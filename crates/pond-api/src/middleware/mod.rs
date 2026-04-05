@@ -112,17 +112,54 @@ fn is_public_route(path: &str) -> bool {
     )
 }
 
-/// Global token-based authentication middleware
+/// Global token-based authentication middleware.
+///
+/// This middleware protects all API routes by enforcing token-based
+/// authentication. For every incoming request it:
+///
+/// 1. **Checks if the route is public** — routes like `/api/v1/health` and
+///    `/api/v1/handshake` are exempt from authentication (see [`is_public_route`]).
+///    This allows unauthenticated clients to perform the initial handshake and
+///    health checks.
+///
+/// 2. **Extracts the Bearer token** from the `Authorization` header. If the
+///    header is missing or malformed, the request is rejected with `401 Unauthorized`.
+///
+/// 3. **Validates the token** by calling `Handshake::validate_token()` on the
+///    shared application state. This delegates to the active handshake
+///    implementation (e.g. `MockHandshake` in dev, `GotgHandshakeAdapter` in
+///    production) which checks the token against its store.  If the token is
+///    invalid or expired, the request is rejected with `401 Unauthorized`.
+///
+/// 4. If all checks pass, the request proceeds to the next handler in the
+///    middleware chain.
 pub async fn auth_middleware(
+    state: axum::extract::State<std::sync::Arc<crate::AppState>>,
     headers: axum::http::HeaderMap,
     path: axum::http::Uri,
     req: Request,
     next: Next,
 ) -> Result<Response, AuthError> {
+    // 1. Public routes bypass authentication entirely.
     if is_public_route(path.path()) {
         return Ok(next.run(req).await);
     }
-    let _token = extract_bearer_token(&headers)?;
+
+    // 2. Extract the bearer token from the Authorization header.
+    let token = extract_bearer_token(&headers)?;
+
+    // 3. Validate the token via the Handshake port.
+    let is_valid = state
+        .handshake
+        .validate_token(&token)
+        .await
+        .unwrap_or(false);
+
+    if !is_valid {
+        return Err(AuthError::InvalidToken);
+    }
+
+    // 4. Token is valid — proceed to the next handler.
     Ok(next.run(req).await)
 }
 
