@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod biometric;
 pub mod memory;
 pub mod message;
 pub mod model_record;  // re-exports ModelRecord, ModelCategory, ModelRoleAssignment, BinaryRecord

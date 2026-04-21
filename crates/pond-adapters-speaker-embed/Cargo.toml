@@ -1,0 +1,24 @@
+[package]
+name = "pond-adapters-speaker-embed"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+pond-core   = { workspace = true }
+anyhow      = { workspace = true }
+async-trait = { workspace = true }
+chrono      = { workspace = true }
+hound       = { workspace = true }
+ndarray     = { workspace = true }
+ort         = { workspace = true }
+rustfft     = { workspace = true }
+sqlx        = { workspace = true }
+tokio       = { workspace = true }
+tracing     = { workspace = true }
+uuid        = { workspace = true }
+
+[dev-dependencies]
+tokio    = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile = { workspace = true }
