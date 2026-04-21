@@ -447,8 +447,8 @@ Voice prints extracted from enrollment audio samples.
 | `id` | TEXT | PK | UUID |
 | `user_id` | TEXT | NOT NULL, FK → user_profiles(id) ON DELETE CASCADE | |
 | `embedding` | BLOB | NOT NULL | float32 vector, little-endian serialized |
-| `model_name` | TEXT | NOT NULL | `"x_vector_512"`, `"resemblyzer_256"` |
-| `embedding_dim` | INTEGER | NOT NULL | 256 or 512 |
+| `model_name` | TEXT | NOT NULL | `"x_vector_512"` |
+| `embedding_dim` | INTEGER | NOT NULL | 512 |
 | `audio_duration_ms` | INTEGER | Nullable | Length of enrollment sample |
 | `created_at` | TEXT | NOT NULL DEFAULT datetime('now') | |
 | `last_verified_at` | TEXT | Nullable | Last time this embedding matched |

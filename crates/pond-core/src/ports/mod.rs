@@ -15,3 +15,4 @@ pub mod onboarding;
 pub mod voice_input;
 pub mod voice_output;
 pub mod wake_word;
+pub mod speaker_id;
