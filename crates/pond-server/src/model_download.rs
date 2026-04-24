@@ -960,6 +960,13 @@ fn copy_dir_all(src: &Path, dst: &Path) -> anyhow::Result<()> {
 
 // ── llamafile LLM model registry ──────────────────────────────────────────────
 
+// ── Speaker model ─────────────────────────────────────────────────────────────
+
+/// On-disk path for the x-vector speaker ONNX model.
+pub fn speaker_model_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("models").join("speaker.onnx")
+}
+
 // ── Generic file download helper ──────────────────────────────────────────────
 
 /// Download `url` to `dest`, showing a live progress line.  Skips if `dest` exists.

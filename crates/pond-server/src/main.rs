@@ -35,7 +35,10 @@ use clap::{Parser, Subcommand};
 use pond_adapters_llamafile::LlamafileProvider;
 use pond_adapters_ollama::OllamaProvider;
 use pond_adapters_piper::PiperOutput;
-use pond_adapters_whisper::{WhisperInput, WhisperKeywordDetector};
+use pond_adapters_speaker_embed::OnnxSpeakerAdapter;
+use pond_adapters_whisper::{self, WhisperInput, WhisperKeywordDetector};
+use pond_core::ports::speaker_id::SpeakerIdentification;
+use pond_core::ports::wake_word::WakeWordDetector;
 use pond_core::ports::voice_input::VoiceInput;
 use pond_core::ports::voice_output::VoiceOutput;
 use pond_core::services::instant_activation::InstantActivation;
@@ -156,6 +159,27 @@ enum Commands {
         /// Path to the Piper voice model (.onnx file). Defaults to $DATA_DIR/models/tts/en_US-lessac-medium.onnx
         #[arg(long)]
         tts_model: Option<std::path::PathBuf>,
+
+        /// Path to the x-vector speaker ONNX model for speaker identification.
+        /// Defaults to $DATA_DIR/models/speaker.onnx if that file exists.
+        #[arg(long)]
+        speaker_model: Option<std::path::PathBuf>,
+    },
+
+    /// Enrol your voice for a profile — records 3 microphone samples automatically
+    Enroll {
+        /// Profile ID to link the voice embedding to
+        #[arg(short, long)]
+        profile: String,
+
+        /// How many seconds to record per sample (default: 10)
+        #[arg(long, default_value = "10")]
+        duration: u32,
+
+        /// Path to the x-vector speaker ONNX model.
+        /// Defaults to $DATA_DIR/models/speaker.onnx
+        #[arg(long)]
+        speaker_model: Option<std::path::PathBuf>,
     },
 
     /// Show system status
@@ -384,9 +408,13 @@ async fn main() -> Result<()> {
             init_tracing(debug);
             run_server(static_dir, open, debug, &agent, native).await
         }
-        Some(Commands::Chat { provider, model, input, wake_word, no_wake_word, tts, tts_model }) => {
+        Some(Commands::Chat { provider, model, input, wake_word, no_wake_word, tts, tts_model, speaker_model }) => {
             init_tracing(false);
-            run_chat(provider.as_deref(), model.as_deref(), &input, wake_word.as_deref(), no_wake_word, tts.as_deref(), tts_model).await
+            run_chat(provider.as_deref(), model.as_deref(), &input, wake_word.as_deref(), no_wake_word, tts.as_deref(), tts_model, speaker_model).await
+        }
+        Some(Commands::Enroll { profile, duration, speaker_model }) => {
+            init_tracing(false);
+            run_enroll(&profile, duration, speaker_model).await
         }
         Some(Commands::Status) => {
             run_status().await
@@ -548,6 +576,44 @@ async fn run_setup(model: &str) -> Result<()> {
         println!("     Install piper manually or retry setup.");
     } else {
         println!("  ✅ Piper binary ready — select a voice model in the web Settings page.");
+    }
+
+    // Speaker identification model
+    println!("\n  Setting up speaker identification model...");
+    let output_path = model_download::speaker_model_path(&data_dir);
+    let speaker_ready = if output_path.exists() {
+        println!("  ✅ Speaker model already present: {}", output_path.display());
+        true
+    } else {
+        println!("  📦 Installing Python dependencies (speechbrain, onnx, torch)...");
+        let pip = tokio::process::Command::new("pip3")
+            .args(["install", "--quiet", "speechbrain", "onnx", "torch"])
+            .status().await;
+        match pip {
+            Ok(s) if s.success() => {
+                println!("  ✅ Python dependencies ready");
+                println!("  🔄 Exporting x-vector ONNX model (this may take a few minutes)...");
+                let export = tokio::process::Command::new("python3")
+                    .args(["scripts/export_xvector.py", "--output",
+                           output_path.to_str().unwrap_or("speaker.onnx")])
+                    .status().await;
+                match export {
+                    Ok(s) if s.success() && output_path.exists() => {
+                        println!("  ✅ Speaker model ready: {}", output_path.display());
+                        true
+                    }
+                    Ok(_) => { println!("  ⚠  Export script failed."); false }
+                    Err(e) => { println!("  ⚠  Could not run python3: {}", e); false }
+                }
+            }
+            Ok(_) => { println!("  ⚠  pip3 install failed."); false }
+            Err(e) => { println!("  ⚠  Could not run pip3: {}", e); false }
+        }
+    };
+    if !speaker_ready {
+        println!("     Speaker ID disabled. To enable later:");
+        println!("       pip3 install speechbrain onnx torch");
+        println!("       python3 scripts/export_xvector.py");
     }
 
     println!();
@@ -1270,6 +1336,18 @@ async fn run_server(static_dir: std::path::PathBuf, open: bool, debug: bool, age
         recipe_repo: Some(recipe_repo.clone()),
         llamafile_manager: Some(llamafile_manager),
         event_log_repo: event_log_repo,
+        speaker_id: {
+            let model_path = data_dir.join("models").join("speaker.onnx");
+            if model_path.exists() {
+                match OnnxSpeakerAdapter::new(&model_path, db.system.clone(), db.logs.clone()) {
+                    Ok(a) => {
+                        println!("  ✅ Speaker ID: x-vector model loaded");
+                        Some(Arc::new(a) as Arc<dyn SpeakerIdentification + Send + Sync>)
+                    }
+                    Err(e) => { tracing::warn!("Speaker ID failed to load: {}", e); None }
+                }
+            } else { None }
+        },
     });
 
     // Warn if static assets haven't been built yet
@@ -1370,7 +1448,7 @@ fn spawn_desktop_app(server_port: u16) {
     }
 }
 
-async fn run_chat(provider: Option<&str>, model: Option<&str>, input: &str, wake_word: Option<&str>, no_wake_word: bool, tts: Option<&str>, tts_model: Option<std::path::PathBuf>) -> Result<()> {
+async fn run_chat(provider: Option<&str>, model: Option<&str>, input: &str, wake_word: Option<&str>, no_wake_word: bool, tts: Option<&str>, tts_model: Option<std::path::PathBuf>, speaker_model: Option<std::path::PathBuf>) -> Result<()> {
     println!("  ╔═══════════════════════════════════════╗");
     println!("  ║   🦆  Goose-in-a-Pond  v{}       ║", env!("CARGO_PKG_VERSION"));
     println!("  ║   Wait → Listen → Think → Speak      ║");
@@ -1623,6 +1701,7 @@ async fn run_chat(provider: Option<&str>, model: Option<&str>, input: &str, wake
     };
 
     let db_system = db.system.clone();
+    let db_logs = db.logs.clone();
     let storage: Arc<dyn SessionStorage> = Arc::new(SqliteSessionStorage::new(db.system));
     // Create session if it doesn't exist; ignore duplicate-key errors from prior runs
     if let Err(e) = storage.create_session(session_id.clone()).await {
@@ -1840,6 +1919,27 @@ async fn run_chat(provider: Option<&str>, model: Option<&str>, input: &str, wake
         }
     };
     chat_service = chat_service.with_voice_output(voice_out);
+
+    // ── Wire speaker identification (optional) ──
+    let speaker_model_path = speaker_model.unwrap_or_else(|| {
+        data_dir.join("models").join("speaker.onnx")
+    });
+    if speaker_model_path.exists() {
+        let profile_repo: Arc<dyn pond_core::ports::profile::ProfileRepository + Send + Sync> =
+            Arc::new(pond_infra::sqlite_profile::SqliteProfileRepository::new(db_system.clone()));
+        match OnnxSpeakerAdapter::new(&speaker_model_path, db_system.clone(), db_logs.clone()) {
+            Ok(adapter) => {
+                println!("  Speaker ID: enabled");
+                let adapter: Arc<dyn SpeakerIdentification> = Arc::new(adapter);
+                chat_service = chat_service
+                    .with_speaker_id(adapter)
+                    .with_profile_repo(profile_repo);
+            }
+            Err(e) => println!("  ⚠  Speaker ID: failed to load model — {}", e),
+        }
+    } else {
+        println!("  Speaker ID: disabled (no model at {})", speaker_model_path.display());
+    }
 
     chat_service.run_loop().await?;
 
@@ -2119,14 +2219,15 @@ async fn run_main_menu() -> Result<()> {
         println!("  1) Chat        — Interactive AI chat");
         println!("  2) Serve       — Start the HTTP server + API");
         println!("  3) Status      — Show system info");
-        println!("  4) Exit");
+        println!("  4) Enroll      — Set up voice recognition for a profile");
+        println!("  5) Exit");
         println!();
 
         let choice = prompt_nonempty("Choose an option: ")?;
 
         match choice.trim() {
             "1" => {
-                run_chat(None, None, "stdin", None, true, Some("none"), None).await?;
+                run_chat(None, None, "stdin", None, true, Some("none"), None, None).await?;
             }
             "2" => {
                 run_server(std::path::PathBuf::from("web/dist"), false, false, "goose", false).await?;
@@ -2135,6 +2236,9 @@ async fn run_main_menu() -> Result<()> {
                 run_status().await?;
             }
             "4" => {
+                run_enroll_menu(&default_data_dir()).await?;
+            }
+            "5" => {
                 println!("Goodbye!");
                 break;
             }
@@ -2146,6 +2250,94 @@ async fn run_main_menu() -> Result<()> {
 
     Ok(())
 }
+async fn run_enroll_menu(data_dir: &std::path::Path) -> Result<()> {
+    let db = Database::init(data_dir).await?;
+    let model_path = data_dir.join("models").join("speaker.onnx");
+    if !model_path.exists() {
+        println!("\n  ⚠  Speaker model not found. Run `pond-server setup` first.");
+        return Ok(());
+    }
+    let adapter = match OnnxSpeakerAdapter::new(&model_path, db.system.clone(), db.logs.clone()) {
+        Ok(a) => a,
+        Err(e) => { println!("\n  ⚠  Failed to load speaker model: {}", e); return Ok(()); }
+    };
+    let profile_repo = SqliteProfileRepository::new(db.system.clone());
+    let mut profiles = pond_core::ports::profile::ProfileRepository::list(&profile_repo).await?;
+    if profiles.is_empty() {
+        println!("\n  No profiles found. Let's create one.");
+        let name = prompt_nonempty("  Enter your name: ")?;
+        let created = pond_core::ports::profile::ProfileRepository::create(
+            &profile_repo,
+            pond_core::domain::profile::CreateProfileRequest {
+                display_name: name.trim().to_string(),
+                avatar_emoji: "🦆".to_string(),
+            },
+        ).await?;
+        println!("  ✅ Profile created for {}", created.display_name);
+        profiles = vec![created];
+    }
+    println!("\n  👤 Voice Enrollment");
+    println!("  ───────────────────");
+    for (i, p) in profiles.iter().enumerate() {
+        println!("     {}) {}", i + 1, p.display_name);
+    }
+    println!();
+    let choice = prompt_nonempty(&format!("  Select profile (1–{}): ", profiles.len()))?;
+    let idx: usize = choice.trim().parse().unwrap_or(0);
+    if idx < 1 || idx > profiles.len() {
+        println!("  Invalid selection.");
+        return Ok(());
+    }
+    let profile = &profiles[idx - 1];
+    println!("\n  Enrolling voice for: {}", profile.display_name);
+    println!("  Speak naturally for 10 seconds each time when prompted.\n");
+    for i in 1..=3u32 {
+        println!("  Sample {}/3 — press ENTER then start speaking", i);
+        let mut buf = String::new();
+        io::stdin().read_line(&mut buf)?;
+        let audio = tokio::task::spawn_blocking(|| pond_adapters_whisper::record_wav_sample(10)).await??;
+        match adapter.register_speaker(&profile.id, &audio).await {
+            Ok(embedding) => println!("  ✅ Sample {} saved ({})\n", i, embedding.id),
+            Err(e) => { println!("  ❌ Failed to save sample: {}", e); return Ok(()); }
+        }
+    }
+    let count = adapter.enrollment_count(&profile.id).await.unwrap_or(0);
+    println!("  ✅ Enrollment complete for {}! ({} samples stored)", profile.display_name, count);
+    Ok(())
+}
+
+async fn run_enroll(profile_id: &str, duration_secs: u32, speaker_model: Option<std::path::PathBuf>) -> Result<()> {
+    let data_dir = default_data_dir();
+    let db = Database::init(&data_dir).await?;
+    let model_path = speaker_model.unwrap_or_else(|| data_dir.join("models").join("speaker.onnx"));
+    if !model_path.exists() {
+        anyhow::bail!("Speaker model not found at {}.\nRun `pond-server setup` first.", model_path.display());
+    }
+    let adapter = OnnxSpeakerAdapter::new(&model_path, db.system.clone(), db.logs.clone())
+        .map_err(|e| anyhow::anyhow!("Failed to load speaker model: {}", e))?;
+    let profile_repo = SqliteProfileRepository::new(db.system.clone());
+    let display_name = match pond_core::ports::profile::ProfileRepository::get(&profile_repo, profile_id).await? {
+        Some(p) => p.display_name,
+        None => anyhow::bail!("Profile '{}' not found", profile_id),
+    };
+    println!("  Enrolling voice for: {}", display_name);
+    println!("  Speak naturally for {} seconds each time when prompted.\n", duration_secs);
+    for i in 1..=3u32 {
+        println!("  Sample {}/3 — press ENTER then start speaking", i);
+        let mut buf = String::new();
+        io::stdin().read_line(&mut buf)?;
+        let dur = duration_secs;
+        let audio = tokio::task::spawn_blocking(move || pond_adapters_whisper::record_wav_sample(dur)).await??;
+        match adapter.register_speaker(profile_id, &audio).await {
+            Ok(embedding) => println!("  ✅ Sample {} saved ({})\n", i, embedding.id),
+            Err(e) => { println!("  ❌ Failed: {}", e); return Ok(()); }
+        }
+    }
+    let count = adapter.enrollment_count(profile_id).await.unwrap_or(0);
+    println!("  ✅ Enrollment complete for {}! ({} samples stored)", display_name, count);
+    Ok(())
+}
+
 async fn run_onboard(reset: bool) -> Result<()> {
     println!("🦆 Goose In A Pond — Interactive Onboarding Wizard\n");
 

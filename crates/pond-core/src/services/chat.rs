@@ -2,8 +2,10 @@ use crate::domain::agent::{AgentRequest, AgentStreamEvent, WorkflowEvent, Workfl
 use crate::domain::message::ChatMessage;
 use crate::domain::session::SessionMessage;
 use crate::ports::agent::Agent;
+use crate::ports::profile::ProfileRepository;
 use crate::ports::provider::LlmProvider;
 use crate::ports::session_storage::SessionStorage;
+use crate::ports::speaker_id::SpeakerIdentification;
 use crate::ports::voice_input::VoiceInput;
 use crate::ports::voice_output::VoiceOutput;
 use crate::ports::wake_word::StreamingWakeWordDetector;
@@ -900,9 +902,13 @@ pub struct ChatService {
     /// System prompt sent to the LLM on every completion call.
     /// Defaults to `SYSTEM_PROMPT`; override with `with_system_prompt()`.
     system_prompt: String,
+    /// System prompt used when the speaker is not recognised (guest turns).
+    guest_system_prompt: String,
     /// Optional LLM-based context compactor.  When set, triggers at 80% of
     /// the context budget instead of falling straight to trim_to_budget.
     compactor: Option<ContextCompactor>,
+    speaker_id: Option<Arc<dyn SpeakerIdentification>>,
+    profile_repo: Option<Arc<dyn ProfileRepository>>,
 }
 
 impl ChatService {
@@ -920,7 +926,10 @@ impl ChatService {
             session_id,
             session_storage,
             system_prompt: SYSTEM_PROMPT.to_string(),
+            guest_system_prompt: SYSTEM_PROMPT.to_string(),
             compactor: None,
+            speaker_id: None,
+            profile_repo: None,
         }
     }
 
@@ -959,6 +968,21 @@ impl ChatService {
     /// prompt from `Settings`.  The default is the static `SYSTEM_PROMPT` constant.
     pub fn with_system_prompt(mut self, prompt: String) -> Self {
         self.system_prompt = prompt;
+        self
+    }
+
+    pub fn with_guest_system_prompt(mut self, prompt: String) -> Self {
+        self.guest_system_prompt = prompt;
+        self
+    }
+
+    pub fn with_speaker_id(mut self, speaker_id: Arc<dyn SpeakerIdentification>) -> Self {
+        self.speaker_id = Some(speaker_id);
+        self
+    }
+
+    pub fn with_profile_repo(mut self, repo: Arc<dyn ProfileRepository>) -> Self {
+        self.profile_repo = Some(repo);
         self
     }
 
@@ -1240,6 +1264,38 @@ impl ChatService {
     ///   Wait → Listen → Thinking → Speak → (back to Wait)
     ///
     /// Input is obtained via the `VoiceInput` port (stdin by default).
+    async fn resolve_speaker(&self, audio_bytes: &[u8]) -> (String, String) {
+        let speaker_id = match &self.speaker_id {
+            Some(s) => s,
+            None => return ("Guest".to_string(), self.guest_system_prompt.clone()),
+        };
+        if audio_bytes.is_empty() {
+            return ("Guest".to_string(), self.guest_system_prompt.clone());
+        }
+        match speaker_id.identify_speaker(audio_bytes).await {
+            Ok(Some((profile_id, confidence))) => {
+                let name = if let Some(repo) = &self.profile_repo {
+                    match repo.get(&profile_id).await {
+                        Ok(Some(profile)) => profile.display_name,
+                        _ => profile_id,
+                    }
+                } else {
+                    profile_id
+                };
+                println!("  👤 {} (confidence: {:.0}%)", name, confidence * 100.0);
+                (name, self.system_prompt.clone())
+            }
+            Ok(None) => {
+                println!("  👤 Guest");
+                ("Guest".to_string(), self.guest_system_prompt.clone())
+            }
+            Err(e) => {
+                tracing::warn!("Speaker identification failed (non-fatal): {}", e);
+                ("Guest".to_string(), self.guest_system_prompt.clone())
+            }
+        }
+    }
+
     pub async fn run_loop(&self) -> Result<()> {
         // First interaction always requires the wake word.
         // After that, conversational turn-taking: Goose listens for the user's
@@ -1248,7 +1304,7 @@ impl ChatService {
         let mut first_turn = true;
 
         loop {
-            let input = if first_turn {
+            let (input, audio_bytes) = if first_turn {
                 // ── Wait for wake word ──
                 self.emit_event(WorkflowEvent::StateChanged(WorkflowState::Wait));
                 println!("\n  🟢 {} (type \"exit\" to quit)", self.wake_word_detector.activation_prompt());
@@ -1265,38 +1321,37 @@ impl ChatService {
                     self.voice_input.prime_with_captured(wav);
                 }
 
-                self.voice_input.listen().await?
+                match self.voice_input.listen_with_audio().await? {
+                    None => {
+                        self.emit_event(WorkflowEvent::Exit);
+                        println!("\n  ⏹ End of input.");
+                        break;
+                    }
+                    Some((text, _)) if text.is_empty() => {
+                        first_turn = true;
+                        continue;
+                    }
+                    Some(pair) => pair,
+                }
             } else {
                 // ── Conversational turn — listen without wake word ──
                 self.emit_event(WorkflowEvent::StateChanged(WorkflowState::Listen));
                 println!("\n  🎧 Listening for your reply...");
                 io::stdout().flush()?;
 
-                self.voice_input.listen().await?
-            };
-
-            let input = match input {
-                None if first_turn => {
-                    // Stdin EOF — exit the loop
-                    self.emit_event(WorkflowEvent::Exit);
-                    println!("\n  ⏹ End of input.");
-                    break;
-                }
-                None => {
-                    // Conversational mode, no speech — reset to wake word
-                    println!("  💤 No speech detected, returning to wake word mode.");
-                    first_turn = true;
-                    continue;
-                }
-                Some(text) if text.is_empty() => {
-                    // Empty transcription — fall back to wake word mode
-                    if !first_turn {
-                        println!("  💤 No speech detected, returning to wake word mode.");
+                match self.voice_input.listen_with_audio().await? {
+                    None => {
+                        self.emit_event(WorkflowEvent::Exit);
+                        println!("\n  ⏹ End of input.");
+                        break;
                     }
-                    first_turn = true;
-                    continue;
+                    Some((text, _)) if text.is_empty() => {
+                        println!("  💤 No speech detected, returning to wake word mode.");
+                        first_turn = true;
+                        continue;
+                    }
+                    Some(pair) => pair,
                 }
-                Some(text) => text,
             };
 
             // ── Dismissal / sleep commands → speak farewell, return to wake word ──
@@ -1332,6 +1387,10 @@ impl ChatService {
             first_turn = false;
 
             self.emit_event(WorkflowEvent::UserInput(input.clone()));
+
+            // ── Identify speaker ──
+            let (_, prompt) = self.resolve_speaker(&audio_bytes).await;
+            let _ = prompt; // system_prompt used inside chat_stream_once for now
 
             // ── Thinking → Speak (streaming) ──
             self.emit_event(WorkflowEvent::StateChanged(WorkflowState::Thinking));

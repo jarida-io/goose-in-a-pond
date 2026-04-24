@@ -109,69 +109,49 @@ impl WhisperInput {
 #[async_trait]
 impl VoiceInput for WhisperInput {
     async fn listen(&self) -> Result<Option<String>> {
+        match self.listen_with_audio().await? {
+            Some((text, _)) => Ok(Some(text)),
+            None => Ok(None),
+        }
+    }
+
+    /// Record once, return both the transcript and the raw WAV bytes.
+    /// The WAV bytes are reused by speaker identification — no second recording needed.
+    async fn listen_with_audio(&self) -> Result<Option<(String, Vec<u8>)>> {
         let captured = self.captured.lock().unwrap().take();
         let max_record = self.duration_secs;
         let silence_ms = self.silence_ms;
 
-        if let Some(wav) = captured {
-            // One-breath path: we have pre-captured audio from the wake listener,
-            // but the user may still be speaking.  Decode what we have, continue
-            // recording from the mic until silence, combine, then transcribe.
-            let wav_bytes = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>> {
+        let wav_bytes = if let Some(wav) = captured {
+            tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>> {
                 println!("  🎤 Listening...");
-
-                // Decode the pre-captured 16kHz WAV.
                 let (captured_samples, captured_rate) = decode_wav_mono_f32(&wav)?;
-
-                // Continue recording — no onset wait, just listen until silence.
-                let (fresh_samples, fresh_rate) = record_mono_f32_until_silence(
-                    max_record, silence_ms,
-                )?;
-
-                // Resample fresh recording to match captured rate (16 kHz).
+                let (fresh_samples, fresh_rate) = record_mono_f32_until_silence(max_record, silence_ms)?;
                 let fresh_16k = resample_to_16k(&fresh_samples, fresh_rate);
-
-                // Combine: captured audio first, then continuation.
                 let mut combined = captured_samples;
-                // Skip the leading silence from the fresh recording — the mic
-                // needs ~200ms to spin up before producing real audio.
-                let skip = (captured_rate as usize) / 5; // ~200ms at 16kHz
+                let skip = (captured_rate as usize) / 5;
                 if fresh_16k.len() > skip {
                     combined.extend_from_slice(&fresh_16k[skip..]);
                 }
-
-                if combined.is_empty() {
-                    return Ok(None);
-                }
+                if combined.is_empty() { return Ok(None); }
                 Ok(Some(encode_wav_mono_16k(&combined)))
-            })
-            .await??;
-
-            match wav_bytes {
-                Some(wav) => self.transcribe_wav(wav).await,
-                None => Ok(Some(String::new())),
-            }
+            }).await??
         } else {
-            // Normal path: VAD-aware recording — waits for speech, stops on silence.
-            let wav_bytes = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>> {
+            tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>> {
                 println!("  🎤 Listening...");
-                let (samples, sample_rate) = record_mono_f32_vad(
-                    10,           // max 10s waiting for speech to start
-                    max_record,   // hard cap on total recording
-                    silence_ms,   // end-of-speech silence threshold
-                )?;
-                if samples.is_empty() {
-                    return Ok(None);
-                }
+                let (samples, sample_rate) = record_mono_f32_vad(10, max_record, silence_ms)?;
+                if samples.is_empty() { return Ok(None); }
                 let samples_16k = resample_to_16k(&samples, sample_rate);
                 Ok(Some(encode_wav_mono_16k(&samples_16k)))
-            })
-            .await??;
+            }).await??
+        };
 
-            match wav_bytes {
-                Some(wav) => self.transcribe_wav(wav).await,
-                None => Ok(Some(String::new())),
-            }
+        match wav_bytes {
+            Some(wav) => match self.transcribe_wav(wav.clone()).await? {
+                Some(text) => Ok(Some((text, wav))),
+                None => Ok(None),
+            },
+            None => Ok(Some((String::new(), Vec::new()))),
         }
     }
 
@@ -650,6 +630,20 @@ fn encode_wav_mono_16k(samples: &[f32]) -> Vec<u8> {
     }
 
     buf
+}
+
+/// Record `duration_secs` of audio from the default mic and return 16 kHz mono WAV bytes.
+///
+/// Used for voice enrollment — pass the returned bytes directly to
+/// `SpeakerIdentification::register_speaker`.
+pub fn record_wav_sample(duration_secs: u32) -> Result<Vec<u8>> {
+    println!("  🎤 Recording for {} seconds...", duration_secs);
+    let (samples, sample_rate) = record_mono_f32(duration_secs)?;
+    if samples.is_empty() {
+        return Err(anyhow!("No audio captured — check that a microphone is connected"));
+    }
+    let samples_16k = resample_to_16k(&samples, sample_rate);
+    Ok(encode_wav_mono_16k(&samples_16k))
 }
 
 // ── WhisperKeywordDetector ────────────────────────────────────────────────────

@@ -47,6 +47,7 @@ use pond_core::domain::skill::UserSkill;
 
 use crate::{AppState, DownloadEntry, ModelStatusEntry};
 use crate::middleware::onboarding_guard::require_onboarding_complete;
+use pond_adapters_whisper;
 
 // ───────────────────────── REST API Routes ─────────────────────────
 
@@ -105,6 +106,8 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/models/{category}/{name}", delete(delete_model))
         .route("/profiles", get(list_profiles))
         .route("/profiles/{id}", get(get_profile).delete(delete_profile))
+        .route("/profiles/{id}/enroll", post(enroll_speaker))
+        .route("/profiles/{id}/biometrics", delete(delete_speaker_biometrics))
         .route("/sensors", post(record_sensor))
         .route("/sensors/{device_id}", get(get_recent_sensors))
         .route("/camera/events", get(list_camera_events).post(record_camera_event))
@@ -2038,6 +2041,65 @@ async fn delete_profile(
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<Value>)> {
     state.profile_repo.delete(&id).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()})))
+    })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Speaker biometric handlers ────────────────────────────────────────────────
+
+async fn enroll_speaker(
+    State(state): State<Arc<AppState>>,
+    Path(profile_id): Path<String>,
+    body: Option<Json<serde_json::Value>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let speaker_id = state.speaker_id.as_ref().ok_or_else(|| (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": "speaker identification not configured — run pond-server setup first"})),
+    ))?;
+
+    state.profile_repo.get(&profile_id).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "profile not found"}))))?;
+
+    let duration_secs = body
+        .as_ref()
+        .and_then(|b| b.get("duration_secs"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5) as u32;
+
+    let audio = tokio::task::spawn_blocking(move || {
+        pond_adapters_whisper::record_wav_sample(duration_secs)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+
+    let embedding = speaker_id.register_speaker(&profile_id, &audio).await.map_err(|e| {
+        (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error": e.to_string()})))
+    })?;
+
+    let count = speaker_id.enrollment_count(&profile_id).await.unwrap_or(0);
+
+    Ok(Json(json!({
+        "embedding_id":   embedding.id,
+        "profile_id":     embedding.profile_id,
+        "model":          embedding.model,
+        "dims":           embedding.dims,
+        "enrolled_count": count,
+        "created_at":     embedding.created_at.to_rfc3339(),
+    })))
+}
+
+async fn delete_speaker_biometrics(
+    State(state): State<Arc<AppState>>,
+    Path(profile_id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<Value>)> {
+    let speaker_id = state.speaker_id.as_ref().ok_or_else(|| (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": "speaker identification not configured"})),
+    ))?;
+    speaker_id.delete_speaker(&profile_id).await.map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()})))
     })?;
     Ok(StatusCode::NO_CONTENT)

@@ -1,4 +1,4 @@
-//! Speaker identification adapter — in-process ONNX x-vector model.
+﻿//! Speaker identification adapter — in-process ONNX x-vector model.
 //!
 //! Replaces the former Resemblyzer HTTP bridge with a pure-Rust pipeline:
 //!
@@ -12,7 +12,7 @@
 //!
 //! # Model
 //! Tested against the SpeechBrain `spkrec-xvect-voxceleb` ONNX export:
-//! - Input tensor  : `"feats"`     — shape `[1, T, 40]` float32
+//! - Input tensor  : `"feats"`     — shape `[1, T, 24]` float32
 //! - Output tensor : `"embedding"` — shape `[1, 512]` float32
 //!
 //! Export the model once (requires Python + speechbrain):
@@ -57,7 +57,7 @@ const TARGET_SAMPLE_RATE: u32 = 16_000;
 const FRAME_LEN: usize = 400;   // 25 ms at 16 kHz
 const FRAME_SHIFT: usize = 160; // 10 ms at 16 kHz
 const N_FFT: usize = 512;
-const N_MELS: usize = 40;
+const N_MELS: usize = 24;
 const F_MIN: f32 = 20.0;
 const F_MAX: f32 = 8_000.0;
 const PRE_EMPHASIS: f32 = 0.97;
@@ -96,13 +96,26 @@ impl OnnxSpeakerAdapter {
                 model_path.as_ref()
             ))?;
 
+        // Read tensor names directly from the model so the adapter works with
+        // any ONNX export, not just the SpeechBrain naming convention.
+        let input_name = session
+            .inputs()
+            .first()
+            .map(|i| i.name().to_string())
+            .unwrap_or_else(|| "feats".to_string());
+        let output_name = session
+            .outputs()
+            .first()
+            .map(|o| o.name().to_string())
+            .unwrap_or_else(|| "embedding".to_string());
+
         Ok(Self {
             session: Mutex::new(session),
             system_pool,
             logs_pool,
             threshold: DEFAULT_THRESHOLD,
-            input_name: "feats".to_string(),
-            output_name: "embedding".to_string(),
+            input_name,
+            output_name,
         })
     }
 

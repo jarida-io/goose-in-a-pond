@@ -194,6 +194,8 @@ pub struct AppState {
     /// Used by the `/api/v1/logs` endpoint.
     /// `None` in tests.
     pub event_log_repo: Option<Arc<dyn pond_core::ports::event_log::EventLogRepository>>,
+    /// Speaker identification adapter. `None` when no ONNX model is configured.
+    pub speaker_id: Option<Arc<dyn pond_core::ports::speaker_id::SpeakerIdentification + Send + Sync>>,
 }
 
 /// State of a single in-progress (or recently completed) model download.
