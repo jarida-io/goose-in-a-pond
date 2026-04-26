@@ -1050,98 +1050,212 @@ pub async fn download_file(url: &str, dest: &Path, approx_size_mb: u64) -> Resul
     Ok(())
 }
 
-// ── Face recognition models (SCRFD detector + ArcFace R50 embedding + Silent-Face PAD) ──
+// ── Face recognition models ──────────────────────────────────────────────────
+//
+// Stack (preferred → fallback):
+//
+//   Embedder:  AdaFace IR-101 (250 MB) → ArcFace R50 from buffalo_l (174 MB)
+//   Detector:  SCRFD 34G       (140 MB) → SCRFD 10G  from buffalo_l ( 17 MB)
+//   PAD:       Silent-Face V2  (  2 MB) primary
+//              DeepPixBis      (  2 MB) secondary  ── ensembled in adapter
+//
+// AdaFace beats ArcFace on low-light / blurry crops (IJCB 2022 winner) and
+// SCRFD 34G catches faces at smaller pixel sizes than 10G.  DeepPixBis is
+// patch-based PAD — pairs well with Silent-Face's full-image classifier
+// for stronger replay-attack rejection.  Each URL is overridable via env
+// var so a dead mirror can be swapped without rebuilding.
 
 /// On-disk directory where face models live: `<data_dir>/models/face/`.
 pub fn face_models_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("models").join("face")
 }
 
-/// Returns the canonical (default) paths for the three face-recognition models.
+/// Returns the canonical (default) paths for the four face-recognition model
+/// files.  `(embedding, detector, antispoof_primary, antispoof_secondary)`.
 ///
-/// `(embedding, detector, antispoof)` — matching what `build_face_recognition`
-/// in main.rs looks up.  Operators can override each with the matching
-/// `POND_FACE_*_PATH` env var.
-pub fn face_model_paths(data_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+/// All four are env-overridable in `build_face_recognition` (`POND_FACE_*_PATH`).
+/// The auto-downloader prefers the new defaults but keeps the old buffalo_l
+/// files (`w600k_r50.onnx` + `scrfd.onnx`) as fallback when a fresh download
+/// of a new model fails (e.g. mirror 404).
+pub fn face_model_paths(data_dir: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
     let dir = face_models_dir(data_dir);
     (
-        dir.join("w600k_r50.onnx"),
-        dir.join("scrfd.onnx"),
+        dir.join("adaface_ir101.onnx"),
+        dir.join("scrfd_34g.onnx"),
         dir.join("antispoof.onnx"),
+        dir.join("deeppixbis.onnx"),
     )
 }
 
 /// `buffalo_l.zip` from InsightFace ships both the SCRFD 10G detector
 /// (`det_10g.onnx`) and the ArcFace R50 embedder (`w600k_r50.onnx`) in a
-/// single ~281 MB archive — downloading once gets us both files.
+/// single ~281 MB archive.  Kept as the fallback bundle when the AdaFace +
+/// SCRFD-34G mirrors fail.
 const BUFFALO_L_ZIP_URL: &str =
     "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip";
 const BUFFALO_L_APPROX_MB: u64 = 281;
 
+/// AdaFace IR-101 embedder — 112×112 input, 512-d output.  Drop-in for
+/// ArcFace R100 with higher tolerance for low-light / blurry crops.
+/// Override the mirror with `POND_FACE_EMBEDDING_URL` if the default 404s.
+const ADAFACE_DEFAULT_URL: &str =
+    "https://huggingface.co/yakhyo/face-recognition-onnx/resolve/main/adaface_ir101_webface12m.onnx";
+const ADAFACE_APPROX_MB: u64 = 250;
+
+/// SCRFD 34G detector with 5-point landmarks — same family as the SCRFD 10G
+/// in buffalo_l, deeper backbone.  Catches faces ~30 % smaller pixel-wise.
+/// Override the mirror with `POND_FACE_DETECTOR_URL`.
+const SCRFD_34G_DEFAULT_URL: &str =
+    "https://huggingface.co/yakhyo/face-detection-onnx/resolve/main/scrfd_34g_bnkps.onnx";
+const SCRFD_34G_APPROX_MB: u64 = 140;
+
 /// Silent-Face MiniFASNetV2 anti-spoof model — 3-class export
-/// `[fake_2D, fake_3D, live]` at 80×80 BGR input.  We try a couple of
-/// community mirrors; if all fail we just skip and leave the heuristic
-/// gate in place (face recognition still works, only PAD is degraded).
+/// `[fake_2D, fake_3D, live]` at 80×80 BGR input.  Override the mirror
+/// with `POND_FACE_ANTISPOOF_URL`.
 const ANTISPOOF_MIRRORS: &[&str] = &[
     "https://huggingface.co/hash-ash/Silent-Face-Anti-Spoofing-ONNX/resolve/main/2.7_80x80_MiniFASNetV2.onnx",
     "https://huggingface.co/datasets/giap-mirror/silent-face-anti-spoofing/resolve/main/2.7_80x80_MiniFASNetV2.onnx",
 ];
 const ANTISPOOF_APPROX_MB: u64 = 2;
 
+/// DeepPixBis PAD — patch-based binary supervision, complementary to
+/// Silent-Face.  224×224 RGB input, single-scalar live probability output.
+/// Override the mirror with `POND_FACE_ANTISPOOF_2_URL`.
+const DEEPPIXBIS_DEFAULT_URL: &str =
+    "https://huggingface.co/yakhyo/face-anti-spoofing-onnx/resolve/main/deeppixbis.onnx";
+const DEEPPIXBIS_APPROX_MB: u64 = 5;
+
+fn env_url_override(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|s| !s.trim().is_empty())
+}
+
 /// Download face recognition models into `<data_dir>/models/face/`.
 ///
-/// - `w600k_r50.onnx` (ArcFace R50, 174 MB embedding head)
-/// - `scrfd.onnx`     (SCRFD 10G detector with 5-point landmarks, 17 MB)
-///   — both extracted from a single buffalo_l.zip download.
-/// - `antispoof.onnx` (Silent-Face MiniFASNetV2, ~2 MB) — best-effort.
+/// Preferred stack (4 files, ~400 MB total):
+/// - `adaface_ir101.onnx`  (AdaFace IR-101 embedder, ~250 MB)
+/// - `scrfd_34g.onnx`      (SCRFD 34G detector with 5-pt landmarks, ~140 MB)
+/// - `antispoof.onnx`      (Silent-Face MiniFASNetV2 PAD, ~2 MB)
+/// - `deeppixbis.onnx`     (DeepPixBis secondary PAD, ~5 MB)
 ///
-/// Models that already exist are skipped.  Failure to fetch the anti-spoof
-/// mirror is non-fatal — the heuristic PAD plus burst-liveness gates still
-/// catch most photo attacks.
+/// Fallback (when the AdaFace / SCRFD-34G mirrors are unreachable) reuses
+/// the buffalo_l bundle to populate `w600k_r50.onnx` (ArcFace R50) and
+/// `scrfd.onnx` (SCRFD 10G).  `build_face_recognition` then prefers the
+/// new files when present and silently uses the buffalo_l fallback
+/// otherwise — so a missing mirror downgrades quality but never breaks
+/// face recognition.
+///
+/// Each URL is overridable via env so a dead mirror can be replaced
+/// without recompiling: `POND_FACE_EMBEDDING_URL`,
+/// `POND_FACE_DETECTOR_URL`, `POND_FACE_ANTISPOOF_URL`,
+/// `POND_FACE_ANTISPOOF_2_URL`.
 pub async fn download_face_models(data_dir: &Path) -> Result<()> {
-    let (embed, detect, antispoof) = face_model_paths(data_dir);
+    let (embed, detect, antispoof, antispoof_2) = face_model_paths(data_dir);
     let dir = face_models_dir(data_dir);
     tokio::fs::create_dir_all(&dir).await?;
 
-    // ── Embedder + detector (single zip) ────────────────────────────────────
-    if !embed.exists() || !detect.exists() {
-        println!("  📥 Face models not found — downloading buffalo_l (ArcFace R50 + SCRFD 10G)...");
-        match fetch_buffalo_l_zip(&dir, &embed, &detect).await {
+    // ── Embedder: AdaFace IR-101 (preferred) ────────────────────────────────
+    if !embed.exists() {
+        let url = env_url_override("POND_FACE_EMBEDDING_URL")
+            .unwrap_or_else(|| ADAFACE_DEFAULT_URL.to_string());
+        println!("  📥 AdaFace embedder not found — downloading from {}", url);
+        match download_file(&url, &embed, ADAFACE_APPROX_MB).await {
             Ok(_) => {}
             Err(e) => {
-                println!("  ⚠  Face model download failed: {} — face recognition will be disabled", e);
-                // Don't bail — antispoof is still worth attempting.
+                println!(
+                    "  ⚠  AdaFace download failed: {e}\n     \
+                     Falling back to ArcFace R50 from buffalo_l bundle (smaller, \
+                     less low-light tolerance but matcher math is identical)."
+                );
             }
         }
     } else {
-        println!("  ✅ Face embedder + detector already present");
+        println!("  ✅ AdaFace embedder already present");
     }
 
-    // ── Anti-spoof (separate small file, multiple mirrors) ──────────────────
+    // ── Detector: SCRFD 34G (preferred) ─────────────────────────────────────
+    if !detect.exists() {
+        let url = env_url_override("POND_FACE_DETECTOR_URL")
+            .unwrap_or_else(|| SCRFD_34G_DEFAULT_URL.to_string());
+        println!("  📥 SCRFD 34G detector not found — downloading from {}", url);
+        match download_file(&url, &detect, SCRFD_34G_APPROX_MB).await {
+            Ok(_) => {}
+            Err(e) => {
+                println!(
+                    "  ⚠  SCRFD 34G download failed: {e}\n     \
+                     Falling back to SCRFD 10G from buffalo_l bundle."
+                );
+            }
+        }
+    } else {
+        println!("  ✅ SCRFD 34G detector already present");
+    }
+
+    // ── Buffalo_L fallback for whichever of {embed, detect} the new mirror
+    // failed to populate.  We only fetch the bundle when at least one of the
+    // two new defaults is missing AND the corresponding fallback file is
+    // also missing (so we don't re-download for users who already have it).
+    let fallback_embed  = dir.join("w600k_r50.onnx");
+    let fallback_detect = dir.join("scrfd.onnx");
+    let need_fallback_embed  = !embed.exists()  && !fallback_embed.exists();
+    let need_fallback_detect = !detect.exists() && !fallback_detect.exists();
+    if need_fallback_embed || need_fallback_detect {
+        println!(
+            "  📥 Fetching buffalo_l fallback bundle for {}{}{}",
+            if need_fallback_embed  { "ArcFace R50" } else { "" },
+            if need_fallback_embed && need_fallback_detect { " + " } else { "" },
+            if need_fallback_detect { "SCRFD 10G" } else { "" },
+        );
+        if let Err(e) = fetch_buffalo_l_zip(&dir, &fallback_embed, &fallback_detect).await {
+            println!("  ⚠  buffalo_l fallback download failed: {e}");
+        }
+    }
+
+    // ── Primary anti-spoof: Silent-Face V2 ──────────────────────────────────
     if !antispoof.exists() {
-        println!("  📥 Anti-spoof model not found — trying community mirrors...");
+        let mirrors: Vec<String> = match env_url_override("POND_FACE_ANTISPOOF_URL") {
+            Some(u) => vec![u],
+            None => ANTISPOOF_MIRRORS.iter().map(|s| s.to_string()).collect(),
+        };
+        println!("  📥 Silent-Face PAD not found — trying mirrors...");
         let mut got = false;
-        for url in ANTISPOOF_MIRRORS {
+        for url in &mirrors {
             match download_file(url, &antispoof, ANTISPOOF_APPROX_MB).await {
-                Ok(_) => {
-                    got = true;
-                    break;
-                }
-                Err(e) => {
-                    println!("  ⚠  Mirror {} failed: {}", url, e);
-                }
+                Ok(_) => { got = true; break; }
+                Err(e) => println!("  ⚠  Mirror {url} failed: {e}"),
             }
         }
         if !got {
             println!(
-                "  ⚠  Anti-spoof model unavailable — heuristic PAD + burst liveness gates \
+                "  ⚠  Silent-Face PAD unavailable — heuristic PAD + burst liveness gates \
                  will still run, but the strongest photo-attack defence is missing.\n     \
                  Place the file manually at: {}",
                 antispoof.display()
             );
         }
     } else {
-        println!("  ✅ Anti-spoof model already present");
+        println!("  ✅ Silent-Face PAD already present");
+    }
+
+    // ── Secondary anti-spoof: DeepPixBis ────────────────────────────────────
+    // Best-effort — adapter ensembles primary + secondary via max(spoof_score)
+    // when both are present, but a missing secondary just disables the
+    // ensemble (primary alone still runs).
+    if !antispoof_2.exists() {
+        let url = env_url_override("POND_FACE_ANTISPOOF_2_URL")
+            .unwrap_or_else(|| DEEPPIXBIS_DEFAULT_URL.to_string());
+        println!("  📥 DeepPixBis (secondary PAD) not found — downloading from {}", url);
+        match download_file(&url, &antispoof_2, DEEPPIXBIS_APPROX_MB).await {
+            Ok(_) => {}
+            Err(e) => {
+                println!(
+                    "  ⚠  DeepPixBis download failed: {e}\n     \
+                     Ensemble PAD disabled — Silent-Face V2 still runs alone, \
+                     but replay-attack robustness will be lower than with the pair."
+                );
+            }
+        }
+    } else {
+        println!("  ✅ DeepPixBis secondary PAD already present");
     }
 
     Ok(())

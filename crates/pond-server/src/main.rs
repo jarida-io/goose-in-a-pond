@@ -1982,6 +1982,18 @@ fn apply_face_recognition_defaults() {
     if std::env::var_os("POND_FACE_ANTISPOOF_PIXEL_SCALE").is_none() {
         unsafe { std::env::set_var("POND_FACE_ANTISPOOF_PIXEL_SCALE", "unit") };
     }
+
+    // Secondary PAD (DeepPixBis) for the ensemble — same auto-opt-in logic
+    // as in `build_face_recognition`. Kept in both code paths because each
+    // is reachable under different launch flows (`setup` vs `serve`).
+    if std::env::var_os("POND_FACE_ANTISPOOF_PATH_2").is_none() {
+        let default_path = default_data_dir()
+            .join("models").join("face").join("deeppixbis.onnx");
+        if default_path.exists() {
+            // SAFETY: single-threaded setup, before any worker spawns.
+            unsafe { std::env::set_var("POND_FACE_ANTISPOOF_PATH_2", default_path) };
+        }
+    }
 }
 
 fn default_data_dir() -> std::path::PathBuf {
@@ -2016,18 +2028,20 @@ fn build_face_recognition(
     use pond_core::ports::face_embedding_extractor::FaceEmbeddingExtractor;
     use pond_infra::sqlite_face_recognition::SqliteFaceRecognition;
 
-    // Default model lookup tries the well-calibrated buffalo_l export first,
-    // then falls back to legacy `arcface.onnx` for users who haven't migrated
-    // yet.  Operators can pin a specific path via `POND_FACE_MODEL_PATH`.
+    // Embedder lookup, preferred → fallback:
+    //   1. `POND_FACE_MODEL_PATH` (explicit operator override)
+    //   2. `adaface_ir101.onnx`   (AdaFace IR-101 — best low-light tolerance)
+    //   3. `w600k_r50.onnx`       (ArcFace R50 from buffalo_l)
+    //   4. `arcface.onnx`         (legacy filename, still supported)
     let model_path = match std::env::var("POND_FACE_MODEL_PATH") {
         Ok(p) => std::path::PathBuf::from(p),
         Err(_) => {
-            let preferred = data_dir.join("models/face/w600k_r50.onnx");
-            if preferred.exists() {
-                preferred
-            } else {
-                data_dir.join("models/face/arcface.onnx")
-            }
+            let adaface  = data_dir.join("models/face/adaface_ir101.onnx");
+            let arcface  = data_dir.join("models/face/w600k_r50.onnx");
+            let legacy   = data_dir.join("models/face/arcface.onnx");
+            if adaface.exists() { adaface }
+            else if arcface.exists() { arcface }
+            else { legacy }
         }
     };
 
@@ -2051,6 +2065,24 @@ fn build_face_recognition(
     // index 0.  Pin the default to 2 so the model works out-of-the-box.
     if std::env::var_os("POND_FACE_ANTISPOOF_LIVE_INDEX").is_none() {
         unsafe { std::env::set_var("POND_FACE_ANTISPOOF_LIVE_INDEX", "2"); }
+    }
+
+    // Secondary PAD (DeepPixBis) for the ensemble path in
+    // `pond-adapters-face-onnx`.  When the file is on disk and the env var
+    // is unset, opt the user into the stronger ensemble automatically —
+    // the adapter already takes `max(spoof_score)` of primary + secondary
+    // so a missing or dud secondary just falls back to primary-alone.
+    if std::env::var_os("POND_FACE_ANTISPOOF_PATH_2").is_none() {
+        let secondary_default = data_dir.join("models/face/deeppixbis.onnx");
+        if secondary_default.exists() {
+            // SAFETY: single-threaded init phase before any task scheduling.
+            unsafe {
+                std::env::set_var(
+                    "POND_FACE_ANTISPOOF_PATH_2",
+                    secondary_default.as_os_str(),
+                );
+            }
+        }
     }
 
     if !model_path.exists() {
@@ -2105,9 +2137,20 @@ fn build_face_recognition(
     //      — bbox only; no alignment, roughly phase-2 baseline behaviour.
     //   3. No detector; adapter falls back to center-square cropping.  Safe
     //      but prone to the "everyone matches" failure mode — log loudly.
+    // Detector preference: SCRFD 34G > SCRFD 10G > UltraFace > center-square.
+    // 34G catches faces at smaller pixel sizes than 10G (deeper backbone)
+    // but is ~140 MB instead of ~17 MB. `POND_FACE_SCRFD_PATH` overrides
+    // both SCRFD candidates explicitly.
     let scrfd_path = std::env::var("POND_FACE_SCRFD_PATH")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| data_dir.join("models/face/scrfd.onnx"));
+        .unwrap_or_else(|_| {
+            let scrfd_34 = data_dir.join("models/face/scrfd_34g.onnx");
+            if scrfd_34.exists() {
+                scrfd_34
+            } else {
+                data_dir.join("models/face/scrfd.onnx")
+            }
+        });
     let ultraface_path = std::env::var("POND_FACE_DETECTOR_PATH")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| data_dir.join("models/face/ultraface.onnx"));

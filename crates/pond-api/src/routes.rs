@@ -4465,12 +4465,14 @@ async fn list_face_enrollments(
 
 /// GET /api/v1/faces/models — report status of the three face models on disk.
 ///
-/// Returns availability + size for each of: ArcFace R50 embedder
-/// (`w600k_r50.onnx`), SCRFD 10G detector (`scrfd.onnx`), Silent-Face PAD
-/// (`antispoof.onnx`).  Drives the Face Recognition card on the web/desktop
-/// Models pages.  Returns `feature_enabled: false` when pond-server was
-/// built without the `face-onnx` feature so the UI can render a "rebuild
-/// with --features face-onnx" hint.
+/// Returns availability + size for each of the face-recognition model files.
+///
+/// Reports both the **preferred** model in each slot (AdaFace IR-101,
+/// SCRFD 34G, Silent-Face V2, DeepPixBis) and the **fallback** files
+/// from the buffalo_l bundle (ArcFace R50, SCRFD 10G), so the Models UI
+/// can show "ready / fallback / missing" per slot.  Returns
+/// `feature_enabled: false` when pond-server was built without the
+/// `face-onnx` feature.
 async fn list_face_models_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<Value> {
@@ -4501,9 +4503,15 @@ async fn list_face_models_handler(
     }
 
     let entries = vec![
-        describe(&dir, "w600k_r50.onnx", "ArcFace R50",        174, "embedding"),
-        describe(&dir, "scrfd.onnx",     "SCRFD 10G",           17, "detector"),
-        describe(&dir, "antispoof.onnx", "Silent-Face PAD",      2, "antispoof"),
+        // Embedder slot — preferred + fallback.
+        describe(&dir, "adaface_ir101.onnx", "AdaFace IR-101 (preferred)", 250, "embedding"),
+        describe(&dir, "w600k_r50.onnx",     "ArcFace R50 (fallback)",     174, "embedding"),
+        // Detector slot — preferred + fallback.
+        describe(&dir, "scrfd_34g.onnx",     "SCRFD 34G (preferred)",      140, "detector"),
+        describe(&dir, "scrfd.onnx",         "SCRFD 10G (fallback)",        17, "detector"),
+        // Anti-spoof ensemble.
+        describe(&dir, "antispoof.onnx",     "Silent-Face V2 (primary PAD)",  2, "antispoof"),
+        describe(&dir, "deeppixbis.onnx",    "DeepPixBis (secondary PAD)",    5, "antispoof"),
     ];
 
     Json(json!({
