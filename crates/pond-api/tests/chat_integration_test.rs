@@ -111,6 +111,7 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
         recipe_repo: None,
         llamafile_manager: None,
         event_log_repo: None,
+        speaker_id: None,
     });
     (build_router(state, std::path::PathBuf::from("web/dist")), tmp)
 }

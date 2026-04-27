@@ -450,7 +450,7 @@ async fn main() -> Result<()> {
         None => {
             // Default: run interactive chat (backward compat) — provider comes from Settings
             init_tracing(false);
-            run_chat(None, None, "stdin", None, true, Some("none"), None).await
+            run_chat(None, None, "stdin", None, true, Some("none"), None, None).await
         }
     }
 }
@@ -1131,6 +1131,19 @@ async fn run_server(static_dir: std::path::PathBuf, open: bool, debug: bool, age
             as Arc<dyn LlmProvider>
     )));
 
+    let speaker_id_serve: Option<Arc<dyn SpeakerIdentification + Send + Sync>> = {
+        let model_path = data_dir.join("models").join("speaker.onnx");
+        if model_path.exists() {
+            match OnnxSpeakerAdapter::new(&model_path, db.system.clone(), db.logs.clone()) {
+                Ok(a) => {
+                    println!("  ✅ Speaker ID: x-vector model loaded");
+                    Some(Arc::new(a))
+                }
+                Err(e) => { tracing::warn!("Speaker ID failed to load: {}", e); None }
+            }
+        } else { None }
+    };
+
     let db = Arc::new(db);
 
     // Spawn background TTL pruning task (runs every 6 hours)
@@ -1336,18 +1349,7 @@ async fn run_server(static_dir: std::path::PathBuf, open: bool, debug: bool, age
         recipe_repo: Some(recipe_repo.clone()),
         llamafile_manager: Some(llamafile_manager),
         event_log_repo: event_log_repo,
-        speaker_id: {
-            let model_path = data_dir.join("models").join("speaker.onnx");
-            if model_path.exists() {
-                match OnnxSpeakerAdapter::new(&model_path, db.system.clone(), db.logs.clone()) {
-                    Ok(a) => {
-                        println!("  ✅ Speaker ID: x-vector model loaded");
-                        Some(Arc::new(a) as Arc<dyn SpeakerIdentification + Send + Sync>)
-                    }
-                    Err(e) => { tracing::warn!("Speaker ID failed to load: {}", e); None }
-                }
-            } else { None }
-        },
+        speaker_id: speaker_id_serve,
     });
 
     // Warn if static assets haven't been built yet
@@ -2507,6 +2509,22 @@ async fn run_onboard(reset: bool) -> Result<()> {
                     println!("Run with --reset to start over.");
                 } else {
                     println!("\nOnboarding complete! Saving your settings...\n");
+
+                    // Create profile so enrollment and speaker ID can find the user
+                    let profile_repo = SqliteProfileRepository::new(db.system.clone());
+                    if let Some(name) = user_data.get("user_name") {
+                        match pond_core::ports::profile::ProfileRepository::create(
+                            &profile_repo,
+                            pond_core::domain::profile::CreateProfileRequest {
+                                display_name: name.clone(),
+                                avatar_emoji: "🦆".to_string(),
+                            },
+                        ).await {
+                            Ok(p) => println!("  ✅ Profile created for {}", p.display_name),
+                            Err(e) => tracing::warn!("Failed to create profile: {}", e),
+                        }
+                    }
+
                     let mut settings = settings_repo.get().await.unwrap_or_default();
                     if let Some(v) = user_data.get("user_name")       { settings.user_name = v.clone(); }
                     if let Some(v) = user_data.get("timezone")        { settings.timezone = v.clone(); }
@@ -2518,7 +2536,7 @@ async fn run_onboard(reset: bool) -> Result<()> {
                         settings.active_llm_model = v.clone();
                     }
                     settings_repo.update(&settings).await?;
-                    println!("  Settings saved to database.");
+                    println!("  ✅ Settings saved to database.");
                 }
                 run_main_menu().await?;
                 break;

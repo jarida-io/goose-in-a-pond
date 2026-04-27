@@ -127,6 +127,7 @@ async fn make_app_with_settings_repo(
         recipe_repo:         None,
         llamafile_manager: None,
         event_log_repo: None,
+        speaker_id: None,
     });
 
     (

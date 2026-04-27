@@ -115,6 +115,7 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
         recipe_repo:         Some(Arc::new(SqliteRecipeRepository::new(pool.clone()))),
         llamafile_manager: None,
         event_log_repo: None,
+        speaker_id: None,
     });
 
     (build_router(state, std::path::PathBuf::from("web/dist")), tmp)
@@ -278,6 +279,7 @@ async fn prompt_template_delete_system_returns_403() {
         recipe_repo:         None,
         llamafile_manager: None,
         event_log_repo: None,
+        speaker_id: None,
     });
 
     let app = build_router(state, std::path::PathBuf::from("web/dist"));
@@ -548,6 +550,7 @@ async fn returns_501_when_repos_not_configured() {
         recipe_repo:         None,
         llamafile_manager: None,
         event_log_repo: None,
+        speaker_id: None,
     });
     let app = build_router(state, std::path::PathBuf::from("web/dist"));
 
