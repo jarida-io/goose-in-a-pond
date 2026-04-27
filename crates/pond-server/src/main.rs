@@ -2535,6 +2535,9 @@ async fn run_onboard(reset: bool) -> Result<()> {
                         settings.chat_model = v.clone();
                         settings.active_llm_model = v.clone();
                     }
+                    if settings.active_whisper_model.is_empty() {
+                        settings.active_whisper_model = "base".to_string();
+                    }
                     settings_repo.update(&settings).await?;
                     println!("  ✅ Settings saved to database.");
                 }
