@@ -1336,7 +1336,7 @@ impl ChatService {
             } else {
                 // ── Conversational turn — listen without wake word ──
                 self.emit_event(WorkflowEvent::StateChanged(WorkflowState::Listen));
-                println!("\n  🎧 Listening for your reply...");
+                println!("\n  ⌨️  Waiting for your reply...");
                 io::stdout().flush()?;
 
                 match self.voice_input.listen_with_audio().await? {
