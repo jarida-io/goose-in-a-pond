@@ -30,7 +30,7 @@
 //! # Privacy
 //! Raw audio bytes are held in memory only for the duration of feature
 //! extraction and are never written to disk by this adapter.
-i 
+
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use ndarray::{Array1, Array2, Array3};
@@ -99,14 +99,14 @@ impl OnnxSpeakerAdapter {
         // Read tensor names directly from the model so the adapter works with
         // any ONNX export, not just the SpeechBrain naming convention.
         let input_name = session
-            .inputs()
+            .inputs
             .first()
-            .map(|i| i.name().to_string())
+            .map(|i| i.name.to_string())
             .unwrap_or_else(|| "feats".to_string());
         let output_name = session
-            .outputs()
+            .outputs
             .first()
-            .map(|o| o.name().to_string())
+            .map(|o| o.name.to_string())
             .unwrap_or_else(|| "embedding".to_string());
 
         Ok(Self {

@@ -10,6 +10,7 @@ members = [
     "crates/pond-adapters-ollama",
     "crates/pond-adapters-whisper",
     "crates/pond-adapters-piper",
+    "crates/pond-adapters-face-onnx",
     "crates/pond-adapters-gotg",
     "crates/pond-adapters-weather",
     "crates/pond-adapters-mcp-memory",
@@ -99,7 +100,10 @@ tera = { version = "1", default-features = false }
 shellexpand = "3.1"
 tempfile = "3"
 thiserror = "1.0"
-tokio = { version = "1.49", features = ["full"] }
+tokio = { version = "1.49", features = [
+    "rt-multi-thread", "macros", "sync", "time",
+    "io-util", "io-std", "fs", "net", "signal", "process",
+] }
 tokio-stream = "0.1"
 tokio-util = "0.7"
 tower = "0.5"
@@ -128,8 +132,8 @@ tracing-opentelemetry = "0.32"
 hostname = "0.4"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls", "migrate", "chrono"] }
 hound   = "3.5"
-ndarray = { version = "0.17", features = ["std"] }
-ort     = { version = "=2.0.0-rc.12", features = ["download-binaries", "ndarray"] }
+image   = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+ndarray = { version = "0.16", features = ["std"] }
 rustfft = "6"
 
 # Internal workspace crates
@@ -142,6 +146,15 @@ pond-adapters-weather          = { path = "crates/pond-adapters-weather" }
 pond-adapters-mcp-memory       = { path = "crates/pond-adapters-mcp-memory" }
 pond-adapters-local-inference  = { path = "crates/pond-adapters-local-inference" }
 pond-adapters-speaker-embed    = { path = "crates/pond-adapters-speaker-embed" }
+pond-adapters-face-onnx        = { path = "crates/pond-adapters-face-onnx" }
+
+# ── Release profile for Jetson / embedded deployment ─────────────────────────
+[profile.release]
+opt-level = "s"         # size-optimize (matches Tauri sub-crate choice)
+lto = "thin"            # good optimization, faster compile than fat LTO
+codegen-units = 1
+strip = true
+panic = "abort"
 
 # ── Patches required by goose sub-crates ─────────────────────────────────────
 [patch.crates-io]

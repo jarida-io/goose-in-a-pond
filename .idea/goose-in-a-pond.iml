@@ -30,9 +30,21 @@
       <sourceFolder url="file://$MODULE_DIR$/crates/pond-adapters-piper/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/pond-adapters-qwen-tts/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/pond-api/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-adapters-weather/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-infra-scheduler/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-mcp-server/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-adapters-local-inference/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-adapters-mcp-memory/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-server/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-adapters-ollama/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-adapters-piper/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-adapters-goose/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-adapters-goose/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-adapters-face-onnx/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/pond-adapters-speaker-embed/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/goose/target" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
+      <excludeFolder url="file://$MODULE_DIR$/crates/pond-mcp-server/target" />
     </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />

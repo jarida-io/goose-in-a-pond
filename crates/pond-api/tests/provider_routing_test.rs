@@ -21,7 +21,6 @@ use pond_core::services::mock_memory::MockMemoryRepository;
 use pond_core::services::mock_profile::MockProfileRepository;
 use pond_core::services::mock_sensor::{MockCameraStorage, MockSensorStorage};
 use pond_core::services::mock_settings::MockSettingsRepository;
-use pond_core::services::model_router::ModelRouter;
 use pond_infra::mock_handshake::MockHandshake;
 use pond_infra::sqlite_session_storage::SqliteSessionStorage;
 use reqwest::Client as ReqwestClient;
@@ -206,6 +205,11 @@ async fn make_app_with_provider(
         llamafile_manager: None,
         event_log_repo: None,
         speaker_id: None,
+        face_recognition: None,
+        session_user_bindings: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+        tool_agent: None,
+        answer_reviewer: None,
     });
     (build_router(state, std::path::PathBuf::from("web/dist")), tmp)
 }
@@ -251,7 +255,7 @@ async fn chat_message_routes_to_chat_provider() {
         .await;
 
     let llamafile = Arc::new(LlamafileProvider::new(Some(&server.uri())));
-    let router = Arc::new(ModelRouter::new(llamafile.clone(), llamafile.clone(), llamafile));
+    let router = llamafile.clone();
     let (app, _tmp) = make_app_with_provider(router).await;
 
     let resp = app
@@ -270,9 +274,9 @@ async fn chat_message_routes_to_chat_provider() {
     );
 }
 
-/// A reasoning-type message should route to the think provider.
+/// A reasoning-type message goes through the same model (no routing).
 #[tokio::test]
-async fn think_message_routes_to_think_provider() {
+async fn think_message_uses_single_provider() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -285,7 +289,7 @@ async fn think_message_routes_to_think_provider() {
         .await;
 
     let llamafile = Arc::new(LlamafileProvider::new(Some(&server.uri())));
-    let router = Arc::new(ModelRouter::new(llamafile.clone(), llamafile.clone(), llamafile));
+    let router = llamafile.clone();
     let (app, _tmp) = make_app_with_provider(router).await;
 
     let resp = app
@@ -296,12 +300,12 @@ async fn think_message_routes_to_think_provider() {
 
     let events = collect_sse_events(resp.into_body()).await;
     let done = done_event(&events).expect("no done event");
-    assert_eq!(done["model_role"].as_str(), Some("think"));
+    assert_eq!(done["model_role"].as_str(), Some("chat"));
 }
 
-/// An action/reminder message should route to the task provider.
+/// An action/reminder message goes through the same model (no routing).
 #[tokio::test]
-async fn task_message_routes_to_task_provider() {
+async fn task_message_uses_single_provider() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -314,7 +318,7 @@ async fn task_message_routes_to_task_provider() {
         .await;
 
     let llamafile = Arc::new(LlamafileProvider::new(Some(&server.uri())));
-    let router = Arc::new(ModelRouter::new(llamafile.clone(), llamafile.clone(), llamafile));
+    let router = llamafile.clone();
     let (app, _tmp) = make_app_with_provider(router).await;
 
     let resp = app
@@ -325,7 +329,7 @@ async fn task_message_routes_to_task_provider() {
 
     let events = collect_sse_events(resp.into_body()).await;
     let done = done_event(&events).expect("no done event");
-    assert_eq!(done["model_role"].as_str(), Some("task"));
+    assert_eq!(done["model_role"].as_str(), Some("chat"));
 }
 
 /// Even when the wired provider would return 503, /chat/stream executes via
@@ -340,7 +344,7 @@ async fn provider_failure_does_not_break_universal_agent_path() {
         .await;
 
     let llamafile = Arc::new(LlamafileProvider::new(Some(&server.uri())));
-    let router = Arc::new(ModelRouter::new(llamafile.clone(), llamafile.clone(), llamafile));
+    let router = llamafile.clone();
     let (app, _tmp) = make_app_with_provider(router).await;
 
     let resp = app
@@ -378,7 +382,7 @@ async fn done_event_has_session_id() {
         .await;
 
     let llamafile = Arc::new(LlamafileProvider::new(Some(&server.uri())));
-    let router = Arc::new(ModelRouter::new(llamafile.clone(), llamafile.clone(), llamafile));
+    let router = llamafile.clone();
     let (app, _tmp) = make_app_with_provider(router).await;
 
     let resp = app
@@ -409,7 +413,7 @@ async fn done_event_has_usage_shape_for_agent_path() {
         .await;
 
     let llamafile = Arc::new(LlamafileProvider::new(Some(&server.uri())));
-    let router = Arc::new(ModelRouter::new(llamafile.clone(), llamafile.clone(), llamafile));
+    let router = llamafile.clone();
     let (app, _tmp) = make_app_with_provider(router).await;
 
     let resp = app
@@ -476,6 +480,11 @@ async fn no_provider_still_returns_agent_response_for_non_task_messages() {
         llamafile_manager: None,
         event_log_repo: None,
         speaker_id: None,
+        face_recognition: None,
+        session_user_bindings: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+        tool_agent: None,
+        answer_reviewer: None,
     });
     let app = build_router(state, std::path::PathBuf::from("web/dist"));
 
@@ -542,6 +551,11 @@ async fn task_message_uses_agent_with_tool_call_events_without_provider() {
         llamafile_manager: None,
         event_log_repo: None,
         speaker_id: None,
+        face_recognition: None,
+        session_user_bindings: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+        tool_agent: None,
+        answer_reviewer: None,
     });
     let app = build_router(state, std::path::PathBuf::from("web/dist"));
 
@@ -558,5 +572,5 @@ async fn task_message_uses_agent_with_tool_call_events_without_provider() {
     assert!(tool_event.is_some(), "expected tool_call event: {:?}", events);
 
     let done = done_event(&events).expect("no done event");
-    assert_eq!(done["model_role"].as_str(), Some("task"));
+    assert_eq!(done["model_role"].as_str(), Some("chat"));
 }

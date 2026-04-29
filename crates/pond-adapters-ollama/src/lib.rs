@@ -245,6 +245,10 @@ impl OllamaProvider {
 
 #[async_trait]
 impl LlmProvider for OllamaProvider {
+    fn capabilities(&self) -> pond_core::domain::model_capabilities::ModelCapabilities {
+        pond_core::domain::model_capabilities::ModelCapabilities::from_model_name(&self.model)
+    }
+
     async fn complete(
         &self,
         system_prompt: &str,

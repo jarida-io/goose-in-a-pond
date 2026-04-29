@@ -728,8 +728,8 @@ fn wake_listener_thread(
                             // command ("hey goose" [brief pause] "what time is it").
                             // The ring buffer accumulates audio during the ASR call
                             // and afterwards; drain it for continuation.
-                            const POST_TRIGGER_MS: u64       = 3000;
-                            const POST_TRIGGER_SILENCE: u64  = 800;
+                            const POST_TRIGGER_MS: u64       = 2000;
+                            const POST_TRIGGER_SILENCE: u64  = 400;
                             const POLL_MS: u64               = 30;
 
                             let mut continuation: Vec<i16> = Vec::new();

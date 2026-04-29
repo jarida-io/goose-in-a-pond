@@ -454,6 +454,76 @@
   padding: 8px 4px; font-size: var(--text-sm); color: var(--grey-600);
 }
 
+/* ── System stats bar ────────────────────────────────────────── */
+
+.sys-stats {
+  display: flex; flex-direction: column; gap: 6px;
+  background: var(--color-bg); border: 1px solid var(--color-border);
+  border-radius: var(--radius-md); padding: 10px var(--space-4);
+}
+.sys-stats__row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.sys-stats__label {
+  font-size: var(--text-xs); font-weight: 700; color: var(--color-text-secondary);
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.sys-stats__value {
+  font-family: var(--font-mono); font-size: var(--text-xs); color: var(--fg);
+  flex: 1;
+}
+
+/* ── Download progress ───────────────────────────────────────── */
+
+.dl-progress {
+  display: flex; flex-direction: column; gap: var(--space-2);
+  background: var(--color-bg); border: 1px solid var(--color-border);
+  border-radius: var(--radius-md); padding: var(--space-3) var(--space-4);
+}
+.dl-progress__header {
+  display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px;
+}
+.dl-progress__title {
+  font-size: var(--text-xs); font-weight: 700; color: var(--color-text-secondary);
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.dl-progress__item { display: flex; flex-direction: column; gap: 4px; }
+.dl-progress__item-header {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--space-2);
+}
+.dl-progress__filename {
+  font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-text);
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dl-progress__status {
+  font-size: var(--text-xs); flex-shrink: 0; font-family: var(--font-mono);
+  color: var(--color-text-secondary);
+}
+.dl-progress__status--done { color: var(--color-success); }
+.dl-progress__status--error { color: var(--color-destructive); }
+.dl-progress__track {
+  height: 6px; background: rgba(23,22,22,0.08); border-radius: 3px; overflow: hidden;
+}
+.dl-progress__fill {
+  height: 100%; border-radius: 3px; transition: width 0.4s ease;
+  background: var(--color-accent);
+}
+.dl-progress__fill--done { background: var(--color-success); }
+.dl-progress__fill--error { background: var(--color-destructive); }
+.dl-progress__fill--downloading {
+  background: linear-gradient(90deg, var(--color-accent), var(--color-accent-hover, #6d4de6));
+  animation: dl-shimmer 1.5s ease-in-out infinite;
+}
+@keyframes dl-shimmer {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+/* ── Spin animation for loaders ─────────────────────────────── */
+
+.spin { animation: spin-anim 1s linear infinite; }
+@keyframes spin-anim { to { transform: rotate(360deg); } }
+
 .muted-foot {
   font-size: var(--text-sm);
   color: var(--grey-500);

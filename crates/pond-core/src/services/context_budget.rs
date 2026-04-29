@@ -9,6 +9,7 @@
 //! This ensures the most recent context is always preserved.
 
 use crate::domain::message::{ChatMessage, Role};
+use crate::domain::model_capabilities::ModelCapabilities;
 
 const CHARS_PER_TOKEN: usize = 4;
 const MIN_USABLE_HISTORY_CHARS: usize = 256;
@@ -122,13 +123,34 @@ pub fn trim_to_budget(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     trim_to_char_budget(messages, USABLE_HISTORY_CHARS)
 }
 
+/// Trim using the model's actual context window.
+///
+/// Reserves 20% for the system prompt and generation headroom (minimum 2048 tokens).
+/// When `override_tokens` is non-zero, it caps the context window to that value
+/// (useful for memory-constrained deployments like Jetson 8GB).
+pub fn trim_to_budget_for_model(
+    messages: Vec<ChatMessage>,
+    capabilities: &ModelCapabilities,
+    override_tokens: u32,
+) -> Vec<ChatMessage> {
+    let token_limit = if override_tokens > 0 {
+        override_tokens.min(capabilities.context_window_tokens) as usize
+    } else {
+        capabilities.context_window_tokens as usize
+    };
+    // Reserve 20% for system prompt + generation headroom, min 2048 tokens
+    let reserved = (token_limit / 5).max(2048);
+    let effective = token_limit.saturating_sub(reserved).max(256);
+    trim_to_budget_with_limit(messages, effective)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::message::Role;
 
     fn msg(content: &str) -> ChatMessage {
-        ChatMessage { role: Role::User, content: content.to_string() }
+        ChatMessage { role: Role::User, content: content.to_string(), images: Vec::new() }
     }
 
     fn total_chars(msgs: &[ChatMessage]) -> usize {
@@ -214,7 +236,7 @@ mod tests {
     #[test]
     fn truncate_tool_outputs_truncates_large_assistant_payloads() {
         let messages = vec![
-            ChatMessage { role: Role::Assistant, content: format!("{{\"tool\":\"weather\",\"result\":\"{}\"}}", "x".repeat(TOOL_RESULT_MAX_CHARS + 300)) },
+            ChatMessage { role: Role::Assistant, content: format!("{{\"tool\":\"weather\",\"result\":\"{}\"}}", "x".repeat(TOOL_RESULT_MAX_CHARS + 300)), images: Vec::new() },
             msg("normal user message"),
         ];
 
@@ -230,8 +252,46 @@ mod tests {
         let plain_assistant = ChatMessage {
             role: Role::Assistant,
             content: "This is a normal answer without tool payload markers.".to_string(),
+            images: Vec::new(),
         };
         let result = truncate_tool_outputs(vec![plain_assistant.clone()]);
         assert_eq!(result[0].content, plain_assistant.content);
+    }
+
+    #[test]
+    fn trim_for_model_uses_reported_context_window() {
+        // 128K context → 80% usable = ~102K tokens → ~409K chars
+        let caps = ModelCapabilities {
+            context_window_tokens: 128_000,
+            ..Default::default()
+        };
+        let messages: Vec<ChatMessage> = (0..200).map(|_| msg(&"x".repeat(200))).collect();
+        let result = trim_to_budget_for_model(messages.clone(), &caps, 0);
+        // With 128K context, all 200 messages (40K chars) should fit easily
+        assert_eq!(result.len(), 200);
+    }
+
+    #[test]
+    fn trim_for_model_with_small_context() {
+        // 4K context → 80% = ~3.2K tokens → ~12.8K chars - 2048 reserve
+        let caps = ModelCapabilities::default(); // 4096 tokens
+        let messages: Vec<ChatMessage> = (0..200).map(|_| msg(&"x".repeat(200))).collect();
+        let result = trim_to_budget_for_model(messages, &caps, 0);
+        // Should trim significantly — 40K chars won't fit in ~6K usable
+        assert!(result.len() < 200);
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn trim_for_model_override_caps_context() {
+        // Model reports 128K but override limits to 4K
+        let caps = ModelCapabilities {
+            context_window_tokens: 128_000,
+            ..Default::default()
+        };
+        let messages: Vec<ChatMessage> = (0..200).map(|_| msg(&"x".repeat(200))).collect();
+        let result = trim_to_budget_for_model(messages, &caps, 4096);
+        // Override to 4K should trim just like the small context case
+        assert!(result.len() < 200);
     }
 }

@@ -9,14 +9,32 @@ pub struct ServerProcess {
     child: Mutex<Option<Child>>,
     pub url: Mutex<String>,
     recovery_lock: AsyncMutex<()>,
+    /// True when the desktop was launched as a child of an already-running
+    /// pond-server (`pond-server serve --native` sets `GIAP_SERVER_PORT`).
+    /// In that case we MUST NOT try to spawn our own — port 4000 is already
+    /// bound and a second spawn would either fail or fight for the socket,
+    /// leaving the WebView blank ("the app launches but it shows nothing").
+    /// Instead we just patiently poll for health.
+    parent_managed: bool,
 }
 
 impl ServerProcess {
     pub fn new() -> Self {
+        // The parent process can pin our server URL via GIAP_SERVER_PORT so
+        // the WebView talks to the same instance, instead of falling back to
+        // 4000 and racing the parent for the port.
+        let (url, parent_managed) = match std::env::var("GIAP_SERVER_PORT") {
+            Ok(port) if !port.is_empty() => (
+                format!("http://127.0.0.1:{}", port),
+                true,
+            ),
+            _ => ("http://127.0.0.1:4000".to_string(), false),
+        };
         Self {
             child: Mutex::new(None),
-            url: Mutex::new("http://127.0.0.1:4000".to_string()),
+            url: Mutex::new(url),
             recovery_lock: AsyncMutex::new(()),
+            parent_managed,
         }
     }
 
@@ -42,6 +60,28 @@ impl ServerProcess {
         if self.health_check(&url).await {
             tracing::info!("Connected to existing pond-server at {}", url);
             return Ok(url);
+        }
+
+        // 1b. Parent-managed mode (`pond-server serve --native` set
+        //     GIAP_SERVER_PORT). The parent has already bound the socket — we
+        //     MUST NOT spawn our own. Poll patiently while the parent finishes
+        //     loading models. Use a long timeout because cold-start with face
+        //     recognition + Whisper + TTS can take well over a minute.
+        if self.parent_managed {
+            tracing::info!(
+                "Parent-managed pond-server detected; waiting for {} to become healthy",
+                url
+            );
+            for _ in 0..240 {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if self.health_check(&url).await {
+                    tracing::info!("Parent pond-server is ready at {}", url);
+                    return Ok(url);
+                }
+            }
+            return Err(format!(
+                "Parent-managed pond-server at {url} did not become healthy within 120 s"
+            ));
         }
 
         self.cleanup_orphaned_child();

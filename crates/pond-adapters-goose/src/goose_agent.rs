@@ -111,6 +111,8 @@ pub struct GooseAdapter {
     /// When true, prompt templates include voice-mode instructions (keep responses
     /// short, conversational, no formatting). Set by the CLI when `--input whisper`.
     voice_mode: std::sync::atomic::AtomicBool,
+    /// Runtime capabilities of the currently loaded model.
+    model_capabilities: Mutex<pond_core::domain::model_capabilities::ModelCapabilities>,
 }
 
 impl GooseAdapter {
@@ -160,6 +162,7 @@ impl GooseAdapter {
             loaded_extensions: Mutex::new(HashSet::new()),
             goose_session_map: Mutex::new(HashMap::new()),
             voice_mode: std::sync::atomic::AtomicBool::new(false),
+            model_capabilities: Mutex::new(pond_core::domain::model_capabilities::ModelCapabilities::default()),
         })
     }
 
@@ -265,8 +268,10 @@ impl GooseAdapter {
         {
             let last = self.last_provider_key.lock().unwrap();
             if *last == key {
+                println!("[model-switch] provider already current: {}", key);
                 return Ok(());
             }
+            println!("[model-switch] provider change detected: {:?} -> {}", *last, key);
         }
 
         let provider: Option<Arc<dyn Provider>> = match settings.chat_provider.as_str() {
@@ -284,12 +289,15 @@ impl GooseAdapter {
                     Self::register_gguf_model(&model_name, dd);
                 }
                 let cfg = goose::model::ModelConfig::new_or_fail(&model_name);
+                println!("[model-switch] building LocalInferenceProvider for '{}'...", model_name);
                 match goose::providers::local_inference::LocalInferenceProvider::from_env(cfg, vec![]).await {
                     Ok(p) => {
+                        println!("[model-switch] LocalInferenceProvider ready for '{}'", model_name);
                         tracing::info!("Built LocalInferenceProvider for model '{}'", model_name);
                         Some(Arc::new(p))
                     }
                     Err(e) => {
+                        println!("[model-switch] FAILED to build LocalInferenceProvider for '{}': {e}", model_name);
                         tracing::warn!("Failed to build local inference provider for '{}': {e}", model_name);
                         None
                     }
@@ -305,9 +313,14 @@ impl GooseAdapter {
                     settings.chat_model.clone()
                 };
                 let cfg = goose::model::ModelConfig::new_or_fail(&model_name);
+                println!("[model-switch] building llamafile OllamaProvider for '{}'...", model_name);
                 match goose::providers::ollama::OllamaProvider::from_env(cfg).await {
-                    Ok(p) => Some(Arc::new(p)),
+                    Ok(p) => {
+                        println!("[model-switch] llamafile provider ready for '{}'", model_name);
+                        Some(Arc::new(p))
+                    }
                     Err(e) => {
+                        println!("[model-switch] FAILED to build llamafile provider for '{}': {e}", model_name);
                         tracing::warn!("Failed to build llamafile provider: {e}");
                         None
                     }
@@ -320,25 +333,44 @@ impl GooseAdapter {
                 } else {
                     settings.chat_model.clone()
                 };
+                println!("[model-switch] building Ollama provider for '{}'...", model_name);
                 let cfg = goose::model::ModelConfig::new_or_fail(&model_name);
                 match goose::providers::ollama::OllamaProvider::from_env(cfg).await {
-                    Ok(p) => Some(Arc::new(p)),
+                    Ok(p) => {
+                        println!("[model-switch] Ollama provider ready for '{}'", model_name);
+                        Some(Arc::new(p))
+                    }
                     Err(e) => {
+                        println!("[model-switch] FAILED to build Ollama provider for '{}': {e}", model_name);
                         tracing::warn!("Failed to build ollama provider: {e}");
                         None
                     }
                 }
             }
-            _ => None, // unknown provider — keep whatever Goose currently has
+            _ => {
+                println!("[model-switch] unknown provider '{}', keeping current", settings.chat_provider);
+                None
+            }
         };
 
         if let Some(p) = provider {
+            println!("[model-switch] swapping Goose provider to {}:{} for session {}", settings.chat_provider, settings.chat_model, session_id);
             tracing::info!(
                 "Switching Goose provider to {}:{} for session {}",
                 settings.chat_provider, settings.chat_model, session_id
             );
             self.agent.update_provider(p, session_id).await?;
-            *self.last_provider_key.lock().unwrap() = key;
+            *self.last_provider_key.lock().unwrap() = key.clone();
+
+            // Update model capabilities from the new model name
+            let caps = pond_core::domain::model_capabilities::ModelCapabilities::from_model_name(&settings.chat_model);
+            println!("[model-switch] capabilities: thinking={}, vision={}, context={}k",
+                caps.thinking, caps.vision, caps.context_window_tokens / 1000);
+            *self.model_capabilities.lock().unwrap() = caps;
+
+            println!("[model-switch] swap complete, key={}", key);
+        } else {
+            println!("[model-switch] no provider built for {}:{}", settings.chat_provider, settings.chat_model);
         }
         Ok(())
     }
@@ -417,23 +449,36 @@ impl GooseAdapter {
         // Goose maintains its own sessions.db with auto-generated IDs.
         let goose_sid = self.resolve_goose_session(&session_id).await;
 
-        // ── 1. System prompt ──────────────────────────────────────────────────
-        let template_content = self.template_repo
-            .get(&settings.prompt_style)
-            .await
+        // ── 1-4. System prompt, extras, skills, memory — fetched in parallel ─
+        let memory_limit = if settings.agent_memory_inject {
+            Some(settings.agent_memory_limit as usize)
+        } else {
+            None
+        };
+
+        let (template_result, devices_result, extras_result, skills_result, memories_result) = tokio::join!(
+            self.template_repo.get(&settings.prompt_style),
+            self.device_repo.list_devices(),
+            self.extras_repo.list_active(),
+            self.skill_repo.list_active(),
+            async {
+                match memory_limit {
+                    Some(limit) => self.memory_repo.search_recent(None, limit).await,
+                    None => Ok(vec![]),
+                }
+            },
+        );
+
+        let template_content = template_result
             .ok()
             .flatten()
             .map(|t| t.content)
             .unwrap_or_else(|| FALLBACK_PROMPT.to_string());
 
-        // Populate runtime state for Jinja2 rendering (device list + current date/time).
-        // Failure to read devices is non-fatal — renders with empty home-control section.
         let prompt_state = {
             use chrono::Local;
             let now = Local::now();
-            let current_date = now.format("%A, %-d %B %Y").to_string();
-            let current_time = now.format("%H:%M").to_string();
-            let devices = self.device_repo.list_devices().await.unwrap_or_default();
+            let devices = devices_result.unwrap_or_default();
             let device_count = devices.len();
             let has_home_devices = device_count > 0;
             let online_device_names = devices
@@ -442,13 +487,27 @@ impl GooseAdapter {
                 .map(|d| d.name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
+            // Use cached tool description lines (avoids 6 format!() allocations per turn)
+            let available_tools: Vec<String> = pond_core::prompts::giap_tool_description_lines()
+                .to_vec();
+
+            // Resolve thinking mode from settings + capabilities
+            let caps = self.model_capabilities.lock().unwrap().clone();
+            let thinking_enabled = match settings.thinking_mode.as_str() {
+                "on"  => true,
+                "off" => false,
+                _     => caps.thinking, // "auto" — enable when model supports it
+            };
+
             PromptState {
-                current_date,
-                current_time,
+                current_date: now.format("%A, %-d %B %Y").to_string(),
+                current_time: now.format("%H:%M").to_string(),
                 device_count,
                 has_home_devices,
                 online_device_names,
                 voice_mode: self.voice_mode.load(std::sync::atomic::Ordering::Relaxed),
+                available_tools,
+                thinking_enabled,
             }
         };
 
@@ -460,15 +519,13 @@ impl GooseAdapter {
         );
         self.agent.override_system_prompt(system_prompt).await;
 
-        // ── 2. System prompt extras ───────────────────────────────────────────
-        if let Ok(extras) = self.extras_repo.list_active().await {
+        if let Ok(extras) = extras_result {
             for extra in extras {
                 self.agent.extend_system_prompt(extra.key, extra.instruction).await;
             }
         }
 
-        // ── 3. Active user skills ─────────────────────────────────────────────
-        if let Ok(skills) = self.skill_repo.list_active().await {
+        if let Ok(skills) = skills_result {
             for skill in skills {
                 self.agent
                     .extend_system_prompt(format!("skill:{}", skill.name), skill.content)
@@ -476,23 +533,19 @@ impl GooseAdapter {
             }
         }
 
-        // ── 4. Memory injection ───────────────────────────────────────────────
-        if settings.agent_memory_inject {
-            let limit = settings.agent_memory_limit as usize;
-            if let Ok(memories) = self.memory_repo.search_recent(None, limit).await {
-                if !memories.is_empty() {
-                    let block = memories
-                        .iter()
-                        .map(|m| format!("- {}", m.content))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    self.agent
-                        .extend_system_prompt(
-                            "memories".to_string(),
-                            format!("Relevant memories:\n{block}"),
-                        )
-                        .await;
-                }
+        if let Ok(memories) = memories_result {
+            if !memories.is_empty() {
+                let block = memories
+                    .iter()
+                    .map(|m| format!("- {}", m.content))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                self.agent
+                    .extend_system_prompt(
+                        "memories".to_string(),
+                        format!("Relevant memories:\n{block}"),
+                    )
+                    .await;
             }
         }
 
@@ -501,32 +554,21 @@ impl GooseAdapter {
             tracing::warn!("Provider update failed (continuing with current provider): {e}");
         }
 
-        // ── 6. Auto-load "giap" builtin extension ─────────────────────────────
-        let needs_extension_load = {
-            let loaded = self.loaded_extensions.lock().unwrap();
-            !loaded.contains(&goose_sid)
-        };
-        if needs_extension_load {
-            if let Err(e) = self.add_builtin_extension("giap", &goose_sid).await {
-                tracing::error!(
-                    session = %goose_sid,
-                    error = %e,
-                    "Failed to load GIAP builtin extension — agent will have no tools"
-                );
-            }
-
-            // Remove all Goose platform/builtin extensions that may have bled in
-            // from ~/.config/goose/config.yaml or prior sessions.  GIAP only exposes
-            // the "giap" MCP extension; everything else is noise or a security risk.
-            for ext in &[
-                "developer", "computercontroller", "extensionmanager",
-                "todo", "apps", "analyze", "summon", "summarize",
-                "orchestrator", "tom",
-            ] {
-                self.agent.remove_extension(ext, &goose_sid).await.ok();
-            }
-
-            self.loaded_extensions.lock().unwrap().insert(goose_sid.clone());
+        // ── 6. Tool-free mode ─────────────────────────────────────────────────
+        // GIAP tools (Wikipedia, weather, etc.) are handled by the Tool Agent
+        // pre-processor in routes.rs BEFORE the main LLM runs. The Goose agent
+        // operates with ZERO tools — no MCP extensions loaded, no tool schemas
+        // in the prompt, no tool-call formatting required from the model.
+        // This eliminates tool-call argument failures and model-swap overhead.
+        //
+        // Remove any extensions that may have bled in from prior sessions or
+        // Goose's default config.
+        for ext in &[
+            "giap", "developer", "computercontroller", "extensionmanager",
+            "todo", "apps", "analyze", "summon", "summarize",
+            "orchestrator", "tom",
+        ] {
+            self.agent.remove_extension(ext, &goose_sid).await.ok();
         }
 
         // ── 7. GooseMode from model_role ──────────────────────────────────────
@@ -537,6 +579,10 @@ impl GooseAdapter {
             .ok();
 
         // ── 8. Run the agentic loop ───────────────────────────────────────────
+        // Stash the user message so MCP tools can use it as fallback when the
+        // model calls a tool with empty parameters (common with small local models).
+        pond_mcp_server::set_last_user_message(&request.message).await;
+
         let user_msg = Message::user().with_text(&request.message);
         let session_cfg = goose::agents::types::SessionConfig {
             id: goose_sid.clone(),
@@ -651,6 +697,10 @@ impl GooseAdapter {
 
 #[async_trait]
 impl AgentPort for GooseAdapter {
+    fn capabilities(&self) -> pond_core::domain::model_capabilities::ModelCapabilities {
+        self.model_capabilities.lock().unwrap().clone()
+    }
+
     async fn chat(&self, request: AgentRequest) -> Result<AgentResponse> {
         let mut stream: futures::stream::BoxStream<'static, Result<AgentStreamEvent>> =
             self.chat_stream(request).await?;

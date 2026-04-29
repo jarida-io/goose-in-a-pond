@@ -111,6 +111,11 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
         llamafile_manager: None,
         event_log_repo: None,
         speaker_id: None,
+        face_recognition: None,
+        session_user_bindings: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+        tool_agent: None,
+        answer_reviewer: None,
     });
     (build_router(state, std::path::PathBuf::from("web/dist")), tmp)
 }

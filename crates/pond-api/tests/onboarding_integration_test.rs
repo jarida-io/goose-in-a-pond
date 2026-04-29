@@ -102,6 +102,7 @@ async fn app_with_step(step: Option<OnboardingStep>) -> (axum::Router, tempfile:
         embedding_provider: None,
         sensor_storage: Arc::new(MockSensorStorage::new()),
         camera_storage: Arc::new(MockCameraStorage::new()),
+        face_recognition: None,
         prompt_template_dir: None,
         model_repo: None,
         data_dir: None,
@@ -122,6 +123,10 @@ async fn app_with_step(step: Option<OnboardingStep>) -> (axum::Router, tempfile:
         llamafile_manager: None,
         event_log_repo: None,
         speaker_id: None,
+        session_user_bindings: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+        tool_agent: None,
+        answer_reviewer: None,
     });
     (build_router(state, std::path::PathBuf::from("web/dist")), tmp)
 }

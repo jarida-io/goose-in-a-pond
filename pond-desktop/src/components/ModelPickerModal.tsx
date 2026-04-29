@@ -4,7 +4,7 @@ import { Search, Check } from "lucide-react";
 import { api } from "../api/PondApiClient";
 import type { ModelEntry } from "../api/types";
 
-export type ModelRole = "chat" | "think" | "task";
+export type ModelRole = "chat";
 
 interface ModelPickerModalProps {
   role: ModelRole;
@@ -15,9 +15,7 @@ interface ModelPickerModalProps {
 }
 
 const ROLE_LABELS: Record<ModelRole, string> = {
-  chat:  "Conversation",
-  think: "Reasoning",
-  task:  "Tools & Tasks",
+  chat:  "Main LLM",
 };
 
 export function ModelPickerModal({

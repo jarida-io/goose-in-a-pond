@@ -18,6 +18,8 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { useAppState, useAppDispatch } from "../state/AppContext";
+import { api } from "../api/PondApiClient";
+import type { SessionSummary } from "../api/types";
 
 /* ── Helpers ─────────────────────────────────────────────────────────────────── */
 
@@ -43,6 +45,28 @@ const VU_BAR_COUNT = VU_BAR_HEIGHTS.length;
 export function Dashboard() {
   const state = useAppState();
   const dispatch = useAppDispatch();
+
+  /* Recent chat sessions */
+  const [recentSessions, setRecentSessions] = useState<SessionSummary[]>([]);
+  useEffect(() => {
+    if (!state.serverOnline || !state.sessionToken) return;
+    let cancelled = false;
+    api.listSessions()
+      .then((sessions) => {
+        if (cancelled) return;
+        const sorted = [...sessions]
+          .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))
+          .slice(0, 5);
+        setRecentSessions(sorted);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [state.serverOnline, state.sessionToken]);
+
+  function openSession(id: string) {
+    dispatch({ type: "SET_SESSION_ID", payload: id });
+    dispatch({ type: "SET_SECTION", payload: "chat" });
+  }
 
   /* VU meter animation state */
   const [vuLevel, setVuLevel] = useState(0);
@@ -340,6 +364,48 @@ export function Dashboard() {
           </div>
         </CardContent>
       </Card>
+
+      {/* ── Recent conversations ─────────────────────────────── */}
+      {state.serverOnline && recentSessions.length > 0 && (
+        <Card shadow="none" className="giap-card">
+          <CardContent>
+            <div className="card-header" style={{ padding: 0, marginBottom: 10 }}>
+              <span className="card__label">Recent conversations</span>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {recentSessions.map((s) => {
+                const ago = timeAgo(s.updated_at);
+                return (
+                  <button
+                    key={s.id}
+                    onClick={() => openSession(s.id)}
+                    className="quick-action"
+                    style={{ textAlign: "left" }}
+                  >
+                    <span className="quick-action__icon"><MessageSquare size={14} /></span>
+                    <span className="quick-action__label" style={{ flex: 1 }}>
+                      {s.title || `Session ${s.id.slice(0, 8)}`}
+                    </span>
+                    <span style={{ fontSize: 11, color: "var(--grey-500)", whiteSpace: "nowrap" }}>{ago}</span>
+                    <ChevronRight size={14} className="quick-action__arrow" />
+                  </button>
+                );
+              })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
+}
+
+function timeAgo(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
 }

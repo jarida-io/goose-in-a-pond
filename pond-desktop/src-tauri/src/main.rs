@@ -188,6 +188,15 @@ fn main() {
                         tray::set_tray_tooltip(&handle_server, "Connected");
                         inject_server_url(&handle_server, &url);
 
+                        // CRITICAL: emit `server-status: true` here so the
+                        // frontend AppContext fires its handshake immediately.
+                        // Previously this emit only happened in the periodic
+                        // health-check loop (every HEALTH_CHECK_INTERVAL_SECS),
+                        // which is why the very first launch came up blank
+                        // until the periodic tick eventually fired — the user
+                        // had to "close and reopen" to see anything.
+                        let _ = handle_server.emit("server-status", true);
+
                         // Start notification poller now that we have a live server URL
                         let handle_notif = handle_server.clone();
                         let notif_url = url.clone();

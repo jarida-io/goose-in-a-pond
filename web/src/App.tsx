@@ -10,13 +10,14 @@ import Schedules from "./pages/Schedules";
 import Models from "./pages/Models";
 import Agent from "./pages/Agent";
 import Prompts from "./pages/Prompts";
+import FaceEnrollment from "./pages/FaceEnrollment";
 import Onboarding from "./pages/Onboarding";
 import LoggedOut from "./pages/LoggedOut";
 import logo from "./assets/logo.png";
 import logoDark from "./assets/Logodark.png";
 import "./dashboard.css";
 
-type Page = "chat" | "devices" | "activity" | "status" | "settings" | "schedules" | "models" | "agent" | "prompts";
+type Page = "chat" | "devices" | "activity" | "status" | "settings" | "schedules" | "models" | "agent" | "prompts" | "faces";
 
 function getInitials(name: string): string {
     return name.split(' ').map(w => w[0]).filter(Boolean).slice(0, 2).join('').toUpperCase() || '?'
@@ -120,19 +121,90 @@ const NAV_ITEMS: { page: Page; label: string; icon: React.ReactNode }[] = [
             </svg>
         ),
     },
+    {
+        page: "faces",
+        label: "Faces",
+        icon: (
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="8" r="4" />
+                <path d="M4 21a8 8 0 0 1 16 0" />
+            </svg>
+        ),
+    },
 ];
 
 function App() {
     const [page, setPage] = useState<Page>("chat");
 
-    // Apply saved theme preference on mount
+    // Cross-component navigation hook used by deep-link buttons elsewhere
+    // in the app (e.g. the "Open Face Enrollment →" link in the Models page).
+    // Detail must be one of the Page string literals.
     useEffect(() => {
+        const handler = (e: Event) => {
+            const detail = (e as CustomEvent<string>).detail;
+            if (typeof detail === "string") {
+                setPage(detail as Page);
+            }
+        };
+        window.addEventListener("pond-nav", handler as EventListener);
+        return () => window.removeEventListener("pond-nav", handler as EventListener);
+    }, []);
+
+    // Resolved theme drives the logo swap — we watch both the explicit
+    // `pond_theme` setting and (when set to `system`) the OS preference,
+    // so a user toggling dark mode in macOS System Settings immediately
+    // gets the matching logo asset.
+    // The resolved theme value itself isn't read in JSX (logo swap is now
+    // pure-CSS via `.db-logo-light` / `.db-logo-dark`), but we still need the
+    // setter so the effect below can re-fire on theme changes. Prefix with
+    // `_` to silence the noUnusedLocals tsc check that breaks `npm run build`.
+    const [_resolvedTheme, setResolvedTheme] = useState<"light" | "dark">(() => {
         const saved = localStorage.getItem("pond_theme") ?? "system";
-        if (saved === "system") {
-            delete document.documentElement.dataset.theme;
-        } else {
-            document.documentElement.dataset.theme = saved;
-        }
+        if (saved === "dark") return "dark";
+        if (saved === "light") return "light";
+        return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    });
+
+    // Apply saved theme preference on mount + whenever it (or the OS
+    // preference) changes.  We deliberately do NOT observe mutations on
+    // `data-theme` — the previous implementation watched the same attribute
+    // it wrote to, which caused a feedback loop that could hang the UI when
+    // the Settings page toggled the theme.  Settings now fires a custom
+    // `pond-theme-change` event after writing localStorage, which is the
+    // single same-tab signal path.
+    useEffect(() => {
+        const readResolved = (): "light" | "dark" => {
+            const saved = localStorage.getItem("pond_theme") ?? "system";
+            if (saved === "dark") return "dark";
+            if (saved === "light") return "light";
+            return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        };
+        const applyTheme = () => {
+            const saved = localStorage.getItem("pond_theme") ?? "system";
+            if (saved === "system") {
+                if (document.documentElement.dataset.theme) {
+                    delete document.documentElement.dataset.theme;
+                }
+            } else if (document.documentElement.dataset.theme !== saved) {
+                document.documentElement.dataset.theme = saved;
+            }
+            const next = readResolved();
+            setResolvedTheme((prev) => (prev === next ? prev : next));
+        };
+        applyTheme();
+
+        const mq = window.matchMedia?.("(prefers-color-scheme: dark)");
+        const onMq = () => applyTheme();
+        mq?.addEventListener?.("change", onMq);
+        const onStorage = (e: StorageEvent) => { if (e.key === "pond_theme") applyTheme(); };
+        window.addEventListener("storage", onStorage);
+        const onCustom = () => applyTheme();
+        window.addEventListener("pond-theme-change", onCustom);
+        return () => {
+            mq?.removeEventListener?.("change", onMq);
+            window.removeEventListener("storage", onStorage);
+            window.removeEventListener("pond-theme-change", onCustom);
+        };
     }, []);
     const [token, setToken] = useState<string>(
         () => localStorage.getItem("pond_session_token") ?? ""
@@ -329,6 +401,7 @@ function App() {
                 {page === "settings"  && <Settings token={token} />}
                 {page === "agent"     && <Agent token={token} />}
                 {page === "prompts"   && <Prompts token={token} />}
+                {page === "faces"     && <FaceEnrollment token={token} />}
             </main>
 
 

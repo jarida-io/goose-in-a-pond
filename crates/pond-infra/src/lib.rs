@@ -5,6 +5,7 @@ pub mod sqlite_model_repository;
 pub mod onboarding;
 pub mod pruning;
 pub mod sqlite_device_registry;
+pub mod sqlite_face_recognition;
 pub mod sqlite_memory;
 pub mod sqlite_profile;
 pub mod sqlite_prompt_extra;

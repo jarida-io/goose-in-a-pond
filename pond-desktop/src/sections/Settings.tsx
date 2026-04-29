@@ -349,9 +349,8 @@ function ModelRoleRow({
 }
 
 function ModelsTab({ s, patch }: { s: Partial<SettingsType>; patch: (k: keyof SettingsType, v: unknown) => void }) {
-  const [pickerRole, setPickerRole] = useState<ModelRole | null>(null);
-  const [thinkSameAsChat, setThinkSameAsChat] = useState(!s.think_provider && !s.think_model);
-  const [taskSameAsChat, setTaskSameAsChat]   = useState(!s.task_provider && !s.task_model);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [toolModels, setToolModels] = useState<string[]>([]);
 
   // Seed model fields from live active roles if settings don't already have them
   useEffect(() => {
@@ -360,16 +359,14 @@ function ModelsTab({ s, patch }: { s: Partial<SettingsType>; patch: (k: keyof Se
         patch("chat_provider", roles.chat.provider);
         patch("chat_model", roles.chat.model);
       }
-      if (!s.think_provider && !s.think_model && roles.think) {
-        setThinkSameAsChat(false);
-        patch("think_provider", roles.think.provider);
-        patch("think_model", roles.think.model);
-      }
-      if (!s.task_provider && !s.task_model && roles.task) {
-        setTaskSameAsChat(false);
-        patch("task_provider", roles.task.provider);
-        patch("task_model", roles.task.model);
-      }
+    }).catch(() => {/* non-fatal */});
+
+    // Fetch available GGUF models for the tool-caller dropdown
+    api.listModels().then((models) => {
+      const gguf = models
+        .filter((m) => m.provider === "gguf" || m.provider === "local")
+        .map((m) => m.name);
+      setToolModels(gguf);
     }).catch(() => {/* non-fatal */});
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -377,67 +374,59 @@ function ModelsTab({ s, patch }: { s: Partial<SettingsType>; patch: (k: keyof Se
   const temp = s.llm_temperature ?? 0.7;
   const maxTokenOpts = [128, 256, 512, 1024, 2048, 4096];
 
-  function handleModelSelect(role: ModelRole, provider: string, model: string) {
-    patch(`${role}_provider`, provider);
-    patch(`${role}_model`, model);
-    setPickerRole(null);
-  }
-
   return (
     <div className="settings-body">
       <Section title="AI Models">
-        <FormRow label="Conversation" hint="Used for everyday chat and questions">
+        <FormRow label="Main LLM" hint="Handles all conversation, reasoning, and response generation">
           <ModelRoleRow
             provider={s.chat_provider}
             model={s.chat_model}
-            onPick={() => setPickerRole("chat")}
+            onPick={() => setPickerOpen(true)}
           />
         </FormRow>
 
-        <FormRow label="Reasoning" hint="Used for complex, multi-step thinking">
-          <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-2)", width: "100%" }}>
-            <Switch
-              isSelected={thinkSameAsChat}
-              onChange={(v) => {
-                setThinkSameAsChat(v);
-                if (v) { patch("think_provider", null); patch("think_model", null); }
-              }}
-            >
-              Same as Conversation
-            </Switch>
-            {!thinkSameAsChat && (
-              <ModelRoleRow
-                provider={s.think_provider}
-                model={s.think_model}
-                onPick={() => setPickerRole("think")}
-              />
-            )}
-          </div>
-        </FormRow>
-
-        <FormRow label="Tools & Tasks" hint="Used when running actions or automations">
-          <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-2)", width: "100%" }}>
-            <Switch
-              isSelected={taskSameAsChat}
-              onChange={(v) => {
-                setTaskSameAsChat(v);
-                if (v) { patch("task_provider", null); patch("task_model", null); }
-              }}
-            >
-              Same as Conversation
-            </Switch>
-            {!taskSameAsChat && (
-              <ModelRoleRow
-                provider={s.task_provider}
-                model={s.task_model}
-                onPick={() => setPickerRole("task")}
-              />
-            )}
-          </div>
+        <FormRow label="Tool Caller" hint="Small specialist model for structured tool-call arguments (optional)">
+          <select
+            value={s.tool_model ?? ""}
+            onChange={(e) => patch("tool_model", e.target.value || null)}
+            style={{ width: "100%", padding: "var(--space-2)", borderRadius: "var(--radius-2)", border: "1px solid var(--border)", background: "var(--surface)" }}
+          >
+            <option value="">None (use main LLM for tool calls)</option>
+            {toolModels.map((name) => (
+              <option key={name} value={name}>{name}</option>
+            ))}
+          </select>
+          {(!s.tool_model || s.tool_model === s.chat_model) && (
+            <span style={{ fontSize: "0.75rem", color: "var(--text-secondary)", marginTop: 4, display: "block" }}>
+              Same model as main LLM — zero swap overhead
+            </span>
+          )}
         </FormRow>
       </Section>
 
       <Section title="Response Quality">
+        <FormRow label="Thinking Mode" hint="Enable internal reasoning for better analysis, planning, and complex answers">
+          <select
+            style={selectFallback}
+            value={s.thinking_mode ?? "auto"}
+            onChange={(e) => patch("thinking_mode", e.target.value)}
+          >
+            <option value="auto">Auto (enable for capable models)</option>
+            <option value="on">Always On</option>
+            <option value="off">Off</option>
+          </select>
+        </FormRow>
+        <FormRow label="Answer Review" hint="Adversarial critic reviews answers for completeness, accuracy, and depth before delivery">
+          <select
+            style={selectFallback}
+            value={s.review_mode ?? "off"}
+            onChange={(e) => patch("review_mode", e.target.value)}
+          >
+            <option value="off">Off</option>
+            <option value="auto">Auto (review factual/analytical questions only)</option>
+            <option value="on">Always On (review every answer)</option>
+          </select>
+        </FormRow>
         <FormRow label={`Creativity: ${temp.toFixed(1)}`} hint="Higher = more creative; lower = more focused and consistent">
           <input
             type="range"
@@ -460,13 +449,17 @@ function ModelsTab({ s, patch }: { s: Partial<SettingsType>; patch: (k: keyof Se
         </FormRow>
       </Section>
 
-      {pickerRole && (
+      {pickerOpen && (
         <ModelPickerModal
-          role={pickerRole}
-          currentProvider={pickerRole === "chat" ? s.chat_provider : pickerRole === "think" ? s.think_provider : s.task_provider}
-          currentModel={pickerRole === "chat" ? s.chat_model : pickerRole === "think" ? s.think_model : s.task_model}
-          onSelect={(provider, model) => handleModelSelect(pickerRole, provider, model)}
-          onClose={() => setPickerRole(null)}
+          role="chat"
+          currentProvider={s.chat_provider}
+          currentModel={s.chat_model}
+          onSelect={(provider, model) => {
+            patch("chat_provider", provider);
+            patch("chat_model", model);
+            setPickerOpen(false);
+          }}
+          onClose={() => setPickerOpen(false)}
         />
       )}
     </div>
@@ -548,7 +541,9 @@ function PromptsTab({ s, patch }: { s: Partial<SettingsType>; patch: (k: keyof S
               setCustomEnabled(v);
               if (!v) patch("custom_system_prompt", null);
             }}
-          />
+          >
+            <Switch.Control><Switch.Thumb /></Switch.Control>
+          </Switch>
         </FormRow>
         <FormRow label="System prompt" hint="Replaces the built-in system prompt entirely">
           <div style={{ position: "relative" }}>
@@ -579,6 +574,7 @@ function LocationTab({ s, patch }: { s: Partial<SettingsType>; patch: (k: keyof 
             isSelected={enabled}
             onChange={(v) => patch("weather_enabled", v)}
           >
+            <Switch.Control><Switch.Thumb /></Switch.Control>
             Enable weather
           </Switch>
         </FormRow>
@@ -681,6 +677,7 @@ function AgentTab({ s, patch }: { s: Partial<SettingsType>; patch: (k: keyof Set
             isSelected={memInject}
             onChange={(v) => patch("agent_memory_inject", v)}
           >
+            <Switch.Control><Switch.Thumb /></Switch.Control>
             Use conversation memory
           </Switch>
         </FormRow>
@@ -962,7 +959,7 @@ function ToolsTab() {
         <div className="ext-list">
           {extensions.map((ext) => (
             <div key={ext.name} className="ext-row">
-              <Switch isSelected={ext.enabled} onChange={() => toggle(ext.name, !ext.enabled)} aria-label={`Toggle ${ext.name}`} />
+              <Switch isSelected={ext.enabled} onChange={() => toggle(ext.name, !ext.enabled)} aria-label={`Toggle ${ext.name}`}><Switch.Control><Switch.Thumb /></Switch.Control></Switch>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", flexWrap: "wrap" as const }}>
                   <span className="ext-row__name">{ext.name}</span>

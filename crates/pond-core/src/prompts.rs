@@ -53,7 +53,184 @@ pub struct PromptState {
     /// When set, prompts instruct the LLM to keep responses short, spoken-friendly,
     /// and free of visual formatting.
     pub voice_mode: bool,
+    /// Available tool descriptions for the Tool Agent classifier.
+    /// Each entry is a human-readable line like "wikipedia — Look up factual information..."
+    pub available_tools: Vec<String>,
+    /// True when the model supports thinking/reasoning (Gemma 4, Qwen3, etc.)
+    /// and thinking_mode is not "off".
+    pub thinking_enabled: bool,
 }
+
+/// Tool definitions shared between the system prompt template and the classifier.
+/// Returns a list of `(id, description)` pairs. Content is static.
+pub fn giap_tool_definitions() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("wikipedia", "Look up ANY factual, conceptual, or encyclopedic information. Use for: people, places, events, science, history, geography, technology, definitions, concepts, comparisons (\"compare X and Y\"), \"what is X\", \"how does X work\", \"what is the difference between X and Y\", cultural topics, organizations, species, diseases, inventions, wars, countries, languages — anything where accurate, detailed knowledge matters. ALWAYS prefer this over guessing from memory. When in doubt, look it up."),
+        ("weather", "Get current real-time weather conditions (temperature, humidity, wind, forecast) for the user's configured location. Use when the user asks about current weather, temperature, forecast, or whether to bring an umbrella."),
+        ("save_memory", "Save information the user wants remembered for later (preferences, facts about themselves, important dates, notes). Use when the user says 'remember', 'don't forget', 'save this', 'note that', or states a personal preference or fact about themselves."),
+        ("recall_memory", "Search saved memories for previously stored information. Use when the user asks 'do you remember', 'what did I say about', or references something they told you before, or asks about their own preferences/history."),
+        ("devices", "List or check status of registered smart home devices. Use when the user asks about their devices, what's connected, or home automation status."),
+        ("schedules", "List scheduled tasks and automations. Use when the user asks about their schedules, reminders, or timed tasks."),
+    ]
+}
+
+/// Pre-formatted tool description lines for prompt template injection.
+/// Cached to avoid 6 `format!()` allocations per turn.
+pub fn giap_tool_description_lines() -> &'static [String] {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<Vec<String>> = OnceLock::new();
+    CACHED.get_or_init(|| {
+        giap_tool_definitions()
+            .iter()
+            .map(|(name, desc)| format!("{} — {}", name, desc))
+            .collect()
+    })
+}
+
+/// Build the classifier system prompt from tool definitions.
+///
+/// The prompt is cached after the first call — it's static content that
+/// doesn't change between requests. Avoids ~3KB of string allocations per message.
+pub fn build_classifier_prompt() -> String {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<String> = OnceLock::new();
+    return CACHED.get_or_init(build_classifier_prompt_inner).clone();
+}
+
+fn build_classifier_prompt_inner() -> String {
+    let tools = giap_tool_definitions();
+    let tool_lines: Vec<String> = tools.iter()
+        .enumerate()
+        .map(|(i, (name, desc))| format!("{}. {} — {}", i + 1, name, desc))
+        .collect();
+
+    format!(
+        "You are a tool routing classifier. Your ONLY job is to output a JSON object.\n\n\
+        IMPORTANT: You are classifying for a small on-device language model with LIMITED knowledge. \
+        This model frequently gets facts wrong, confuses details, or gives shallow answers when \
+        asked about real-world topics. The wikipedia tool gives it accurate, detailed information \
+        that dramatically improves answer quality. When in doubt, USE THE TOOL — a lookup that \
+        wasn't strictly needed costs nothing, but a wrong answer without a lookup is harmful.\n\n\
+        RULE: If the user asks about ANY real-world topic, concept, person, place, event, science, \
+        comparison, definition, or factual question — route to wikipedia. Only skip the tool for \
+        purely conversational messages (greetings, jokes, opinions, creative writing, personal \
+        chat, coding help).\n\n\
+        TOOLS:\n{tools}\n\n\
+        EXAMPLES:\n\
+        User: \"What's the weather like?\" → {{\"needs_tool\": true, \"tool\": \"weather\"}}\n\
+        User: \"Who is Albert Einstein?\" → {{\"needs_tool\": true, \"tool\": \"wikipedia\"}}\n\
+        User: \"Tell me about black holes\" → {{\"needs_tool\": true, \"tool\": \"wikipedia\"}}\n\
+        User: \"What is photosynthesis?\" → {{\"needs_tool\": true, \"tool\": \"wikipedia\"}}\n\
+        User: \"Compare Python and Rust\" → {{\"needs_tool\": true, \"tool\": \"wikipedia\"}}\n\
+        User: \"What is the difference between TCP and UDP?\" → {{\"needs_tool\": true, \"tool\": \"wikipedia\"}}\n\
+        User: \"How does a combustion engine work?\" → {{\"needs_tool\": true, \"tool\": \"wikipedia\"}}\n\
+        User: \"Tell me about Kenya\" → {{\"needs_tool\": true, \"tool\": \"wikipedia\"}}\n\
+        User: \"What are the symptoms of malaria?\" → {{\"needs_tool\": true, \"tool\": \"wikipedia\"}}\n\
+        User: \"Who invented the telephone?\" → {{\"needs_tool\": true, \"tool\": \"wikipedia\"}}\n\
+        User: \"What is quantum computing?\" → {{\"needs_tool\": true, \"tool\": \"wikipedia\"}}\n\
+        User: \"Explain the theory of relativity\" → {{\"needs_tool\": true, \"tool\": \"wikipedia\"}}\n\
+        User: \"What are the pros and cons of solar energy?\" → {{\"needs_tool\": true, \"tool\": \"wikipedia\"}}\n\
+        User: \"How tall is Mount Kilimanjaro?\" → {{\"needs_tool\": true, \"tool\": \"wikipedia\"}}\n\
+        User: \"What is machine learning?\" → {{\"needs_tool\": true, \"tool\": \"wikipedia\"}}\n\
+        User: \"Remember that I love peanuts\" → {{\"needs_tool\": true, \"tool\": \"save_memory\"}}\n\
+        User: \"Don't forget my birthday is March 5\" → {{\"needs_tool\": true, \"tool\": \"save_memory\"}}\n\
+        User: \"Note that I'm allergic to shellfish\" → {{\"needs_tool\": true, \"tool\": \"save_memory\"}}\n\
+        User: \"Do you remember what food I like?\" → {{\"needs_tool\": true, \"tool\": \"recall_memory\"}}\n\
+        User: \"What did I tell you about my preferences?\" → {{\"needs_tool\": true, \"tool\": \"recall_memory\"}}\n\
+        User: \"What devices are connected?\" → {{\"needs_tool\": true, \"tool\": \"devices\"}}\n\
+        User: \"What's on my schedule?\" → {{\"needs_tool\": true, \"tool\": \"schedules\"}}\n\
+        User: \"How's the temperature outside?\" → {{\"needs_tool\": true, \"tool\": \"weather\"}}\n\
+        User: \"Hello!\" → {{\"needs_tool\": false, \"tool\": null}}\n\
+        User: \"Tell me a joke\" → {{\"needs_tool\": false, \"tool\": null}}\n\
+        User: \"Thanks\" → {{\"needs_tool\": false, \"tool\": null}}\n\
+        User: \"Write me a poem about the sea\" → {{\"needs_tool\": false, \"tool\": null}}\n\
+        User: \"Help me debug this code\" → {{\"needs_tool\": false, \"tool\": null}}\n\
+        User: \"What do you think about AI?\" → {{\"needs_tool\": false, \"tool\": null}}\n\n\
+        Output ONLY the JSON object. No explanation.",
+        tools = tool_lines.join("\n"),
+    )
+}
+
+/// Estimate how many tokens the model should generate based on query complexity.
+///
+/// Simple greetings get fewer tokens; complex analysis/planning questions get more.
+/// Returns a multiplied version of `base_max_tokens`.
+pub fn estimate_response_budget(message: &str, base_max_tokens: u32) -> u32 {
+    let lower = message.to_lowercase();
+
+    // Complex indicators — planning, analysis, comparison, detailed explanation
+    const COMPLEX_KEYWORDS: &[&str] = &[
+        "explain", "analyze", "analyse", "compare", "plan", "design",
+        "write a", "describe in detail", "step by step", "in depth",
+        "how does", "why does", "what are the differences",
+        "break down", "elaborate", "comprehensive", "thorough",
+        "pros and cons", "advantages and disadvantages",
+    ];
+
+    let is_complex = COMPLEX_KEYWORDS.iter().any(|k| lower.contains(k));
+
+    // Short indicators — greetings, simple yes/no, quick lookups
+    let is_short = message.len() < 25 && !is_complex;
+
+    if is_short {
+        (base_max_tokens / 2).max(1024)   // 2048 for quick replies
+    } else if is_complex {
+        base_max_tokens.saturating_mul(2)  // 8192 for deep analysis
+    } else {
+        base_max_tokens                     // 4096 default
+    }
+}
+
+// ── Adversarial Review Prompts ────────────────────────────────────────────────
+
+/// System prompt for the adversarial answer reviewer.
+///
+/// The reviewer evaluates answers against a rubric and outputs a structured
+/// JSON verdict. Uses the SAME model as the main LLM with a critic persona.
+pub const REVIEW_SYSTEM_PROMPT: &str = "\
+You are a strict quality reviewer for an AI assistant's answers. Your job is to \
+evaluate whether an answer is COMPLETE, CORRECT, and HELPFUL for the user's question.
+
+Be adversarial: assume the answer might be wrong, shallow, or missing key information.
+
+Evaluate these criteria:
+1. COMPLETENESS: Does the answer address ALL parts of the question? If the user asked \
+to compare two things, are BOTH sides covered with specific details?
+2. ACCURACY: Are the facts, numbers, and claims correct? Flag anything that sounds \
+made up or suspiciously vague.
+3. DEPTH: Is the answer detailed and substantive, or is it vague platitudes? Does it \
+give specific examples, concrete numbers, real comparisons?
+4. RELEVANCE: Does it answer what was actually asked, not something adjacent?
+5. USEFULNESS: Would a human reading this feel genuinely helped, or would they need \
+to search elsewhere for the real answer?
+
+Output ONLY a JSON object with this exact structure:
+{\"pass\": true, \"score\": 4, \"expectations\": [\"what the answer should contain\"], \"critique\": \"\"}
+
+Scoring guide:
+5 = Excellent: thorough, accurate, specific, well-structured, genuinely helpful
+4 = Good: covers the question well, minor gaps only
+3 = Adequate: answers the question but lacks depth or specificity
+2 = Poor: significant gaps, vague, or partially wrong
+1 = Unusable: wrong, off-topic, or dangerously misleading
+
+Be HARSH. A score of 3 means barely adequate. Only give 4-5 for genuinely good answers. \
+Set pass to false and provide a specific critique when the score is below the threshold.
+
+Output ONLY the JSON object. No explanation before or after.";
+
+/// System prompt for the revision pass when the reviewer rejects an answer.
+///
+/// Instructs the main LLM to revise using the reviewer's critique.
+pub const REVISION_SYSTEM_PROMPT: &str = "\
+You previously answered a question, but a quality reviewer found issues with your response. \
+Revise your answer to address the specific critique below. Be more thorough, more specific, \
+and more accurate. Include concrete details, examples, and comparisons where relevant.
+
+Do NOT mention the review process, the reviewer, or that this is a revision. Just give \
+the best possible answer to the original question, as if answering for the first time.
+
+Match the tone and personality from your usual system prompt.";
 
 // ── Static fallback ───────────────────────────────────────────────────────────
 
@@ -78,7 +255,8 @@ Return ONLY the title text — no quotes, no punctuation, no explanation.";
 //   String: {{assistant_name}}, {{user_name}}, {{personality}}, {{timezone}},
 //           {{location}}, {{current_date}}, {{current_time}}, {{online_device_names}}
 //   usize:  {{device_count}}
-//   bool:   {{has_home_devices}}, {{atypical_speech}}
+//   bool:   {{has_home_devices}}, {{atypical_speech}}, {{has_tools}}
+//   list:   {{tools}} — available Tool Agent capabilities (human-readable lines)
 //
 // Home-control sections are gated behind {% if has_home_devices %} so the prompt
 // adapts automatically when no devices are configured. Extension injection is
@@ -111,8 +289,40 @@ If a routine includes a lock or alarm step, pause and confirm that step explicit
 If a request requires leaving the local network, say so clearly and wait for confirmation.
 {% endif %}
 
-IMPORTANT: Only use tools listed in your schema. Never use shell commands, bash, \
-python, curl, or execution tools. If a tool is unavailable, tell the user directly.
+{% if has_tools %}
+## Knowledge and Tools
+You are a compact on-device model. Your training data may be incomplete, outdated, or wrong \
+on specific facts — especially names, dates, numbers, comparisons, and niche topics. You have \
+access to tools that fill this gap with accurate, up-to-date information:
+{% for tool in tools %}- {{tool}}
+{% endfor %}
+These tools are handled automatically by the Tool Agent behind the scenes — you do not call \
+them yourself. When you receive information marked as [Retrieved information], USE IT as the \
+authoritative source for your answer. Weave the retrieved facts naturally into a helpful, \
+detailed response.
+
+CRITICAL RULES:
+- When the user asks a factual, conceptual, or comparative question, answer confidently and \
+thoroughly — the Tool Agent will have already retrieved accurate information for you.
+- NEVER say you lack access to real-time data or cannot look things up — you CAN, through \
+your tools.
+- NEVER give a vague or shallow answer when detailed information is available. If you have \
+retrieved content, use ALL of it to give the best possible answer.
+- When comparing concepts, provide specific differences, advantages, use cases, and concrete \
+details — not generic platitudes.
+- When explaining something, include how it works, why it matters, and real examples.
+{% endif %}
+
+IMPORTANT: Never use shell commands, bash, python, curl, or execution tools. \
+If something is outside your capabilities, tell the user directly.
+{%- if thinking_enabled %}
+
+## Deep Thinking
+For complex questions, reason through the problem step by step before answering. \
+For planning tasks, consider multiple approaches before recommending one. \
+When asked to explain or analyze, provide thorough responses with examples. \
+Quality matters more than speed — take time to think when the question deserves it.
+{%- endif %}
 {% if voice_mode %}
 
 ## Voice Mode
@@ -143,6 +353,12 @@ Door/alarm: require explicit confirmation in same message. Unknown device: say n
 External network: ask before proceeding.
 {% endif %}
 
+{% if has_tools %}
+Tools available (handled automatically — use retrieved info as authoritative source):
+{% for tool in tools %}- {{tool}}
+{% endfor %}
+Never say you lack access to information when tools are available. Use retrieved data fully.
+{% endif %}
 ONLY use tools in your schema. NO shell, bash, curl, or execution tools.
 {% if voice_mode %}
 Voice mode active — responses read aloud via TTS. Keep answers short, conversational, \
@@ -173,8 +389,23 @@ unrecognised device: offer to add it; external egress: disclose destination and 
 routines with a lock or alarm step: pause and confirm that step separately.
 {% endif %}
 
+{% if has_tools %}
+## Available Tools
+You are a compact on-device model — your training data has gaps. These tools provide \
+accurate, current information automatically via the Tool Agent:
+{% for tool in tools %}- {{tool}}
+{% endfor %}
+When you receive [Retrieved information], treat it as authoritative. Use ALL retrieved \
+data to give detailed, technically precise answers. For comparisons, cite specific \
+differences with concrete details. Never claim you lack access to information.
+{% endif %}
 No Markdown in voice output. Never emit \"echo\", \"end of turn\", or role delimiters.
 Tool use: ONLY use tools in your schema; NEVER use shell, bash, python, curl, or execution tools.
+{%- if thinking_enabled %}
+
+Deep analysis mode active — for complex queries, show your reasoning chain, \
+evaluate trade-offs explicitly, and surface uncertainty. Prefer precision over brevity.
+{%- endif %}
 {% if voice_mode %}
 
 Voice mode active — user is speaking via microphone, responses are read aloud. \
@@ -203,6 +434,14 @@ If I don't recognise a device I'll let you know and offer to add it. \
 I'll always ask before doing anything outside your home network.
 {% endif %}
 
+{% if has_tools %}
+I have some great tools that help me give you accurate answers on lots of topics:
+{% for tool in tools %}- {{tool}}
+{% endfor %}
+These work automatically behind the scenes, so I can answer questions about the world, \
+weather, your saved info, and more with real, accurate data. I'll never tell you I can't \
+look something up when I actually can!
+{% endif %}
 I only use the special tools I've been given — I never run shell commands or curl.
 {% if voice_mode %}
 
@@ -308,6 +547,16 @@ pub fn render_jinja_template(
     ctx.insert("online_device_names", online_names);
     ctx.insert("voice_mode",          &state.map(|s| s.voice_mode).unwrap_or(false));
 
+    // Available tools — rendered into the prompt so the model knows its capabilities
+    let tools: Vec<String> = state
+        .map(|s| s.available_tools.clone())
+        .unwrap_or_default();
+    ctx.insert("has_tools", &!tools.is_empty());
+    ctx.insert("tools", &tools);
+
+    // Thinking mode — enables deep reasoning instructions in the prompt
+    ctx.insert("thinking_enabled", &state.map(|s| s.thinking_enabled).unwrap_or(false));
+
     // Profile context
     ctx.insert(
         "atypical_speech",
@@ -361,7 +610,7 @@ pub fn build_system_prompt_with_profile(settings: &Settings, profile: Option<&Pr
     let base = render_jinja_template(&tmpl, settings, None, profile);
 
     // ── Profile context lines ─────────────────────────────────────────────────
-    let mut profile_lines: Vec<String> = Vec::new();
+    let mut profile_lines: Vec<String> = Vec::with_capacity(8);
 
     if let Some(ctx) = profile {
         let user = sanitize_field(&settings.user_name, 50);
@@ -454,7 +703,7 @@ pub fn build_system_prompt_from_template_full(
     };
 
     // ── Profile context lines (same logic as build_system_prompt_with_profile) ─
-    let mut profile_lines: Vec<String> = Vec::new();
+    let mut profile_lines: Vec<String> = Vec::with_capacity(8);
     if let Some(ctx) = profile {
         let user = sanitize_field(&settings.user_name, 50);
 
@@ -788,5 +1037,41 @@ mod tests {
         let result = build_system_prompt_from_template(&s, PROMPT_BALANCED);
         assert!(result.contains("Goose"));
         assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn estimate_response_budget_short_message() {
+        assert!(estimate_response_budget("hi", 4096) < 4096);
+        assert!(estimate_response_budget("thanks!", 4096) < 4096);
+    }
+
+    #[test]
+    fn estimate_response_budget_complex_message() {
+        assert!(estimate_response_budget("explain how photosynthesis works step by step", 4096) > 4096);
+        assert!(estimate_response_budget("compare these two approaches and analyze the trade-offs", 4096) > 4096);
+    }
+
+    #[test]
+    fn estimate_response_budget_normal_message() {
+        assert_eq!(estimate_response_budget("What's the weather like today?", 4096), 4096);
+    }
+
+    #[test]
+    fn thinking_section_rendered_when_enabled() {
+        let s = Settings::default();
+        let state = PromptState {
+            thinking_enabled: true,
+            ..Default::default()
+        };
+        let result = render_jinja_template(PROMPT_BALANCED, &s, Some(&state), None);
+        assert!(result.contains("Deep Thinking"));
+    }
+
+    #[test]
+    fn thinking_section_hidden_when_disabled() {
+        let s = Settings::default();
+        let state = PromptState::default(); // thinking_enabled = false
+        let result = render_jinja_template(PROMPT_BALANCED, &s, Some(&state), None);
+        assert!(!result.contains("Deep Thinking"));
     }
 }

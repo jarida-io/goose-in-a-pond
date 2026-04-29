@@ -36,10 +36,14 @@ impl Database {
         let opts = SqliteConnectOptions::from_str(
             &format!("sqlite:{}?mode=rwc", path.display()),
         )?
-        .create_if_missing(true);
+        .create_if_missing(true)
+        .pragma("journal_mode", "WAL")
+        .pragma("synchronous", "NORMAL")
+        .pragma("cache_size", "2000")       // 2000 pages × 4KB = 8MB shared cache
+        .pragma("mmap_size", "33554432");   // 32MB mmap — friendly to ARM flash
 
         Ok(SqlitePoolOptions::new()
-            .max_connections(5)
+            .max_connections(4)
             .connect_with(opts)
             .await?)
     }
@@ -77,6 +81,15 @@ mod tests {
         let logs: Vec<&str> = log_tables.iter().map(|r| r.0.as_str()).collect();
         assert!(logs.contains(&"event_log"),   "event_log missing");
         assert!(logs.contains(&"system_info"), "system_info missing");
+
+        // Verify WAL journal mode is active on both databases
+        let (journal,): (String,) = sqlx::query_as("PRAGMA journal_mode")
+            .fetch_one(&db.system).await.unwrap();
+        assert_eq!(journal.to_lowercase(), "wal", "system db should use WAL");
+
+        let (journal,): (String,) = sqlx::query_as("PRAGMA journal_mode")
+            .fetch_one(&db.logs).await.unwrap();
+        assert_eq!(journal.to_lowercase(), "wal", "logs db should use WAL");
     }
 
     #[tokio::test]

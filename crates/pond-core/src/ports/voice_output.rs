@@ -16,6 +16,27 @@ pub trait VoiceOutput: Send + Sync {
     /// Synthesise and deliver `text` (speak aloud or print).
     async fn speak(&self, text: &str) -> Result<()>;
 
+    /// Synthesize text to audio bytes WITHOUT playing.
+    ///
+    /// Enables pipelined TTS: synthesize the next sentence while the current
+    /// one is still playing. Returns `None` when the implementation doesn't
+    /// support split synthesis/playback (chat loop falls back to `speak()`).
+    async fn synthesize(&self, _text: &str) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    /// Play pre-synthesized audio bytes (from `synthesize()`).
+    /// Blocks until playback finishes.
+    async fn play_audio(&self, _audio: Vec<u8>) -> Result<()> {
+        Ok(())
+    }
+
+    /// Immediately stop any in-progress speech playback.
+    ///
+    /// Called when the user interrupts with the wake word during TTS output.
+    /// Idempotent — safe to call when nothing is playing.
+    fn stop_speaking(&self) {}
+
     /// Start a soft ambient thinking tone that loops until `stop_thinking_tone()`.
     /// Called when the LLM is inferring so the user hears that the system is working.
     /// Default implementation is a no-op (for PrintOutput / tests).

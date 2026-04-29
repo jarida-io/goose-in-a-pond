@@ -5,6 +5,7 @@ use std::pin::Pin;
 use thiserror::Error;
 
 pub use crate::domain::message::ChatMessage;
+use crate::domain::model_capabilities::ModelCapabilities;
 
 #[derive(Error, Debug)]
 pub enum ProviderError {
@@ -52,6 +53,15 @@ pub trait LlmProvider: Send + Sync {
 
     /// The name of the underlying model (e.g. "llama-3.2-3b", "gpt-4o").
     fn model_name(&self) -> String;
+
+    /// Runtime capabilities of the underlying model.
+    ///
+    /// Providers override this to declare what the active model supports
+    /// (thinking, vision, context window, etc.). The default returns the
+    /// most conservative assumptions so unknown models work safely.
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities::default()
+    }
 
     /// Stream tokens as they are generated.
     ///

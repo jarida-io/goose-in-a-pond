@@ -42,6 +42,9 @@ pub struct PiperOutput {
     espeak_data: Option<PathBuf>,
     /// Thinking tone stop flag — shared with the background tone thread.
     thinking_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Speech interrupt flag — set to true to immediately stop TTS playback.
+    /// Checked by `play_wav_interruptible()` every 50ms during playback.
+    speech_interrupted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl PiperOutput {
@@ -56,6 +59,7 @@ impl PiperOutput {
             sample_rate: 22_050,
             espeak_data: None,
             thinking_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            speech_interrupted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -143,26 +147,139 @@ impl VoiceOutput for PiperOutput {
         self.thinking_active.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
+    fn stop_speaking(&self) {
+        self.speech_interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     async fn speak(&self, text: &str) -> Result<()> {
+        // Clear interrupt flag before this utterance
+        self.speech_interrupted.store(false, std::sync::atomic::Ordering::SeqCst);
         let bin = self.piper_bin.clone();
         let model = self.model.clone();
         let sample_rate = self.sample_rate;
         let text = text.to_string();
-
         let espeak_data = self.espeak_data.clone();
+        let flag = self.speech_interrupted.clone();
 
-        // Piper is a blocking subprocess — run it off the async executor.
+        // Synthesize then play with interrupt support
         tokio::task::spawn_blocking(move || {
-            speak_blocking(&bin, &model, espeak_data.as_deref(), sample_rate, &text)
+            let wav = synthesize_blocking(&bin, &model, espeak_data.as_deref(), sample_rate, &text)?;
+            if wav.is_empty() { return Ok(()); }
+            play_wav_interruptible(wav, &flag)
         })
         .await
         .context("piper speak task panicked")??;
 
         Ok(())
     }
+
+    async fn synthesize(&self, text: &str) -> Result<Option<Vec<u8>>> {
+        let bin = self.piper_bin.clone();
+        let model = self.model.clone();
+        let sample_rate = self.sample_rate;
+        let text = text.to_string();
+        let espeak_data = self.espeak_data.clone();
+
+        let wav = tokio::task::spawn_blocking(move || {
+            synthesize_blocking(&bin, &model, espeak_data.as_deref(), sample_rate, &text)
+        })
+        .await
+        .context("piper synthesize task panicked")??;
+
+        if wav.is_empty() { Ok(None) } else { Ok(Some(wav)) }
+    }
+
+    async fn play_audio(&self, audio: Vec<u8>) -> Result<()> {
+        // Clear the interrupt flag before playback starts
+        self.speech_interrupted.store(false, std::sync::atomic::Ordering::SeqCst);
+        let flag = self.speech_interrupted.clone();
+        tokio::task::spawn_blocking(move || play_wav_interruptible(audio, &flag))
+            .await
+            .context("playback task panicked")?
+    }
+}
+
+impl PiperOutput {
+    /// Synthesize text to raw WAV bytes without playing.
+    ///
+    /// This is the first half of the speak pipeline: it runs piper and
+    /// returns the PCM-wrapped-in-WAV buffer for later playback. By
+    /// separating synthesis from playback, callers can pipeline: synthesize
+    /// the NEXT sentence while the current one is still playing.
+    pub async fn synthesize(&self, text: &str) -> Result<Vec<u8>> {
+        let bin = self.piper_bin.clone();
+        let model = self.model.clone();
+        let sample_rate = self.sample_rate;
+        let text = text.to_string();
+        let espeak_data = self.espeak_data.clone();
+
+        tokio::task::spawn_blocking(move || {
+            synthesize_blocking(&bin, &model, espeak_data.as_deref(), sample_rate, &text)
+        })
+        .await
+        .context("piper synthesize task panicked")?
+    }
+
+    /// Play pre-synthesized WAV bytes through the speaker.
+    ///
+    /// This is the second half of the speak pipeline. Blocks until
+    /// playback finishes.
+    pub async fn play(&self, wav: Vec<u8>) -> Result<()> {
+        tokio::task::spawn_blocking(move || play_wav(wav))
+            .await
+            .context("playback task panicked")?
+    }
 }
 
 // ── Blocking implementation ───────────────────────────────────────────────────
+
+/// Synthesize text to WAV bytes without playing. Returns the WAV buffer.
+fn synthesize_blocking(
+    piper_bin: &std::path::Path,
+    model: &std::path::Path,
+    espeak_data: Option<&std::path::Path>,
+    sample_rate: u32,
+    text: &str,
+) -> Result<Vec<u8>> {
+    use std::process::{Command, Stdio};
+
+    let mut cmd = Command::new(piper_bin);
+    cmd.args(["--model", &model.to_string_lossy()])
+       .args(["--output-raw", "--quiet"]);
+    if let Some(d) = espeak_data {
+        cmd.args(["--espeak_data", &d.to_string_lossy()]);
+    }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("Failed to spawn piper at {}", piper_bin.display()))?;
+
+    {
+        let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("piper stdin unavailable"))?;
+        stdin.write_all(text.as_bytes()).context("Failed to write text to piper stdin")?;
+    }
+
+    let output = child.wait_with_output().context("Failed to wait for piper")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        if stderr.is_empty() {
+            return Err(anyhow!("piper exited with status {}", output.status));
+        }
+        return Err(anyhow!("piper exited with status {}: {}", output.status, stderr));
+    }
+
+    let pcm = output.stdout;
+    if pcm.is_empty() {
+        tracing::warn!("piper produced no PCM output for text: {:?}", text);
+        return Ok(Vec::new());
+    }
+
+    Ok(pcm_to_wav(&pcm, sample_rate))
+}
 
 fn speak_blocking(
     piper_bin: &std::path::Path,
@@ -257,8 +374,18 @@ fn pcm_to_wav(pcm: &[u8], sample_rate: u32) -> Vec<u8> {
 // ── Audio playback ────────────────────────────────────────────────────────────
 
 fn play_wav(wav: Vec<u8>) -> Result<()> {
+    play_wav_interruptible(wav, &std::sync::atomic::AtomicBool::new(false))
+}
+
+/// Play WAV audio with interrupt support.
+///
+/// Polls the `interrupted` flag every 50ms. When set to true, immediately
+/// stops the rodio sink and returns Ok. This enables wake-word interruption
+/// of TTS playback with <50ms response time.
+fn play_wav_interruptible(wav: Vec<u8>, interrupted: &std::sync::atomic::AtomicBool) -> Result<()> {
     use rodio::{Decoder, OutputStream, Sink};
     use std::io::Cursor;
+    use std::sync::atomic::Ordering;
 
     let cursor = Cursor::new(wav);
     let decoder = Decoder::new(cursor).context("Failed to decode WAV for playback")?;
@@ -268,7 +395,16 @@ fn play_wav(wav: Vec<u8>) -> Result<()> {
     let sink = Sink::try_new(&stream_handle).context("Failed to create audio sink")?;
 
     sink.append(decoder);
-    sink.sleep_until_end();
+
+    // Poll for interrupt instead of blocking until end
+    while !sink.empty() {
+        if interrupted.load(Ordering::Relaxed) {
+            sink.stop();
+            tracing::debug!("TTS playback interrupted by wake word");
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 
     Ok(())
 }

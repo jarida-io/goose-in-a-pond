@@ -11,6 +11,12 @@
 //! | `sensor_readings`  | Delete rows older than 7 days              |
 //! | `camera_events`    | Delete *acknowledged* rows older than 14 d |
 //! | `session_messages` | Keep the 500 most recent per session       |
+//! | `face_embeddings`  | Delete orphaned rows (no matching profile) |
+//!
+//! Face embeddings themselves are never auto-expired — they are explicit
+//! biometric data managed by the user.  The orphan sweep defends against
+//! cases where a profile row is deleted without FK cascade (e.g. older
+//! SQLite connections that did not enable `PRAGMA foreign_keys`).
 //!
 //! All constants are configurable via [`PruningConfig`].
 
@@ -67,6 +73,7 @@ pub async fn prune_once(logs: &Pool<Sqlite>, system: &Pool<Sqlite>, config: &Pru
     prune_sensor_readings(logs, config.sensor_readings_days).await;
     prune_camera_events(logs, config.camera_events_days).await;
     prune_session_messages(system, config.session_messages_keep).await;
+    prune_orphan_face_embeddings(system).await;
 }
 
 async fn prune_event_log(pool: &Pool<Sqlite>, days: u32) {
@@ -110,6 +117,37 @@ async fn prune_camera_events(pool: &Pool<Sqlite>, days: u32) {
     {
         Ok(r) => info!("pruning: deleted {} camera_events rows older than {} days", r.rows_affected(), days),
         Err(e) => warn!("pruning: camera_events failed: {}", e),
+    }
+}
+
+/// Remove face_embeddings rows whose `profile_id` no longer exists in
+/// `profiles`.  Defensive cleanup — relied upon for biometric-data
+/// hygiene if the DB connection ever runs without `PRAGMA foreign_keys=ON`.
+async fn prune_orphan_face_embeddings(pool: &Pool<Sqlite>) {
+    // Skip silently on schemas that don't yet have the face_embeddings table
+    // (older DBs, tests that mount partial schemas).
+    let exists: Option<(i64,)> = sqlx::query_as(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='face_embeddings'",
+    )
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None);
+    if exists.is_none() {
+        return;
+    }
+
+    match sqlx::query(
+        "DELETE FROM face_embeddings \
+         WHERE profile_id NOT IN (SELECT id FROM profiles)",
+    )
+    .execute(pool)
+    .await
+    {
+        Ok(r) if r.rows_affected() > 0 => {
+            info!("pruning: deleted {} orphan face_embeddings rows", r.rows_affected())
+        }
+        Ok(_) => {}
+        Err(e) => warn!("pruning: face_embeddings failed: {}", e),
     }
 }
 

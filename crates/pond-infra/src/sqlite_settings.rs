@@ -56,10 +56,7 @@ impl SettingsRepository for SqliteSettingsRepository {
         upsert!("primary_profile_id", settings.primary_profile_id.as_deref().unwrap_or(""));
         upsert!("chat_provider",      &settings.chat_provider);
         upsert!("chat_model",         &settings.chat_model);
-        upsert!("think_provider",     settings.think_provider.as_deref().unwrap_or(""));
-        upsert!("think_model",        settings.think_model.as_deref().unwrap_or(""));
-        upsert!("task_provider",      settings.task_provider.as_deref().unwrap_or(""));
-        upsert!("task_model",         settings.task_model.as_deref().unwrap_or(""));
+        upsert!("tool_model",          settings.tool_model.as_deref().unwrap_or(""));
         upsert!("assistant_name",                  &settings.assistant_name);
         upsert!("assistant_personality",           &settings.assistant_personality);
         upsert!("user_name",                       &settings.user_name);
@@ -96,6 +93,14 @@ impl SettingsRepository for SqliteSettingsRepository {
         upsert!("weather_latitude",      settings.weather_latitude.to_string());
         upsert!("weather_longitude",     settings.weather_longitude.to_string());
         upsert!("weather_location_name", &settings.weather_location_name);
+        // Thinking / reasoning
+        upsert!("thinking_mode",         &settings.thinking_mode);
+        upsert!("show_thinking",         if settings.show_thinking { "true" } else { "false" });
+        upsert!("context_window_override", settings.context_window_override.to_string());
+        // Answer review
+        upsert!("review_mode",            &settings.review_mode);
+        upsert!("review_max_rounds",      settings.review_max_rounds.to_string());
+        upsert!("review_pass_threshold",  settings.review_pass_threshold.to_string());
 
         Ok(())
     }
@@ -130,18 +135,11 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
         }
         "chat_provider"  => s.chat_provider = value.to_string(),
         "chat_model"     => s.chat_model = value.to_string(),
-        "think_provider" => {
-            s.think_provider = if value.is_empty() { None } else { Some(value.to_string()) };
+        "tool_model" => {
+            s.tool_model = if value.is_empty() { None } else { Some(value.to_string()) };
         }
-        "think_model" => {
-            s.think_model = if value.is_empty() { None } else { Some(value.to_string()) };
-        }
-        "task_provider" => {
-            s.task_provider = if value.is_empty() { None } else { Some(value.to_string()) };
-        }
-        "task_model" => {
-            s.task_model = if value.is_empty() { None } else { Some(value.to_string()) };
-        }
+        // Legacy keys — silently ignored for backward compat with old DBs
+        "think_provider" | "think_model" | "task_provider" | "task_model" => {}
         "assistant_name"                  => s.assistant_name = value.to_string(),
         "assistant_personality"           => s.assistant_personality = value.to_string(),
         "user_name"                       => s.user_name = value.to_string(),
@@ -205,6 +203,20 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
         "weather_latitude"      => { if let Ok(v) = value.parse() { s.weather_latitude = v; } }
         "weather_longitude"     => { if let Ok(v) = value.parse() { s.weather_longitude = v; } }
         "weather_location_name" => s.weather_location_name = value.to_string(),
+        // Thinking / reasoning
+        "thinking_mode"          => s.thinking_mode = value.to_string(),
+        "show_thinking"          => s.show_thinking = value == "true",
+        "context_window_override" => {
+            if let Ok(v) = value.parse() { s.context_window_override = v; }
+        }
+        // Answer review
+        "review_mode"            => s.review_mode = value.to_string(),
+        "review_max_rounds"      => {
+            if let Ok(v) = value.parse() { s.review_max_rounds = v; }
+        }
+        "review_pass_threshold"  => {
+            if let Ok(v) = value.parse() { s.review_pass_threshold = v; }
+        }
         _ => {} // unknown key — ignore
     }
 }

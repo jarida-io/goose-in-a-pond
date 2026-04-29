@@ -6,6 +6,9 @@ pub struct AgentRequest {
     pub message: String,
     pub session_id: String,
     pub model_role: String, // "chat" | "think" | "task"
+    /// Optional image attachments for multimodal models.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<crate::domain::message::ImageAttachment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +23,11 @@ pub enum AgentStreamEvent {
     Status {
         content: String,
     },
+    /// Internal reasoning / chain-of-thought from models that support thinking
+    /// (Gemma 4, Qwen3, DeepSeek-R1). Only emitted when `show_thinking` is enabled.
+    Thinking {
+        content: String,
+    },
     ToolCall {
         id: String,
         tool: String,
@@ -32,6 +40,17 @@ pub enum AgentStreamEvent {
     },
     Text {
         content: String,
+    },
+    /// Adversarial review status — emitted during post-inference answer review.
+    ReviewStatus {
+        content: String,
+    },
+    /// Revised answer from the adversarial reviewer.
+    /// The frontend should replace the previously streamed text with this content.
+    ReviewRevision {
+        content: String,
+        score: u8,
+        rounds: u32,
     },
     Done {
         session_id: String,

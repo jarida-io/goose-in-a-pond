@@ -75,7 +75,7 @@ fn goose_message_to_pond(
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().to_string()),
         session_id: session_id.to_string(),
-        message: ChatMessage { role, content },
+        message: ChatMessage { role, content, images: Vec::new() },
         created_at,
     }
 }

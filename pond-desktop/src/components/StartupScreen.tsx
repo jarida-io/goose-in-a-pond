@@ -9,7 +9,13 @@ interface Props {
 
 type StartupPhase = "starting" | "connecting" | "ready" | "error";
 
-const MAX_POLLS = 60; // 30 seconds at 500ms intervals
+// 120 polls × 500 ms = 60 s. Cold start with face recognition + Whisper +
+// TTS warming the GGUF cache can easily take 30-45 s the very first time
+// (model auto-downloads, ONNX runtime init, sqlite migrations). The old
+// 30 s budget timed out before the parent server was ready, leaving the
+// WebView blank ("nothing shows; close-and-reopen fixes it" — by then the
+// parent server had finished booting in the background).
+const MAX_POLLS = 120;
 const POLL_INTERVAL_MS = 500;
 
 export function StartupScreen({ onReady }: Props) {
@@ -79,7 +85,7 @@ export function StartupScreen({ onReady }: Props) {
     }
 
     setPhase("error");
-    setError("Could not connect to pond-server within 30 seconds.");
+    setError("Could not connect to pond-server within 60 seconds.");
   }, [onReady]);
 
   // Animated dots

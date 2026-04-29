@@ -12,7 +12,9 @@ import { Skills } from "../sections/Skills";
 import { Models } from "../sections/Models";
 import { Prompts } from "../sections/Prompts";
 import { Settings } from "../sections/Settings";
+import { Faces } from "../sections/Faces";
 import { Agent } from "../sections/Agent";
+import { Canvas } from "../sections/Canvas";
 import { Logs } from "../sections/Logs";
 
 function SectionContent({ section }: { section: GuiSection }) {
@@ -26,7 +28,9 @@ function SectionContent({ section }: { section: GuiSection }) {
     case "models":    return <Models />;
     case "prompts":   return <Prompts />;
     case "settings":  return <Settings />;
+    case "faces":     return <Faces />;
     case "agent":     return <Agent />;
+    case "canvas":    return <Canvas />;
     case "logs":      return <Logs />;
   }
 }

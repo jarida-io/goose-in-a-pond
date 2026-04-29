@@ -36,11 +36,12 @@ describe("desktopState", () => {
     expect(normalizeGuiSection(undefined)).toBe("dashboard");
   });
 
-  it("DESKTOP_SECTIONS is a flat ordered list of all 11 sidebar items", () => {
-    expect(DESKTOP_SECTIONS).toHaveLength(11);
+  it("DESKTOP_SECTIONS is a flat ordered list of all 12 sidebar items", () => {
+    // 13 = dashboard, chat, canvas, devices, schedules, memory, skills,
+    // models, prompts, faces, settings, agent, logs.
+    expect(DESKTOP_SECTIONS).toHaveLength(13);
     expect(DESKTOP_SECTIONS[0]).toEqual({ section: "dashboard", label: "Dashboard" });
     expect(DESKTOP_SECTIONS[1]).toEqual({ section: "chat", label: "Chat" });
-    // Verify all expected sections are present
     const sectionKeys = DESKTOP_SECTIONS.map((s) => s.section);
     expect(sectionKeys).toContain("devices");
     expect(sectionKeys).toContain("schedules");
@@ -48,6 +49,7 @@ describe("desktopState", () => {
     expect(sectionKeys).toContain("skills");
     expect(sectionKeys).toContain("models");
     expect(sectionKeys).toContain("prompts");
+    expect(sectionKeys).toContain("faces");
     expect(sectionKeys).toContain("settings");
     expect(sectionKeys).toContain("agent");
     expect(sectionKeys).toContain("logs");

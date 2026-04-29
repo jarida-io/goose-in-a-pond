@@ -57,6 +57,7 @@ mod tests {
             message: "Hello, Pond!".to_string(),
             session_id: "test-session".to_string(),
             model_role: "chat".to_string(),
+            images: Vec::new(),
         };
         let response = agent.chat(request).await.unwrap();
         assert_eq!(response.text, "Echo: Hello, Pond!");
@@ -70,6 +71,7 @@ mod tests {
             message: "Hello, Stream!".to_string(),
             session_id: "test-session".to_string(),
             model_role: "chat".to_string(),
+            images: Vec::new(),
         };
         let mut stream = agent.chat_stream(request).await.unwrap();
 

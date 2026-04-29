@@ -18,3 +18,21 @@ pub struct UserSkill {
     /// ISO datetime when this skill was created.
     pub created_at: String,
 }
+
+impl UserSkill {
+    /// Maximum allowed content length (bytes). Skills are injected into
+    /// the system prompt on every turn — a single oversized skill can
+    /// exhaust the model's context window.
+    pub const MAX_CONTENT_LEN: usize = 5000;
+
+    /// Validate the skill content length.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.content.len() > Self::MAX_CONTENT_LEN {
+            return Err(format!(
+                "Skill content exceeds {} bytes (got {})",
+                Self::MAX_CONTENT_LEN, self.content.len()
+            ));
+        }
+        Ok(())
+    }
+}

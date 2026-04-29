@@ -93,6 +93,7 @@ export function Logs() {
             isSelected={autoscroll}
             onValueChange={setAutoscroll}
           >
+            <Switch.Control><Switch.Thumb /></Switch.Control>
             <span className="muted-12">Autoscroll</span>
           </Switch>
           <Button size="sm" variant="light" onPress={load} isDisabled={loading} startContent={<RefreshCw size={14} />}>

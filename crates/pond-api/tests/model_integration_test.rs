@@ -108,6 +108,7 @@ async fn make_app_with_settings_repo(
         embedding_provider:  None,
         sensor_storage:      Arc::new(MockSensorStorage::new()),
         camera_storage:      Arc::new(MockCameraStorage::new()),
+        face_recognition:    None,
         prompt_template_dir: None,
         model_repo:          Some(model_repo.clone()),
         data_dir:            Some(tmp.path().to_path_buf()),
@@ -128,6 +129,10 @@ async fn make_app_with_settings_repo(
         llamafile_manager: None,
         event_log_repo: None,
         speaker_id: None,
+        session_user_bindings: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+        tool_agent: None,
+        answer_reviewer: None,
     });
 
     (

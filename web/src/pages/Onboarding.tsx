@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { api, isPreviewMode, DEV_MOCK_TOKEN } from '../api'
 import logo from '../assets/logo.png'
 import '../onboarding.css'
@@ -6,8 +6,8 @@ import '../onboarding.css'
 // ── Types ────────────────────────────────────────────────────────────────────
 
 // 0=Welcome 1=Basics 2=Location 3=Accessibility 4=Personality
-// 5=GooseIdentity 6=WakeWord 7=Model 8=Extensions 9=Done
-type Step = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+// 5=GooseIdentity 6=WakeWord 7=Model 8=Extensions 9=Face 10=Done
+type Step = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10
 
 interface Draft {
   token:              string
@@ -87,13 +87,14 @@ const STEP_META = [
   { label: 'Wake Word',   icon: '🔊' },
   { label: 'AI Model',    icon: '🧠' },
   { label: 'Extensions',  icon: '🔌' },
+  { label: 'Face',        icon: '🙂' },
 ]
 
 // ── Progress bar ─────────────────────────────────────────────────────────────
 
 function ProgressBar({ step }: { step: Step }) {
-  if (step === 0 || step === 9) return null
-  const total = 8
+  if (step === 0 || step === 10) return null
+  const total = 9
   return (
     <div className="ob-progress" aria-label={`Step ${step} of ${total}`}>
       {Array.from({ length: total }, (_, i) => (
@@ -109,12 +110,12 @@ function ProgressBar({ step }: { step: Step }) {
 // ── Step header ──────────────────────────────────────────────────────────────
 
 function StepHeader({ step }: { step: Step }) {
-  if (step === 0 || step === 9) return null
+  if (step === 0 || step === 10) return null
   const meta = STEP_META[step]
   return (
     <div className="ob-step-header">
       <span className="ob-step-icon">{meta.icon}</span>
-      <span className="ob-step-label">Step {step} of 8 · {meta.label}</span>
+      <span className="ob-step-label">Step {step} of 9 · {meta.label}</span>
     </div>
   )
 }
@@ -856,6 +857,163 @@ function StepExtensions({ draft, onChange, onNext, onBack, loading, error }: {
   )
 }
 
+// ── Step 9 — Face Enrollment (optional) ──────────────────────────────────────
+//
+// Captures three webcam frames and POSTs each to /api/v1/faces/register
+// against the primary profile created in step 1. Three samples is the
+// minimum required by the matcher's `MIN_SAMPLES_TO_IDENTIFY` floor, so
+// completing this step gives the user an immediately-usable face profile.
+// Skipping is always allowed — face recognition can be added later from
+// the Faces page without re-running onboarding.
+
+function StepFace({ draft, onNext, onBack }: {
+  draft: Draft
+  onNext: () => void
+  onBack: () => void
+}) {
+  const videoRef    = useRef<HTMLVideoElement | null>(null)
+  const canvasRef   = useRef<HTMLCanvasElement | null>(null)
+  const streamRef   = useRef<MediaStream | null>(null)
+  const [cameraError, setCameraError] = useState<string | null>(null)
+  const [count, setCount]             = useState(0)   // samples captured
+  const [busy, setBusy]               = useState(false)
+  const [featureMissing, setFeatureMissing] = useState(false)
+  const [error, setError]             = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    async function startCam() {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setCameraError('This browser does not support webcam capture.')
+        return
+      }
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
+          audio: false,
+        })
+        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return }
+        streamRef.current = stream
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream
+          await videoRef.current.play().catch(() => {/* autoplay */})
+        }
+      } catch (e) {
+        setCameraError(e instanceof Error ? e.message : 'Camera permission denied.')
+      }
+    }
+    startCam()
+    return () => {
+      cancelled = true
+      streamRef.current?.getTracks().forEach(t => t.stop())
+      streamRef.current = null
+    }
+  }, [])
+
+  async function captureBlob(): Promise<Blob | null> {
+    const v = videoRef.current
+    const c = canvasRef.current
+    if (!v || !c || v.videoWidth === 0) return null
+    c.width = v.videoWidth; c.height = v.videoHeight
+    const ctx = c.getContext('2d')
+    if (!ctx) return null
+    ctx.drawImage(v, 0, 0, c.width, c.height)
+    return new Promise(r => c.toBlob(b => r(b), 'image/jpeg', 0.92))
+  }
+
+  async function handleCaptureSample() {
+    setError(null)
+    if (!draft.primaryProfileId || isPreviewMode(draft.token)) {
+      // No profile (preview mode) — just count locally.
+      setCount(c => c + 1); return
+    }
+    setBusy(true)
+    try {
+      const blob = await captureBlob()
+      if (!blob) { setError('Could not capture a frame yet — give the camera a moment.'); return }
+      await api.registerFace(draft.primaryProfileId, blob, draft.token)
+      setCount(c => c + 1)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      if (msg.includes('503') || msg.toLowerCase().includes('not configured')) {
+        setFeatureMissing(true)
+      } else {
+        setError(msg)
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const enough = count >= 3
+
+  return (
+    <div className="ob-body ob-form">
+      <h2>Recognise you on sight (optional)</h2>
+      <p className="ob-hint">
+        Capture three quick frames so Goose can tell who is talking when multiple
+        people share the assistant. Only a small embedding vector is stored —
+        never the photo itself, and the vector cannot be reversed back into an image.
+        You can skip this and enrol later from the Faces page.
+      </p>
+
+      {featureMissing && (
+        <p className="ob-error">
+          This server was built without face recognition support. Rebuild
+          pond-server with <code>--features face-onnx</code> to enable.
+        </p>
+      )}
+
+      <div style={{ display: 'flex', gap: '1rem', alignItems: 'flex-start', marginTop: '0.75rem', flexWrap: 'wrap' }}>
+        <div style={{ flex: '1 1 320px', position: 'relative', minWidth: 280 }}>
+          {cameraError ? (
+            <p className="ob-error">{cameraError}</p>
+          ) : (
+            <video
+              ref={videoRef}
+              muted
+              playsInline
+              style={{ width: '100%', borderRadius: 12, background: '#000', aspectRatio: '4/3' }}
+            />
+          )}
+          <canvas ref={canvasRef} style={{ display: 'none' }} />
+        </div>
+
+        <div style={{ flex: '1 1 220px', minWidth: 200 }}>
+          <p style={{ fontWeight: 600, marginBottom: '0.5rem' }}>
+            Captured: {count} / 3
+          </p>
+          <ul className="ob-hint" style={{ margin: '0 0 0.75rem 1rem', padding: 0 }}>
+            <li>Frame 1 — face the camera straight on</li>
+            <li>Frame 2 — turn ~15° left</li>
+            <li>Frame 3 — turn ~15° right</li>
+          </ul>
+          <button
+            type="button"
+            className="ob-btn ob-btn-primary"
+            onClick={handleCaptureSample}
+            disabled={busy || !!cameraError || featureMissing || count >= 3}
+          >
+            {busy ? 'Capturing…' : count >= 3 ? 'Done' : 'Capture frame'}
+          </button>
+        </div>
+      </div>
+
+      {error && <p className="ob-error" style={{ marginTop: '0.75rem' }}>{error}</p>}
+
+      <div className="ob-actions" style={{ marginTop: '1rem' }}>
+        <button className="ob-btn ob-btn-ghost" onClick={onBack}>Back</button>
+        <button className="ob-btn ob-btn-ghost" onClick={onNext}>
+          Skip for now
+        </button>
+        <button className="ob-btn ob-btn-primary" onClick={onNext} disabled={!enough && !featureMissing}>
+          {enough ? 'Continue' : `Capture ${3 - count} more`}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // ── Orchestrator ─────────────────────────────────────────────────────────────
 
 interface Props {
@@ -1023,7 +1181,7 @@ export default function Onboarding({ onComplete }: Props) {
     })
   }
 
-  // ── Step 8 → Done: save extensions ──────────────────────────────────────
+  // ── Step 8 → 9: save extensions ─────────────────────────────────────────
   async function handleExtensions() {
     await wrap(async () => {
       if (!isPreviewMode(draft.token)) {
@@ -1031,6 +1189,16 @@ export default function Onboarding({ onComplete }: Props) {
       }
       setStep(9)
     })
+  }
+
+  // ── Step 9 → Done: face enrollment is purely optional ────────────────────
+  // The captured frames are POSTed to /faces/register against the primary
+  // profile created in step 1. If the backend was built without
+  // `--features face-onnx` the call 503s — we surface the error inline and
+  // let the user skip past, since face recognition is an enhancement, not a
+  // gate to using GIAP.
+  function handleFaceDone() {
+    setStep(10)
   }
 
   // ── Done: complete onboarding ────────────────────────────────────────────
@@ -1045,7 +1213,7 @@ export default function Onboarding({ onComplete }: Props) {
   }
 
   // ── Done screen ──────────────────────────────────────────────────────────
-  if (step === 9) {
+  if (step === 10) {
     const name = draft.preferredName.trim() || draft.userName.trim()
     const resolvedWakeWord = draft.wakeWord === 'custom' ? draft.wakeWordCustom : draft.wakeWord
     return (
@@ -1097,6 +1265,7 @@ export default function Onboarding({ onComplete }: Props) {
           {step === 6 && <StepWakeWord    draft={draft} onChange={patch} onNext={handleWakeWord}     onBack={() => back(5)} loading={loading} error={error} />}
           {step === 7 && <StepModel       draft={draft} onChange={patch} onNext={handleModel}        onBack={() => back(6)} loading={loading} error={error} />}
           {step === 8 && <StepExtensions  draft={draft} onChange={patch} onNext={handleExtensions}   onBack={() => back(7)} loading={loading} error={error} />}
+          {step === 9 && <StepFace        draft={draft} onNext={handleFaceDone}                       onBack={() => back(8)} />}
         </div>
       </div>
     </div>

@@ -182,10 +182,7 @@ export interface Settings {
   // Model role assignments
   chat_provider:  string
   chat_model:     string
-  think_provider: string | null
-  think_model:    string | null
-  task_provider:  string | null
-  task_model:     string | null
+  tool_model:     string | null
 }
 
 // ── Agent data types ──────────────────────────────────────────────────────────
@@ -381,6 +378,10 @@ export const api = {
 
   // ── Profiles ─────────────────────────────────────────────────────────────
 
+  /** List all household profiles */
+  listProfiles: (token: string) =>
+    getReq<{ profiles: { id: string; display_name: string; avatar_emoji: string; preferences: Record<string, string> }[] }>('/profiles', token),
+
   /** Create a new household profile (public — callable during onboarding) */
   createProfile: (req: { display_name: string; avatar_emoji: string }, token: string) =>
     post<{ id: string; display_name: string; avatar_emoji: string; preferences: Record<string, string> }>('/profiles', req, token),
@@ -500,6 +501,10 @@ export const api = {
   /** List llamafile releases from GitHub */
   searchLlamafileModels: (q: string, token: string) =>
     getReq<{ models: LlamafileAsset[]; error?: string }>(`/models/search/llamafile?q=${encodeURIComponent(q)}`, token),
+
+  /** Get runtime capabilities of the active model */
+  getModelCapabilities: (token: string) =>
+    getReq<{ thinking: boolean; vision: boolean; audio_input: boolean; context_window_tokens: number; structured_output: boolean }>('/models/capabilities', token),
 
   /** Get current RAM usage and loaded model info */
   getMemoryStatus: (token: string) =>
@@ -719,5 +724,137 @@ export const api = {
     } catch {
       return null
     }
+  },
+
+  // ── Face Biometrics (Phase 2) ────────────────────────────────────────────
+  //
+  // Backed by `pond-server` compiled with `--features face-onnx`.  When the
+  // feature is disabled these endpoints return 503 — the UI should surface a
+  // "face recognition unavailable" state instead of erroring out.
+
+  /** Register a face enrollment for the given profile. */
+  registerFace: async (
+    profileId: string,
+    imageBlob: Blob,
+    token: string,
+    bbox?: { x: number; y: number; width: number; height: number },
+  ): Promise<{ id: string; profile_id: string; model_dims: number; created_at: string }> => {
+    const form = new FormData()
+    form.append('profile_id', profileId)
+    form.append('image', imageBlob, 'face.jpg')
+    if (bbox) form.append('bbox', `${bbox.x},${bbox.y},${bbox.width},${bbox.height}`)
+    const res = await fetch(`${BASE}/faces/register`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` },
+      body: form,
+    })
+    if (!res.ok) {
+      const text = await res.text()
+      throw new Error(text || `HTTP ${res.status}`)
+    }
+    return res.json()
+  },
+
+  /** Legacy single-frame identify — retained for API callers but
+   *  vulnerable to photo attacks (no liveness signal across frames).
+   *  Prefer `identifyFaceBurst` for anything user-facing. */
+  identifyFace: async (
+    imageBlob: Blob,
+    token: string,
+    bbox?: { x: number; y: number; width: number; height: number },
+  ): Promise<{ identified: boolean; profile_id: string | null; confidence: number | null; threshold: number }> => {
+    const form = new FormData()
+    form.append('image', imageBlob, 'face.jpg')
+    if (bbox) form.append('bbox', `${bbox.x},${bbox.y},${bbox.width},${bbox.height}`)
+    const res = await fetch(`${BASE}/faces/identify`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` },
+      body: form,
+    })
+    if (!res.ok) {
+      const text = await res.text()
+      throw new Error(text || `HTTP ${res.status}`)
+    }
+    return res.json()
+  },
+
+  /** Production-style identify: 5-frame burst with multi-frame liveness
+   *  gates.  Inter-frame embedding sameness + landmark pixel-motion
+   *  std-dev catch photo/phone-screen attacks that single-frame can't see.
+   *  Response adds `reason: "liveness_failed"` when a still-image
+   *  presentation attack is detected. */
+  identifyFaceBurst: async (
+    frames: Blob[],
+    token: string,
+    bbox?: { x: number; y: number; width: number; height: number },
+  ): Promise<{
+    identified: boolean
+    profile_id: string | null
+    confidence: number | null
+    threshold: number
+    reason?: string
+    liveness?: {
+      hard_reject: boolean
+      suspicious: boolean
+      mean_inter_cos: number
+      landmark_motion: number
+      eye_ratio_spread: number
+    }
+  }> => {
+    const form = new FormData()
+    frames.forEach((f, i) => form.append('image', f, `frame${i}.jpg`))
+    if (bbox) form.append('bbox', `${bbox.x},${bbox.y},${bbox.width},${bbox.height}`)
+    const res = await fetch(`${BASE}/faces/identify-burst`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` },
+      body: form,
+    })
+    if (!res.ok) {
+      const text = await res.text()
+      throw new Error(text || `HTTP ${res.status}`)
+    }
+    return res.json()
+  },
+
+  /** Status of the three on-disk face models — used by Models pages to render
+   *  a parity card for ArcFace + SCRFD + Silent-Face PAD. Returns
+   *  `feature_enabled: false` when pond-server was built without
+   *  `--features face-onnx`. */
+  listFaceModels: (token: string) =>
+    getReq<{
+      feature_enabled: boolean
+      models_dir: string | null
+      models: Array<{
+        name: string
+        label: string
+        role: 'embedding' | 'detector' | 'antispoof'
+        expected_mb: number
+        size_mb: number | null
+        downloaded: boolean
+        path: string | null
+      }>
+    }>(`/faces/models`, token),
+
+  /** List all face enrollments for a profile (metadata only — embeddings stay server-side). */
+  listFaceEnrollments: (profileId: string, token: string) =>
+    getReq<{ profile_id: string; enrollments: { id: string; profile_id: string; model_dims: number; created_at: string }[]; count: number }>(
+      `/faces/profile/${profileId}`,
+      token,
+    ),
+
+  /** Delete every biometric record for a profile (face embeddings today; voice prints once Phase 1 lands). */
+  deleteUserBiometrics: async (
+    profileId: string,
+    token: string,
+  ): Promise<{ profile_id: string; face_embeddings_deleted: number }> => {
+    const res = await fetch(`${BASE}/users/${profileId}/biometrics`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${token}` },
+    })
+    if (!res.ok) {
+      const text = await res.text()
+      throw new Error(text || `HTTP ${res.status}`)
+    }
+    return res.json()
   },
 }

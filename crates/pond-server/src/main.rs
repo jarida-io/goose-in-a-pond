@@ -51,7 +51,6 @@ use pond_core::ports::mcp_server::McpServerRepository as _;
 use pond_core::ports::settings::SettingsRepository as _;
 use pond_core::prompts::build_system_prompt;
 use pond_core::services::chat::ChatService;
-use pond_core::services::model_router::ModelRouter;
 use pond_core::services::mock_agent::MockAgent;
 use pond_core::services::stdin_input::StdinInput;
 use pond_infra::db::Database;
@@ -396,8 +395,22 @@ enum MemoryAction {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let num_cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    // On Jetson Orin Nano (6 cores), cap at 4 to leave headroom for OS + audio.
+    // On dev machines, use all cores.
+    let workers = if num_cpus <= 6 { num_cpus.min(4) } else { num_cpus };
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()?;
+    runtime.block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -616,6 +629,15 @@ async fn run_setup(model: &str) -> Result<()> {
         println!("       python3 scripts/export_xvector.py");
     }
 
+    // Step 7 (face-onnx feature only): face recognition models
+    #[cfg(feature = "face-onnx")]
+    {
+        println!("\n  [7/7] Setting up face recognition models...");
+        if let Err(e) = model_download::download_face_models(&data_dir).await {
+            println!("  ⚠  Face model setup failed: {} — face recognition will be disabled until you add the files manually", e);
+        }
+    }
+
     println!();
     println!("  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("  ✅ Setup complete!  Next steps:");
@@ -758,6 +780,12 @@ async fn run_server(static_dir: std::path::PathBuf, open: bool, debug: bool, age
     println!("  ╔═══════════════════════════════════════╗");
     println!("  ║   🦆  Goose In A Pond  v{}         ║", env!("CARGO_PKG_VERSION"));
     println!("  ╚═══════════════════════════════════════╝");
+
+    // Bake in the face-recognition runtime defaults so the server Just Works
+    // on a fresh macOS install without the operator having to remember a
+    // four-line env-var incantation.  Every var stays overridable — we only
+    // set it when it is currently *unset*.
+    apply_face_recognition_defaults();
 
     // Initialize databases
     let data_dir = default_data_dir();
@@ -962,9 +990,7 @@ async fn run_server(static_dir: std::path::PathBuf, open: bool, debug: bool, age
 
     // LLM — only start llamafile when at least one role is configured to use it.
     // ModelService handles downloading autonomously inside try_start.
-    let any_role_needs_llamafile = settings.chat_provider == "llamafile"
-        || settings.think_provider.as_deref() == Some("llamafile")
-        || settings.task_provider.as_deref()  == Some("llamafile");
+    let any_role_needs_llamafile = settings.chat_provider == "llamafile";
 
     let active_llm_name: String = settings.chat_model.clone();
     let (initial_llamafile_guard, llamafile_port) = if any_role_needs_llamafile {
@@ -1005,6 +1031,29 @@ async fn run_server(static_dir: std::path::PathBuf, open: bool, debug: bool, age
         Arc::new(SqliteSensorStorage::new(db.logs.clone()));
     let camera_storage: Arc<dyn pond_core::ports::camera_storage::CameraStorage + Send + Sync> =
         Arc::new(SqliteCameraStorage::new(db.logs.clone()));
+
+    // ── Face recognition (Phase 2) ──────────────────────────────────────────
+    // Built only when the --features face-onnx build flag is enabled AND an
+    // ONNX embedding model is present on disk.  Missing model file → None
+    // (server starts normally; /api/v1/faces/* return 503).
+    //
+    // First call the auto-downloader so a fresh `cargo run` brings the
+    // models down on its own, exactly the way whisper / piper do.  We
+    // do this only when the face feature is compiled in, and we let
+    // failures fall through — `build_face_recognition` will simply
+    // return `None` when the files are absent.
+    #[cfg(feature = "face-onnx")]
+    {
+        if let Err(e) = model_download::download_face_models(&data_dir).await {
+            tracing::warn!("face model auto-download failed: {e:#}");
+        }
+        // Re-apply defaults: the antispoof file may have just appeared on
+        // disk for the first time, in which case the earlier env-default
+        // pass was a no-op.  Idempotent — only sets unset vars.
+        apply_face_recognition_defaults();
+    }
+    let face_recognition: Option<Arc<dyn pond_core::ports::face_recognition::FaceRecognition>> =
+        build_face_recognition(&data_dir, db.system.clone());
 
     let prompt_template_repo: Arc<dyn pond_core::ports::prompt_template::PromptTemplateRepository + Send + Sync> =
         Arc::new(SqlitePromptTemplateRepository::new(db.system.clone()));
@@ -1110,25 +1159,8 @@ async fn run_server(static_dir: std::path::PathBuf, open: bool, debug: bool, age
         &llamafile_url, data_dir_ref, max_tokens, temperature,
     ).await;
 
-    // Think role: reuse chat Arc if not separately configured.
-    let think_provider_arc: Arc<dyn LlmProvider> =
-        if let (Some(tp), Some(tm)) = (&settings.think_provider, &settings.think_model) {
-            build_provider(tp, tm, &llamafile_url, data_dir_ref, max_tokens, temperature).await
-        } else {
-            chat_provider_arc.clone()
-        };
-
-    // Task role: reuse chat Arc if not separately configured.
-    let task_provider_arc: Arc<dyn LlmProvider> =
-        if let (Some(tp), Some(tm)) = (&settings.task_provider, &settings.task_model) {
-            build_provider(tp, tm, &llamafile_url, data_dir_ref, max_tokens, temperature).await
-        } else {
-            chat_provider_arc.clone()
-        };
-
     let llm_provider = Arc::new(tokio::sync::RwLock::new(Some(
-        Arc::new(ModelRouter::new(chat_provider_arc, think_provider_arc, task_provider_arc))
-            as Arc<dyn LlmProvider>
+        chat_provider_arc.clone() as Arc<dyn LlmProvider>
     )));
 
     let speaker_id_serve: Option<Arc<dyn SpeakerIdentification + Send + Sync>> = {
@@ -1143,6 +1175,24 @@ async fn run_server(static_dir: std::path::PathBuf, open: bool, debug: bool, age
             }
         } else { None }
     };
+
+    // Build ToolAgent for the HTTP path — uses the LIVE provider (RwLock) so the
+    // classifier always uses whatever model is currently loaded. No model swap.
+    println!("  Tool Agent: using live provider (zero model-swap overhead)");
+    let tool_agent_for_http: Option<Arc<dyn pond_core::ports::tool_agent::ToolAgent>> =
+        Some(Arc::new(GiapToolAgent { live_provider: llm_provider.clone() }) as Arc<dyn pond_core::ports::tool_agent::ToolAgent>);
+
+    // Build AnswerReviewer for the HTTP path — adversarial post-inference quality gate.
+    // Always constructed so the user can toggle it on/off at runtime via settings.
+    // The routes.rs handler checks review_mode at request time, not at startup.
+    println!("  Answer Reviewer: ready (mode={}, threshold={}/5, max_rounds={})",
+        settings.review_mode, settings.review_pass_threshold, settings.review_max_rounds);
+    let answer_reviewer_for_http: Option<Arc<dyn pond_core::ports::answer_reviewer::AnswerReviewer>> =
+        Some(Arc::new(GiapAnswerReviewer {
+            provider: chat_provider_arc,
+            pass_threshold: settings.review_pass_threshold,
+            max_rounds: settings.review_max_rounds,
+        }) as Arc<dyn pond_core::ports::answer_reviewer::AnswerReviewer>);
 
     let db = Arc::new(db);
 
@@ -1219,7 +1269,7 @@ async fn run_server(static_dir: std::path::PathBuf, open: bool, debug: bool, age
 
     // ── Agent backend ────────────────────────────────────────────────────────────
     #[cfg(feature = "goose-agent")]
-    let (agent, extension_manager) = build_goose_backend(
+    let (agent, extension_manager, tool_caller) = build_goose_backend(
         agent_backend,
         &llamafile_url,
         &data_dir,
@@ -1235,6 +1285,8 @@ async fn run_server(static_dir: std::path::PathBuf, open: bool, debug: bool, age
         false, // voice_mode — server mode, not voice
     ).await;
 
+    #[cfg(not(feature = "goose-agent"))]
+    let tool_caller: Option<Arc<dyn pond_core::ports::tool_caller::ToolCaller>> = None;
     #[cfg(not(feature = "goose-agent"))]
     let (agent, extension_manager): (Arc<dyn Agent>, Option<Arc<dyn pond_core::ports::extension_manager::ExtensionManagerPort>>) = {
         if agent_backend == "goose" {
@@ -1350,6 +1402,11 @@ async fn run_server(static_dir: std::path::PathBuf, open: bool, debug: bool, age
         llamafile_manager: Some(llamafile_manager),
         event_log_repo: event_log_repo,
         speaker_id: speaker_id_serve,
+        face_recognition,
+        session_user_bindings: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+        tool_agent: tool_agent_for_http,
+        answer_reviewer: answer_reviewer_for_http,
     });
 
     // Warn if static assets haven't been built yet
@@ -1660,7 +1717,7 @@ async fn run_chat(provider: Option<&str>, model: Option<&str>, input: &str, wake
             s.chat_model    = effective_model.to_string();
             settings_repo_arc.update(&s).await.ok();
         }
-        let (a, _ext_mgr) = build_goose_backend(
+        let (a, _ext_mgr, _tc) = build_goose_backend(
             "goose",
             &llamafile_url,
             &data_dir,
@@ -1982,9 +2039,343 @@ async fn run_chat(provider: Option<&str>, model: Option<&str>, input: &str, wake
         println!("  Speaker ID: disabled (no model at {})", speaker_model_path.display());
     }
 
+    // ── Wire Tool Agent for voice mode ──
+    // Build a provider for the tool classifier. When goose-agent is active,
+    // ChatService.provider is None (GooseAdapter manages its own provider),
+    // so we construct one explicitly for classification calls.
+    {
+        let classifier_provider: Option<Arc<dyn pond_core::ports::provider::LlmProvider>> =
+            if let Some(ref p) = chat_service.provider_ref() {
+                Some(p.clone())
+            } else {
+                // GooseAdapter mode — build a provider from settings for classification
+                match effective_provider {
+                    "local" | "gguf" => {
+                        #[cfg(feature = "local-inference")]
+                        {
+                            use pond_adapters_local_inference::LocalInferenceLlmAdapter;
+                            LocalInferenceLlmAdapter::new_with_data_dir(effective_model, &data_dir)
+                                .await
+                                .ok()
+                                .map(|p| Arc::new(p) as Arc<dyn pond_core::ports::provider::LlmProvider>)
+                        }
+                        #[cfg(not(feature = "local-inference"))]
+                        { None }
+                    }
+                    "ollama" => Some(Arc::new(
+                        OllamaProvider::new(None, Some(effective_model))
+                    ) as Arc<dyn pond_core::ports::provider::LlmProvider>),
+                    _ => Some(Arc::new(
+                        LlamafileProvider::new(Some(&llamafile_url))
+                    ) as Arc<dyn pond_core::ports::provider::LlmProvider>),
+                }
+            };
+
+        if let Some(provider) = classifier_provider {
+            let live = Arc::new(tokio::sync::RwLock::new(
+                Some(provider as Arc<dyn pond_core::ports::provider::LlmProvider>)
+            ));
+            let ta = GiapToolAgent { live_provider: live };
+            chat_service = chat_service.with_tool_agent(Arc::new(ta));
+            println!("  Tool Agent: active (classifier + wikipedia/weather/memory)");
+        } else {
+            println!("  Tool Agent: inactive (no provider available for classification)");
+        }
+    }
+
     chat_service.run_loop().await?;
 
     Ok(())
+}
+
+/// Tool Agent implementation for both HTTP and CLI voice paths.
+/// Uses the LIVE LLM provider (from the RwLock) for classification so it always
+/// uses the currently loaded model — no model swap, no unload/reload overhead.
+///
+/// Before this fix, the classifier held a startup-time Arc snapshot. When the user
+/// hot-reloaded the model via the UI, the classifier still used the old model,
+/// causing a full model unload/reload on every message.
+struct GiapToolAgent {
+    /// Live provider reference — reads from the RwLock on each call so it always
+    /// uses whatever model is currently loaded. Zero model-swap overhead.
+    live_provider: Arc<tokio::sync::RwLock<Option<Arc<dyn pond_core::ports::provider::LlmProvider>>>>,
+}
+
+#[async_trait::async_trait]
+impl pond_core::ports::tool_agent::ToolAgent for GiapToolAgent {
+    async fn process(&self, message: &str) -> anyhow::Result<Option<String>> {
+        // Read the LIVE provider — always uses whatever model is currently loaded.
+        // No model swap, no unload/reload overhead.
+        let provider = {
+            let guard = self.live_provider.read().await;
+            match guard.as_ref() {
+                Some(p) => p.clone(),
+                None => {
+                    println!("[tool-classifier] no provider available, skipping classification");
+                    return Ok(None);
+                }
+            }
+        };
+
+        let classify_prompt = pond_core::prompts::build_classifier_prompt();
+
+        // Retry classifier up to 3 times — thinking models sometimes generate
+        // only reasoning tokens without the required JSON output.
+        const MAX_CLASSIFIER_RETRIES: usize = 3;
+        let mut text = String::new();
+        let mut classified = false;
+
+        for attempt in 1..=MAX_CLASSIFIER_RETRIES {
+            println!("[tool-classifier] classifying (attempt {}/{}, model={}): {:?}",
+                attempt, MAX_CLASSIFIER_RETRIES, provider.model_name(), message);
+
+            let classify_msg_retry = vec![pond_core::domain::message::ChatMessage::user(message)];
+            let response = match provider.complete(&classify_prompt, classify_msg_retry).await {
+                Ok(r) => r,
+                Err(e) => {
+                    println!("[tool-classifier] inference error on attempt {}: {}", attempt, e);
+                    continue;
+                }
+            };
+
+            // Strip thinking tokens — models like Gemma 4 emit
+            // <|channel>thought...<channel|> preambles even in classifier mode.
+            let raw = &response.content;
+            let stripped = strip_thinking_from_classifier(raw);
+            text = stripped.to_lowercase();
+            println!("[tool-classifier] response (attempt {}, stripped): {:?}",
+                attempt, &text[..text.len().min(200)]);
+
+            // Check if we got valid JSON with needs_tool field
+            if text.contains("needs_tool") {
+                classified = true;
+                break;
+            }
+
+            // Also accept empty JSON {} as "no tool needed"
+            if text.trim() == "{}" {
+                classified = true;
+                break;
+            }
+
+            println!("[tool-classifier] attempt {} produced no valid JSON, retrying...", attempt);
+        }
+
+        if !classified {
+            println!("[tool-classifier] all {} attempts failed to produce valid JSON, skipping tool", MAX_CLASSIFIER_RETRIES);
+            return Ok(None);
+        }
+
+        let needs_tool = text.contains("\"needs_tool\": true")
+            || text.contains("\"needs_tool\":true")
+            || text.contains("needs_tool\": true");
+
+        if !needs_tool {
+            return Ok(None);
+        }
+
+        let tool = if text.contains("weather") { "weather" }
+            else if text.contains("save_memory") { "save_memory" }
+            else if text.contains("recall_memory") { "recall_memory" }
+            else if text.contains("devices") { "devices" }
+            else if text.contains("schedules") { "schedules" }
+            else { "wikipedia" };
+
+        println!("[voice-tool-agent] tool={}, executing...", tool);
+
+        match pond_mcp_server::try_tool_agent(tool, message).await {
+            Some(info) => {
+                println!("[voice-tool-agent] got result ({} chars)", info.len());
+                Ok(Some(format!(
+                    "{}\n\n\
+                    [Retrieved information — USE THIS AS YOUR PRIMARY SOURCE]\n\
+                    {}\n\n\
+                    INSTRUCTIONS: Answer the user's question using the retrieved information above as \
+                    your authoritative source. Be thorough and detailed — include specific facts, numbers, \
+                    dates, and comparisons from the retrieved data. If the user asked to compare things, \
+                    highlight concrete differences and similarities. If they asked how something works, \
+                    explain the mechanism step by step. \
+                    Do NOT give a vague or generic answer when you have specific information available. \
+                    Do NOT mention tools, Wikipedia, APIs, or that anything was looked up — present \
+                    the information naturally as your own knowledge. \
+                    Match the personality and style from your system prompt.",
+                    message, info
+                )))
+            }
+            None => {
+                println!("[voice-tool-agent] tool returned no result");
+                Ok(None)
+            }
+        }
+    }
+}
+
+// ── Adversarial Answer Reviewer ───────────────────────────────────────────────
+
+/// Adversarial answer reviewer — post-inference quality gate.
+///
+/// Uses the same LlmProvider as the main LLM with a critic system prompt.
+/// Reviews the completed answer, and if it scores below threshold, sends
+/// the critique back to the LLM for revision.
+struct GiapAnswerReviewer {
+    provider: Arc<dyn pond_core::ports::provider::LlmProvider>,
+    pass_threshold: u8,
+    max_rounds: u32,
+}
+
+#[async_trait::async_trait]
+impl pond_core::ports::answer_reviewer::AnswerReviewer for GiapAnswerReviewer {
+    async fn review(
+        &self,
+        question: &str,
+        answer: &str,
+        tool_context: Option<&str>,
+    ) -> anyhow::Result<pond_core::ports::answer_reviewer::ReviewResult> {
+        use pond_core::ports::answer_reviewer::{ReviewResult, ReviewVerdict};
+        use pond_core::domain::message::ChatMessage;
+
+        let mut current_answer = answer.to_string();
+        let mut rounds = 0u32;
+        let mut last_verdict: Option<ReviewVerdict> = None;
+
+        for _ in 0..self.max_rounds {
+            rounds += 1;
+
+            // Step 1: Review the current answer
+            let review_input = if let Some(ctx) = tool_context {
+                format!(
+                    "QUESTION: {}\n\nCONTEXT PROVIDED TO THE ANSWERER:\n{}\n\nANSWER TO REVIEW:\n{}",
+                    question, ctx, current_answer
+                )
+            } else {
+                format!(
+                    "QUESTION: {}\n\nANSWER TO REVIEW:\n{}",
+                    question, current_answer
+                )
+            };
+
+            println!("[answer-reviewer] reviewing (round {})...", rounds);
+            let review_msg = vec![ChatMessage::user(review_input)];
+            let review_response = self.provider
+                .complete(pond_core::prompts::REVIEW_SYSTEM_PROMPT, review_msg)
+                .await?;
+
+            let verdict = parse_review_verdict(&review_response.content);
+            println!("[answer-reviewer] verdict: pass={}, score={}/5", verdict.pass, verdict.score);
+
+            if verdict.pass || verdict.score >= self.pass_threshold {
+                return Ok(ReviewResult {
+                    final_answer: current_answer,
+                    was_revised: last_verdict.is_some(),
+                    verdict,
+                    rounds,
+                });
+            }
+
+            // Step 2: Revise the answer using the critique
+            println!("[answer-reviewer] critique: {}", verdict.critique);
+            let revision_input = format!(
+                "ORIGINAL QUESTION: {}\n\n\
+                YOUR PREVIOUS ANSWER:\n{}\n\n\
+                REVIEWER CRITIQUE:\n{}\n\n\
+                WHAT THE ANSWER SHOULD INCLUDE:\n- {}\n\n\
+                Please provide an improved, more thorough answer.",
+                question,
+                current_answer,
+                verdict.critique,
+                verdict.expectations.join("\n- ")
+            );
+
+            println!("[answer-reviewer] revising...");
+            let revision_msg = vec![ChatMessage::user(revision_input)];
+            let revision_response = self.provider
+                .complete(pond_core::prompts::REVISION_SYSTEM_PROMPT, revision_msg)
+                .await?;
+
+            current_answer = revision_response.content.clone();
+            last_verdict = Some(verdict);
+        }
+
+        // Exhausted rounds — return the last revision
+        Ok(ReviewResult {
+            final_answer: current_answer,
+            was_revised: true,
+            verdict: last_verdict.unwrap_or(ReviewVerdict {
+                pass: true,
+                score: 3,
+                expectations: Vec::new(),
+                critique: String::new(),
+            }),
+            rounds,
+        })
+    }
+}
+
+/// Strip thinking tokens from classifier output so JSON can be parsed.
+///
+/// Handles Gemma 4 (`<|channel>thought...<channel|>JSON`) and Qwen3/DeepSeek
+/// (`<think>...</think>JSON`). Also extracts JSON from mixed text by finding
+/// the first `{` and last `}`.
+fn strip_thinking_from_classifier(raw: &str) -> String {
+    let mut text = raw.to_string();
+
+    // Gemma 4: everything after last <channel|>
+    if let Some(pos) = text.rfind("<channel|>") {
+        text = text[pos + "<channel|>".len()..].trim().to_string();
+    }
+
+    // Qwen3/DeepSeek: remove <think>...</think> blocks
+    while let Some(start) = text.find("<think>") {
+        if let Some(end) = text[start..].find("</think>") {
+            let before = &text[..start];
+            let after = &text[start + end + "</think>".len()..];
+            text = format!("{}{}", before, after);
+        } else {
+            // Unclosed think block — take everything before it
+            text = text[..start].to_string();
+            break;
+        }
+    }
+
+    // Try to extract JSON object from remaining text
+    let trimmed = text.trim();
+    if let Some(json_start) = trimmed.find('{') {
+        if let Some(json_end) = trimmed.rfind('}') {
+            if json_end > json_start {
+                return trimmed[json_start..=json_end].to_string();
+            }
+        }
+    }
+
+    trimmed.to_string()
+}
+
+/// Parse a review verdict from LLM output.
+///
+/// Tries to extract JSON from the response text. If parsing fails,
+/// defaults to `pass: true` — review must never block the user.
+fn parse_review_verdict(text: &str) -> pond_core::ports::answer_reviewer::ReviewVerdict {
+    use pond_core::ports::answer_reviewer::ReviewVerdict;
+
+    let json_start = text.find('{');
+    let json_end = text.rfind('}');
+    if let (Some(start), Some(end)) = (json_start, json_end) {
+        if end > start {
+            if let Ok(verdict) = serde_json::from_str::<ReviewVerdict>(&text[start..=end]) {
+                return verdict;
+            }
+        }
+    }
+
+    // Fallback — unparseable output defaults to pass
+    println!("[answer-reviewer] WARNING: unparseable verdict, defaulting to pass: {:?}",
+        &text[..text.len().min(100)]);
+    ReviewVerdict {
+        pass: true,
+        score: 3,
+        expectations: Vec::new(),
+        critique: String::new(),
+    }
 }
 
 /// Returns `true` when the process has access to a graphical display.
@@ -2088,6 +2479,74 @@ async fn run_status() -> Result<()> {
     Ok(())
 }
 
+/// Populate the face-recognition env vars with values that are known to
+/// work end-to-end on a fresh macOS dev install, so the operator no longer
+/// has to remember:
+///
+/// ```bash
+/// ORT_DYLIB_PATH=… POND_FACE_ANTISPOOF_PATH=… \
+/// POND_FACE_ANTISPOOF_LIVE_INDEX=2 \
+/// POND_FACE_ANTISPOOF_PIXEL_SCALE=unit \
+/// cargo run … serve
+/// ```
+///
+/// Each var is only set when currently **unset** — explicit values from
+/// the operator's shell keep taking precedence, so nothing a power user
+/// has configured gets clobbered.
+///
+/// The anti-spoof tuning (`LIVE_INDEX=2`, `PIXEL_SCALE=unit`) reflects the
+/// specific 3-class Silent-Face ONNX file we shipped install instructions
+/// for — on that export, slot 2 is the live class and the preprocess
+/// expects `[0, 1]` pixels.  Other exports need different values; override
+/// at the shell if you swap the model file.
+fn apply_face_recognition_defaults() {
+    // ONNX Runtime dylib — Homebrew installs to /opt/homebrew on Apple
+    // Silicon and /usr/local on Intel.  Try both.
+    let ort_candidates = [
+        "/opt/homebrew/lib/libonnxruntime.dylib",
+        "/usr/local/lib/libonnxruntime.dylib",
+    ];
+    if std::env::var_os("ORT_DYLIB_PATH").is_none() {
+        for p in ort_candidates {
+            if std::path::Path::new(p).exists() {
+                // SAFETY: single-threaded setup, before any worker spawns.
+                unsafe { std::env::set_var("ORT_DYLIB_PATH", p) };
+                break;
+            }
+        }
+    }
+
+    // Anti-spoof ONNX model — default to the canonical location under the
+    // platform data dir so users who followed the README land here too.
+    if std::env::var_os("POND_FACE_ANTISPOOF_PATH").is_none() {
+        let default_path = default_data_dir()
+            .join("models").join("face").join("antispoof.onnx");
+        if default_path.exists() {
+            // SAFETY: single-threaded setup, before any worker spawns.
+            unsafe { std::env::set_var("POND_FACE_ANTISPOOF_PATH", default_path) };
+        }
+    }
+
+    // Tuning for the specific 3-class Silent-Face export we ship.
+    if std::env::var_os("POND_FACE_ANTISPOOF_LIVE_INDEX").is_none() {
+        unsafe { std::env::set_var("POND_FACE_ANTISPOOF_LIVE_INDEX", "2") };
+    }
+    if std::env::var_os("POND_FACE_ANTISPOOF_PIXEL_SCALE").is_none() {
+        unsafe { std::env::set_var("POND_FACE_ANTISPOOF_PIXEL_SCALE", "unit") };
+    }
+
+    // Secondary PAD (DeepPixBis) for the ensemble — same auto-opt-in logic
+    // as in `build_face_recognition`. Kept in both code paths because each
+    // is reachable under different launch flows (`setup` vs `serve`).
+    if std::env::var_os("POND_FACE_ANTISPOOF_PATH_2").is_none() {
+        let default_path = default_data_dir()
+            .join("models").join("face").join("OULU_Protocol_2_model_0_0.onnx");
+        if default_path.exists() {
+            // SAFETY: single-threaded setup, before any worker spawns.
+            unsafe { std::env::set_var("POND_FACE_ANTISPOOF_PATH_2", default_path) };
+        }
+    }
+}
 /// `pond-server calibrate` — record N samples of the wake-word phrase and store
 /// Whisper's transcriptions as calibration variants in settings.
 async fn run_calibrate(
@@ -2101,7 +2560,6 @@ async fn run_calibrate(
     let settings_repo = SqliteSettingsRepository::new(db.system.clone());
     let mut settings = settings_repo.get().await?;
 
-    // Resolve phrase and whisper URL from args → settings → defaults.
     let phrase = phrase_arg
         .unwrap_or(settings.voice_wake_word.as_str())
         .to_string();
@@ -2132,7 +2590,6 @@ async fn run_calibrate(
         println!();
     }
 
-    // Save the phrase to settings in case it was provided via --phrase.
     if phrase_arg.is_some() {
         settings.voice_wake_word = phrase.clone();
     }
@@ -2146,7 +2603,6 @@ async fn run_calibrate(
         println!("  ── Sample {} / {} ─────────────────────────────────", collected + 1, target_samples);
         println!("  Press Enter, then say \"{}\"...", phrase);
         {
-            // Wait for Enter
             let mut buf = String::new();
             io::stdin().read_line(&mut buf)?;
         }
@@ -2169,7 +2625,6 @@ async fn run_calibrate(
             }
         };
 
-        // Normalize: strip punctuation, collapse whitespace, lowercase.
         let normalized: String = text
             .chars()
             .map(|c| if c.is_alphabetic() { c } else { ' ' })
@@ -2188,7 +2643,6 @@ async fn run_calibrate(
 
         if settings.voice_wake_word_transcriptions.contains(&normalized) {
             println!("  (already stored as a variant — skipping duplicate)");
-            // Still count toward progress so the loop terminates.
             collected += 1;
             continue;
         }
@@ -2226,6 +2680,257 @@ fn default_data_dir() -> std::path::PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("goose-in-a-pond")
+}
+
+/// Build the face-recognition service for Phase 2.
+///
+/// Returns `None` in three cases:
+///   1. The `face-onnx` Cargo feature is disabled.
+///   2. No ONNX embedding model is present at `$DATA_DIR/models/face/arcface.onnx`.
+///   3. The ONNX Runtime shared library could not be loaded.
+///
+/// In all cases the server continues to start normally; the face endpoints
+/// return 503 until a model is supplied.
+#[cfg(feature = "face-onnx")]
+fn build_face_recognition(
+    data_dir: &std::path::Path,
+    pool: sqlx::Pool<sqlx::Sqlite>,
+) -> Option<Arc<dyn pond_core::ports::face_recognition::FaceRecognition>> {
+    use pond_adapters_face_onnx::{
+        EmbeddingModel, OnnxFaceEmbeddingExtractor, ScrfdDetector, UltraFaceDetector,
+    };
+    use pond_core::ports::face_detector::FaceDetector;
+    use pond_core::ports::face_embedding_extractor::FaceEmbeddingExtractor;
+    use pond_infra::sqlite_face_recognition::SqliteFaceRecognition;
+
+    // Embedder lookup, preferred → fallback:
+    //   1. `POND_FACE_MODEL_PATH` (explicit operator override)
+    //   2. `adaface_ir101.onnx`   (AdaFace IR-101 — best low-light tolerance)
+    //   3. `w600k_r50.onnx`       (ArcFace R50 from buffalo_l)
+    //   4. `arcface.onnx`         (legacy filename, still supported)
+    let model_path = match std::env::var("POND_FACE_MODEL_PATH") {
+        Ok(p) => std::path::PathBuf::from(p),
+        Err(_) => {
+            let adaface  = data_dir.join("models/face/adaface_ir101.onnx");
+            let arcface  = data_dir.join("models/face/w600k_r50.onnx");
+            let legacy   = data_dir.join("models/face/arcface.onnx");
+            if adaface.exists() { adaface }
+            else if arcface.exists() { arcface }
+            else { legacy }
+        }
+    };
+
+    // Default the anti-spoof path so users get the Silent-Face PAD gate
+    // for free once the model file is present, with no env-var setup.
+    if std::env::var_os("POND_FACE_ANTISPOOF_PATH").is_none() {
+        let antispoof_default = data_dir.join("models/face/antispoof.onnx");
+        if antispoof_default.exists() {
+            // SAFETY: single-threaded init phase before any task scheduling.
+            unsafe {
+                std::env::set_var(
+                    "POND_FACE_ANTISPOOF_PATH",
+                    antispoof_default.as_os_str(),
+                );
+            }
+        }
+    }
+    // Same idea for the live-class index — the Silent-Face MiniFASNetV2
+    // export at the install URL we ship has [fake_2D, fake_3D, live] order
+    // (live is index 2), but the in-tree default is `auto` which assumes
+    // index 0.  Pin the default to 2 so the model works out-of-the-box.
+    if std::env::var_os("POND_FACE_ANTISPOOF_LIVE_INDEX").is_none() {
+        unsafe { std::env::set_var("POND_FACE_ANTISPOOF_LIVE_INDEX", "2"); }
+    }
+
+    // Secondary PAD (DeepPixBis) for the ensemble path in
+    // `pond-adapters-face-onnx`.  When the file is on disk and the env var
+    // is unset, opt the user into the stronger ensemble automatically —
+    // the adapter already takes `max(spoof_score)` of primary + secondary
+    // so a missing or dud secondary just falls back to primary-alone.
+    if std::env::var_os("POND_FACE_ANTISPOOF_PATH_2").is_none() {
+        let secondary_default = data_dir.join("models/face/OULU_Protocol_2_model_0_0.onnx");
+        if secondary_default.exists() {
+            // SAFETY: single-threaded init phase before any task scheduling.
+            unsafe {
+                std::env::set_var(
+                    "POND_FACE_ANTISPOOF_PATH_2",
+                    secondary_default.as_os_str(),
+                );
+            }
+        }
+    }
+
+    if !model_path.exists() {
+        tracing::info!(
+            "face-onnx feature enabled but no embedding model at {}; face recognition disabled",
+            model_path.display()
+        );
+        return None;
+    }
+
+    let model_kind = if model_path.to_string_lossy().contains("mobilefacenet") {
+        EmbeddingModel::MobileFaceNet128
+    } else {
+        EmbeddingModel::ArcFace512
+    };
+
+    // ONNX Runtime initialises lazily on the first `Session::builder()` call
+    // and *panics* (rather than returning Err) when its dynamic library is
+    // missing — see the `ort` crate.  Wrap the entire constructor in
+    // `catch_unwind` so a missing libonnxruntime.dylib downgrades to
+    // "face disabled" instead of taking down the whole server.  This makes
+    // the misconfigured-ORT case behave the same as the missing-model case.
+    let extractor: Arc<dyn FaceEmbeddingExtractor> = match std::panic::catch_unwind(
+        std::panic::AssertUnwindSafe(|| OnnxFaceEmbeddingExtractor::new(&model_path, model_kind)),
+    ) {
+        Ok(Ok(e)) => Arc::new(e),
+        Ok(Err(e)) => {
+            tracing::warn!("face recognition disabled: {e:#}");
+            return None;
+        }
+        Err(panic) => {
+            // Best-effort: ort's panic payload is a String; surface it.
+            let msg = panic
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "ort init panicked (unknown payload)".to_string());
+            tracing::warn!(
+                "face recognition disabled: ONNX Runtime failed to initialise — {} \
+                 (hint: install onnxruntime and set ORT_DYLIB_PATH)",
+                msg
+            );
+            return None;
+        }
+    };
+
+    // Detector resolution order:
+    //   1. SCRFD at $POND_FACE_SCRFD_PATH or $DATA_DIR/models/face/scrfd.onnx
+    //      — landmark-producing, drives similarity-transform alignment
+    //      (dramatically better real-world accuracy).
+    //   2. UltraFace at $POND_FACE_DETECTOR_PATH or $DATA_DIR/models/face/ultraface.onnx
+    //      — bbox only; no alignment, roughly phase-2 baseline behaviour.
+    //   3. No detector; adapter falls back to center-square cropping.  Safe
+    //      but prone to the "everyone matches" failure mode — log loudly.
+    // Detector preference: SCRFD 34G > SCRFD 10G > UltraFace > center-square.
+    // 34G catches faces at smaller pixel sizes than 10G (deeper backbone)
+    // but is ~140 MB instead of ~17 MB. `POND_FACE_SCRFD_PATH` overrides
+    // both SCRFD candidates explicitly.
+    let scrfd_path = std::env::var("POND_FACE_SCRFD_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let scrfd_34 = data_dir.join("models/face/scrfd_34g.onnx");
+            if scrfd_34.exists() {
+                scrfd_34
+            } else {
+                data_dir.join("models/face/scrfd.onnx")
+            }
+        });
+    let ultraface_path = std::env::var("POND_FACE_DETECTOR_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| data_dir.join("models/face/ultraface.onnx"));
+
+    let detector: Option<Arc<dyn FaceDetector>> = if scrfd_path.exists() {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ScrfdDetector::new(&scrfd_path, 0.5, 0.4)
+        }))
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("SCRFD ort init panicked"))) {
+            Ok(d) => {
+                tracing::info!(
+                    "SCRFD face detector loaded from {} — landmark alignment enabled",
+                    scrfd_path.display()
+                );
+                Some(Arc::new(d))
+            }
+            Err(e) => {
+                tracing::warn!("SCRFD detector unavailable: {e:#}; falling back to UltraFace");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let detector = detector.or_else(|| {
+        if ultraface_path.exists() {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                UltraFaceDetector::new(&ultraface_path, 0.85, 0.3)
+            }))
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("UltraFace ort init panicked"))) {
+                Ok(d) => {
+                    tracing::warn!(
+                        "SCRFD model not found at {}; using UltraFace fallback (no landmark alignment). \
+                         Download SCRFD to restore real-world accuracy.",
+                        scrfd_path.display()
+                    );
+                    Some(Arc::new(d) as Arc<dyn FaceDetector>)
+                }
+                Err(e) => {
+                    tracing::warn!("UltraFace detector unavailable: {e:#}");
+                    None
+                }
+            }
+        } else {
+            tracing::warn!(
+                "No face detector model found (looked at {} and {}). \
+                 Face recognition will use center-square fallback — \
+                 accuracy will be poor.",
+                scrfd_path.display(), ultraface_path.display(),
+            );
+            None
+        }
+    });
+
+    // Thresholds calibrated against ArcFace R100 on Umeyama-aligned 112×112
+    // crops.  The previous 0.50 floor was tuned for small in-house test
+    // sets where every profile was visually distinct; on real webcams
+    // with lighting / pose variance, 0.50 admits far too many
+    // cross-identity near-neighbours (a different person can trivially
+    // hit 0.55–0.65 post-blend once S-norm + centroid weights are in
+    // play).  The new floors sit inside the empirically-safe 0.68–0.75
+    // band for ArcFace aligned.  `POND_FACE_MATCH_THRESHOLD` still
+    // overrides via the env-driven default, but only when this code
+    // path does NOT call `.with_threshold()` — see below.
+    let threshold = match (&detector, model_kind) {
+        (Some(d), EmbeddingModel::ArcFace512) if d.produces_landmarks() => 0.70,
+        (Some(_), EmbeddingModel::ArcFace512)                            => 0.72,
+        (None, EmbeddingModel::ArcFace512)                                => 0.85,
+        (Some(d), EmbeddingModel::MobileFaceNet128) if d.produces_landmarks() => 0.70,
+        (Some(_), EmbeddingModel::MobileFaceNet128)                      => 0.72,
+        (None, EmbeddingModel::MobileFaceNet128)                         => 0.85,
+    };
+    // Allow a shell-level override to take precedence over the
+    // model-aware default — useful when a power user has tuned the gate
+    // for their specific enrollment quality.
+    let threshold = std::env::var("POND_FACE_MATCH_THRESHOLD")
+        .ok()
+        .and_then(|s| s.parse::<f32>().ok())
+        .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
+        .unwrap_or(threshold);
+
+    tracing::info!(
+        "face recognition enabled (model={:?}, threshold={}, aligned={})",
+        model_kind,
+        threshold,
+        detector.as_ref().map(|d| d.produces_landmarks()).unwrap_or(false),
+    );
+
+    let mut svc = SqliteFaceRecognition::new(pool, extractor)
+        .with_threshold(threshold)
+        .with_model_name(match model_kind {
+            EmbeddingModel::ArcFace512 => "arcface-512",
+            EmbeddingModel::MobileFaceNet128 => "mobilefacenet-128",
+        });
+    if let Some(d) = detector { svc = svc.with_detector(d); }
+    Some(Arc::new(svc))
+}
+
+#[cfg(not(feature = "face-onnx"))]
+fn build_face_recognition(
+    _data_dir: &std::path::Path,
+    _pool: sqlx::Pool<sqlx::Sqlite>,
+) -> Option<Arc<dyn pond_core::ports::face_recognition::FaceRecognition>> {
+    None
 }
 
 fn get_local_ip() -> Option<String> {
@@ -2636,13 +3341,43 @@ async fn build_goose_backend(
 ) -> (
     Arc<dyn Agent>,
     Option<Arc<dyn pond_core::ports::extension_manager::ExtensionManagerPort>>,
+    Option<Arc<dyn pond_core::ports::tool_caller::ToolCaller>>,
 ) {
     use pond_adapters_goose::{GiapServiceHandles, GooseAdapter, register_giap_extension};
+    use pond_adapters_local_inference::ToolCallerEngine;
     use pond_core::ports::extension_manager::ExtensionManagerPort;
+    use pond_core::ports::tool_caller::ToolCaller;
 
     if agent_backend != "goose" {
-        return (Arc::new(MockAgent::new()), None);
+        return (Arc::new(MockAgent::new()), None, None);
     }
+
+    // Build tool-calling specialist (FunctionGemma) if configured.
+    // The Tool Agent runs BEFORE the main LLM — model swap overhead is
+    // accepted because the main model never attempts tool calls itself.
+    let tool_caller: Option<Arc<dyn ToolCaller>> = {
+        let settings = settings_repo.get().await.unwrap_or_default();
+        match settings.tool_model.as_deref() {
+            Some(model_name) if !model_name.is_empty() => {
+                match ToolCallerEngine::new(model_name, data_dir).await {
+                    Ok(engine) => {
+                        println!("[tool-agent] FunctionGemma specialist loaded: {}", model_name);
+                        tracing::info!("Tool-calling specialist loaded: {}", model_name);
+                        Some(Arc::new(engine) as Arc<dyn ToolCaller>)
+                    }
+                    Err(e) => {
+                        println!("[tool-agent] FAILED to load specialist '{}': {e}", model_name);
+                        tracing::warn!("Failed to load tool specialist '{}': {e}", model_name);
+                        None
+                    }
+                }
+            }
+            _ => {
+                println!("[tool-agent] no tool_model configured, using code-path fallback");
+                None
+            }
+        }
+    };
 
     // Register the GIAP MCP server into Goose's builtin extension registry.
     let handles = Arc::new(GiapServiceHandles {
@@ -2653,10 +3388,13 @@ async fn build_goose_backend(
         memory_repo: memory_repo.clone(),
         skill_repo: skill_repo.clone(),
         recipe_repo: recipe_repo.clone(),
+        http_client: reqwest::Client::new(),
+        tool_caller: tool_caller.clone(),
+        last_user_message: tokio::sync::RwLock::new(String::new()),
     });
     if let Err(e) = register_giap_extension(handles) {
         tracing::error!("GIAP MCP registration failed: {e} — falling back to mock agent");
-        return (Arc::new(MockAgent::new()), None);
+        return (Arc::new(MockAgent::new()), None, None);
     }
 
     // Build the adapter with all repos injected.
@@ -2678,11 +3416,11 @@ async fn build_goose_backend(
                 adapter.extension_manager();
             tracing::info!("Goose agent active — GIAP MCP extension registered");
             let agent: Arc<dyn Agent> = Arc::new(adapter);
-            (agent, Some(ext_mgr))
+            (agent, Some(ext_mgr), tool_caller)
         }
         Err(e) => {
             tracing::error!("GooseAdapter init failed: {e} — falling back to mock agent");
-            (Arc::new(MockAgent::new()), None)
+            (Arc::new(MockAgent::new()), None, None)
         }
     }
 }
@@ -3010,6 +3748,20 @@ async fn stream_agent_response(agent: &Arc<dyn Agent>, request: pond_core::domai
                 }
                 break;
             }
+            AgentStreamEvent::Thinking { content } => {
+                eprint!("\r\x1b[K\x1b[2m  💭 {content}\x1b[0m");
+                let _ = io::stderr().flush();
+            }
+            AgentStreamEvent::ReviewStatus { content } => {
+                eprint!("\r\x1b[K\x1b[33m  🔍 {content}\x1b[0m");
+                let _ = io::stderr().flush();
+            }
+            AgentStreamEvent::ReviewRevision { content, score, rounds } => {
+                // Clear previous answer and print revised version
+                eprintln!("\r\x1b[K\x1b[33m  📝 Revised (score: {score}/5, rounds: {rounds})\x1b[0m");
+                println!("{content}");
+                printed_newline = content.ends_with('\n');
+            }
             AgentStreamEvent::Error { content } => {
                 eprintln!("\n  error: {content}");
                 std::process::exit(1);
@@ -3074,7 +3826,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
             eprintln!("  {} | provider: {}  model: {}  role: {}",
                 settings.assistant_name, settings.chat_provider, settings.chat_model, model_role);
 
-            let (agent, _ext_mgr) = build_goose_backend(
+            let (agent, _ext_mgr, _tc) = build_goose_backend(
                 "goose",
                 &llamafile_url,
                 &data_dir,
@@ -3094,6 +3846,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 message,
                 session_id: session,
                 model_role,
+                images: Vec::new(),
             };
             stream_agent_response(&agent, request).await?;
         }
@@ -3102,7 +3855,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
             use pond_core::domain::agent::AgentRequest;
             use tokio::io::AsyncBufReadExt as _;
 
-            let (agent, _ext_mgr) = build_goose_backend(
+            let (agent, _ext_mgr, _tc) = build_goose_backend(
                 "goose",
                 &llamafile_url,
                 &data_dir,
@@ -3148,6 +3901,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                     message,
                     session_id: session.clone(),
                     model_role,
+                    images: Vec::new(),
                 };
                 if let Err(e) = stream_agent_response(&agent, request).await {
                     eprintln!("\n  error: {e}");
@@ -3156,7 +3910,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
         }
 
         AgentAction::Tools => {
-            let (_agent, ext_mgr) = build_goose_backend(
+            let (_agent, ext_mgr, _tc) = build_goose_backend(
                 "goose",
                 &llamafile_url,
                 &data_dir,

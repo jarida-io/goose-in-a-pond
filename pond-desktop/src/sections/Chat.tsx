@@ -10,6 +10,24 @@ import { ThinkingPlaceholder } from "../components/ThinkingPlaceholder";
 import type { ChatEvent } from "../api/types";
 import { filterThinking } from "../lib/thinkFilter";
 
+// Human-readable tool status for the chat bubble while a tool runs.
+function friendlyToolStatus(rawName: string): string {
+  const bare = rawName.includes("__") ? rawName.split("__").pop()! : rawName;
+  const map: Record<string, string> = {
+    get_current_weather: "Checking the weather…",
+    list_registered_devices: "Looking up your devices…",
+    recall_memories: "Recalling what I know…",
+    save_memory: "Saving that for later…",
+    list_schedules: "Looking up your schedules…",
+    get_recipe: "Finding that recipe…",
+    get_user_profile: "Looking up your profile…",
+    list_skills: "Checking my skills…",
+  };
+  if (map[bare]) return map[bare];
+  const pretty = bare.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  return `Working on: ${pretty}…`;
+}
+
 interface Message {
   id: number;
   role: "user" | "agent";
@@ -36,9 +54,28 @@ export function Chat() {
   const sessionIdRef = useRef<string | undefined>(state.sessionId ?? undefined);
   const inThinkBlockRef = useRef(false);
 
-  // Keep sessionIdRef in sync with state
+  // Keep sessionIdRef in sync with state. When the session id changes
+  // externally (e.g. user clicked a Recent item on Dashboard), load
+  // that session's messages.
   useEffect(() => {
-    sessionIdRef.current = state.sessionId ?? undefined;
+    const newId = state.sessionId ?? undefined;
+    if (newId === sessionIdRef.current) return;
+    const wasExternal = !!newId;
+    sessionIdRef.current = newId;
+    if (!wasExternal) return;
+    api.getSessionMessages(newId!)
+      .then((msgs) => {
+        setMessages(
+          (msgs ?? []).map((m) => ({
+            id: ++msgId,
+            role: m.role === "user" ? ("user" as const) : ("agent" as const),
+            text: m.content,
+          })),
+        );
+      })
+      .catch((err) => {
+        console.warn("Could not load session history (non-fatal):", err);
+      });
   }, [state.sessionId]);
 
   // Load most recent session on mount (once server is online)
@@ -136,7 +173,7 @@ export function Chat() {
             return [...prev.slice(0, -1), { 
               ...last, 
               cards: [...(last.cards ?? []), card],
-              status: `Using tool: ${ev.tool}`
+              status: friendlyToolStatus(ev.tool)
             }];
           });
 
@@ -291,14 +328,12 @@ export function Chat() {
                 ) : "")}
               </div>
 
-              {/* Inline tool call result cards */}
-              {msg.role === "agent" && (msg.cards?.length ?? 0) > 0 && (
-                <div style={styles.cardList}>
-                  {msg.cards!.map((card) => (
-                    <ContextCard key={card.id} card={card} />
-                  ))}
-                </div>
-              )}
+              {/* Inline tool-call ContextCards intentionally NOT rendered in
+               * the chat thread. They were leaking the agent's plumbing
+               * (raw "Get Recipe" / "Get Weather" chips with `{}` JSON
+               * underneath) every time the model invoked a tool. The
+               * canvas overlay still receives cards via PUSH_CONTEXT_CARD
+               * for voice mode, so that flow is unaffected. */}
 
               {/* Model role badge + token count */}
               {msg.role === "agent" && msg.modelRole && !msg.streaming && (

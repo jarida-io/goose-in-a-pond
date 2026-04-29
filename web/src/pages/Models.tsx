@@ -27,6 +27,30 @@ function formatSize(mb: number): string {
   return `${mb} MB`
 }
 
+/** Infer capabilities from a model name and render compact badges. */
+function WebCapabilityBadges({ name }: { name: string }) {
+  const n = name.toLowerCase()
+  const badges: string[] = []
+  if (/gemma[-_]?4|qwen3|qwq|deepseek[-_]?r1/.test(n)) badges.push('Thinking')
+  if (/gemma[-_]?4|llava|bakllava|moondream/.test(n)) badges.push('Vision')
+  if (/gemma[-_]?4/.test(n) && /e[24]b/i.test(n)) badges.push('Audio')
+  if (/gemma[-_]?4/.test(n)) badges.push('128k ctx')
+  else if (/qwen/.test(n) || /mistral/.test(n)) badges.push('32k ctx')
+
+  if (badges.length === 0) return null
+  return (
+    <div style={{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap', marginTop: '0.25rem' }}>
+      {badges.map(b => (
+        <span key={b} style={{
+          fontSize: '0.62rem', fontWeight: 600, padding: '0.08rem 0.4rem',
+          borderRadius: '10px', background: 'rgba(99,179,237,0.12)',
+          color: 'rgba(99,179,237,0.9)', border: '1px solid rgba(99,179,237,0.2)',
+        }}>{b}</span>
+      ))}
+    </div>
+  )
+}
+
 // Map a ModelStatusEntry to the provider string GIAP uses in settings
 function providerForEntry(entry: ModelStatusEntry): string {
   if (entry.category === 'llamafile') return 'llamafile'
@@ -39,8 +63,7 @@ function roleForEntry(entry: ModelStatusEntry, settings: Settings | null, ollama
   const provider = ollamaName ? 'ollama' : providerForEntry(entry)
   const name = ollamaName ?? entry.name
   if (settings.chat_provider === provider && settings.chat_model === name) return 'chat'
-  if (settings.think_provider === provider && settings.think_model === name) return 'think'
-  if (settings.task_provider === provider && settings.task_model === name) return 'task'
+  if (settings.tool_model === name) return 'tool'
   return null
 }
 
@@ -77,6 +100,106 @@ function DownloadBar({ entry }: { entry: DownloadEntry }) {
           animation: pct == null && entry.status === 'downloading' ? 'pulse 1.5s ease-in-out infinite' : 'none',
           opacity: pct == null ? 0.5 : 1,
         }} />
+      </div>
+    </div>
+  )
+}
+
+// ── Face Recognition card ────────────────────────────────────────────────────
+//
+// Mirrors the visual treatment of the LLM/ASR/TTS category cards but binds
+// to GET /api/v1/faces/models — a read-only status panel since the three
+// models (ArcFace R50 + SCRFD 10G + Silent-Face PAD) are auto-managed by
+// pond-server's boot-time downloader. There is intentionally no per-model
+// "Download" button: the buffalo_l zip ships embedder + detector together
+// and the antispoof file is only ~2 MB.
+function FaceModelsCard({ token }: { token: string }) {
+  type FaceModel = { name: string; label: string; role: string; expected_mb: number; size_mb: number | null; downloaded: boolean }
+  const [enabled, setEnabled]   = useState<boolean | null>(null)
+  const [modelsDir, setModelsDir] = useState<string | null>(null)
+  const [models, setModels]     = useState<FaceModel[]>([])
+  const [error, setError]       = useState<string | null>(null)
+
+  const reload = useCallback(async () => {
+    try {
+      const r = await api.listFaceModels(token)
+      setEnabled(r.feature_enabled)
+      setModelsDir(r.models_dir)
+      setModels(r.models)
+      setError(null)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load face models')
+    }
+  }, [token])
+
+  useEffect(() => { void reload() }, [reload])
+
+  const installed = models.filter(m => m.downloaded).length
+
+  return (
+    <div className="db-card" style={{ marginTop: '1.25rem' }}>
+      <div className="db-card-header">
+        <h3>
+          Face Recognition
+          {installed > 0 && (
+            <span style={{ marginLeft: '0.5rem', fontSize: '0.72rem', fontWeight: 600, color: '#4ade80', background: 'rgba(74,222,128,0.12)', border: '1px solid rgba(74,222,128,0.3)', borderRadius: '20px', padding: '0.1rem 0.5rem' }}>
+              {installed} of {models.length} installed
+            </span>
+          )}
+          {enabled === false && (
+            <span style={{ marginLeft: '0.5rem', fontSize: '0.72rem', fontWeight: 600, color: '#e8a020', background: 'rgba(232,160,32,0.12)', border: '1px solid rgba(232,160,32,0.3)', borderRadius: '20px', padding: '0.1rem 0.5rem' }}>
+              feature disabled
+            </span>
+          )}
+        </h3>
+        <span style={{ fontSize: '0.75rem', opacity: 0.55 }}>
+          ArcFace embeddings + SCRFD detector + Silent-Face anti-spoof. Auto-downloaded on first server boot.
+        </span>
+      </div>
+
+      {error && <p style={{ fontSize: '0.8rem', color: '#e55', padding: '0.5rem 0' }}>{error}</p>}
+
+      {enabled === false && (
+        <p style={{ fontSize: '0.8rem', opacity: 0.7, padding: '0.5rem 0' }}>
+          Rebuild pond-server with <code>--features face-onnx</code> to enable per-user identification.
+        </p>
+      )}
+
+      <div className="db-model-list">
+        {models.map(m => (
+          <div className="db-model-card" key={m.name} data-downloaded={m.downloaded ? 'true' : 'false'}>
+            <div className="db-model-card-info">
+              <div className="db-model-card-name">
+                {m.label}
+                {m.downloaded ? (
+                  <span className="db-badge db-badge-green">ready</span>
+                ) : (
+                  <span className="db-badge" style={{ background: 'rgba(232,160,32,0.18)', color: '#e8a020', border: '1px solid rgba(232,160,32,0.3)' }}>missing</span>
+                )}
+                <span className="db-badge" style={{ background: 'rgba(169,111,245,0.18)', color: '#a96ff5', border: '1px solid rgba(169,111,245,0.3)' }}>
+                  {m.role}
+                </span>
+              </div>
+              <div className="db-model-card-size">
+                {m.size_mb != null ? formatSize(m.size_mb) : `~${formatSize(m.expected_mb)} expected`}
+                <span style={{ marginLeft: '0.5rem', opacity: 0.55, fontFamily: 'monospace' }}>{m.name}</span>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {modelsDir && (
+        <p style={{ fontSize: '0.7rem', opacity: 0.45, marginTop: '0.5rem', fontFamily: 'monospace' }}>
+          {modelsDir}
+        </p>
+      )}
+
+      <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.75rem' }}>
+        <a href="#faces" className="db-btn-sm" onClick={(e) => { e.preventDefault(); window.dispatchEvent(new CustomEvent('pond-nav', { detail: 'faces' })) }}>
+          Open Face Enrollment →
+        </a>
+        <button className="db-btn-sm" onClick={() => void reload()}>Refresh</button>
       </div>
     </div>
   )
@@ -422,10 +545,12 @@ function RolePanel({
   const llmRoles: Array<'chat' | 'think' | 'task'> = ['chat', 'think', 'task']
   const [activeRoles, setActiveRoles] = useState<ActiveRolesResponse | null>(null)
   const [justUpdated, setJustUpdated] = useState<string | null>(null)
+  const [caps, setCaps] = useState<{ thinking: boolean; vision: boolean; audio_input: boolean; context_window_tokens: number; structured_output: boolean } | null>(null)
 
   const reload = () => {
     if (!token || token === 'dev-mock-token') return
     api.getActiveRoles(token).then(setActiveRoles).catch(() => {})
+    api.getModelCapabilities(token).then(setCaps).catch(() => {})
   }
 
   useEffect(reload, [token, settings]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -581,6 +706,22 @@ function RolePanel({
 
       <MemoryBar status={memory} />
 
+      {/* Active model capabilities */}
+      {caps && (caps.thinking || caps.vision || caps.audio_input || caps.context_window_tokens > 4096) && (
+        <div style={{
+          display: 'flex', gap: '0.35rem', flexWrap: 'wrap', alignItems: 'center',
+          marginTop: '0.6rem', padding: '0.5rem 0.6rem',
+          borderRadius: '6px', background: 'rgba(99,179,237,0.06)', border: '1px solid rgba(99,179,237,0.15)',
+        }}>
+          <span style={{ fontSize: '0.7rem', opacity: 0.55, marginRight: '0.25rem' }}>Active model features:</span>
+          {caps.thinking && <span style={{ fontSize: '0.62rem', fontWeight: 600, padding: '0.08rem 0.4rem', borderRadius: '10px', background: 'rgba(99,179,237,0.15)', color: 'rgba(99,179,237,0.9)' }}>Thinking</span>}
+          {caps.vision && <span style={{ fontSize: '0.62rem', fontWeight: 600, padding: '0.08rem 0.4rem', borderRadius: '10px', background: 'rgba(99,179,237,0.15)', color: 'rgba(99,179,237,0.9)' }}>Vision</span>}
+          {caps.audio_input && <span style={{ fontSize: '0.62rem', fontWeight: 600, padding: '0.08rem 0.4rem', borderRadius: '10px', background: 'rgba(99,179,237,0.15)', color: 'rgba(99,179,237,0.9)' }}>Audio</span>}
+          {caps.structured_output && <span style={{ fontSize: '0.62rem', fontWeight: 600, padding: '0.08rem 0.4rem', borderRadius: '10px', background: 'rgba(99,179,237,0.15)', color: 'rgba(99,179,237,0.9)' }}>Structured Output</span>}
+          {caps.context_window_tokens > 4096 && <span style={{ fontSize: '0.62rem', fontWeight: 600, padding: '0.08rem 0.4rem', borderRadius: '10px', background: 'rgba(99,179,237,0.15)', color: 'rgba(99,179,237,0.9)' }}>{Math.round(caps.context_window_tokens / 1000)}k context</span>}
+        </div>
+      )}
+
       <p style={{ fontSize: '0.72rem', opacity: 0.4, marginTop: '0.6rem' }}>
         Assign models using the {ROLE_ICONS['chat']}{ROLE_ICONS['think']}{ROLE_ICONS['task']} buttons on installed model cards below. Changes take effect immediately — no restart needed.
       </p>
@@ -642,6 +783,7 @@ function ModelCard({
             </span>
           )}
         </div>
+        <WebCapabilityBadges name={entry.name} />
       </div>
       <div className="db-model-card-actions">
         {/* Status indicator */}
@@ -1126,6 +1268,9 @@ export default function Models({ token }: Props) {
                 </div>
               )}
             </div>
+
+            {/* Face Recognition (auto-managed; read-only status) */}
+            <FaceModelsCard token={token} />
           </>
         )}
       </div>

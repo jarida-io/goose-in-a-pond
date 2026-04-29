@@ -565,9 +565,13 @@ export function VoiceMode() {
 
       {/* ── Zone 3: Transcript (fills remaining height) ───── */}
       <div style={styles.transcriptZone}>
+        {/* contextCards intentionally NOT passed — they render the raw
+         * "Get Weather / Get User Profile" chips that the user explicitly
+         * does not want in the chat thread. The model's spoken reply
+         * already conveys the tool result, so there's nothing to lose by
+         * suppressing them here too. */}
         <TranscriptFeed
           messages={state.transcript}
-          contextCards={state.contextCards}
           fillHeight
         />
       </div>

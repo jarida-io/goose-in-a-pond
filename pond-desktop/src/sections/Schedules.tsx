@@ -322,7 +322,9 @@ export function Schedules() {
                     onValueChange={() => handleToggle(s)}
                     isDisabled={!state.serverOnline}
                     aria-label={s.enabled ? "Pause schedule" : "Resume schedule"}
-                  />
+                  >
+                    <Switch.Control><Switch.Thumb /></Switch.Control>
+                  </Switch>
                 </div>
 
                 {/* Meta: recipe + next run */}

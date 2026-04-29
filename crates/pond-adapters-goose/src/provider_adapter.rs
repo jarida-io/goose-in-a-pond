@@ -47,12 +47,18 @@ impl GooseProviderAdapter {
         ChatMessage {
             role,
             content: msg.as_concat_text(),
+            images: Vec::new(),
         }
     }
 }
 
 #[async_trait]
 impl LlmProvider for GooseProviderAdapter {
+    fn capabilities(&self) -> pond_core::domain::model_capabilities::ModelCapabilities {
+        let name = self.provider.get_model_config().model_name.clone();
+        pond_core::domain::model_capabilities::ModelCapabilities::from_model_name(&name)
+    }
+
     async fn complete(
         &self,
         system_prompt: &str,

@@ -74,7 +74,7 @@ impl TryFrom<MessageRow> for SessionMessage {
         Ok(SessionMessage {
             id:         r.id,
             session_id: r.session_id,
-            message:    ChatMessage { role: str_to_role(&r.role)?, content: r.content },
+            message:    ChatMessage { role: str_to_role(&r.role)?, content: r.content, images: Vec::new() },
             created_at: parse_dt(&r.created_at),
         })
     }

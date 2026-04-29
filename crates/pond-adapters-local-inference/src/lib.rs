@@ -28,7 +28,9 @@
 //! ```
 
 pub mod scheduler;
+pub mod tool_caller;
 pub use scheduler::{NoopScheduler, ResourceAwareModelScheduler, LLM_BUDGET_MB, JETSON_TOTAL_RAM_MB};
+pub use tool_caller::ToolCallerEngine;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -80,6 +82,8 @@ impl LocalInferenceLlmAdapter {
         // Ampere GPU (sm_87) with 1024 CUDA cores, and CUDA 12.6 on JetPack 6.2.
         #[cfg(feature = "cuda")]
         Self::apply_jetson_settings(model_id);
+        #[cfg(not(feature = "cuda"))]
+        Self::apply_platform_settings(model_id);
 
         tracing::info!("initialising LocalInferenceProvider for model: {}", model_id);
         let provider = LocalInferenceProvider::from_env(model_config, vec![]).await?;
@@ -233,6 +237,55 @@ impl LocalInferenceLlmAdapter {
         Self::new(model_id).await
     }
 
+    /// Apply platform-optimised model settings for non-CUDA builds (macOS Metal, CPU).
+    ///
+    /// On Apple Silicon (M1-M4), enables full Metal GPU offload, flash attention,
+    /// and sets a reasonable 8K context window. Without this, ALL inference runs
+    /// on CPU despite Metal being available — `n_gpu_layers` defaults to `None`.
+    #[cfg(not(feature = "cuda"))]
+    fn apply_platform_settings(model_id: &str) {
+        use goose::providers::local_inference::local_model_registry::{
+            get_registry, ModelSettings,
+        };
+
+        let settings = ModelSettings {
+            // Full GPU offload — Apple Silicon has unified memory so all layers
+            // fit without any CPU/GPU split.
+            n_gpu_layers: Some(99),
+            // 8K context balances memory usage and conversation depth.
+            // Fits ~6K tokens of history + system prompt + 2K generation headroom.
+            // On M4 with 18GB this uses ~322MB KV cache for E4B — very comfortable.
+            context_size: Some(8192),
+            // Batch 512 is optimal for Metal prefill throughput.
+            n_batch: Some(512),
+            // Flash attention reduces KV-cache memory by ~40%.
+            flash_attention: Some(true),
+            // Unified memory — mlock is unnecessary and can cause issues.
+            use_mlock: false,
+            // Let llama.cpp auto-detect thread count (good on Apple Silicon).
+            ..Default::default()
+        };
+
+        match get_registry().lock() {
+            Ok(mut registry) => {
+                if let Err(e) = registry.update_model_settings(model_id, settings) {
+                    tracing::debug!(
+                        "Platform settings not applied to '{}' (model not yet registered): {}",
+                        model_id, e
+                    );
+                } else {
+                    tracing::info!(
+                        "Applied Metal/platform settings to model '{}' (n_gpu_layers=99, ctx=8192, flash_attn=true)",
+                        model_id
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Could not acquire model registry lock for platform settings: {}", e);
+            }
+        }
+    }
+
     /// Patch the Goose model registry with Jetson Orin Nano–optimised settings.
     ///
     /// These settings are applied at startup and saved to `~/.local/share/goose/
@@ -335,6 +388,11 @@ fn strip_thinking_tokens(text: &str) -> String {
 
 #[async_trait]
 impl LlmProvider for LocalInferenceLlmAdapter {
+    fn capabilities(&self) -> pond_core::domain::model_capabilities::ModelCapabilities {
+        let name = self.inner.model_name();
+        pond_core::domain::model_capabilities::ModelCapabilities::from_model_name(&name)
+    }
+
     async fn complete(
         &self,
         system: &str,

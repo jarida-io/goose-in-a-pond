@@ -58,6 +58,23 @@ export default function VoiceOrb({ token }: Props) {
     return () => window.removeEventListener('keydown', onKey)
   }, [loopState, cancel])
 
+  // The mute toggle now lives only in the chat composer (ChatWidget), but
+  // VoiceOrb still gates TTS playback on `muted`.  Subscribe to the shared
+  // localStorage key so toggling there immediately silences the orb without
+  // a page reload.  The `storage` event fires only on *other* tabs, so we
+  // also poll for in-tab updates via a custom event ChatWidget dispatches.
+  useEffect(() => {
+    function syncFromStorage() {
+      setMuted(localStorage.getItem('pond_tts_muted') === 'true')
+    }
+    window.addEventListener('storage', syncFromStorage)
+    window.addEventListener('pond-tts-muted-changed', syncFromStorage)
+    return () => {
+      window.removeEventListener('storage', syncFromStorage)
+      window.removeEventListener('pond-tts-muted-changed', syncFromStorage)
+    }
+  }, [])
+
   // Cleanup on unmount
   useEffect(() => () => { cancel() }, [cancel])
 
@@ -188,18 +205,18 @@ export default function VoiceOrb({ token }: Props) {
     }
   }
 
-  function toggleMute() {
-    const next = !muted
-    setMuted(next)
-    localStorage.setItem('pond_tts_muted', String(next))
-    if (next && loopState === 'speak') {
+  // When mute flips on (from the chat toolbar) while we're mid-speak,
+  // cut the playback immediately and return to Wait — same UX the old
+  // floating mute button used to provide.
+  useEffect(() => {
+    if (muted && loopState === 'speak') {
       if (currentAudioRef.current) {
         currentAudioRef.current.pause()
         currentAudioRef.current = null
       }
       setLoopState('wait')
     }
-  }
+  }, [muted, loopState])
 
   return (
     <div className="voice-orb-container" aria-label="Voice assistant">
@@ -235,34 +252,11 @@ export default function VoiceOrb({ token }: Props) {
         </div>
       )}
 
-      {/* Controls row: mute + orb */}
+      {/* The big orb itself — the only floating control. The small mute
+          toggle that used to live next to it has moved into the chat
+          composer toolbar, alongside Stop / Clear, where its state is
+          easier to see and discoverable from one place. */}
       <div className="voice-orb-controls">
-        <button
-          className={`voice-orb-mute-btn ${muted ? 'muted' : ''}`}
-          onClick={toggleMute}
-          title={muted ? 'Unmute voice' : 'Mute voice'}
-          aria-label={muted ? 'Unmute voice output' : 'Mute voice output'}
-        >
-          {muted ? (
-            // Muted icon
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="1" y1="1" x2="23" y2="23" />
-              <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6" />
-              <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23" />
-              <line x1="12" y1="19" x2="12" y2="22" />
-            </svg>
-          ) : (
-            // Unmuted icon
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-              <line x1="12" y1="19" x2="12" y2="22" />
-              <line x1="8" y1="22" x2="16" y2="22" />
-            </svg>
-          )}
-        </button>
-
-        {/* The orb itself */}
         <button
           className={`voice-orb-btn voice-orb-${loopState}`}
           onClick={handleOrbClick}

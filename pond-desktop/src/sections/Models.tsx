@@ -1,51 +1,98 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Button, Tabs, Card, CardContent, Chip, ProgressBar } from "@heroui/react";
 import {
-  Brain, Mic, Volume2, RefreshCw, Download, CheckCircle,
+  Brain, Mic, Volume2, RefreshCw, Download, CheckCircle, XCircle,
   ChevronDown, ChevronUp, Search, Trash2, MessageSquare, Wrench, Play,
+  ScanFace, Loader2, Puzzle,
 } from "lucide-react";
 import { api } from "../api/PondApiClient";
 import { useAppState } from "../state/AppContext";
 import type {
-  ModelEntry, ModelActiveRoles, ModelMemoryStatus, HfModel, HfModelFile, DownloadEntry,
-  OllamaModel, LlamafileRelease,
+  ModelEntry, ModelActiveRoles, ModelMemoryStatus, ModelCapabilities,
+  HfModel, HfModelFile, DownloadEntry,
+  OllamaModel, LlamafileRelease, FaceModelsResponse,
 } from "../api/types";
 import { ApiError } from "../api/types";
+
+// ── Capability detection from model name (frontend heuristic) ──
+
+/** Infer capabilities from a model name string (mirrors backend ModelCapabilities::from_model_name). */
+function inferCapabilities(name: string): Partial<ModelCapabilities> {
+  const n = name.toLowerCase();
+  const caps: Partial<ModelCapabilities> = {};
+
+  // Thinking
+  if (/gemma[-_]?4|qwen3|qwq|deepseek[-_]?r1/.test(n)) caps.thinking = true;
+  // Vision
+  if (/gemma[-_]?4|llava|bakllava|moondream/.test(n)) caps.vision = true;
+  // Audio
+  if (/gemma[-_]?4/.test(n) && /e[24]b/i.test(n)) caps.audio_input = true;
+  // Context window
+  if (/gemma[-_]?4/.test(n)) caps.context_window_tokens = 128_000;
+  else if (/llama[-_]?3/.test(n)) caps.context_window_tokens = 8_192;
+  else if (/qwen/.test(n)) caps.context_window_tokens = 32_768;
+  else if (/mistral/.test(n)) caps.context_window_tokens = 32_768;
+
+  return caps;
+}
+
+/** Compact capability badge list for a model name. */
+function CapabilityBadges({ name }: { name: string }) {
+  const caps = inferCapabilities(name);
+  const badges: Array<{ label: string; title: string }> = [];
+  if (caps.thinking) badges.push({ label: "Thinking", title: "Supports internal chain-of-thought reasoning" });
+  if (caps.vision) badges.push({ label: "Vision", title: "Accepts image input (multimodal)" });
+  if (caps.audio_input) badges.push({ label: "Audio", title: "Accepts raw audio input" });
+  if (caps.context_window_tokens && caps.context_window_tokens > 8192)
+    badges.push({ label: `${Math.round(caps.context_window_tokens / 1000)}k ctx`, title: `${caps.context_window_tokens.toLocaleString()} token context window` });
+
+  if (badges.length === 0) return null;
+  return (
+    <>
+      {badges.map(b => (
+        <Chip key={b.label} size="sm" variant="soft" color="default" title={b.title}>{b.label}</Chip>
+      ))}
+    </>
+  );
+}
+
 // ── Design constants ──────────────────────────────────────────
 
 const CAT_COLOR = {
-  llm: "var(--color-role-chat)",
-  asr: "var(--color-role-asr)",
-  tts: "var(--color-role-tts)",
+  llm:  "var(--color-role-chat)",
+  asr:  "var(--color-role-asr)",
+  tts:  "var(--color-role-tts)",
+  face: "#3b82f6",
 } as const;
 
 // ── Active Roles Banner ───────────────────────────────────────
 
 /** Maps role keys to role-chip CSS modifier classes */
 const ROLE_CHIP_VARIANT: Record<string, string> = {
-  chat: "secondary", think: "warning", task: "success", asr: "primary", tts: "danger",
+  chat: "secondary", tool: "success", asr: "primary", tts: "danger",
 };
 
 function ActiveRolesBanner({
   roles,
   memoryStatus,
+  capabilities,
   onRefresh,
   loading,
   onNavigate,
 }: {
   roles: ModelActiveRoles | null;
   memoryStatus: ModelMemoryStatus | null;
+  capabilities: ModelCapabilities | null;
   onRefresh: () => void;
   loading: boolean;
   onNavigate?: (category: "llm" | "asr" | "tts") => void;
 }) {
-  const ROLE_DEFS = [
-    { key: "chat"  as const, label: "Chat",  icon: <MessageSquare size={10} />, category: "llm" as const },
-    { key: "think" as const, label: "Think", icon: <Brain size={10} />,         category: "llm" as const },
-    { key: "task"  as const, label: "Task",  icon: <Wrench size={10} />,        category: "llm" as const },
-    { key: "asr"   as const, label: "ASR",   icon: <Mic size={10} />,           category: "asr" as const },
-    { key: "tts"   as const, label: "TTS",   icon: <Volume2 size={10} />,       category: "tts" as const },
+  const ROLE_DEFS: Array<{ key: "chat" | "asr" | "tts"; label: string; icon: React.ReactNode; category: "llm" | "asr" | "tts" }> = [
+    { key: "chat", label: "Main LLM", icon: <MessageSquare size={10} />, category: "llm" },
+    { key: "asr",  label: "ASR",      icon: <Mic size={10} />,           category: "asr" },
+    { key: "tts",  label: "TTS",      icon: <Volume2 size={10} />,       category: "tts" },
   ];
+  const toolModel = roles?.tool?.model;
 
   const memPct = memoryStatus && memoryStatus.total_mb > 0
     ? Math.round(((memoryStatus.total_mb - memoryStatus.available_for_llm_mb) / memoryStatus.total_mb) * 100)
@@ -111,7 +158,50 @@ function ActiveRolesBanner({
               </div>
             );
           })}
+          {/* Tool Caller chip */}
+          <div
+            className="role-chip role-chip--success"
+            onClick={!toolModel && onNavigate ? () => onNavigate("llm") : undefined}
+            style={{ cursor: !toolModel && onNavigate ? "pointer" : "default" }}
+            title={!toolModel ? "Click to set a tool-calling specialist model" : undefined}
+          >
+            <div className="role-chip__bar" />
+            <div className="role-chip__body">
+              <div className="role-chip__head">
+                <Puzzle size={10} />
+                <span className="role-chip__role">Tool Caller</span>
+              </div>
+              <span style={{
+                fontSize: "var(--text-xs)", fontFamily: "var(--font-mono)",
+                color: toolModel ? "var(--fg)" : "var(--grey-500)", fontStyle: toolModel ? "normal" : "italic",
+                whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", display: "block",
+              }}>
+                {toolModel ?? "Not set"}
+              </span>
+            </div>
+          </div>
         </div>
+
+        {/* Active model capabilities */}
+        {capabilities && (capabilities.thinking || capabilities.vision || capabilities.audio_input || capabilities.context_window_tokens > 4096) && (
+          <div style={{
+            display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center",
+            padding: "6px 0 0", borderTop: "1px solid var(--grey-200)",
+          }}>
+            <span style={{ fontSize: "var(--text-xs)", color: "var(--grey-500)", marginRight: 4 }}>
+              Model features:
+            </span>
+            {capabilities.thinking && <Chip size="sm" variant="soft" color="accent">Thinking</Chip>}
+            {capabilities.vision && <Chip size="sm" variant="soft" color="accent">Vision</Chip>}
+            {capabilities.audio_input && <Chip size="sm" variant="soft" color="accent">Audio</Chip>}
+            {capabilities.structured_output && <Chip size="sm" variant="soft" color="accent">Structured Output</Chip>}
+            {capabilities.context_window_tokens > 4096 && (
+              <Chip size="sm" variant="soft" color="accent">
+                {Math.round(capabilities.context_window_tokens / 1000)}k context
+              </Chip>
+            )}
+          </div>
+        )}
       </CardContent>
     </Card>
   );
@@ -119,65 +209,59 @@ function ActiveRolesBanner({
 
 // ── Download Progress ─────────────────────────────────────────
 
+/** Format bytes as human-readable size. */
+function fmtBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
 function DownloadProgress({ downloads, onScanModels }: { downloads: DownloadEntry[]; onScanModels: () => void }) {
   if (downloads.length === 0) return null;
   const allDone = downloads.every((d) => d.status === "done" || d.status === "error");
   return (
-    <div style={dlSt.root}>
-      <div style={dlSt.header}>
-        <span style={dlSt.title}>Downloads</span>
+    <div className="dl-progress">
+      <div className="dl-progress__header">
+        <span className="dl-progress__title">Downloads</span>
         {allDone && (
           <Button variant="outline" size="sm" onPress={onScanModels}>
             <RefreshCw size={12} /> Scan & index
           </Button>
         )}
       </div>
-      {downloads.map((d) => (
-        <div key={d.filename} style={dlSt.item}>
-          <div style={dlSt.itemHeader}>
-            <code style={dlSt.filename}>{d.filename}</code>
-            <span style={{
-              ...dlSt.status,
-              color: d.status === "error" ? "var(--color-destructive)" : d.status === "done" ? "var(--color-success)" : "var(--color-text-secondary)",
-            }}>
-              {d.status === "done" ? "Complete" : d.status === "error" ? (d.error ?? "Error") : `${d.progress_pct ?? 0}%`}
-            </span>
+      {downloads.map((d) => {
+        const pct = d.total_bytes ? Math.round((d.downloaded_bytes / d.total_bytes) * 100) : 0;
+        const sizeLabel = d.total_bytes
+          ? `${fmtBytes(d.downloaded_bytes)} / ${fmtBytes(d.total_bytes)}`
+          : fmtBytes(d.downloaded_bytes);
+        return (
+          <div key={d.filename} className="dl-progress__item">
+            <div className="dl-progress__item-header">
+              <code className="dl-progress__filename">{d.filename}</code>
+              <span className={`dl-progress__status dl-progress__status--${d.status}`}>
+                {d.status === "done" ? "Complete" : d.status === "error" ? (d.error ?? "Error") : `${pct}% — ${sizeLabel}`}
+              </span>
+            </div>
+            <div className="dl-progress__track">
+              <div
+                className={`dl-progress__fill dl-progress__fill--${d.status}`}
+                style={{ width: d.status === "done" ? "100%" : `${pct}%` }}
+              />
+            </div>
           </div>
-          <div style={dlSt.track}>
-            <div style={{
-              ...dlSt.fill,
-              width: `${d.progress_pct ?? 0}%`,
-              background: d.status === "error" ? "var(--color-destructive)" : d.status === "done" ? "var(--color-success)" : "var(--color-accent)",
-            }} />
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
 
-const dlSt: Record<string, React.CSSProperties> = {
-  root: {
-    display: "flex", flexDirection: "column", gap: "var(--space-2)",
-    background: "var(--color-bg)", border: "1px solid var(--color-border)",
-    borderRadius: "var(--radius-md)", padding: "var(--space-3) var(--space-4)",
-  },
-  header: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "2px" },
-  title: { fontSize: "var(--text-xs)", fontWeight: 700, color: "var(--color-text-secondary)", textTransform: "uppercase" as const, letterSpacing: "0.06em" },
-  item: { display: "flex", flexDirection: "column" as const, gap: "4px" },
-  itemHeader: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "var(--space-2)" },
-  filename: { fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)", color: "var(--color-text)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const },
-  status: { fontSize: "var(--text-xs)", flexShrink: 0, fontFamily: "var(--font-mono)" },
-  track: { height: "4px", background: "rgba(23,22,22,0.08)", borderRadius: "2px", overflow: "hidden" },
-  fill: { height: "100%", borderRadius: "2px", transition: "width 0.4s ease" },
-};
-
 // ── Shared ModelList ──────────────────────────────────────────
 
-type RoleKey = "chat" | "think" | "task" | "asr" | "tts";
+type RoleKey = "chat" | "tool" | "asr" | "tts";
 
 const ROLE_LABELS: Record<RoleKey, string> = {
-  chat: "Chat", think: "Think", task: "Task", asr: "ASR", tts: "TTS",
+  chat: "Main LLM", tool: "Tool Caller", asr: "ASR", tts: "TTS",
 };
 
 function ModelList({
@@ -206,6 +290,9 @@ function ModelList({
   if (models.length === 0) return <p style={hint}>{emptyMessage}</p>;
 
   function isRoleActive(m: ModelEntry, role: RoleKey) {
+    if (role === "tool") {
+      return activeRoles?.tool?.model === m.name;
+    }
     const a = activeRoles?.[role];
     if (!a) return false;
     return a.provider === m.provider && a.model === m.name;
@@ -238,6 +325,7 @@ function ModelList({
                 {activeFor.map((r) => (
                   <Chip key={r} size="sm" color="accent" variant="soft">{ROLE_LABELS[r]}</Chip>
                 ))}
+                <CapabilityBadges name={m.name} />
               </div>
               <div className="giap-model-row__file"><code>{m.provider} / {m.name}</code></div>
             </div>
@@ -645,7 +733,7 @@ function OllamaPanel({
         loading={modelsLoading && ollamaLoading}
         error={modelsError}
         activeRoles={activeRoles}
-        availableRoles={["chat", "think", "task"]}
+        availableRoles={["chat"]}
         onActivate={onActivate}
         onDelete={onDelete}
         emptyMessage={isRunning ? "No Ollama models found. Pull a model above." : "Ollama is not running. Start it to see available models."}
@@ -727,7 +815,7 @@ function LlmTab({
             loading={modelsLoading}
             error={modelsError}
             activeRoles={activeRoles}
-            availableRoles={["chat", "think", "task"]}
+            availableRoles={["chat", "tool"]}
             onActivate={onActivate}
             onDelete={onDelete}
             emptyMessage="No GGUF models found. Download one below."
@@ -744,7 +832,7 @@ function LlmTab({
             loading={modelsLoading}
             error={modelsError}
             activeRoles={activeRoles}
-            availableRoles={["chat", "think", "task"]}
+            availableRoles={["chat"]}
             onActivate={onActivate}
             onDelete={onDelete}
             emptyMessage="No Llamafile models found. Download one below."
@@ -772,13 +860,144 @@ function LlmTab({
 
 // ── Category Tabs ─────────────────────────────────────────────
 
-type Category = "llm" | "asr" | "tts";
+type Category = "llm" | "asr" | "tts" | "face";
 
 const CATEGORIES: Array<{ key: Category; label: string; icon: React.ReactNode; color: string }> = [
   { key: "llm", label: "LLM", icon: <Brain size={14} />, color: CAT_COLOR.llm },
   { key: "asr", label: "ASR", icon: <Mic size={14} />, color: CAT_COLOR.asr },
   { key: "tts", label: "TTS", icon: <Volume2 size={14} />, color: CAT_COLOR.tts },
+  { key: "face", label: "Face", icon: <ScanFace size={14} />, color: "#3b82f6" },
 ];
+
+// ── Face Recognition Panel ───────────────────────────────────
+//
+// Read-only status for the face models (ArcFace R50 + SCRFD 10G +
+// Silent-Face PAD). pond-server downloads them automatically on first
+// boot when built with `--features face-onnx`, so there is no per-model
+// "Download" button — operators just watch progress here. When the
+// feature is disabled the card surfaces the rebuild instruction.
+function FacePanel() {
+  const [data, setData]       = useState<FaceModelsResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError]     = useState<string | null>(null);
+
+  const reload = useCallback(async () => {
+    setLoading(true); setError(null);
+    try { setData(await api.listFaceModels()); }
+    catch (e) { setError(String(e)); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { reload(); }, [reload]);
+
+  const installed = data?.models.filter(m => m.downloaded).length ?? 0;
+  const total     = data?.models.length ?? 0;
+
+  const fpHint: React.CSSProperties = {
+    color: "var(--color-text-tertiary)", fontSize: "var(--text-sm)", margin: 0,
+  };
+  const fpBadge: React.CSSProperties = {
+    fontSize: "var(--text-xs)", fontFamily: "var(--font-mono)",
+    color: "var(--color-text-tertiary)", background: "rgba(23,22,22,0.05)",
+    padding: "1px 6px", borderRadius: "var(--radius-xs, 4px)", flexShrink: 0,
+  };
+  const fpRow: React.CSSProperties = {
+    display: "flex", alignItems: "center", gap: "var(--space-3)",
+    padding: "var(--space-3) var(--space-4)",
+    background: "var(--color-bg)", border: "1px solid var(--color-border)",
+    borderLeft: "4px solid", transition: "border-color 120ms",
+  };
+  const fpInlineCode: React.CSSProperties = {
+    fontFamily: "var(--font-mono)", fontSize: "0.85em",
+    background: "rgba(23,22,22,0.06)", padding: "1px 5px", borderRadius: 4,
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
+        <ScanFace size={14} style={{ color: CAT_COLOR.face }} />
+        <span style={{
+          fontFamily: "var(--font-display)", fontWeight: 700,
+          fontSize: "var(--text-sm)", textTransform: "uppercase" as const,
+          letterSpacing: "0.06em", color: CAT_COLOR.face,
+        }}>
+          Face Recognition
+        </span>
+        {data && (
+          <span style={fpBadge}>
+            {data.feature_enabled ? `${installed}/${total} ready` : "feature disabled"}
+          </span>
+        )}
+        <div style={{ flex: 1 }} />
+        <Button variant="ghost" size="sm" onPress={reload} isDisabled={loading}>
+          <RefreshCw size={12} /> Refresh
+        </Button>
+      </div>
+
+      {loading && <p style={fpHint}>Loading...</p>}
+      {error && <p style={{ ...fpHint, color: "var(--color-destructive)" }}>{error}</p>}
+
+      {data && !data.feature_enabled && (
+        <p style={fpHint}>
+          Face recognition is disabled in this build. Rebuild pond-server with
+          {" "}<code style={fpInlineCode}>--features face-onnx</code>{" "}
+          to enable per-user identification.
+        </p>
+      )}
+
+      {data && data.models.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-2)" }}>
+          {data.models.map(m => (
+            <div
+              key={m.name}
+              style={{ ...fpRow, borderLeftColor: m.downloaded ? CAT_COLOR.face : "transparent" }}
+            >
+              <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", flexWrap: "wrap" as const }}>
+                  <span style={{
+                    fontWeight: 600, fontSize: "var(--text-sm)", color: "var(--color-text)",
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const,
+                  }}>
+                    {m.label}
+                  </span>
+                  <span style={fpBadge}>{m.role}</span>
+                  {m.downloaded ? (
+                    <span style={{ ...fpBadge, color: "var(--color-success)" }}>
+                      {m.size_mb != null ? `${m.size_mb} MB` : "ready"}
+                    </span>
+                  ) : (
+                    <span style={{ ...fpBadge, color: "#e5a000" }}>
+                      missing · ~{m.expected_mb} MB
+                    </span>
+                  )}
+                </div>
+                <span style={{
+                  fontSize: "var(--text-xs)", fontFamily: "var(--font-mono)",
+                  color: "var(--color-text-tertiary)",
+                }}>
+                  {m.name}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {data?.models_dir && (
+        <p style={{ ...fpHint, fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)", opacity: 0.6 }}>
+          {data.models_dir}
+        </p>
+      )}
+
+      <p style={fpHint}>
+        Models auto-download on first server boot. The buffalo_l fallback zip ships
+        ArcFace R50 + SCRFD 10G; Glint-R100 + SCRFD 34G are fetched separately when
+        their mirrors are reachable. Once installed, use the <strong>Faces</strong>
+        section (left sidebar) to enroll household members.
+      </p>
+    </div>
+  );
+}
 
 // ── Memory Status Bar ─────────────────────────────────────────
 
@@ -786,17 +1005,26 @@ function MemoryStatusBar({ status }: { status: ModelMemoryStatus | null }) {
   if (!status) return null;
   const { total_mb, available_for_llm_mb, loaded_model } = status;
   if (total_mb <= 0) return null;
+  const usedMb = total_mb - available_for_llm_mb;
+  const usedPct = Math.round((usedMb / total_mb) * 100);
+  const totalGb = (total_mb / 1024).toFixed(1);
+  const availGb = (available_for_llm_mb / 1024).toFixed(1);
   return (
-    <div className="seg-banner seg-banner--info">
-      <span style={{ fontFamily: "var(--font-display)", fontWeight: 700, fontSize: "var(--text-xs)", letterSpacing: "0.06em" }}>
-        System Memory
-      </span>
-      <span style={{ fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)" }}>
-        {total_mb.toLocaleString()} MB total · {available_for_llm_mb.toLocaleString()} MB available
-      </span>
-      {loaded_model && (
-        <Chip size="sm" color="accent" variant="soft">Hot: {loaded_model}</Chip>
-      )}
+    <div className="sys-stats">
+      <div className="sys-stats__row">
+        <span className="sys-stats__label">Memory</span>
+        <span className="sys-stats__value">{availGb} GB free / {totalGb} GB</span>
+        {loaded_model && <Chip size="sm" variant="soft">{loaded_model}</Chip>}
+      </div>
+      <div className="dl-progress__track" style={{ height: 8 }}>
+        <div
+          className="dl-progress__fill"
+          style={{
+            width: `${usedPct}%`,
+            background: usedPct > 85 ? "var(--color-destructive)" : usedPct > 60 ? "#f59e0b" : "var(--color-success)",
+          }}
+        />
+      </div>
     </div>
   );
 }
@@ -813,6 +1041,7 @@ export function Models() {
   const [downloads, setDownloads] = useState<DownloadEntry[]>([]);
   const [actionMsg, setActionMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const [memoryStatus, setMemoryStatus] = useState<ModelMemoryStatus | null>(null);
+  const [capabilities, setCapabilities] = useState<ModelCapabilities | null>(null);
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadRoles = useCallback(async () => {
@@ -861,6 +1090,7 @@ export function Models() {
   useEffect(() => {
     loadRoles(); loadModels(); loadDownloads();
     api.getMemoryStatus().then(setMemoryStatus).catch(() => {/* non-fatal */});
+    api.getModelCapabilities().then(setCapabilities).catch(() => {/* non-fatal */});
     return () => { if (pollRef.current) { clearTimeout(pollRef.current); pollRef.current = null; } };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -872,8 +1102,14 @@ export function Models() {
 
   async function handleActivate(provider: string, name: string, role: string) {
     try {
-      await api.activateModel(provider, name, role);
-      flash(`${name} set as ${role} model.`);
+      if (role === "tool") {
+        // Tool caller is a settings field, not a model-role assignment
+        await api.updateSettings({ tool_model: name });
+        flash(`${name} set as Tool Caller.`);
+      } else {
+        await api.activateModel(provider, name, role);
+        flash(`${name} set as ${ROLE_LABELS[role as RoleKey] ?? role} model.`);
+      }
       await loadRoles();
     } catch (e) { flash(String(e), false); }
   }
@@ -922,6 +1158,7 @@ export function Models() {
       <ActiveRolesBanner
         roles={activeRoles}
         memoryStatus={memoryStatus}
+        capabilities={capabilities}
         onRefresh={loadRoles}
         loading={rolesLoading}
         onNavigate={(cat) => setCategory(cat)}
@@ -1030,6 +1267,76 @@ export function Models() {
           />
           <p className="muted-foot">TTS models power the voice output. Piper voices use <code>.onnx</code> + <code>.json</code> pairs in <code>models/tts/</code>.</p>
         </div>
+      )}
+
+      {category === "face" && <FacePanel />}
+    </div>
+  );
+}
+
+// ── Face Recognition Panel ───────────────────────────────────
+
+function FacePanel() {
+  const [data, setData] = useState<FaceModelsResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    api.listFaceModels()
+      .then(setData)
+      .catch(() => setData(null))
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: 16, color: "var(--grey-500)" }}>
+        <Loader2 size={16} className="spin" /> Loading face models...
+      </div>
+    );
+  }
+
+  if (!data || !data.feature_enabled) {
+    return (
+      <div className="seg-banner seg-banner--warn">
+        <ScanFace size={14} />
+        <span>Face recognition is not enabled. Build the server with <code>--features face-onnx</code> to activate.</span>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div className="seg-banner" style={{ borderColor: "#3b82f6", background: "rgba(59,130,246,0.06)" }}>
+        <ScanFace size={14} />
+        <span>Face Recognition Models</span>
+      </div>
+      {data.models.map((m) => (
+        <div
+          key={m.name}
+          className={`giap-model-row ${m.downloaded ? "is-active" : ""}`}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
+            {m.downloaded
+              ? <CheckCircle size={14} style={{ color: "var(--color-success)", flexShrink: 0 }} />
+              : <XCircle size={14} style={{ color: "var(--color-destructive)", flexShrink: 0 }} />}
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontWeight: 600, fontSize: "var(--text-sm)" }}>{m.label || m.name}</div>
+              {m.path && (
+                <code style={{ fontSize: 10, color: "var(--grey-500)", display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {m.path}
+                </code>
+              )}
+            </div>
+          </div>
+          <Chip size="sm" variant={m.downloaded ? "success" : "outline"}>
+            {m.downloaded ? "Ready" : "Missing"}
+          </Chip>
+        </div>
+      ))}
+      {data.models_dir && (
+        <p className="muted-foot">
+          Models directory: <code>{data.models_dir}</code>
+        </p>
       )}
     </div>
   );

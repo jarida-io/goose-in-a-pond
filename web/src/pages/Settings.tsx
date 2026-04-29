@@ -62,12 +62,8 @@ export default function Settings({ token }: Props) {
   // Model role assignments
   const [chatProvider,  setChatProvider]  = useState(() => localStorage.getItem('pond_chat_provider') ?? '')
   const [chatModel,     setChatModel]     = useState(() => localStorage.getItem('pond_chat_model') ?? '')
-  const [thinkProvider, setThinkProvider] = useState(() => localStorage.getItem('pond_think_provider') ?? '')
-  const [thinkModel,    setThinkModel]    = useState(() => localStorage.getItem('pond_think_model') ?? '')
-  const [taskProvider,  setTaskProvider]  = useState(() => localStorage.getItem('pond_task_provider') ?? '')
-  const [taskModel,     setTaskModel]     = useState(() => localStorage.getItem('pond_task_model') ?? '')
-  const [thinkSameAsChat, setThinkSameAsChat] = useState(() => !localStorage.getItem('pond_think_model'))
-  const [taskSameAsChat,  setTaskSameAsChat]  = useState(() => !localStorage.getItem('pond_task_model'))
+  const [toolModel,     setToolModel]     = useState(() => localStorage.getItem('pond_tool_model') ?? '')
+  const [reviewMode,    setReviewMode]    = useState(() => localStorage.getItem('pond_review_mode') ?? 'off')
 
   // ── Voice ──
   const [wakeWord, setWakeWord]               = useState(() => localStorage.getItem('pond_wake_word') ?? '')
@@ -108,10 +104,8 @@ export default function Settings({ token }: Props) {
     // Model role assignments
     if (s.chat_provider)  setChatProvider(s.chat_provider)
     if (s.chat_model)     setChatModel(s.chat_model)
-    if (s.think_provider) { setThinkProvider(s.think_provider); setThinkSameAsChat(false) }
-    if (s.think_model)    { setThinkModel(s.think_model);       setThinkSameAsChat(false) }
-    if (s.task_provider)  { setTaskProvider(s.task_provider);   setTaskSameAsChat(false) }
-    if (s.task_model)     { setTaskModel(s.task_model);         setTaskSameAsChat(false) }
+    if (s.tool_model)     setToolModel(s.tool_model)
+    if ((s as any).review_mode) setReviewMode((s as any).review_mode)
     // Voice
     if (s.voice_wake_word)               setWakeWord(s.voice_wake_word)
     if (s.active_whisper_model)          setWhisperModel(s.active_whisper_model)
@@ -170,10 +164,8 @@ export default function Settings({ token }: Props) {
             voice_tts_voice:              ttsVoice.trim(),
             chat_provider:         chatProvider.trim(),
             chat_model:            chatModel.trim(),
-            think_provider:        thinkSameAsChat ? null : thinkProvider.trim() || null,
-            think_model:           thinkSameAsChat ? null : thinkModel.trim() || null,
-            task_provider:         taskSameAsChat  ? null : taskProvider.trim()  || null,
-            task_model:            taskSameAsChat  ? null : taskModel.trim()     || null,
+            tool_model:            toolModel.trim() || null,
+            review_mode:           reviewMode,
           },
           token,
         )
@@ -211,6 +203,8 @@ export default function Settings({ token }: Props) {
     } else {
       document.documentElement.dataset.theme = value
     }
+    // Notify same-tab listeners (App.tsx swaps the logo asset on this).
+    window.dispatchEvent(new Event('pond-theme-change'))
   }
 
   function handleClearActivity() {
@@ -284,60 +278,86 @@ export default function Settings({ token }: Props) {
         <div className="db-card">
           <div className="db-card-header"><h3>LLM Pipeline</h3></div>
           <p className="db-settings-hint">
-            Assign a provider and model to each role. GIAP auto-routes requests: <strong>Chat</strong> handles everyday questions,
-            <strong> Think</strong> handles deep reasoning, <strong>Task</strong> handles tool-use and scheduling.
-            Use the <strong>Models</strong> page to assign roles with one click, or configure manually below.
+            Configure your main LLM and optional tool-calling specialist.
+            Use the <strong>Models</strong> page to download and manage model files.
           </p>
 
-          {/* Role rows */}
-          {([
-            { role: 'chat',  icon: '💬', label: 'Chat',  provider: chatProvider,  setProvider: setChatProvider,  model: chatModel,  setModel: setChatModel,  sameAsChat: false,          setSameAsChat: null },
-            { role: 'think', icon: '🧠', label: 'Think', provider: thinkProvider, setProvider: setThinkProvider, model: thinkModel, setModel: setThinkModel, sameAsChat: thinkSameAsChat, setSameAsChat: setThinkSameAsChat },
-            { role: 'task',  icon: '⚙️', label: 'Task',  provider: taskProvider,  setProvider: setTaskProvider,  model: taskModel,  setModel: setTaskModel,  sameAsChat: taskSameAsChat,  setSameAsChat: setTaskSameAsChat },
-          ] as const).map(row => (
-            <div key={row.role} className="db-settings-field" style={{ borderTop: '1px solid rgba(128,128,128,0.1)', paddingTop: '0.85rem' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                <label className="db-settings-label" style={{ margin: 0 }}>
-                  <span style={{ marginRight: '0.4rem' }}>{row.icon}</span>{row.label}
-                </label>
-                {row.setSameAsChat && (
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.78rem', opacity: 0.7, cursor: 'pointer' }}>
-                    <input
-                      type="checkbox"
-                      checked={row.sameAsChat}
-                      onChange={e => row.setSameAsChat!(e.target.checked)}
-                    />
-                    Same as Chat
-                  </label>
-                )}
-              </div>
-              {(!row.setSameAsChat || !row.sameAsChat) && (
-                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                  <select
-                    className="db-settings-input"
-                    style={{ flex: '0 0 auto', width: 'auto', minWidth: '8rem' }}
-                    value={row.provider}
-                    onChange={e => row.setProvider(e.target.value)}
-                  >
-                    <option value="">— provider —</option>
-                    {LLM_PROVIDERS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
-                  </select>
-                  <input
-                    className="db-settings-input"
-                    style={{ flex: '1 1 10rem' }}
-                    type="text"
-                    value={row.model}
-                    onChange={e => row.setModel(e.target.value)}
-                    placeholder="model name"
-                    maxLength={100}
-                  />
-                </div>
-              )}
-              {row.setSameAsChat && row.sameAsChat && (
-                <p className="db-settings-hint" style={{ margin: 0 }}>Uses the Chat role model.</p>
-              )}
+          {/* Main LLM */}
+          <div className="db-settings-field" style={{ borderTop: '1px solid rgba(128,128,128,0.1)', paddingTop: '0.85rem' }}>
+            <label className="db-settings-label">Main LLM</label>
+            <p className="db-settings-hint" style={{ margin: '0 0 0.5rem' }}>Handles all conversation, reasoning, and responses.</p>
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <select
+                className="db-settings-input"
+                style={{ flex: '0 0 auto', width: 'auto', minWidth: '8rem' }}
+                value={chatProvider}
+                onChange={e => setChatProvider(e.target.value)}
+              >
+                <option value="">-- provider --</option>
+                {LLM_PROVIDERS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+              </select>
+              <input
+                className="db-settings-input"
+                style={{ flex: '1 1 10rem' }}
+                type="text"
+                value={chatModel}
+                onChange={e => setChatModel(e.target.value)}
+                placeholder="model name"
+                maxLength={100}
+              />
             </div>
-          ))}
+          </div>
+
+          {/* Tool Caller */}
+          <div className="db-settings-field" style={{ borderTop: '1px solid rgba(128,128,128,0.1)', paddingTop: '0.85rem' }}>
+            <label className="db-settings-label">Tool Caller (optional)</label>
+            <p className="db-settings-hint" style={{ margin: '0 0 0.5rem' }}>Small specialist model for generating structured tool-call arguments. Select "None" to use the main LLM.</p>
+            <select
+              className="db-settings-input"
+              value={toolModel}
+              onChange={e => setToolModel(e.target.value)}
+            >
+              <option value="">None (use main LLM for tool calls)</option>
+              {/* Populated dynamically from available GGUF models */}
+            </select>
+            <input
+              className="db-settings-input"
+              style={{ marginTop: '0.35rem' }}
+              type="text"
+              value={toolModel}
+              onChange={e => setToolModel(e.target.value)}
+              placeholder="Or type a model name manually"
+              maxLength={100}
+            />
+          </div>
+
+          {/* Thinking mode */}
+          <div className="db-settings-field" style={{ borderTop: '1px solid rgba(128,128,128,0.1)', paddingTop: '0.85rem' }}>
+            <label className="db-settings-label">Thinking Mode</label>
+            <p className="db-settings-hint" style={{ margin: '0 0 0.5rem' }}>Enable internal reasoning for better analysis, planning, and complex answers.</p>
+            <select className="db-settings-input" defaultValue="auto">
+              <option value="auto">Auto (enable for capable models)</option>
+              <option value="on">Always On</option>
+              <option value="off">Off</option>
+            </select>
+          </div>
+
+          {/* Answer review */}
+          <div className="db-settings-field" style={{ borderTop: '1px solid rgba(128,128,128,0.1)', paddingTop: '0.85rem' }}>
+            <label className="db-settings-label">Answer Review</label>
+            <p className="db-settings-hint" style={{ margin: '0 0 0.5rem' }}>
+              Adversarial critic reviews answers for completeness, accuracy, and depth before delivery. Adds ~3-5s per review.
+            </p>
+            <select
+              className="db-settings-input"
+              value={reviewMode}
+              onChange={e => setReviewMode(e.target.value)}
+            >
+              <option value="off">Off</option>
+              <option value="auto">Auto (review factual/analytical questions only)</option>
+              <option value="on">Always On (review every answer)</option>
+            </select>
+          </div>
 
           {/* Shared generation params */}
           <div className="db-settings-field" style={{ borderTop: '1px solid rgba(128,128,128,0.1)', paddingTop: '0.85rem' }}>

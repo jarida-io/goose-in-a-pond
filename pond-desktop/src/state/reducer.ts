@@ -37,6 +37,7 @@ export interface AppState {
   serverUrl: string;
   sessionToken: string | null;
   sessionId: string | null;
+  needsOnboarding: boolean;
   voiceState: VoiceState;
   voiceError: string | null;
   transcript: TranscriptMessage[];
@@ -62,7 +63,8 @@ export type AppAction =
   | { type: "PUSH_CONTEXT_CARD"; payload: ContextCard }
   | { type: "CLEAR_CONTEXT_CARDS" }
   | { type: "VOICE_ACTIVATE" }
-  | { type: "SET_LAST_RESPONSE_META"; payload: LastResponseMeta };
+  | { type: "SET_LAST_RESPONSE_META"; payload: LastResponseMeta }
+  | { type: "SET_NEEDS_ONBOARDING"; payload: boolean };
 
 let _transcriptIdCounter = 0;
 let _cardIdCounter = 0;
@@ -83,6 +85,7 @@ export function buildInitialState(): AppState {
     serverUrl: storedUrl,
     sessionToken: storedToken,
     sessionId: null,
+    needsOnboarding: false,
     voiceState: "idle",
     voiceError: null,
     transcript: [],
@@ -174,6 +177,9 @@ export function reducer(state: AppState, action: AppAction): AppState {
 
     case "SET_LAST_RESPONSE_META":
       return { ...state, lastResponseMeta: action.payload };
+
+    case "SET_NEEDS_ONBOARDING":
+      return { ...state, needsOnboarding: action.payload };
 
     default:
       return state;

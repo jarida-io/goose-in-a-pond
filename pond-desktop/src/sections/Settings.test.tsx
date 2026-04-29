@@ -103,17 +103,15 @@ describe("Settings", () => {
     expect(screen.getByText("Calibrate")).toBeTruthy();
   });
 
-  it("Models tab shows model role rows with Change buttons", async () => {
+  it("Models tab shows Main LLM and Tool Caller sections", async () => {
     await renderSettings();
     clickTab("Models");
-    // The new UI shows "Conversation", "Reasoning", "Tools & Tasks" labels
     await waitFor(() => {
-      if (!screen.queryByText("Conversation")) throw new Error("not rendered");
+      if (!screen.queryByText("Main LLM")) throw new Error("not rendered");
     });
-    expect(screen.getByText("Conversation")).toBeTruthy();
-    expect(screen.getByText("Reasoning")).toBeTruthy();
-    expect(screen.getByText("Tools & Tasks")).toBeTruthy();
-    // Each role row shows a "Change…" button
+    expect(screen.getByText("Main LLM")).toBeTruthy();
+    expect(screen.getByText("Tool Caller")).toBeTruthy();
+    // The main LLM role row shows a "Change…" button
     const changeBtns = screen.getAllByText("Change…");
     expect(changeBtns.length).toBeGreaterThanOrEqual(1);
     // Current chat model is shown in the display row

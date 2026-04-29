@@ -61,6 +61,7 @@ pub struct RateLimiter {
     clients: Arc<RwLock<HashMap<String, ClientRateLimit>>>,
     max_requests: usize,
     window_duration: Duration,
+    last_cleanup: Arc<RwLock<Instant>>,
 }
 
 #[derive(Clone)]
@@ -75,6 +76,7 @@ impl RateLimiter {
             clients: Arc::new(RwLock::new(HashMap::new())),
             max_requests,
             window_duration,
+            last_cleanup: Arc::new(RwLock::new(Instant::now())),
         }
     }
 
@@ -89,12 +91,21 @@ impl RateLimiter {
             client.window_start = now;
             client.request_count = 0;
         }
-        if client.request_count < self.max_requests {
+        let allowed = if client.request_count < self.max_requests {
             client.request_count += 1;
             true
         } else {
             false
+        };
+
+        // Periodic eviction of stale entries to prevent unbounded growth.
+        let mut lc = self.last_cleanup.write().await;
+        if now.duration_since(*lc) > self.window_duration * 2 {
+            clients.retain(|_, v| now.duration_since(v.window_start) <= self.window_duration);
+            *lc = now;
         }
+
+        allowed
     }
 }
 
@@ -254,6 +265,23 @@ mod tests {
         assert!(limiter.check_rate_limit("client-1").await);
         assert!(limiter.check_rate_limit("client-2").await);
         assert!(limiter.check_rate_limit("client-2").await);
+    }
+
+    #[tokio::test]
+    async fn test_rate_limiter_evicts_stale_entries() {
+        // Window = 1s, cleanup triggers after 2× window = 2s
+        let limiter = RateLimiter::new(100, Duration::from_secs(1));
+        limiter.check_rate_limit("stale-client").await;
+
+        // Wait for the entry to go stale and cleanup to trigger
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        // This call triggers cleanup (>2× window since last cleanup)
+        limiter.check_rate_limit("new-client").await;
+
+        let clients = limiter.clients.read().await;
+        assert!(!clients.contains_key("stale-client"), "stale entry should have been evicted");
+        assert_eq!(clients.len(), 1, "only the fresh entry should remain");
     }
 
     #[test]

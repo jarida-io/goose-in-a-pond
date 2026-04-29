@@ -12,7 +12,7 @@
 
 use crate::domain::message::{ChatMessage, Role};
 use crate::ports::provider::LlmProvider;
-use crate::services::context_budget::{trim_to_budget, USABLE_HISTORY_CHARS};
+use crate::services::context_budget::{trim_to_budget, trim_to_budget_for_model, USABLE_HISTORY_CHARS};
 use anyhow::Result;
 
 /// 4 characters per token is a common heuristic for English text.
@@ -82,6 +82,7 @@ impl ContextCompactor {
                         "[Earlier conversation summary]\n{}\n[End of summary]",
                         summary
                     ),
+                    images: Vec::new(),
                 };
                 let mut result = vec![summary_msg];
                 result.extend_from_slice(to_keep);
@@ -111,6 +112,7 @@ async fn summarise(provider: &dyn LlmProvider, messages: &[ChatMessage]) -> Resu
 
     let prompt_messages = vec![ChatMessage {
         role: Role::User,
+        images: Vec::new(),
         content: format!(
             "Summarise the following conversation concisely, preserving all important \
              facts, decisions, and context. Write 3-5 sentences maximum.\n\n{}",
@@ -148,6 +150,7 @@ mod tests {
                 Ok(ChatMessage {
                     role: Role::Assistant,
                     content: self.summary.clone(),
+                    images: Vec::new(),
                 })
             }
         }
@@ -158,7 +161,7 @@ mod tests {
     }
 
     fn msg(role: Role, content: &str) -> ChatMessage {
-        ChatMessage { role, content: content.to_string() }
+        ChatMessage { role, content: content.to_string(), images: Vec::new() }
     }
 
     fn big_history(count: usize, payload_len: usize) -> Vec<ChatMessage> {

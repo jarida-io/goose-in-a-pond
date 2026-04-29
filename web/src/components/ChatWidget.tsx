@@ -189,6 +189,10 @@ export default function ChatWidget({ token }: Props) {
       setSpeaking(false)
       setSpeakingMsgId(null)
     }
+    // `storage` events do not fire in the originating tab, so dispatch a
+    // custom event for in-tab listeners (notably VoiceOrb, which gates
+    // its TTS playback on this same key).
+    window.dispatchEvent(new Event('pond-tts-muted-changed'))
   }
 
   /**
@@ -471,7 +475,7 @@ export default function ChatWidget({ token }: Props) {
         <div className="db-chat-control-btns">
           {/* Mute/unmute TTS — shows animated sound bars while Goose is speaking */}
           <button
-            className={`db-chat-control-btn db-chat-mute-btn ${speaking && !muted ? 'speaking' : ''}`}
+            className={`db-chat-control-btn db-chat-mute-btn ${muted ? 'is-muted' : ''} ${speaking && !muted ? 'speaking' : ''}`}
             onClick={toggleMute}
             title={muted ? 'Unmute voice' : speaking ? 'Goose is speaking — click to mute' : 'Mute voice'}
           >

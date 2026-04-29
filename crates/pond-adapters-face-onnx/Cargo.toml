@@ -1,0 +1,28 @@
+[package]
+name = "pond-adapters-face-onnx"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "ONNX-based face detection + embedding adapter (mtCNN + ArcFace/MobileFaceNet)"
+
+[dependencies]
+pond-core   = { workspace = true }
+anyhow      = { workspace = true }
+async-trait = { workspace = true }
+tokio       = { workspace = true }
+tracing     = { workspace = true }
+image       = { workspace = true }
+ndarray     = { workspace = true }
+
+# ort v2 — load-dynamic links to the system ONNX Runtime at runtime rather
+# than statically. This keeps GIAP's build lightweight and lets operators
+# swap in a CUDA/TensorRT-enabled ORT on Jetson without recompiling.
+#
+# Expects `ORT_DYLIB_PATH` to point at `libonnxruntime.so` (Linux/Jetson) or
+# `libonnxruntime.dylib` (macOS). Falls back to the default library search
+# path if unset.
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["load-dynamic", "ndarray"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

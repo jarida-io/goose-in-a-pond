@@ -35,14 +35,18 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["app", "dmg"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/icon.png"
     ],
+    "category": "Productivity",
+    "shortDescription": "Local-first AI assistant for your home network.",
+    "longDescription": "Goose In A Pond is a private, local-first AI assistant. It runs LLM, speech recognition, text-to-speech, and face identification entirely on your own hardware — no data ever leaves the device.",
     "macOS": {
-      "infoPlist": "Info.plist"
+      "infoPlist": "Info.plist",
+      "minimumSystemVersion": "10.15"
     }
   }
 }

@@ -164,7 +164,9 @@ export function Skills() {
                   isSelected={s.active}
                   onValueChange={() => toggle(s.id, s.active)}
                   aria-label={`Enable ${s.name}`}
-                />
+                >
+                  <Switch.Control><Switch.Thumb /></Switch.Control>
+                </Switch>
                 <Button
                   size="sm"
                   variant="light"

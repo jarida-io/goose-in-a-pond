@@ -28,3 +28,16 @@ node_modules/
 .ai/*{txt,md,log}
 **/scratchpad.md
 
+# macOS Finder cruft
+.DS_Store
+**/.DS_Store
+
+# Local server logs (rotated to disk in dev mode)
+llama.log
+**/llama.log
+
+# Local editor / agent session state
+.claude/
+.vscode/
+
+**/*.log

@@ -33,10 +33,12 @@ export interface Settings {
   // Model roles
   chat_provider?: string;
   chat_model?: string;
-  think_provider?: string | null;
-  think_model?: string | null;
-  task_provider?: string | null;
-  task_model?: string | null;
+  tool_model?: string | null;
+  thinking_mode?: string;
+  show_thinking?: boolean;
+  review_mode?: string;
+  review_max_rounds?: number;
+  review_pass_threshold?: number;
   llm_provider?: string;
   llm_temperature?: number;
   llm_max_tokens?: number;
@@ -123,6 +125,14 @@ export interface ModelMemoryStatus {
   loaded_model: string | null;
 }
 
+export interface ModelCapabilities {
+  thinking: boolean;
+  vision: boolean;
+  audio_input: boolean;
+  context_window_tokens: number;
+  structured_output: boolean;
+}
+
 // ── Prompt Templates ──────────────────────────────────────────
 export interface PromptTemplate {
   name: string;
@@ -151,7 +161,7 @@ export interface AgentRecipe {
 }
 
 // ── Chat / Streaming ──────────────────────────────────────────
-export type ChatEventType = "text" | "tool_call" | "done" | "error" | "status";
+export type ChatEventType = "text" | "thinking" | "tool_call" | "tool_result" | "done" | "error" | "status" | "review_status" | "review_revision";
 
 export interface ChatEvent {
   type: ChatEventType;
@@ -199,8 +209,7 @@ export interface ModelRoleAssignment {
 
 export interface ModelActiveRoles {
   chat:  ModelRoleAssignment | null;
-  think: ModelRoleAssignment | null;
-  task:  ModelRoleAssignment | null;
+  tool:  { model: string | null } | null;
   asr:   ModelRoleAssignment | null;
   tts:   ModelRoleAssignment | null;
 }
@@ -240,8 +249,9 @@ export interface HfModelFile {
 export interface DownloadEntry {
   filename: string;
   category: string;
-  progress_pct: number;
-  status: string;
+  downloaded_bytes: number;
+  total_bytes: number | null;
+  status: "downloading" | "done" | "error";
   error?: string;
 }
 
@@ -292,6 +302,27 @@ export interface LogEntry {
   source: string;
   message: string;
   metadata?: string;  // JSON string
+}
+
+// ── Face Recognition models (auto-managed status) ──────────────
+//
+// Mirrors the JSON returned by GET /api/v1/faces/models. The desktop
+// Models section renders this read-only — pond-server downloads the
+// three files automatically on first boot when built with `face-onnx`.
+export interface FaceModelEntry {
+  name: string;        // file basename, e.g. "w600k_r50.onnx"
+  label: string;       // human-readable, e.g. "ArcFace R50"
+  role: "embedding" | "detector" | "antispoof";
+  expected_mb: number;
+  size_mb: number | null;   // null when missing on disk
+  downloaded: boolean;
+  path: string | null;
+}
+
+export interface FaceModelsResponse {
+  feature_enabled: boolean;  // false when pond-server lacks --features face-onnx
+  models_dir: string | null;
+  models: FaceModelEntry[];
 }
 
 // ── API Error ─────────────────────────────────────────────────

@@ -93,6 +93,37 @@ pub fn classify_request(message: &str) -> ModelRole {
     ModelRole::Chat
 }
 
+/// Check if a message is a factual/knowledge question that the Tool Agent
+/// should handle (Wikipedia lookup, weather, etc.) before the main LLM runs.
+///
+/// Deliberately simple — keyword matching is instant and avoids model inference.
+pub fn needs_tool_call(message: &str) -> bool {
+    let mut stripped = message.to_lowercase();
+    for prefix in WAKE_PREFIXES {
+        if let Some(rest) = stripped.strip_prefix(prefix) {
+            stripped = rest.to_string();
+        }
+    }
+    let stripped = stripped.trim();
+
+    const KNOWLEDGE_PREFIXES: &[&str] = &[
+        "who is", "who was", "who are",
+        "what is", "what are", "what was", "what were",
+        "where is", "where are", "where was",
+        "when was", "when did", "when is",
+        "tell me about", "explain ", "describe ",
+        "how does", "how do", "how did",
+        "look up", "search for", "search ", "define ",
+        "can you tell me about",
+    ];
+
+    KNOWLEDGE_PREFIXES.iter().any(|p| stripped.starts_with(p))
+        || stripped.contains("wikipedia")
+        || stripped.contains("weather")
+        || stripped.contains("temperature")
+        || stripped.contains("forecast")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

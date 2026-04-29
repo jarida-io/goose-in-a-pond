@@ -8,6 +8,7 @@ import {
   type Device,
   type DownloadEntry,
   type Extension,
+  type FaceModelsResponse,
   type HandshakeResponse,
   type HealthResponse,
   type HfModel,
@@ -218,6 +219,10 @@ export class PondApiClient {
     });
   }
 
+  getModelCapabilities(): Promise<import("./types").ModelCapabilities> {
+    return this.get("/api/v1/models/capabilities");
+  }
+
   getMemoryStatus(): Promise<ModelMemoryStatus> {
     return this.get("/api/v1/models/memory-status");
   }
@@ -240,8 +245,7 @@ export class PondApiClient {
       }
       return {
         chat:  normalize(raw.chat),
-        think: normalize(raw.think),
-        task:  normalize(raw.task),
+        tool:  raw.tool ?? null,
         asr:   normalize(raw.asr),
         tts:   normalize(raw.tts),
       } as ModelActiveRoles;
@@ -434,6 +438,71 @@ export class PondApiClient {
 
   pullOllamaModel(model: string): Promise<{ status: string }> {
     return this.post("/api/v1/models/ollama/pull", { model });
+  }
+
+  // ── Face Recognition (auto-managed; status only) ──────────
+  //
+  // The desktop Models section binds to this for read-only status of the
+  // ArcFace + SCRFD + Silent-Face PAD models that pond-server downloads
+  // automatically on first boot when built with `--features face-onnx`.
+  listFaceModels(): Promise<FaceModelsResponse> {
+    return this.get("/api/v1/faces/models");
+  }
+
+  // ── Face enrollment / identification (Faces section) ──────
+  //
+  // Multipart-form endpoints — bypass the JSON helpers and use fetch
+  // directly so the request body stays a FormData. All calls require the
+  // `face-onnx` cargo feature; without it pond-server returns 503 which
+  // bubbles up as ApiError(503).
+
+  listProfiles(): Promise<{ profiles: Array<{ id: string; display_name: string; avatar_emoji: string }> }> {
+    return this.get("/api/v1/profiles");
+  }
+
+  async registerFace(profileId: string, frame: Blob): Promise<{
+    id: string; profile_id: string; model_dims: number; created_at: string;
+  }> {
+    const form = new FormData();
+    form.append("profile_id", profileId);
+    form.append("image", frame, "face.jpg");
+    return this.postMultipart("/api/v1/faces/register", form);
+  }
+
+  async identifyFaceBurst(frames: Blob[]): Promise<{
+    identified: boolean;
+    profile_id: string | null;
+    confidence: number | null;
+    threshold: number;
+    reason?: string;
+  }> {
+    const form = new FormData();
+    frames.forEach((f, i) => form.append("image", f, `frame${i}.jpg`));
+    return this.postMultipart("/api/v1/faces/identify-burst", form);
+  }
+
+  listFaceEnrollments(profileId: string): Promise<{
+    profile_id: string;
+    enrollments: Array<{ id: string; profile_id: string; model_dims: number; created_at: string }>;
+    count: number;
+  }> {
+    return this.get(`/api/v1/faces/profile/${encodeURIComponent(profileId)}`);
+  }
+
+  deleteUserBiometrics(profileId: string): Promise<{ profile_id: string; face_embeddings_deleted: number }> {
+    return this.del(`/api/v1/users/${encodeURIComponent(profileId)}/biometrics`);
+  }
+
+  private async postMultipart<T>(path: string, form: FormData): Promise<T> {
+    const headers: Record<string, string> = {};
+    if (this.token) headers["Authorization"] = `Bearer ${this.token}`;
+    const res = await fetch(`${this.base}${path}`, { method: "POST", headers, body: form });
+    if (!res.ok) {
+      let message = `HTTP ${res.status}`;
+      try { message = (await res.text()) || message; } catch { /* ignore */ }
+      throw new ApiError(res.status, message);
+    }
+    return res.json() as Promise<T>;
   }
 
   // ── Llamafile GitHub releases ─────────────────────────────

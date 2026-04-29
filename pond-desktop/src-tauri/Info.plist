@@ -4,5 +4,26 @@
 <dict>
     <key>NSMicrophoneUsageDescription</key>
     <string>Goose In A Pond uses the microphone for voice commands and wake word detection.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Goose In A Pond uses the camera for face-based user recognition during enrollment and wake-on-face identification.</string>
+
+    <!-- Launch Services / Finder integration. Without these the .app can copy
+         into /Applications but Finder won't index it (so it never appears in
+         Launchpad or the Applications grid until you reboot or run
+         `killall Finder`). LSApplicationCategoryType also fixes the App Store
+         category badge and makes Spotlight return the app for keyword search. -->
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.productivity</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>10.15</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+    <!-- Keep the app on screen / dock — explicitly NOT a UI element / agent. -->
+    <key>LSUIElement</key>
+    <false/>
+    <key>LSBackgroundOnly</key>
+    <false/>
 </dict>
 </plist>

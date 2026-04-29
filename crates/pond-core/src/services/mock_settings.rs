@@ -100,7 +100,7 @@ mod tests {
         let repo = MockSettingsRepository::new();
         let s = repo.get().await.unwrap();
         assert_eq!(s.assistant_name, "Goose");
-        assert_eq!(s.llm_max_tokens, 1024);
+        assert_eq!(s.llm_max_tokens, 4096);
     }
 
     #[tokio::test]

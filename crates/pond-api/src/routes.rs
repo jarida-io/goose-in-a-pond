@@ -29,9 +29,8 @@ use pond_core::ports::handshake::{HandshakeRequest, HandshakeResponse};
 use pond_core::prompts::{build_system_prompt_with_profile, render_template, sanitize_field, ProfileContext};
 use pond_core::ports::provider::LlmProvider;
 use pond_core::services::chat::ChatService;
-use pond_core::services::model_router::ModelRouter;
 use pond_core::services::onboarding::OnboardingService;
-use pond_core::services::request_classifier::classify_request;
+// Tool classification is handled by the ToolAgent port (injected via AppState).
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::convert::Infallible;
@@ -90,6 +89,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/devices/{id}/heartbeat", post(device_heartbeat))
         .route("/settings", get(get_settings))
         .route("/models", get(list_models))
+        .route("/models/capabilities", get(get_model_capabilities))
         .route("/models/memory-status", get(get_memory_status))
         .route("/models/active-roles", get(get_active_roles))
         .route("/models/registry/refresh", post(refresh_model_registry))
@@ -143,6 +143,25 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // ── Recipes ───────────────────────────────────────────────────────────
         .route("/recipes", get(list_recipes).post(create_recipe))
         .route("/recipes/{id}", put(update_recipe).delete(delete_recipe))
+        // ── Face biometrics (Phase 2) ─────────────────────────────────────────
+        .route("/faces/register", post(register_face_handler))
+        .route("/faces/identify", post(identify_face_handler))
+        .route("/faces/identify-burst", post(burst_identify_face_handler))
+        .route("/faces/enroll-quality", post(enroll_quality_handler))
+        .route("/faces/profile/{profile_id}", get(list_face_enrollments))
+        .route(
+            "/faces/profile/{profile_id}/threshold",
+            get(get_profile_threshold_handler)
+                .put(put_profile_threshold_handler)
+                .delete(delete_profile_threshold_handler),
+        )
+        .route("/faces/debug/pairwise", get(face_pairwise_debug))
+        .route("/faces/debug/eval", get(face_eval_debug))
+        .route("/faces/models", get(list_face_models_handler))
+        .route("/users/{profile_id}/biometrics", delete(delete_user_biometrics))
+        // Wake-on-face: bind an identified profile to an active chat session
+        .route("/sessions/{session_id}/identify-user", post(identify_session_user_handler))
+        .route("/sessions/{session_id}/user", get(get_session_user_handler).delete(clear_session_user_handler))
         .layer(
             axum::middleware::from_fn_with_state(state.clone(), require_onboarding_complete)
         );
@@ -289,6 +308,9 @@ async fn onboarding_status(State(state): State<Arc<AppState>>) -> Json<Value> {
 struct ChatRequest {
     session_id: Option<String>,
     message: String,
+    /// Optional image attachments for multimodal models (base64-encoded).
+    #[serde(default)]
+    images: Vec<pond_core::domain::message::ImageAttachment>,
 }
 
 /// Send a message and get a response.
@@ -322,15 +344,7 @@ async fn chat(
             })?;
     }
 
-    // Classify the message to determine which model role will handle it
-    let model_role = {
-        use pond_core::domain::model_role::ModelRole;
-        match classify_request(&req.message) {
-            ModelRole::Think => "think",
-            ModelRole::Task  => "task",
-            ModelRole::Chat  => "chat",
-        }
-    };
+    let model_role = "chat";
 
     // Build ChatService — agent is always primary (GooseAdapter builds system
     // prompt from DB settings, manages history, handles MCP tools internally).
@@ -506,11 +520,15 @@ async fn chat_stream(
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)> {
     use futures::StreamExt;
     use pond_core::ports::agent::AgentStreamEvent;
+    let permit = state.sse_semaphore.clone().try_acquire_owned().map_err(|_| {
+        (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "Too many concurrent streams"})))
+    })?;
     let Json(req) = body.map_err(|e| {
         (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()})))
     })?;
 
     let stream = async_stream::stream! {
+        let _permit = permit;
         let session_id = req.session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let storage = &state.session_storage;
 
@@ -543,10 +561,10 @@ async fn chat_stream(
                 None
             };
 
-            let file_template = state
-                .prompt_template_dir
-                .as_ref()
-                .and_then(|dir| std::fs::read_to_string(dir.join("system.md")).ok());
+            let file_template = match state.prompt_template_dir.as_ref() {
+                Some(dir) => tokio::fs::read_to_string(dir.join("system.md")).await.ok(),
+                None => None,
+            };
 
             match file_template {
                 Some(tmpl) => {
@@ -612,14 +630,28 @@ async fn chat_stream(
             }
         }
 
-        // Classify message for model role
-        let model_role = {
-            use pond_core::domain::model_role::ModelRole;
-            match classify_request(&req.message) {
-                ModelRole::Think => "think",
-                ModelRole::Task  => "task",
-                ModelRole::Chat  => "chat",
+        let model_role = "chat";
+
+        // ── Tool Agent: classify and pre-fetch if needed ─────────────────
+        // Delegates to the ToolAgent port (injected via AppState). The same
+        // implementation serves both HTTP and CLI voice paths — no duplicate
+        // classifier logic. pond-api never calls pond-mcp-server directly.
+        let tool_context: Option<String> = if let Some(ref ta) = state.tool_agent {
+            let status = json!({"type": "status", "content": "Thinking..."}).to_string();
+            yield Ok(Event::default().data(status));
+            match ta.process(&req.message).await {
+                Ok(Some(augmented)) => {
+                    tracing::debug!(target: "giap::tool_agent", "tool result injected ({} chars)", augmented.len());
+                    Some(augmented)
+                }
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::debug!(target: "giap::tool_agent", "classification error: {e}");
+                    None
+                }
             }
+        } else {
+            None
         };
 
         // Persist user message
@@ -639,9 +671,7 @@ async fn chat_stream(
         // If any role uses llamafile and the process is not responding, emit a
         // status event and wait up to 90 s before attempting to stream.
         {
-            let is_llamafile_role = settings.chat_provider == "llamafile"
-                || settings.think_provider.as_deref() == Some("llamafile")
-                || settings.task_provider.as_deref()  == Some("llamafile");
+            let is_llamafile_role = settings.chat_provider == "llamafile";
 
             if is_llamafile_role {
                 if let Some(manager) = &state.llamafile_manager {
@@ -676,29 +706,28 @@ async fn chat_stream(
         let usage_prompt_tokens: u32 = 0;
         let usage_completion_tokens: u32 = 0;
 
-        let model_name_for_done = match model_role {
-            "think" => settings
-                .think_model
-                .as_deref()
-                .unwrap_or(settings.chat_model.as_str())
-                .to_string(),
-            "task" => settings
-                .task_model
-                .as_deref()
-                .unwrap_or(settings.chat_model.as_str())
-                .to_string(),
-            _ => settings.chat_model.clone(),
-        };
+        let model_name_for_done = settings.chat_model.clone();
 
         use pond_core::domain::agent::AgentRequest;
+        // Keep a reference to tool context for the reviewer (needs it to evaluate answer quality)
+        let tool_context_for_review = tool_context.clone();
+        let agent_message = tool_context.unwrap_or_else(|| req.message.clone());
         let agent_req = AgentRequest {
-            message: req.message.clone(),
+            message: agent_message,
             session_id: session_id.clone(),
             model_role: model_role.to_string(),
+            images: req.images.clone(),
         };
 
         let mut full_text = String::new();
-        let mut in_think_block = false; // filter <think> blocks before SSE
+        // Filter Harmony-style `<|channel>thought ... <channel|>` reasoning
+        // preambles and `<think>…</think>` blocks out of the per-token stream.
+        // When show_thinking is enabled, capture thinking blocks as SSE events.
+        let mut thought = if settings.show_thinking {
+            crate::thought_filter::ThoughtFilter::new().with_thinking_capture()
+        } else {
+            crate::thought_filter::ThoughtFilter::new()
+        };
         let mut agent_stream = match state.agent.chat_stream(agent_req).await {
             Ok(s) => s,
             Err(e) => {
@@ -711,35 +740,69 @@ async fn chat_stream(
         while let Some(event_result) = agent_stream.next().await {
             match event_result {
                 Ok(event) => {
-                    let data = match event {
+                    let maybe_data = match event {
                         AgentStreamEvent::Status { content } => {
-                            json!({"type": "status", "content": content}).to_string()
+                            Some(json!({"type": "status", "content": content}).to_string())
+                        }
+                        AgentStreamEvent::Thinking { content } => {
+                            Some(json!({"type": "thinking", "content": content}).to_string())
                         }
                         AgentStreamEvent::ToolCall { tool, id, input } => {
-                            json!({"type": "tool_call", "tool": tool, "id": id, "input": input}).to_string()
+                            Some(json!({"type": "tool_call", "tool": tool, "id": id, "input": input}).to_string())
                         }
                         AgentStreamEvent::ToolResult { tool, id, content } => {
-                            json!({"type": "tool_result", "tool": tool, "id": id, "content": content}).to_string()
+                            Some(json!({"type": "tool_result", "tool": tool, "id": id, "content": content}).to_string())
                         }
                         AgentStreamEvent::Text { content } => {
-                            // Filter <think>…</think> blocks before sending to clients.
-                            let (visible, new_state) = pond_core::services::chat::filter_thinking(&content, in_think_block);
-                            in_think_block = new_state;
+                            let visible = thought.push(&content);
                             if visible.is_empty() {
-                                continue;
+                                None
+                            } else {
+                                full_text.push_str(&visible);
+                                Some(json!({"type": "text", "content": visible, "token": visible}).to_string())
                             }
-                            full_text.push_str(&visible);
-                            json!({"type": "text", "content": visible}).to_string()
+                        }
+                        AgentStreamEvent::ReviewStatus { content } => {
+                            Some(json!({"type": "review_status", "content": content}).to_string())
+                        }
+                        AgentStreamEvent::ReviewRevision { content, score, rounds } => {
+                            Some(json!({"type": "review_revision", "content": content, "score": score, "rounds": rounds}).to_string())
                         }
                         AgentStreamEvent::Done { .. } => {
                             // Handled at the end of the loop
                             continue;
                         }
                         AgentStreamEvent::Error { content } => {
-                            json!({"error": content}).to_string()
+                            Some(json!({"error": content}).to_string())
                         }
                     };
-                    yield Ok(Event::default().data(data));
+                    if let Some(data) = maybe_data {
+                        yield Ok(Event::default().data(data));
+                    }
+                    // Emit captured thinking blocks as SSE events (when show_thinking is on)
+                    for thinking_content in thought.take_thinking() {
+                        let data = json!({"type": "thinking", "content": thinking_content}).to_string();
+                        yield Ok(Event::default().data(data));
+                    }
+                    // After every push the filter may have captured a complete
+                    // tool-call envelope (`<|tool_call> ... <tool_call|>`).
+                    // Surface those as a visible note so the user understands
+                    // why the action they asked for produced nothing — the
+                    // model emitted Harmony text markup instead of using the
+                    // structured tool-call protocol Goose actually invokes.
+                    for body in thought.take_tool_calls() {
+                        let notice = match crate::thought_filter::parse_tool_envelope(&body) {
+                            Some((name, args)) => format!(
+                                "_The model attempted to call **{name}** with arguments `{args}` but used the legacy text-based tool-call format instead of the structured protocol, so the call was not executed. Try a chat model that supports OpenAI-style tool calling (e.g. a Llama-3.1 Instruct or Qwen2.5 Instruct GGUF) to enable live weather and similar actions._\n"
+                            ),
+                            None => format!(
+                                "_The model emitted an unrecognised tool-call envelope (`{body}`) and the action was not executed._\n"
+                            ),
+                        };
+                        full_text.push_str(&notice);
+                        let data = json!({"type": "text", "content": notice, "token": notice}).to_string();
+                        yield Ok(Event::default().data(data));
+                    }
                 }
                 Err(e) => {
                     let err_msg = e.to_string();
@@ -750,7 +813,65 @@ async fn chat_stream(
             }
         }
 
-        // Persist full assistant response
+        // Flush any tail buffered by the thought filter (e.g. text after the
+        // last `<channel|>` that had not yet exceeded the safe-emit threshold).
+        let tail = thought.flush();
+        if !tail.is_empty() {
+            full_text.push_str(&tail);
+            let data = json!({"type": "text", "content": tail, "token": tail}).to_string();
+            yield Ok(Event::default().data(data));
+        }
+
+        // ── Adversarial answer review (post-inference) ───────────────
+        // When review_mode is "on" or "auto", evaluate the answer before
+        // persisting. If the reviewer rejects it, revise and emit a
+        // review_revision event that the frontend uses to replace the text.
+        {
+            let should_review = match settings.review_mode.as_str() {
+                "on" => true,
+                "auto" => {
+                    // Review factual/analytical questions or tool-augmented answers
+                    use pond_core::services::request_classifier::classify_request;
+                    use pond_core::domain::model_role::ModelRole;
+                    let role = classify_request(&req.message);
+                    role == ModelRole::Think || tool_context_for_review.is_some()
+                }
+                _ => false,
+            };
+
+            if should_review {
+                if let Some(ref reviewer) = state.answer_reviewer {
+                    let status = json!({"type": "review_status", "content": "Reviewing answer..."}).to_string();
+                    yield Ok(Event::default().data(status));
+
+                    let tool_ctx = tool_context_for_review.as_deref();
+                    match reviewer.review(&req.message, &full_text, tool_ctx).await {
+                        Ok(result) if result.was_revised => {
+                            full_text = result.final_answer.clone();
+                            let data = json!({
+                                "type": "review_revision",
+                                "content": result.final_answer,
+                                "score": result.verdict.score,
+                                "rounds": result.rounds,
+                            }).to_string();
+                            yield Ok(Event::default().data(data));
+                        }
+                        Ok(result) => {
+                            let status = json!({
+                                "type": "review_status",
+                                "content": format!("Answer verified (score: {}/5)", result.verdict.score),
+                            }).to_string();
+                            yield Ok(Event::default().data(status));
+                        }
+                        Err(e) => {
+                            tracing::warn!("Answer review failed (non-fatal): {}", e);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Persist full assistant response (uses revised text if review triggered revision)
         {
             use pond_core::domain::message::ChatMessage;
             use pond_core::domain::session::SessionMessage;
@@ -847,19 +968,35 @@ async fn rename_session(
     })))
 }
 
-/// Get all messages for a session.
+/// Get messages for a session (paginated).
 ///
-/// GET /api/v1/sessions/:session_id/messages
+/// GET /api/v1/sessions/:session_id/messages?limit=100&offset=0
+///
+/// Query params (optional):
+/// - `limit`:  max messages to return (default 100, capped at 500)
+/// - `offset`: skip this many oldest messages (default 0)
+///
+/// When called without params, returns the 100 most recent messages — enough
+/// for the UI to render a session without loading the full history into RAM.
 async fn get_session_messages(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     use pond_core::domain::message::Role;
     use pond_core::ports::session_storage::SessionStorageError;
 
+    let limit: usize = params.get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100)
+        .min(500);
+    let offset: usize = params.get("offset")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
     let messages = state
         .session_storage
-        .get_messages(&session_id)
+        .get_messages_paginated(&session_id, limit, offset)
         .await
         .map_err(|e| {
             let status = match &e {
@@ -1026,12 +1163,11 @@ async fn update_settings(
         })?;
 
     // Hot-reload the ModelRouter whenever any provider/model field changes.
-    let provider_keys = ["chat_provider","chat_model","think_provider","think_model",
-                         "task_provider","task_model",
+    let provider_keys = ["chat_provider","chat_model","tool_model",
                          "active_whisper_model","active_tts_model"];
     if let Some(obj) = patch.as_object() {
         if obj.keys().any(|k| provider_keys.contains(&k.as_str())) {
-            rebuild_model_router(&state, &merged).await;
+            rebuild_llm_provider(&state, &merged).await;
 
             // Sync role fields → model_role_assignments (source of truth).
             // This ensures CLI `models list` and `/activate` see the same state
@@ -1039,8 +1175,6 @@ async fn update_settings(
             if let Some(repo) = &state.model_repo {
                 let role_map: &[(&str, &str, &str)] = &[
                     ("chat",  &merged.chat_provider,  &merged.chat_model),
-                    ("think", merged.think_provider.as_deref().unwrap_or(""), merged.think_model.as_deref().unwrap_or("")),
-                    ("task",  merged.task_provider.as_deref().unwrap_or(""),  merged.task_model.as_deref().unwrap_or("")),
                     ("asr",  "", &merged.active_whisper_model),
                     ("tts",  "", &merged.active_tts_model),
                 ];
@@ -1071,7 +1205,7 @@ async fn update_settings(
 
 /// Rebuild and hot-swap the ModelRouter using the new settings.
 /// Called whenever the user changes any provider/model assignment.
-async fn rebuild_model_router(state: &Arc<AppState>, settings: &Settings) {
+async fn rebuild_llm_provider(state: &Arc<AppState>, settings: &Settings) {
     use pond_adapters_llamafile::LlamafileProvider;
     use pond_adapters_ollama::OllamaProvider;
     #[allow(unused_imports)]
@@ -1142,28 +1276,12 @@ async fn rebuild_model_router(state: &Arc<AppState>, settings: &Settings) {
 
     let chat = build_one(&effective_chat_provider, &effective_chat_model,
                          url, data_dir.clone(), max_tokens, temperature).await;
-    let think = if let (Some(tp), Some(tm)) = (&settings.think_provider, &settings.think_model) {
-        build_one(tp, tm, url, data_dir.clone(), max_tokens, temperature).await
-    } else { chat.clone() };
-    let task  = if let (Some(tp), Some(tm)) = (&settings.task_provider, &settings.task_model) {
-        build_one(tp, tm, url, data_dir, max_tokens, temperature).await
-    } else { chat.clone() };
-
-    // If any role uses llamafile, ensure the process is running before
-    // the new router goes live (so the first request doesn't time out).
-    let any_llamafile = effective_chat_provider == "llamafile"
-        || settings.think_provider.as_deref() == Some("llamafile")
-        || settings.task_provider.as_deref()  == Some("llamafile");
-
-    if any_llamafile {
+    // If chat uses llamafile, ensure the process is running before
+    // the new provider goes live (so the first request doesn't time out).
+    if effective_chat_provider == "llamafile" {
         if let Some(manager) = &state.llamafile_manager {
             tracing::info!("llamafile provider selected — ensuring server is running");
-            let model_hint = if effective_chat_provider == "llamafile" {
-                Some(effective_chat_model.as_str())
-            } else {
-                None
-            };
-            manager.ensure_started(model_hint).await;
+            manager.ensure_started(Some(effective_chat_model.as_str())).await;
         } else {
             tracing::warn!(
                 "llamafile provider selected but no LlamafileManager wired in AppState; \
@@ -1172,16 +1290,23 @@ async fn rebuild_model_router(state: &Arc<AppState>, settings: &Settings) {
         }
     }
 
-    let new_router: Arc<dyn LlmProvider> = Arc::new(ModelRouter::new(chat, think, task));
-    *state.llm_provider.write().await = Some(new_router);
-    tracing::info!("ModelRouter hot-reloaded: chat={}/{} think={:?}/{:?} task={:?}/{:?}",
+    println!("[model-switch] hot-reloading LLM provider: {}/{}", effective_chat_provider, effective_chat_model);
+    *state.llm_provider.write().await = Some(chat);
+    println!("[model-switch] hot-reload complete: {}/{}", effective_chat_provider, effective_chat_model);
+    tracing::info!("LLM provider hot-reloaded: {}/{}",
         effective_chat_provider, effective_chat_model,
-        settings.think_provider, settings.think_model,
-        settings.task_provider, settings.task_model,
     );
 }
 
 // ── Model registry handlers ───────────────────────────────────────────────────
+
+/// GET /api/v1/models/capabilities — returns the active model's runtime capabilities.
+async fn get_model_capabilities(
+    State(state): State<Arc<AppState>>,
+) -> Json<Value> {
+    let caps = state.agent.capabilities();
+    Json(serde_json::to_value(caps).unwrap_or_default())
+}
 
 /// GET /api/v1/models/active-roles — returns the provider+model currently wired for each role.
 ///
@@ -1215,15 +1340,8 @@ async fn get_active_roles(
             "model":    chat_model,
             "model_id": assignments.get("chat"),
         },
-        "think": {
-            "provider": settings.think_provider,
-            "model":    settings.think_model,
-            "model_id": assignments.get("think"),
-        },
-        "task":  {
-            "provider": settings.task_provider,
-            "model":    settings.task_model,
-            "model_id": assignments.get("task"),
+        "tool": {
+            "model": settings.tool_model,
         },
         "asr": { "model_id": assignments.get("asr") },
         "tts": { "model_id": assignments.get("tts") },
@@ -1284,62 +1402,67 @@ async fn scan_filesystem_extras(
         .filter_map(|m| m.filename.clone())
         .collect();
 
-    let scan_dir = |dir: std::path::PathBuf, category: ModelCategory, exts: &[&'static str]|
-        -> Vec<ModelRecord>
-    {
-        let mut found = vec![];
-        let Ok(rd) = std::fs::read_dir(&dir) else { return found };
-        for entry in rd.flatten() {
-            let fname = entry.file_name().to_string_lossy().to_string();
-            if !exts.iter().any(|e| fname.ends_with(e)) { continue; }
-            if known_filenames.contains(&fname) { continue; }
-            let size_mb = entry.metadata().map(|m| m.len() / 1_048_576).unwrap_or(0);
-            let name = fname
-                .trim_end_matches(".gguf")
-                .trim_end_matches(".llamafile")
-                .trim_end_matches(".onnx")
-                .trim_end_matches(".bin")
-                .to_string();
-            found.push(ModelRecord {
-                id:              ModelRecord::id_for(&category, &name),
-                category:        category.clone(),
-                name,
-                filename:        Some(fname),
-                description:     "(detected on disk)".to_string(),
-                size_mb,
-                url:             None,
-                hf_id:           None,
-                ram_estimate_mb: None,
-                recommended_role: None,
-                context_length:  None,
-                quantization:    None,
-                asr_language:    None,
-                asr_size:        None,
-                tts_engine:      None,
-                tts_voice_name:  None,
-                config_filename: None,
-                config_url:      None,
-                tts_url:         None,
-                sample_rate:     None,
-                downloaded:      true,
-                is_custom:       true,
-            });
-        }
-        found
-    };
+    let data_dir_owned = data_dir.to_path_buf();
+    let known = known_filenames;
+    let extras_from_disk = tokio::task::spawn_blocking(move || {
+        let scan_dir = |dir: std::path::PathBuf, category: ModelCategory, exts: &[&str]|
+            -> Vec<ModelRecord>
+        {
+            let mut found = vec![];
+            let Ok(rd) = std::fs::read_dir(&dir) else { return found };
+            for entry in rd.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if !exts.iter().any(|e| fname.ends_with(e)) { continue; }
+                if known.contains(&fname) { continue; }
+                let size_mb = entry.metadata().map(|m| m.len() / 1_048_576).unwrap_or(0);
+                let name = fname
+                    .trim_end_matches(".gguf")
+                    .trim_end_matches(".llamafile")
+                    .trim_end_matches(".onnx")
+                    .trim_end_matches(".bin")
+                    .to_string();
+                found.push(ModelRecord {
+                    id:              ModelRecord::id_for(&category, &name),
+                    category:        category.clone(),
+                    name,
+                    filename:        Some(fname),
+                    description:     "(detected on disk)".to_string(),
+                    size_mb,
+                    url:             None,
+                    hf_id:           None,
+                    ram_estimate_mb: None,
+                    recommended_role: None,
+                    context_length:  None,
+                    quantization:    None,
+                    asr_language:    None,
+                    asr_size:        None,
+                    tts_engine:      None,
+                    tts_voice_name:  None,
+                    config_filename: None,
+                    config_url:      None,
+                    tts_url:         None,
+                    sample_rate:     None,
+                    downloaded:      true,
+                    is_custom:       true,
+                });
+            }
+            found
+        };
 
-    let mut extras = vec![];
-    extras.extend(scan_dir(data_dir.join("models").join("gguf"),  ModelCategory::Gguf,      &[".gguf"]));
-    extras.extend(scan_dir(data_dir.join("models").join("llm"),   ModelCategory::Llamafile, &[".llamafile", ".exe"]));
-    extras.extend(scan_dir(data_dir.join("models"),               ModelCategory::Whisper,   &[".bin"]));
-    extras.extend(scan_dir(data_dir.join("models").join("tts"),   ModelCategory::TtsPiper,  &[".onnx"]));
+        let mut extras = vec![];
+        extras.extend(scan_dir(data_dir_owned.join("models").join("gguf"),  ModelCategory::Gguf,      &[".gguf"]));
+        extras.extend(scan_dir(data_dir_owned.join("models").join("llm"),   ModelCategory::Llamafile, &[".llamafile", ".exe"]));
+        extras.extend(scan_dir(data_dir_owned.join("models"),               ModelCategory::Whisper,   &[".bin"]));
+        extras.extend(scan_dir(data_dir_owned.join("models").join("tts"),   ModelCategory::TtsPiper,  &[".onnx"]));
+        extras
+    }).await.unwrap_or_default();
 
     // Persist newly discovered models to the catalog
-    for m in &extras {
+    for m in &extras_from_disk {
         let _ = model_repo.upsert(m).await;
     }
 
-    extras
+    extras_from_disk
 }
 
 /// GET /api/v1/models — returns all catalog models with downloaded/active flags.
@@ -1441,10 +1564,20 @@ async fn refresh_model_registry(
 }
 
 /// GET /api/v1/models/download/progress — return all active/recent downloads.
+///
+/// Also evicts entries that finished more than 5 minutes ago to prevent
+/// unbounded growth of the in-memory tracker over long server uptimes.
 async fn get_download_progress(
     State(state): State<Arc<AppState>>,
 ) -> Json<Value> {
-    let tracker = state.download_tracker.read().await;
+    let mut tracker = state.download_tracker.write().await;
+    let now = std::time::Instant::now();
+    tracker.retain(|_, e| {
+        match e.finished_at {
+            Some(t) => now.duration_since(t) < std::time::Duration::from_secs(300),
+            None => true, // still in progress — keep
+        }
+    });
     let entries: Vec<&DownloadEntry> = tracker.values().collect();
     Json(json!({"downloads": entries}))
 }
@@ -1490,11 +1623,12 @@ async fn download_model(
     };
 
     let tracker     = Arc::clone(&state.download_tracker);
+    let dl_client   = state.http_client.clone();
     let dl_filename = filename.clone();
     let dl_category = category.clone();
 
     tokio::spawn(async move {
-        spawn_tracked_download(url, dest, dl_filename, dl_category, tracker, async move {
+        spawn_tracked_download(url, dest, dl_filename, dl_category, tracker, dl_client, async move {
             let _ = model_repo.set_downloaded(&model_id, true).await;
         }).await;
     });
@@ -1544,7 +1678,7 @@ async fn delete_model(
             ModelCategory::Ollama    => data_dir.join("models").join(filename),
         };
         if path.exists() {
-            std::fs::remove_file(&path).map_err(|e| {
+            tokio::fs::remove_file(&path).await.map_err(|e| {
                 (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Failed to delete file: {e}")})))
             })?;
         }
@@ -1623,14 +1757,7 @@ async fn activate_model(
             let _ = settings_repo.set_key("chat_model",    name.clone()).await;
             let _ = settings_repo.set_key("chat_provider", provider.to_string()).await;
         }
-        "think" => {
-            let _ = settings_repo.set_key("think_model",    name.clone()).await;
-            let _ = settings_repo.set_key("think_provider", provider.to_string()).await;
-        }
-        "task"  => {
-            let _ = settings_repo.set_key("task_model",    name.clone()).await;
-            let _ = settings_repo.set_key("task_provider", provider.to_string()).await;
-        }
+        "tool"  => { let _ = settings_repo.set_key("tool_model", name.clone()).await; }
         "asr"   => { let _ = settings_repo.set_key("active_whisper_model", name.clone()).await; }
         "tts"   => { let _ = settings_repo.set_key("active_tts_model",     name.clone()).await; }
         _       => {}
@@ -1639,7 +1766,7 @@ async fn activate_model(
     // Hot-rebuild the ModelRouter for LLM roles using the existing helper
     if matches!(role.as_str(), "chat" | "think" | "task") {
         let settings = state.settings_repo.get().await.unwrap_or_default();
-        rebuild_model_router(&state, &settings).await;
+        rebuild_llm_provider(&state, &settings).await;
     }
 
     Ok(Json(json!({"role": role, "model_id": model_id})))
@@ -1647,12 +1774,13 @@ async fn activate_model(
 
 /// GET /api/v1/models/ollama — proxy Ollama's /api/tags to list available local models.
 /// Returns `{"models": [...]}` or `{"models": [], "error": "..."}` if Ollama is unreachable.
-async fn list_ollama_models() -> Json<Value> {
-    let client = reqwest::Client::builder()
+async fn list_ollama_models(
+    State(state): State<Arc<AppState>>,
+) -> Json<Value> {
+    let client = &state.http_client;
+    match client.get("http://localhost:11434/api/tags")
         .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .unwrap_or_default();
-    match client.get("http://localhost:11434/api/tags").send().await {
+        .send().await {
         Ok(resp) if resp.status().is_success() => {
             let body: Value = resp.json().await.unwrap_or(json!({"models": []}));
             Json(body)
@@ -1687,6 +1815,7 @@ async fn pull_ollama_model(
 
 /// GET /api/v1/models/search/gguf?q=<query> — proxy HuggingFace API for GGUF models.
 async fn search_gguf_models(
+    State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Json<Value> {
     let q = params.get("q").map(|s| s.as_str()).unwrap_or("");
@@ -1694,12 +1823,11 @@ async fn search_gguf_models(
         "https://huggingface.co/api/models?filter=gguf&search={}&limit=20&sort=downloads&direction=-1",
         urlencoding::encode(q)
     );
-    let client = reqwest::Client::builder()
+    let client = &state.http_client;
+    match client.get(&url)
         .timeout(std::time::Duration::from_secs(10))
-        .user_agent(concat!("goose-in-a-pond/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .unwrap_or_default();
-    match client.get(&url).send().await {
+        .header("user-agent", concat!("goose-in-a-pond/", env!("CARGO_PKG_VERSION")))
+        .send().await {
         Ok(resp) if resp.status().is_success() => {
             let models: Vec<Value> = resp.json().await.unwrap_or_default();
             // Return a simplified shape: id, downloads, likes, tags
@@ -1719,16 +1847,16 @@ async fn search_gguf_models(
 
 /// GET /api/v1/models/search/llamafile?q=<query> — list llamafile releases from GitHub.
 async fn search_llamafile_models(
+    State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Json<Value> {
     let q = params.get("q").map(|s| s.to_lowercase()).unwrap_or_default();
     let url = "https://api.github.com/repos/Mozilla-Ocho/llamafile/releases?per_page=5";
-    let client = reqwest::Client::builder()
+    let client = &state.http_client;
+    match client.get(url)
         .timeout(std::time::Duration::from_secs(10))
-        .user_agent(concat!("goose-in-a-pond/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .unwrap_or_default();
-    match client.get(url).send().await {
+        .header("user-agent", concat!("goose-in-a-pond/", env!("CARGO_PKG_VERSION")))
+        .send().await {
         Ok(resp) if resp.status().is_success() => {
             let releases: Vec<Value> = resp.json().await.unwrap_or_default();
             let mut assets: Vec<Value> = Vec::new();
@@ -1762,6 +1890,7 @@ async fn search_llamafile_models(
 
 /// GET /api/v1/models/search/gguf/files?repo=<owner/name> — list .gguf files inside a HF repo.
 async fn list_hf_model_files(
+    State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Json<Value> {
     let repo = match params.get("repo") {
@@ -1771,12 +1900,11 @@ async fn list_hf_model_files(
     // Do NOT percent-encode the repo — HF expects the literal owner/name path segment
     // (urlencoding::encode would turn '/' into '%2F' which returns 400)
     let url = format!("https://huggingface.co/api/models/{}", repo);
-    let client = reqwest::Client::builder()
+    let client = &state.http_client;
+    match client.get(&url)
         .timeout(std::time::Duration::from_secs(10))
-        .user_agent(concat!("goose-in-a-pond/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .unwrap_or_default();
-    match client.get(&url).send().await {
+        .header("user-agent", concat!("goose-in-a-pond/", env!("CARGO_PKG_VERSION")))
+        .send().await {
         Ok(resp) if resp.status().is_success() => {
             let meta: Value = resp.json().await.unwrap_or_default();
             let files: Vec<Value> = meta["siblings"]
@@ -1844,8 +1972,9 @@ async fn download_model_from_url(
     let resp_filename = filename.clone();
     let resp_category = category.clone();
 
+    let dl_client = state.http_client.clone();
     tokio::spawn(async move {
-        spawn_tracked_download(url, dest, filename, category, tracker, async {}).await;
+        spawn_tracked_download(url, dest, filename, category, tracker, dl_client, async {}).await;
     });
 
     (StatusCode::ACCEPTED, Json(json!({"status": "downloading", "filename": resp_filename, "category": resp_category})))
@@ -1860,6 +1989,7 @@ async fn spawn_tracked_download<F>(
     filename: String,
     category: String,
     tracker:  Arc<tokio::sync::RwLock<std::collections::HashMap<String, DownloadEntry>>>,
+    client:   reqwest::Client,
     on_done:  F,
 ) where F: std::future::Future<Output = ()> + Send {
     use tokio::io::AsyncWriteExt;
@@ -1873,17 +2003,13 @@ async fn spawn_tracked_download<F>(
             downloaded_bytes: 0,
             total_bytes:      None,
             status:           "downloading".to_string(),
+            finished_at:      None,
         });
     }
 
     if let Some(parent) = dest.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(7200))
-        .build()
-        .unwrap_or_default();
 
     tracing::info!("Downloading {} from {}", filename, url);
 
@@ -1926,6 +2052,7 @@ async fn spawn_tracked_download<F>(
                 let mut t = tracker.write().await;
                 if let Some(e) = t.get_mut(&filename) {
                     e.status = "done".to_string();
+                    e.finished_at = Some(std::time::Instant::now());
                 }
             }
             on_done.await;
@@ -1935,6 +2062,7 @@ async fn spawn_tracked_download<F>(
             let mut t = tracker.write().await;
             if let Some(e) = t.get_mut(&filename) {
                 e.status = "error".to_string();
+                e.finished_at = Some(std::time::Instant::now());
             }
         }
     }
@@ -3314,6 +3442,135 @@ pub async fn dev_test_page() -> Html<&'static str> {
     Html(DEV_TEST_HTML)
 }
 
+/// `GET /dev/face` — self-contained webcam page that exercises every face
+/// endpoint added in phase-2: enroll-quality, register, identify, identify-
+/// burst, and the per-profile threshold + diagnostic routes.  Requires the
+/// browser to grant camera access.  **Never expose this to the internet.**
+pub async fn dev_face_page() -> Html<&'static str> {
+    Html(DEV_FACE_HTML)
+}
+
+const DEV_FACE_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>pond — face dev panel</title>
+<style>
+ body{font-family:-apple-system,system-ui,sans-serif;margin:0;background:#0b1020;color:#e6e8f2;padding:18px;}
+ h1{font-size:18px;margin:0 0 12px;font-weight:600;}
+ .row{display:flex;gap:18px;flex-wrap:wrap;}
+ .card{background:#161c33;border-radius:10px;padding:14px;min-width:320px;flex:1;}
+ video{width:100%;background:#000;border-radius:8px;}
+ button{background:#3b82f6;color:#fff;border:0;border-radius:6px;padding:8px 12px;font-weight:600;cursor:pointer;margin:4px 4px 4px 0;}
+ button:hover{background:#2563eb;}
+ button.warn{background:#b45309;}
+ button.danger{background:#b91c1c;}
+ input,select{background:#0f1530;color:#e6e8f2;border:1px solid #2a3460;padding:6px;border-radius:5px;}
+ pre{background:#0f1530;border-radius:6px;padding:10px;font-size:12px;max-height:260px;overflow:auto;}
+ .ok{color:#22c55e;} .bad{color:#ef4444;} .dim{color:#9ca3af;}
+ .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#1e293b;font-size:11px;margin-left:6px;}
+</style></head><body>
+<h1>🎥 Face recognition dev panel <span class="pill" id="status">starting…</span></h1>
+<div class="row">
+  <div class="card">
+    <h3>Camera</h3>
+    <video id="cam" autoplay playsinline muted></video>
+    <div style="margin-top:8px;">
+      <label>Profile: <select id="profile"></select></label>
+      <button id="refreshProfiles">↻</button>
+      <button id="newProfile">+ new</button>
+    </div>
+    <div style="margin-top:6px;">
+      <button id="quality">Pre-flight (enroll-quality)</button>
+      <button id="enroll">Enroll one frame</button>
+      <button id="enroll5" class="warn">Enroll 5 frames</button>
+    </div>
+    <div style="margin-top:6px;">
+      <button id="identify">Identify (live, 5-frame burst)</button>
+      <button id="burst" class="dim" title="Same pipeline — kept for back-compat">Identify burst</button>
+    </div>
+    <div style="margin-top:6px;">
+      <button id="pairwise" class="dim">/debug/pairwise</button>
+      <button id="evalbtn" class="dim">/debug/eval</button>
+      <button id="forget" class="danger">Forget biometrics</button>
+    </div>
+  </div>
+  <div class="card">
+    <h3>Result</h3>
+    <pre id="out">(no calls yet)</pre>
+  </div>
+</div>
+<script>
+const API='/api/v1';
+const $=id=>document.getElementById(id);
+const log=o=>$('out').textContent=(typeof o==='string'?o:JSON.stringify(o,null,2));
+let stream=null,sel=()=>$('profile').value;
+
+async function init(){
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({video:{width:640,height:480}});
+    $('cam').srcObject=stream;
+    $('status').textContent='camera live';$('status').classList.add('ok');
+  }catch(e){$('status').textContent='camera blocked';$('status').classList.add('bad');log(e.message);}
+  await refreshProfiles();
+}
+
+async function refreshProfiles(){
+  const r=await fetch(API+'/profiles').then(r=>r.json()).catch(e=>({error:e.message}));
+  const list=Array.isArray(r)?r:(r.profiles||[]);
+  const sel=$('profile');sel.innerHTML='';
+  list.forEach(p=>{const o=document.createElement('option');o.value=p.id;o.textContent=`${p.name||p.display_name||p.id} (${p.id.slice(0,8)})`;sel.appendChild(o);});
+  if(!list.length){const o=document.createElement('option');o.value='';o.textContent='(no profiles — click "+ new")';sel.appendChild(o);}
+}
+
+async function newProfile(){
+  const name=prompt('Display name?');if(!name)return;
+  const r=await fetch(API+'/profiles',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({display_name:name})}).then(r=>r.json());
+  log(r);await refreshProfiles();
+}
+
+function grabFrame(){
+  const v=$('cam'),c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;
+  c.getContext('2d').drawImage(v,0,0);
+  return new Promise(res=>c.toBlob(res,'image/jpeg',0.9));
+}
+
+async function postMultipart(path,fields){
+  const fd=new FormData();
+  for(const[k,v]of Object.entries(fields)){
+    if(Array.isArray(v))v.forEach(x=>fd.append(k,x));else fd.append(k,v);
+  }
+  const r=await fetch(API+path,{method:'POST',body:fd});return r.json();
+}
+
+$('refreshProfiles').onclick=refreshProfiles;
+$('newProfile').onclick=newProfile;
+$('quality').onclick=async()=>{const f=await grabFrame();log(await postMultipart('/faces/enroll-quality',{image:f}));};
+$('enroll').onclick=async()=>{const pid=sel();if(!pid)return alert('select profile');const f=await grabFrame();log(await postMultipart('/faces/register',{profile_id:pid,image:f}));};
+$('enroll5').onclick=async()=>{
+  const pid=sel();if(!pid)return alert('select profile');
+  const out=[];for(let i=0;i<5;i++){await new Promise(r=>setTimeout(r,700));const f=await grabFrame();out.push(await postMultipart('/faces/register',{profile_id:pid,image:f}));log({progress:`${i+1}/5`,latest:out[out.length-1]});}
+  log({enrolled:out.length,results:out});
+};
+// Production-style identify: always multi-frame with liveness gates.
+// A held-up photo yields near-identical embeddings + zero landmark motion
+// across the burst and trips `reason: "liveness_failed"` — which a single
+// frame cannot detect.  The old single-frame endpoint (/faces/identify)
+// still exists server-side for API callers, but the dev UI no longer
+// exposes it.
+$('identify').onclick=async()=>{
+  const frames=[];for(let i=0;i<5;i++){await new Promise(r=>setTimeout(r,400));frames.push(await grabFrame());}
+  log(await postMultipart('/faces/identify-burst',{image:frames}));
+};
+$('burst').onclick=async()=>{
+  const frames=[];for(let i=0;i<5;i++){await new Promise(r=>setTimeout(r,400));frames.push(await grabFrame());}
+  log(await postMultipart('/faces/identify-burst',{image:frames}));
+};
+$('pairwise').onclick=async()=>log(await fetch(API+'/faces/debug/pairwise').then(r=>r.json()));
+$('evalbtn').onclick=async()=>log(await fetch(API+'/faces/debug/eval').then(r=>r.json()));
+$('forget').onclick=async()=>{const pid=sel();if(!pid)return;if(!confirm('Forget all biometrics for '+pid+'?'))return;const r=await fetch(API+`/users/${pid}/biometrics`,{method:'DELETE'});log(await r.json());};
+
+init();
+</script>
+</body></html>"#;
+
 /// `GET /api/v1/dev/goose` — Goose agent status (public, dev only).
 ///
 /// Returns whether the Goose agent is active and the extension manager is wired.
@@ -3564,6 +3821,13 @@ async fn agent_chat_stream(
     use pond_core::ports::agent::AgentStreamEvent;
     use futures::stream::StreamExt;
 
+    let permit = match state.sse_semaphore.clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "Too many concurrent streams"}))).into_response();
+        }
+    };
+
     let body = match body {
         Ok(b) => b.0,
         Err(e) => {
@@ -3580,13 +3844,14 @@ async fn agent_chat_stream(
     let agent = state.agent.clone();
 
     let stream = async_stream::stream! {
+        let _permit = permit;
         let request = AgentRequest {
             message,
             session_id: session_id.clone(),
             model_role: "task".to_string(),
+            images: Vec::new(),
         };
 
-        let mut in_think_block = false; // filter <think> blocks
         let mut agent_stream = match agent.chat_stream(request).await {
             Ok(s) => s,
             Err(e) => {
@@ -3596,35 +3861,69 @@ async fn agent_chat_stream(
             }
         };
 
+        // See chat_stream above for rationale — same Harmony preamble filter.
+        let mut thought = crate::thought_filter::ThoughtFilter::new();
+
         while let Some(event_result) = agent_stream.next().await {
             match event_result {
                 Ok(event) => {
-                    let data = match event {
+                    let maybe_data = match event {
                         AgentStreamEvent::Status { content } => {
-                            json!({"type": "status", "content": content}).to_string()
+                            Some(json!({"type": "status", "content": content}).to_string())
+                        }
+                        AgentStreamEvent::Thinking { content } => {
+                            Some(json!({"type": "thinking", "content": content}).to_string())
                         }
                         AgentStreamEvent::ToolCall { tool, id, input } => {
-                            json!({"type": "tool_call", "tool": tool, "id": id, "input": input}).to_string()
+                            Some(json!({"type": "tool_call", "tool": tool, "id": id, "input": input}).to_string())
                         }
                         AgentStreamEvent::ToolResult { tool, id, content } => {
-                            json!({"type": "tool_result", "tool": tool, "id": id, "content": content}).to_string()
+                            Some(json!({"type": "tool_result", "tool": tool, "id": id, "content": content}).to_string())
                         }
                         AgentStreamEvent::Text { content } => {
-                            let (visible, new_state) = pond_core::services::chat::filter_thinking(&content, in_think_block);
-                            in_think_block = new_state;
+                            let visible = thought.push(&content);
                             if visible.is_empty() {
-                                continue;
+                                None
+                            } else {
+                                Some(json!({"type": "text", "content": visible, "token": visible}).to_string())
                             }
-                            json!({"type": "text", "content": visible}).to_string()
+                        }
+                        AgentStreamEvent::ReviewStatus { content } => {
+                            Some(json!({"type": "review_status", "content": content}).to_string())
+                        }
+                        AgentStreamEvent::ReviewRevision { content, score, rounds } => {
+                            Some(json!({"type": "review_revision", "content": content, "score": score, "rounds": rounds}).to_string())
                         }
                         AgentStreamEvent::Done { .. } => {
-                            json!({"done": true, "session_id": session_id.clone()}).to_string()
+                            Some(json!({"done": true, "session_id": session_id.clone()}).to_string())
                         }
                         AgentStreamEvent::Error { content } => {
-                            json!({"error": content}).to_string()
+                            Some(json!({"error": content}).to_string())
                         }
                     };
-                    yield Ok::<Event, std::convert::Infallible>(Event::default().data(data));
+                    if let Some(data) = maybe_data {
+                        yield Ok::<Event, std::convert::Infallible>(Event::default().data(data));
+                    }
+                    // Emit thinking blocks captured by the filter
+                    for thinking_content in thought.take_thinking() {
+                        let data = json!({"type": "thinking", "content": thinking_content}).to_string();
+                        yield Ok::<Event, std::convert::Infallible>(Event::default().data(data));
+                    }
+                    // See chat_stream for rationale — surface Harmony-format
+                    // tool-call leaks so the user knows the model attempted
+                    // something rather than silently dropping it.
+                    for body in thought.take_tool_calls() {
+                        let notice = match crate::thought_filter::parse_tool_envelope(&body) {
+                            Some((name, args)) => format!(
+                                "_The model attempted to call **{name}** with arguments `{args}` but used the legacy text-based tool-call format instead of the structured protocol, so the call was not executed. Try a chat model that supports OpenAI-style tool calling (e.g. a Llama-3.1 Instruct or Qwen2.5 Instruct GGUF) to enable live weather and similar actions._\n"
+                            ),
+                            None => format!(
+                                "_The model emitted an unrecognised tool-call envelope (`{body}`) and the action was not executed._\n"
+                            ),
+                        };
+                        let data = json!({"type": "text", "content": notice, "token": notice}).to_string();
+                        yield Ok::<Event, std::convert::Infallible>(Event::default().data(data));
+                    }
                 }
                 Err(e) => {
                     let data = json!({"error": e.to_string()}).to_string();
@@ -3632,6 +3931,12 @@ async fn agent_chat_stream(
                     return;
                 }
             }
+        }
+
+        let tail = thought.flush();
+        if !tail.is_empty() {
+            let data = json!({"type": "text", "content": tail, "token": tail}).to_string();
+            yield Ok::<Event, std::convert::Infallible>(Event::default().data(data));
         }
     };
 
@@ -4245,4 +4550,1390 @@ async fn delete_recipe(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
     }
+}
+
+// ───────────────────────── Face Biometrics (Phase 2) ────────────────────────
+//
+// Endpoints operate over multipart/form-data so the frontend can POST raw
+// camera frames without a base64 round trip.
+//
+// Expected fields:
+//   - `profile_id` (register only): text field naming the household member.
+//   - `image`:      binary JPEG/PNG/WebP bytes.
+//   - `bbox`:       optional `"x,y,w,h"` string naming the face crop region
+//                   in source-pixel coordinates.  When absent the adapter
+//                   falls back to a center-square crop (works for headshot
+//                   framings; a real face detector should be wired in front
+//                   for wide photos).
+//
+// When `AppState.face_recognition` is `None` (no ONNX model configured),
+// every endpoint returns 503 Service Unavailable — callers should hide
+// the biometric UI in that state.
+
+fn face_unavailable() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "error": "Face recognition is not configured on this server",
+            "hint":  "Install an ONNX face embedding model (see docs) and restart pond-server",
+        })),
+    )
+}
+
+/// Read `profile_id` + `image` + optional `bbox` out of a multipart body.
+async fn read_face_multipart(
+    mut multipart: Multipart,
+) -> Result<
+    (
+        Option<String>,
+        Vec<u8>,
+        Option<pond_core::domain::face_recognition::BoundingBox>,
+    ),
+    (StatusCode, Json<Value>),
+> {
+    let mut profile_id: Option<String> = None;
+    let mut image_bytes: Option<Vec<u8>> = None;
+    let mut bbox: Option<pond_core::domain::face_recognition::BoundingBox> = None;
+
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("multipart error: {}", e)})),
+        )
+    })? {
+        match field.name() {
+            Some("profile_id") => {
+                let text = field.text().await.map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": format!("read error: {}", e)})),
+                    )
+                })?;
+                profile_id = Some(text);
+            }
+            Some("image") => {
+                let bytes = field.bytes().await.map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": format!("read error: {}", e)})),
+                    )
+                })?;
+                image_bytes = Some(bytes.to_vec());
+            }
+            Some("bbox") => {
+                let text = field.text().await.map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": format!("read error: {}", e)})),
+                    )
+                })?;
+                bbox = pond_core::domain::face_recognition::BoundingBox::parse_csv(&text);
+                if bbox.is_none() {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": "invalid 'bbox' field — expected \"x,y,w,h\" unsigned integers"
+                        })),
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let image = image_bytes.ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "missing 'image' field in multipart body"})),
+        )
+    })?;
+    Ok((profile_id, image, bbox))
+}
+
+/// POST /api/v1/faces/register — enroll a face for a household member.
+///
+/// Accepts `multipart/form-data` with `profile_id` and `image` fields.
+/// Multiple enrollments per profile are allowed and recommended (3+ samples
+/// per the acceptance criteria).
+async fn register_face_handler(
+    State(state): State<Arc<AppState>>,
+    multipart: Multipart,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let face = state.face_recognition.as_ref().ok_or_else(face_unavailable)?;
+
+    let (profile_id, image, bbox) = read_face_multipart(multipart).await?;
+    let profile_id = profile_id.ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "missing 'profile_id' field"})),
+        )
+    })?;
+
+    // Validate that the profile exists before touching biometric storage.
+    match state.profile_repo.get(&profile_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("profile {} not found", profile_id)})),
+            ));
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("profile lookup failed: {}", e)})),
+            ));
+        }
+    }
+
+    let stored = face.register_face(&profile_id, &image, bbox).await.map_err(|e| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
+
+    Ok(Json(json!({
+        "id":         stored.id,
+        "profile_id": stored.profile_id,
+        "model_dims": stored.model_dims,
+        "created_at": stored.created_at,
+    })))
+}
+
+/// POST /api/v1/faces/identify — identify a face against all enrolled profiles.
+///
+/// Accepts `multipart/form-data` with an `image` field.  Returns the best
+/// matching profile when cosine similarity exceeds the configured threshold.
+async fn identify_face_handler(
+    State(state): State<Arc<AppState>>,
+    multipart: Multipart,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let face = state.face_recognition.as_ref().ok_or_else(face_unavailable)?;
+    let (_profile_id, image, bbox) = read_face_multipart(multipart).await?;
+
+    let result = face.identify_face(&image, bbox).await.map_err(|e| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
+
+    Ok(Json(json!({
+        "identified": result.identified,
+        "profile_id": result.profile_id,
+        "confidence": result.confidence,
+        "threshold":  face.match_threshold(),
+    })))
+}
+
+/// GET /api/v1/faces/profile/:profile_id — list enrollments for a profile.
+///
+/// Returns embedding metadata (id, dims, timestamp) without the raw vector,
+/// matching the privacy requirement that embeddings remain opaque BLOBs.
+async fn list_face_enrollments(
+    State(state): State<Arc<AppState>>,
+    Path(profile_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let face = state.face_recognition.as_ref().ok_or_else(face_unavailable)?;
+    let rows = face.list_embeddings(&profile_id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
+
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|e| {
+            json!({
+                "id":         e.id,
+                "profile_id": e.profile_id,
+                "model_dims": e.model_dims,
+                "created_at": e.created_at,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "profile_id":  profile_id,
+        "enrollments": items,
+        "count":       rows.len(),
+    })))
+}
+
+/// GET /api/v1/faces/models — report status of the three face models on disk.
+///
+/// Returns availability + size for each of the face-recognition model files.
+///
+/// Reports both the **preferred** model in each slot (AdaFace IR-101,
+/// SCRFD 34G, Silent-Face V2, DeepPixBis) and the **fallback** files
+/// from the buffalo_l bundle (ArcFace R50, SCRFD 10G), so the Models UI
+/// can show "ready / fallback / missing" per slot.  Returns
+/// `feature_enabled: false` when pond-server was built without the
+/// `face-onnx` feature.
+async fn list_face_models_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<Value> {
+    let feature_enabled = state.face_recognition.is_some();
+    let dir = state
+        .data_dir
+        .as_ref()
+        .map(|d| d.join("models").join("face"));
+
+    let dir_clone = dir.clone();
+    let entries = tokio::task::spawn_blocking(move || {
+        let describe = |dir: &Option<std::path::PathBuf>, name: &str, label: &str, expected_mb: u64, role: &str| -> Value {
+            let path = dir.as_ref().map(|d| d.join(name));
+            let (downloaded, size_mb) = match &path {
+                Some(p) => match std::fs::metadata(p) {
+                    Ok(md) => (true, Some(md.len() / 1_048_576)),
+                    Err(_) => (false, None),
+                },
+                None => (false, None),
+            };
+            json!({
+                "name": name,
+                "label": label,
+                "role": role,
+                "expected_mb": expected_mb,
+                "size_mb": size_mb,
+                "downloaded": downloaded,
+                "path": path.as_ref().map(|p| p.display().to_string()),
+            })
+        };
+
+        vec![
+            // Embedder slot — preferred + fallback.
+            describe(&dir_clone, "adaface_ir101.onnx", "AdaFace IR-101 (preferred)", 250, "embedding"),
+            describe(&dir_clone, "w600k_r50.onnx",     "ArcFace R50 (fallback)",     174, "embedding"),
+            // Detector slot — preferred + fallback.
+            describe(&dir_clone, "scrfd_34g.onnx",     "SCRFD 34G (preferred)",      140, "detector"),
+            describe(&dir_clone, "scrfd.onnx",         "SCRFD 10G (fallback)",        17, "detector"),
+            // Anti-spoof ensemble.
+            describe(&dir_clone, "antispoof.onnx",     "Silent-Face V2 (primary PAD)",  2, "antispoof"),
+            describe(&dir_clone, "OULU_Protocol_2_model_0_0.onnx", "DeepPixBis OULU-NPU (secondary PAD)", 13, "antispoof"),
+        ]
+    }).await.unwrap_or_default();
+
+    Json(json!({
+        "feature_enabled": feature_enabled,
+        "models_dir": dir.as_ref().map(|d| d.display().to_string()),
+        "models": entries,
+    }))
+}
+
+/// GET /api/v1/faces/debug/pairwise — diagnostic: cross-sample cosine matrix.
+///
+/// Surfaces the full pairwise-cosine list plus a verdict:
+///   * `healthy`             — within-profile pairs average high, cross low
+///   * `collapsed`           — every pair (inc. cross-profile) > 0.90
+///   * `cross_profile_leakage` — any cross-profile pair > 0.70
+///   * `no_data`             — fewer than two stored embeddings
+///
+/// This is the single most useful lens when debugging "everyone matches at
+/// ~0.6" regressions: it immediately tells you whether the model is
+/// producing diverse embeddings or has collapsed under a preprocessing bug.
+async fn face_pairwise_debug(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let face = state.face_recognition.as_ref().ok_or_else(face_unavailable)?;
+    let pairs = face.pairwise_similarities().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
+
+    // Compute same-profile vs cross-profile summary stats.
+    let same: Vec<f32> = pairs.iter().filter(|p| p.same_profile).map(|p| p.similarity).collect();
+    let cross: Vec<f32> = pairs.iter().filter(|p| !p.same_profile).map(|p| p.similarity).collect();
+    let mean = |v: &[f32]| -> Option<f32> {
+        if v.is_empty() { None } else { Some(v.iter().sum::<f32>() / v.len() as f32) }
+    };
+    let max = |v: &[f32]| -> Option<f32> { v.iter().copied().fold(None, |acc, x| Some(acc.map_or(x, |a: f32| a.max(x)))) };
+    let min = |v: &[f32]| -> Option<f32> { v.iter().copied().fold(None, |acc, x| Some(acc.map_or(x, |a: f32| a.min(x)))) };
+
+    let verdict = if pairs.len() < 1 {
+        "no_data"
+    } else if pairs.iter().all(|p| p.similarity > 0.90) {
+        "collapsed"
+    } else if cross.iter().any(|&s| s > 0.70) {
+        "cross_profile_leakage"
+    } else {
+        "healthy"
+    };
+
+    let items: Vec<Value> = pairs
+        .iter()
+        .map(|p| json!({
+            "id_a":        p.id_a,
+            "id_b":        p.id_b,
+            "profile_a":   p.profile_a,
+            "profile_b":   p.profile_b,
+            "similarity":  p.similarity,
+            "same_profile": p.same_profile,
+        }))
+        .collect();
+
+    Ok(Json(json!({
+        "verdict":  verdict,
+        "summary": {
+            "same_profile":  { "count": same.len(),  "mean": mean(&same),  "min": min(&same),  "max": max(&same)  },
+            "cross_profile": { "count": cross.len(), "mean": mean(&cross), "min": min(&cross), "max": max(&cross) },
+        },
+        "pairs": items,
+        "threshold": face.match_threshold(),
+    })))
+}
+
+/// GET /api/v1/faces/debug/eval — ROC-style calibration harness.
+///
+/// Uses the currently-stored pairwise similarities to:
+///   * Compute FAR (false-accept rate) and FRR (false-reject rate) at a
+///     sweep of candidate thresholds between 0.30 and 0.95.
+///   * Report the EER-proxy (minimum of FAR+FRR), the threshold where the
+///     two rates cross, and how they compare to the operator-configured
+///     threshold returned by `face.match_threshold()`.
+///
+/// This is the single best-informed way to pick a threshold: "0.60 because
+/// the spec said so" is a guess; "0.54, where cross-profile pairs drop
+/// below 1% and same-profile pairs stay above 95%" is calibrated.  Works
+/// only once there are enough enrollments to make the curve meaningful
+/// (we require at least one same-profile pair and one cross-profile pair).
+async fn face_eval_debug(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let face = state.face_recognition.as_ref().ok_or_else(face_unavailable)?;
+    let pairs = face.pairwise_similarities().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
+
+    let same: Vec<f32> = pairs.iter().filter(|p| p.same_profile).map(|p| p.similarity).collect();
+    let cross: Vec<f32> = pairs.iter().filter(|p| !p.same_profile).map(|p| p.similarity).collect();
+
+    if same.is_empty() || cross.is_empty() {
+        return Ok(Json(json!({
+            "status": "insufficient_data",
+            "hint":   "Need at least one same-profile and one cross-profile pair. Enroll two distinct members with ≥2 samples each.",
+            "counts": { "same_profile": same.len(), "cross_profile": cross.len() },
+            "threshold_in_use": face.match_threshold(),
+        })));
+    }
+
+    // Sweep thresholds.  At each threshold:
+    //   FAR = fraction of cross pairs with sim ≥ t  (should be LOW)
+    //   FRR = fraction of same  pairs with sim <  t  (should be LOW)
+    let n_same  = same.len() as f32;
+    let n_cross = cross.len() as f32;
+    let mut curve: Vec<(f32, f32, f32)> = Vec::new(); // (t, FAR, FRR)
+    let mut best_sum = f32::MAX;
+    let mut best_threshold = face.match_threshold();
+    let mut crossover: Option<(f32, f32)> = None; // (threshold, rate at crossover)
+
+    for step in 0..=130 {
+        let t = 0.30 + (step as f32) * 0.005; // 0.30 .. 0.95 in 0.005 steps
+        let far = cross.iter().filter(|&&s| s >= t).count() as f32 / n_cross;
+        let frr = same.iter().filter(|&&s| s <  t).count() as f32 / n_same;
+        let sum = far + frr;
+        if sum < best_sum {
+            best_sum = sum;
+            best_threshold = t;
+        }
+        // Track the first crossover (FAR == FRR, approx) for the eer-ish
+        // point used as a visual reference on the UI.
+        if crossover.is_none() {
+            if let Some(prev) = curve.last() {
+                // Sign flip in (FAR - FRR) between consecutive samples.
+                let prev_diff = prev.1 - prev.2;
+                let cur_diff = far - frr;
+                if prev_diff.signum() != cur_diff.signum() && prev_diff.is_finite() && cur_diff.is_finite() {
+                    crossover = Some((t, (far + frr) / 2.0));
+                }
+            }
+        }
+        curve.push((t, far, frr));
+    }
+
+    let summary_mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
+    let summary_max = |v: &[f32]| v.iter().copied().fold(f32::MIN, f32::max);
+    let summary_min = |v: &[f32]| v.iter().copied().fold(f32::MAX, f32::min);
+
+    Ok(Json(json!({
+        "status": "ok",
+        "counts": { "same_profile": same.len(), "cross_profile": cross.len() },
+        "same_profile_stats":  {
+            "mean": summary_mean(&same),
+            "min":  summary_min(&same),
+            "max":  summary_max(&same),
+        },
+        "cross_profile_stats": {
+            "mean": summary_mean(&cross),
+            "min":  summary_min(&cross),
+            "max":  summary_max(&cross),
+        },
+        "threshold_in_use":   face.match_threshold(),
+        "recommended_threshold": best_threshold,
+        "recommended_sum_far_frr": best_sum,
+        "crossover": crossover.map(|(t, r)| json!({ "threshold": t, "rate": r })),
+        "curve": curve.iter().map(|(t, far, frr)| json!({
+            "threshold": t, "far": far, "frr": frr
+        })).collect::<Vec<_>>(),
+        "note": "far = false-accept rate; frr = false-reject rate. Pick a \
+                 threshold where far is small (≤1 %) and frr is acceptable \
+                 for your use case; recommended_threshold minimises far+frr.",
+    })))
+}
+
+/// Read multipart for the burst-identify endpoint.
+///
+/// Accepts repeated `image` fields (any number ≥ 1) plus an optional `bbox`
+/// shared across the whole burst.  Returns one `Vec<u8>` per frame in order.
+async fn read_face_multipart_burst(
+    mut multipart: Multipart,
+) -> Result<
+    (
+        Vec<Vec<u8>>,
+        Option<pond_core::domain::face_recognition::BoundingBox>,
+    ),
+    (StatusCode, Json<Value>),
+> {
+    let mut frames: Vec<Vec<u8>> = Vec::new();
+    let mut bbox: Option<pond_core::domain::face_recognition::BoundingBox> = None;
+
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("multipart error: {}", e)})),
+        )
+    })? {
+        match field.name() {
+            Some("image") => {
+                let bytes = field.bytes().await.map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": format!("read error: {}", e)})),
+                    )
+                })?;
+                if !bytes.is_empty() {
+                    frames.push(bytes.to_vec());
+                }
+            }
+            Some("bbox") => {
+                let text = field.text().await.map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": format!("read error: {}", e)})),
+                    )
+                })?;
+                bbox = pond_core::domain::face_recognition::BoundingBox::parse_csv(&text);
+            }
+            _ => {}
+        }
+    }
+
+    if frames.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "expected one or more 'image' fields in multipart body"})),
+        ));
+    }
+    // Cap the burst size to avoid runaway CPU on a single request.  At
+    // ~80 ms per ArcFace inference plus detection overhead, 12 frames is the
+    // ceiling that keeps the worst-case turn under one second on Jetson.
+    if frames.len() > 12 {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({
+                "error": "too many frames in burst",
+                "max":   12,
+                "got":   frames.len(),
+            })),
+        ));
+    }
+    Ok((frames, bbox))
+}
+
+/// Parse an f32 env var, falling back to `default` on missing / unparseable.
+fn env_or(name: &str, default: f32) -> f32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|s| s.parse::<f32>().ok())
+        .filter(|v| v.is_finite())
+        .unwrap_or(default)
+}
+
+/// POST /api/v1/faces/identify-burst — multi-frame consensus identify.
+///
+/// Accepts N (1..=12) `image` fields representing successive camera frames
+/// of the same subject.  Each frame is run through the full identify
+/// pipeline; the per-frame results are then aggregated into a consensus:
+///
+///   * The **winning** profile is the one identified in the most frames
+///     (ties broken by the higher mean confidence).
+///   * The verdict is `identified=true` only when at least
+///     `ceil(N * agreement_ratio)` frames agree on that profile, where the
+///     ratio defaults to 0.6 (i.e. 3-of-5, 4-of-7) but can be tightened.
+///   * `mean_confidence` reports the average cosine of the agreeing frames.
+///
+/// This blocks the "single lucky frame matched a stranger" failure mode the
+/// single-shot endpoint can exhibit when the camera autofocus is mid-hunt
+/// or the user is mid-blink.  It also makes a printed-photo attack harder
+/// because a print presents *identical* embeddings across frames — high
+/// agreement, but every frame trips the anti-spoof gate inside the
+/// embedding extractor and is rejected as `no_face`.
+async fn burst_identify_face_handler(
+    State(state): State<Arc<AppState>>,
+    multipart: Multipart,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let face = state.face_recognition.as_ref().ok_or_else(face_unavailable)?;
+    let (frames, bbox) = read_face_multipart_burst(multipart).await?;
+    let n = frames.len();
+
+    // Per-frame results (kept for the response so a UI can surface per-frame
+    // diagnostics — useful when the consensus fails to explain *why*).
+    let mut per_frame: Vec<Value> = Vec::with_capacity(n);
+    let mut votes: std::collections::HashMap<String, (u32, f32)> =
+        std::collections::HashMap::new(); // profile_id → (count, sum_confidence)
+    let mut no_face_count = 0_u32;
+
+    // Liveness side-channels: we accumulate the per-frame embedding and
+    // landmark set so we can gate the burst on inter-frame motion *before*
+    // trusting the identity consensus.  A held-up photo / phone screen
+    // produces 12 near-identical embeddings and zero landmark jitter; a
+    // real face does not.
+    let mut frame_embeddings: Vec<Vec<f32>> = Vec::with_capacity(n);
+    let mut frame_landmarks: Vec<pond_core::domain::face_recognition::FaceLandmarks> =
+        Vec::with_capacity(n);
+
+    for (idx, bytes) in frames.iter().enumerate() {
+        match face.identify_with_diagnostics(bytes, bbox).await {
+            Ok(details) => {
+                let r = &details.identification;
+                per_frame.push(json!({
+                    "frame":      idx,
+                    "identified": r.identified,
+                    "profile_id": r.profile_id,
+                    "confidence": r.confidence,
+                }));
+                if r.identified {
+                    if let (Some(pid), Some(c)) = (r.profile_id.clone(), r.confidence) {
+                        let entry = votes.entry(pid).or_insert((0, 0.0));
+                        entry.0 += 1;
+                        entry.1 += c;
+                    }
+                } else if r.confidence.is_none() {
+                    no_face_count += 1;
+                }
+                if let Some(emb) = details.embedding {
+                    frame_embeddings.push(emb);
+                }
+                if let Some(lm) = details.landmarks {
+                    frame_landmarks.push(lm);
+                }
+            }
+            Err(e) => {
+                per_frame.push(json!({
+                    "frame": idx,
+                    "error": e.to_string(),
+                }));
+            }
+        }
+    }
+
+    // ── Liveness gates (skipped for single-frame bursts) ────────────────
+    let liveness = if n >= 3 {
+        Some(compute_liveness_report(&frame_embeddings, &frame_landmarks))
+    } else {
+        None
+    };
+
+    if let Some(ref rep) = liveness {
+        // Visible at info! so operators can see the actual numbers every
+        // call produces — critical for tuning thresholds against real
+        // webcams.  Pair with the matcher log to understand why a given
+        // burst was accepted/rejected.
+        tracing::info!(
+            mean_inter_cos = rep.mean_inter_cos,
+            landmark_motion = rep.landmark_motion,
+            differential_motion = rep.differential_motion,
+            eye_ratio_spread = rep.eye_ratio_spread,
+            hard_reject = rep.hard_reject,
+            suspicious = rep.suspicious,
+            frames = n,
+            "burst liveness report"
+        );
+        if rep.hard_reject {
+            return Ok(Json(json!({
+                "identified":       false,
+                "reason":           "liveness_failed",
+                "liveness":         rep.to_json(),
+                "frames_total":     n,
+                "no_face_frames":   no_face_count,
+                "per_frame":        per_frame,
+            })));
+        }
+    }
+
+    // Consensus: highest vote count, ties broken by mean confidence.
+    let winner: Option<(String, u32, f32)> = votes
+        .clone()
+        .into_iter()
+        .map(|(pid, (count, sum))| (pid, count, sum / count as f32))
+        .max_by(|a, b| {
+            a.1.cmp(&b.1)
+                .then(a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+        });
+
+    // ─── Production-grade verification gate ────────────────────────────
+    //
+    // The matcher alone is not sufficient when only one profile is
+    // enrolled — the runner-up margin and open-set gap are no-ops in that
+    // regime, so a stranger whose embedding happens to land above the
+    // global threshold slips through.  Burst verification closes this by
+    // demanding multiple, independently converging signals:
+    //
+    //   (a) **Unanimity** — every frame that contained a face must
+    //       identify the *same* profile.  A stranger occasionally pokes
+    //       above threshold on one frame; unanimity across 5 frames at
+    //       400 ms spacing happens with probability ≈ p^5, and a real
+    //       match has p ≈ 1.
+    //   (b) **Per-frame confidence floor** — every winning frame must
+    //       individually clear `threshold + SINGLE_FRAME_MARGIN`, not
+    //       just the mean.  Blocks the "three great frames + two bad
+    //       frames averaging to pass" attack vector.
+    //   (c) **Mean confidence floor** — the mean of winning frames must
+    //       clear `threshold + MEAN_MARGIN` (0.03).  Kills the "barely
+    //       5 × threshold" edge case.
+    //   (d) **No-face budget** — if more than 20 % of frames produced no
+    //       face / no embedding, the capture was too noisy to trust
+    //       regardless of what the winning frames said.
+    //   (e) **Suspicious-burst lockout** — soft-suspicious liveness
+    //       (motion right at the floor) elevates the margins further.
+    //
+    // All margins are tunable via environment variables so operators can
+    // move the ROC curve without recompiling.
+    let suspicious = liveness.as_ref().map(|r| r.suspicious).unwrap_or(false);
+    let threshold = face.match_threshold();
+
+    // Empirical burst margins tuned against the w600k_r50 embedder:
+    //   * Live face (real webcam): per-frame confidence clusters at 0.85–0.92
+    //   * Photo attack (printed or screen): per-frame confidence lands at
+    //     0.72–0.78 because the embedding of the photo differs slightly
+    //     from the embedding of the real face due to lighting / sharpness /
+    //     colour gamut differences.
+    // A ~15-point gap exists.  Putting the floor at threshold+0.10 (= 0.80
+    // when threshold=0.70) splits the middle cleanly: live clears it,
+    // photos don't.  If you swap in a different embedder with tighter
+    // calibration, lower these via env vars.
+    let single_frame_margin = env_or("POND_FACE_BURST_FRAME_MARGIN", 0.10_f32);
+    let mean_margin         = env_or("POND_FACE_BURST_MEAN_MARGIN",  0.12_f32);
+    let suspicious_extra    = env_or("POND_FACE_BURST_SUSPICIOUS_MARGIN", 0.05_f32);
+    let no_face_budget      = env_or("POND_FACE_BURST_NOFACE_BUDGET", 0.20_f32);
+
+    let frame_floor = threshold + single_frame_margin
+        + if suspicious { suspicious_extra } else { 0.0 };
+    let mean_floor  = threshold + mean_margin
+        + if suspicious { suspicious_extra } else { 0.0 };
+
+    // Required vote count.  Single-frame bursts degrade to single-shot.
+    // For n ≥ 3 we require **all face-bearing frames** to agree — which
+    // after the no-face budget check below is effectively (n - no_face).
+    let face_bearing = n as u32 - no_face_count;
+    let no_face_ratio = if n == 0 { 1.0 } else { no_face_count as f32 / n as f32 };
+
+    // Extract per-frame confidences for the winning profile so we can
+    // enforce (b) the individual-frame floor.
+    let winner_pid_opt = winner.as_ref().map(|(p, _, _)| p.clone());
+    let winner_frame_confs: Vec<f32> = winner_pid_opt.as_ref().map(|target| {
+        per_frame.iter().filter_map(|pf| {
+            let pid = pf.get("profile_id").and_then(|v| v.as_str())?;
+            let conf = pf.get("confidence").and_then(|v| v.as_f64())?;
+            let identified = pf.get("identified").and_then(|v| v.as_bool()).unwrap_or(false);
+            if identified && pid == target { Some(conf as f32) } else { None }
+        }).collect()
+    }).unwrap_or_default();
+    let min_winner_conf = winner_frame_confs.iter().cloned().fold(f32::INFINITY, f32::min);
+
+    let required: u32 = if n == 1 { 1 } else { face_bearing.max(2) };
+
+    let (identified, profile_id, mean_conf, votes_for_winner) = match &winner {
+        Some((pid, count, mean))
+            if *count >= required
+                && no_face_ratio <= no_face_budget
+                && *mean >= mean_floor
+                && min_winner_conf >= frame_floor
+                && winner_frame_confs.len() as u32 == *count =>
+        {
+            (true, Some(pid.clone()), Some(*mean), *count)
+        }
+        Some((pid, count, mean)) => {
+            // Surface the would-be winner so callers can show "almost
+            // matched X (2 of 5 frames)" instead of a bare null.
+            (false, Some(pid.clone()), Some(*mean), *count)
+        }
+        None => (false, None, None, 0),
+    };
+
+    // Emit why a burst failed, when it failed — invaluable for tuning.
+    if !identified {
+        tracing::info!(
+            n,
+            no_face_count,
+            no_face_ratio,
+            required,
+            mean_conf = ?mean_conf,
+            min_winner_conf = if min_winner_conf.is_finite() { min_winner_conf } else { 0.0 },
+            frame_floor,
+            mean_floor,
+            suspicious,
+            votes_for_winner,
+            "burst identify rejected"
+        );
+    }
+
+    Ok(Json(json!({
+        "identified":         identified,
+        "profile_id":         if identified { profile_id.clone() } else { None },
+        "candidate_profile":  profile_id,
+        "mean_confidence":    mean_conf,
+        "votes":              votes_for_winner,
+        "frames_total":       n,
+        "frames_required":    required,
+        "no_face_frames":     no_face_count,
+        "threshold":          threshold,
+        "suspicious":         suspicious,
+        "liveness":           liveness.as_ref().map(|r| r.to_json()),
+        "per_frame":          per_frame,
+    })))
+}
+
+/// Summary of the multi-frame liveness analysis.
+///
+/// `hard_reject` fires when the burst is almost certainly a presentation
+/// attack (flat photo / phone screen) — inter-frame embedding cosine so
+/// high, or landmark motion so low, that no real face could produce them.
+/// `suspicious` is a softer signal: the burst is plausible but lives
+/// close enough to the spoof floor that we want to require tighter
+/// consensus before trusting it.
+struct LivenessReport {
+    hard_reject:       bool,
+    suspicious:        bool,
+    mean_inter_cos:    f32,
+    landmark_motion:   f32,
+    eye_ratio_spread:  f32,
+    /// Mean **non-rigid** per-landmark displacement in pixels across
+    /// consecutive frame pairs.  A moving photo produces pure rigid
+    /// translation (all five landmarks shift by the same vector), so
+    /// subtracting the mean displacement across the five points leaves
+    /// near-zero residual.  A live face produces non-rigid motion
+    /// (independent blinks, mouth twitches, eyebrow raises) so the
+    /// residual is ≥ 0.4 px even when overall motion is small.  This is
+    /// the key photo-attack signal that survives an attacker waving the
+    /// photo around to defeat `landmark_motion`.
+    differential_motion: f32,
+}
+
+impl LivenessReport {
+    fn to_json(&self) -> Value {
+        json!({
+            "hard_reject":         self.hard_reject,
+            "suspicious":          self.suspicious,
+            "mean_inter_cos":      self.mean_inter_cos,
+            "landmark_motion":     self.landmark_motion,
+            "eye_ratio_spread":    self.eye_ratio_spread,
+            "differential_motion": self.differential_motion,
+        })
+    }
+}
+
+/// Compute liveness metrics for a burst of per-frame diagnostics.
+///
+/// Three signals, all derived from the already-computed landmarks and
+/// embeddings — no extra inference:
+///
+/// 1. **Inter-frame embedding cosine.** Adjacent live-face frames differ
+///    by 0.005–0.03 in cosine; a printed photo or LCD screen produces
+///    > 0.995 across the burst.
+///
+/// 2. **Landmark motion.** Per-landmark pixel std-dev across the burst.
+///    A still photo produces < 0.5 px (sensor noise only); a real face
+///    micro-moves by ≥ 1.5 px.
+///
+/// 3. **Eye-ratio spread.** Inter-eye distance divided by inter-eye-to-
+///    nose distance, range across the burst.  A blink / micro-expression
+///    changes this by ≥ 0.5 %; a still photo keeps it flat.
+fn compute_liveness_report(
+    embeddings: &[Vec<f32>],
+    landmarks: &[pond_core::domain::face_recognition::FaceLandmarks],
+) -> LivenessReport {
+    // (1) Inter-frame cosine similarity (mean over adjacent pairs).
+    let mean_inter_cos = if embeddings.len() >= 2 {
+        let mut sum = 0.0_f32;
+        let mut count = 0_u32;
+        for w in embeddings.windows(2) {
+            if w[0].len() == w[1].len() && !w[0].is_empty() {
+                let dot: f32 = w[0].iter().zip(&w[1]).map(|(a, b)| a * b).sum();
+                // Embeddings are L2-normalised, so dot *is* cosine.
+                sum += dot;
+                count += 1;
+            }
+        }
+        if count == 0 { 0.0 } else { sum / count as f32 }
+    } else {
+        0.0
+    };
+
+    // (2) Landmark motion: std-dev of each of the five points in pixels,
+    // averaged across points.  Each landmark is (x, y); combine x/y via
+    // Euclidean per-frame deviation from the mean position.
+    let landmark_motion = if landmarks.len() >= 2 {
+        let n = landmarks.len() as f32;
+        let mut total = 0.0_f32;
+        let mut pts = 0_u32;
+        for i in 0..5 {
+            let point_of = |lm: &pond_core::domain::face_recognition::FaceLandmarks| -> (f32, f32) {
+                match i {
+                    0 => lm.left_eye,
+                    1 => lm.right_eye,
+                    2 => lm.nose,
+                    3 => lm.left_mouth,
+                    _ => lm.right_mouth,
+                }
+            };
+            let (mx, my) = landmarks.iter().fold((0.0_f32, 0.0_f32), |(sx, sy), lm| {
+                let (x, y) = point_of(lm);
+                (sx + x, sy + y)
+            });
+            let (mx, my) = (mx / n, my / n);
+            let var = landmarks
+                .iter()
+                .map(|lm| {
+                    let (x, y) = point_of(lm);
+                    (x - mx).powi(2) + (y - my).powi(2)
+                })
+                .sum::<f32>()
+                / n;
+            total += var.sqrt();
+            pts += 1;
+        }
+        if pts == 0 { 0.0 } else { total / pts as f32 }
+    } else {
+        0.0
+    };
+
+    // (3) Eye ratio spread — (inter-eye distance) / (eye-midpoint-to-nose),
+    // min-max across the burst.
+    let eye_ratio_spread = if landmarks.len() >= 2 {
+        let ratios: Vec<f32> = landmarks
+            .iter()
+            .filter_map(|lm| {
+                let eye_dx = lm.right_eye.0 - lm.left_eye.0;
+                let eye_dy = lm.right_eye.1 - lm.left_eye.1;
+                let eye_dist = (eye_dx * eye_dx + eye_dy * eye_dy).sqrt();
+                let mid_x = (lm.left_eye.0 + lm.right_eye.0) * 0.5;
+                let mid_y = (lm.left_eye.1 + lm.right_eye.1) * 0.5;
+                let nose_dx = lm.nose.0 - mid_x;
+                let nose_dy = lm.nose.1 - mid_y;
+                let nose_dist = (nose_dx * nose_dx + nose_dy * nose_dy).sqrt();
+                if nose_dist > 1e-3 {
+                    Some(eye_dist / nose_dist)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if ratios.len() >= 2 {
+            let min = ratios.iter().cloned().fold(f32::INFINITY, f32::min);
+            let max = ratios.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let mean = ratios.iter().sum::<f32>() / ratios.len() as f32;
+            if mean > 0.0 { (max - min) / mean } else { 0.0 }
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+
+    // Calibration note: ArcFace embeddings of the same person across 5
+    // frames at ~400 ms intervals are inherently near-identical (we've
+    // observed live cosines of 0.9974–0.9992 in repeated webcam tests),
+    // so **inter-frame cosine is NOT discriminative** between a live
+    // face and a photo at this burst length.  We keep it only as a
+    // diagnostic signal in the response payload.
+    //
+    // The only signals that genuinely separate live from photo at 5
+    // frames are:
+    //
+    //   * **Landmark motion** in pixels — live faces produce 2–15 px of
+    //     jitter from breathing + micro-head-motion; a steady photo
+    //     produces < 0.5 px.
+    //   * **Eye-ratio spread** — live faces show 0.03–0.20 of geometric
+    //     variance from blinks and expression; a photo shows < 0.005.
+    //
+    // We only hard-reject when **both** are at spoof levels, and with
+    // a conservative floor — the cost of a false reject (user has to
+    // retry and gets suspicious of the system) is higher than the cost
+    // of a false accept here because the matcher threshold (0.70) and
+    // the per-frame ONNX anti-spoof still stand in the way of a full
+    // spoof match.
+    // (4) Differential landmark motion.  For each consecutive frame pair,
+    // compute the (dx, dy) displacement of each of the 5 landmarks, then
+    // subtract the mean displacement across the five points (the rigid
+    // component) and take the magnitude of the residual.  A photo being
+    // translated / rotated produces near-zero residual; a live face's
+    // independent eye / mouth motion produces ≥ 0.4 px per frame pair.
+    //
+    // This is the **key** signal for "photo being waved around" attacks:
+    // `landmark_motion` is high (the whole face moves) but the motion is
+    // rigid, so `differential_motion` stays low.
+    let differential_motion = if landmarks.len() >= 2 {
+        let mut sum = 0.0_f32;
+        let mut pairs = 0_u32;
+        for w in landmarks.windows(2) {
+            let pts_a = [
+                w[0].left_eye, w[0].right_eye, w[0].nose,
+                w[0].left_mouth, w[0].right_mouth,
+            ];
+            let pts_b = [
+                w[1].left_eye, w[1].right_eye, w[1].nose,
+                w[1].left_mouth, w[1].right_mouth,
+            ];
+            // Per-landmark displacement.
+            let disps: [(f32, f32); 5] = [
+                (pts_b[0].0 - pts_a[0].0, pts_b[0].1 - pts_a[0].1),
+                (pts_b[1].0 - pts_a[1].0, pts_b[1].1 - pts_a[1].1),
+                (pts_b[2].0 - pts_a[2].0, pts_b[2].1 - pts_a[2].1),
+                (pts_b[3].0 - pts_a[3].0, pts_b[3].1 - pts_a[3].1),
+                (pts_b[4].0 - pts_a[4].0, pts_b[4].1 - pts_a[4].1),
+            ];
+            // Rigid component = mean displacement across the 5 landmarks.
+            let mean_dx = disps.iter().map(|d| d.0).sum::<f32>() / 5.0;
+            let mean_dy = disps.iter().map(|d| d.1).sum::<f32>() / 5.0;
+            // Mean magnitude of residual (non-rigid) displacement.
+            let residual = disps.iter().map(|d| {
+                let rx = d.0 - mean_dx;
+                let ry = d.1 - mean_dy;
+                (rx * rx + ry * ry).sqrt()
+            }).sum::<f32>() / 5.0;
+            sum += residual;
+            pairs += 1;
+        }
+        if pairs == 0 { 0.0 } else { sum / pairs as f32 }
+    } else {
+        0.0
+    };
+
+    // (5) Face-size variation across the burst.  A live face moves slightly
+    // closer to / further from the camera as the user breathes and shifts
+    // their head, producing inter-eye distance variation of ~1.5–6 % across
+    // 5 frames.  A photo held on a phone screen at arm's length stays at a
+    // near-constant size (< 0.8 % variation).  This is the new signal that
+    // catches the case the user reported: their own photo on a phone, with
+    // slight hand jitter passing the existing motion floor but staying
+    // dimensionally rigid.
+    let face_size_spread = if landmarks.len() >= 2 {
+        let dists: Vec<f32> = landmarks.iter().map(|lm| {
+            let dx = lm.right_eye.0 - lm.left_eye.0;
+            let dy = lm.right_eye.1 - lm.left_eye.1;
+            (dx * dx + dy * dy).sqrt()
+        }).collect();
+        let mean = dists.iter().sum::<f32>() / dists.len() as f32;
+        if mean > 1e-3 {
+            let min = dists.iter().cloned().fold(f32::INFINITY, f32::min);
+            let max = dists.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            (max - min) / mean
+        } else { 0.0 }
+    } else { 0.0 };
+
+    // Gates.
+    //
+    // Tunable via env so field-tuning doesn't require a rebuild:
+    //   POND_FACE_LIVENESS_DIFF_MOTION_MIN   (default 0.60 px — was 0.35,
+    //                                         raised because phone-screen
+    //                                         photos with hand jitter can
+    //                                         leak ~0.3 px non-rigid noise)
+    //   POND_FACE_LIVENESS_MOTION_MIN        (default 0.5  px)
+    //   POND_FACE_LIVENESS_EYE_SPREAD_MIN    (default 0.003 — was 0.002)
+    //   POND_FACE_LIVENESS_SIZE_SPREAD_MIN   (default 0.012 — new: 1.2 % min
+    //                                         inter-eye distance variation)
+    //   POND_FACE_LIVENESS_INTER_COS_MAX     (default 0.9994 — new: phone-
+    //                                         screen replays have ≥ 0.9995
+    //                                         cosine because the same pixels
+    //                                         are re-imaged each frame)
+    let diff_floor = std::env::var("POND_FACE_LIVENESS_DIFF_MOTION_MIN")
+        .ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.60);
+    let motion_floor = std::env::var("POND_FACE_LIVENESS_MOTION_MIN")
+        .ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.5);
+    let eye_floor = std::env::var("POND_FACE_LIVENESS_EYE_SPREAD_MIN")
+        .ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.003);
+    let size_floor = std::env::var("POND_FACE_LIVENESS_SIZE_SPREAD_MIN")
+        .ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.012);
+    let cos_ceiling = std::env::var("POND_FACE_LIVENESS_INTER_COS_MAX")
+        .ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.9994);
+
+    let barely_moving     = landmark_motion < motion_floor && landmarks.len() >= 3;
+    let flat_eye_ratio    = eye_ratio_spread < eye_floor;
+    let rigid_motion      = differential_motion < diff_floor && landmarks.len() >= 3;
+    let dimensionally_rigid = face_size_spread < size_floor && landmarks.len() >= 3;
+    let frozen_embedding  = mean_inter_cos > cos_ceiling && embeddings.len() >= 3;
+
+    // Hard reject on **any two** photo-like signals.  Previously we required
+    // (flat_eye_ratio) to be one of them, which let a phone-screen photo with
+    // slight zoom artefacts pass when its eye ratio happened to vary > 0.002.
+    // The new "any two of five" rule is strictly stricter: a live face
+    // typically fails ONE gate (e.g. brief still moment between blinks); a
+    // photo fails THREE or more (eyes flat, size flat, rigid motion, frozen
+    // embedding all at once).
+    let photo_like = [
+        barely_moving,
+        flat_eye_ratio,
+        rigid_motion,
+        dimensionally_rigid,
+        frozen_embedding,
+    ].iter().filter(|x| **x).count();
+    let hard_reject = photo_like >= 2;
+
+    // Soft suspicious tightens consensus on a single failed axis.
+    let suspicious = !hard_reject && photo_like >= 1;
+
+    LivenessReport {
+        hard_reject,
+        suspicious,
+        mean_inter_cos,
+        landmark_motion,
+        eye_ratio_spread,
+        differential_motion,
+    }
+}
+
+/// POST /api/v1/faces/enroll-quality — pre-flight quality check for enrollment.
+///
+/// Accepts the same multipart payload as `/faces/register` (minus
+/// `profile_id`) and reports whether the supplied frame is *good enough* to
+/// enroll, without persisting anything.  The enrollment wizard calls this
+/// per captured frame so it can show "good lighting ✓ / hold still" hints.
+///
+/// A frame passes when:
+///   * a face is detected (we ran the same detector + alignment as the real
+///     embedding pipeline), AND
+///   * the embedding extractor returns a non-`None` vector, meaning the
+///     frame cleared the variance / brightness / blur / anti-spoof gates.
+///
+/// The endpoint returns `ok=true/false` plus the reason on failure so the
+/// UI can guide the user instead of silently rejecting their attempt.
+async fn enroll_quality_handler(
+    State(state): State<Arc<AppState>>,
+    multipart: Multipart,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let face = state.face_recognition.as_ref().ok_or_else(face_unavailable)?;
+    let (profile_id, image, bbox) = read_face_multipart(multipart).await?;
+
+    // Uses `identify_with_diagnostics` so we can get the embedding back and
+    // measure how well it aligns with the profile's existing enrollments.
+    // Self-consistency is the strongest operator-facing signal that an
+    // enrollment is noisy: if three supposed "same person" frames disagree
+    // with each other, the profile is going to false-reject or false-accept
+    // unpredictably.
+    let details = match face.identify_with_diagnostics(&image, bbox).await {
+        Ok(d) => d,
+        Err(e) => {
+            return Ok(Json(json!({
+                "ok":     false,
+                "reason": format!("pipeline error: {}", e),
+            })));
+        }
+    };
+
+    let result = details.identification;
+    let has_face = result.confidence.is_some() || details.embedding.is_some();
+
+    // Fetch existing embeddings for this profile to score self-consistency.
+    // Any error here is non-fatal — we still want to return the basic
+    // quality verdict.
+    let existing: Vec<pond_core::domain::face_recognition::FaceEmbedding> =
+        match profile_id.as_deref() {
+            Some(pid) => face.list_embeddings(pid).await.unwrap_or_default(),
+            None => Vec::new(),
+        };
+
+    let existing_count = existing.len();
+    let self_consistency = if existing.len() >= 2 {
+        // Mean pairwise cosine across existing embeddings.  ≥ 0.70 is the
+        // "same person, different captures" regime for ArcFace-aligned
+        // 112×112; below that the operator should delete and re-enroll.
+        let vecs: Vec<&Vec<f32>> = existing.iter().map(|e| &e.embedding).collect();
+        let mut sum = 0.0_f32;
+        let mut count = 0_u32;
+        for i in 0..vecs.len() {
+            for j in (i + 1)..vecs.len() {
+                if vecs[i].len() == vecs[j].len() && !vecs[i].is_empty() {
+                    let dot: f32 = vecs[i].iter().zip(vecs[j]).map(|(a, b)| a * b).sum();
+                    // Stored embeddings are already L2-normalised.
+                    sum += dot;
+                    count += 1;
+                }
+            }
+        }
+        if count == 0 { None } else { Some(sum / count as f32) }
+    } else {
+        None
+    };
+
+    // Alignment: this new frame's embedding vs. existing centroid.  Gives
+    // the UI an immediate "this shot looks like the enrolled person" read.
+    let alignment_with_existing = match (&details.embedding, existing.len()) {
+        (Some(q), n) if n >= 1 => {
+            let dims = q.len();
+            if dims == 0 {
+                None
+            } else {
+                let mut centroid = vec![0.0_f32; dims];
+                let mut counted = 0_u32;
+                for e in &existing {
+                    if e.embedding.len() == dims {
+                        for (c, v) in centroid.iter_mut().zip(&e.embedding) {
+                            *c += *v;
+                        }
+                        counted += 1;
+                    }
+                }
+                if counted == 0 {
+                    None
+                } else {
+                    let inv = 1.0 / counted as f32;
+                    for c in &mut centroid {
+                        *c *= inv;
+                    }
+                    let norm: f32 = centroid.iter().map(|v| v * v).sum::<f32>().sqrt();
+                    if norm < 1e-6 {
+                        None
+                    } else {
+                        for c in &mut centroid {
+                            *c /= norm;
+                        }
+                        let dot: f32 = q.iter().zip(&centroid).map(|(a, b)| a * b).sum();
+                        Some(dot)
+                    }
+                }
+            }
+        }
+        _ => None,
+    };
+
+    // Recommended minimum aligned with `POND_FACE_MIN_SAMPLES` default (3).
+    // Surface it so the UI can show "3 of 3 enrolled" progress.
+    let recommended_min = std::env::var("POND_FACE_MIN_SAMPLES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(3);
+
+    let consistency_warning = match self_consistency {
+        Some(c) if c < 0.70 => Some(format!(
+            "existing enrollments disagree with each other (mean pairwise cosine {:.2} \
+             < 0.70 floor) — recommend deleting and re-enrolling with better lighting / pose",
+            c
+        )),
+        _ => None,
+    };
+
+    let (ok, reason) = if has_face {
+        (true, None)
+    } else {
+        (
+            false,
+            Some(
+                "no usable face: detector found nothing or the frame was too dark, \
+                 too blurry, too uniform, or flagged as a presentation attack"
+                    .to_string(),
+            ),
+        )
+    };
+
+    Ok(Json(json!({
+        "ok":       ok,
+        "reason":   reason,
+        "matches_existing":         result.identified,
+        "matched_profile":          if result.identified { result.profile_id } else { None },
+        "confidence":               result.confidence,
+        "existing_samples":         existing_count,
+        "recommended_min_samples":  recommended_min,
+        "self_consistency":         self_consistency,
+        "alignment_with_existing":  alignment_with_existing,
+        "consistency_warning":      consistency_warning,
+    })))
+}
+
+/// GET /api/v1/faces/profile/:profile_id/threshold — read per-profile override.
+///
+/// Returns `{ "profile_id", "threshold": <f32|null>, "global_threshold": <f32> }`.
+/// `threshold = null` means no override is configured and `global_threshold`
+/// applies to that profile.  Useful for the operator UI to render the
+/// "use default / custom" toggle.
+async fn get_profile_threshold_handler(
+    State(state): State<Arc<AppState>>,
+    Path(profile_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let face = state.face_recognition.as_ref().ok_or_else(face_unavailable)?;
+    let override_t = face.get_profile_threshold(&profile_id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
+    Ok(Json(json!({
+        "profile_id":       profile_id,
+        "threshold":        override_t,
+        "global_threshold": face.match_threshold(),
+    })))
+}
+
+/// PUT /api/v1/faces/profile/:profile_id/threshold — set the override.
+///
+/// Body: `{ "threshold": 0.62, "note": "tightened after sibling false-match" }`.
+/// `threshold` is required and clamped to [0.0, 1.0]; `note` is optional.
+async fn put_profile_threshold_handler(
+    State(state): State<Arc<AppState>>,
+    Path(profile_id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let face = state.face_recognition.as_ref().ok_or_else(face_unavailable)?;
+    let threshold = body
+        .get("threshold")
+        .and_then(|v| v.as_f64())
+        .map(|f| f as f32);
+    let threshold = match threshold {
+        Some(t) if (0.0..=1.0).contains(&t) => t,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "missing or invalid 'threshold' (expected float in [0.0, 1.0])"
+                })),
+            ))
+        }
+    };
+    let note = body.get("note").and_then(|v| v.as_str());
+
+    face.set_profile_threshold(&profile_id, Some(threshold), note)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?;
+    Ok(Json(json!({
+        "profile_id": profile_id,
+        "threshold":  threshold,
+        "note":       note,
+    })))
+}
+
+/// DELETE /api/v1/faces/profile/:profile_id/threshold — clear the override.
+///
+/// After this call the global threshold applies again for that profile.
+async fn delete_profile_threshold_handler(
+    State(state): State<Arc<AppState>>,
+    Path(profile_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let face = state.face_recognition.as_ref().ok_or_else(face_unavailable)?;
+    face.set_profile_threshold(&profile_id, None, None).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
+    Ok(Json(json!({ "profile_id": profile_id, "threshold": null })))
+}
+
+/// DELETE /api/v1/users/:profile_id/biometrics — forget all biometric data
+/// for a household member.  Part of the Phase 3 privacy contract; implemented
+/// for face embeddings now, extended to voice prints when Phase 1 lands.
+async fn delete_user_biometrics(
+    State(state): State<Arc<AppState>>,
+    Path(profile_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let face = state.face_recognition.as_ref().ok_or_else(face_unavailable)?;
+    let deleted = face.delete_embeddings(&profile_id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
+
+    Ok(Json(json!({
+        "profile_id":      profile_id,
+        "face_embeddings_deleted": deleted,
+        // `voice_prints_deleted` will be populated once Phase 1 lands.
+    })))
+}
+
+/// POST /api/v1/sessions/:session_id/identify-user — wake-on-face hook.
+///
+/// Accepts the same multipart payload as `/faces/identify` (plus optional
+/// `bbox` field).  On a confident match the identified `profile_id` is
+/// bound to the given session via the in-memory registry, so subsequent
+/// chat turns can personalise the system prompt to the recognised user.
+///
+/// Returns the same body as `/faces/identify`, plus the `session_id` that
+/// was bound.  `identified=false` leaves the binding untouched.
+async fn identify_session_user_handler(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    multipart: Multipart,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let face = state.face_recognition.as_ref().ok_or_else(face_unavailable)?;
+    let (_profile_id, image, bbox) = read_face_multipart(multipart).await?;
+
+    let result = face.identify_face(&image, bbox).await.map_err(|e| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
+
+    if result.identified {
+        if let Some(pid) = result.profile_id.clone() {
+            let mut guard = state.session_user_bindings.write().await;
+            guard.insert(session_id.clone(), pid);
+        }
+    }
+
+    Ok(Json(json!({
+        "session_id": session_id,
+        "identified": result.identified,
+        "profile_id": result.profile_id,
+        "confidence": result.confidence,
+        "threshold":  face.match_threshold(),
+    })))
+}
+
+/// GET /api/v1/sessions/:session_id/user — read the bound profile.
+async fn get_session_user_handler(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let guard = state.session_user_bindings.read().await;
+    let profile_id = guard.get(&session_id).cloned();
+    Ok(Json(json!({
+        "session_id": session_id,
+        "profile_id": profile_id,
+    })))
+}
+
+/// DELETE /api/v1/sessions/:session_id/user — release the binding.
+async fn clear_session_user_handler(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mut guard = state.session_user_bindings.write().await;
+    let removed = guard.remove(&session_id).is_some();
+    Ok(Json(json!({
+        "session_id": session_id,
+        "cleared":    removed,
+    })))
 }

@@ -6,6 +6,7 @@ import React, {
   type ReactNode,
 } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { api } from "../api/PondApiClient";
 import {
   reducer,
@@ -36,37 +37,75 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    // Ensure onboarding is complete so protected routes are accessible.
-    // pond-desktop has no onboarding wizard UI, so we auto-complete on first connect.
+    // Check onboarding status — if not yet onboarded, show the wizard UI
+    // instead of auto-completing silently.
     const ensureOnboarded = async () => {
       try {
         const status = await api.getOnboardingStatus();
         if (!status.onboarded) {
-          await api.completeOnboarding();
+          dispatch({ type: "SET_NEEDS_ONBOARDING", payload: true });
         }
       } catch (err) {
         console.warn("Onboarding check failed (non-fatal):", err);
       }
     };
 
-    // Server online/offline status
+    // Centralised "server is up — handshake + ensure onboarded" so both the
+    // initial-probe path AND the event-listener path share one code body.
+    // Re-entrant: dedupe via a flag so a fast Rust emit + a slow polling
+    // probe don't double-handshake.
+    let onlineHandled = false;
+    const handleServerOnline = () => {
+      if (onlineHandled) return;
+      onlineHandled = true;
+      dispatch({ type: "SERVER_ONLINE" });
+      api.handshake("pond-desktop")
+        .then(async (res) => {
+          api.setToken(res.token);
+          dispatch({ type: "SET_SESSION_TOKEN", payload: res.token });
+          await ensureOnboarded();
+        })
+        .catch((err) => console.warn("Handshake failed (non-fatal):", err));
+    };
+
+    // Server online/offline status — reactive path.
     listen<boolean>("server-status", (e) => {
       if (e.payload) {
-        dispatch({ type: "SERVER_ONLINE" });
-        // Always re-handshake when server comes online — the server restarts
-        // alongside the app, so any previously stored token is invalid.
-        api.handshake("pond-desktop")
-          .then(async (res) => {
-            api.setToken(res.token);
-            dispatch({ type: "SET_SESSION_TOKEN", payload: res.token });
-            // Ensure onboarding is complete before any protected route is called
-            await ensureOnboarded();
-          })
-          .catch((err) => console.warn("Handshake failed (non-fatal):", err));
+        handleServerOnline();
       } else {
+        // Server went offline — reset so a subsequent online event retriggers.
+        onlineHandled = false;
         dispatch({ type: "SERVER_OFFLINE" });
       }
     }).then((u) => unlisten.push(u));
+
+    // Active probe path. Tauri events are NOT buffered: if the Rust side
+    // emits `server-status: true` before our `listen()` registration above
+    // resolves (which is async), the React side never learns the server is
+    // up — the dashboard sits blank until the periodic 10-second health
+    // tick fires. The user reported this as "first launch shows nothing,
+    // close-and-reopen fixes it". Polling `server_health` here on mount
+    // closes the race regardless of event-arrival order.
+    let probeCancelled = false;
+    (async () => {
+      // Short, dense polling (every 250 ms for up to 60 s) so the dashboard
+      // appears within a quarter-second of the server actually accepting
+      // connections — much snappier than waiting for the 10 s tick.
+      for (let i = 0; i < 240; i++) {
+        if (probeCancelled || onlineHandled) return;
+        try {
+          const healthy = await invoke<boolean>("server_health");
+          if (healthy) {
+            handleServerOnline();
+            return;
+          }
+        } catch {
+          // server_health command not registered yet — keep polling.
+        }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    })();
+    unlisten.push(() => { probeCancelled = true; });
 
     listen("server-starting", () => {
       dispatch({ type: "SERVER_STARTING" });

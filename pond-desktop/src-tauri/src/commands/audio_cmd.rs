@@ -122,7 +122,7 @@ pub async fn record_with_vad(
             &app,
             10,   // max 10s waiting for speech to start
             30,   // hard cap on total recording
-            800,  // end-of-speech silence threshold (ms)
+            400,  // end-of-speech silence threshold (ms)
         )
     })
     .await
