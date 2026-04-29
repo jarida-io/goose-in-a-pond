@@ -149,7 +149,7 @@ impl VoiceInput for WhisperInput {
         match wav_bytes {
             Some(wav) => match self.transcribe_wav(wav.clone()).await? {
                 Some(text) => Ok(Some((text, wav))),
-                None => Ok(None),
+                None => Ok(Some((String::new(), wav))),
             },
             None => Ok(Some((String::new(), Vec::new()))),
         }
@@ -638,7 +638,7 @@ fn encode_wav_mono_16k(samples: &[f32]) -> Vec<u8> {
 /// `SpeakerIdentification::register_speaker`.
 pub fn record_wav_sample(duration_secs: u32) -> Result<Vec<u8>> {
     println!("  🎤 Recording for {} seconds...", duration_secs);
-    let (samples, sample_rate) = record_mono_f32(duration_secs)?;
+    let (samples, sample_rate) = record_mono_f32_vad(2, duration_secs, (duration_secs as u64) * 1000)?;
     if samples.is_empty() {
         return Err(anyhow!("No audio captured — check that a microphone is connected"));
     }

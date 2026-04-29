@@ -1549,6 +1549,23 @@ async fn run_chat(provider: Option<&str>, model: Option<&str>, input: &str, wake
         if n > 0 { tracing::info!("sync_disk_flags: corrected {n} stale record(s)"); }
     }
 
+    // If provider is not set, auto-detect it from the model catalog.
+    // This handles the case where onboarding saved chat_model but not chat_provider.
+    let detected_provider: String;
+    let effective_provider: &str = if effective_provider.is_empty() && !effective_model.is_empty() {
+        let mut found = String::new();
+        for cat in &["gguf", "llamafile", "ollama"] {
+            if chat_model_repo.get_by_id(&format!("{}/{}", cat, effective_model)).await.ok().flatten().is_some() {
+                found = category_to_provider(cat);
+                break;
+            }
+        }
+        detected_provider = if found.is_empty() { "llamafile".to_string() } else { found };
+        &detected_provider
+    } else {
+        effective_provider
+    };
+
     // Auto-start llamafile only when the provider is explicitly "llamafile".
     // Other providers (ollama, local, gguf, openai, etc.) manage their own process or need no process.
     let mut llamafile_port = ports::LLAMAFILE;
@@ -1719,6 +1736,28 @@ async fn run_chat(provider: Option<&str>, model: Option<&str>, input: &str, wake
     let mut chat_service = ChatService::new(agent, session_id.clone(), storage)
         .with_system_prompt(system_prompt);
 
+    // ── Auto-download gguf model if not on disk ──────────────────────────────────
+    if matches!(effective_provider, "local" | "gguf") {
+        if let Ok(Some(record)) = chat_model_repo.get_by_id(&format!("gguf/{}", effective_model)).await {
+            let filename = record.filename.unwrap_or_else(|| format!("{}.gguf", effective_model));
+            let model_path = data_dir.join("models").join(&filename);
+            if !model_path.exists() {
+                if let Some(url) = record.url.filter(|u| !u.is_empty()) {
+                    println!("  📥 LLM model not found — downloading ({}, {} MB)...", effective_model, record.size_mb);
+                    if let Some(parent) = model_path.parent() {
+                        let _ = tokio::fs::create_dir_all(parent).await;
+                    }
+                    match model_download::download_file(&url, &model_path, record.size_mb).await {
+                        Ok(_)  => println!("  ✅ Model downloaded."),
+                        Err(e) => println!("  ⚠  Model download failed: {}", e),
+                    }
+                } else {
+                    println!("  ⚠  LLM model '{}' has no download URL in catalog.", effective_model);
+                }
+            }
+        }
+    }
+
     // ── Wire LLM provider (no-goose-agent fallback only) ────────────────────────
     // When GooseAdapter is active it selects the provider internally via the DB.
     // This block runs only in builds without the goose-agent feature.
@@ -1800,7 +1839,7 @@ async fn run_chat(provider: Option<&str>, model: Option<&str>, input: &str, wake
     let voice: Arc<dyn VoiceInput> = match input {
         "whisper" => {
             println!("  Input:    whisper (@ {})", whisper_url);
-            Arc::new(WhisperInput::new(Some(&whisper_url)))
+            Arc::new(WhisperInput::new(Some(&whisper_url)).with_silence_ms(2000))
         }
         _ => {
             println!("  Input:    stdin");
@@ -2291,6 +2330,15 @@ async fn run_enroll_menu(data_dir: &std::path::Path) -> Result<()> {
         return Ok(());
     }
     let profile = &profiles[idx - 1];
+    let existing = adapter.enrollment_count(&profile.id).await.unwrap_or(0);
+    if existing > 0 {
+        println!("\n  ⚠  {} is already enrolled ({} samples).", profile.display_name, existing);
+        let confirm = prompt_nonempty("  Re-enroll and replace existing samples? (y/N): ")?;
+        if !confirm.trim().eq_ignore_ascii_case("y") {
+            println!("  Enrollment cancelled.");
+            return Ok(());
+        }
+    }
     println!("\n  Enrolling voice for: {}", profile.display_name);
     println!("  Speak naturally for 10 seconds each time when prompted.\n");
     for i in 1..=3u32 {
@@ -2322,6 +2370,15 @@ async fn run_enroll(profile_id: &str, duration_secs: u32, speaker_model: Option<
         Some(p) => p.display_name,
         None => anyhow::bail!("Profile '{}' not found", profile_id),
     };
+    let existing = adapter.enrollment_count(profile_id).await.unwrap_or(0);
+    if existing > 0 {
+        println!("  ⚠  {} is already enrolled ({} samples).", display_name, existing);
+        let confirm = prompt_nonempty("  Re-enroll and replace existing samples? (y/N): ")?;
+        if !confirm.trim().eq_ignore_ascii_case("y") {
+            println!("  Enrollment cancelled.");
+            return Ok(());
+        }
+    }
     println!("  Enrolling voice for: {}", display_name);
     println!("  Speak naturally for {} seconds each time when prompted.\n", duration_secs);
     for i in 1..=3u32 {
@@ -2488,7 +2545,9 @@ async fn run_onboard(reset: bool) -> Result<()> {
                     let input = prompt_nonempty("Enter number to select, or type a name directly: ")?;
                     match input.parse::<usize>() {
                         Ok(idx) if idx >= 1 && idx <= catalog_models.len() => {
-                            catalog_models[idx - 1].name.clone()
+                            let m = &catalog_models[idx - 1];
+                            user_data.insert("chat_category".to_string(), m.category.as_str().to_string());
+                            m.name.clone()
                         }
                         _ => input,
                     }
@@ -2534,6 +2593,9 @@ async fn run_onboard(reset: bool) -> Result<()> {
                     if let Some(v) = user_data.get("chat_model") {
                         settings.chat_model = v.clone();
                         settings.active_llm_model = v.clone();
+                        if let Some(cat) = user_data.get("chat_category") {
+                            settings.chat_provider = category_to_provider(cat);
+                        }
                     }
                     if settings.active_whisper_model.is_empty() {
                         settings.active_whisper_model = "base".to_string();
