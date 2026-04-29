@@ -582,7 +582,9 @@ export const api = {
 
           try {
             const payload = JSON.parse(raw) as {
+              type?: string
               token?: string
+              content?: string
               done?: boolean
               session_id?: string
               model_role?: string
@@ -596,8 +598,9 @@ export const api = {
               onDone(payload.session_id ?? '', payload.model_role)
               return
             }
-            if (payload.token) {
-              onToken(payload.token)
+            const text = (payload.type === 'text' ? payload.content : undefined) ?? payload.token
+            if (text) {
+              onToken(text)
             }
           } catch {
             // Ignore malformed SSE lines
