@@ -10,9 +10,10 @@ license.workspace = true
 local-inference = ["dep:pond-adapters-local-inference"]
 
 [dependencies]
-pond-core = { workspace = true }
-pond-infra = { workspace = true }
-pond-adapters-llamafile = { workspace = true }
+pond-core                = { workspace = true }
+pond-infra               = { workspace = true }
+pond-adapters-llamafile  = { workspace = true }
+pond-adapters-whisper    = { path = "../pond-adapters-whisper" }
 pond-adapters-ollama = { path = "../pond-adapters-ollama" }
 pond-adapters-local-inference = { workspace = true, optional = true }
 anyhow = { workspace = true }

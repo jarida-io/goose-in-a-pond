@@ -6,6 +6,11 @@
 //! `listen()` blocks until a complete utterance is available, then returns
 //! the transcribed text.  Returns `Ok(None)` on EOF / end-of-stream to
 //! signal that the loop should terminate cleanly.
+//!
+//! `listen_with_audio()` returns both the transcript and the raw WAV bytes.
+//! The default implementation delegates to `listen()` and returns an empty
+//! byte vector.  Microphone-backed implementations override this so callers
+//! can run speaker identification on the captured audio without re-recording.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -18,6 +23,18 @@ pub trait VoiceInput: Send + Sync {
     /// Returns `Ok(None)` when the input stream is exhausted (EOF / device
     /// closed) — the caller should exit its loop cleanly.
     async fn listen(&self) -> Result<Option<String>>;
+
+    /// Capture one utterance and return `(transcript, wav_bytes)`.
+    ///
+    /// The default implementation calls `listen()` and returns an empty
+    /// `Vec<u8>` for the audio.  Microphone-backed implementations should
+    /// override this to return the actual WAV bytes.
+    async fn listen_with_audio(&self) -> Result<Option<(String, Vec<u8>)>> {
+        match self.listen().await? {
+            Some(text) => Ok(Some((text, Vec::new()))),
+            None => Ok(None),
+        }
+    }
 
     /// Short label shown in the terminal prompt before each capture.
     ///

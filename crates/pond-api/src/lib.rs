@@ -196,6 +196,8 @@ pub struct AppState {
     /// Used by the `/api/v1/logs` endpoint.
     /// `None` in tests.
     pub event_log_repo: Option<Arc<dyn pond_core::ports::event_log::EventLogRepository>>,
+    /// Speaker identification adapter. `None` when no ONNX model is configured.
+    pub speaker_id: Option<Arc<dyn pond_core::ports::speaker_id::SpeakerIdentification + Send + Sync>>,
     /// Biometric face recognition service (register + identify household
     /// members from camera frames).  `None` when no ONNX embedding model
     /// is configured — all face endpoints then return 503.
