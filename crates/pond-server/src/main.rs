@@ -51,7 +51,8 @@ use pond_core::services::chat::ChatService;
 use pond_core::services::mock_agent::MockAgent;
 use pond_core::services::stdin_input::StdinInput;
 use pond_infra::db::Database;
-use pond_infra::mock_handshake::MockHandshake;
+use pond_infra::sqlite_handshake::SqliteHandshakeAdapter;
+use pond_adapters_gotg::handshake_adapter::GotgHandshakeAdapter;
 use pond_infra_scheduler::{CronSchedulerAdapter, WebhookTaskExecutor};
 use pond_adapters_weather::{OpenMeteoWeatherAdapter, WeatherProvider};
 use pond_infra::sqlite_device_registry::SqliteDeviceRegistry;
@@ -1278,10 +1279,15 @@ async fn run_server(static_dir: std::path::PathBuf, open: bool, debug: bool, age
     let event_log_repo: Option<Arc<dyn pond_core::ports::event_log::EventLogRepository>> =
         Some(Arc::new(SqliteEventLogRepository::new(db.logs.clone())));
 
+    let handshake: Arc<dyn pond_core::ports::handshake::Handshake> =
+        Arc::new(GotgHandshakeAdapter::new(Arc::new(
+            SqliteHandshakeAdapter::new(db.system.clone()),
+        )));
+
     let state = Arc::new(AppState {
         db,
         onboarding_repo,
-        handshake: Arc::new(MockHandshake::new()),
+        handshake: handshake.clone(),
         whisper_url: whisper_url.clone(),
         session_storage,
         http_client: reqwest::Client::new(),
@@ -1339,7 +1345,7 @@ async fn run_server(static_dir: std::path::PathBuf, open: bool, debug: bool, age
     }
 
     // Build router
-    let app = pond_api::build_router(state, static_dir);
+    let app = pond_api::build_router(state.clone(), static_dir);
 
     // Resolve hostname — strip trailing ".local" if the OS already appended it
     let hostname = hostname::get()
@@ -1358,6 +1364,23 @@ async fn run_server(static_dir: std::path::PathBuf, open: bool, debug: bool, age
     println!("  📡 Dashboard: {}", display_url);
     println!("  📡 API:       {}/api/v1/health", display_url);
     println!();
+
+    // Issue and display a fresh GOTG pairing code at startup. The plaintext
+    // is shown only here (and at /api/v1/handshake/pairing-code from
+    // loopback) — clients have ~10 minutes to complete the two-phase
+    // handshake before it expires.
+    match handshake.issue_pairing_code().await {
+        Ok(pc) => {
+            println!("  ┌──────────────────────────────────────────┐");
+            println!("  │  GOTG pairing code:  {}             │", pc.code);
+            println!("  │  expires:            {}  │", &pc.expires_at[..pc.expires_at.len().min(19)]);
+            println!("  └──────────────────────────────────────────┘");
+            println!();
+        }
+        Err(e) => {
+            tracing::warn!("could not issue pairing code at startup: {e}");
+        }
+    }
 
     // Open the browser when:
     //   - `--open` is explicitly passed, OR

@@ -125,6 +125,11 @@ fn is_public_route(path: &str) -> bool {
         path,
         "/health"
             | "/handshake"
+            | "/handshake/init"
+            | "/handshake/verify"
+            | "/handshake/refresh"
+            | "/handshake/revoke"
+            | "/handshake/pairing-code"
             | "/onboard"
             | "/onboard/complete"
             | "/onboard/status"

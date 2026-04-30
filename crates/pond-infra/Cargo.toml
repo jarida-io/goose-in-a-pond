@@ -18,6 +18,12 @@ async-trait = { workspace = true }
 hostname = { workspace = true }
 tracing = { workspace = true }
 reqwest = {workspace = true}
+sha2 = { workspace = true }
+hmac = { workspace = true }
+rand = { workspace = true }
+base64 = { workspace = true }
+subtle = { workspace = true }
+once_cell = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

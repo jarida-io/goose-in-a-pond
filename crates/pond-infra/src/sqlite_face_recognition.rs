@@ -28,7 +28,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use pond_core::domain::face_recognition::{
-    BoundingBox, DetectedFace, FaceEmbedding, FaceIdentification, FaceLandmarks,
+    BoundingBox, DetectedFace, FaceEmbedding, FaceIdentification, FaceLandmarks, RejectionReason,
 };
 use pond_core::ports::face_detector::FaceDetector;
 use pond_core::ports::face_embedding_extractor::FaceEmbeddingExtractor;
@@ -100,6 +100,17 @@ const DEFAULT_MIN_SAMPLES_TO_IDENTIFY: usize = 1;
 /// `POND_FACE_OPEN_SET_GAP`.
 const DEFAULT_OPEN_SET_GAP_TO_MEAN_MIN: f32 = 0.08;
 
+/// Opportunistic auto-enrollment cap. When the burst handler stores a new
+/// high-confidence embedding via `auto_enroll_high_confidence`, we keep at
+/// most this many embeddings per profile and evict the oldest first. Only
+/// embeddings that have already passed every burst-level liveness gate
+/// reach this code path, so FAR is not affected.
+///
+/// Overrides:
+///   - `POND_FACE_AUTO_ENROLL` (`on`/`off`, default `on`)
+///   - `POND_FACE_AUTO_ENROLL_MAX` (per-profile cap, default 30)
+const DEFAULT_AUTO_ENROLL_MAX_PER_PROFILE: usize = 30;
+
 /// Maximum absolute eye-line tilt (radians) before a face is considered too
 /// rotated for reliable matching.  At 25° the embedding space starts to
 /// degrade noticeably even with alignment.
@@ -146,6 +157,30 @@ fn env_usize(name: &str, default: usize, lo: usize, hi: usize) -> usize {
         Some(v) => v.clamp(lo, hi),
         _ => default,
     }
+}
+
+fn env_bool(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "1" | "on" | "true" | "yes" | "y" => true,
+            "0" | "off" | "false" | "no" | "n" => false,
+            _ => default,
+        },
+        Err(_) => default,
+    }
+}
+
+fn auto_enroll_enabled() -> bool {
+    env_bool("POND_FACE_AUTO_ENROLL", true)
+}
+
+fn auto_enroll_max_per_profile() -> usize {
+    env_usize(
+        "POND_FACE_AUTO_ENROLL_MAX",
+        DEFAULT_AUTO_ENROLL_MAX_PER_PROFILE,
+        1,
+        500,
+    )
 }
 
 impl SqliteFaceRecognition {
@@ -299,6 +334,77 @@ impl SqliteFaceRecognition {
                 Ok(Some(face))
             }
         }
+    }
+
+    /// Persist a high-confidence query embedding back against the matching
+    /// profile, evicting the oldest stored embedding when the per-profile
+    /// cap is reached. Best-effort; called from the success branch of
+    /// `identify_with_diagnostics`. Lives in the inherent impl because the
+    /// `FaceRecognition` port trait does not (and should not) include
+    /// auto-enrollment in its public surface.
+    async fn auto_enroll_embedding(
+        &self,
+        profile_id: &str,
+        embedding: &[f32],
+    ) -> Result<()> {
+        let dims = self.extractor.embedding_dims();
+        if embedding.len() != dims as usize {
+            return Err(anyhow!(
+                "auto-enroll embedding dim mismatch: {} vs {}",
+                embedding.len(),
+                dims
+            ));
+        }
+        let cap = auto_enroll_max_per_profile();
+        let id = Uuid::new_v4().to_string();
+        let packed = pack_embedding(embedding);
+
+        let mut tx = self.pool.begin().await.context("auto-enroll: begin tx")?;
+        sqlx::query(
+            "INSERT INTO face_embeddings \
+             (id, profile_id, embedding, model_dims, model_name, created_at) \
+             VALUES (?, ?, ?, ?, ?, datetime('now'))",
+        )
+        .bind(&id)
+        .bind(profile_id)
+        .bind(&packed)
+        .bind(dims as i64)
+        .bind(&self.model_name)
+        .execute(&mut *tx)
+        .await
+        .context("auto-enroll: insert")?;
+
+        let count_row: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM face_embeddings WHERE profile_id = ?")
+                .bind(profile_id)
+                .fetch_one(&mut *tx)
+                .await
+                .context("auto-enroll: count")?;
+        let total = count_row.0 as usize;
+        if total > cap {
+            let to_drop = (total - cap) as i64;
+            sqlx::query(
+                "DELETE FROM face_embeddings WHERE id IN ( \
+                    SELECT id FROM face_embeddings \
+                    WHERE profile_id = ? \
+                    ORDER BY created_at ASC, id ASC LIMIT ? \
+                 )",
+            )
+            .bind(profile_id)
+            .bind(to_drop)
+            .execute(&mut *tx)
+            .await
+            .context("auto-enroll: prune")?;
+        }
+        tx.commit().await.context("auto-enroll: commit")?;
+        info!(
+            %profile_id,
+            %id,
+            cap,
+            stored = total.min(cap),
+            "auto-enrolled high-confidence embedding"
+        );
+        Ok(())
     }
 }
 
@@ -561,7 +667,10 @@ impl FaceRecognition for SqliteFaceRecognition {
         };
 
         if rows.is_empty() {
-            return Ok(with_diag(FaceIdentification::unknown(None)));
+            return Ok(with_diag(FaceIdentification::unknown(
+                None,
+                RejectionReason::NoEnrolledProfiles,
+            )));
         }
 
         // Group embeddings and similarities by profile.  We retain the raw
@@ -612,7 +721,10 @@ impl FaceRecognition for SqliteFaceRecognition {
             .collect();
 
         if per_profile.is_empty() {
-            return Ok(with_diag(FaceIdentification::unknown(None)));
+            return Ok(with_diag(FaceIdentification::unknown(
+                None,
+                RejectionReason::UnderEnrolled,
+            )));
         }
 
         // ── S-norm (query-side) ─────────────────────────────────────────
@@ -723,9 +835,29 @@ impl FaceRecognition for SqliteFaceRecognition {
         );
 
         if passes_threshold && passes_runner_up && passes_open_set {
+            // NOTE: auto-enrollment used to fire here. It does not anymore:
+            // a single frame cannot tell a real face from a printed photo
+            // strongly enough to safely grow the reference set. The burst
+            // handler calls `auto_enroll_high_confidence` once per burst,
+            // and only after the inter-frame liveness gates have passed.
             Ok(with_diag(FaceIdentification::found(best_pid, confidence)))
         } else {
-            Ok(with_diag(FaceIdentification::unknown(Some(confidence))))
+            // Pick the most actionable reason. Threshold first (commonest),
+            // then runner-up, then open-set. This mirrors how operators read
+            // the decision log: low confidence is the most common cause and
+            // the easiest for the user to fix (more enrollments / better
+            // lighting); the cross-profile gates are rarer.
+            let reason = if !passes_threshold {
+                RejectionReason::BelowThreshold
+            } else if !passes_runner_up {
+                RejectionReason::LostToRunnerUp
+            } else {
+                RejectionReason::OpenSetGap
+            };
+            Ok(with_diag(FaceIdentification::unknown(
+                Some(confidence),
+                reason,
+            )))
         }
     }
 
@@ -768,6 +900,21 @@ impl FaceRecognition for SqliteFaceRecognition {
         // Delegate to the inherent method (kept available for callers that
         // hold a concrete `SqliteFaceRecognition`, e.g. tests).
         SqliteFaceRecognition::set_profile_threshold(self, profile_id, threshold, note).await
+    }
+
+    /// Trait-level entry point for opportunistic auto-enrollment. The
+    /// burst handler calls this once per identified burst, AFTER every
+    /// inter-frame liveness gate has cleared. We still gate on the
+    /// kill-switch env var so operators can disable auto-enroll entirely.
+    async fn auto_enroll_high_confidence(
+        &self,
+        profile_id: &str,
+        embedding: &[f32],
+    ) -> Result<()> {
+        if !auto_enroll_enabled() {
+            return Ok(());
+        }
+        self.auto_enroll_embedding(profile_id, embedding).await
     }
 
     async fn pairwise_similarities(&self) -> Result<Vec<PairwiseSimilarity>> {
@@ -1033,5 +1180,109 @@ mod tests {
         assert!(cosine_similarity(&a, &c).abs() < 1e-6);
         assert_eq!(cosine_similarity(&[], &[0.0]), 0.0);
         assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
+    }
+
+    #[tokio::test]
+    async fn rejection_reason_no_enrolled_profiles() {
+        let (svc, _profile_id, _tmp) = setup().await;
+        // No registers performed → empty embeddings table.
+        let result = svc.identify_face(&[1u8], None).await.unwrap();
+        assert!(!result.identified);
+        assert_eq!(
+            result.rejection_reason,
+            Some(RejectionReason::NoEnrolledProfiles)
+        );
+    }
+
+    #[tokio::test]
+    async fn rejection_reason_below_threshold() {
+        let (svc, profile_id, _tmp) = setup().await;
+        svc.register_face(&profile_id, &[1u8], None).await.unwrap();
+        svc.register_face(&profile_id, &[1u8, 9], None).await.unwrap();
+        svc.register_face(&profile_id, &[1u8, 9, 7], None).await.unwrap();
+        // Orthogonal probe → similarity 0 → falls through to BelowThreshold.
+        let result = svc.identify_face(&[200u8], None).await.unwrap();
+        assert!(!result.identified);
+        assert_eq!(
+            result.rejection_reason,
+            Some(RejectionReason::BelowThreshold)
+        );
+    }
+
+    #[tokio::test]
+    async fn single_frame_identify_does_not_auto_enroll() {
+        // Critical security invariant: a successful single-frame identify
+        // must NEVER grow the reference set. The burst path is the only
+        // safe place to auto-enroll, because only the burst has the
+        // inter-frame liveness signals that distinguish a real face from
+        // a printed photo.
+        let (svc, profile_id, _tmp) = setup().await;
+        svc.register_face(&profile_id, &[42u8], None).await.unwrap();
+        svc.register_face(&profile_id, &[42u8, 5], None).await.unwrap();
+        svc.register_face(&profile_id, &[42u8, 7, 3], None).await.unwrap();
+
+        let before = svc.list_embeddings(&profile_id).await.unwrap().len();
+        let result = svc.identify_face(&[42u8, 99], None).await.unwrap();
+        assert!(result.identified);
+        let after = svc.list_embeddings(&profile_id).await.unwrap().len();
+        assert_eq!(
+            after, before,
+            "single-frame identify must NOT trigger auto-enrollment"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_enroll_high_confidence_inserts_under_cap() {
+        // Tests run in parallel within the same process and env vars are
+        // process-global; an "off" sibling test could otherwise leak its
+        // setting in here. Call the inherent helper directly to bypass the
+        // env-gated trait wrapper.
+        let (svc, profile_id, _tmp) = setup().await;
+        svc.register_face(&profile_id, &[42u8], None).await.unwrap();
+        let dims = svc.extractor.embedding_dims() as usize;
+        let mut emb = vec![0.0_f32; dims];
+        emb[7] = 1.0;
+        let before = svc.list_embeddings(&profile_id).await.unwrap().len();
+        svc.auto_enroll_embedding(&profile_id, &emb).await.unwrap();
+        let after = svc.list_embeddings(&profile_id).await.unwrap().len();
+        assert_eq!(after, before + 1);
+    }
+
+    #[tokio::test]
+    async fn auto_enroll_high_confidence_caps_at_max() {
+        // Bypass the env-gated wrapper to avoid races with sibling tests
+        // that toggle POND_FACE_AUTO_ENROLL. The cap env var is read on
+        // each call, so setting it just for this test is fine.
+        std::env::set_var("POND_FACE_AUTO_ENROLL_MAX", "3");
+        let (svc, profile_id, _tmp) = setup().await;
+        svc.register_face(&profile_id, &[1u8], None).await.unwrap();
+        svc.register_face(&profile_id, &[2u8], None).await.unwrap();
+        svc.register_face(&profile_id, &[3u8], None).await.unwrap();
+
+        let dims = svc.extractor.embedding_dims() as usize;
+        let mut emb = vec![0.0_f32; dims];
+        emb[5] = 1.0;
+        svc.auto_enroll_embedding(&profile_id, &emb).await.unwrap();
+        svc.auto_enroll_embedding(&profile_id, &emb).await.unwrap();
+        let after = svc.list_embeddings(&profile_id).await.unwrap().len();
+        assert_eq!(after, 3, "cap should evict the oldest row");
+        std::env::remove_var("POND_FACE_AUTO_ENROLL_MAX");
+    }
+
+    #[tokio::test]
+    async fn auto_enroll_high_confidence_respects_off_switch() {
+        std::env::set_var("POND_FACE_AUTO_ENROLL", "off");
+        let (svc, profile_id, _tmp) = setup().await;
+        svc.register_face(&profile_id, &[1u8], None).await.unwrap();
+        let dims = svc.extractor.embedding_dims() as usize;
+        let mut emb = vec![0.0_f32; dims];
+        emb[5] = 1.0;
+        let before = svc.list_embeddings(&profile_id).await.unwrap().len();
+        svc.auto_enroll_high_confidence(&profile_id, &emb)
+            .await
+            .unwrap();
+        let after = svc.list_embeddings(&profile_id).await.unwrap().len();
+        assert_eq!(after, before, "off-switch must skip storage entirely");
+        std::env::remove_var("POND_FACE_AUTO_ENROLL");
     }
 }

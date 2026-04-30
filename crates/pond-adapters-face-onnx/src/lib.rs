@@ -206,17 +206,17 @@ pub(crate) fn mean_luminance(img: &RgbImage) -> f32 {
 pub(crate) fn stretch_histogram_2_98(img: &mut RgbImage) {
     // Dispatcher: caller picks the algorithm via POND_FACE_AUTO_EXPOSURE_MODE.
     //
-    //   * `stretch` (default) — per-channel 2-98 percentile linear stretch.
+    //   * `clahe` (default) — per-channel Contrast Limited Adaptive Histogram
+    //     Equalization (8x8 tiles, clip 4x mean). Recovers face detail in
+    //     scenes with both bright windows and dim corners much better than
+    //     percentile stretch, at the cost of ~3 ms compute and slightly more
+    //     visible noise on uniformly-dim frames.
+    //   * `stretch`         — per-channel 2-98 percentile linear stretch.
     //     Cheap (~0.2 ms on 112x112), preserves global tonality, may leave
     //     mixed-lighting scenes with shadowed faces.
-    //   * `clahe`              — per-channel Contrast Limited Adaptive
-    //     Histogram Equalization (8x8 tiles, clip 4x mean). Recovers face
-    //     detail in scenes with both bright windows and dim corners much
-    //     better than `stretch` does, at the cost of ~3 ms compute and
-    //     slightly more visible noise on uniformly-dim frames.
     match auto_exposure_mode().as_str() {
-        "clahe" => clahe_per_channel(img, 8, 4.0),
-        _       => stretch_histogram_2_98_linear(img),
+        "stretch" => stretch_histogram_2_98_linear(img),
+        _         => clahe_per_channel(img, 8, 4.0),
     }
 }
 
@@ -225,7 +225,7 @@ fn auto_exposure_mode() -> String {
         .ok()
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "stretch".to_string())
+        .unwrap_or_else(|| "clahe".to_string())
 }
 
 /// Per-channel 2-98 percentile linear stretch.  See dispatcher above for

@@ -57,6 +57,8 @@ impl Handshake for MockHandshake {
         Ok(HandshakeResponse {
             accepted: true,
             session_token: Some(token),
+            refresh_token: None,
+            expires_at: None,
             hostname: hostname::get()
                 .map(|h| h.to_string_lossy().to_string())
                 .unwrap_or_else(|_| "localhost".to_string()),

@@ -1,5 +1,6 @@
 pub mod db;
 pub mod mock_handshake;
+pub mod sqlite_handshake;
 pub mod sqlite_event_log;
 pub mod sqlite_model_repository;
 pub mod onboarding;

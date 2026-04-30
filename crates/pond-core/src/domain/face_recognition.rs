@@ -28,6 +28,32 @@ pub struct FaceEmbedding {
     pub created_at: DateTime<Utc>,
 }
 
+/// Why an identification attempt failed. Surfaced through the API so the
+/// frontend can give users actionable guidance instead of a generic
+/// "not recognised". `None` on a successful identification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RejectionReason {
+    /// No face detected in the frame at all.
+    NoFace,
+    /// Face was too small, too tilted, or otherwise failed the geometric
+    /// quality gate (eye tilt, nose centering, minimum pixel size).
+    QualityGate,
+    /// Anti-spoof model classified the frame as non-live.
+    AntiSpoof,
+    /// No profile is enrolled with enough samples to be matchable.
+    UnderEnrolled,
+    /// Best score did not clear the absolute match threshold.
+    BelowThreshold,
+    /// Best profile failed the runner-up margin against the second-best.
+    LostToRunnerUp,
+    /// Best profile won the runner-up gate but failed the open-set
+    /// gap-to-mean check.
+    OpenSetGap,
+    /// No profiles are enrolled in the system.
+    NoEnrolledProfiles,
+}
+
 /// Result of a face identification attempt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FaceIdentification {
@@ -38,6 +64,9 @@ pub struct FaceIdentification {
     pub confidence: Option<f32>,
     /// Whether the identification was conclusive (confidence ≥ threshold).
     pub identified: bool,
+    /// Why the identification failed, populated when `identified = false`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub rejection_reason: Option<RejectionReason>,
 }
 
 impl FaceIdentification {
@@ -47,15 +76,17 @@ impl FaceIdentification {
             profile_id: Some(profile_id),
             confidence: Some(confidence),
             identified: true,
+            rejection_reason: None,
         }
     }
 
-    /// Build a result where no stored face matched.
-    pub fn unknown(confidence: Option<f32>) -> Self {
+    /// Build a result where no stored face matched, with a structured reason.
+    pub fn unknown(confidence: Option<f32>, reason: RejectionReason) -> Self {
         Self {
             profile_id: None,
             confidence,
             identified: false,
+            rejection_reason: Some(reason),
         }
     }
 
@@ -65,6 +96,7 @@ impl FaceIdentification {
             profile_id: None,
             confidence: None,
             identified: false,
+            rejection_reason: Some(RejectionReason::NoFace),
         }
     }
 }

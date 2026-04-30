@@ -34,9 +34,79 @@ interface IdentifyResult {
   confidence: number | null;
   threshold: number;
   reason?: string;
+  rejection_reason?: RejectionReason | null;
 }
 
-type Busy = "idle" | "enrolling" | "identifying" | "deleting";
+type RejectionReason =
+  | "no_face"
+  | "quality_gate"
+  | "anti_spoof"
+  | "under_enrolled"
+  | "below_threshold"
+  | "lost_to_runner_up"
+  | "open_set_gap"
+  | "no_enrolled_profiles";
+
+type Busy = "idle" | "enrolling" | "identifying" | "deleting" | "guided";
+
+// Cues for the guided in-place enrollment flow. Designed so the user can
+// complete every step from a single comfortable position — no walking
+// between rooms required. Variety across rooms / times-of-day is filled
+// in over time by opportunistic auto-enrollment on the server.
+const GUIDED_STEPS: { title: string; hint: string }[] = [
+  { title: "Look directly at the camera",       hint: "Neutral expression, eyes on the lens." },
+  { title: "Slight head turn — left",           hint: "Just a small angle, like glancing away." },
+  { title: "Slight head turn — right",          hint: "Same on the other side." },
+  { title: "Tilt chin slightly down",           hint: "A subtle nod, eyes still on the camera." },
+  { title: "Take half a step closer, then back", hint: "Recapture so the system sees you a touch nearer." },
+];
+
+function rejectionCopy(r: RejectionReason | null | undefined): { title: string; hint: string } | null {
+  switch (r) {
+    case "no_face":
+      return {
+        title: "We couldn't find a face in the camera view",
+        hint:  "Make sure your face is centred in the dashed square, then try again.",
+      };
+    case "quality_gate":
+      return {
+        title: "The frame wasn't clear enough",
+        hint:  "Hold your head steadier and a bit more level — extreme tilt or motion blur trips the quality check.",
+      };
+    case "anti_spoof":
+      return {
+        title: "We couldn't confirm a real, live face",
+        hint:  "Move slightly or blink and try again. Photos and phone screens are blocked by design.",
+      };
+    case "under_enrolled":
+      return {
+        title: "Not enough samples on file yet",
+        hint:  "Use Quick enroll below to capture a few more samples — that fills out your reference set without lowering security.",
+      };
+    case "below_threshold":
+      return {
+        title: "We weren't confident enough to make a match",
+        hint:  "Try Quick enroll once more from where you usually stand — adding 2–3 in-place samples covers the lighting that's tripping us up.",
+      };
+    case "lost_to_runner_up":
+      return {
+        title: "Two profiles looked similar in this frame",
+        hint:  "Capture another sample under steadier lighting so your reference set pulls clearly ahead.",
+      };
+    case "open_set_gap":
+      return {
+        title: "Your match wasn't far enough ahead of other profiles",
+        hint:  "One or two more samples in your usual spot will tighten this gap — security stays the same.",
+      };
+    case "no_enrolled_profiles":
+      return {
+        title: "No one is enrolled yet",
+        hint:  "Pick a household member above and use Quick enroll to capture your first samples.",
+      };
+    default:
+      return null;
+  }
+}
 
 export function Faces() {
   const videoRef    = useRef<HTMLVideoElement | null>(null);
@@ -57,6 +127,11 @@ export function Faces() {
   // WebView, which is why the previous "Delete biometrics" button silently
   // did nothing. Toggling this state shows a small inline confirmation panel.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  // Guided in-place enrollment: when active, the user is being walked
+  // through GUIDED_STEPS one cue at a time. `guidedStep` is the index of
+  // the *current* cue (-1 = inactive).
+  const [guidedStep, setGuidedStep] = useState<number>(-1);
+  const guidedActive = guidedStep >= 0;
 
   // ── Profiles ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -189,6 +264,48 @@ export function Faces() {
       }
       setEnrollments(fresh.enrollments);
       setAvailable("available");
+    } catch (e) { flashError(e); }
+    finally { setBusy("idle"); }
+  }
+
+  function startGuided() {
+    setError(null);
+    setBanner(null);
+    if (!selectedProfile) {
+      setError("Choose who you're enrolling first, then start Quick enroll.");
+      return;
+    }
+    setGuidedStep(0);
+  }
+
+  function cancelGuided() {
+    setGuidedStep(-1);
+    setBusy("idle");
+  }
+
+  // Capture a sample for the current guided step, advance to the next, and
+  // wrap up when every step has been recorded. Reuses the same
+  // /faces/register endpoint as the single-frame path.
+  async function captureGuidedStep() {
+    if (!selectedProfile || guidedStep < 0) return;
+    setError(null);
+    setBanner(null);
+    const blob = await captureFrame();
+    if (!blob) { setError("The camera isn't sending video yet — give it a moment."); return; }
+    setBusy("guided");
+    try {
+      await api.registerFace(selectedProfile, blob);
+      const fresh = await api.listFaceEnrollments(selectedProfile);
+      setEnrollments(fresh.enrollments);
+      const next = guidedStep + 1;
+      if (next >= GUIDED_STEPS.length) {
+        setGuidedStep(-1);
+        setBanner(
+          `Quick enroll complete — ${GUIDED_STEPS.length} new samples saved for ${profileLabel(selectedProfile)}. ✅`
+        );
+      } else {
+        setGuidedStep(next);
+      }
     } catch (e) { flashError(e); }
     finally { setBusy("idle"); }
   }
@@ -340,9 +457,16 @@ export function Faces() {
             <Button
               variant="primary" size="sm"
               onPress={handleEnroll}
-              isDisabled={busy !== "idle" || !selectedProfile || available === "unavailable"}
+              isDisabled={busy !== "idle" || !selectedProfile || available === "unavailable" || guidedActive}
             >
               <Camera size={13} /> {busy === "enrolling" ? "Enrolling…" : "Enroll sample"}
+            </Button>
+            <Button
+              variant="outline" size="sm"
+              onPress={startGuided}
+              isDisabled={busy !== "idle" || !selectedProfile || available === "unavailable" || guidedActive}
+            >
+              <Camera size={13} /> Quick enroll ({GUIDED_STEPS.length} samples)
             </Button>
             <Button
               variant="outline" size="sm"
@@ -359,6 +483,28 @@ export function Faces() {
               <Trash2 size={13} /> {busy === "deleting" ? "Deleting…" : "Delete biometrics"}
             </Button>
           </div>
+
+          {guidedActive && (
+            <div style={st.guidedBox}>
+              <div style={{ fontSize: "var(--text-xs)", color: "var(--color-text-tertiary)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
+                Sample {guidedStep + 1} of {GUIDED_STEPS.length}
+              </div>
+              <div style={{ fontWeight: 600, fontSize: "var(--text-sm)", marginBottom: 4 }}>
+                {GUIDED_STEPS[guidedStep].title}
+              </div>
+              <div style={{ fontSize: "var(--text-xs)", color: "var(--color-text-secondary)", marginBottom: "var(--space-2)" }}>
+                {GUIDED_STEPS[guidedStep].hint} You can stay where you are — variety across rooms is captured automatically over time.
+              </div>
+              <div style={{ display: "flex", gap: "var(--space-2)" }}>
+                <Button variant="primary" size="sm" onPress={captureGuidedStep} isDisabled={busy === "guided"}>
+                  <Camera size={13} /> {busy === "guided" ? "Saving…" : "Capture"}
+                </Button>
+                <Button variant="ghost" size="sm" onPress={cancelGuided} isDisabled={busy === "guided"}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
 
           {confirmingDelete && (
             <div style={st.confirmBox}>
@@ -399,18 +545,28 @@ export function Faces() {
                     Try again with your face in front of the camera and a small natural movement (a blink or slight head turn).
                   </div>
                 </>
-              ) : (
-                <>
-                  <div style={{ fontWeight: 600, fontSize: "var(--text-sm)", marginBottom: 4 }}>
-                    No matching profile found
-                  </div>
-                  <div style={{ fontSize: "var(--text-xs)", color: "var(--color-text-secondary)" }}>
-                    {last.confidence != null && last.confidence > 0
-                      ? "We weren't confident enough to make a match. Try a brighter spot, or enrol another sample under similar lighting."
-                      : "We couldn't find a face in the camera view. Make sure your face is centred in the dashed square and try again."}
-                  </div>
-                </>
-              )}
+              ) : (() => {
+                const copy = rejectionCopy(last.rejection_reason ?? null) ?? {
+                  title: "No matching profile found",
+                  hint:
+                    last.confidence != null && last.confidence > 0
+                      ? "We weren't confident enough to make a match. Try Quick enroll to add a couple more samples from where you usually stand."
+                      : "We couldn't find a face in the camera view. Make sure your face is centred in the dashed square and try again.",
+                };
+                return (
+                  <>
+                    <div style={{ fontWeight: 600, fontSize: "var(--text-sm)", marginBottom: 4 }}>
+                      {copy.title}
+                    </div>
+                    <div style={{ fontSize: "var(--text-xs)", color: "var(--color-text-secondary)" }}>
+                      {copy.hint}
+                      {last.confidence != null && last.confidence > 0 && (
+                        <> · best score {pct(last.confidence)} (threshold {pct(last.threshold)})</>
+                      )}
+                    </div>
+                  </>
+                );
+              })()}
             </div>
           )}
         </section>
@@ -502,6 +658,7 @@ const st: Record<string, React.CSSProperties> = {
   bannerError: { padding: "var(--space-3)", borderRadius: "var(--radius-md)", background: "rgba(239,68,68,0.10)", color: "#991b1b", border: "1px solid rgba(239,68,68,0.30)", fontSize: "var(--text-sm)" },
   bannerOk:    { padding: "var(--space-3)", borderRadius: "var(--radius-md)", background: "rgba(34,197,94,0.10)", color: "#065f46", border: "1px solid rgba(34,197,94,0.30)", fontSize: "var(--text-sm)" },
   confirmBox:  { marginTop: "var(--space-3)", padding: "var(--space-3)", borderRadius: "var(--radius-md)", background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.30)", fontSize: "var(--text-sm)", color: "var(--color-text)" },
+  guidedBox:   { marginTop: "var(--space-3)", padding: "var(--space-3)", borderRadius: "var(--radius-md)", background: "rgba(140,82,255,0.08)", border: "1px solid rgba(140,82,255,0.35)", fontSize: "var(--text-sm)", color: "var(--color-text)" },
   hint: { fontSize: "var(--text-xs)", color: "var(--color-text-tertiary)", margin: "var(--space-2) 0 0" },
   cropGuide: {
     position: "absolute",

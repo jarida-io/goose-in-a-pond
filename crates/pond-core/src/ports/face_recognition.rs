@@ -123,6 +123,24 @@ pub trait FaceRecognition: Send + Sync {
         })
     }
 
+    /// Opportunistic auto-enrollment: store a high-confidence query embedding
+    /// against `profile_id`. The caller is responsible for deciding the
+    /// frame is safe to enroll — typically only after a multi-frame burst
+    /// has cleared every liveness gate (no presentation attack, real motion,
+    /// embedding diversity). This MUST NOT be called for single-frame
+    /// identifications because the per-frame anti-spoof signal alone is
+    /// not strong enough to rule out a printed photo.
+    ///
+    /// Default implementation is a no-op so adapters that have no storage
+    /// (mocks, tests) silently ignore the request.
+    async fn auto_enroll_high_confidence(
+        &self,
+        _profile_id: &str,
+        _embedding: &[f32],
+    ) -> Result<()> {
+        Ok(())
+    }
+
     /// Diagnostic: pairwise cosine similarity across every stored embedding.
     ///
     /// Returned rows are `(id_a, id_b, profile_a, profile_b, similarity)`

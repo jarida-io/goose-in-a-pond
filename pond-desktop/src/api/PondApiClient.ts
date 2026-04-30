@@ -475,6 +475,16 @@ export class PondApiClient {
     confidence: number | null;
     threshold: number;
     reason?: string;
+    rejection_reason?:
+      | "no_face"
+      | "quality_gate"
+      | "anti_spoof"
+      | "under_enrolled"
+      | "below_threshold"
+      | "lost_to_runner_up"
+      | "open_set_gap"
+      | "no_enrolled_profiles"
+      | null;
   }> {
     const form = new FormData();
     frames.forEach((f, i) => form.append("image", f, `frame${i}.jpg`));
