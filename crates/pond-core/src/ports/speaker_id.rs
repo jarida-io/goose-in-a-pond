@@ -46,4 +46,8 @@ pub trait SpeakerIdentification: Send + Sync {
 
     /// Return the number of stored embeddings for `profile_id`.
     async fn enrollment_count(&self, profile_id: &str) -> Result<u32>;
+
+    /// Return metadata for every stored embedding for `profile_id`.
+    /// Raw BLOB vectors are never included.
+    async fn list_enrollments(&self, profile_id: &str) -> Result<Vec<SpeakerEmbedding>>;
 }

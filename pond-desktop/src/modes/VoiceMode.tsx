@@ -160,6 +160,32 @@ export function VoiceMode() {
     return () => { unlisten?.(); };
   }, []);
 
+  // ── Speaker identification listener ───────────────────────────
+  // Fires on every turn — audio_cmd.rs sends WAV bytes to
+  // /api/v1/speaker/identify-audio concurrently with transcription.
+  useEffect(() => {
+    const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+    if (!isTauri) return;
+    let unlisten: (() => void) | null = null;
+    listen<{
+      identified: boolean;
+      profile_id: string | null;
+      confidence: number | null;
+      display_name: string | null;
+    }>("speaker-identified", (e) => {
+      const { identified, profile_id, confidence, display_name } = e.payload;
+      if (identified && profile_id && confidence != null && display_name) {
+        dispatch({
+          type: "SET_CURRENT_SPEAKER",
+          payload: { profileId: profile_id, displayName: display_name, confidence },
+        });
+      } else {
+        dispatch({ type: "SET_CURRENT_SPEAKER", payload: null });
+      }
+    }).then((u) => { unlisten = u; });
+    return () => { unlisten?.(); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Dismissal handler ──────────────────────────────────────────
   // When the Rust pipeline detects "bye", "dismissed", etc. it speaks a
   // farewell and emits `voice-dismissed`.  Reset to wake word mode here.
@@ -553,7 +579,7 @@ export function VoiceMode() {
         </Button>
       </div>
 
-      {/* ── Zone 2: Waveform ──────────────────────────────── */}
+      {/* ── Zone 2: Waveform + speaker badge ─────────────── */}
       <div style={styles.waveZone}>
         <AudioWaves
           state={voiceState}
@@ -561,6 +587,15 @@ export function VoiceMode() {
           size="lg"
           style={{ maxWidth: "480px", margin: "0 auto" }}
         />
+        {state.currentSpeaker && (
+          <div style={styles.speakerBadge}>
+            <span style={styles.speakerAvatar}>👤</span>
+            <span style={styles.speakerName}>{state.currentSpeaker.displayName}</span>
+            <span style={styles.speakerConf}>
+              {(state.currentSpeaker.confidence * 100).toFixed(0)}%
+            </span>
+          </div>
+        )}
       </div>
 
       {/* ── Zone 3: Transcript (fills remaining height) ───── */}
@@ -742,7 +777,26 @@ const styles: Record<string, React.CSSProperties> = {
   waveZone: {
     flexShrink: 0,
     padding: "16px var(--space-6) 8px",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: "var(--space-2)",
   },
+
+  speakerBadge: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "6px",
+    padding: "4px 12px",
+    borderRadius: "999px",
+    background: "rgba(140,82,255,0.10)",
+    border: "1px solid rgba(140,82,255,0.25)",
+    fontSize: "var(--text-xs)",
+    color: "var(--color-text)",
+  },
+  speakerAvatar: { fontSize: 14, lineHeight: 1 },
+  speakerName:   { fontWeight: 600 },
+  speakerConf:   { color: "var(--color-text-tertiary)" },
 
   // ── Transcript zone
   transcriptZone: {

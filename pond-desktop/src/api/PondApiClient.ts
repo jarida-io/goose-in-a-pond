@@ -493,6 +493,46 @@ export class PondApiClient {
     return this.del(`/api/v1/users/${encodeURIComponent(profileId)}/biometrics`);
   }
 
+  // ── Voice / Speaker biometrics ────────────────────────────────────────────────
+  //
+  // Enrollment triggers server-side mic recording (5 s by default). In the
+  // Tauri desktop app the server runs on the same machine, so the server mic
+  // IS the user's mic. Returns the new total enrollment count so the UI can
+  // display progress without a separate listing endpoint.
+
+  enrollSpeaker(profileId: string, durationSecs = 5): Promise<{
+    embedding_id: string;
+    profile_id: string;
+    model: string;
+    dims: number;
+    enrolled_count: number;
+    created_at: string;
+  }> {
+    return this.post(`/api/v1/profiles/${encodeURIComponent(profileId)}/enroll`, {
+      duration_secs: durationSecs,
+    });
+  }
+
+  deleteSpeakerBiometrics(profileId: string): Promise<void> {
+    return this.del(`/api/v1/profiles/${encodeURIComponent(profileId)}/biometrics`);
+  }
+
+  listSpeakerEnrollments(profileId: string): Promise<{
+    profile_id: string;
+    enrollments: Array<{ id: string; profile_id: string; model: string; dims: number; created_at: string }>;
+    count: number;
+  }> {
+    return this.get(`/api/v1/speaker/enrollments/${encodeURIComponent(profileId)}`);
+  }
+
+  identifyVoice(durationSecs = 5): Promise<{
+    identified: boolean;
+    profile_id: string | null;
+    confidence: number | null;
+  }> {
+    return this.post("/api/v1/speaker/identify", { duration_secs: durationSecs });
+  }
+
   private async postMultipart<T>(path: string, form: FormData): Promise<T> {
     const headers: Record<string, string> = {};
     if (this.token) headers["Authorization"] = `Bearer ${this.token}`;

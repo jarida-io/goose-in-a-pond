@@ -324,6 +324,41 @@ impl SpeakerIdentification for OnnxSpeakerAdapter {
         Ok(count as u32)
     }
 
+    async fn list_enrollments(&self, profile_id: &str) -> Result<Vec<SpeakerEmbedding>> {
+        let rows: Vec<(String, String, String, i64, f64, String)> = sqlx::query_as(
+            "SELECT id, profile_id, model, dims, threshold, created_at \
+             FROM speaker_embeddings WHERE profile_id = ? ORDER BY created_at ASC",
+        )
+        .bind(profile_id)
+        .fetch_all(&self.system_pool)
+        .await
+        .context("Failed to list speaker embeddings")?;
+
+        rows.into_iter()
+            .map(|(id, profile_id, model, dims, threshold, created_at_str)| {
+                let created_at = chrono::NaiveDateTime::parse_from_str(
+                    &created_at_str,
+                    "%Y-%m-%d %H:%M:%S",
+                )
+                .map(|n| n.and_utc())
+                .or_else(|_| {
+                    chrono::DateTime::parse_from_rfc3339(&created_at_str)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                })
+                .unwrap_or_else(|_| chrono::Utc::now());
+
+                Ok(SpeakerEmbedding {
+                    id,
+                    profile_id,
+                    model,
+                    dims: dims as u32,
+                    threshold: threshold as f32,
+                    created_at,
+                })
+            })
+            .collect()
+    }
+
     async fn delete_speaker(&self, profile_id: &str) -> Result<()> {
         sqlx::query("DELETE FROM speaker_embeddings WHERE profile_id = ?")
             .bind(profile_id)

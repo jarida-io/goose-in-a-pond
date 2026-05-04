@@ -13,6 +13,7 @@ import { Models } from "../sections/Models";
 import { Prompts } from "../sections/Prompts";
 import { Settings } from "../sections/Settings";
 import { Faces } from "../sections/Faces";
+import { VoiceBiometrics } from "../sections/VoiceBiometrics";
 import { Agent } from "../sections/Agent";
 import { Canvas } from "../sections/Canvas";
 import { Logs } from "../sections/Logs";
@@ -29,6 +30,7 @@ function SectionContent({ section }: { section: GuiSection }) {
     case "prompts":   return <Prompts />;
     case "settings":  return <Settings />;
     case "faces":     return <Faces />;
+    case "voice-id":  return <VoiceBiometrics />;
     case "agent":     return <Agent />;
     case "canvas":    return <Canvas />;
     case "logs":      return <Logs />;

@@ -11,6 +11,7 @@ export type GuiSection =
   | "prompts"
   | "settings"
   | "faces"
+  | "voice-id"
   | "agent"
   | "canvas"
   | "logs";
@@ -47,6 +48,7 @@ export const SIDEBAR_GROUPS: SidebarGroup[] = [
       { section: "models",   label: "Models",   icon: "model" },
       { section: "prompts",  label: "Prompts",  icon: "prompt" },
       { section: "faces",    label: "Faces",    icon: "face" },
+      { section: "voice-id", label: "Voice ID", icon: "voice-id" },
       { section: "settings", label: "Settings", icon: "settings" },
     ],
   },
