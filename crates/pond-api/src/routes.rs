@@ -46,6 +46,7 @@ use pond_core::domain::skill::UserSkill;
 
 use crate::{AppState, DownloadEntry, ModelStatusEntry};
 use crate::middleware::onboarding_guard::require_onboarding_complete;
+use pond_adapters_whisper;
 
 // ───────────────────────── REST API Routes ─────────────────────────
 
@@ -105,6 +106,11 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/models/{category}/{name}", delete(delete_model))
         .route("/profiles", get(list_profiles))
         .route("/profiles/{id}", get(get_profile).delete(delete_profile))
+        .route("/profiles/{id}/enroll", post(enroll_speaker))
+        .route("/profiles/{id}/biometrics", delete(delete_speaker_biometrics))
+        .route("/speaker/identify", post(identify_speaker_handler))
+        .route("/speaker/identify-audio", post(identify_speaker_audio_handler))
+        .route("/speaker/enrollments/{profile_id}", get(list_speaker_enrollments_handler))
         .route("/sensors", post(record_sensor))
         .route("/sensors/{device_id}", get(get_recent_sensors))
         .route("/camera/events", get(list_camera_events).post(record_camera_event))
@@ -2169,6 +2175,203 @@ async fn delete_profile(
         (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()})))
     })?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Speaker biometric handlers ────────────────────────────────────────────────
+
+async fn enroll_speaker(
+    State(state): State<Arc<AppState>>,
+    Path(profile_id): Path<String>,
+    body: Option<Json<serde_json::Value>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let speaker_id = state.speaker_id.as_ref().ok_or_else(|| (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": "speaker identification not configured — run pond-server setup first"})),
+    ))?;
+
+    state.profile_repo.get(&profile_id).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "profile not found"}))))?;
+
+    let duration_secs = body
+        .as_ref()
+        .and_then(|b| b.get("duration_secs"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5) as u32;
+
+    let audio = tokio::task::spawn_blocking(move || {
+        pond_adapters_whisper::record_wav_sample(duration_secs)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+
+    let embedding = speaker_id.register_speaker(&profile_id, &audio).await.map_err(|e| {
+        (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error": e.to_string()})))
+    })?;
+
+    let count = speaker_id.enrollment_count(&profile_id).await.unwrap_or(0);
+
+    Ok(Json(json!({
+        "embedding_id":   embedding.id,
+        "profile_id":     embedding.profile_id,
+        "model":          embedding.model,
+        "dims":           embedding.dims,
+        "enrolled_count": count,
+        "created_at":     embedding.created_at.to_rfc3339(),
+    })))
+}
+
+async fn delete_speaker_biometrics(
+    State(state): State<Arc<AppState>>,
+    Path(profile_id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<Value>)> {
+    let speaker_id = state.speaker_id.as_ref().ok_or_else(|| (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": "speaker identification not configured"})),
+    ))?;
+    speaker_id.delete_speaker(&profile_id).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()})))
+    })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Record a short audio clip from the server mic and identify the speaker.
+///
+/// Mirrors `POST /profiles/{id}/enroll` but runs identification instead of
+/// enrollment.  The `duration_secs` body field is optional (default: 5).
+/// Returns `{ identified, profile_id, confidence }`.
+async fn identify_speaker_handler(
+    State(state): State<Arc<AppState>>,
+    body: Option<Json<serde_json::Value>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let speaker_id = state.speaker_id.as_ref().ok_or_else(|| (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": "speaker identification not configured — run pond-server setup first"})),
+    ))?;
+
+    let duration_secs = body
+        .as_ref()
+        .and_then(|b| b.get("duration_secs"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5) as u32;
+
+    let audio = tokio::task::spawn_blocking(move || {
+        pond_adapters_whisper::record_wav_sample(duration_secs)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+
+    let result = speaker_id.identify_speaker(&audio).await.map_err(|e| {
+        (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error": e.to_string()})))
+    })?;
+
+    match result {
+        Some((profile_id, confidence)) => Ok(Json(json!({
+            "identified":  true,
+            "profile_id":  profile_id,
+            "confidence":  confidence,
+        }))),
+        None => Ok(Json(json!({
+            "identified":  false,
+            "profile_id":  null,
+            "confidence":  null,
+        }))),
+    }
+}
+
+async fn list_speaker_enrollments_handler(
+    State(state): State<Arc<AppState>>,
+    Path(profile_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let speaker_id = state.speaker_id.as_ref().ok_or_else(|| (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": "speaker identification not configured"})),
+    ))?;
+
+    let embeddings = speaker_id.list_enrollments(&profile_id).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()})))
+    })?;
+
+    let enrollments: Vec<Value> = embeddings.iter().map(|e| json!({
+        "id":         e.id,
+        "profile_id": e.profile_id,
+        "model":      e.model,
+        "dims":       e.dims,
+        "created_at": e.created_at.to_rfc3339(),
+    })).collect();
+
+    Ok(Json(json!({
+        "profile_id":  profile_id,
+        "enrollments": enrollments,
+        "count":       embeddings.len(),
+    })))
+}
+
+/// Accept WAV bytes from the Tauri client, identify the speaker, and return the
+/// matched profile together with its display name so the frontend can show it.
+///
+/// This is the client-audio counterpart to `POST /speaker/identify` (which
+/// records from the server mic). The Tauri voice pipeline sends the same WAV
+/// bytes it captured for transcription, so identification runs concurrently at
+/// zero extra latency cost to the user.
+async fn identify_speaker_audio_handler(
+    State(state): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let speaker_id = state.speaker_id.as_ref().ok_or_else(|| (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": "speaker identification not configured"})),
+    ))?;
+
+    let mut audio_bytes: Option<Vec<u8>> = None;
+    while let Some(field) = multipart.next_field().await.map_err(|e| (
+        StatusCode::BAD_REQUEST,
+        Json(json!({"error": format!("multipart error: {e}")})),
+    ))? {
+        if field.name() == Some("audio") {
+            audio_bytes = Some(
+                field.bytes().await
+                    .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))))?
+                    .to_vec(),
+            );
+        }
+    }
+
+    let audio = audio_bytes.ok_or_else(|| (
+        StatusCode::BAD_REQUEST,
+        Json(json!({"error": "missing audio field"})),
+    ))?;
+
+    let result = speaker_id.identify_speaker(&audio).await.map_err(|e| {
+        (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error": e.to_string()})))
+    })?;
+
+    match result {
+        Some((profile_id, confidence)) => {
+            // Fetch display name so the frontend can show it without a second round-trip.
+            let display_name = state.profile_repo
+                .get(&profile_id).await
+                .ok()
+                .flatten()
+                .map(|p| format!("{} {}", p.avatar_emoji, p.display_name))
+                .unwrap_or_else(|| profile_id.clone());
+
+            Ok(Json(json!({
+                "identified":   true,
+                "profile_id":   profile_id,
+                "confidence":   confidence,
+                "display_name": display_name,
+            })))
+        }
+        None => Ok(Json(json!({
+            "identified":   false,
+            "profile_id":   null,
+            "confidence":   null,
+            "display_name": null,
+        }))),
+    }
 }
 
 // ── Sensor handlers ───────────────────────────────────────────────────────────

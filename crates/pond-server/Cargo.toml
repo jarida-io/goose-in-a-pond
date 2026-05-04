@@ -47,7 +47,8 @@ pond-infra-scheduler   = { workspace = true }
 pond-adapters-weather  = { workspace = true }
 pond-adapters-llamafile = { path = "../../crates/pond-adapters-llamafile" }
 pond-adapters-ollama = { path = "../../crates/pond-adapters-ollama" }
-pond-adapters-whisper = { path = "../../crates/pond-adapters-whisper" }
+pond-adapters-whisper        = { path = "../../crates/pond-adapters-whisper" }
+pond-adapters-speaker-embed  = { workspace = true }
 pond-adapters-piper = { path = "../../crates/pond-adapters-piper" }
 pond-mcp-server    = { path = "../pond-mcp-server" }
 # Both depend on the goose submodule which creates a diamond rmcp conflict when

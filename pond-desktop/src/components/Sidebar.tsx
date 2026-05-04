@@ -37,6 +37,7 @@ const NAV_ICONS: Record<string, React.ElementType> = {
   prompt:   PenLine,
   settings: Settings,
   face:     ScanFace,
+  "voice-id": Mic,
   canvas:   Layers,
   agent:    Bot,
 };

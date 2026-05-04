@@ -29,6 +29,12 @@ export interface LastResponseMeta {
   completionTokens: number;
 }
 
+export interface CurrentSpeaker {
+  profileId: string;
+  displayName: string;
+  confidence: number;
+}
+
 export interface AppState {
   mode: DesktopMode;
   section: GuiSection;
@@ -44,6 +50,7 @@ export interface AppState {
   contextCards: ContextCard[];
   voiceRequestId: number;
   lastResponseMeta: LastResponseMeta | null;
+  currentSpeaker: CurrentSpeaker | null;
 }
 
 export type AppAction =
@@ -64,7 +71,8 @@ export type AppAction =
   | { type: "CLEAR_CONTEXT_CARDS" }
   | { type: "VOICE_ACTIVATE" }
   | { type: "SET_LAST_RESPONSE_META"; payload: LastResponseMeta }
-  | { type: "SET_NEEDS_ONBOARDING"; payload: boolean };
+  | { type: "SET_NEEDS_ONBOARDING"; payload: boolean }
+  | { type: "SET_CURRENT_SPEAKER"; payload: CurrentSpeaker | null };
 
 let _transcriptIdCounter = 0;
 let _cardIdCounter = 0;
@@ -92,6 +100,7 @@ export function buildInitialState(): AppState {
     contextCards: [],
     voiceRequestId: 0,
     lastResponseMeta: null,
+    currentSpeaker: null,
   };
 }
 
@@ -134,7 +143,13 @@ export function reducer(state: AppState, action: AppAction): AppState {
       return { ...state, sessionId: action.payload };
 
     case "SET_VOICE_STATE":
-      return { ...state, voiceState: action.payload, voiceError: null };
+      // Preserve voiceError when entering error state so the message survives
+      // the two-dispatch sequence (SET_VOICE_ERROR then SET_VOICE_STATE "error").
+      return {
+        ...state,
+        voiceState: action.payload,
+        voiceError: action.payload === "error" ? state.voiceError : null,
+      };
 
     case "SET_VOICE_ERROR":
       return { ...state, voiceError: action.payload };
@@ -180,6 +195,9 @@ export function reducer(state: AppState, action: AppAction): AppState {
 
     case "SET_NEEDS_ONBOARDING":
       return { ...state, needsOnboarding: action.payload };
+
+    case "SET_CURRENT_SPEAKER":
+      return { ...state, currentSpeaker: action.payload };
 
     default:
       return state;

@@ -237,6 +237,36 @@ pub async fn run_voice_pipeline(
         Some(format!("Bearer {}", auth_token))
     };
 
+    // ── 0. Speaker identification — runs concurrently with transcription ─────
+    // Sends the same WAV bytes to /speaker/identify-audio. Because both tasks
+    // run in parallel the user feels no additional latency: identification
+    // resolves while Whisper is still computing the transcript.
+    {
+        let sid_client  = client.clone();
+        let sid_url     = base_url.clone();
+        let sid_app     = app.clone();
+        let sid_auth    = bearer.clone();
+        let sid_wav     = wav_bytes.clone();
+        tokio::spawn(async move {
+            let part = multipart::Part::bytes(sid_wav)
+                .file_name("audio.wav")
+                .mime_str("audio/wav")
+                .unwrap_or_else(|_| multipart::Part::bytes(vec![]));
+            let form = multipart::Form::new().part("audio", part);
+            let mut req = sid_client
+                .post(format!("{}/api/v1/speaker/identify-audio", sid_url))
+                .multipart(form);
+            if let Some(auth) = sid_auth {
+                req = req.header("Authorization", auth);
+            }
+            if let Ok(res) = req.send().await {
+                if let Ok(json) = res.json::<serde_json::Value>().await {
+                    let _ = sid_app.emit("speaker-identified", json);
+                }
+            }
+        });
+    }
+
     // ── 1. Transcribe (quip starts AFTER, not before — avoids talking over user) ──
     let part = multipart::Part::bytes(wav_bytes)
         .file_name("audio.wav")

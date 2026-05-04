@@ -25,12 +25,14 @@ const BASE: AppState = {
   serverUrl: "http://127.0.0.1:4000",
   sessionToken: null,
   sessionId: null,
+  needsOnboarding: false,
   voiceState: "idle",
   voiceError: null,
   transcript: [],
   contextCards: [],
   voiceRequestId: 0,
   lastResponseMeta: null,
+  currentSpeaker: null,
 };
 
 function msg(overrides?: Partial<TranscriptMessage>): TranscriptMessage {
