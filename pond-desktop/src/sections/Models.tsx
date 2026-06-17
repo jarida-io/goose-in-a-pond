@@ -3,7 +3,7 @@ import { Button, Tabs, Chip } from "@heroui/react";
 import {
   Brain, Mic, Volume2, RefreshCw, Download, CheckCircle, XCircle,
   ChevronDown, ChevronUp, Search, Trash2, MessageSquare, Wrench, Play,
-  ScanFace, Loader2, Puzzle, Cpu,
+  ScanFace, Loader2, Cpu,
 } from "lucide-react";
 import { api } from "../api/PondApiClient";
 import { useAppState } from "../state/AppContext";
@@ -114,8 +114,6 @@ function ActiveRolesBanner({
     { key: "tts",       label: "TTS",       icon: <Volume2 size={12} strokeWidth={1.8} />,        category: "tts" },
     { key: "embedding", label: "Embedding", icon: <Cpu size={12} strokeWidth={1.8} />,            category: "embedding" },
   ];
-  const toolModel = roles?.tool?.model;
-
   return (
     <div className="roles-banner">
       <div className="role-grid">
@@ -183,24 +181,6 @@ function ActiveRolesBanner({
             </div>
           );
         })}
-        {/* Tool Caller chip */}
-        <div
-          className={`role-chip role-chip--success${toolModel ? " is-set" : ""}`}
-          onClick={!toolModel && onNavigate ? () => onNavigate("llm") : undefined}
-          style={{ cursor: !toolModel && onNavigate ? "pointer" : "default" }}
-          title={!toolModel ? "Click to set a tool-calling specialist model" : undefined}
-        >
-          <div className="role-chip__bar" />
-          <div className="role-chip__body">
-            <div className="role-chip__head">
-              <Puzzle size={12} strokeWidth={1.8} />
-              <span className="role-chip__role">Tool Caller</span>
-            </div>
-            <span className={`role-chip__value ${toolModel ? "role-chip__value--set" : "role-chip__value--empty"}`}>
-              {toolModel ?? "---"}
-            </span>
-          </div>
-        </div>
       </div>
 
       {/* Active model capabilities -- shown inline when set */}
@@ -928,6 +908,27 @@ const CATEGORIES: Array<{ key: Category; label: string; icon: React.ReactNode; c
   { key: "face",      label: "Face",      icon: <ScanFace size={14} strokeWidth={1.8} />, color: "#3b82f6" },
 ];
 
+// ── Setup flow role definitions ───────────────────────────────
+
+type RoleSetupKey = "chat" | "asr" | "tts" | "embedding";
+
+const ROLE_SETUP_DEFS: Array<{
+  key: RoleSetupKey;
+  title: string;
+  description: string;
+  icon: React.ReactNode;
+  accentColor: string;
+  accentBg: string;
+  providers: string[];
+  activateRole: string;
+  downloadCategory: string;
+}> = [
+  { key: "chat",      title: "Your AI brain",      description: "Handles chat, tasks, and reasoning. A 3–8 B GGUF model works well on most laptops.",                  icon: <Brain   size={18} strokeWidth={1.8} />, accentColor: "var(--color-role-chat)",  accentBg: "var(--color-role-chat-soft)",      providers: ["gguf", "llamafile", "ollama"],  activateRole: "chat",      downloadCategory: "gguf"      },
+  { key: "asr",       title: "Voice input",         description: "Turns your speech into text so the assistant can hear you. Whisper Tiny is fast and private.",         icon: <Mic     size={18} strokeWidth={1.8} />, accentColor: "var(--color-role-asr)",   accentBg: "var(--color-role-asr-soft)",       providers: ["whisper"],                      activateRole: "asr",       downloadCategory: "whisper"   },
+  { key: "tts",       title: "Assistant's voice",   description: "Gives your assistant a natural speaking voice for voice mode.",                                         icon: <Volume2 size={18} strokeWidth={1.8} />, accentColor: "var(--color-role-tts)",   accentBg: "var(--color-role-tts-soft)",       providers: ["tts", "tts_piper", "tts_http"], activateRole: "tts",       downloadCategory: "tts"       },
+  { key: "embedding", title: "Memory engine",       description: "Helps the assistant search and remember things you've shared. Downloads automatically on first use.",   icon: <Cpu     size={18} strokeWidth={1.8} />, accentColor: CAT_COLOR.embedding,       accentBg: "rgba(139, 92, 246, 0.08)",         providers: ["embedding"],                    activateRole: "embedding", downloadCategory: "embedding" },
+];
+
 // ── Face Recognition Panel ───────────────────────────────────
 //
 // Read-only status for the face models (ArcFace R50 + SCRFD 10G +
@@ -1392,10 +1393,144 @@ function TtsCatalogPanel({
   );
 }
 
+// ── Setup Progress ────────────────────────────────────────────
+
+function SetupProgress({ configuredCount }: { configuredCount: number }) {
+  return (
+    <div className="setup-progress">
+      <div className="setup-progress__bar">
+        <div className="setup-progress__fill" style={{ width: `${(configuredCount / 4) * 100}%` }} />
+      </div>
+      <span className="setup-progress__label">
+        {configuredCount === 0 ? "Let's get you set up" : configuredCount === 4 ? "All roles configured" : `${configuredCount} of 4 roles configured`}
+      </span>
+    </div>
+  );
+}
+
+// ── Role Setup Card ───────────────────────────────────────────
+
+function RoleSetupCard({
+  def,
+  models,
+  modelsLoading,
+  activeRoles,
+  onActivate,
+  onDownload,
+  downloading,
+}: {
+  def: typeof ROLE_SETUP_DEFS[number];
+  models: ModelEntry[];
+  modelsLoading: boolean;
+  activeRoles: ModelActiveRoles | null;
+  onActivate: (provider: string, name: string, role: string) => void;
+  onDownload: (category: string, model: ModelEntry) => void;
+  downloading: string | null;
+}) {
+  const roleModels = models.filter((m) => def.providers.includes(m.provider));
+  const downloaded = roleModels.filter((m) => m.downloaded !== false);
+  const available  = roleModels.filter((m) => m.downloaded === false).slice(0, 3);
+
+  const activeEntry =
+    def.key === "chat"      ? activeRoles?.chat :
+    def.key === "asr"       ? activeRoles?.asr :
+    def.key === "tts"       ? activeRoles?.tts :
+    activeRoles?.embedding;
+  const isConfigured = !!(activeEntry?.model);
+
+  // Active model may not be in the catalog list (e.g. Ollama models fetched separately)
+  const activeInCatalog = isConfigured && downloaded.some((m) => m.name === activeEntry!.model);
+
+  return (
+    <div className={`setup-card${isConfigured ? " is-configured" : ""}`}>
+      <div className="setup-card__header">
+        <div className="setup-card__icon" style={{ color: def.accentColor, background: def.accentBg }}>
+          {def.icon}
+        </div>
+        <div className="setup-card__meta">
+          <div className="setup-card__title">{def.title}</div>
+          <div className="setup-card__desc">{def.description}</div>
+        </div>
+        {isConfigured && (
+          <div className="setup-card__status">
+            <CheckCircle size={15} strokeWidth={2} />
+            <span className="setup-card__active-name">{activeEntry!.model}</span>
+          </div>
+        )}
+      </div>
+
+      {(isConfigured || downloaded.length > 0 || available.length > 0) && (
+        <div className="setup-card__models">
+          {/* Synthesised row for active model not present in catalog (e.g. Ollama) */}
+          {isConfigured && !activeInCatalog && (
+            <div className="setup-model-row is-active">
+              <div className="setup-model-row__info">
+                <span className="setup-model-row__name">{activeEntry!.model}</span>
+                {activeEntry!.provider && <span className="setup-model-row__size">{activeEntry!.provider}</span>}
+              </div>
+              <span className="setup-model-row__active-label">
+                <CheckCircle size={12} strokeWidth={2.5} /> Active
+              </span>
+            </div>
+          )}
+          {downloaded.map((m) => {
+            const isActive = isConfigured && activeEntry?.model === m.name;
+            return (
+              <div key={m.id} className={`setup-model-row${isActive ? " is-active" : ""}`}>
+                <div className="setup-model-row__info">
+                  <span className="setup-model-row__name">{m.display_name ?? m.name}</span>
+                  {m.ram_estimate_mb && <span className="setup-model-row__size">{m.ram_estimate_mb} MB</span>}
+                  <CapabilityBadges name={m.name} />
+                </div>
+                {isActive ? (
+                  <span className="setup-model-row__active-label">
+                    <CheckCircle size={12} strokeWidth={2.5} /> Active
+                  </span>
+                ) : (
+                  <Button size="sm" variant="secondary" onPress={() => onActivate(m.provider, m.name, def.activateRole)}>
+                    Use
+                  </Button>
+                )}
+              </div>
+            );
+          })}
+          {available.map((m) => (
+            <div key={m.id} className="setup-model-row setup-model-row--available">
+              <div className="setup-model-row__info">
+                <span className="setup-model-row__name">{m.display_name ?? m.name}</span>
+                {m.size_mb != null && <span className="setup-model-row__size">{m.size_mb} MB</span>}
+                <CapabilityBadges name={m.name} />
+              </div>
+              <Button
+                size="sm"
+                variant="primary"
+                onPress={() => onDownload(def.downloadCategory, m)}
+                isDisabled={downloading === m.name}
+              >
+                <Download size={11} />
+                {downloading === m.name ? "Starting…" : "Download"}
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {modelsLoading && downloaded.length === 0 && available.length === 0 && (
+        <p className="setup-card__hint">Loading…</p>
+      )}
+      {!modelsLoading && downloaded.length === 0 && available.length === 0 && (
+        <p className="setup-card__hint">No models in catalog. Try scanning.</p>
+      )}
+    </div>
+  );
+}
+
 // ── Main Models Component ─────────────────────────────────────
 
 export function Models() {
   const confirm = useConfirm();
+  const [viewOverride, setViewOverride] = useState<"setup" | "manage" | null>(null);
+  const [setupDownloading, setSetupDownloading] = useState<string | null>(null);
   const [category, setCategory] = useState<Category>("llm");
   const [activeRoles, setActiveRoles] = useState<ModelActiveRoles | null>(null);
   const [rolesLoading, setRolesLoading] = useState(false);
@@ -1459,6 +1594,15 @@ export function Models() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const configuredCount = [
+    activeRoles?.chat?.model,
+    activeRoles?.asr?.model,
+    activeRoles?.tts?.model,
+    activeRoles?.embedding?.model,
+  ].filter(Boolean).length;
+
+  const view: "setup" | "manage" = viewOverride ?? (activeRoles?.chat?.model ? "manage" : "setup");
+
   function flash(text: string, ok = true) {
     setActionMsg({ text, ok });
     setTimeout(() => setActionMsg(null), 3000);
@@ -1501,6 +1645,21 @@ export function Models() {
     } catch (e) { flash(String(e), false); }
   }
 
+  async function handleSetupDownload(category: string, m: ModelEntry) {
+    setSetupDownloading(m.name);
+    try {
+      const res = await api.downloadModel(category, m.name);
+      if (res.status === "already_downloaded" || res.status === "ready") {
+        flash(`${m.name} is ready.`);
+      } else {
+        flash(`Downloading ${m.name}… Activate it once it finishes.`);
+        startDownloadPoll();
+      }
+      await loadModels();
+    } catch (e) { flash(String(e), false); }
+    finally { setSetupDownloading(null); }
+  }
+
   const asrModels       = models.filter((m) => m.provider === "whisper");
   const ttsModels       = models.filter((m) => m.provider === "tts" || m.provider === "tts_piper" || m.provider === "tts_http");
   const embeddingModels = models.filter((m) => m.provider === "embedding" || m.category === "embedding");
@@ -1510,60 +1669,103 @@ export function Models() {
 
   return (
     <div className="screen">
-      {/* Page header */}
       <PageHeader
         title="Models"
         action={
-          <Button size="sm" variant="ghost" onPress={handleScan}>
-            <RefreshCw size={14} strokeWidth={1.8} /> Scan
-          </Button>
+          <div className="models-view-toggle">
+            <button
+              className={`models-view-toggle__btn${view === "setup" ? " is-active" : ""}`}
+              onClick={() => setViewOverride("setup")}
+            >
+              Set up
+            </button>
+            <button
+              className={`models-view-toggle__btn${view === "manage" ? " is-active" : ""}`}
+              onClick={() => setViewOverride("manage")}
+            >
+              Manage models
+            </button>
+            <Button size="sm" variant="ghost" isIconOnly onPress={handleScan} aria-label="Scan for models">
+              <RefreshCw size={13} strokeWidth={1.8} />
+            </Button>
+          </div>
         }
       />
 
-      {/* Active Roles Card */}
-      <div className="card">
-        <div className="card-header">
-          <span className="card__label">Active model roles</span>
-          <div className="card-header__right">
-            {memoryStatus && memoryStatus.total_mb > 0 && (
-              <span className="mem-stat">
-                {(((memoryStatus.total_mb - memoryStatus.available_for_llm_mb) / memoryStatus.total_mb) * 100).toFixed(0)}%
-                {" · "}
-                {(memoryStatus.available_for_llm_mb / 1024).toFixed(1)} / {(memoryStatus.total_mb / 1024).toFixed(1)} GB
-                {memoryStatus.loaded_model && (
-                  <Chip size="sm" variant="flat" color="secondary" className="mem-stat__chip">{memoryStatus.loaded_model}</Chip>
-                )}
-              </span>
-            )}
-            <Button size="sm" variant="ghost" isIconOnly onPress={loadRoles} isDisabled={rolesLoading} aria-label="Refresh roles">
-              <RefreshCw size={13} strokeWidth={1.8} style={{ opacity: rolesLoading ? 0.4 : 1, transition: "opacity 0.2s" }} />
-            </Button>
-          </div>
-        </div>
-        <div className="card-body--roles">
-          <ActiveRolesBanner
-            roles={activeRoles}
-            memoryStatus={memoryStatus}
-            capabilities={capabilities}
-            onRefresh={loadRoles}
-            loading={rolesLoading}
-            onNavigate={(cat) => setCategory(cat)}
-          />
-        </div>
-      </div>
-
-      {/* Download Progress */}
-      <DownloadProgress downloads={downloads} onScanModels={handleScan} />
-
-      {/* Action feedback */}
       {actionMsg && (
         <p className={`hint ${actionMsg.ok ? "hint--success" : "hint--error"}`}>
           {actionMsg.text}
         </p>
       )}
 
-      {/* Category tabs toolbar */}
-      <div className="models-toolbar">
+      {/* ── Setup view ── */}
+      {view === "setup" && (
+        <div className="setup-flow">
+          <SetupProgress configuredCount={configuredCount} />
+          {ROLE_SETUP_DEFS.map((def) => (
+            <RoleSetupCard
+              key={def.key}
+              def={def}
+              models={models}
+              modelsLoading={modelsLoading}
+              activeRoles={activeRoles}
+              onActivate={handleActivate}
+              onDownload={handleSetupDownload}
+              downloading={setupDownloading}
+            />
+          ))}
+          {configuredCount === 4 && (
+            <div className="setup-complete">
+              <CheckCircle size={18} strokeWidth={2} />
+              <span>All roles configured — your assistant is ready.</span>
+              <Button size="sm" variant="secondary" onPress={() => setViewOverride("manage")}>
+                Manage models
+              </Button>
+            </div>
+          )}
+          <DownloadProgress downloads={downloads} onScanModels={handleScan} />
+        </div>
+      )}
+
+      {/* ── Manage view ── */}
+      {view === "manage" && (
+        <>
+          {/* Active Roles Card */}
+          <div className="card">
+            <div className="card-header">
+              <span className="card__label">Active model roles</span>
+              <div className="card-header__right">
+                {memoryStatus && memoryStatus.total_mb > 0 && (
+                  <span className="mem-stat">
+                    {(((memoryStatus.total_mb - memoryStatus.available_for_llm_mb) / memoryStatus.total_mb) * 100).toFixed(0)}%
+                    {" · "}
+                    {(memoryStatus.available_for_llm_mb / 1024).toFixed(1)} / {(memoryStatus.total_mb / 1024).toFixed(1)} GB
+                    {memoryStatus.loaded_model && (
+                      <Chip size="sm" variant="flat" color="secondary" className="mem-stat__chip">{memoryStatus.loaded_model}</Chip>
+                    )}
+                  </span>
+                )}
+                <Button size="sm" variant="ghost" isIconOnly onPress={loadRoles} isDisabled={rolesLoading} aria-label="Refresh roles">
+                  <RefreshCw size={13} strokeWidth={1.8} style={{ opacity: rolesLoading ? 0.4 : 1, transition: "opacity 0.2s" }} />
+                </Button>
+              </div>
+            </div>
+            <div className="card-body--roles">
+              <ActiveRolesBanner
+                roles={activeRoles}
+                memoryStatus={memoryStatus}
+                capabilities={capabilities}
+                onRefresh={loadRoles}
+                loading={rolesLoading}
+                onNavigate={(cat) => setCategory(cat)}
+              />
+            </div>
+          </div>
+
+          <DownloadProgress downloads={downloads} onScanModels={handleScan} />
+
+          {/* Category tabs toolbar */}
+          <div className="models-toolbar">
         <Tabs
           selectedKey={category}
           onSelectionChange={(k) => setCategory(String(k) as Category)}
@@ -1652,7 +1854,9 @@ export function Models() {
         />
       )}
 
-      {category === "face" && <FacePanel />}
+          {category === "face" && <FacePanel />}
+        </>
+      )}
     </div>
   );
 }
