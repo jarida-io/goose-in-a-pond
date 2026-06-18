@@ -40,6 +40,9 @@ jobs:
       # After the first run, unchanged crates are not recompiled.
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install system dependencies
+        run: sudo apt-get install -y libasound2-dev
+
       - name: cargo fmt
         run: cargo fmt --check
 
