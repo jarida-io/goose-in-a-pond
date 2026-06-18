@@ -24,10 +24,13 @@ jobs:
           submodules: false
           fetch-depth: 1
 
-      # Fetch the submodule at the current branch HEAD rather than the pinned SHA,
-      # because giap-patches is force-pushed and the stored SHA may be unreachable.
+      # Clone goose directly at the giap-patches branch HEAD.
+      # Bypasses submodule SHA pinning — the stored SHA may be unreachable after
+      # force-pushes to giap-patches.
       - name: Checkout goose submodule
-        run: git submodule update --init --remote --depth 1 goose
+        run: |
+          rm -rf goose
+          git clone --depth=1 --branch giap-patches https://github.com/jarida-io/Goose goose
 
       - uses: dtolnay/rust-toolchain@stable
         with:
