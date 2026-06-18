@@ -4155,6 +4155,10 @@
 .logs-toolbar [role="tab"][aria-selected="true"] {
   background: var(--color-accent); color: #fff; border-radius: 7px;
 }
+/* Settings header action row (dev toggle + save button) */
+.settings-header-actions { display: flex; align-items: center; gap: var(--space-3); }
+.settings-dev-toggle { display: flex; align-items: center; gap: var(--space-2); cursor: pointer; }
+
 /* Settings underlined tabs */
 .settings-tabs { border-bottom: 1px solid var(--grey-200); }
 .settings-tabs [role="tab"][aria-selected="true"]::after {
