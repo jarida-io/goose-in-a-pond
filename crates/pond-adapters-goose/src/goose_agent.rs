@@ -6,18 +6,16 @@ use goose::config::GooseMode;
 use goose::conversation::message::Message;
 use goose::providers::base::Provider;
 use goose::session::SessionManager;
-use pond_core::mcp::ports::tools::tool_registry::ToolRegistryPort;
-use pond_core::models::ports::agent::{
-    Agent as AgentPort, AgentRequest, AgentResponse, AgentStreamEvent,
-};
-use pond_core::models::services::prompt_builder::build_prompt_partition;
+use pond_core::ports::agent::{Agent as AgentPort, AgentRequest, AgentResponse, AgentStreamEvent};
+use pond_core::ports::device_registry::DeviceRegistry;
+use pond_core::ports::memory_repository::MemoryRepository;
+use pond_core::ports::prompt_extra::PromptExtraRepository;
+use pond_core::ports::prompt_template::PromptTemplateRepository;
+use pond_core::ports::settings::SettingsRepository;
+use pond_core::ports::skill::UserSkillRepository;
+use pond_core::ports::tool_registry::ToolRegistryPort;
 use pond_core::prompts::PromptState;
-use pond_core::user_data::ports::device_registry::DeviceRegistry;
-use pond_core::user_data::ports::memory_repository::MemoryRepository;
-use pond_core::user_data::ports::prompt_extra::PromptExtraRepository;
-use pond_core::user_data::ports::prompt_template::PromptTemplateRepository;
-use pond_core::user_data::ports::settings::SettingsRepository;
-use pond_core::user_data::ports::skill::UserSkillRepository;
+use pond_core::services::prompt_builder::build_prompt_partition;
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::path::PathBuf;
@@ -98,7 +96,7 @@ pub struct GooseAdapter {
     /// short, conversational, no formatting). Set by the CLI when `--input whisper`.
     voice_mode: std::sync::atomic::AtomicBool,
     /// Runtime capabilities of the currently loaded model.
-    model_capabilities: Mutex<pond_core::models::domain::model_capabilities::ModelCapabilities>,
+    model_capabilities: Mutex<pond_core::domain::model_capabilities::ModelCapabilities>,
     /// Hash of the last static prefix sent via `override_system_prompt()`.
     /// When the current partition's `prefix_hash` matches this value, the static
     /// prefix has not changed and we skip `override_system_prompt()` — allowing
@@ -190,7 +188,7 @@ impl GooseAdapter {
             user_extensions: Arc::new(tokio::sync::RwLock::new(HashSet::new())),
             voice_mode: std::sync::atomic::AtomicBool::new(false),
             model_capabilities: Mutex::new(
-                pond_core::models::domain::model_capabilities::ModelCapabilities::default(),
+                pond_core::domain::model_capabilities::ModelCapabilities::default(),
             ),
             last_prefix_hash: Mutex::new(0),
             cached_tools: tokio::sync::RwLock::new(None),
@@ -208,12 +206,12 @@ impl GooseAdapter {
     /// Convenience factory for non-server use (tests, CLI one-shots).
     /// Uses mock repos and connects to llamafile at `host`.
     pub async fn with_llamafile(host: Option<&str>) -> Result<Self> {
-        use pond_core::user_data::mocks::mock_device_registry::MockDeviceRegistry;
-        use pond_core::user_data::mocks::mock_memory::MockMemoryRepository;
-        use pond_core::user_data::mocks::mock_prompt_extra::MockPromptExtraRepository;
-        use pond_core::user_data::mocks::mock_prompt_template::MockPromptTemplateRepository;
-        use pond_core::user_data::mocks::mock_settings::MockSettingsRepository;
-        use pond_core::user_data::mocks::mock_skill::MockSkillRepository;
+        use pond_core::services::mock_device_registry::MockDeviceRegistry;
+        use pond_core::services::mock_memory::MockMemoryRepository;
+        use pond_core::services::mock_prompt_extra::MockPromptExtraRepository;
+        use pond_core::services::mock_prompt_template::MockPromptTemplateRepository;
+        use pond_core::services::mock_settings::MockSettingsRepository;
+        use pond_core::services::mock_skill::MockSkillRepository;
 
         let url = host.unwrap_or("http://127.0.0.1:8080").to_string();
         Self::new(
@@ -286,7 +284,7 @@ impl GooseAdapter {
         if let Some(gid) = self
             .goose_session_map
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap()
             .get(giap_sid)
             .cloned()
         {
@@ -301,7 +299,7 @@ impl GooseAdapter {
         {
             self.goose_session_map
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap()
                 .insert(giap_sid.to_string(), giap_sid.to_string());
             return giap_sid.to_string();
         }
@@ -320,7 +318,7 @@ impl GooseAdapter {
                 let gid = session.id.clone();
                 self.goose_session_map
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .unwrap()
                     .insert(giap_sid.to_string(), gid.clone());
                 gid
             }
@@ -360,7 +358,7 @@ impl GooseAdapter {
             _ => {
                 // HTTP providers — use model-reported context window.
                 let caps =
-                    pond_core::models::domain::model_capabilities::ModelCapabilities::from_model_name(
+                    pond_core::domain::model_capabilities::ModelCapabilities::from_model_name(
                         model,
                     );
                 caps.context_window_tokens as usize
@@ -371,12 +369,12 @@ impl GooseAdapter {
     /// Hot-swap the Goose provider when `chat_provider` / `chat_model` in settings changes.
     async fn ensure_provider_current(
         &self,
-        settings: &pond_core::user_data::domain::settings::Settings,
+        settings: &pond_core::domain::settings::Settings,
         session_id: &str,
     ) -> Result<()> {
         let key = format!("{}:{}", settings.chat_provider, settings.chat_model);
         {
-            let last = self.last_provider_key.lock().unwrap_or_else(|e| e.into_inner());
+            let last = self.last_provider_key.lock().unwrap();
             if *last == key {
                 println!("[model-switch] provider already current: {}", key);
                 return Ok(());
@@ -492,9 +490,6 @@ impl GooseAdapter {
                 }
             }
             "ollama" => {
-                let ollama_host = std::env::var("GIAP_OLLAMA_URL")
-                    .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
-                std::env::set_var("OLLAMA_HOST", &ollama_host);
                 std::env::set_var("OLLAMA_TIMEOUT", "600");
                 let model_name = if settings.chat_model.is_empty() {
                     "llama3.2".to_string()
@@ -536,33 +531,30 @@ impl GooseAdapter {
                 settings.chat_provider, settings.chat_model, session_id
             );
             tracing::info!(
-                target: "giap::trace",
-                kind = "provider_swap",
-                session_id = %session_id,
-                provider = %settings.chat_provider,
-                model = %settings.chat_model,
-                "Switching Goose provider"
+                "Switching Goose provider to {}:{} for session {}",
+                settings.chat_provider,
+                settings.chat_model,
+                session_id
             );
             self.agent.update_provider(p, session_id).await?;
-            *self.last_provider_key.lock().unwrap_or_else(|e| e.into_inner()) = key.clone();
+            *self.last_provider_key.lock().unwrap() = key.clone();
 
             // Update model capabilities from the new model name
-            let caps =
-                pond_core::models::domain::model_capabilities::ModelCapabilities::from_model_name(
-                    &settings.chat_model,
-                );
+            let caps = pond_core::domain::model_capabilities::ModelCapabilities::from_model_name(
+                &settings.chat_model,
+            );
             println!(
                 "[model-switch] capabilities: thinking={}, vision={}, context={}k",
                 caps.thinking,
                 caps.vision,
                 caps.context_window_tokens / 1000
             );
-            *self.model_capabilities.lock().unwrap_or_else(|e| e.into_inner()) = caps;
+            *self.model_capabilities.lock().unwrap() = caps;
 
             // Reset prefix hash so the system prompt is rebuilt with the new model's
             // capabilities on the next turn. KV-cache is invalidated by the provider
             // swap anyway — no cache to preserve.
-            *self.last_prefix_hash.lock().unwrap_or_else(|e| e.into_inner()) = 0;
+            *self.last_prefix_hash.lock().unwrap() = 0;
 
             println!("[model-switch] swap complete, key={}", key);
         } else {
@@ -612,6 +604,7 @@ impl GooseAdapter {
                     let mut settings = ModelSettings::default();
                     settings.native_tool_calling = true;
                     settings.use_jinja = true;
+                    settings.enable_thinking = false;
                     let entry = LocalModelEntry {
                         id: stem.clone(),
                         repo_id: format!("local/{}", stem),
@@ -621,6 +614,10 @@ impl GooseAdapter {
                         source_url: String::new(),
                         settings,
                         size_bytes: 0,
+                        mmproj_path: None,
+                        mmproj_size_bytes: 0,
+                        mmproj_source_url: None,
+                        shard_files: vec![],
                     };
                     match registry.add_model(entry) {
                         Ok(_) => {
@@ -648,17 +645,16 @@ impl GooseAdapter {
         let session_id = request.session_id.clone();
         let model_role = request.model_role.clone();
 
-        // Stash the user message and session ID so MCP tool handlers can read
-        // them for ToolCaller param generation and outbound HTTP trace events.
+        // Stash the user message so MCP tools can fall back to it when the
+        // model calls the right tool but sends empty params (common with small models).
         pond_mcp_server::set_last_user_message(&request.message);
-        pond_mcp_server::set_current_session_id(&session_id);
 
         // Goose maintains its own sessions.db with auto-generated IDs.
         let goose_sid = self.resolve_goose_session(&session_id).await;
 
         // ── 0. Load GIAP builtin MCP extensions (once per session) ────────────
         {
-            let needs_load = !self.loaded_sessions.lock().unwrap_or_else(|e| e.into_inner()).contains(&goose_sid);
+            let needs_load = !self.loaded_sessions.lock().unwrap().contains(&goose_sid);
             if needs_load {
                 let extensions = registered_extensions();
                 println!(
@@ -675,7 +671,7 @@ impl GooseAdapter {
                 }
                 self.loaded_sessions
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .unwrap()
                     .insert(goose_sid.clone());
 
                 // List discovered tools to verify extensions are working
@@ -739,7 +735,7 @@ impl GooseAdapter {
         );
 
         // Merge recent + relevant, deduplicate by ID
-        let memories_result: Result<Vec<pond_core::user_data::domain::memory::MemoryFragment>> = {
+        let memories_result: Result<Vec<pond_core::domain::memory::MemoryFragment>> = {
             let mut merged = recent_memories.unwrap_or_default();
             let relevant = relevant_memories.unwrap_or_default();
             let seen: std::collections::HashSet<String> =
@@ -777,7 +773,7 @@ impl GooseAdapter {
             // per-request flag (desktop voice pipeline sends voice_mode: true).
             let is_voice =
                 self.voice_mode.load(std::sync::atomic::Ordering::Relaxed) || request.voice_mode;
-            let caps = self.model_capabilities.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let caps = self.model_capabilities.lock().unwrap().clone();
             let thinking_enabled = if is_voice {
                 false
             } else {
@@ -794,7 +790,7 @@ impl GooseAdapter {
             let effective_ctx =
                 Self::effective_context_window(&settings.chat_provider, &settings.chat_model);
             let compact_prompt =
-                pond_core::models::services::context_budget::CompactionProfile::from_context_window(
+                pond_core::services::context_budget::CompactionProfile::from_context_window(
                     effective_ctx,
                 )
                 .use_compact_prompt();
@@ -845,7 +841,7 @@ impl GooseAdapter {
             // Check whether the static prefix changed. Drop the MutexGuard
             // before any `.await` to keep the future `Send`.
             let prefix_changed = {
-                let last_hash = self.last_prefix_hash.lock().unwrap_or_else(|e| e.into_inner());
+                let last_hash = self.last_prefix_hash.lock().unwrap();
                 *last_hash != partition.prefix_hash
             };
 
@@ -857,7 +853,7 @@ impl GooseAdapter {
                 self.agent
                     .override_system_prompt(partition.static_prefix)
                     .await;
-                let mut last_hash = self.last_prefix_hash.lock().unwrap_or_else(|e| e.into_inner());
+                let mut last_hash = self.last_prefix_hash.lock().unwrap();
                 *last_hash = partition.prefix_hash;
             } else {
                 tracing::debug!(
@@ -907,7 +903,7 @@ impl GooseAdapter {
         let effective_ctx =
             Self::effective_context_window(&settings.chat_provider, &settings.chat_model);
         let compaction_profile =
-            pond_core::models::services::context_budget::CompactionProfile::from_context_window(
+            pond_core::services::context_budget::CompactionProfile::from_context_window(
                 effective_ctx,
             );
 
@@ -928,8 +924,7 @@ impl GooseAdapter {
                 // chars/4 heuristic, keep fragments until the budget is spent.
                 let token_budget = compaction_profile.memory_token_budget;
                 let mut tokens_used: usize = 0;
-                let mut budgeted: Vec<&pond_core::user_data::domain::memory::MemoryFragment> =
-                    Vec::new();
+                let mut budgeted: Vec<&pond_core::domain::memory::MemoryFragment> = Vec::new();
                 for m in &memories {
                     let estimated_tokens = m.content.len() / 4 + 1;
                     if tokens_used + estimated_tokens > token_budget && !budgeted.is_empty() {
@@ -994,11 +989,7 @@ impl GooseAdapter {
         // Strip Goose default extensions that would pollute the prompt.
         // Only do this once per session — subsequent turns skip the strip loop.
         {
-            let already_stripped = self
-                .defaults_stripped
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .contains(&goose_sid);
+            let already_stripped = self.defaults_stripped.lock().unwrap().contains(&goose_sid);
             if !already_stripped {
                 let strip_list: &[&str] = &[
                     "developer",
@@ -1021,7 +1012,7 @@ impl GooseAdapter {
                 drop(user_exts);
                 self.defaults_stripped
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .unwrap()
                     .insert(goose_sid.clone());
                 // Invalidate tool cache since extensions changed.
                 *self.cached_tools.write().await = None;
@@ -1169,7 +1160,6 @@ impl GooseAdapter {
         let goose_sid_for_usage = goose_sid.clone();
 
         let user_msg_len = request.message.len();
-        let turn_start = std::time::Instant::now();
 
         // Cancellation token: when the stream is dropped (e.g. voice interrupt),
         // the DropGuard fires and cancels the token.  Goose's agent loop checks
@@ -1187,17 +1177,6 @@ impl GooseAdapter {
             let mut total_output_chars: usize = 0;
             // Track tool call ID → tool name so ToolResult events carry the tool name.
             let mut tool_id_to_name: HashMap<String, String> = HashMap::new();
-            // Wall-clock start per tool call (keyed by Goose tool-call ID) for latency.
-            let mut tool_call_starts: HashMap<String, std::time::Instant> = HashMap::new();
-
-            tracing::info!(
-                target: "giap::trace",
-                kind = "turn_start",
-                session_id = %session_id,
-                model = %settings.chat_model,
-                provider = %settings.chat_provider,
-                message_len = user_msg_len,
-            );
 
             let mut goose_stream = match agent_clone.reply(user_msg, session_cfg, Some(cancel_token)).await {
                 Ok(s) => s,
@@ -1229,14 +1208,6 @@ impl GooseAdapter {
                                                 continue;
                                             }
                                             tool_id_to_name.insert(tr.id.clone(), tool_name.clone());
-                                            tool_call_starts.insert(tr.id.clone(), std::time::Instant::now());
-                                            tracing::info!(
-                                                target: "giap::trace",
-                                                kind = "tool_call",
-                                                session_id = %session_id,
-                                                tool = %tool_name,
-                                                tool_id = %tr.id,
-                                            );
                                             yield Ok(AgentStreamEvent::ToolCall {
                                                 id: tr.id.clone(),
                                                 tool: tool_name,
@@ -1260,19 +1231,6 @@ impl GooseAdapter {
                                                 .get(&tr.id)
                                                 .cloned()
                                                 .unwrap_or_default();
-                                            let tool_latency_ms = tool_call_starts
-                                                .remove(&tr.id)
-                                                .map(|s| s.elapsed().as_millis() as u64)
-                                                .unwrap_or(0);
-                                            tracing::info!(
-                                                target: "giap::trace",
-                                                kind = "tool_result",
-                                                session_id = %session_id,
-                                                tool = %tool_name,
-                                                tool_id = %tr.id,
-                                                latency_ms = tool_latency_ms,
-                                                result_len = content_text.len(),
-                                            );
                                             yield Ok(AgentStreamEvent::ToolResult {
                                                 id: tr.id.clone(),
                                                 tool: tool_name,
@@ -1316,25 +1274,16 @@ impl GooseAdapter {
                     let output = goose_session.accumulated_output_tokens
                         .map(|t| t.max(0) as u32)
                         .unwrap_or((total_output_chars / 4).max(1) as u32);
-                    pond_core::models::ports::provider::UsageStats {
+                    pond_core::ports::provider::UsageStats {
                         prompt_tokens: input,
                         completion_tokens: output,
                     }
                 }
-                Err(_) => pond_core::models::ports::provider::UsageStats {
+                Err(_) => pond_core::ports::provider::UsageStats {
                     prompt_tokens: (user_msg_len / 4).max(1) as u32,
                     completion_tokens: (total_output_chars / 4).max(1) as u32,
                 },
             };
-            let total_latency_ms = turn_start.elapsed().as_millis() as u64;
-            tracing::info!(
-                target: "giap::trace",
-                kind = "turn_end",
-                session_id = %session_id,
-                prompt_tokens = usage.prompt_tokens,
-                completion_tokens = usage.completion_tokens,
-                total_latency_ms,
-            );
             yield Ok(AgentStreamEvent::Done { session_id, model_role, usage: Some(usage) });
         };
 
@@ -1344,8 +1293,8 @@ impl GooseAdapter {
 
 #[async_trait]
 impl AgentPort for GooseAdapter {
-    fn capabilities(&self) -> pond_core::models::domain::model_capabilities::ModelCapabilities {
-        let mut caps = self.model_capabilities.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    fn capabilities(&self) -> pond_core::domain::model_capabilities::ModelCapabilities {
+        let mut caps = self.model_capabilities.lock().unwrap().clone();
         // Voice mode disables expensive/leaky capabilities: thinking tokens
         // waste TTS time, vision/audio inputs aren't used in voice flow.
         if self.voice_mode.load(std::sync::atomic::Ordering::Relaxed) {

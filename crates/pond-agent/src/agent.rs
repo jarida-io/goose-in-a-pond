@@ -11,39 +11,40 @@
 //! 6. Terminates when the model produces a final text answer (no tool calls)
 //!    or the iteration guard fires (max 10 rounds)
 
+use crate::history;
 use crate::ollama_provider::OllamaInferenceProvider;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use futures::StreamExt;
-use pond_core::mcp::ports::tools::tool_dispatcher::ToolDispatcher;
-use pond_core::models::domain::message::{ChatMessage, ToolCallRecord};
-use pond_core::models::domain::model_capabilities::ModelCapabilities;
-use pond_core::models::ports::agent::Agent;
-use pond_core::models::ports::inference::{InferenceOptions, InferenceProvider, ToolDefinition};
-use pond_core::models::ports::provider::UsageStats;
-use pond_core::models::services::context_budget::{available_history_chars, CompactionProfile};
-use pond_core::models::services::history_manager::HistoryManager;
-use pond_core::models::services::prompt_builder;
+use pond_core::domain::agent::{AgentRequest, AgentResponse, AgentStreamEvent};
+use pond_core::domain::message::ChatMessage;
+use pond_core::domain::model_capabilities::ModelCapabilities;
+use pond_core::domain::settings::Settings;
+use pond_core::ports::agent::Agent;
+use pond_core::ports::device_registry::DeviceRegistry;
+use pond_core::ports::inference::{InferenceOptions, InferenceProvider, ToolDefinition};
+use pond_core::ports::prompt_extra::PromptExtraRepository;
+use pond_core::ports::prompt_template::PromptTemplateRepository;
+use pond_core::ports::provider::UsageStats;
+use pond_core::ports::session_storage::SessionStorage;
+use pond_core::ports::settings::SettingsRepository;
+use pond_core::ports::skill::UserSkillRepository;
+use pond_core::ports::tool_dispatcher::ToolDispatcher;
 use pond_core::prompts;
-use pond_core::shared::domain::agent::{AgentRequest, AgentResponse, AgentStreamEvent};
-use pond_core::user_data::domain::session::SessionMessage;
-use pond_core::user_data::domain::settings::Settings;
-use pond_core::user_data::ports::device_registry::DeviceRegistry;
-use pond_core::user_data::ports::prompt_extra::PromptExtraRepository;
-use pond_core::user_data::ports::prompt_template::PromptTemplateRepository;
-use pond_core::user_data::ports::session_storage::SessionStorage;
-use pond_core::user_data::ports::settings::SettingsRepository;
-use pond_core::user_data::ports::skill::UserSkillRepository;
+use pond_core::services::prompt_builder;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
 /// Maximum tool-calling loop iterations before the agent gives up.
 const MAX_TOOL_ITERATIONS: u32 = 10;
 
-/// Maximum conversation history messages to fetch per request before budgeting.
-/// The actual cut-off is determined by `CompactionProfile::history_token_budget`.
-const HISTORY_LIMIT: usize = 60;
+/// Maximum conversation history turns to include per request.
+const HISTORY_LIMIT: usize = 30;
+
+/// Maximum characters for the history XML block (~tokens * 4).
+/// Keeps history from consuming too much of the context window.
+const HISTORY_CHAR_BUDGET: usize = 4000;
 
 /// The core GIAP agent with sustained tool-calling support.
 ///
@@ -71,6 +72,11 @@ pub struct PondAgent {
     tool_dispatcher: Option<Arc<dyn ToolDispatcher>>,
     /// Tracks the current provider key for hot-swap detection.
     last_provider_key: Mutex<String>,
+    /// In-memory conversation history per session (current server lifetime only).
+    /// Each session_id maps to accumulated (user, assistant) message pairs.
+    /// Sent to the model as `<history>` XML in the user message.
+    session_history:
+        Arc<tokio::sync::Mutex<std::collections::HashMap<String, Vec<(String, String)>>>>,
 }
 
 impl PondAgent {
@@ -108,6 +114,7 @@ impl PondAgent {
             session_storage,
             tool_dispatcher,
             last_provider_key: Mutex::new(initial_key),
+            session_history: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -330,7 +337,55 @@ impl Agent for PondAgent {
         // 3. Build system prompt.
         let system_prompt = self.build_system_prompt(&settings, &request).await;
 
-        // 4. Determine if tools should be offered.
+        // 4. Build user message with in-memory session history as XML.
+        // History is scoped to current server lifetime (not cross-session DB).
+        // Format: <history><user>...</user><assistant>...</assistant></history>
+        //         <user-message>current request</user-message>
+        let history_xml = {
+            let hist = self.session_history.lock().await;
+            if let Some(turns) = hist.get(request.session_id.as_str()) {
+                if turns.is_empty() {
+                    String::new()
+                } else {
+                    // Build history from most recent turns, respecting char budget.
+                    // Older turns are dropped first to fit within context window.
+                    let mut entries: Vec<String> = Vec::new();
+                    let mut total_chars = 0usize;
+                    for (user_msg, asst_msg) in turns.iter().rev().take(HISTORY_LIMIT / 2) {
+                        let entry = format!(
+                            "<user>{}</user>\n<assistant>{}</assistant>\n",
+                            user_msg, asst_msg
+                        );
+                        if total_chars + entry.len() > HISTORY_CHAR_BUDGET {
+                            break; // Budget exhausted — drop older turns
+                        }
+                        total_chars += entry.len();
+                        entries.push(entry);
+                    }
+                    if entries.is_empty() {
+                        String::new()
+                    } else {
+                        entries.reverse(); // Chronological order
+                        format!("<history>\n{}</history>\n", entries.join(""))
+                    }
+                }
+            } else {
+                String::new()
+            }
+        };
+
+        // 5. Build messages array with history embedded in the user message.
+        let user_content = if history_xml.is_empty() {
+            request.message.clone()
+        } else {
+            format!(
+                "{}<user-message>\n{}\n</user-message>",
+                history_xml, request.message
+            )
+        };
+        let mut messages = vec![ChatMessage::user(user_content)];
+
+        // 6. Determine if tools should be offered.
         //    Query the dispatcher LIVE each turn for pre-formatted JSON.
         //    This produces the EXACT same format as Goose's format_tools() —
         //    no intermediate conversion through ToolDefinition objects.
@@ -365,45 +420,6 @@ impl Agent for PondAgent {
             (vec![], None, None)
         };
 
-        // 5. Calculate dynamic context budget for history injection.
-        //    Profile is keyed off the provider's effective context window; the
-        //    history budget gets whatever is left after the system prompt and
-        //    tool-schema overhead are accounted for.
-        let context_tokens = if settings.context_window_override > 0 {
-            (settings.context_window_override as usize).min(caps.context_window_tokens as usize)
-        } else {
-            caps.context_window_tokens as usize
-        };
-        let profile = CompactionProfile::from_context_window(context_tokens);
-        let tool_schema_chars = tools_json_override.as_ref().map(|j| j.len()).unwrap_or(0);
-        let history_budget =
-            available_history_chars(&profile, system_prompt.len(), tool_schema_chars);
-
-        // 6. Load history from SessionStorage and build the structured message array.
-        //    `HistoryManager` groups stored messages into atomic turns and trims
-        //    newest-first so a tool call and its result always stay together.
-        let stored_messages = self
-            .session_storage
-            .get_recent_messages(request.session_id.as_str(), HISTORY_LIMIT)
-            .await
-            .unwrap_or_default();
-        let history_mgr = HistoryManager::new(history_budget);
-        let mut messages: Vec<ChatMessage> = history_mgr.build_history(&stored_messages);
-        let history_messages_len = messages.len();
-
-        tracing::debug!(
-            history_budget_chars = history_budget,
-            stored_messages = stored_messages.len(),
-            kept_history_messages = history_messages_len,
-            profile_history_tokens = profile.history_token_budget,
-            "history loaded from session storage"
-        );
-
-        // Append the current user message. It is *not* wrapped in <user-message>
-        // XML because the history is no longer flattened into one user turn —
-        // the model now receives a proper multi-turn conversation.
-        messages.push(ChatMessage::user(request.message.clone()));
-
         let thinking_enabled = match settings.thinking_mode.as_str() {
             "on" => true,
             "off" => false,
@@ -421,9 +437,10 @@ impl Agent for PondAgent {
         // 7. Clone what we need for the spawned task.
         let provider = Arc::clone(&*provider);
         let session_id = request.session_id.clone();
+        let user_message = request.message.clone();
         let model_role = request.model_role.clone();
         let dispatcher = self.tool_dispatcher.clone();
-        let storage = self.session_storage.clone();
+        let session_history = self.session_history.clone();
 
         // 8. Spawn the tool loop on a channel.
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentStreamEvent>>(64);
@@ -468,20 +485,20 @@ impl Agent for PondAgent {
 
                 while let Some(event) = stream.next().await {
                     match event {
-                        Ok(pond_core::models::ports::inference::ChatEvent::Text(t)) => {
+                        Ok(pond_core::ports::inference::ChatEvent::Text(t)) => {
                             text_buf.push_str(&t);
                             // Stream immediately so ThoughtFilter sees tokens in real-time
                             let _ = tx.send(Ok(AgentStreamEvent::Text { content: t })).await;
                             streamed_any_text = true;
                         }
-                        Ok(pond_core::models::ports::inference::ChatEvent::ToolCall {
+                        Ok(pond_core::ports::inference::ChatEvent::ToolCall {
                             id,
                             name,
                             arguments,
                         }) => {
                             tool_calls.push((id, name, arguments));
                         }
-                        Ok(pond_core::models::ports::inference::ChatEvent::Usage(u)) => {
+                        Ok(pond_core::ports::inference::ChatEvent::Usage(u)) => {
                             total_usage.prompt_tokens += u.prompt_tokens;
                             total_usage.completion_tokens += u.completion_tokens;
                         }
@@ -527,6 +544,7 @@ impl Agent for PondAgent {
                 // Tool calls detected — dispatch ALL concurrently, then inject results.
                 // Parallel execution saves latency when multiple tools are called
                 // (e.g. weather + time, or multiple lookups).
+                let mut tool_context = text_buf.clone();
 
                 // Emit all tool_call events immediately.
                 for (id, name, args) in &tool_calls {
@@ -538,22 +556,6 @@ impl Agent for PondAgent {
                         }))
                         .await;
                 }
-
-                // Push the assistant turn with structured tool_call metadata.
-                // The OpenAI-compatible message format preserves these on the
-                // next request so the model sees its own tool usage history.
-                let tool_call_records: Vec<ToolCallRecord> = tool_calls
-                    .iter()
-                    .map(|(id, name, args)| ToolCallRecord {
-                        id: id.clone(),
-                        name: name.clone(),
-                        arguments: args.to_string(),
-                    })
-                    .collect();
-                messages.push(ChatMessage::assistant_with_tool_calls(
-                    text_buf.clone(),
-                    tool_call_records,
-                ));
 
                 // Dispatch all tools in parallel.
                 let dispatch_futures: Vec<_> = tool_calls
@@ -579,9 +581,7 @@ impl Agent for PondAgent {
 
                 let results = futures::future::join_all(dispatch_futures).await;
 
-                // Emit each result event and append a Role::Tool message that
-                // references the originating tool_call id. The model now sees a
-                // proper tool turn (no flat-text injection, no user-role nudge).
+                // Emit results and build context (in original call order).
                 for (id, name, result_text) in &results {
                     let _ = tx
                         .send(Ok(AgentStreamEvent::ToolResult {
@@ -591,51 +591,36 @@ impl Agent for PondAgent {
                         }))
                         .await;
 
-                    messages.push(ChatMessage::tool_result(result_text.clone(), id.clone()));
+                    tool_context.push_str(&format!("\n[Tool {} returned]: {}", name, result_text));
                 }
 
-                // Small local models (Gemma 4 E4B/E2B) don't reliably synthesize
-                // after structured role:tool messages without an explicit prompt.
-                // This nudge keeps the structured history intact while giving the
-                // model a clear signal to produce a text answer.
+                // Append as assistant message (model sees its own tool usage + results).
+                messages.push(ChatMessage::assistant(&tool_context));
+
+                // Inject a user nudge so the model knows to synthesize a final answer
+                // from the tool results rather than calling tools again.
                 messages.push(ChatMessage::user(
-                    "Using the tool results above, provide a helpful answer to the user's question.",
+                    "Now provide a helpful answer based on the tool results above. \
+                     Do not call tools again."
+                        .to_string(),
                 ));
 
                 // Loop back for next LLM call with tool results.
             }
 
-            // ── Persist this turn to SessionStorage ────────────────────────
-            // Capture everything appended during this request: the current user
-            // message (pushed before the loop) and every assistant/tool message
-            // produced inside the loop. The synthesis nudge is an internal
-            // loop artifact — skip it so it never shows as a YOU bubble in
-            // history. Spawn fire-and-forget so persistence never blocks SSE.
-            const SYNTHESIS_NUDGE: &str =
-                "Using the tool results above, provide a helpful answer to the user's question.";
-            let turn_messages: Vec<ChatMessage> = messages[history_messages_len..]
+            // ── Persist turn to in-memory session history ──────────────────
+            // Store (user_message, assistant_response) for XML injection on
+            // subsequent turns. Scoped to current server lifetime only.
+            if let Some(last_assistant) = messages
                 .iter()
-                .filter(|m| m.content.trim() != SYNTHESIS_NUDGE)
-                .cloned()
-                .collect();
-            let storage_ref = storage.clone();
-            let session_id_persist = session_id.clone();
-            tokio::spawn(async move {
-                for msg in turn_messages {
-                    let sm = SessionMessage {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        session_id: session_id_persist.clone(),
-                        message: msg,
-                        created_at: chrono::Utc::now(),
-                    };
-                    if let Err(e) = storage_ref
-                        .add_message(session_id_persist.clone(), sm)
-                        .await
-                    {
-                        tracing::warn!(error = %e, session_id = %session_id_persist, "failed to persist turn message");
-                    }
-                }
-            });
+                .rev()
+                .find(|m| m.role == pond_core::domain::message::Role::Assistant)
+            {
+                let mut hist = session_history.lock().await;
+                hist.entry(session_id.clone())
+                    .or_insert_with(Vec::new)
+                    .push((user_message.clone(), last_assistant.content.clone()));
+            }
 
             // Emit done event.
             let _ = tx
@@ -662,11 +647,11 @@ impl Agent for PondAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pond_core::models::ports::inference::ChatEventStream;
-    use pond_core::user_data::domain::session::{Session, SessionMessage};
-    use pond_core::user_data::ports::device_registry::{Device, RegisterDeviceRequest};
-    use pond_core::user_data::ports::session_storage::SessionStorageError;
-    use pond_core::user_data::ports::settings::SettingsRepository;
+    use pond_core::domain::session::{Session, SessionMessage};
+    use pond_core::ports::device_registry::{Device, RegisterDeviceRequest};
+    use pond_core::ports::inference::ChatEventStream;
+    use pond_core::ports::session_storage::SessionStorageError;
+    use pond_core::ports::settings::SettingsRepository;
 
     // ── Mock implementations ─────────────────────────────────────────────────
 
@@ -780,8 +765,8 @@ mod tests {
             let reply = format!("Echo: {}", last_msg);
 
             Box::pin(async_stream::stream! {
-                yield Ok(pond_core::models::ports::inference::ChatEvent::Text(reply));
-                yield Ok(pond_core::models::ports::inference::ChatEvent::Usage(UsageStats {
+                yield Ok(pond_core::ports::inference::ChatEvent::Text(reply));
+                yield Ok(pond_core::ports::inference::ChatEvent::Usage(UsageStats {
                     prompt_tokens: 10,
                     completion_tokens: 5,
                 }));

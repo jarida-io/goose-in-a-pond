@@ -25,9 +25,7 @@ mod llamafile_process;
 mod llm_memory_consolidator;
 mod llm_memory_extractor;
 mod model_download;
-#[cfg(feature = "legacy-subprocess")]
 mod piper_http;
-#[cfg(feature = "legacy-subprocess")]
 mod piper_process;
 mod ports;
 mod reqwest_model_downloader;
@@ -35,47 +33,40 @@ mod schedule_executors;
 mod startup;
 mod system_deps;
 mod three_stage_consolidator;
-mod tracing_setup;
-#[cfg(feature = "legacy-subprocess")]
 mod whisper_process;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use futures::StreamExt as _;
 use pond_adapters_llamafile::LlamafileProvider;
 use pond_adapters_ollama::OllamaProvider;
-#[cfg(feature = "legacy-subprocess")]
 use pond_adapters_piper::PiperOutput;
-use pond_adapters_piper::PiperRsOutput;
 use pond_adapters_weather::{OpenMeteoWeatherAdapter, WeatherProvider};
-#[cfg(feature = "legacy-subprocess")]
-use pond_adapters_whisper::WhisperInput;
-use pond_adapters_whisper::{WhisperKeywordDetector, WhisperRsInput};
+use pond_adapters_whisper::{WhisperInput, WhisperKeywordDetector};
 use pond_api::{AppState, LlamafileManager};
-use pond_core::mcp::ports::mcp_server::McpServerRepository as _;
-use pond_core::models::domain::model_record::{ModelCategory, ModelRecord};
-use pond_core::models::ports::agent::Agent;
-use pond_core::models::ports::model_repository::ModelRepository;
-use pond_core::models::ports::provider::LlmProvider;
-use pond_core::models::ports::voice_input::VoiceInput;
-use pond_core::models::ports::voice_output::VoiceOutput;
-use pond_core::models::services::instant_activation::InstantActivation;
+use pond_core::domain::model_record::{ModelCategory, ModelRecord};
+use pond_core::domain::onboarding::OnboardingStep;
+use pond_core::ports::agent::Agent;
+use pond_core::ports::mcp_server::McpServerRepository as _;
+use pond_core::ports::model_repository::ModelRepository;
+use pond_core::ports::provider::LlmProvider;
+use pond_core::ports::session_storage::SessionStorage;
+use pond_core::ports::settings::SettingsRepository as _;
+use pond_core::ports::voice_input::VoiceInput;
+use pond_core::ports::voice_output::VoiceOutput;
 use pond_core::prompts::build_system_prompt;
-use pond_core::shared::mocks::mock_agent::MockAgent;
-use pond_core::shared::services::chat::ChatService;
-use pond_core::shared::services::in_process_event_bus::InProcessEventBus;
-use pond_core::shared::services::print_output::PrintOutput;
-use pond_core::shared::services::stdin_input::StdinInput;
-use pond_core::user_data::domain::onboarding::OnboardingStep;
-use pond_core::user_data::ports::session_storage::SessionStorage;
-use pond_core::user_data::ports::settings::SettingsRepository as _;
-use pond_core::user_data::services::onboarding::OnboardingService;
+use pond_core::services::chat::ChatService;
+use pond_core::services::instant_activation::InstantActivation;
+use pond_core::services::mock_agent::MockAgent;
+use pond_core::services::onboarding::OnboardingService;
+use pond_core::services::print_output::PrintOutput;
+use pond_core::services::stdin_input::StdinInput;
 use pond_infra::db::Database;
-use pond_infra::sqlite_handshake::SqliteHandshakeAdapter;
+use pond_infra::mock_handshake::MockHandshake;
 use pond_infra::onboarding::SqlxOnboardingRepository;
 use pond_infra::sqlite_device_registry::SqliteDeviceRegistry;
 use pond_infra::sqlite_draft::SqliteDraftRepository;
-use pond_infra::sqlite_event_log::{SqliteEventLog, SqliteEventLogRepository};
+use pond_infra::sqlite_event_log::SqliteEventLogRepository;
 use pond_infra::sqlite_mcp_servers::SqliteMcpServerRepository;
 use pond_infra::sqlite_memory::SqliteMemoryRepository;
 use pond_infra::sqlite_model_repository::SqliteModelRepository;
@@ -87,7 +78,6 @@ use pond_infra::sqlite_sensor::{SqliteCameraStorage, SqliteSensorStorage};
 use pond_infra::sqlite_session_storage::SqliteSessionStorage;
 use pond_infra::sqlite_settings::SqliteSettingsRepository;
 use pond_infra::sqlite_skill::SqliteSkillRepository;
-use pond_infra::sqlite_telemetry::SqliteTelemetry;
 use pond_infra_scheduler::CronSchedulerAdapter;
 use schedule_executors::{AgentScheduleExecutor, DeferredExecutor};
 use std::collections::HashMap;
@@ -131,10 +121,6 @@ enum Commands {
         /// Also configurable via PUT /api/v1/settings with agent_backend field.
         #[arg(long, default_value = "goose")]
         agent: String,
-
-        /// Port to listen on (defaults to 4000)
-        #[arg(long)]
-        port: Option<u16>,
 
         /// Also launch the native Tauri desktop app after the server starts.
         /// Searches for the binary in pond-desktop/src-tauri/target/debug/ and
@@ -413,7 +399,6 @@ fn main() -> Result<()> {
 
 async fn async_main() -> Result<()> {
     let cli = Cli::parse();
-    let data_dir = default_data_dir();
 
     match cli.command {
         Some(Commands::Setup { model }) => run_setup(&model).await,
@@ -422,11 +407,10 @@ async fn async_main() -> Result<()> {
             open,
             debug,
             agent,
-            port,
             native,
         }) => {
-            let drain = tracing_setup::init_tracing(debug, &data_dir);
-            run_server(static_dir, open, debug, &agent, port, native, drain).await
+            init_tracing(debug);
+            run_server(static_dir, open, debug, &agent, native).await
         }
         Some(Commands::Chat {
             provider,
@@ -437,7 +421,7 @@ async fn async_main() -> Result<()> {
             tts,
             tts_model,
         }) => {
-            let _log = tracing_setup::init_tracing(false, &data_dir);
+            init_tracing(false);
             run_chat(
                 provider.as_deref(),
                 model.as_deref(),
@@ -458,7 +442,7 @@ async fn async_main() -> Result<()> {
         }
         Some(Commands::Models { action }) => run_models(action).await,
         Some(Commands::Agent { action }) => {
-            let _log = tracing_setup::init_tracing(false, &data_dir);
+            init_tracing(false);
             run_agent_cmd(action).await
         }
         Some(Commands::Prompts { action }) => run_prompts_cmd(action).await,
@@ -473,12 +457,31 @@ async fn async_main() -> Result<()> {
         }) => run_calibrate(phrase.as_deref(), samples, whisper_url.as_deref(), reset).await,
         None => {
             // Default: run interactive chat (backward compat) — provider comes from Settings
-            let _log = tracing_setup::init_tracing(false, &data_dir);
+            init_tracing(false);
             run_chat(None, None, "stdin", None, true, Some("none"), None).await
         }
     }
 }
 
+fn init_tracing(debug: bool) {
+    // In debug mode, our own crates run at DEBUG while noisy third-party crates
+    // (sqlx, hyper, tower, reqwest) are capped at WARN so their internal query
+    // and connection tracing does not drown out the useful output.
+    //
+    // RUST_LOG always takes priority, so a developer can still override any
+    // target at runtime:
+    //   RUST_LOG=sqlx=debug cargo run -p pond-server -- serve --debug
+    let filter = if debug {
+        "debug,sqlx=warn,hyper=warn,tower=warn,reqwest=warn,hyper_util=warn,rustls=warn"
+    } else {
+        "info"
+    };
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| filter.into()),
+        )
+        .init();
+}
 
 async fn run_setup(model: &str) -> Result<()> {
     println!("  ╔═══════════════════════════════════════╗");
@@ -505,36 +508,16 @@ async fn run_setup(model: &str) -> Result<()> {
     let db_setup = Database::init(&data_dir).await?;
     println!("  ✅ Databases ready");
 
-    // One-shot HF cache migration — moves pre-existing flat model files into
-    // the content-addressed blob layout so subsequent downloads dedupe. Errors
-    // are logged but never block startup. Idempotent via filesystem marker.
-    match pond_server::hf_cache_migration::migrate_flat_files_to_blobs(&data_dir).await {
-        Ok(r) if r.is_empty() => {}
-        Ok(r) => {
-            println!(
-                "  📦 HF cache migration: scanned {}, migrated {}, skipped {} symlinks, {} errors",
-                r.scanned,
-                r.migrated,
-                r.skipped_symlinks,
-                r.errors.len()
-            );
-            for e in &r.errors {
-                tracing::warn!(target: "hf_cache_migration", "{e}");
-            }
-        }
-        Err(e) => tracing::warn!(target: "hf_cache_migration", "migration failed: {e}"),
-    }
-
     let setup_model_repo = SqliteModelRepository::new(db_setup.system.clone());
     println!("  📋 Fetching model catalog from upstream sources...");
     seed_model_catalog(&setup_model_repo, &data_dir).await;
 
     // Seed built-in prompt templates (INSERT OR IGNORE — never overwrites user edits)
     {
-        use pond_core::prompts::{PROMPT_BALANCED, PROMPT_CONCISE, PROMPT_TECHNICAL, PROMPT_WARM};
-        use pond_core::user_data::domain::prompt_template::PromptTemplate;
+        use pond_core::domain::prompt_template::PromptTemplate;
         #[allow(unused_imports)]
-        use pond_core::user_data::ports::prompt_template::PromptTemplateRepository;
+        use pond_core::ports::prompt_template::PromptTemplateRepository;
+        use pond_core::prompts::{PROMPT_BALANCED, PROMPT_CONCISE, PROMPT_TECHNICAL, PROMPT_WARM};
 
         let template_repo = SqlitePromptTemplateRepository::new(db_setup.system.clone());
         let built_ins = [
@@ -578,7 +561,7 @@ async fn run_setup(model: &str) -> Result<()> {
     let effective_model = if model.is_empty() { "base" } else { model };
     let (expected_path, whisper_dl_url, whisper_dl_mb) = {
         use crate::filesystem_model_storage::FilesystemModelStorage;
-        use pond_core::models::ports::model_storage::ModelStorage as _;
+        use pond_core::ports::model_storage::ModelStorage as _;
         let storage = FilesystemModelStorage::new(&data_dir);
         let model_id = format!("whisper/{}", effective_model);
         match setup_model_repo.get_by_id(&model_id).await.ok().flatten() {
@@ -617,38 +600,20 @@ async fn run_setup(model: &str) -> Result<()> {
         );
     }
 
-    // Step 4: whisper-server binary — only with the legacy-subprocess escape valve.
-    // Default build runs Whisper in-process via whisper-rs; no second binary needed.
-    #[cfg(feature = "legacy-subprocess")]
-    {
-        println!("\n  [4/6] Downloading whisper-server binary (legacy-subprocess)...");
-        let _ = model_download::download_whisper_binary(&data_dir).await;
-    }
-    #[cfg(not(feature = "legacy-subprocess"))]
-    {
-        println!("\n  [4/6] Whisper runs in-process — no binary download needed.");
-    }
+    // Step 4: Download whisper-server binary
+    println!("\n  [4/6] Downloading whisper-server binary...");
+    let _ = model_download::download_whisper_binary(&data_dir).await;
 
-    // Step 5: Piper TTS binary — only with the legacy-subprocess escape valve.
-    // Default build runs Piper in-process via piper-rs.
-    #[cfg(feature = "legacy-subprocess")]
-    {
-        println!("\n  [5/6] Setting up Piper TTS subprocess (legacy-subprocess)...");
-        let piper_bin_ok = model_download::download_piper_binary(&data_dir)
-            .await
-            .is_ok();
-        if !piper_bin_ok {
-            println!("  ⚠  Piper binary unavailable — voice output will be text-only.");
-            println!("     Install piper manually or retry setup.");
-        } else {
-            println!("  ✅ Piper binary ready — select a voice model in the web Settings page.");
-        }
-    }
-    #[cfg(not(feature = "legacy-subprocess"))]
-    {
-        println!(
-            "\n  [5/6] Piper runs in-process — select a voice model in the web Settings page."
-        );
+    // Step 5: Piper TTS binary — voice model is selected via the web Settings page
+    println!("\n  [5/6] Setting up Piper TTS...");
+    let piper_bin_ok = model_download::download_piper_binary(&data_dir)
+        .await
+        .is_ok();
+    if !piper_bin_ok {
+        println!("  ⚠  Piper binary unavailable — voice output will be text-only.");
+        println!("     Install piper manually or retry setup.");
+    } else {
+        println!("  ✅ Piper binary ready — select a voice model in the web Settings page.");
     }
 
     // Step 6: ONNX Runtime — detect or auto-download
@@ -691,7 +656,7 @@ async fn run_setup(model: &str) -> Result<()> {
 /// without `pond-api` having any process-management knowledge.
 struct LlamafileManagerImpl {
     data_dir: std::path::PathBuf,
-    model_service: Arc<pond_core::models::services::model_service::ModelService>,
+    model_service: Arc<pond_core::services::model_service::ModelService>,
     /// Holds the spawned process guard so it stays alive as long as AppState does.
     guard: Arc<tokio::sync::Mutex<Option<llamafile_process::LlamafileProcess>>>,
     /// The port the process actually bound to.
@@ -787,7 +752,7 @@ impl LlamafileManagerImpl {
     /// initial startup (or the base port if the process was not started yet).
     fn new(
         data_dir: std::path::PathBuf,
-        model_service: Arc<pond_core::models::services::model_service::ModelService>,
+        model_service: Arc<pond_core::services::model_service::ModelService>,
         initial_guard: Option<llamafile_process::LlamafileProcess>,
         initial_port: u16,
     ) -> Self {
@@ -810,9 +775,7 @@ async fn run_server(
     open: bool,
     debug: bool,
     agent_backend: &str,
-    port: Option<u16>,
     native: bool,
-    drain_handle: tracing_setup::LogDrainHandle,
 ) -> Result<()> {
     println!("  ╔═══════════════════════════════════════╗");
     println!(
@@ -835,28 +798,6 @@ async fn run_server(
     // Initialize databases
     let data_dir = default_data_dir();
     let db = Database::init(&data_dir).await?;
-
-    // One-shot HF cache migration — moves pre-existing flat model files into
-    // the content-addressed blob layout. Idempotent via filesystem marker; on
-    // a migrated install the call costs one stat() and returns immediately.
-    // Errors per-file are logged but never block startup.
-    match pond_server::hf_cache_migration::migrate_flat_files_to_blobs(&data_dir).await {
-        Ok(r) if r.is_empty() => {}
-        Ok(r) => {
-            tracing::info!(
-                target: "hf_cache_migration",
-                scanned = r.scanned,
-                migrated = r.migrated,
-                skipped_symlinks = r.skipped_symlinks,
-                errors = r.errors.len(),
-                "flat-file migration complete"
-            );
-            for e in &r.errors {
-                tracing::warn!(target: "hf_cache_migration", "{e}");
-            }
-        }
-        Err(e) => tracing::warn!(target: "hf_cache_migration", "migration failed: {e}"),
-    }
 
     // Soft system-dep check (non-fatal — just warn if something looks wrong)
     system_deps::warn_if_missing();
@@ -888,13 +829,13 @@ async fn run_server(
     // ── Component startup: auto-download + wire critical services ────────────
     println!("\n  ── Components ──────────────────────────────────────");
 
-    // STT — whisper ggml model download (the in-process backend reads the
-    // same `.bin` files the legacy subprocess used).
-    let whisper_model_path: Option<std::path::PathBuf> = if settings.active_whisper_model.is_empty()
-    {
+    // STT — whisper.cpp binary + model (only when active_whisper_model is configured)
+    // Guard is held for the server lifetime; port is used to build the URL below.
+    let (_whisper_guard, whisper_port) = if settings.active_whisper_model.is_empty() {
         println!("  ⏭  STT: whisper skipped (no whisper model configured in Settings)");
-        None
+        (None, ports::WHISPER)
     } else {
+        // Derive filename and download URL from the model catalog DB.
         let (whisper_filename, whisper_url, whisper_mb) =
             SqliteModelRepository::new(db.system.clone())
                 .get_by_id(&format!("whisper/{}", settings.active_whisper_model))
@@ -939,38 +880,25 @@ async fn run_server(
                 );
             }
         }
-        Some(whisper_model)
-    };
-
-    // Optional legacy subprocess — only compiled in with the escape-valve feature.
-    #[allow(unused_mut, unused_assignments)]
-    let mut whisper_port = ports::WHISPER;
-    #[cfg(feature = "legacy-subprocess")]
-    let _whisper_guard = if let Some(ref whisper_model) = whisper_model_path {
         if !model_download::whisper_binary_path(&data_dir).exists() {
             println!("  📥 STT binary not found — downloading...");
-            if let Err(e) = model_download::download_whisper_binary(&data_dir).await {
-                println!("  ⚠  STT binary download failed: {}", e);
+            match model_download::download_whisper_binary(&data_dir).await {
+                Ok(_) => {}
+                Err(e) => println!("  ⚠  STT binary download failed: {}", e),
             }
         }
-        let (guard, port) = whisper_process::try_start(&data_dir, whisper_model).await;
-        whisper_port = port;
-        guard
-    } else {
-        None
+        whisper_process::try_start(&data_dir, &whisper_model).await
     };
-    #[cfg(not(feature = "legacy-subprocess"))]
-    let _whisper_guard: Option<()> = None;
-
-    // Honour an explicit settings override; otherwise compose the loopback URL.
-    // Used by the (legacy) audio-transcribe / calibrate HTTP routes in pond-api.
+    // When the user has set a custom whisper URL (not the default 127.0.0.1:9000),
+    // honour it — this lets users point at an external whisper server.
+    // Otherwise use the auto-started local process URL.
     const DEFAULT_WHISPER_URL: &str = "http://127.0.0.1:9000";
     let whisper_url = if !settings.voice_whisper_url.is_empty()
         && settings.voice_whisper_url != DEFAULT_WHISPER_URL
     {
         settings.voice_whisper_url.clone()
     } else {
-        format!("http://127.0.0.1:{}", whisper_port)
+        whisper_process::url_for(whisper_port)
     };
 
     // Piper voice path — None when no voice is configured (skips all piper startup).
@@ -984,22 +912,12 @@ async fn run_server(
 
     // Only download/install piper components when piper is the configured active TTS
     // AND a specific voice model has been chosen by the user.
-    //
-    // In-process build (default): download the .onnx + .onnx.json voice model
-    // and the espeak-ng-data directory. No `piper` binary needed any more —
-    // piper-rs loads the ONNX model directly via ort.
-    //
-    // Legacy build (--features legacy-subprocess): additionally download the
-    // `piper` executable.
     let piper_is_primary = settings.active_tts_model.starts_with("piper");
     if piper_is_primary {
         if let Some(ref piper_model_path) = piper_model {
-            #[cfg(feature = "legacy-subprocess")]
-            {
-                if !model_download::piper_binary_path(&data_dir).exists() {
-                    println!("  📥 Piper binary not found — downloading...");
-                    let _ = model_download::download_piper_binary(&data_dir).await;
-                }
+            if !model_download::piper_binary_path(&data_dir).exists() {
+                println!("  📥 Piper binary not found — downloading...");
+                let _ = model_download::download_piper_binary(&data_dir).await;
             }
             if !piper_model_path.exists() {
                 // Look up the exact voice in the DB to get the correct download URL.
@@ -1035,10 +953,8 @@ async fn run_server(
         }
     }
 
-    // espeak-ng phoneme data directory. Used by both backends:
-    // - Legacy subprocess: passed to piper as `--espeak_data <dir>`.
-    // - In-process: set as the `PIPER_ESPEAKNG_DATA_DIRECTORY` env var that
-    //   espeak-rs consults during its lazy init.
+    // Start piper as a persistent HTTP server so it shows up in the service list.
+    // Only starts when both the binary and a configured voice model are present on disk.
     let espeak_data = {
         let p = model_download::piper_espeak_data_path(&data_dir);
         if p.exists() {
@@ -1047,55 +963,8 @@ async fn run_server(
             None
         }
     };
-
-    // ── Construct the TTS backend ──
-    //
-    // Default: in-process `PiperRsOutput`. Loads the .onnx + .onnx.json once
-    // and synthesises with zero subprocess overhead.
-    //
-    // Legacy: `PiperOutput` (subprocess) plus a `piper_http` HTTP wrapper on a
-    // background port for backwards compatibility with the old `piper_http_port`
-    // status report.
-    #[allow(unused_mut)]
     let mut piper_http_port: Option<u16> = None;
-
-    #[cfg(not(feature = "legacy-subprocess"))]
-    let piper_tts: Option<Arc<dyn pond_core::models::ports::voice_output::VoiceOutput>> =
-        match &piper_model {
-            Some(model_path) if model_path.exists() => {
-                let config_path =
-                    std::path::PathBuf::from(format!("{}.json", model_path.display()));
-                if !config_path.exists() {
-                    println!(
-                        "  ⚠  Piper voice config (.onnx.json) missing at {}",
-                        config_path.display()
-                    );
-                    None
-                } else {
-                    match PiperRsOutput::new(model_path.clone(), config_path) {
-                        Ok(out) => {
-                            let out = match espeak_data.clone() {
-                                Some(d) => out.with_espeak_data(d),
-                                None => out,
-                            };
-                            println!("  ✅ Piper TTS: in-process (piper-rs / ort)");
-                            Some(Arc::new(out)
-                                as Arc<
-                                    dyn pond_core::models::ports::voice_output::VoiceOutput,
-                                >)
-                        }
-                        Err(e) => {
-                            tracing::warn!("PiperRsOutput failed to load voice: {e}");
-                            None
-                        }
-                    }
-                }
-            }
-            _ => None,
-        };
-
-    #[cfg(feature = "legacy-subprocess")]
-    let piper_tts: Option<Arc<dyn pond_core::models::ports::voice_output::VoiceOutput>> =
+    let piper_tts: Option<Arc<dyn pond_core::ports::voice_output::VoiceOutput>> =
         match (piper_process::find_binary(&data_dir), &piper_model) {
             (Some(bin), Some(model_path)) if model_path.exists() => {
                 let ed = espeak_data.clone();
@@ -1121,8 +990,7 @@ async fn run_server(
             }
             _ => None,
         };
-    let tts: Option<Arc<dyn pond_core::models::ports::voice_output::VoiceOutput>> = match piper_tts
-    {
+    let tts: Option<Arc<dyn pond_core::ports::voice_output::VoiceOutput>> = match piper_tts {
         Some(piper) => {
             println!("  ✅ TTS: piper");
             Some(piper)
@@ -1136,21 +1004,19 @@ async fn run_server(
     // ── Persistent model catalog & ModelService ────────────────────────────────
     let model_repo: Arc<dyn ModelRepository + Send + Sync> =
         Arc::new(SqliteModelRepository::new(db.system.clone()));
-    let model_service = Arc::new(
-        pond_core::models::services::model_service::ModelService::new(
-            model_repo.clone(),
-            Arc::new(
-                crate::composite_model_catalog_provider::CompositeModelCatalogProvider::new(
-                    reqwest::Client::builder()
-                        .user_agent(concat!("goose-in-a-pond/", env!("CARGO_PKG_VERSION")))
-                        .build()
-                        .unwrap_or_default(),
-                ),
+    let model_service = Arc::new(pond_core::services::model_service::ModelService::new(
+        model_repo.clone(),
+        Arc::new(
+            crate::composite_model_catalog_provider::CompositeModelCatalogProvider::new(
+                reqwest::Client::builder()
+                    .user_agent(concat!("goose-in-a-pond/", env!("CARGO_PKG_VERSION")))
+                    .build()
+                    .unwrap_or_default(),
             ),
-            Arc::new(crate::http_model_downloader::HttpModelDownloader::new()),
-            Arc::new(crate::filesystem_model_storage::FilesystemModelStorage::new(&data_dir)),
         ),
-    );
+        Arc::new(crate::http_model_downloader::HttpModelDownloader::new()),
+        Arc::new(crate::filesystem_model_storage::FilesystemModelStorage::new(&data_dir)),
+    ));
 
     // Seed catalog from upstream sources (idempotent, safe to call every startup)
     if let Err(e) = model_service.seed_catalog().await {
@@ -1171,14 +1037,12 @@ async fn run_server(
         use crate::reqwest_model_downloader::ReqwestModelDownloader;
         use crate::startup::auto_download_assigned_models;
 
-        let dl_repo: Arc<
-            dyn pond_core::models::ports::model_repository::ModelRepository + Send + Sync,
-        > = model_repo.clone();
-        let dl_storage: Arc<
-            dyn pond_core::models::ports::model_storage::ModelStorage + Send + Sync,
-        > = Arc::new(FilesystemModelStorage::new(&data_dir));
+        let dl_repo: Arc<dyn pond_core::ports::model_repository::ModelRepository + Send + Sync> =
+            model_repo.clone();
+        let dl_storage: Arc<dyn pond_core::ports::model_storage::ModelStorage + Send + Sync> =
+            Arc::new(FilesystemModelStorage::new(&data_dir));
         let dl_downloader: Arc<
-            dyn pond_core::models::ports::model_downloader::ModelDownloader + Send + Sync,
+            dyn pond_core::ports::model_downloader::ModelDownloader + Send + Sync,
         > = Arc::new(ReqwestModelDownloader);
 
         tokio::spawn(async move {
@@ -1223,28 +1087,22 @@ async fn run_server(
 
     // Build app state
     let onboarding_repo = Arc::new(SqlxOnboardingRepository::new(db.system.clone()));
-    let session_storage: Arc<dyn pond_core::user_data::ports::session_storage::SessionStorage> =
+    let session_storage: Arc<dyn pond_core::ports::session_storage::SessionStorage> =
         Arc::new(SqliteSessionStorage::new(db.system.clone()));
-    let settings_repo: Arc<
-        dyn pond_core::user_data::ports::settings::SettingsRepository + Send + Sync,
-    > = Arc::new(SqliteSettingsRepository::new(db.system.clone()));
-    let profile_repo: Arc<
-        dyn pond_core::user_data::ports::profile::ProfileRepository + Send + Sync,
-    > = Arc::new(SqliteProfileRepository::new(db.system.clone()));
-    let device_registry: Arc<
-        dyn pond_core::user_data::ports::device_registry::DeviceRegistry + Send + Sync,
-    > = Arc::new(SqliteDeviceRegistry::new(db.system.clone()));
-    let memory_repo: Arc<
-        dyn pond_core::user_data::ports::memory_repository::MemoryRepository + Send + Sync,
-    > = Arc::new(SqliteMemoryRepository::new(db.system.clone()));
-    let draft_repo: Arc<dyn pond_core::user_data::ports::draft::DraftRepository + Send + Sync> =
+    let settings_repo: Arc<dyn pond_core::ports::settings::SettingsRepository + Send + Sync> =
+        Arc::new(SqliteSettingsRepository::new(db.system.clone()));
+    let profile_repo: Arc<dyn pond_core::ports::profile::ProfileRepository + Send + Sync> =
+        Arc::new(SqliteProfileRepository::new(db.system.clone()));
+    let device_registry: Arc<dyn pond_core::ports::device_registry::DeviceRegistry + Send + Sync> =
+        Arc::new(SqliteDeviceRegistry::new(db.system.clone()));
+    let memory_repo: Arc<dyn pond_core::ports::memory_repository::MemoryRepository + Send + Sync> =
+        Arc::new(SqliteMemoryRepository::new(db.system.clone()));
+    let draft_repo: Arc<dyn pond_core::ports::draft::DraftRepository + Send + Sync> =
         Arc::new(SqliteDraftRepository::new(db.system.clone()));
-    let sensor_storage: Arc<
-        dyn pond_core::user_data::ports::sensor_storage::SensorStorage + Send + Sync,
-    > = Arc::new(SqliteSensorStorage::new(db.logs.clone()));
-    let camera_storage: Arc<
-        dyn pond_core::user_data::ports::camera_storage::CameraStorage + Send + Sync,
-    > = Arc::new(SqliteCameraStorage::new(db.logs.clone()));
+    let sensor_storage: Arc<dyn pond_core::ports::sensor_storage::SensorStorage + Send + Sync> =
+        Arc::new(SqliteSensorStorage::new(db.logs.clone()));
+    let camera_storage: Arc<dyn pond_core::ports::camera_storage::CameraStorage + Send + Sync> =
+        Arc::new(SqliteCameraStorage::new(db.logs.clone()));
 
     // ── Face recognition (Phase 2) ──────────────────────────────────────────
     // Built only when the --features face-onnx build flag is enabled AND an
@@ -1266,28 +1124,26 @@ async fn run_server(
         // pass was a no-op.  Idempotent — only sets unset vars.
         apply_face_recognition_defaults();
     }
-    let face_recognition: Option<
-        Arc<dyn pond_core::user_data::ports::face_recognition::FaceRecognition>,
-    > = build_face_recognition(&data_dir, db.system.clone());
+    let face_recognition: Option<Arc<dyn pond_core::ports::face_recognition::FaceRecognition>> =
+        build_face_recognition(&data_dir, db.system.clone());
 
     let prompt_template_repo: Arc<
-        dyn pond_core::user_data::ports::prompt_template::PromptTemplateRepository + Send + Sync,
+        dyn pond_core::ports::prompt_template::PromptTemplateRepository + Send + Sync,
     > = Arc::new(SqlitePromptTemplateRepository::new(db.system.clone()));
     let prompt_extra_repo: Arc<
-        dyn pond_core::user_data::ports::prompt_extra::PromptExtraRepository + Send + Sync,
+        dyn pond_core::ports::prompt_extra::PromptExtraRepository + Send + Sync,
     > = Arc::new(SqlitePromptExtraRepository::new(db.system.clone()));
-    let skill_repo: Arc<dyn pond_core::user_data::ports::skill::UserSkillRepository + Send + Sync> =
+    let skill_repo: Arc<dyn pond_core::ports::skill::UserSkillRepository + Send + Sync> =
         Arc::new(SqliteSkillRepository::new(db.system.clone()));
-    let recipe_repo: Arc<
-        dyn pond_core::user_data::ports::recipe::AgentRecipeRepository + Send + Sync,
-    > = Arc::new(SqliteRecipeRepository::new(db.system.clone()));
+    let recipe_repo: Arc<dyn pond_core::ports::recipe::AgentRecipeRepository + Send + Sync> =
+        Arc::new(SqliteRecipeRepository::new(db.system.clone()));
 
     // Reseed built-in prompt templates with latest Jinja2 general-purpose content.
     {
-        use pond_core::prompts::{PROMPT_BALANCED, PROMPT_CONCISE, PROMPT_TECHNICAL, PROMPT_WARM};
-        use pond_core::user_data::domain::prompt_template::PromptTemplate;
+        use pond_core::domain::prompt_template::PromptTemplate;
         #[allow(unused_imports)]
-        use pond_core::user_data::ports::prompt_template::PromptTemplateRepository;
+        use pond_core::ports::prompt_template::PromptTemplateRepository;
+        use pond_core::prompts::{PROMPT_BALANCED, PROMPT_CONCISE, PROMPT_TECHNICAL, PROMPT_WARM};
         let built_ins = [
             (
                 "balanced",
@@ -1408,8 +1264,8 @@ async fn run_server(
     // Build InferencePool — concurrent LLM task submission with provider-aware
     // concurrency limits. HTTP providers (Ollama/llamafile) get 3 concurrent
     // slots; local GGUF gets 1 (serialized by Goose's model mutex anyway).
-    let inference_pool: Option<Arc<dyn pond_core::models::ports::inference_pool::InferencePool>> = {
-        use pond_core::models::ports::inference_pool::InferencePool as _;
+    let inference_pool: Option<Arc<dyn pond_core::ports::inference_pool::InferencePool>> = {
+        use pond_core::ports::inference_pool::InferencePool as _;
         let pool = inference_pool::TokioInferencePool::for_provider(
             llm_provider.clone(),
             &effective_chat_provider,
@@ -1430,26 +1286,24 @@ async fn run_server(
         settings.review_mode, settings.review_pass_threshold, settings.review_max_rounds
     );
     let answer_reviewer_for_http: Option<
-        Arc<dyn pond_core::models::ports::answer_reviewer::AnswerReviewer>,
+        Arc<dyn pond_core::ports::answer_reviewer::AnswerReviewer>,
     > = Some(Arc::new(GiapAnswerReviewer {
         live_provider: llm_provider.clone(),
         pass_threshold: settings.review_pass_threshold,
         max_rounds: settings.review_max_rounds,
     })
-        as Arc<
-            dyn pond_core::models::ports::answer_reviewer::AnswerReviewer,
-        >);
+        as Arc<dyn pond_core::ports::answer_reviewer::AnswerReviewer>);
 
     // Memory extractor — background extraction of durable facts from conversations.
     let (memory_extractor_for_http, memory_extraction_service_for_http) =
         if settings.memory_extraction_enabled {
-            let extractor: Arc<dyn pond_core::user_data::ports::memory_extractor::MemoryExtractor> =
+            let extractor: Arc<dyn pond_core::ports::memory_extractor::MemoryExtractor> =
                 Arc::new(llm_memory_extractor::LlmMemoryExtractor::new(
                     llm_provider.clone(),
                     settings.memory_extraction_max_facts,
                 ));
             let service = Arc::new(
-                pond_core::user_data::services::memory_extraction::MemoryExtractionService::new(
+                pond_core::services::memory_extraction::MemoryExtractionService::new(
                     settings.memory_extraction_interval_secs,
                 ),
             );
@@ -1485,7 +1339,7 @@ async fn run_server(
                 tokio::time::interval(std::time::Duration::from_secs(cleanup_interval_secs));
             loop {
                 interval.tick().await;
-                match pond_core::user_data::services::memory_cleanup::run_cleanup(
+                match pond_core::services::memory_cleanup::run_cleanup(
                     cleanup_repo.as_ref(),
                     prune_threshold,
                     archive_threshold,
@@ -1519,7 +1373,7 @@ async fn run_server(
         tokio::sync::RwLock<Option<tokio_util::sync::CancellationToken>>,
     > = Arc::new(tokio::sync::RwLock::new(None));
     let (consolidation_event_tx, _) = tokio::sync::broadcast::channel::<
-        pond_core::user_data::ports::memory_consolidator::ConsolidationEvent,
+        pond_core::ports::memory_consolidator::ConsolidationEvent,
     >(64);
 
     // Build the ConsolidationRunner closure that pond-api will call from the
@@ -1633,11 +1487,10 @@ async fn run_server(
     // exists.  The real executor (AgentScheduleExecutor) is injected after the
     // agent is constructed further below.
     let deferred_executor = Arc::new(DeferredExecutor::new());
-    let (schedule_result_tx, _) = tokio::sync::broadcast::channel::<
-        pond_core::user_data::domain::schedule::ScheduleResultEvent,
-    >(32);
-    let scheduler: Option<Arc<dyn pond_core::user_data::ports::scheduler::SchedulerPort>> = {
-        let exec: Arc<dyn pond_core::user_data::ports::schedule_execution::ScheduleExecutor> =
+    let (schedule_result_tx, _) =
+        tokio::sync::broadcast::channel::<pond_core::domain::schedule::ScheduleResultEvent>(32);
+    let scheduler: Option<Arc<dyn pond_core::ports::scheduler::SchedulerPort>> = {
+        let exec: Arc<dyn pond_core::ports::schedule_execution::ScheduleExecutor> =
             deferred_executor.clone();
         match CronSchedulerAdapter::with_options(
             data_dir.join("schedules.json"),
@@ -1664,26 +1517,23 @@ async fn run_server(
 
     // MCP Memory — enabled when --features mcp-memory is passed at build time.
     #[cfg(feature = "mcp-memory")]
-    let mcp_memory: Option<
-        Arc<dyn pond_core::mcp::ports::mcp_knowledge::McpKnowledgePort + Send + Sync>,
-    > = {
+    let mcp_memory: Option<Arc<dyn pond_core::ports::mcp_memory::McpMemoryPort + Send + Sync>> = {
         use pond_adapters_mcp_memory::GooseMcpMemoryAdapter;
         let adapter = GooseMcpMemoryAdapter::new(data_dir.join("memory"));
         tracing::info!("MCP memory enabled ({})", data_dir.join("memory").display());
         Some(Arc::new(adapter))
     };
     #[cfg(not(feature = "mcp-memory"))]
-    let mcp_memory: Option<
-        Arc<dyn pond_core::mcp::ports::mcp_knowledge::McpKnowledgePort + Send + Sync>,
-    > = None;
+    let mcp_memory: Option<Arc<dyn pond_core::ports::mcp_memory::McpMemoryPort + Send + Sync>> =
+        None;
 
     // ── Embedding provider (fastembed / ONNX) ────────────────────────────────
     // Initialized before the agent backend so it can be wired into the memory
     // MCP server for semantic search on recall/save.
     let embedding_provider: Option<
-        Arc<dyn pond_core::models::ports::embedding::EmbeddingProvider + Send + Sync>,
+        Arc<dyn pond_core::ports::embedding::EmbeddingProvider + Send + Sync>,
     > = {
-        use pond_core::models::ports::embedding::EmbeddingProvider as _;
+        use pond_core::ports::embedding::EmbeddingProvider as _;
         if settings.embedding_provider == "none" {
             tracing::info!("embedding provider: disabled (embedding_provider = \"none\")");
             None
@@ -1706,9 +1556,7 @@ async fn run_server(
                     );
                     Some(Arc::new(provider)
                         as Arc<
-                            dyn pond_core::models::ports::embedding::EmbeddingProvider
-                                + Send
-                                + Sync,
+                            dyn pond_core::ports::embedding::EmbeddingProvider + Send + Sync,
                         >)
                 }
                 Err(e) => {
@@ -1728,16 +1576,10 @@ async fn run_server(
     let pond_agent_active = false;
 
     #[cfg(feature = "goose-agent")]
-    // Device actuation backend — logging stub until MQTT/HTTP/IR or HA-MCP land.
-    let device_control: Arc<
-        dyn pond_core::user_data::ports::device_control::DeviceControlPort,
-    > = Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new());
-
     let (agent, extension_manager, _tool_caller, tool_registry) = if pond_agent_active {
         // Build PondAgent directly — no Goose, no llama backend conflict.
-        let default_registry: Arc<
-            dyn pond_core::mcp::ports::tools::tool_registry::ToolRegistryPort,
-        > = Arc::new(pond_core::mcp::services::tool_registry::InMemoryToolRegistry::new());
+        let default_registry: Arc<dyn pond_core::ports::tool_registry::ToolRegistryPort> =
+            Arc::new(pond_core::services::tool_registry::InMemoryToolRegistry::new());
 
         #[cfg(feature = "pond-agent")]
         let agent: Arc<dyn Agent> = {
@@ -1759,21 +1601,20 @@ async fn run_server(
                     recipe_repo.clone(),
                     draft_repo.clone(),
                     embedding_provider.clone(),
-                    device_control.clone(),
                 );
-                let disp: Arc<dyn pond_core::mcp::ports::tools::tool_dispatcher::ToolDispatcher> =
+                let disp: Arc<dyn pond_core::ports::tool_dispatcher::ToolDispatcher> =
                     Arc::new(dispatcher);
-                let tool_defs: Vec<pond_core::models::ports::inference::ToolDefinition> = disp
+                let tool_defs: Vec<pond_core::ports::inference::ToolDefinition> = disp
                     .available_tool_definitions()
                     .await
                     .into_iter()
-                    .map(|(name, desc, schema)| {
-                        pond_core::models::ports::inference::ToolDefinition {
+                    .map(
+                        |(name, desc, schema)| pond_core::ports::inference::ToolDefinition {
                             name,
                             description: desc,
                             parameters_schema: schema,
-                        }
-                    })
+                        },
+                    )
                     .collect();
                 let agent = pond_agent::PondAgent::new(
                     Arc::new(eng),
@@ -1812,7 +1653,6 @@ async fn run_server(
             prompt_template_repo.clone(),
             prompt_extra_repo.clone(),
             draft_repo.clone(),
-            device_control.clone(),
             Some(session_storage.clone()),
             false, // voice_mode — server mode, not voice
         )
@@ -1820,14 +1660,14 @@ async fn run_server(
     };
 
     #[cfg(not(feature = "goose-agent"))]
-    let tool_caller: Option<Arc<dyn pond_core::mcp::ports::tools::tool_caller::ToolCaller>> = None;
+    let tool_caller: Option<Arc<dyn pond_core::ports::tool_caller::ToolCaller>> = None;
     #[cfg(not(feature = "goose-agent"))]
-    let tool_registry: Arc<dyn pond_core::mcp::ports::tools::tool_registry::ToolRegistryPort> =
-        Arc::new(pond_core::mcp::services::tool_registry::InMemoryToolRegistry::new());
+    let tool_registry: Arc<dyn pond_core::ports::tool_registry::ToolRegistryPort> =
+        Arc::new(pond_core::services::tool_registry::InMemoryToolRegistry::new());
     #[cfg(not(feature = "goose-agent"))]
     let (agent, extension_manager): (
         Arc<dyn Agent>,
-        Option<Arc<dyn pond_core::mcp::ports::extension_manager::ExtensionManagerPort>>,
+        Option<Arc<dyn pond_core::ports::extension_manager::ExtensionManagerPort>>,
     ) = {
         if agent_backend == "goose" {
             tracing::warn!(
@@ -1847,19 +1687,14 @@ async fn run_server(
             settings.schedule_max_concurrent,
         ));
         deferred_executor
-            .init(
-                real_executor
-                    as Arc<dyn pond_core::user_data::ports::schedule_execution::ScheduleExecutor>,
-            )
+            .init(real_executor as Arc<dyn pond_core::ports::schedule_execution::ScheduleExecutor>)
             .await;
         tracing::info!("schedule executor initialized — agent-prompt schedules are now active");
     }
 
     // Secret storage — file-based at $DATA_DIR/secrets.json (0o600 permissions).
     // Initialized before MCP auto-connect so startup can resolve OAuth tokens.
-    let secret_repo: Option<
-        Arc<dyn pond_core::security::ports::secret::SecretRepository + Send + Sync>,
-    > = {
+    let secret_repo: Option<Arc<dyn pond_core::ports::secret::SecretRepository + Send + Sync>> = {
         match pond_infra::keyring_secret_repository::FileSecretRepository::new(&data_dir) {
             Ok(repo) => {
                 tracing::info!(
@@ -1877,11 +1712,11 @@ async fn run_server(
 
     // Marketplace — curated registry of installable extensions.
     // Initialized before MCP auto-connect so startup can look up required_secrets.
-    let marketplace: Arc<dyn pond_core::mcp::ports::extension_marketplace::ExtensionMarketplace> =
-        Arc::new(pond_core::mcp::services::marketplace::BundledMarketplace::new());
+    let marketplace: Arc<dyn pond_core::ports::extension_marketplace::ExtensionMarketplace> =
+        Arc::new(pond_core::services::marketplace::BundledMarketplace::new());
 
     // MCP client — load persisted server configs and auto-connect enabled ones.
-    let mcp_server_repo: Option<Arc<dyn pond_core::mcp::ports::mcp_server::McpServerRepository>> = {
+    let mcp_server_repo: Option<Arc<dyn pond_core::ports::mcp_server::McpServerRepository>> = {
         let repo = Arc::new(SqliteMcpServerRepository::new(db.system.clone()));
         // Auto-connect saved external MCP servers if the extension manager is available.
         if let Some(mgr) = &extension_manager {
@@ -1889,9 +1724,9 @@ async fn run_server(
                 Ok(servers) => {
                     for srv in servers
                         .into_iter()
-                        .filter(|s: &pond_core::mcp::ports::mcp_server::McpServerConfig| s.enabled)
+                        .filter(|s: &pond_core::ports::mcp_server::McpServerConfig| s.enabled)
                     {
-                        use pond_core::mcp::ports::extension_manager::AddExtensionRequest;
+                        use pond_core::ports::extension_manager::AddExtensionRequest;
 
                         // Start with persisted env, then resolve any secrets
                         // from the secret repo that aren't already present.
@@ -1939,9 +1774,7 @@ async fn run_server(
     // and spawn a background pre-loader that warms the model slot on wake-word detection.
     // For llamafile / Ollama those backends manage their own memory; use None there.
     #[cfg(feature = "local-inference")]
-    let model_scheduler: Option<
-        Arc<dyn pond_core::models::ports::model_scheduler::ModelScheduler>,
-    > = {
+    let model_scheduler: Option<Arc<dyn pond_core::ports::model_scheduler::ModelScheduler>> = {
         use pond_adapters_local_inference::ResourceAwareModelScheduler;
         let (sched, mut wake_rx) = ResourceAwareModelScheduler::new();
         let sched_arc = Arc::new(sched);
@@ -1955,102 +1788,24 @@ async fn run_server(
                 }
             }
         });
-        Some(sched_arc as Arc<dyn pond_core::models::ports::model_scheduler::ModelScheduler>)
+        Some(sched_arc as Arc<dyn pond_core::ports::model_scheduler::ModelScheduler>)
     };
     #[cfg(not(feature = "local-inference"))]
-    let model_scheduler: Option<
-        Arc<dyn pond_core::models::ports::model_scheduler::ModelScheduler>,
-    > = None;
+    let model_scheduler: Option<Arc<dyn pond_core::ports::model_scheduler::ModelScheduler>> = None;
 
     // Capture logs pool before `db` is moved into AppState
-    let event_log_repo: Option<Arc<dyn pond_core::security::ports::event_log::EventLogRepository>> =
+    let event_log_repo: Option<Arc<dyn pond_core::ports::event_log::EventLogRepository>> =
         Some(Arc::new(SqliteEventLogRepository::new(db.logs.clone())));
-
-    // Privacy/security boundary hook — wraps the event log as its audit sink.
-    // Default-allow; routes opt in to calling `allow`/`audit`.
-    let security_policy: Option<Arc<dyn pond_core::security::ports::policy::SecurityPolicy>> =
-        Some(Arc::new(
-            pond_infra::sqlite_security_policy::SqliteSecurityPolicy::new(Arc::new(
-                SqliteEventLogRepository::new(db.logs.clone()),
-            )),
-        ));
-
-    // Start routing WARN+ tracing events into the SQLite event log.
-    // _file_guard must live until run_server returns so the background file
-    // writer keeps flushing log output to disk.
-    let _file_guard = drain_handle.drain_into(event_log_repo.clone());
-
-    // Durable per-turn telemetry persisted to pond_logs.db. Falls back to the
-    // in-memory store if the SQLite-backed adapter cannot be initialised.
-    let telemetry: Option<Arc<dyn pond_core::security::ports::telemetry::TelemetryPort>> =
-        match SqliteTelemetry::new(db.logs.clone()).await {
-            Ok(t) => Some(Arc::new(t)),
-            Err(e) => {
-                tracing::warn!("Failed to initialize SQLite telemetry, falling back to in-memory: {e}");
-                Some(Arc::new(pond_core::security::services::telemetry::InMemoryTelemetry::new()))
-            }
-        };
 
     // Bind the API port early so we can thread it into AppState (needed for
     // dynamic OAuth redirect URIs).  The actual `axum::serve()` call that
     // consumes the listener happens further below.
-    let (listener, api_port) = ports::bind_with_fallback("0.0.0.0", port.unwrap_or(ports::API_SERVER)).await?;
-
-    // Direct MCP tool dispatcher for POST /api/v1/tools/invoke (bypasses the LLM).
-    let tool_dispatcher: Option<
-        Arc<dyn pond_core::mcp::ports::tools::tool_dispatcher::ToolDispatcher>,
-    > = Some(Arc::new(pond_mcp_server::McpToolDispatcher::new(
-        memory_repo.clone(),
-        weather.clone(),
-        scheduler.clone(),
-        settings_repo.clone(),
-        device_registry.clone(),
-        skill_repo.clone(),
-        recipe_repo.clone(),
-        draft_repo.clone(),
-        embedding_provider.clone(),
-        device_control.clone(),
-    )));
-
-    // Event bus + durable event log (#91/#109). The bus is shared with AppState
-    // for publishing on ingest; a background bridge subscribes to it and appends
-    // every bus event (sensor/camera/device) into the unified `events` table, so
-    // events written in normal operation are queryable from pond_logs.db.
-    let event_bus: Arc<dyn pond_core::shared::ports::event_bus::EventBus> =
-        Arc::new(InProcessEventBus::new());
-    {
-        let event_log = SqliteEventLog::new(db.logs.clone());
-        let mut events = event_bus.subscribe();
-        tokio::spawn(async move {
-            use futures::StreamExt;
-            use pond_core::security::ports::event_log::EventLog as _;
-            while let Some(bus_event) = events.next().await {
-                if let Err(e) = event_log.append(bus_event.to_event()).await {
-                    tracing::warn!(error = %e, "failed to persist bus event to event log");
-                }
-            }
-        });
-    }
-
-    // DB-backed handshake/pairing (#93). Construct before `db` is moved into
-    // AppState, then issue a fresh pairing code the operator reads off the CLI
-    // to pair a GOTG device.
-    let handshake: Arc<dyn pond_core::security::ports::handshake::Handshake> =
-        Arc::new(SqliteHandshakeAdapter::new(db.system.clone()));
-    match handshake.issue_pairing_code().await {
-        Ok(pc) => {
-            println!("\n  ┌───────────────────────────────────────┐");
-            println!("  │  Pairing code:  {}   (valid 10 min) │", pc.code);
-            println!("  └───────────────────────────────────────┘");
-            println!("  Enter this in Goose On The Go to pair this device.\n");
-        }
-        Err(e) => tracing::warn!("failed to issue pairing code at startup: {e:#}"),
-    }
+    let (listener, api_port) = ports::bind_with_fallback("0.0.0.0", ports::API_SERVER).await?;
 
     let state = Arc::new(AppState {
         db,
         onboarding_repo,
-        handshake: handshake.clone(),
+        handshake: Arc::new(MockHandshake::new()),
         whisper_url: whisper_url.clone(),
         session_storage,
         http_client: reqwest::Client::new(),
@@ -2075,7 +1830,6 @@ async fn run_server(
         extension_manager,
         mcp_server_repo,
         tool_registry: Some(tool_registry),
-        tool_dispatcher,
         marketplace: Some(marketplace),
         secret_repo,
         download_tracker: std::sync::Arc::new(tokio::sync::RwLock::new(
@@ -2097,7 +1851,6 @@ async fn run_server(
         recipe_repo: Some(recipe_repo.clone()),
         llamafile_manager: Some(llamafile_manager),
         event_log_repo: event_log_repo,
-        event_bus: Some(event_bus.clone()),
         face_recognition,
         session_user_bindings: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -2110,16 +1863,15 @@ async fn run_server(
         consolidation_runner,
         inference_pool,
         schedule_result_tx: schedule_result_tx.clone(),
-        telemetry,
-        context_monitor: Arc::new(
-            pond_core::models::services::context_monitor::ContextMonitor::new(),
-        ),
+        telemetry: Some(Arc::new(
+            pond_core::services::telemetry::InMemoryTelemetry::new(),
+        )),
+        context_monitor: Arc::new(pond_core::services::context_monitor::ContextMonitor::new()),
         mcp_app_resources: pond_mcp_server::all_app_resources()
             .into_iter()
             .map(|(uri, html)| (uri.to_string(), html))
             .collect(),
         oauth_state: pond_api::oauth_callback::new_oauth_state(),
-        security_policy,
         api_port,
     });
 
@@ -2136,8 +1888,7 @@ async fn run_server(
             interval.tick().await; // skip the initial immediate tick
             loop {
                 interval.tick().await;
-                let providers =
-                    pond_core::user_data::services::oauth_providers::builtin_oauth_providers();
+                let providers = pond_core::services::oauth_providers::builtin_oauth_providers();
                 for provider in &providers {
                     let Some(repo) = &refresh_secret_repo else {
                         continue;
@@ -2355,11 +2106,11 @@ async fn run_chat(
         effective_provider, effective_model
     );
 
-    // Resolve the whisper ggml model path (used by both the in-process backend
-    // and the legacy HTTP subprocess). When voice input is not requested we
-    // still resolve the path to surface a clear download-needed message.
-    let whisper_model_path: Option<std::path::PathBuf> = if input == "whisper" {
+    // Auto-start whisper.cpp when voice input is requested.
+    let mut whisper_port = ports::WHISPER;
+    let _whisper_guard = if input == "whisper" {
         let whisper_model_name = settings.active_whisper_model.as_str();
+        // Look up filename and URL from the catalog DB.
         let (whisper_filename, whisper_url, whisper_mb) =
             SqliteModelRepository::new(db.system.clone())
                 .get_by_id(&format!("whisper/{}", whisper_model_name))
@@ -2403,49 +2154,30 @@ async fn run_chat(
                 );
             }
         }
-        Some(whisper_model)
-    } else {
-        None
-    };
-
-    // Optionally start the legacy whisper.cpp subprocess. Default build skips
-    // this entirely — `WhisperRsInput` handles inference in-process.
-    #[allow(unused_mut, unused_assignments)]
-    let mut whisper_port = ports::WHISPER;
-    #[cfg(feature = "legacy-subprocess")]
-    let _whisper_guard = if let Some(ref whisper_model) = whisper_model_path {
-        let (guard, port) = whisper_process::try_start(&data_dir, whisper_model).await;
+        let (guard, port) = whisper_process::try_start(&data_dir, &whisper_model).await;
         whisper_port = port;
         guard
     } else {
         None
     };
-    #[cfg(not(feature = "legacy-subprocess"))]
-    let _whisper_guard: Option<()> = None;
-
-    // The URL is only meaningful when the legacy subprocess is running; the
-    // in-process backend ignores it. Kept here to populate AppState.whisper_url
-    // for the (legacy) audio-transcribe / calibrate HTTP routes.
-    let whisper_url = format!("http://127.0.0.1:{}", whisper_port);
+    let whisper_url = whisper_process::url_for(whisper_port);
 
     // ── Model catalog & ModelService (for autonomous downloading) ──────────────
     let chat_model_repo: Arc<dyn ModelRepository + Send + Sync> =
         Arc::new(SqliteModelRepository::new(db.system.clone()));
-    let chat_model_service = Arc::new(
-        pond_core::models::services::model_service::ModelService::new(
-            chat_model_repo.clone(),
-            Arc::new(
-                crate::composite_model_catalog_provider::CompositeModelCatalogProvider::new(
-                    reqwest::Client::builder()
-                        .user_agent(concat!("goose-in-a-pond/", env!("CARGO_PKG_VERSION")))
-                        .build()
-                        .unwrap_or_default(),
-                ),
+    let chat_model_service = Arc::new(pond_core::services::model_service::ModelService::new(
+        chat_model_repo.clone(),
+        Arc::new(
+            crate::composite_model_catalog_provider::CompositeModelCatalogProvider::new(
+                reqwest::Client::builder()
+                    .user_agent(concat!("goose-in-a-pond/", env!("CARGO_PKG_VERSION")))
+                    .build()
+                    .unwrap_or_default(),
             ),
-            Arc::new(crate::http_model_downloader::HttpModelDownloader::new()),
-            Arc::new(crate::filesystem_model_storage::FilesystemModelStorage::new(&data_dir)),
         ),
-    );
+        Arc::new(crate::http_model_downloader::HttpModelDownloader::new()),
+        Arc::new(crate::filesystem_model_storage::FilesystemModelStorage::new(&data_dir)),
+    ));
 
     // Seed catalog so model records exist for resolution
     if let Err(e) = chat_model_service.seed_catalog().await {
@@ -2478,37 +2210,33 @@ async fn run_chat(
     let session_id = "default-session".to_string();
 
     // ── Build repos for GooseAdapter (before db.system is consumed) ───────────────
-    let settings_repo_arc: Arc<
-        dyn pond_core::user_data::ports::settings::SettingsRepository + Send + Sync,
-    > = Arc::new(SqliteSettingsRepository::new(db.system.clone()));
-    let memory_repo: Arc<
-        dyn pond_core::user_data::ports::memory_repository::MemoryRepository + Send + Sync,
-    > = Arc::new(SqliteMemoryRepository::new(db.system.clone()));
-    let skill_repo: Arc<dyn pond_core::user_data::ports::skill::UserSkillRepository + Send + Sync> =
+    let settings_repo_arc: Arc<dyn pond_core::ports::settings::SettingsRepository + Send + Sync> =
+        Arc::new(SqliteSettingsRepository::new(db.system.clone()));
+    let memory_repo: Arc<dyn pond_core::ports::memory_repository::MemoryRepository + Send + Sync> =
+        Arc::new(SqliteMemoryRepository::new(db.system.clone()));
+    let skill_repo: Arc<dyn pond_core::ports::skill::UserSkillRepository + Send + Sync> =
         Arc::new(SqliteSkillRepository::new(db.system.clone()));
-    let recipe_repo: Arc<
-        dyn pond_core::user_data::ports::recipe::AgentRecipeRepository + Send + Sync,
-    > = Arc::new(SqliteRecipeRepository::new(db.system.clone()));
+    let recipe_repo: Arc<dyn pond_core::ports::recipe::AgentRecipeRepository + Send + Sync> =
+        Arc::new(SqliteRecipeRepository::new(db.system.clone()));
     let template_repo: Arc<
-        dyn pond_core::user_data::ports::prompt_template::PromptTemplateRepository + Send + Sync,
+        dyn pond_core::ports::prompt_template::PromptTemplateRepository + Send + Sync,
     > = Arc::new(SqlitePromptTemplateRepository::new(db.system.clone()));
-    let extras_repo: Arc<
-        dyn pond_core::user_data::ports::prompt_extra::PromptExtraRepository + Send + Sync,
-    > = Arc::new(SqlitePromptExtraRepository::new(db.system.clone()));
+    let extras_repo: Arc<dyn pond_core::ports::prompt_extra::PromptExtraRepository + Send + Sync> =
+        Arc::new(SqlitePromptExtraRepository::new(db.system.clone()));
     let device_registry_arc: Arc<
-        dyn pond_core::user_data::ports::device_registry::DeviceRegistry + Send + Sync,
+        dyn pond_core::ports::device_registry::DeviceRegistry + Send + Sync,
     > = Arc::new(SqliteDeviceRegistry::new(db.system.clone()));
-    let draft_repo: Arc<dyn pond_core::user_data::ports::draft::DraftRepository + Send + Sync> =
+    let draft_repo: Arc<dyn pond_core::ports::draft::DraftRepository + Send + Sync> =
         Arc::new(SqliteDraftRepository::new(db.system.clone()));
 
     // Reseed built-in prompt templates at startup with the latest Jinja2 general-purpose content.
     // Uses upsert (not insert_if_absent) so existing installs get the updated templates.
     // User-created templates (is_system = false) are never touched.
     {
-        use pond_core::prompts::{PROMPT_BALANCED, PROMPT_CONCISE, PROMPT_TECHNICAL, PROMPT_WARM};
-        use pond_core::user_data::domain::prompt_template::PromptTemplate;
+        use pond_core::domain::prompt_template::PromptTemplate;
         #[allow(unused_imports)]
-        use pond_core::user_data::ports::prompt_template::PromptTemplateRepository;
+        use pond_core::ports::prompt_template::PromptTemplateRepository;
+        use pond_core::prompts::{PROMPT_BALANCED, PROMPT_CONCISE, PROMPT_TECHNICAL, PROMPT_WARM};
         let built_ins = [
             (
                 "balanced",
@@ -2598,7 +2326,6 @@ async fn run_chat(
             template_repo,
             extras_repo,
             draft_repo,
-            Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
             None,               // session_storage — not needed for goose backend
             input == "whisper", // voice_mode
         )
@@ -2662,7 +2389,7 @@ async fn run_chat(
     // Create session if it doesn't exist; ignore duplicate-key errors from prior runs
     if let Err(e) = storage.create_session(session_id.clone()).await {
         match e {
-            pond_core::user_data::ports::session_storage::SessionStorageError::StorageError(_) => {
+            pond_core::ports::session_storage::SessionStorageError::StorageError(_) => {
                 // Likely a duplicate key — session already exists, which is fine
                 tracing::debug!("Session already exists, reusing: {}", session_id);
             }
@@ -2748,29 +2475,10 @@ async fn run_chat(
     }
 
     // ── Wire voice input ──
-    // Build a shared in-process Whisper backend once per session. It powers
-    // both the `VoiceInput` adapter and the wake-word detector — no separate
-    // KWS subprocess needed any more.
-    let whisper_backend: Option<Arc<WhisperRsInput>> = if input == "whisper" {
-        match &whisper_model_path {
-            Some(p) => match WhisperRsInput::new(p.clone()) {
-                Ok(w) => Some(Arc::new(w)),
-                Err(e) => {
-                    println!("  ⚠  In-process whisper load failed: {}", e);
-                    println!("     Falling back to stdin input.");
-                    None
-                }
-            },
-            None => None,
-        }
-    } else {
-        None
-    };
-
-    let voice: Arc<dyn VoiceInput> = match (input, &whisper_backend) {
-        ("whisper", Some(backend)) => {
-            println!("  Input:    whisper (in-process via whisper.cpp)");
-            backend.clone() as Arc<dyn VoiceInput>
+    let voice: Arc<dyn VoiceInput> = match input {
+        "whisper" => {
+            println!("  Input:    whisper (@ {})", whisper_url);
+            Arc::new(WhisperInput::new(Some(&whisper_url)))
         }
         _ => {
             println!("  Input:    stdin");
@@ -2780,12 +2488,16 @@ async fn run_chat(
     chat_service = chat_service.with_voice_input(voice);
 
     // ── Wire wake word detector ──
-    if no_wake_word || input != "whisper" || whisper_backend.is_none() {
+    if no_wake_word || input != "whisper" {
         chat_service = chat_service.with_wake_word_detector(Arc::new(InstantActivation));
     } else {
-        let backend = whisper_backend.clone().expect("checked above");
         let trigger = wake_word.unwrap_or(settings.voice_wake_word.as_str());
         let transcriptions = settings.voice_wake_word_transcriptions.clone();
+        // Tiered model: use a separate (fast, tiny) whisper server for KWS when configured.
+        let kws_url = settings
+            .voice_kws_whisper_url
+            .as_deref()
+            .unwrap_or(&whisper_url);
 
         if transcriptions.is_empty() {
             println!(
@@ -2799,6 +2511,8 @@ async fn run_chat(
                 transcriptions.len()
             );
         }
+        println!("  KWS whisper:   {}", kws_url);
+        println!("  ASR whisper:   {}", whisper_url);
         println!(
             "  Energy gate:   {:.3} RMS  |  cooldown: {}ms  |  VAD silence: {}ms",
             settings.voice_kws_energy_threshold,
@@ -2806,7 +2520,7 @@ async fn run_chat(
             settings.voice_kws_post_trigger_silence_ms
         );
 
-        use pond_adapters_whisper::{KeywordDetectorConfig, WhisperBackend};
+        use pond_adapters_whisper::KeywordDetectorConfig;
         let kws_config = KeywordDetectorConfig {
             energy_threshold: settings.voice_kws_energy_threshold,
             post_trigger_silence_ms: settings.voice_kws_post_trigger_silence_ms,
@@ -2815,7 +2529,7 @@ async fn run_chat(
         };
 
         let detector = Arc::new(
-            WhisperKeywordDetector::new(backend as Arc<dyn WhisperBackend>, trigger)
+            WhisperKeywordDetector::new(Some(kws_url), trigger)
                 .with_transcriptions(transcriptions)
                 .with_config(kws_config),
         );
@@ -2838,6 +2552,13 @@ async fn run_chat(
             match model_path_opt {
                 None => Arc::new(PrintOutput),
                 Some(model_path) => {
+                    if piper_process::find_binary(&data_dir).is_none() {
+                        println!("  📥 TTS binary not found — downloading...");
+                        match model_download::download_piper_binary(&data_dir).await {
+                            Ok(_) => {}
+                            Err(e) => println!("  ⚠  TTS binary download failed: {}", e),
+                        }
+                    }
                     // Piper requires both the .onnx weights AND the .onnx.json config.
                     // Check both — the JSON is often missing even when the onnx was
                     // downloaded in an earlier version that didn't fetch the config.
@@ -2876,78 +2597,17 @@ async fn run_chat(
                             );
                         }
                     }
-
-                    // espeak-ng-data: in-process backend uses the env var
-                    // path; legacy subprocess passes it as --espeak_data.
-                    let espeak_data_dir = {
-                        let p = model_download::piper_espeak_data_path(&data_dir);
-                        if p.exists() {
-                            Some(p)
-                        } else {
-                            None
+                    match piper_process::find_binary(&data_dir) {
+                        Some(bin) => {
+                            println!(
+                                "  TTS:      piper ({})",
+                                model_path.file_name().unwrap_or_default().to_string_lossy()
+                            );
+                            Arc::new(PiperOutput::new(bin, model_path))
                         }
-                    };
-
-                    // Default: in-process. Loads the .onnx + .onnx.json via
-                    // piper-rs and synthesises with zero subprocess overhead.
-                    #[cfg(not(feature = "legacy-subprocess"))]
-                    {
-                        if !model_path.exists() || !config_path.exists() {
-                            println!("  TTS:      piper unavailable (model or config missing) — falling back to print");
-                            Arc::new(PrintOutput) as Arc<dyn VoiceOutput>
-                        } else {
-                            match PiperRsOutput::new(model_path.clone(), config_path) {
-                                Ok(out) => {
-                                    let out = match espeak_data_dir {
-                                        Some(d) => out.with_espeak_data(d),
-                                        None => out,
-                                    };
-                                    println!(
-                                        "  TTS:      piper-rs ({})",
-                                        model_path
-                                            .file_name()
-                                            .unwrap_or_default()
-                                            .to_string_lossy()
-                                    );
-                                    Arc::new(out) as Arc<dyn VoiceOutput>
-                                }
-                                Err(e) => {
-                                    println!(
-                                        "  TTS:      piper unavailable (load failed: {}) — falling back to print",
-                                        e
-                                    );
-                                    Arc::new(PrintOutput) as Arc<dyn VoiceOutput>
-                                }
-                            }
-                        }
-                    }
-
-                    // Legacy: subprocess `piper` binary.
-                    #[cfg(feature = "legacy-subprocess")]
-                    {
-                        if piper_process::find_binary(&data_dir).is_none() {
-                            println!("  📥 TTS binary not found — downloading...");
-                            match model_download::download_piper_binary(&data_dir).await {
-                                Ok(_) => {}
-                                Err(e) => println!("  ⚠  TTS binary download failed: {}", e),
-                            }
-                        }
-                        match piper_process::find_binary(&data_dir) {
-                            Some(bin) => {
-                                println!(
-                                    "  TTS:      piper ({})",
-                                    model_path.file_name().unwrap_or_default().to_string_lossy()
-                                );
-                                let mut out = PiperOutput::new(bin, model_path);
-                                if let Some(d) = espeak_data_dir {
-                                    out = out.with_espeak_data(d);
-                                }
-                                Arc::new(out) as Arc<dyn VoiceOutput>
-                            }
-                            None => {
-                                println!("  TTS:      piper unavailable (binary not found) — falling back to print");
-                                Arc::new(PrintOutput) as Arc<dyn VoiceOutput>
-                            }
+                        None => {
+                            println!("  TTS:      piper unavailable (binary not found) — falling back to print");
+                            Arc::new(PrintOutput)
                         }
                     }
                 }
@@ -2976,21 +2636,21 @@ struct GiapAnswerReviewer {
     /// Live provider reference — reads from the RwLock so it always uses
     /// whatever model is currently loaded.
     live_provider:
-        Arc<tokio::sync::RwLock<Option<Arc<dyn pond_core::models::ports::provider::LlmProvider>>>>,
+        Arc<tokio::sync::RwLock<Option<Arc<dyn pond_core::ports::provider::LlmProvider>>>>,
     pass_threshold: u8,
     max_rounds: u32,
 }
 
 #[async_trait::async_trait]
-impl pond_core::models::ports::answer_reviewer::AnswerReviewer for GiapAnswerReviewer {
+impl pond_core::ports::answer_reviewer::AnswerReviewer for GiapAnswerReviewer {
     async fn review(
         &self,
         question: &str,
         answer: &str,
         tool_context: Option<&str>,
-    ) -> anyhow::Result<pond_core::models::ports::answer_reviewer::ReviewResult> {
-        use pond_core::models::domain::message::ChatMessage;
-        use pond_core::models::ports::answer_reviewer::{ReviewResult, ReviewVerdict};
+    ) -> anyhow::Result<pond_core::ports::answer_reviewer::ReviewResult> {
+        use pond_core::domain::message::ChatMessage;
+        use pond_core::ports::answer_reviewer::{ReviewResult, ReviewVerdict};
 
         // Read the LIVE provider — always uses whatever model is currently loaded.
         let provider = {
@@ -3127,8 +2787,8 @@ fn strip_thinking_tags(raw: &str) -> String {
 ///
 /// Tries to extract JSON from the response text. If parsing fails,
 /// defaults to `pass: true` — review must never block the user.
-fn parse_review_verdict(text: &str) -> pond_core::models::ports::answer_reviewer::ReviewVerdict {
-    use pond_core::models::ports::answer_reviewer::ReviewVerdict;
+fn parse_review_verdict(text: &str) -> pond_core::ports::answer_reviewer::ReviewVerdict {
+    use pond_core::ports::answer_reviewer::ReviewVerdict;
 
     let json_start = text.find('{');
     let json_end = text.rfind('}');
@@ -3179,17 +2839,15 @@ fn has_display() -> bool {
 /// actions, and broadcast events. Shared by the inactivity scheduler and the
 /// manual `POST /api/v1/memory/consolidate` endpoint (via `ConsolidationRunner`).
 async fn run_consolidation_pipeline(
-    repo: Arc<dyn pond_core::user_data::ports::memory_repository::MemoryRepository + Send + Sync>,
+    repo: Arc<dyn pond_core::ports::memory_repository::MemoryRepository + Send + Sync>,
     provider: Arc<tokio::sync::RwLock<Option<Arc<dyn LlmProvider>>>>,
     broadcast_tx: tokio::sync::broadcast::Sender<
-        pond_core::user_data::ports::memory_consolidator::ConsolidationEvent,
+        pond_core::ports::memory_consolidator::ConsolidationEvent,
     >,
     cancel: tokio_util::sync::CancellationToken,
 ) {
-    use pond_core::user_data::domain::memory::MemoryLifecycle;
-    use pond_core::user_data::ports::memory_consolidator::{
-        ConsolidationAction, ConsolidationEvent,
-    };
+    use pond_core::domain::memory::MemoryLifecycle;
+    use pond_core::ports::memory_consolidator::{ConsolidationAction, ConsolidationEvent};
 
     let memories = match repo.search_scoreable(None).await {
         Ok(m) => m,
@@ -3235,7 +2893,7 @@ async fn run_consolidation_pipeline(
             // Build lookup for source memory metadata (corrects, segment)
             let memory_map: std::collections::HashMap<
                 &str,
-                &pond_core::user_data::domain::memory::MemoryFragment,
+                &pond_core::domain::memory::MemoryFragment,
             > = memories.iter().map(|m| (m.id.as_str(), m)).collect();
 
             for exchange in &result.exchanges {
@@ -3256,7 +2914,7 @@ async fn run_consolidation_pipeline(
                             .any(|m| m.is_correction());
 
                         let effective_segment = if any_correction {
-                            pond_core::user_data::domain::memory::MemorySegment::Correction
+                            pond_core::domain::memory::MemorySegment::Correction
                         } else {
                             segment.clone()
                         };
@@ -3273,22 +2931,21 @@ async fn run_consolidation_pipeline(
                             );
                         }
 
-                        let new_frag =
-                            pond_core::user_data::domain::memory::MemoryFragment::from_extraction(
-                                uuid::Uuid::new_v4().to_string(),
-                                None,
-                                merged_content.clone(),
-                                effective_segment,
-                                *importance,
-                                corrects,
-                            );
+                        let new_frag = pond_core::domain::memory::MemoryFragment::from_extraction(
+                            uuid::Uuid::new_v4().to_string(),
+                            None,
+                            merged_content.clone(),
+                            effective_segment,
+                            *importance,
+                            corrects,
+                        );
                         let new_id = new_frag.id.clone();
                         let _ = repo.add(new_frag).await;
                         for src_id in source_ids {
                             let _ = repo.mark_superseded(src_id, &new_id).await;
                             let _ = repo
                                 .log_event(
-                                    pond_core::user_data::domain::memory::MemoryEventKind::Superseded,
+                                    pond_core::domain::memory::MemoryEventKind::Superseded,
                                     src_id,
                                     None,
                                     Some(&new_id),
@@ -3297,7 +2954,7 @@ async fn run_consolidation_pipeline(
                         }
                         let _ = repo
                             .log_event(
-                                pond_core::user_data::domain::memory::MemoryEventKind::Consolidated,
+                                pond_core::domain::memory::MemoryEventKind::Consolidated,
                                 &new_id,
                                 None,
                                 None,
@@ -3318,7 +2975,7 @@ async fn run_consolidation_pipeline(
                         let _ = repo.update_lifecycle(id, MemoryLifecycle::Archived).await;
                         let _ = repo
                             .log_event(
-                                pond_core::user_data::domain::memory::MemoryEventKind::Pruned,
+                                pond_core::domain::memory::MemoryEventKind::Pruned,
                                 id,
                                 None,
                                 None,
@@ -3335,7 +2992,7 @@ async fn run_consolidation_pipeline(
                             .await;
                         let _ = repo
                             .log_event(
-                                pond_core::user_data::domain::memory::MemoryEventKind::Consolidated,
+                                pond_core::domain::memory::MemoryEventKind::Consolidated,
                                 id,
                                 None,
                                 Some("recategorized"),
@@ -3358,7 +3015,7 @@ async fn run_consolidation_pipeline(
                             let entry_corrects = if !corrects_assigned
                                 && source_corrects.is_some()
                                 && entry.segment
-                                    == pond_core::user_data::domain::memory::MemorySegment::Correction
+                                    == pond_core::domain::memory::MemorySegment::Correction
                             {
                                 corrects_assigned = true;
                                 source_corrects.clone()
@@ -3367,7 +3024,7 @@ async fn run_consolidation_pipeline(
                             };
 
                             let new_frag =
-                                pond_core::user_data::domain::memory::MemoryFragment::from_extraction(
+                                pond_core::domain::memory::MemoryFragment::from_extraction(
                                     uuid::Uuid::new_v4().to_string(),
                                     None,
                                     entry.content.clone(),
@@ -3382,7 +3039,7 @@ async fn run_consolidation_pipeline(
                             let _ = repo.add(new_frag).await;
                             let _ = repo
                                 .log_event(
-                                    pond_core::user_data::domain::memory::MemoryEventKind::Consolidated,
+                                    pond_core::domain::memory::MemoryEventKind::Consolidated,
                                     &nid,
                                     None,
                                     None,
@@ -3393,7 +3050,7 @@ async fn run_consolidation_pipeline(
                             let _ = repo.mark_superseded(source_id, &first_new_id).await;
                             let _ = repo
                                 .log_event(
-                                    pond_core::user_data::domain::memory::MemoryEventKind::Superseded,
+                                    pond_core::domain::memory::MemoryEventKind::Superseded,
                                     source_id,
                                     None,
                                     Some(&first_new_id),
@@ -3820,7 +3477,7 @@ fn apply_face_recognition_defaults() {
 async fn run_calibrate(
     phrase_arg: Option<&str>,
     target_samples: usize,
-    _whisper_url_arg: Option<&str>,
+    whisper_url_arg: Option<&str>,
     reset: bool,
 ) -> Result<()> {
     let data_dir = default_data_dir();
@@ -3831,36 +3488,16 @@ async fn run_calibrate(
     let phrase = phrase_arg
         .unwrap_or(settings.voice_wake_word.as_str())
         .to_string();
-
-    // Resolve the ggml model path used by the in-process whisper backend.
-    let whisper_model_name = settings.active_whisper_model.clone();
-    if whisper_model_name.is_empty() {
-        anyhow::bail!(
-            "No whisper model configured in Settings. Pick a model in the Models UI \
-             before running calibrate."
-        );
-    }
-    let whisper_filename = SqliteModelRepository::new(db.system.clone())
-        .get_by_id(&format!("whisper/{}", whisper_model_name))
-        .await
-        .ok()
-        .flatten()
-        .and_then(|r| r.filename)
-        .unwrap_or_else(|| format!("ggml-{}.en.bin", whisper_model_name));
-    let whisper_model_path = data_dir.join("models").join(&whisper_filename);
-    if !whisper_model_path.exists() {
-        anyhow::bail!(
-            "Whisper model not downloaded yet: {}\nRun `pond-server setup` first.",
-            whisper_model_path.display()
-        );
-    }
+    let whisper_url = whisper_url_arg
+        .unwrap_or(settings.voice_whisper_url.as_str())
+        .to_string();
 
     println!();
     println!("  ╔═══════════════════════════════════════════════╗");
     println!("  ║   🎤  Wake-Word Calibration                   ║");
     println!("  ╚═══════════════════════════════════════════════╝");
     println!("  Phrase:       \"{}\"", phrase);
-    println!("  Model:        {} (in-process)", whisper_filename);
+    println!("  Whisper URL:  {}", whisper_url);
     println!("  Samples:      {}", target_samples);
     println!();
 
@@ -3885,8 +3522,7 @@ async fn run_calibrate(
         settings.voice_wake_word = phrase.clone();
     }
 
-    let whisper = WhisperRsInput::new(whisper_model_path.clone())
-        .with_context(|| format!("loading whisper model: {}", whisper_model_path.display()))?;
+    let whisper = WhisperInput::new(Some(&whisper_url));
     let mut collected = 0usize;
     let mut attempt = 0usize;
 
@@ -3913,7 +3549,7 @@ async fn run_calibrate(
                 continue;
             }
             Err(e) => {
-                println!(" (error: {})", e);
+                println!(" (error: {} — is whisper running at {}?)", e, whisper_url);
                 if attempt >= target_samples * 3 {
                     anyhow::bail!("Too many failed attempts — aborting calibration.");
                 }
@@ -4002,12 +3638,12 @@ fn default_data_dir() -> std::path::PathBuf {
 fn build_face_recognition(
     data_dir: &std::path::Path,
     pool: sqlx::Pool<sqlx::Sqlite>,
-) -> Option<Arc<dyn pond_core::user_data::ports::face_recognition::FaceRecognition>> {
+) -> Option<Arc<dyn pond_core::ports::face_recognition::FaceRecognition>> {
     use pond_adapters_face_onnx::{
         EmbeddingModel, OnnxFaceEmbeddingExtractor, ScrfdDetector, UltraFaceDetector,
     };
-    use pond_core::user_data::ports::face_detector::FaceDetector;
-    use pond_core::user_data::ports::face_embedding_extractor::FaceEmbeddingExtractor;
+    use pond_core::ports::face_detector::FaceDetector;
+    use pond_core::ports::face_embedding_extractor::FaceEmbeddingExtractor;
     use pond_infra::sqlite_face_recognition::SqliteFaceRecognition;
 
     // Embedder lookup, preferred → fallback:
@@ -4243,7 +3879,7 @@ fn build_face_recognition(
 fn build_face_recognition(
     _data_dir: &std::path::Path,
     _pool: sqlx::Pool<sqlx::Sqlite>,
-) -> Option<Arc<dyn pond_core::user_data::ports::face_recognition::FaceRecognition>> {
+) -> Option<Arc<dyn pond_core::ports::face_recognition::FaceRecognition>> {
     None
 }
 
@@ -4288,16 +3924,12 @@ async fn run_main_menu() -> Result<()> {
                 run_chat(None, None, "stdin", None, true, Some("none"), None).await?;
             }
             "2" => {
-                let data_dir = default_data_dir();
-                let drain = tracing_setup::init_tracing(false, &data_dir);
                 run_server(
                     std::path::PathBuf::from("web/dist"),
                     false,
                     false,
                     "goose",
-                    None,
                     false,
-                    drain,
                 )
                 .await?;
             }
@@ -4543,45 +4175,36 @@ async fn build_goose_backend(
     llamafile_url: &str,
     data_dir: &std::path::Path,
     weather: Option<Arc<dyn WeatherProvider>>,
-    device_registry: Arc<
-        dyn pond_core::user_data::ports::device_registry::DeviceRegistry + Send + Sync,
-    >,
-    scheduler: Option<Arc<dyn pond_core::user_data::ports::scheduler::SchedulerPort>>,
-    settings_repo: Arc<dyn pond_core::user_data::ports::settings::SettingsRepository + Send + Sync>,
-    memory_repo: Arc<
-        dyn pond_core::user_data::ports::memory_repository::MemoryRepository + Send + Sync,
-    >,
+    device_registry: Arc<dyn pond_core::ports::device_registry::DeviceRegistry + Send + Sync>,
+    scheduler: Option<Arc<dyn pond_core::ports::scheduler::SchedulerPort>>,
+    settings_repo: Arc<dyn pond_core::ports::settings::SettingsRepository + Send + Sync>,
+    memory_repo: Arc<dyn pond_core::ports::memory_repository::MemoryRepository + Send + Sync>,
     embedding_provider: Option<
-        Arc<dyn pond_core::models::ports::embedding::EmbeddingProvider + Send + Sync>,
+        Arc<dyn pond_core::ports::embedding::EmbeddingProvider + Send + Sync>,
     >,
-    skill_repo: Arc<dyn pond_core::user_data::ports::skill::UserSkillRepository + Send + Sync>,
-    recipe_repo: Arc<dyn pond_core::user_data::ports::recipe::AgentRecipeRepository + Send + Sync>,
+    skill_repo: Arc<dyn pond_core::ports::skill::UserSkillRepository + Send + Sync>,
+    recipe_repo: Arc<dyn pond_core::ports::recipe::AgentRecipeRepository + Send + Sync>,
     template_repo: Arc<
-        dyn pond_core::user_data::ports::prompt_template::PromptTemplateRepository + Send + Sync,
+        dyn pond_core::ports::prompt_template::PromptTemplateRepository + Send + Sync,
     >,
-    extras_repo: Arc<
-        dyn pond_core::user_data::ports::prompt_extra::PromptExtraRepository + Send + Sync,
-    >,
-    draft_repo: Arc<dyn pond_core::user_data::ports::draft::DraftRepository + Send + Sync>,
-    device_control: Arc<
-        dyn pond_core::user_data::ports::device_control::DeviceControlPort + Send + Sync,
-    >,
-    session_storage: Option<Arc<dyn pond_core::user_data::ports::session_storage::SessionStorage>>,
+    extras_repo: Arc<dyn pond_core::ports::prompt_extra::PromptExtraRepository + Send + Sync>,
+    draft_repo: Arc<dyn pond_core::ports::draft::DraftRepository + Send + Sync>,
+    session_storage: Option<Arc<dyn pond_core::ports::session_storage::SessionStorage>>,
     voice_mode: bool,
 ) -> (
     Arc<dyn Agent>,
-    Option<Arc<dyn pond_core::mcp::ports::extension_manager::ExtensionManagerPort>>,
-    Option<Arc<dyn pond_core::mcp::ports::tools::tool_caller::ToolCaller>>,
-    Arc<dyn pond_core::mcp::ports::tools::tool_registry::ToolRegistryPort>,
+    Option<Arc<dyn pond_core::ports::extension_manager::ExtensionManagerPort>>,
+    Option<Arc<dyn pond_core::ports::tool_caller::ToolCaller>>,
+    Arc<dyn pond_core::ports::tool_registry::ToolRegistryPort>,
 ) {
     use pond_adapters_goose::GooseAdapter;
     use pond_adapters_local_inference::ToolCallerEngine;
-    use pond_core::mcp::ports::extension_manager::ExtensionManagerPort;
-    use pond_core::mcp::ports::tools::tool_caller::ToolCaller;
-    use pond_core::mcp::ports::tools::tool_registry::ToolRegistryPort;
+    use pond_core::ports::extension_manager::ExtensionManagerPort;
+    use pond_core::ports::tool_caller::ToolCaller;
+    use pond_core::ports::tool_registry::ToolRegistryPort;
 
     let default_registry: Arc<dyn ToolRegistryPort> =
-        Arc::new(pond_core::mcp::services::tool_registry::InMemoryToolRegistry::new());
+        Arc::new(pond_core::services::tool_registry::InMemoryToolRegistry::new());
 
     // ── PondAgent backend (independent, no Goose dependency) ──────────────
     #[cfg(feature = "pond-agent")]
@@ -4619,18 +4242,17 @@ async fn build_goose_backend(
             recipe_repo.clone(),
             draft_repo,
             embedding_provider,
-            device_control.clone(),
         );
 
-        let dispatcher: Arc<dyn pond_core::mcp::ports::tools::tool_dispatcher::ToolDispatcher> =
+        let dispatcher: Arc<dyn pond_core::ports::tool_dispatcher::ToolDispatcher> =
             Arc::new(dispatcher);
 
         // Get tool definitions from the dispatcher for prompt injection.
-        let tool_defs: Vec<pond_core::models::ports::inference::ToolDefinition> = dispatcher
+        let tool_defs: Vec<pond_core::ports::inference::ToolDefinition> = dispatcher
             .available_tools()
             .await
             .into_iter()
-            .map(|name| pond_core::models::ports::inference::ToolDefinition {
+            .map(|name| pond_core::ports::inference::ToolDefinition {
                 name: name.clone(),
                 description: format!("GIAP tool: {}", name),
                 parameters_schema: serde_json::json!({}),
@@ -4694,7 +4316,6 @@ async fn build_goose_backend(
         skill_repo.clone(),
         recipe_repo.clone(),
         draft_repo,
-        device_control,
         tool_caller.clone(),
     ) {
         Ok(ext_names) => {
@@ -4746,8 +4367,8 @@ async fn build_goose_backend(
 async fn seed_model_catalog(repo: &dyn ModelRepository, data_dir: &std::path::Path) {
     use crate::composite_model_catalog_provider::CompositeModelCatalogProvider;
     use crate::filesystem_model_storage::FilesystemModelStorage;
-    use pond_core::models::ports::model_catalog_provider::ModelCatalogProvider;
-    use pond_core::models::ports::model_storage::ModelStorage;
+    use pond_core::ports::model_catalog_provider::ModelCatalogProvider;
+    use pond_core::ports::model_storage::ModelStorage;
 
     let client = reqwest::Client::builder()
         .user_agent(concat!("goose-in-a-pond/", env!("CARGO_PKG_VERSION")))
@@ -4784,7 +4405,7 @@ async fn seed_model_catalog(repo: &dyn ModelRepository, data_dir: &std::path::Pa
 /// that only have the legacy single-model settings fields).
 async fn sync_assignments_to_settings(
     repo: &dyn ModelRepository,
-    settings_repo: &dyn pond_core::user_data::ports::settings::SettingsRepository,
+    settings_repo: &dyn pond_core::ports::settings::SettingsRepository,
 ) {
     let assignments = match repo.list_assignments().await {
         Ok(a) => a,
@@ -5022,7 +4643,7 @@ async fn run_models(action: ModelAction) -> Result<()> {
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("Model '{id}' not found in catalog"))?;
 
-            use pond_core::models::domain::model_record::ModelRoleAssignment;
+            use pond_core::domain::model_record::ModelRoleAssignment;
             if !ModelRoleAssignment::category_matches_role(&cat, &role) {
                 anyhow::bail!(
                     "Category '{}' is not compatible with role '{}'. \
@@ -5059,9 +4680,9 @@ fn resolve_role(role_arg: &str, _message: &str) -> String {
 /// on stderr so they don't pollute piped output. Returns when the stream ends.
 async fn stream_agent_response(
     agent: &Arc<dyn Agent>,
-    request: pond_core::shared::domain::agent::AgentRequest,
+    request: pond_core::domain::agent::AgentRequest,
 ) -> Result<()> {
-    use pond_core::shared::domain::agent::AgentStreamEvent;
+    use pond_core::domain::agent::AgentStreamEvent;
 
     let mut stream = agent.chat_stream(request).await?;
     let mut printed_newline = false;
@@ -5141,27 +4762,22 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
     let db = Database::init(&data_dir).await?;
 
     // Build all repos once — shared across Chat, Tools, and Extras arms.
-    let settings_repo: Arc<
-        dyn pond_core::user_data::ports::settings::SettingsRepository + Send + Sync,
-    > = Arc::new(SqliteSettingsRepository::new(db.system.clone()));
-    let memory_repo: Arc<
-        dyn pond_core::user_data::ports::memory_repository::MemoryRepository + Send + Sync,
-    > = Arc::new(SqliteMemoryRepository::new(db.system.clone()));
-    let skill_repo: Arc<dyn pond_core::user_data::ports::skill::UserSkillRepository + Send + Sync> =
+    let settings_repo: Arc<dyn pond_core::ports::settings::SettingsRepository + Send + Sync> =
+        Arc::new(SqliteSettingsRepository::new(db.system.clone()));
+    let memory_repo: Arc<dyn pond_core::ports::memory_repository::MemoryRepository + Send + Sync> =
+        Arc::new(SqliteMemoryRepository::new(db.system.clone()));
+    let skill_repo: Arc<dyn pond_core::ports::skill::UserSkillRepository + Send + Sync> =
         Arc::new(SqliteSkillRepository::new(db.system.clone()));
-    let recipe_repo: Arc<
-        dyn pond_core::user_data::ports::recipe::AgentRecipeRepository + Send + Sync,
-    > = Arc::new(SqliteRecipeRepository::new(db.system.clone()));
+    let recipe_repo: Arc<dyn pond_core::ports::recipe::AgentRecipeRepository + Send + Sync> =
+        Arc::new(SqliteRecipeRepository::new(db.system.clone()));
     let template_repo: Arc<
-        dyn pond_core::user_data::ports::prompt_template::PromptTemplateRepository + Send + Sync,
+        dyn pond_core::ports::prompt_template::PromptTemplateRepository + Send + Sync,
     > = Arc::new(SqlitePromptTemplateRepository::new(db.system.clone()));
-    let extras_repo: Arc<
-        dyn pond_core::user_data::ports::prompt_extra::PromptExtraRepository + Send + Sync,
-    > = Arc::new(SqlitePromptExtraRepository::new(db.system.clone()));
-    let device_registry: Arc<
-        dyn pond_core::user_data::ports::device_registry::DeviceRegistry + Send + Sync,
-    > = Arc::new(SqliteDeviceRegistry::new(db.system.clone()));
-    let draft_repo: Arc<dyn pond_core::user_data::ports::draft::DraftRepository + Send + Sync> =
+    let extras_repo: Arc<dyn pond_core::ports::prompt_extra::PromptExtraRepository + Send + Sync> =
+        Arc::new(SqlitePromptExtraRepository::new(db.system.clone()));
+    let device_registry: Arc<dyn pond_core::ports::device_registry::DeviceRegistry + Send + Sync> =
+        Arc::new(SqliteDeviceRegistry::new(db.system.clone()));
+    let draft_repo: Arc<dyn pond_core::ports::draft::DraftRepository + Send + Sync> =
         Arc::new(SqliteDraftRepository::new(db.system.clone()));
 
     let settings = settings_repo.get().await.unwrap_or_default();
@@ -5196,7 +4812,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
             session,
             role,
         } => {
-            use pond_core::shared::domain::agent::AgentRequest;
+            use pond_core::domain::agent::AgentRequest;
 
             let model_role = resolve_role(&role, &message);
             eprintln!(
@@ -5219,7 +4835,6 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 template_repo,
                 extras_repo,
                 draft_repo,
-                Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
                 None, // session_storage — not needed for goose backend
                 false,
             )
@@ -5237,7 +4852,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
         }
 
         AgentAction::Repl { session, role } => {
-            use pond_core::shared::domain::agent::AgentRequest;
+            use pond_core::domain::agent::AgentRequest;
             use tokio::io::AsyncBufReadExt as _;
 
             let (agent, _ext_mgr, _tc, _tr) = build_goose_backend(
@@ -5255,7 +4870,6 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 template_repo,
                 extras_repo,
                 draft_repo,
-                Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
                 None, // session_storage — not needed for goose backend
                 false,
             )
@@ -5319,7 +4933,6 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 template_repo,
                 extras_repo,
                 draft_repo,
-                Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
                 None, // session_storage — not needed for goose backend
                 false,
             )
@@ -5377,7 +4990,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
 // ── Prompts CLI ───────────────────────────────────────────────────────────────
 
 async fn run_prompts_cmd(action: PromptAction) -> Result<()> {
-    use pond_core::user_data::ports::prompt_template::PromptTemplateRepository as _;
+    use pond_core::ports::prompt_template::PromptTemplateRepository as _;
 
     let data_dir = default_data_dir();
     let db = Database::init(&data_dir).await?;
@@ -5410,10 +5023,10 @@ async fn run_prompts_cmd(action: PromptAction) -> Result<()> {
         },
 
         PromptAction::Reset { name } => {
+            use pond_core::domain::prompt_template::PromptTemplate;
             use pond_core::prompts::{
                 PROMPT_BALANCED, PROMPT_CONCISE, PROMPT_TECHNICAL, PROMPT_WARM,
             };
-            use pond_core::user_data::domain::prompt_template::PromptTemplate;
 
             let (content, description) = match name.as_str() {
                 "balanced" => (
@@ -5455,7 +5068,7 @@ async fn run_prompts_cmd(action: PromptAction) -> Result<()> {
 // ── Skills CLI ────────────────────────────────────────────────────────────────
 
 async fn run_skills_cmd(action: SkillAction) -> Result<()> {
-    use pond_core::user_data::ports::skill::UserSkillRepository as _;
+    use pond_core::ports::skill::UserSkillRepository as _;
 
     let data_dir = default_data_dir();
     let db = Database::init(&data_dir).await?;
@@ -5486,7 +5099,7 @@ async fn run_skills_cmd(action: SkillAction) -> Result<()> {
         }
 
         SkillAction::Add { name, content } => {
-            use pond_core::user_data::domain::skill::UserSkill;
+            use pond_core::domain::skill::UserSkill;
 
             let content = match content {
                 Some(c) => c,
@@ -5515,13 +5128,13 @@ async fn run_skills_cmd(action: SkillAction) -> Result<()> {
         }
 
         SkillAction::Toggle { id } => {
-            use pond_core::user_data::ports::skill::UserSkillRepository as _;
+            use pond_core::ports::skill::UserSkillRepository as _;
 
             let skill = repo
                 .get(&id)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("Skill '{id}' not found"))?;
-            let updated = pond_core::user_data::domain::skill::UserSkill {
+            let updated = pond_core::domain::skill::UserSkill {
                 active: !skill.active,
                 ..skill.clone()
             };
@@ -5546,7 +5159,7 @@ async fn run_skills_cmd(action: SkillAction) -> Result<()> {
 // ── Recipes CLI ───────────────────────────────────────────────────────────────
 
 async fn run_recipes_cmd(action: RecipeAction) -> Result<()> {
-    use pond_core::user_data::ports::recipe::AgentRecipeRepository as _;
+    use pond_core::ports::recipe::AgentRecipeRepository as _;
 
     let data_dir = default_data_dir();
     let db = Database::init(&data_dir).await?;
@@ -5596,7 +5209,7 @@ async fn run_recipes_cmd(action: RecipeAction) -> Result<()> {
             file,
             description,
         } => {
-            use pond_core::user_data::domain::recipe::AgentRecipe;
+            use pond_core::domain::recipe::AgentRecipe;
 
             let yaml = tokio::fs::read_to_string(&file)
                 .await
@@ -5633,7 +5246,7 @@ async fn run_recipes_cmd(action: RecipeAction) -> Result<()> {
 // ── Memories CLI ──────────────────────────────────────────────────────────────
 
 async fn run_memories_cmd(action: MemoryAction) -> Result<()> {
-    use pond_core::user_data::ports::memory_repository::MemoryRepository as _;
+    use pond_core::ports::memory_repository::MemoryRepository as _;
 
     let data_dir = default_data_dir();
     let db = Database::init(&data_dir).await?;
@@ -5660,7 +5273,7 @@ async fn run_memories_cmd(action: MemoryAction) -> Result<()> {
         }
 
         MemoryAction::Add { content } => {
-            use pond_core::user_data::domain::memory::MemoryFragment;
+            use pond_core::domain::memory::MemoryFragment;
 
             let id = uuid::Uuid::new_v4().to_string();
             let fragment = MemoryFragment {
@@ -5729,9 +5342,9 @@ mod tests {
 
     #[tokio::test]
     async fn sync_ollama_chat_assignment_updates_settings() {
-        use pond_core::models::domain::model_record::{ModelCategory, ModelRecord};
-        use pond_core::models::ports::model_repository::ModelRepository;
-        use pond_core::user_data::ports::settings::SettingsRepository;
+        use pond_core::domain::model_record::{ModelCategory, ModelRecord};
+        use pond_core::ports::model_repository::ModelRepository;
+        use pond_core::ports::settings::SettingsRepository;
         use pond_infra::db::Database;
         use pond_infra::sqlite_model_repository::SqliteModelRepository;
         use pond_infra::sqlite_settings::SqliteSettingsRepository;
@@ -5779,9 +5392,9 @@ mod tests {
 
     #[tokio::test]
     async fn sync_gguf_chat_assignment_sets_local_provider() {
-        use pond_core::models::domain::model_record::{ModelCategory, ModelRecord};
-        use pond_core::models::ports::model_repository::ModelRepository;
-        use pond_core::user_data::ports::settings::SettingsRepository;
+        use pond_core::domain::model_record::{ModelCategory, ModelRecord};
+        use pond_core::ports::model_repository::ModelRepository;
+        use pond_core::ports::settings::SettingsRepository;
         use pond_infra::db::Database;
         use pond_infra::sqlite_model_repository::SqliteModelRepository;
         use pond_infra::sqlite_settings::SqliteSettingsRepository;
@@ -5833,9 +5446,9 @@ mod tests {
 
     #[tokio::test]
     async fn sync_think_and_task_roles_are_also_synced() {
-        use pond_core::models::domain::model_record::{ModelCategory, ModelRecord};
-        use pond_core::models::ports::model_repository::ModelRepository;
-        use pond_core::user_data::ports::settings::SettingsRepository;
+        use pond_core::domain::model_record::{ModelCategory, ModelRecord};
+        use pond_core::ports::model_repository::ModelRepository;
+        use pond_core::ports::settings::SettingsRepository;
         use pond_infra::db::Database;
         use pond_infra::sqlite_model_repository::SqliteModelRepository;
         use pond_infra::sqlite_settings::SqliteSettingsRepository;
@@ -5913,9 +5526,9 @@ mod tests {
 
     #[tokio::test]
     async fn sync_tool_assignment_updates_settings() {
-        use pond_core::models::domain::model_record::{ModelCategory, ModelRecord};
-        use pond_core::models::ports::model_repository::ModelRepository;
-        use pond_core::user_data::ports::settings::SettingsRepository;
+        use pond_core::domain::model_record::{ModelCategory, ModelRecord};
+        use pond_core::ports::model_repository::ModelRepository;
+        use pond_core::ports::settings::SettingsRepository;
         use pond_infra::db::Database;
         use pond_infra::sqlite_model_repository::SqliteModelRepository;
         use pond_infra::sqlite_settings::SqliteSettingsRepository;

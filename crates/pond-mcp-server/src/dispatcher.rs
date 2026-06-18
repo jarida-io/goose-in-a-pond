@@ -16,25 +16,23 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use pond_adapters_weather::WeatherProvider;
-use pond_core::mcp::ports::tools::tool_dispatcher::{ToolCallResult, ToolDispatcher};
-use pond_core::models::ports::embedding::EmbeddingProvider;
-use pond_core::user_data::ports::device_control::DeviceControlPort;
-use pond_core::user_data::ports::device_registry::DeviceRegistry;
-use pond_core::user_data::ports::draft::DraftRepository;
-use pond_core::user_data::ports::memory_repository::MemoryRepository;
-use pond_core::user_data::ports::recipe::AgentRecipeRepository;
-use pond_core::user_data::ports::scheduler::SchedulerPort;
-use pond_core::user_data::ports::settings::SettingsRepository;
-use pond_core::user_data::ports::skill::UserSkillRepository;
+use pond_core::ports::device_registry::DeviceRegistry;
+use pond_core::ports::draft::DraftRepository;
+use pond_core::ports::embedding::EmbeddingProvider;
+use pond_core::ports::memory_repository::MemoryRepository;
+use pond_core::ports::recipe::AgentRecipeRepository;
+use pond_core::ports::scheduler::SchedulerPort;
+use pond_core::ports::settings::SettingsRepository;
+use pond_core::ports::skill::UserSkillRepository;
+use pond_core::ports::tool_dispatcher::{ToolCallResult, ToolDispatcher};
 use rmcp::model::{CallToolRequestParams, CallToolResult as RmcpCallToolResult, RequestId};
 use rmcp::service::{Peer, RequestContext, RunningService};
 use rmcp::{RoleServer, ServerHandler};
 use std::sync::Arc;
 
 use crate::{
-    DeviceControlMcpServer, DeviceMcpServer, DiscoveryMcpServer, DraftMcpServer, FinanceMcpServer,
-    KnowledgeMcpServer, MemoryMcpServer, NewsMcpServer, ScheduleMcpServer, SystemMcpServer,
-    WeatherMcpServer,
+    DeviceMcpServer, DiscoveryMcpServer, DraftMcpServer, FinanceMcpServer, KnowledgeMcpServer,
+    MemoryMcpServer, NewsMcpServer, ScheduleMcpServer, SystemMcpServer, WeatherMcpServer,
 };
 
 // ── Tool name constants ──────────────────────────────────────────────────────
@@ -45,7 +43,6 @@ const PREFIX_MEMORY: &str = "giap-memory__";
 const PREFIX_SCHEDULE: &str = "giap-schedule__";
 const PREFIX_SYSTEM: &str = "giap-system__";
 const PREFIX_DEVICE: &str = "giap-device__";
-const PREFIX_DEVICE_CONTROL: &str = "giap-device-control__";
 const PREFIX_NEWS: &str = "giap-news__";
 const PREFIX_FINANCE: &str = "giap-finance__";
 const PREFIX_DISCOVERY: &str = "giap-discovery__";
@@ -146,7 +143,6 @@ impl McpToolDispatcher {
         recipe_repo: Arc<dyn AgentRecipeRepository>,
         draft_repo: Arc<dyn DraftRepository>,
         embedding_provider: Option<Arc<dyn EmbeddingProvider + Send + Sync>>,
-        device_control: Arc<dyn DeviceControlPort>,
     ) -> Self {
         let http_client = crate::build_http_client();
 
@@ -161,7 +157,6 @@ impl McpToolDispatcher {
             skill_repo,
             recipe_repo,
         );
-        let device_control_server = DeviceControlMcpServer::new(device_control);
         let news_server = NewsMcpServer::new(http_client.clone(), settings_repo.clone());
         let finance_server = FinanceMcpServer::new(http_client.clone(), settings_repo.clone());
         let discovery_server = DiscoveryMcpServer::new(http_client, settings_repo);
@@ -197,10 +192,6 @@ impl McpToolDispatcher {
             RegisteredServer {
                 prefix: PREFIX_DEVICE,
                 server: Box::new(device_server),
-            },
-            RegisteredServer {
-                prefix: PREFIX_DEVICE_CONTROL,
-                server: Box::new(device_control_server),
             },
             RegisteredServer {
                 prefix: PREFIX_NEWS,
@@ -702,15 +693,13 @@ mod tests {
         // Mock settings repo
         struct MockSettings;
         #[async_trait]
-        impl pond_core::user_data::ports::settings::SettingsRepository for MockSettings {
-            async fn get(
-                &self,
-            ) -> anyhow::Result<pond_core::user_data::domain::settings::Settings> {
-                Ok(pond_core::user_data::domain::settings::Settings::default())
+        impl pond_core::ports::settings::SettingsRepository for MockSettings {
+            async fn get(&self) -> anyhow::Result<pond_core::domain::settings::Settings> {
+                Ok(pond_core::domain::settings::Settings::default())
             }
             async fn update(
                 &self,
-                _: &pond_core::user_data::domain::settings::Settings,
+                _: &pond_core::domain::settings::Settings,
             ) -> anyhow::Result<()> {
                 Ok(())
             }
@@ -721,7 +710,7 @@ mod tests {
                 Ok(())
             }
         }
-        let settings: Arc<dyn pond_core::user_data::ports::settings::SettingsRepository> =
+        let settings: Arc<dyn pond_core::ports::settings::SettingsRepository> =
             Arc::new(MockSettings);
 
         // All servers that don't require complex real deps
