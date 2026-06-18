@@ -49,8 +49,7 @@ jobs:
             --exclude pond-adapters-goose \
             --exclude pond-adapters-local-inference \
             --exclude pond-adapters-face-onnx \
-            --exclude pond-server \
-            -- -D warnings
+            --exclude pond-server
 
       # --ignored is NOT passed so the 28 live-hardware tests are skipped.
       - name: cargo test (fast crates)
