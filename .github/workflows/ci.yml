@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main, hardening, "feat/**", "fix/**"]
+  pull_request:
+    branches: [main, hardening]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # 1: Rust ─────────────────────────────────────────────────────────────
+  # Checks formatting, lints, and runs the fast test suite.
+  # Excludes crates that depend on the Goose submodule or native system libs
+  # (pond-adapters-goose, pond-adapters-local-inference, pond-adapters-face-onnx,
+  # pond-server) to keep compile time reasonable.
+  rust:
+    name: Rust — fmt / clippy / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Caches ~/.cargo/registry and the build target dir keyed on Cargo.lock.
+      # After the first run, unchanged crates are not recompiled.
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --check
+
+      - name: cargo clippy (fast crates)
+        run: |
+          cargo clippy --workspace \
+            --exclude pond-adapters-goose \
+            --exclude pond-adapters-local-inference \
+            --exclude pond-adapters-face-onnx \
+            --exclude pond-server \
+            -- -D warnings
+
+      # --ignored is NOT passed so the 28 live-hardware tests are skipped.
+      - name: cargo test (fast crates)
+        run: |
+          cargo test --workspace \
+            --exclude pond-adapters-goose \
+            --exclude pond-adapters-local-inference \
+            --exclude pond-adapters-face-onnx \
+            --exclude pond-server
+
+  # 2: Frontend ─────────────────────────────────────────────────────────
+  # Runs Vitest unit tests and Playwright E2E tests.
+  # Playwright spins up the Vite dev server itself (no pond-server process needed —
+  # all API calls are intercepted by page.route() mocks in the test files).
+  frontend:
+    name: Frontend — vitest / playwright
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pond-desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: pond-desktop/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Vitest (unit tests)
+        run: npm test
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Playwright (E2E tests)
+        run: npx playwright test
