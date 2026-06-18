@@ -21,8 +21,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
           fetch-depth: 1
+
+      # Fetch the submodule at the current branch HEAD rather than the pinned SHA,
+      # because giap-patches is force-pushed and the stored SHA may be unreachable.
+      - name: Checkout goose submodule
+        run: git submodule update --init --remote --depth 1 goose
 
       - uses: dtolnay/rust-toolchain@stable
         with:
