@@ -693,13 +693,15 @@ mod tests {
         // Mock settings repo
         struct MockSettings;
         #[async_trait]
-        impl pond_core::ports::settings::SettingsRepository for MockSettings {
-            async fn get(&self) -> anyhow::Result<pond_core::domain::settings::Settings> {
-                Ok(pond_core::domain::settings::Settings::default())
+        impl pond_core::user_data::ports::settings::SettingsRepository for MockSettings {
+            async fn get(
+                &self,
+            ) -> anyhow::Result<pond_core::user_data::domain::settings::Settings> {
+                Ok(pond_core::user_data::domain::settings::Settings::default())
             }
             async fn update(
                 &self,
-                _: &pond_core::domain::settings::Settings,
+                _: &pond_core::user_data::domain::settings::Settings,
             ) -> anyhow::Result<()> {
                 Ok(())
             }
@@ -710,7 +712,7 @@ mod tests {
                 Ok(())
             }
         }
-        let settings: Arc<dyn pond_core::ports::settings::SettingsRepository> =
+        let settings: Arc<dyn pond_core::user_data::ports::settings::SettingsRepository> =
             Arc::new(MockSettings);
 
         // All servers that don't require complex real deps

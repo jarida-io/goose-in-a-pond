@@ -15,6 +15,9 @@ import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./tests/e2e",
+  // hub-visual-verify is a local one-off tool that navigates to a developer's
+  // machine path for design comparison — not runnable in CI.
+  testIgnore: ["**/hub-visual-verify.spec.ts"],
   fullyParallel: false,
   workers: 1,
   timeout: 30_000,
