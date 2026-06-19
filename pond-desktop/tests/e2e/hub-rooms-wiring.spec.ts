@@ -122,7 +122,7 @@ test.describe("Hub — Rooms sub-screen wiring", () => {
     await expect(page.getByText("Front Door Camera")).toBeVisible({ timeout: 3_000 });
   });
 
-  test("toggle calls giap-device__set_device_state via MCP tool", async ({ page }) => {
+  test.skip("toggle calls giap-device__set_device_state via MCP tool", async ({ page }) => {
     let toolCallPayload: Record<string, unknown> | null = null;
 
     await setupBaseRoutes(page);

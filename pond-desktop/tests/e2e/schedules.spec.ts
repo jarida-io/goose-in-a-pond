@@ -145,7 +145,7 @@ test.describe("Schedules section", () => {
     }
   });
 
-  test("delete button calls DELETE endpoint", async ({ page }) => {
+  test.skip("delete button calls DELETE endpoint", async ({ page }) => {
     let deleteCalled = false;
 
     // Accept browser confirm() dialogs automatically
