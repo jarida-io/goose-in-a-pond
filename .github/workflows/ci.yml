@@ -48,20 +48,40 @@ jobs:
 
       - name: cargo clippy (fast crates)
         run: |
-          cargo clippy --workspace \
-            --exclude pond-adapters-goose \
-            --exclude pond-adapters-local-inference \
-            --exclude pond-adapters-face-onnx \
-            --exclude pond-server
+          cargo clippy \
+            -p pond-core \
+            -p pond-infra \
+            -p pond-infra-scheduler \
+            -p pond-api \
+            -p pond-agent \
+            -p pond-inference \
+            -p pond-adapters-llamafile \
+            -p pond-adapters-ollama \
+            -p pond-adapters-whisper \
+            -p pond-adapters-piper \
+            -p pond-adapters-gotg \
+            -p pond-adapters-weather \
+            -p pond-adapters-mcp-memory \
+            -p pond-mcp-server
 
       # --ignored is NOT passed so the 28 live-hardware tests are skipped.
       - name: cargo test (fast crates)
         run: |
-          cargo test --workspace \
-            --exclude pond-adapters-goose \
-            --exclude pond-adapters-local-inference \
-            --exclude pond-adapters-face-onnx \
-            --exclude pond-server
+          cargo test \
+            -p pond-core \
+            -p pond-infra \
+            -p pond-infra-scheduler \
+            -p pond-api \
+            -p pond-agent \
+            -p pond-inference \
+            -p pond-adapters-llamafile \
+            -p pond-adapters-ollama \
+            -p pond-adapters-whisper \
+            -p pond-adapters-piper \
+            -p pond-adapters-gotg \
+            -p pond-adapters-weather \
+            -p pond-adapters-mcp-memory \
+            -p pond-mcp-server
 
   # 2: Frontend ─────────────────────────────────────────────────────────
   # Runs Vitest unit tests and Playwright E2E tests.
