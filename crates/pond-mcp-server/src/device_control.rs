@@ -98,7 +98,11 @@ impl DeviceControlMcpServer {
         if let Some(on) = p.power {
             match self.control.set_power(device_id, on).await {
                 Ok(_) => applied.push(format!("power={}", if on { "on" } else { "off" })),
-                Err(e) => return Ok(guidance(format!("Couldn't set power on '{device_id}': {e}"))),
+                Err(e) => {
+                    return Ok(guidance(format!(
+                        "Couldn't set power on '{device_id}': {e}"
+                    )))
+                }
             }
         }
         if let Some(b) = p.brightness {

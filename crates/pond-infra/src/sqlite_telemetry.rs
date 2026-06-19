@@ -53,7 +53,9 @@ fn row_to_turn_metrics(row: &sqlx::sqlite::SqliteRow) -> TurnMetrics {
         ttft_ms: row.get::<i64, _>("ttft_ms") as u64,
         total_latency_ms: row.get::<i64, _>("total_latency_ms") as u64,
         tool_name: row.get("tool_name"),
-        tool_latency_ms: row.get::<Option<i64>, _>("tool_latency_ms").map(|v| v as u64),
+        tool_latency_ms: row
+            .get::<Option<i64>, _>("tool_latency_ms")
+            .map(|v| v as u64),
         tool_cache_hit: row.get::<Option<i64>, _>("tool_cache_hit").map(|v| v != 0),
         context_utilization_pct: row.get::<f64, _>("context_utilization_pct") as f32,
         model_name: row.get("model_name"),

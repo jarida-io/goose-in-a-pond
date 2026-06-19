@@ -95,7 +95,9 @@ async fn make_app_with_bus() -> (axum::Router, Arc<InProcessEventBus>, tempfile:
         inference_pool: None,
         schedule_result_tx: tokio::sync::broadcast::channel(1).0,
         telemetry: None,
-        context_monitor: Arc::new(pond_core::models::services::context_monitor::ContextMonitor::new()),
+        context_monitor: Arc::new(
+            pond_core::models::services::context_monitor::ContextMonitor::new(),
+        ),
         mcp_app_resources: std::collections::HashMap::new(),
         oauth_state: pond_api::oauth_callback::new_oauth_state(),
         security_policy: None,
@@ -129,7 +131,11 @@ async fn sensor_post_publishes_to_event_bus() {
         .unwrap();
 
     let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::CREATED, "sensor POST should persist");
+    assert_eq!(
+        response.status(),
+        StatusCode::CREATED,
+        "sensor POST should persist"
+    );
 
     // The subscriber must receive the published reading.
     let event = tokio::time::timeout(Duration::from_secs(2), subscription.next())

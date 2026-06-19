@@ -771,7 +771,8 @@ mod tests {
     fn brace_heavy_malformed_arguments_does_not_panic() {
         // Arguments containing extra `{` confuse the depth scanner so extraction
         // may fail entirely — the important thing is no panic and no crash.
-        let text = r#"{"tool_calls": [{"function": {"name": "shell", "arguments": "{{bad json"}}]}"#;
+        let text =
+            r#"{"tool_calls": [{"function": {"name": "shell", "arguments": "{{bad json"}}]}"#;
         let calls = parse_tool_calls(text);
         // Either 0 calls (extraction failed) or 1 call with empty args — never a panic.
         assert!(calls.len() <= 1);

@@ -400,10 +400,14 @@ pub fn build_router(state: Arc<AppState>, static_dir: std::path::PathBuf) -> Rou
 fn build_cors_layer() -> CorsLayer {
     use axum::http::{header, HeaderValue, Method};
 
-    let mut origins: Vec<HeaderValue> = ["tauri://localhost", "http://localhost:1420", "http://127.0.0.1:1420"]
-        .iter()
-        .filter_map(|o| o.parse().ok())
-        .collect();
+    let mut origins: Vec<HeaderValue> = [
+        "tauri://localhost",
+        "http://localhost:1420",
+        "http://127.0.0.1:1420",
+    ]
+    .iter()
+    .filter_map(|o| o.parse().ok())
+    .collect();
     if let Ok(extra) = std::env::var("POND_CORS_ALLOWED_ORIGINS") {
         for o in extra.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
             if let Ok(v) = o.parse() {

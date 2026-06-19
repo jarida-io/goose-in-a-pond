@@ -402,12 +402,20 @@ async fn chat_stream_persists_messages_readable_via_sessions_endpoint() {
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let messages = json["messages"].as_array().expect("messages array");
 
-    assert_eq!(messages.len(), 2, "expected user + assistant message, got: {}", json);
+    assert_eq!(
+        messages.len(),
+        2,
+        "expected user + assistant message, got: {}",
+        json
+    );
     assert_eq!(messages[0]["role"], "user");
     assert_eq!(messages[0]["content"], "hello");
     assert_eq!(messages[1]["role"], "assistant");
     assert!(
-        messages[1]["content"].as_str().unwrap_or("").contains("Echo"),
+        messages[1]["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Echo"),
         "assistant message should contain echo response, got: {}",
         messages[1]["content"]
     );
@@ -434,9 +442,14 @@ impl pond_core::models::ports::agent::Agent for ToolEmittingMockAgent {
     async fn chat_stream(
         &self,
         request: pond_core::models::ports::agent::AgentRequest,
-    ) -> anyhow::Result<futures::stream::BoxStream<'static, anyhow::Result<pond_core::models::ports::agent::AgentStreamEvent>>> {
-        use pond_core::models::ports::agent::AgentStreamEvent;
+    ) -> anyhow::Result<
+        futures::stream::BoxStream<
+            'static,
+            anyhow::Result<pond_core::models::ports::agent::AgentStreamEvent>,
+        >,
+    > {
         use futures::StreamExt;
+        use pond_core::models::ports::agent::AgentStreamEvent;
         let session_id = request.session_id.clone();
         let model_role = request.model_role.clone();
         let stream = async_stream::stream! {
@@ -518,7 +531,9 @@ async fn make_app_with_agent(
         inference_pool: None,
         schedule_result_tx: tokio::sync::broadcast::channel(1).0,
         telemetry: None,
-        context_monitor: Arc::new(pond_core::models::services::context_monitor::ContextMonitor::new()),
+        context_monitor: Arc::new(
+            pond_core::models::services::context_monitor::ContextMonitor::new(),
+        ),
         mcp_app_resources: std::collections::HashMap::new(),
         oauth_state: pond_api::oauth_callback::new_oauth_state(),
         security_policy: None,
@@ -526,7 +541,10 @@ async fn make_app_with_agent(
         event_bus: None,
         api_port: 4000,
     });
-    (build_router(state, std::path::PathBuf::from("web/dist")), tmp)
+    (
+        build_router(state, std::path::PathBuf::from("web/dist")),
+        tmp,
+    )
 }
 
 /// Regression: tool result rows (role=tool) must be persisted alongside
@@ -557,7 +575,9 @@ async fn chat_stream_persists_tool_result_rows() {
         .unwrap();
 
     assert_eq!(stream_resp.status(), StatusCode::OK);
-    axum::body::to_bytes(stream_resp.into_body(), usize::MAX).await.unwrap();
+    axum::body::to_bytes(stream_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
 
     let get_resp = app
         .oneshot(
@@ -572,7 +592,9 @@ async fn chat_stream_persists_tool_result_rows() {
         .unwrap();
 
     assert_eq!(get_resp.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(get_resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(get_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let messages = json["messages"].as_array().expect("messages array");
 
@@ -583,9 +605,7 @@ async fn chat_stream_persists_tool_result_rows() {
         json
     );
     assert_eq!(messages[0]["role"], "user");
-    let roles: Vec<&str> = messages.iter()
-        .filter_map(|m| m["role"].as_str())
-        .collect();
+    let roles: Vec<&str> = messages.iter().filter_map(|m| m["role"].as_str()).collect();
     assert!(
         roles.contains(&"tool"),
         "expected a role=tool row in persisted messages, got roles: {:?}",

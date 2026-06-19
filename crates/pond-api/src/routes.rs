@@ -19,7 +19,6 @@ use axum::{
 use pond_core::mcp::ports::extension_manager::ExtensionInfo;
 use pond_core::models::domain::message::ChatMessage;
 use pond_core::models::ports::provider::LlmProvider;
-use pond_core::shared::ports::event_bus::BusEvent;
 use pond_core::prompts::{
     build_system_prompt_with_profile, builtin_template_content, render_template, sanitize_field,
     ProfileContext,
@@ -28,6 +27,7 @@ use pond_core::security::ports::handshake::{
     ChallengeResponse, HandshakeRequest, HandshakeResponse, InitRequest, RefreshRequest,
     VerifyRequest,
 };
+use pond_core::shared::ports::event_bus::BusEvent;
 use pond_core::shared::services::chat::ChatService;
 use pond_core::user_data::domain::onboarding::OnboardingStep;
 use pond_core::user_data::domain::profile::CreateProfileRequest;
@@ -356,7 +356,10 @@ async fn handshake_verify(
 ) -> Result<Json<HandshakeResponse>, (StatusCode, Json<Value>)> {
     // Rate-limit verify attempts per source IP (applies to loopback too — this
     // endpoint is security-sensitive regardless of origin).
-    if !verify_limiter().check_rate_limit(&peer.ip().to_string()).await {
+    if !verify_limiter()
+        .check_rate_limit(&peer.ip().to_string())
+        .await
+    {
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
             Json(json!({"error": "too many handshake attempts; slow down"})),
@@ -3378,12 +3381,16 @@ async fn record_sensor(
         unit: req.unit,
         recorded_at: chrono::Utc::now(),
     };
-    state.sensor_storage.record(reading.clone()).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        )
-    })?;
+    state
+        .sensor_storage
+        .record(reading.clone())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?;
     // Publish to the in-process bus only after the write succeeds (#91), so
     // reactive consumers never see an event for a reading that failed to persist.
     if let Some(bus) = &state.event_bus {
@@ -5359,7 +5366,12 @@ async fn mcp_call_tool(
             Json(json!({ "error": format!("Invalid request: {e}") })),
         )
     })?;
-    dispatch_tool_direct(&state, &req.name, req.arguments.unwrap_or_else(|| json!({}))).await
+    dispatch_tool_direct(
+        &state,
+        &req.name,
+        req.arguments.unwrap_or_else(|| json!({})),
+    )
+    .await
 }
 
 // ── Agent chat stream ─────────────────────────────────────────────────────────

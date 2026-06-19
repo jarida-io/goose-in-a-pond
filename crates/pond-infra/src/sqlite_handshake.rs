@@ -304,7 +304,8 @@ impl Handshake for SqliteHandshakeAdapter {
         if consumed_at.is_some() {
             return Ok(self.reject("challenge_used"));
         }
-        let exp = DateTime::parse_from_rfc3339(&expires_at).map_err(|e| anyhow!("bad expires_at: {e}"))?;
+        let exp = DateTime::parse_from_rfc3339(&expires_at)
+            .map_err(|e| anyhow!("bad expires_at: {e}"))?;
         if exp < Utc::now() {
             return Ok(self.reject("challenge_expired"));
         }
@@ -350,8 +351,12 @@ impl Handshake for SqliteHandshakeAdapter {
             let cache = ISSUED_CODE_CACHE.read().await;
             for (code_hash,) in &codes {
                 if let Some(plaintext) = cache.get(code_hash) {
-                    if verify_mac(plaintext.as_bytes(), &challenge, client_id.as_bytes(), &mac_bytes)
-                    {
+                    if verify_mac(
+                        plaintext.as_bytes(),
+                        &challenge,
+                        client_id.as_bytes(),
+                        &mac_bytes,
+                    ) {
                         matched_hash = Some(code_hash.clone());
                         break;
                     }
@@ -376,9 +381,10 @@ impl Handshake for SqliteHandshakeAdapter {
         ISSUED_CODE_CACHE.write().await.remove(&code_hash);
 
         let device_id = client_id.clone();
-        let device_name = request.device_name.clone().unwrap_or_else(|| {
-            format!("gotg-{}", client_id.chars().take(8).collect::<String>())
-        });
+        let device_name = request
+            .device_name
+            .clone()
+            .unwrap_or_else(|| format!("gotg-{}", client_id.chars().take(8).collect::<String>()));
         let _ = sqlx::query(
             "INSERT INTO devices (id, name, hostname, device_type, ip_address,
                 capabilities, last_seen, is_online, created_at, updated_at)
@@ -395,8 +401,9 @@ impl Handshake for SqliteHandshakeAdapter {
         .execute(&self.pool)
         .await;
 
-        let (session, refresh, expires) =
-            self.issue_session_pair(&client_id, "gotg", &device_id).await?;
+        let (session, refresh, expires) = self
+            .issue_session_pair(&client_id, "gotg", &device_id)
+            .await?;
         tracing::info!(
             client_id = %client_id,
             device = %device_name,
@@ -452,13 +459,18 @@ impl Handshake for SqliteHandshakeAdapter {
         let now = Utc::now();
         let expires = now + Duration::minutes(PAIRING_CODE_TTL_MIN);
 
-        sqlx::query("INSERT INTO pairing_codes (code_hash, created_at, expires_at) VALUES (?, ?, ?)")
-            .bind(&code_hash)
-            .bind(now.to_rfc3339())
-            .bind(expires.to_rfc3339())
-            .execute(&self.pool)
-            .await?;
-        ISSUED_CODE_CACHE.write().await.insert(code_hash, code.clone());
+        sqlx::query(
+            "INSERT INTO pairing_codes (code_hash, created_at, expires_at) VALUES (?, ?, ?)",
+        )
+        .bind(&code_hash)
+        .bind(now.to_rfc3339())
+        .bind(expires.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        ISSUED_CODE_CACHE
+            .write()
+            .await
+            .insert(code_hash, code.clone());
         tracing::info!(
             expires_at = %expires.to_rfc3339(),
             "issued pairing code (valid {PAIRING_CODE_TTL_MIN}m)"
@@ -641,8 +653,14 @@ mod tests {
             .session_token
             .unwrap();
 
-        assert!(!hs.validate_token(&token1).await.unwrap(), "old session revoked");
-        assert!(hs.validate_token(&token2).await.unwrap(), "new session live");
+        assert!(
+            !hs.validate_token(&token1).await.unwrap(),
+            "old session revoked"
+        );
+        assert!(
+            hs.validate_token(&token2).await.unwrap(),
+            "new session live"
+        );
     }
 
     #[tokio::test]
@@ -668,11 +686,19 @@ mod tests {
         let old_session = resp.session_token.clone().unwrap();
         let refresh = resp.refresh_token.unwrap();
 
-        let resp2 = hs.refresh(RefreshRequest { refresh_token: refresh }).await.unwrap();
+        let resp2 = hs
+            .refresh(RefreshRequest {
+                refresh_token: refresh,
+            })
+            .await
+            .unwrap();
         assert!(resp2.accepted);
         let new_session = resp2.session_token.unwrap();
         assert_ne!(old_session, new_session);
-        assert!(!hs.validate_token(&old_session).await.unwrap(), "old revoked");
+        assert!(
+            !hs.validate_token(&old_session).await.unwrap(),
+            "old revoked"
+        );
         assert!(hs.validate_token(&new_session).await.unwrap(), "new live");
     }
 
@@ -698,7 +724,10 @@ mod tests {
             .unwrap()
             .session_token
             .unwrap();
-        assert!(hs.validate_token(&token).await.unwrap(), "fresh token valid");
+        assert!(
+            hs.validate_token(&token).await.unwrap(),
+            "fresh token valid"
+        );
 
         // Force the stored expiry into the past, then re-check.
         let past = (Utc::now() - Duration::hours(1)).to_rfc3339();
@@ -755,7 +784,10 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(resp.accepted, "bad attempts must not lock out the pairing code");
+        assert!(
+            resp.accepted,
+            "bad attempts must not lock out the pairing code"
+        );
     }
 
     /// A challenge authorizes exactly one verify attempt: even a *failed*
@@ -831,16 +863,23 @@ mod tests {
         let old_refresh = paired.refresh_token.unwrap();
 
         let rotated = hs
-            .refresh(RefreshRequest { refresh_token: old_refresh.clone() })
+            .refresh(RefreshRequest {
+                refresh_token: old_refresh.clone(),
+            })
             .await
             .unwrap();
         assert!(rotated.accepted, "first refresh should rotate");
 
         let replay = hs
-            .refresh(RefreshRequest { refresh_token: old_refresh })
+            .refresh(RefreshRequest {
+                refresh_token: old_refresh,
+            })
             .await
             .unwrap();
-        assert!(!replay.accepted, "rotated refresh token must not be replayable");
+        assert!(
+            !replay.accepted,
+            "rotated refresh token must not be replayable"
+        );
         assert_eq!(
             replay.rejection_reason.as_deref(),
             Some("invalid_or_expired_refresh")
