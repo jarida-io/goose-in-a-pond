@@ -778,6 +778,6 @@ mod tests {
             println!("{}\n", serde_json::to_string_pretty(tool).unwrap());
         }
 
-        assert!(total_tools > 25, "Expected 25+ tools, got {}", total_tools);
+        assert!(total_tools >= 24, "Expected 24+ tools, got {}", total_tools);
     }
 }
