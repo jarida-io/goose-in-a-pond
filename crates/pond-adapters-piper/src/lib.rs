@@ -24,7 +24,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use pond_core::ports::voice_output::VoiceOutput;
+use pond_core::models::ports::voice_output::VoiceOutput;
 use std::io::Write as _;
 use std::path::PathBuf;
 
@@ -643,7 +643,7 @@ mod tests {
 
     #[test]
     fn piper_output_compiles_as_voice_output() {
-        use pond_core::ports::voice_output::VoiceOutput;
+        use pond_core::models::ports::voice_output::VoiceOutput;
         use std::sync::Arc;
         let _out: Arc<dyn VoiceOutput> = Arc::new(PiperOutput::new(
             PathBuf::from("piper"),
