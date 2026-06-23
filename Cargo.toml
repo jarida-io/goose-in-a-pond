@@ -22,7 +22,7 @@ members = [
     # the rmcp version conflict (code-mode feature is not enabled).
     "crates/pond-adapters-goose",
     "crates/pond-adapters-local-inference",
-    "crates/pond-mcp-server",
+    "crates/pond-mcp-server", "review",
 ]
 
 [workspace.package]
