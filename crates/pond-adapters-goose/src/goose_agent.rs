@@ -633,6 +633,10 @@ impl GooseAdapter {
                         source_url: String::new(),
                         settings,
                         size_bytes: 0,
+                        mmproj_path: None,
+                        mmproj_source_url: None,
+                        mmproj_size_bytes: 0,
+                        shard_files: vec![],
                     };
                     match registry.add_model(entry) {
                         Ok(_) => {

@@ -13,7 +13,7 @@ async-trait = { workspace = true }
 tokio       = { workspace = true }
 tracing     = { workspace = true }
 image       = { workspace = true }
-ndarray     = { workspace = true }
+ndarray     = "0.17"
 
 # ort v2 — load-dynamic links to the system ONNX Runtime at runtime rather
 # than statically. This keeps GIAP's build lightweight and lets operators
@@ -22,7 +22,7 @@ ndarray     = { workspace = true }
 # Expects `ORT_DYLIB_PATH` to point at `libonnxruntime.so` (Linux/Jetson) or
 # `libonnxruntime.dylib` (macOS). Falls back to the default library search
 # path if unset.
-ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic", "ndarray"] }
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic", "ndarray", "api-18"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

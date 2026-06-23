@@ -72,7 +72,7 @@ fn supports_jinja(binary: &Path) -> bool {
         .output()
         .map(|o| {
             let out = String::from_utf8_lossy(&o.stdout).to_string()
-                + &String::from_utf8_lossy(&o.stderr);
+                + String::from_utf8_lossy(&o.stderr).as_ref();
             out.contains("--jinja")
         })
         .unwrap_or(false)

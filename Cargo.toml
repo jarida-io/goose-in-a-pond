@@ -41,12 +41,14 @@ uninlined_format_args = "allow"
 string_slice = "warn"
 
 [workspace.dependencies]
-# rmcp 1.2.0 — required by goose sub-crates when cargo resolves their
-# `workspace = true` deps against the outer (GIAP) workspace for path-dep builds.
+# rmcp 1.5.0 — bumped to match goose submodule after upstream pull.
+# Required by goose sub-crates when cargo resolves their `workspace = true` deps
+# against the outer (GIAP) workspace for path-dep builds.
 # No GIAP workspace member uses rmcp directly.
-rmcp = { version = "=1.2.0", features = ["schemars", "auth", "server", "client",
+rmcp = { version = "=1.5.0", features = ["schemars", "auth", "server", "client",
     "transport-io", "macros", "transport-child-process",
-    "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
+    "transport-streamable-http-client", "transport-streamable-http-client-reqwest",
+    "transport-streamable-http-client-unix-socket"] }
 # ── Goose sub-workspace deps ──────────────────────────────────────────────────
 # Cargo resolves goose crates' `workspace = true` dependency entries against the
 # outermost workspace (GIAP) when those crates are reached via path deps.

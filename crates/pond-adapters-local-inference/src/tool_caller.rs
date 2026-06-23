@@ -403,6 +403,10 @@ fn register_tool_model(model_id: &str, data_dir: &Path) {
                         ..ModelSettings::default()
                     },
                     size_bytes: 0,
+                    mmproj_path: None,
+                    mmproj_source_url: None,
+                    mmproj_size_bytes: 0,
+                    shard_files: vec![],
                 };
                 match registry.add_model(entry) {
                     Ok(_) => println!("[tool_caller] registered GGUF '{}' in model registry", stem),

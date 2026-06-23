@@ -1495,9 +1495,12 @@ impl ChatService {
                     }
                 }
                 AgentStreamEvent::Done { .. } => {
-                    // Flush any tail held back by the thought filter
+                    // Flush any tail held back by the thought filter.
+                    // Must also append to full_text so the return value and persisted
+                    // message include the withheld lookahead bytes.
                     let tail = thought_filter.flush();
                     if !tail.is_empty() {
+                        full_text.push_str(&tail);
                         sentence_buf.push_str(&tail);
                     }
                     // Flush any remaining buffer
