@@ -23,8 +23,7 @@ cuda = ["goose/cuda"]
 [dependencies]
 pond-core            = { workspace = true }
 pond-adapters-goose  = { path = "../pond-adapters-goose" }
-goose                = { path = "../../goose/crates/goose", default-features = false,
-                         features = ["local-inference", "rustls-tls"] }
+goose                = { path = "../../goose/crates/goose", default-features = false, features = ["local-inference", "rustls-tls"] }
 anyhow               = { workspace = true }
 async-trait          = { workspace = true }
 tokio                = { workspace = true }

@@ -31,7 +31,7 @@ impl MemoryAwareAgent {
             let fact = message["remember ".len()..].trim_end_matches('.').trim().to_string();
             let fragment = MemoryFragment::from_chat(
                 uuid::Uuid::new_v4().to_string(),
-                None,
+                None::<String>,
                 Some(session_id.to_string()),
                 fact.clone(),
             );
