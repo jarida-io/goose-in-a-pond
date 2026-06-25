@@ -45,7 +45,11 @@ impl EventLog for MockEventLog {
 
     async fn query(&self, query: EventQuery) -> Result<Vec<Event>> {
         let events = self.events.lock().unwrap();
-        let mut out: Vec<Event> = events.iter().filter(|e| query.matches(e)).cloned().collect();
+        let mut out: Vec<Event> = events
+            .iter()
+            .filter(|e| query.matches(e))
+            .cloned()
+            .collect();
         // Newest first.
         out.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         if let Some(limit) = query.limit {
@@ -114,9 +118,12 @@ mod tests {
     async fn query_honors_limit_newest_first() {
         let log = MockEventLog::new();
         for i in 0..5 {
-            log.append(Event::new(EventCategory::System, format!("system.tick.{i}")))
-                .await
-                .unwrap();
+            log.append(Event::new(
+                EventCategory::System,
+                format!("system.tick.{i}"),
+            ))
+            .await
+            .unwrap();
         }
         let limited = log
             .query(EventQuery {

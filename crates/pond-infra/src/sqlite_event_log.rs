@@ -102,7 +102,9 @@ fn enum_to_str<T: Serialize>(value: &T) -> Result<String> {
 
 /// Inverse of [`enum_to_str`].
 fn enum_from_str<T: DeserializeOwned>(s: &str) -> Result<T> {
-    Ok(serde_json::from_value(serde_json::Value::String(s.to_string()))?)
+    Ok(serde_json::from_value(serde_json::Value::String(
+        s.to_string(),
+    ))?)
 }
 
 /// Unified, append-only event store (#109) implementing [`EventLog`] over the
@@ -214,7 +216,9 @@ impl EventLog for SqliteEventLog {
 mod event_log_tests {
     use super::*;
     use crate::db::Database;
-    use pond_core::security::domain::event::{AttributeValue, Event, EventCategory, EventQuery, PrivacySensitivity};
+    use pond_core::security::domain::event::{
+        AttributeValue, Event, EventCategory, EventQuery, PrivacySensitivity,
+    };
     use tempfile::tempdir;
 
     async fn fresh() -> SqliteEventLog {
@@ -242,7 +246,10 @@ mod event_log_tests {
         assert_eq!(e.action, "sensor.reading");
         assert_eq!(e.session_id.as_deref(), Some("sess-1"));
         assert_eq!(e.privacy_sensitivity, PrivacySensitivity::Sensitive);
-        assert_eq!(e.attributes.get("value"), Some(&AttributeValue::Float(21.5)));
+        assert_eq!(
+            e.attributes.get("value"),
+            Some(&AttributeValue::Float(21.5))
+        );
         assert_eq!(
             e.attributes.get("device_id"),
             Some(&AttributeValue::Text("sensor-1".into()))
@@ -260,14 +267,20 @@ mod event_log_tests {
             .unwrap();
 
         let sensors = log
-            .query(EventQuery { category: Some(EventCategory::Sensor), ..Default::default() })
+            .query(EventQuery {
+                category: Some(EventCategory::Sensor),
+                ..Default::default()
+            })
             .await
             .unwrap();
         assert_eq!(sensors.len(), 1);
         assert_eq!(sensors[0].category, EventCategory::Sensor);
 
         let sess_b = log
-            .query(EventQuery { session_id: Some("b".into()), ..Default::default() })
+            .query(EventQuery {
+                session_id: Some("b".into()),
+                ..Default::default()
+            })
             .await
             .unwrap();
         assert_eq!(sess_b.len(), 1);
@@ -284,7 +297,10 @@ mod event_log_tests {
             log.append(e).await.unwrap();
         }
         let got = log
-            .query(EventQuery { limit: Some(2), ..Default::default() })
+            .query(EventQuery {
+                limit: Some(2),
+                ..Default::default()
+            })
             .await
             .unwrap();
         assert_eq!(got.len(), 2);

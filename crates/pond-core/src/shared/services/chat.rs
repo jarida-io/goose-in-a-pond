@@ -11,7 +11,10 @@ use crate::shared::domain::agent::{AgentRequest, AgentStreamEvent, WorkflowEvent
 use crate::shared::services::print_output::PrintOutput;
 use crate::shared::services::stdin_input::StdinInput;
 use crate::user_data::domain::session::SessionMessage;
+use crate::user_data::ports::memory_extractor::MemoryExtractor;
+use crate::user_data::ports::memory_repository::MemoryRepository;
 use crate::user_data::ports::session_storage::SessionStorage;
+use crate::user_data::services::memory_extraction::MemoryExtractionService;
 use anyhow::Result;
 use futures::StreamExt as _;
 use std::io::{self, Write};
@@ -1019,6 +1022,12 @@ pub struct ChatService {
     compactor: Option<ContextCompactor>,
     /// Optional Answer Reviewer — adversarial post-inference quality gate.
     answer_reviewer: Option<Arc<dyn crate::models::ports::answer_reviewer::AnswerReviewer>>,
+    /// Optional memory extraction pipeline. When all three are set,
+    /// `persist_assistant_turn` spawns extraction automatically so handlers
+    /// cannot accidentally omit it.
+    memory_extractor: Option<Arc<dyn MemoryExtractor>>,
+    memory_extraction_service: Option<Arc<MemoryExtractionService>>,
+    memory_repo: Option<Arc<dyn MemoryRepository>>,
 }
 
 impl ChatService {
@@ -1038,7 +1047,25 @@ impl ChatService {
             system_prompt: SYSTEM_PROMPT.to_string(),
             compactor: None,
             answer_reviewer: None,
+            memory_extractor: None,
+            memory_extraction_service: None,
+            memory_repo: None,
         }
+    }
+
+    /// Attach the memory extraction pipeline so `persist_assistant_turn`
+    /// automatically triggers extraction. Handlers that omit this call simply
+    /// skip extraction — no silent data loss, no handler-level boilerplate.
+    pub fn with_memory_extraction(
+        mut self,
+        extractor: Arc<dyn MemoryExtractor>,
+        service: Arc<MemoryExtractionService>,
+        repo: Arc<dyn MemoryRepository>,
+    ) -> Self {
+        self.memory_extractor = Some(extractor);
+        self.memory_extraction_service = Some(service);
+        self.memory_repo = Some(repo);
+        self
     }
 
     /// Attach an Answer Reviewer for post-inference adversarial quality review.
@@ -1273,6 +1300,44 @@ impl ChatService {
                     .await;
             }
         }
+
+        Ok(())
+    }
+
+    /// Like `persist_assistant_turn` but also triggers memory extraction in a
+    /// background task. Use this instead of the inline `tokio::spawn` pattern
+    /// in HTTP handlers — the extraction cannot be accidentally omitted.
+    pub async fn persist_assistant_turn_with_extraction(
+        &self,
+        tool_results: Vec<String>,
+        assistant_text: &str,
+        usage: Option<(u32, u32)>,
+        model_name: Option<&str>,
+        user_message: &str,
+    ) -> Result<()> {
+        self.persist_assistant_turn(tool_results, assistant_text, usage, model_name)
+            .await?;
+
+        if let (Some(ext), Some(svc), Some(repo)) = (
+            self.memory_extractor.clone(),
+            self.memory_extraction_service.clone(),
+            self.memory_repo.clone(),
+        ) {
+            let user_msg = user_message.to_string();
+            let asst_resp = assistant_text.to_string();
+            let sid = self.session_id.clone();
+            tokio::spawn(async move {
+                svc.run(
+                    ext.as_ref(),
+                    repo.as_ref(),
+                    &user_msg,
+                    &asst_resp,
+                    Some(&sid),
+                )
+                .await;
+            });
+        }
+
         Ok(())
     }
 
@@ -1297,12 +1362,15 @@ impl ChatService {
             .await?;
 
         // The LLM handles tool routing natively via MCP — no pre-classification needed.
+        // chat_stream_once is only ever reached via run_loop (the voice CLI loop),
+        // so voice_mode is unconditionally true here — this gets the TTS-friendly
+        // prompt and suppressed thinking that desktop's voice path already gets.
         let request = AgentRequest {
             message: message.clone(),
             session_id: self.session_id.clone(),
             model_role: "chat".to_string(),
             images: Vec::new(),
-            voice_mode: false,
+            voice_mode: true,
             canvas_mode: false,
         };
 
@@ -1745,6 +1813,31 @@ mod tests {
         let service = ChatService::new(agent, session_id.clone(), storage.clone());
         let result = service.chat_once("Hello!".to_string()).await.unwrap();
         assert_eq!(result, "Echo: Hello!");
+    }
+
+    #[tokio::test]
+    async fn chat_stream_once_sets_voice_mode_true() {
+        // chat_stream_once is only ever reached via run_loop, the voice CLI
+        // loop — regression test for Q2-23 (voice_mode was hardcoded false,
+        // silently dropping the TTS-friendly prompt + thinking suppression
+        // that desktop's voice path already gets).
+        let agent = Arc::new(MockAgent::new());
+        let storage = Arc::new(InMemorySessionStorage::new());
+        let session_id = "test-session".to_string();
+        storage.create_session(session_id.clone()).await.unwrap();
+
+        let service = ChatService::new(agent.clone(), session_id.clone(), storage.clone());
+        service
+            .chat_stream_once("Hello!".to_string())
+            .await
+            .unwrap();
+
+        let request = agent.last_request().expect("agent should have been called");
+        assert!(
+            request.voice_mode,
+            "chat_stream_once must set voice_mode: true so the agent renders \
+             the <voice-mode> prompt section"
+        );
     }
 
     #[tokio::test]

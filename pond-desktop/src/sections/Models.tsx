@@ -3,7 +3,7 @@ import { Button, Tabs, Chip } from "@heroui/react";
 import {
   Brain, Mic, Volume2, RefreshCw, Download, CheckCircle, XCircle,
   ChevronDown, ChevronUp, Search, Trash2, MessageSquare, Play,
-  ScanFace, Loader2, Cpu, Sparkles,
+  ScanFace, Loader2, Cpu, Sparkles, Heart,
 } from "lucide-react";
 import { api } from "../api/PondApiClient";
 import { useAppState } from "../state/AppContext";
@@ -448,7 +448,7 @@ function BrowseHfAccordion({ onDownloadStarted }: { onDownloadStarted: () => voi
                       <a href={model.url} target="_blank" rel="noopener noreferrer" className="hf-repo__id">{model.id}</a>
                       <div className="hf-repo__tags">
                         <Chip size="sm" variant="soft">↓ {model.downloads?.toLocaleString() ?? "?"}</Chip>
-                        <Chip size="sm" variant="soft">♥ {model.likes ?? "?"}</Chip>
+                        <Chip size="sm" variant="soft"><Heart size={11} /> {model.likes ?? "?"}</Chip>
                         {model.tags?.slice(0, 2).map((tag) => <Chip key={tag} size="sm" variant="soft">{tag}</Chip>)}
                       </div>
                     </div>

@@ -64,7 +64,7 @@ Matches the CLI's `PiperOutput::start_thinking_tone()`.
 
 ### 4. Conversational Turn-Taking
 
-**File:** `pond-desktop/src/modes/VoiceMode.tsx`
+**Files:** `pond-desktop/src/modes/voice/useVoicePipeline.ts`, `pond-desktop/src/modes/voice/TauriVoiceBackend.ts`
 
 After Goose speaks, the app automatically starts recording for the user's next turn — no
 wake word needed within an active conversation. If the user doesn't speak within 8 seconds,
@@ -88,7 +88,7 @@ The voice pipeline recognizes dismissal phrases and speaks a farewell:
 | "bye", "goodbye", "dismissed", "go to sleep", "stop" | Return to wake word mode | "Until next time. Just say my name when you need me." |
 | "exit", "quit" | Full exit | "Goodbye! I'll be here whenever you need me." |
 
-Emits `voice-dismissed` event so VoiceMode.tsx can reset state.
+Emits `voice-dismissed` event so `TauriVoiceBackend.ts` can reset state.
 
 ### 6. Whisper Artifact Stripping
 
@@ -107,7 +107,7 @@ transcription, before sending to LLM).
 
 ### 7. Auto-Start Recording on Mount
 
-**File:** `pond-desktop/src/modes/VoiceMode.tsx`
+**File:** `pond-desktop/src/modes/voice/VoiceMode.tsx`
 
 When VoiceMode mounts with no wake word configured, it auto-starts VAD recording instead of
 showing a "Start Listening" button. Matches the CLI's `InstantActivation` behavior.

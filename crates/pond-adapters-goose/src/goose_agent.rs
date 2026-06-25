@@ -376,7 +376,10 @@ impl GooseAdapter {
     ) -> Result<()> {
         let key = format!("{}:{}", settings.chat_provider, settings.chat_model);
         {
-            let last = self.last_provider_key.lock().unwrap_or_else(|e| e.into_inner());
+            let last = self
+                .last_provider_key
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if *last == key {
                 println!("[model-switch] provider already current: {}", key);
                 return Ok(());
@@ -544,7 +547,10 @@ impl GooseAdapter {
                 "Switching Goose provider"
             );
             self.agent.update_provider(p, session_id).await?;
-            *self.last_provider_key.lock().unwrap_or_else(|e| e.into_inner()) = key.clone();
+            *self
+                .last_provider_key
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = key.clone();
 
             // Update model capabilities from the new model name
             let caps =
@@ -557,12 +563,18 @@ impl GooseAdapter {
                 caps.vision,
                 caps.context_window_tokens / 1000
             );
-            *self.model_capabilities.lock().unwrap_or_else(|e| e.into_inner()) = caps;
+            *self
+                .model_capabilities
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = caps;
 
             // Reset prefix hash so the system prompt is rebuilt with the new model's
             // capabilities on the next turn. KV-cache is invalidated by the provider
             // swap anyway — no cache to preserve.
-            *self.last_prefix_hash.lock().unwrap_or_else(|e| e.into_inner()) = 0;
+            *self
+                .last_prefix_hash
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = 0;
 
             println!("[model-switch] swap complete, key={}", key);
         } else {
@@ -662,7 +674,11 @@ impl GooseAdapter {
 
         // ── 0. Load GIAP builtin MCP extensions (once per session) ────────────
         {
-            let needs_load = !self.loaded_sessions.lock().unwrap_or_else(|e| e.into_inner()).contains(&goose_sid);
+            let needs_load = !self
+                .loaded_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&goose_sid);
             if needs_load {
                 let extensions = registered_extensions();
                 println!(
@@ -781,7 +797,11 @@ impl GooseAdapter {
             // per-request flag (desktop voice pipeline sends voice_mode: true).
             let is_voice =
                 self.voice_mode.load(std::sync::atomic::Ordering::Relaxed) || request.voice_mode;
-            let caps = self.model_capabilities.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let caps = self
+                .model_capabilities
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             let thinking_enabled = if is_voice {
                 false
             } else {
@@ -849,7 +869,10 @@ impl GooseAdapter {
             // Check whether the static prefix changed. Drop the MutexGuard
             // before any `.await` to keep the future `Send`.
             let prefix_changed = {
-                let last_hash = self.last_prefix_hash.lock().unwrap_or_else(|e| e.into_inner());
+                let last_hash = self
+                    .last_prefix_hash
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 *last_hash != partition.prefix_hash
             };
 
@@ -861,7 +884,10 @@ impl GooseAdapter {
                 self.agent
                     .override_system_prompt(partition.static_prefix)
                     .await;
-                let mut last_hash = self.last_prefix_hash.lock().unwrap_or_else(|e| e.into_inner());
+                let mut last_hash = self
+                    .last_prefix_hash
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 *last_hash = partition.prefix_hash;
             } else {
                 tracing::debug!(
@@ -1349,7 +1375,11 @@ impl GooseAdapter {
 #[async_trait]
 impl AgentPort for GooseAdapter {
     fn capabilities(&self) -> pond_core::models::domain::model_capabilities::ModelCapabilities {
-        let mut caps = self.model_capabilities.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let mut caps = self
+            .model_capabilities
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         // Voice mode disables expensive/leaky capabilities: thinking tokens
         // waste TTS time, vision/audio inputs aren't used in voice flow.
         if self.voice_mode.load(std::sync::atomic::Ordering::Relaxed) {

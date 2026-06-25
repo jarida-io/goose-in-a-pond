@@ -1,18 +1,16 @@
-//! #91 acceptance: a subscriber receives an event when a sensor reading is
-//! POSTed. Drives a real `POST /api/v1/sensors` through the router with a live
-//! `InProcessEventBus` wired into `AppState`, then asserts the published
-//! `BusEvent::Sensor` arrives on a subscription.
+//! #114 acceptance: `GET /api/v1/activity` answers "what happened" with
+//! filtering, and `/activity/summary` answers "last hour/day/week". Drives a
+//! real router with a live `SqliteEventLog` wired into `AppState`. Also asserts
+//! the security rule that `Secret`-classified events are never surfaced.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
-use futures::StreamExt;
 use pond_api::{build_router, AppState};
+use pond_core::security::domain::event::{Event, EventCategory, PrivacySensitivity};
+use pond_core::security::ports::event_log::EventLog;
 use pond_core::shared::mocks::mock_agent::MockAgent;
-use pond_core::shared::ports::event_bus::{BusEvent, EventBus};
-use pond_core::shared::services::in_process_event_bus::InProcessEventBus;
 use pond_core::user_data::mocks::mock_device_registry::MockDeviceRegistry;
 use pond_core::user_data::mocks::mock_memory::MockMemoryRepository;
 use pond_core::user_data::mocks::mock_profile::MockProfileRepository;
@@ -21,6 +19,7 @@ use pond_core::user_data::mocks::mock_settings::MockSettingsRepository;
 use pond_infra::db::Database;
 use pond_infra::mock_handshake::MockHandshake;
 use pond_infra::onboarding::SqlxOnboardingRepository;
+use pond_infra::sqlite_event_log::SqliteEventLog;
 use pond_infra::sqlite_prompt_extra::SqlitePromptExtraRepository;
 use pond_infra::sqlite_prompt_template::SqlitePromptTemplateRepository;
 use pond_infra::sqlite_recipe::SqliteRecipeRepository;
@@ -28,18 +27,39 @@ use pond_infra::sqlite_session_storage::SqliteSessionStorage;
 use pond_infra::sqlite_skill::SqliteSkillRepository;
 use tower::ServiceExt;
 
-/// Build the router with a real event bus wired into `AppState`. Returns the
-/// router, the bus (so the test can subscribe), and the tempdir guard.
-async fn make_app_with_bus() -> (axum::Router, Arc<InProcessEventBus>, tempfile::TempDir) {
+/// Build the router with a real `SqliteEventLog` pre-seeded with a few events
+/// (two visible, one `Secret`). Returns the router + tempdir guard.
+async fn make_app() -> (axum::Router, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let db = Database::init(tmp.path()).await.unwrap();
     let pool = db.system.clone();
-    let db = Arc::new(db);
 
+    // Seed the unified event store.
+    let event_log: Arc<dyn EventLog> = Arc::new(SqliteEventLog::new(db.logs.clone()));
+    event_log
+        .append(
+            Event::new(EventCategory::Sensor, "sensor.reading")
+                .attr("device_id", "backyard-pir")
+                .session("sess-a"),
+        )
+        .await
+        .unwrap();
+    event_log
+        .append(Event::new(EventCategory::Device, "device.state_changed").attr("device_id", "lamp"))
+        .await
+        .unwrap();
+    // Secret-classified — must never be surfaced by the API.
+    event_log
+        .append(
+            Event::new(EventCategory::Auth, "auth.token_minted")
+                .sensitivity(PrivacySensitivity::Secret),
+        )
+        .await
+        .unwrap();
+
+    let db = Arc::new(db);
     let mock_hs = MockHandshake::new();
     mock_hs.add_valid_token("test-token".to_string()).await;
-
-    let bus = Arc::new(InProcessEventBus::new());
 
     let state = Arc::new(AppState {
         db,
@@ -82,8 +102,8 @@ async fn make_app_with_bus() -> (axum::Router, Arc<InProcessEventBus>, tempfile:
         recipe_repo: Some(Arc::new(SqliteRecipeRepository::new(pool.clone()))),
         llamafile_manager: None,
         event_log_repo: None,
-        event_bus: Some(bus.clone() as Arc<dyn EventBus>),
-        event_log: None,
+        event_bus: None,
+        event_log: Some(event_log.clone()),
         session_user_bindings: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         answer_reviewer: None,
@@ -106,49 +126,82 @@ async fn make_app_with_bus() -> (axum::Router, Arc<InProcessEventBus>, tempfile:
         api_port: 4000,
     });
 
-    let router = build_router(state, std::path::PathBuf::from("web/dist"));
-    (router, bus, tmp)
+    (
+        build_router(state, std::path::PathBuf::from("web/dist")),
+        tmp,
+    )
+}
+
+async fn get_json(app: &axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header("Authorization", "Bearer test-token")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json)
 }
 
 #[tokio::test]
-async fn sensor_post_publishes_to_event_bus() {
-    let (app, bus, _tmp) = make_app_with_bus().await;
-    let mut subscription = bus.subscribe();
+async fn activity_lists_events_and_hides_secret() {
+    let (app, _tmp) = make_app().await;
 
-    let request = Request::builder()
-        .method(Method::POST)
-        .uri("/api/v1/sensors")
-        .header("Authorization", "Bearer test-token")
-        .header("Content-Type", "application/json")
-        .body(Body::from(
-            serde_json::to_vec(&serde_json::json!({
-                "device_id": "backyard-pir",
-                "sensor_type": "motion",
-                "value": 1.0,
-                "unit": "bool",
-            }))
-            .unwrap(),
-        ))
-        .unwrap();
-
-    let response = app.oneshot(request).await.unwrap();
-    assert_eq!(
-        response.status(),
-        StatusCode::CREATED,
-        "sensor POST should persist"
+    let (status, body) = get_json(&app, "/api/v1/activity").await;
+    assert_eq!(status, StatusCode::OK);
+    // Two seeded events are visible; the Secret one is excluded.
+    assert_eq!(body["count"], 2, "Secret event must be hidden");
+    let actions: Vec<&str> = body["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["action"].as_str().unwrap())
+        .collect();
+    assert!(actions.contains(&"sensor.reading"));
+    assert!(actions.contains(&"device.state_changed"));
+    assert!(
+        !actions.contains(&"auth.token_minted"),
+        "Secret action leaked"
     );
+}
 
-    // The subscriber must receive the published reading.
-    let event = tokio::time::timeout(Duration::from_secs(2), subscription.next())
-        .await
-        .expect("bus event within timeout")
-        .expect("a bus event");
+#[tokio::test]
+async fn activity_filters_by_category_and_session() {
+    let (app, _tmp) = make_app().await;
 
-    match event {
-        BusEvent::Sensor(reading) => {
-            assert_eq!(reading.device_id, "backyard-pir");
-            assert_eq!(reading.sensor_type, "motion");
-        }
-        other => panic!("expected BusEvent::Sensor, got {other:?}"),
-    }
+    let (status, body) = get_json(&app, "/api/v1/activity?category=sensor").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["count"], 1);
+    assert_eq!(body["events"][0]["action"], "sensor.reading");
+
+    let (_, by_session) = get_json(&app, "/api/v1/activity?session_id=sess-a").await;
+    assert_eq!(by_session["count"], 1);
+}
+
+#[tokio::test]
+async fn activity_summary_counts_by_category() {
+    let (app, _tmp) = make_app().await;
+
+    let (status, body) = get_json(&app, "/api/v1/activity/summary?window=day").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], 2, "Secret event excluded from totals");
+    assert_eq!(body["by_category"]["sensor"], 1);
+    assert_eq!(body["by_category"]["device"], 1);
+    assert!(body["by_category"].get("auth").is_none());
+}
+
+#[tokio::test]
+async fn activity_rejects_bad_params() {
+    let (app, _tmp) = make_app().await;
+    let (status, _) = get_json(&app, "/api/v1/activity?category=bogus").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = get_json(&app, "/api/v1/activity?since=not-a-date").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = get_json(&app, "/api/v1/activity/summary?window=decade").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }

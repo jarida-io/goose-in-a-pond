@@ -708,6 +708,7 @@ impl ModelCatalogProvider for OllamaCatalogProvider {
         let resp = self
             .client
             .get("http://localhost:11434/api/tags")
+            .timeout(std::time::Duration::from_secs(3))
             .send()
             .await?
             .json::<serde_json::Value>()

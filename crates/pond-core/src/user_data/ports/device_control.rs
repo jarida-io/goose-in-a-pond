@@ -73,7 +73,10 @@ mod tests {
         let out = dc.set_power("lamp-1", true).await.unwrap();
         assert_eq!(out.device_id, "lamp-1");
         assert_eq!(out.applied.on, Some(true));
-        assert_eq!(dc.last_call().as_deref(), Some("set_power(lamp-1, on=true)"));
+        assert_eq!(
+            dc.last_call().as_deref(),
+            Some("set_power(lamp-1, on=true)")
+        );
     }
 
     #[tokio::test]

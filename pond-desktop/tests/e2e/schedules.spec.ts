@@ -182,6 +182,12 @@ test.describe("Schedules section", () => {
     const deleteBtn = page.getByRole("button", { name: "Delete schedule" }).first();
     await expect(deleteBtn).toBeVisible({ timeout: 5_000 });
     await deleteBtn.click();
+
+    // Delete now goes through the custom ConfirmDialog (replaced window.confirm in
+    // the UX-humanization pass), so confirm via its destructive button.
+    const confirmBtn = page.locator(".confirm-dialog__btn--destructive");
+    await expect(confirmBtn).toBeVisible({ timeout: 5_000 });
+    await confirmBtn.click();
     await page.waitForTimeout(400);
     expect(deleteCalled).toBe(true);
   });

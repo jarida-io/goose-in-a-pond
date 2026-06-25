@@ -4,16 +4,20 @@
 
 ### Persistence ownership
 
-`ChatService` (`crates/pond-core/src/services/chat.rs`) is the **sole owner of turn persistence**.
+`ChatService` (`crates/pond-core/src/shared/services/chat.rs`) is the **sole owner of turn persistence and memory extraction**.
 
-Every chat turn — regardless of which engine path handles it — must go through these two methods:
+Every chat turn — regardless of which engine path handles it — must go through these methods:
 
 | Method | When to call |
 |--------|-------------|
 | `persist_user_message(&str)` | Before starting the agent stream |
-| `persist_assistant_turn(tool_results, text, usage, model)` | After the stream drains |
+| `persist_assistant_turn_with_extraction(tool_results, text, usage, model, user_msg)` | After the stream drains — persists the turn **and** spawns memory extraction |
 
-Both `/chat/stream` (`chat_stream` handler) and `/agent/chat/stream` (`agent_chat_stream` handler) build a `ChatService` and call these methods. Do not add inline persistence blocks to handlers — they will be silently dropped in future refactors.
+When memory extraction is not needed (e.g. `agent_chat_stream`), use `persist_assistant_turn` instead.
+
+Both `/chat/stream` (`chat_stream` handler) and `/agent/chat/stream` (`agent_chat_stream` handler) build a `ChatService` and call these methods. The `chat_stream` handler additionally calls `.with_memory_extraction(extractor, service, repo)` on the builder so extraction is owned by the service, not the handler.
+
+Do not add inline persistence or extraction blocks to handlers — they will be silently dropped in future refactors.
 
 ### Engine paths
 

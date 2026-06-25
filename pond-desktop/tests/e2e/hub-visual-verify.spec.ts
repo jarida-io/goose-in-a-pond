@@ -4,6 +4,7 @@
  * Generates screenshots at /tmp/hub-phase1-home.png and /tmp/hub-design-reference.png.
  */
 import { test, expect } from "@playwright/test";
+import { existsSync } from "node:fs";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
 
 test("Hub visual screenshot", async ({ page }) => {
@@ -89,10 +90,13 @@ test("Design reference screenshot", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const designPath =
     "/Users/jerry/Documents/Jarida/goose-in-a-pond/.ai/giap-design-bundle/project/Goose Hub.html";
+  // Dev-only visual reference: the design bundle lives under .ai/ (gitignored), so
+  // it's absent in CI / fresh clones. Skip rather than fail.
+  test.skip(!existsSync(designPath), "design reference bundle (.ai/) not present");
   await page.goto(`file://${designPath}`);
   // Wait for React to render (loaded via unpkg CDN)
   try {
-    await page.waitForSelector(".ghub", { timeout: 25000 });
+    await page.waitForSelector(".ghub", { timeout: 8000 });
     await page.waitForTimeout(1500);
   } catch {
     // CDN scripts may be blocked; still screenshot what loaded

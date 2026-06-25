@@ -3,22 +3,35 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 /// Mock adapter for the Agent port.
 ///
 /// Echoes back the user's message for testing the workflow loop
-/// without a real LLM provider.
-pub struct MockAgent;
+/// without a real LLM provider. Captures the last `AgentRequest` it
+/// received so tests can assert on fields callers set (e.g. `voice_mode`).
+pub struct MockAgent {
+    last_request: Mutex<Option<AgentRequest>>,
+}
 
 impl MockAgent {
     pub fn new() -> Self {
-        Self
+        Self {
+            last_request: Mutex::new(None),
+        }
+    }
+
+    /// The most recent `AgentRequest` passed to `chat` or `chat_stream`.
+    pub fn last_request(&self) -> Option<AgentRequest> {
+        self.last_request.lock().unwrap().clone()
     }
 }
 
 #[async_trait]
 impl Agent for MockAgent {
     async fn chat(&self, request: AgentRequest) -> Result<AgentResponse> {
+        *self.last_request.lock().unwrap() = Some(request.clone());
+
         // Simulate a tiny "thinking" delay
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
@@ -32,6 +45,8 @@ impl Agent for MockAgent {
         &self,
         request: AgentRequest,
     ) -> Result<BoxStream<'static, Result<AgentStreamEvent>>> {
+        *self.last_request.lock().unwrap() = Some(request.clone());
+
         let response_text = format!("Echo: {}", request.message);
         let session_id = request.session_id.clone();
         let model_role = request.model_role.clone();

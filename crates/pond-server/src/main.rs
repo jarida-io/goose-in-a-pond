@@ -71,11 +71,11 @@ use pond_core::user_data::ports::session_storage::SessionStorage;
 use pond_core::user_data::ports::settings::SettingsRepository as _;
 use pond_core::user_data::services::onboarding::OnboardingService;
 use pond_infra::db::Database;
-use pond_infra::sqlite_handshake::SqliteHandshakeAdapter;
 use pond_infra::onboarding::SqlxOnboardingRepository;
 use pond_infra::sqlite_device_registry::SqliteDeviceRegistry;
 use pond_infra::sqlite_draft::SqliteDraftRepository;
 use pond_infra::sqlite_event_log::{SqliteEventLog, SqliteEventLogRepository};
+use pond_infra::sqlite_handshake::SqliteHandshakeAdapter;
 use pond_infra::sqlite_mcp_servers::SqliteMcpServerRepository;
 use pond_infra::sqlite_memory::SqliteMemoryRepository;
 use pond_infra::sqlite_model_repository::SqliteModelRepository;
@@ -478,7 +478,6 @@ async fn async_main() -> Result<()> {
         }
     }
 }
-
 
 async fn run_setup(model: &str) -> Result<()> {
     println!("  ╔═══════════════════════════════════════╗");
@@ -1072,8 +1071,17 @@ async fn run_server(
                     );
                     None
                 } else {
-                    match PiperRsOutput::new(model_path.clone(), config_path) {
-                        Ok(out) => {
+                    let model_path_owned = model_path.clone();
+                    let config_path_owned = config_path.clone();
+                    let piper_result = tokio::time::timeout(
+                        std::time::Duration::from_secs(15),
+                        tokio::task::spawn_blocking(move || {
+                            PiperRsOutput::new(model_path_owned, config_path_owned)
+                        }),
+                    )
+                    .await;
+                    match piper_result {
+                        Ok(Ok(Ok(out))) => {
                             let out = match espeak_data.clone() {
                                 Some(d) => out.with_espeak_data(d),
                                 None => out,
@@ -1084,8 +1092,19 @@ async fn run_server(
                                     dyn pond_core::models::ports::voice_output::VoiceOutput,
                                 >)
                         }
-                        Err(e) => {
+                        Ok(Ok(Err(e))) => {
                             tracing::warn!("PiperRsOutput failed to load voice: {e}");
+                            None
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!("PiperRsOutput spawn_blocking panicked: {e}");
+                            None
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                "PiperRsOutput timed out after 15 s — ONNX Runtime may be \
+                                 version-incompatible (need ORT 1.24.2)"
+                            );
                             None
                         }
                     }
@@ -1694,10 +1713,26 @@ async fn run_server(
                 &settings.active_embedding_model
             };
             let cache_dir = data_dir.join("models").join("embedding");
-            match pond_infra::fastembed_embedding::FastembedEmbeddingProvider::new(
-                emb_model,
-                Some(cache_dir),
-            ) {
+            let emb_model_owned = emb_model.to_string();
+            let emb_result = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                tokio::task::spawn_blocking(move || {
+                    pond_infra::fastembed_embedding::FastembedEmbeddingProvider::new(
+                        &emb_model_owned,
+                        Some(cache_dir),
+                    )
+                }),
+            )
+            .await;
+            let init_result = match emb_result {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => Err(anyhow::anyhow!("embedding spawn_blocking failed: {e}")),
+                Err(_) => Err(anyhow::anyhow!(
+                    "embedding provider init timed out after 30 s — ONNX Runtime may be \
+                     version-incompatible (need ORT 1.24.2)"
+                )),
+            };
+            match init_result {
                 Ok(provider) => {
                     tracing::info!(
                         model = provider.model_name(),
@@ -1986,15 +2021,20 @@ async fn run_server(
         match SqliteTelemetry::new(db.logs.clone()).await {
             Ok(t) => Some(Arc::new(t)),
             Err(e) => {
-                tracing::warn!("Failed to initialize SQLite telemetry, falling back to in-memory: {e}");
-                Some(Arc::new(pond_core::security::services::telemetry::InMemoryTelemetry::new()))
+                tracing::warn!(
+                    "Failed to initialize SQLite telemetry, falling back to in-memory: {e}"
+                );
+                Some(Arc::new(
+                    pond_core::security::services::telemetry::InMemoryTelemetry::new(),
+                ))
             }
         };
 
     // Bind the API port early so we can thread it into AppState (needed for
     // dynamic OAuth redirect URIs).  The actual `axum::serve()` call that
     // consumes the listener happens further below.
-    let (listener, api_port) = ports::bind_with_fallback("0.0.0.0", port.unwrap_or(ports::API_SERVER)).await?;
+    let (listener, api_port) =
+        ports::bind_with_fallback("0.0.0.0", port.unwrap_or(ports::API_SERVER)).await?;
 
     // Direct MCP tool dispatcher for POST /api/v1/tools/invoke (bypasses the LLM).
     let tool_dispatcher: Option<
@@ -2018,8 +2058,12 @@ async fn run_server(
     // events written in normal operation are queryable from pond_logs.db.
     let event_bus: Arc<dyn pond_core::shared::ports::event_bus::EventBus> =
         Arc::new(InProcessEventBus::new());
+    // One shared event store: the bus→log bridge writes to it, and the activity
+    // query API (#114) reads from it via AppState.
+    let event_log: Arc<dyn pond_core::security::ports::event_log::EventLog> =
+        Arc::new(SqliteEventLog::new(db.logs.clone()));
     {
-        let event_log = SqliteEventLog::new(db.logs.clone());
+        let event_log = event_log.clone();
         let mut events = event_bus.subscribe();
         tokio::spawn(async move {
             use futures::StreamExt;
@@ -2098,6 +2142,7 @@ async fn run_server(
         llamafile_manager: Some(llamafile_manager),
         event_log_repo: event_log_repo,
         event_bus: Some(event_bus.clone()),
+        event_log: Some(event_log.clone()),
         face_recognition,
         session_user_bindings: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -3525,7 +3570,7 @@ async fn run_status() -> Result<()> {
 // v1.21.0 is the latest release with pre-built tarballs for all four
 // platform/arch combos we support (macOS arm64/x86_64, Linux x64/aarch64).
 // Bump this when upgrading — the archive layout is stable across releases.
-const ORT_VERSION: &str = "1.22.0";
+const ORT_VERSION: &str = "1.24.2";
 
 /// Approximate size of the platform library in MB (for the progress message).
 const ORT_APPROX_SIZE_MB: u64 = 30;

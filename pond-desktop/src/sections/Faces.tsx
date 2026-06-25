@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { Button } from "@heroui/react";
-import { ScanFace, Camera, UserCheck, Trash2, RefreshCw } from "lucide-react";
+import { ScanFace, Camera, UserCheck, Trash2, RefreshCw, CheckCircle2, Hand } from "lucide-react";
 import { api } from "../api/PondApiClient";
 import { ApiError } from "../api/types";
 
@@ -50,7 +51,7 @@ export function Faces() {
   const [cameraError, setCameraError]         = useState<string | null>(null);
   const [busy, setBusy]                       = useState<Busy>("idle");
   const [last, setLast]                       = useState<IdentifyResult | null>(null);
-  const [banner, setBanner]                   = useState<string | null>(null);
+  const [banner, setBanner]                   = useState<ReactNode | null>(null);
   const [error, setError]                     = useState<string | null>(null);
   // Custom in-component confirm for the destructive Delete action — the
   // browser's native `confirm()` can be ignored or no-op'd inside a Tauri
@@ -183,7 +184,7 @@ export function Faces() {
       const fresh = await api.listFaceEnrollments(selectedProfile);
       const n = fresh.enrollments.length;
       if (n >= 3) {
-        setBanner(`Sample ${n} saved — ${profileLabel(selectedProfile)} is ready to be recognised. ✅`);
+        setBanner(<><CheckCircle2 size={14} />{" "}Sample {n} saved — {profileLabel(selectedProfile)} is ready to be recognised.</>);
       } else {
         setBanner(`Sample ${n} of 3 saved — capture ${3 - n} more from a slightly different angle for best accuracy.`);
       }
@@ -215,7 +216,7 @@ export function Faces() {
           "Photos and phone screens won't work — that's by design, to keep your account safe."
         );
       } else if (res.identified && res.profile_id) {
-        setBanner(`Welcome back, ${profileLabel(res.profile_id)}! 👋`);
+        setBanner(<><Hand size={14} />{" "}Welcome back, {profileLabel(res.profile_id)}!</>);
       } else if (!res.identified) {
         // Open-set non-match — frame a friendly hint instead of a raw "no match".
         setBanner(
@@ -258,7 +259,7 @@ export function Faces() {
   // ── Render helpers ───────────────────────────────────────────────────────
   function profileLabel(id: string): string {
     const p = profiles.find((p) => p.id === id);
-    return p ? `${p.avatar_emoji} ${p.display_name}` : id.slice(0, 8);
+    return p ? p.display_name : id.slice(0, 8);
   }
   function pct(v: number | null | undefined): string {
     if (v == null) return "—";
@@ -327,7 +328,7 @@ export function Faces() {
           >
             {profiles.length === 0 && <option value="">No profiles — finish onboarding first</option>}
             {profiles.map((p) => (
-              <option key={p.id} value={p.id}>{p.avatar_emoji} {p.display_name}</option>
+              <option key={p.id} value={p.id}>{p.display_name}</option>
             ))}
           </select>
 

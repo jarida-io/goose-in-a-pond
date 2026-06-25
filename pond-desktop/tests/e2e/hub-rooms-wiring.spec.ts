@@ -122,15 +122,19 @@ test.describe("Hub — Rooms sub-screen wiring", () => {
     await expect(page.getByText("Front Door Camera")).toBeVisible({ timeout: 3_000 });
   });
 
-  test("toggle calls giap-device__set_device_state via MCP tool", async ({ page }) => {
+  test("toggle calls set_device_state via the device-control MCP tool", async ({ page }) => {
     let toolCallPayload: Record<string, unknown> | null = null;
 
     await setupBaseRoutes(page);
     await page.route("**/api/v1/devices", (r) => r.fulfill({ json: MOCK_DEVICES }));
-    await page.route("**/api/v1/mcp/tools/call", async (r) => {
-      const body = await r.request().postDataJSON() as Record<string, unknown>;
+    // Device control now goes through POST /api/v1/tools/invoke (bypasses the LLM)
+    // → giap-device-control set_device_state, replacing the old /mcp/tools/call path.
+    await page.route("**/api/v1/tools/invoke", async (r) => {
+      const body = (await r.request().postDataJSON()) as Record<string, unknown>;
       toolCallPayload = body;
-      return r.fulfill({ json: { result: "ok" } });
+      return r.fulfill({
+        json: { tool: "giap-device-control__set_device_state", success: true, content: "ok" },
+      });
     });
 
     await goToRoomsScreen(page);
@@ -143,10 +147,11 @@ test.describe("Hub — Rooms sub-screen wiring", () => {
     await toggles.first().click();
     await page.waitForTimeout(500);
 
-    // The MCP tool call should have been made
+    // The device-control tool call should have been made via /tools/invoke
     expect(toolCallPayload).not.toBeNull();
-    expect(toolCallPayload?.name).toBe("giap-device__set_device_state");
-    expect(toolCallPayload?.arguments).toBeDefined();
+    expect(toolCallPayload?.server).toBe("giap-device-control");
+    expect(toolCallPayload?.tool).toBe("set_device_state");
+    expect(toolCallPayload?.args).toBeDefined();
   });
 
   test("shows offline mock fallback when API returns error", async ({ page }) => {

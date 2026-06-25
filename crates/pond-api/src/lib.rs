@@ -234,6 +234,10 @@ pub struct AppState {
     /// publish here so reactive consumers (the rules engine, live dashboards)
     /// can respond. `None` in tests that don't exercise the bus.
     pub event_bus: Option<Arc<dyn EventBus>>,
+    /// Unified, append-only event store (#109): the durable `events` table that
+    /// the bus→log bridge writes to. Read by the activity query API (#114).
+    /// `None` in tests that don't exercise it.
+    pub event_log: Option<Arc<dyn pond_core::security::ports::event_log::EventLog>>,
     /// Biometric face recognition service (register + identify household
     /// members from camera frames).  `None` when no ONNX embedding model
     /// is configured — all face endpoints then return 503.
@@ -400,10 +404,14 @@ pub fn build_router(state: Arc<AppState>, static_dir: std::path::PathBuf) -> Rou
 fn build_cors_layer() -> CorsLayer {
     use axum::http::{header, HeaderValue, Method};
 
-    let mut origins: Vec<HeaderValue> = ["tauri://localhost", "http://localhost:1420", "http://127.0.0.1:1420"]
-        .iter()
-        .filter_map(|o| o.parse().ok())
-        .collect();
+    let mut origins: Vec<HeaderValue> = [
+        "tauri://localhost",
+        "http://localhost:1420",
+        "http://127.0.0.1:1420",
+    ]
+    .iter()
+    .filter_map(|o| o.parse().ok())
+    .collect();
     if let Ok(extra) = std::env::var("POND_CORS_ALLOWED_ORIGINS") {
         for o in extra.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
             if let Ok(v) = o.parse() {

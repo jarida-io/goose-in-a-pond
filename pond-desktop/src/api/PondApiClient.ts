@@ -135,7 +135,7 @@ export class PondApiClient {
     return h;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, timeout?: number): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown, timeout?: number, _retry = false): Promise<T> {
     await this.ensureTokenFresh();
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout ?? 30_000);
@@ -147,6 +147,13 @@ export class PondApiClient {
         signal: controller.signal,
       });
       clearTimeout(timeoutId);
+      if (res.status === 401 && !_retry) {
+        // Server restarted — in-memory session token was cleared. Re-handshake
+        // using the persisted refresh token, then retry once.
+        this.setToken(null);
+        await this.connect();
+        return this.request<T>(method, path, body, timeout, true);
+      }
       if (!res.ok) {
         let msg = res.statusText;
         try { msg = (await res.json()).message ?? msg; } catch { /* ignore */ }

@@ -19,15 +19,16 @@ use axum::{
 use pond_core::mcp::ports::extension_manager::ExtensionInfo;
 use pond_core::models::domain::message::ChatMessage;
 use pond_core::models::ports::provider::LlmProvider;
-use pond_core::shared::ports::event_bus::BusEvent;
 use pond_core::prompts::{
     build_system_prompt_with_profile, builtin_template_content, render_template, sanitize_field,
     ProfileContext,
 };
+use pond_core::security::domain::event::{EventCategory, EventQuery, PrivacySensitivity};
 use pond_core::security::ports::handshake::{
     ChallengeResponse, HandshakeRequest, HandshakeResponse, InitRequest, RefreshRequest,
     VerifyRequest,
 };
+use pond_core::shared::ports::event_bus::BusEvent;
 use pond_core::shared::services::chat::ChatService;
 use pond_core::user_data::domain::onboarding::OnboardingStep;
 use pond_core::user_data::domain::profile::CreateProfileRequest;
@@ -127,6 +128,9 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/profiles/{id}", get(get_profile).delete(delete_profile))
         .route("/sensors", post(record_sensor))
         .route("/sensors/{device_id}", get(get_recent_sensors))
+        // Activity query API (#114) — read the unified event log.
+        .route("/activity", get(get_activity))
+        .route("/activity/summary", get(activity_summary))
         .route(
             "/camera/events",
             get(list_camera_events).post(record_camera_event),
@@ -356,7 +360,10 @@ async fn handshake_verify(
 ) -> Result<Json<HandshakeResponse>, (StatusCode, Json<Value>)> {
     // Rate-limit verify attempts per source IP (applies to loopback too — this
     // endpoint is security-sensitive regardless of origin).
-    if !verify_limiter().check_rate_limit(&peer.ip().to_string()).await {
+    if !verify_limiter()
+        .check_rate_limit(&peer.ip().to_string())
+        .await
+    {
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
             Json(json!({"error": "too many handshake attempts; slow down"})),
@@ -901,11 +908,20 @@ fn chat_stream_inner(
 
         let model_role = "chat";
 
-        let chat_service = pond_core::shared::services::chat::ChatService::new(
+        let mut chat_service = pond_core::shared::services::chat::ChatService::new(
             state.agent.clone(),
             session_id.clone(),
             storage.clone(),
         );
+        if let (Some(ext), Some(svc)) =
+            (state.memory_extractor.clone(), state.memory_extraction_service.clone())
+        {
+            chat_service = chat_service.with_memory_extraction(
+                ext,
+                svc,
+                state.memory_repo.clone(),
+            );
+        }
 
         // ── Persist user message ────────────────────────────────────────────
         if let Err(e) = chat_service.persist_user_message(&req.message).await {
@@ -1212,38 +1228,20 @@ fn chat_stream_inner(
             }
         }
 
-        // ── Parallel Post-Processing ──────────────────────────────────
-        // Memory extraction is spawned as a background task immediately,
-        // running concurrently with the answer persist below. On HTTP
-        // providers (Ollama/llamafile), the extraction LLM call can
-        // overlap with whatever the main model is doing next.
-        //
-        // The review (above) must remain synchronous because it may
-        // revise `full_text`, which we need before persisting.
-
-        // Start memory extraction ASAP — don't wait for persist.
-        let full_text_for_extraction = full_text.clone();
-        if let (Some(extractor), Some(service)) =
-            (&state.memory_extractor, &state.memory_extraction_service)
-        {
-            let ext = extractor.clone();
-            let svc = service.clone();
-            let repo = state.memory_repo.clone();
-            let user_msg = req.message.clone();
-            let asst_resp = full_text_for_extraction;
-            let sid = session_id.clone();
-            tokio::spawn(async move {
-                svc.run(ext.as_ref(), repo.as_ref(), &user_msg, &asst_resp, Some(&sid)).await;
-            });
-        }
-
-        // ── Persist assistant turn (tool results + response + usage) ───────
-        let _ = chat_service.persist_assistant_turn(
-            tool_results,
-            &full_text,
-            Some((usage_prompt_tokens, usage_completion_tokens)),
-            Some(&model_name_for_done),
-        ).await;
+        // ── Persist assistant turn + memory extraction ────────────────────
+        // `persist_assistant_turn_with_extraction` owns both concerns: it
+        // writes tool results / assistant text / usage to session_messages,
+        // then spawns memory extraction in the background. The handler cannot
+        // accidentally omit extraction by refactoring this block.
+        let _ = chat_service
+            .persist_assistant_turn_with_extraction(
+                tool_results,
+                &full_text,
+                Some((usage_prompt_tokens, usage_completion_tokens)),
+                Some(&model_name_for_done),
+                &req.message,
+            )
+            .await;
 
         // ── Per-turn telemetry ──────────────────────────────────────────
         if settings.telemetry_enabled {
@@ -3378,12 +3376,16 @@ async fn record_sensor(
         unit: req.unit,
         recorded_at: chrono::Utc::now(),
     };
-    state.sensor_storage.record(reading.clone()).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        )
-    })?;
+    state
+        .sensor_storage
+        .record(reading.clone())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?;
     // Publish to the in-process bus only after the write succeeds (#91), so
     // reactive consumers never see an event for a reading that failed to persist.
     if let Some(bus) = &state.event_bus {
@@ -3426,6 +3428,169 @@ async fn get_recent_sensors(
         })
         .collect();
     Ok(Json(json!({ "readings": list })))
+}
+
+// ── Activity query API (#114) ──────────────────────────────────────────────────
+
+/// Upper bound on rows returned by the activity endpoints, regardless of the
+/// requested `limit`, so a single query can't pull unbounded data into memory.
+const ACTIVITY_MAX_LIMIT: usize = 1000;
+
+#[derive(serde::Deserialize)]
+struct ActivityQueryParams {
+    /// RFC3339 inclusive lower bound on timestamp.
+    since: Option<String>,
+    /// RFC3339 exclusive upper bound on timestamp.
+    until: Option<String>,
+    /// `EventCategory` in snake_case (e.g. "sensor", "device", "auth").
+    category: Option<String>,
+    session_id: Option<String>,
+    limit: Option<usize>,
+}
+
+/// Parse an `EventCategory` from its snake_case wire form.
+fn parse_event_category(s: &str) -> Option<EventCategory> {
+    serde_json::from_value(Value::String(s.to_string())).ok()
+}
+
+/// Parse an optional RFC3339 timestamp query param, erroring on malformed input.
+fn parse_rfc3339_param(
+    field: &str,
+    raw: Option<String>,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, (StatusCode, Json<Value>)> {
+    match raw {
+        None => Ok(None),
+        Some(s) => chrono::DateTime::parse_from_rfc3339(&s)
+            .map(|dt| Some(dt.with_timezone(&chrono::Utc)))
+            .map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": format!("invalid `{field}`: expected an RFC3339 timestamp") })),
+                )
+            }),
+    }
+}
+
+/// `GET /api/v1/activity` — recent events, newest first, with optional
+/// `since` / `until` / `category` / `session_id` / `limit` filters.
+///
+/// Secret-classified events are never returned (defense in depth — such events
+/// should not be logged at all, but the API also refuses to surface them).
+async fn get_activity(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<ActivityQueryParams>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(event_log) = state.event_log.as_ref() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "event log not available" })),
+        ));
+    };
+
+    let category = match params.category.as_deref() {
+        Some(c) => Some(parse_event_category(c).ok_or((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid `category`" })),
+        ))?),
+        None => None,
+    };
+
+    let query = EventQuery {
+        category,
+        session_id: params.session_id,
+        trace_id: None,
+        since: parse_rfc3339_param("since", params.since)?,
+        until: parse_rfc3339_param("until", params.until)?,
+        limit: Some(params.limit.unwrap_or(100).min(ACTIVITY_MAX_LIMIT)),
+    };
+
+    let events = event_log.query(query).await.map_err(|e| {
+        tracing::warn!(error = %e, "activity query failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "activity query failed" })),
+        )
+    })?;
+
+    let visible: Vec<Value> = events
+        .into_iter()
+        .filter(|e| e.privacy_sensitivity != PrivacySensitivity::Secret)
+        .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
+        .collect();
+
+    Ok(Json(json!({ "count": visible.len(), "events": visible })))
+}
+
+#[derive(serde::Deserialize)]
+struct ActivitySummaryParams {
+    /// Time window: "hour" | "day" (default) | "week".
+    window: Option<String>,
+}
+
+/// `GET /api/v1/activity/summary` — "what happened in the last hour/day/week":
+/// total count + per-category breakdown over the window (excluding Secret
+/// events). Aggregated over up to `ACTIVITY_MAX_LIMIT` recent in-window events.
+async fn activity_summary(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<ActivitySummaryParams>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(event_log) = state.event_log.as_ref() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "event log not available" })),
+        ));
+    };
+
+    let window = params.window.as_deref().unwrap_or("day");
+    let span = match window {
+        "hour" => chrono::Duration::hours(1),
+        "day" => chrono::Duration::days(1),
+        "week" => chrono::Duration::weeks(1),
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid `window` {other:?}; use hour|day|week") })),
+            ))
+        }
+    };
+    let since = chrono::Utc::now() - span;
+
+    let events = event_log
+        .query(EventQuery {
+            since: Some(since),
+            limit: Some(ACTIVITY_MAX_LIMIT),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "activity summary query failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "activity summary query failed" })),
+            )
+        })?;
+
+    let mut by_category: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut total = 0usize;
+    for event in events
+        .iter()
+        .filter(|e| e.privacy_sensitivity != PrivacySensitivity::Secret)
+    {
+        let key = serde_json::to_value(event.category)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| "unknown".to_string());
+        *by_category.entry(key).or_default() += 1;
+        total += 1;
+    }
+
+    Ok(Json(json!({
+        "window": window,
+        "since": since.to_rfc3339(),
+        "total": total,
+        "by_category": by_category,
+    })))
 }
 
 // ── Camera handlers ───────────────────────────────────────────────────────────
@@ -5359,7 +5524,12 @@ async fn mcp_call_tool(
             Json(json!({ "error": format!("Invalid request: {e}") })),
         )
     })?;
-    dispatch_tool_direct(&state, &req.name, req.arguments.unwrap_or_else(|| json!({}))).await
+    dispatch_tool_direct(
+        &state,
+        &req.name,
+        req.arguments.unwrap_or_else(|| json!({})),
+    )
+    .await
 }
 
 // ── Agent chat stream ─────────────────────────────────────────────────────────

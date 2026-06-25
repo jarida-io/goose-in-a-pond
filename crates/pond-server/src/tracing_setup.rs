@@ -56,7 +56,8 @@ impl Visit for EventVisitor {
         if field.name() == "message" {
             self.message = format!("{value:?}");
         } else {
-            self.fields.insert(field.name().to_string(), format!("{value:?}").into());
+            self.fields
+                .insert(field.name().to_string(), format!("{value:?}").into());
         }
     }
     fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
@@ -176,8 +177,8 @@ pub fn init_tracing(debug: bool, data_dir: &Path) -> LogDrainHandle {
     } else {
         "info"
     };
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| filter_str.into());
+    let env_filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| filter_str.into());
 
     // ── Rolling file appender ────────────────────────────────────────────
     // Produces daily files: <data_dir>/logs/pond.log.YYYY-MM-DD
