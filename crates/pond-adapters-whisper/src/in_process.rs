@@ -22,7 +22,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use pond_core::models::ports::voice_input::VoiceInput;
+use pond_core::models::ports::voice_input::{SpeculativeSignal, VoiceInput};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -31,8 +31,20 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 
 use crate::{
     decode_wav_mono_f32, record_mono_f32_until_silence, record_mono_f32_vad, resample_to_16k,
-    strip_whisper_artifacts, WhisperBackend,
+    strip_whisper_artifacts, SpeculativeSpawn, WhisperBackend,
 };
+
+/// Outcome of the blocking audio-capture step in `listen()`.
+enum SpeechCapture {
+    /// No speech detected within the onset wait — nothing to transcribe.
+    Empty,
+    /// The silence-confirmation run had a matching speculative transcript
+    /// already computed — use it directly, skip a second inference call.
+    Transcript(String),
+    /// No speculative transcript available (e.g. recording hit the hard
+    /// cap before silence was ever confirmed) — transcribe normally.
+    Samples(Vec<f32>),
+}
 
 /// Maximum recording duration (hard cap). VAD usually stops earlier.
 const DEFAULT_DURATION_SECS: u32 = 30;
@@ -258,9 +270,15 @@ fn default_threads() -> std::os::raw::c_int {
     chosen as std::os::raw::c_int
 }
 
-#[async_trait]
-impl VoiceInput for WhisperRsInput {
-    async fn listen(&self) -> Result<Option<String>> {
+impl WhisperRsInput {
+    /// Shared implementation behind both `listen()` and
+    /// `listen_with_speculative()`. `on_speculative_event`, if given, is
+    /// forwarded into `record_mono_f32_vad` so the caller learns about a
+    /// provisional transcript before silence is confirmed (Q2-26).
+    async fn listen_inner(
+        &self,
+        on_speculative_event: Option<Box<dyn Fn(SpeculativeSignal) + Send + Sync>>,
+    ) -> Result<Option<String>> {
         let captured = self.captured.lock().unwrap().take();
         let max_record = self.duration_secs;
         let silence_ms = self.silence_ms;
@@ -271,7 +289,15 @@ impl VoiceInput for WhisperRsInput {
 
         // Capture PCM (already in-process via cpal) on a blocking thread, then
         // hand the samples to whisper-rs without an intermediate WAV round-trip.
-        let samples_result = tokio::task::spawn_blocking(move || -> Result<Vec<f32>> {
+        //
+        // The non-captured (normal VAD) path overlaps whisper inference with
+        // the silence-confirmation wait: `record_mono_f32_vad` fires inference
+        // on the first silent poll rather than after `silence_ms` confirms it,
+        // so by the time silence is confirmed the transcript is often already
+        // done — cutting whisper's inference time out of time-to-first-token
+        // instead of paying for it serially afterward (Q2-26).
+        let ctx_for_speculative = ctx_arc.clone();
+        let capture_result = tokio::task::spawn_blocking(move || -> Result<SpeechCapture> {
             if let Some(wav) = captured {
                 println!("  🎤 Listening...");
                 let (captured_samples, _captured_rate) = decode_wav_mono_f32(&wav)?;
@@ -285,23 +311,40 @@ impl VoiceInput for WhisperRsInput {
                 if fresh_16k.len() > skip {
                     combined.extend_from_slice(&fresh_16k[skip..]);
                 }
-                Ok(combined)
+                Ok(SpeechCapture::Samples(combined))
             } else {
                 println!("  🎤 Listening...");
-                let (samples, sample_rate) =
-                    record_mono_f32_vad(DEFAULT_ONSET_WAIT_SECS, max_record, silence_ms)?;
+                let speculative_spawn: Box<SpeculativeSpawn> = Box::new(move |samples, rate| {
+                    let ctx = ctx_for_speculative.clone();
+                    std::thread::spawn(move || -> Result<String> {
+                        let resampled = resample_to_16k(&samples, rate);
+                        Self::transcribe_samples(ctx, resampled)
+                    })
+                });
+                let (samples, sample_rate, speculative_transcript) = record_mono_f32_vad(
+                    DEFAULT_ONSET_WAIT_SECS,
+                    max_record,
+                    silence_ms,
+                    Some(&*speculative_spawn),
+                    on_speculative_event.as_deref(),
+                )?;
                 if samples.is_empty() {
-                    return Ok(Vec::new());
+                    return Ok(SpeechCapture::Empty);
                 }
-                Ok(resample_to_16k(&samples, sample_rate))
+                if let Some(transcript) = speculative_transcript {
+                    return Ok(SpeechCapture::Transcript(transcript));
+                }
+                Ok(SpeechCapture::Samples(resample_to_16k(&samples, sample_rate)))
             }
         })
         .await
         .map_err(|e| anyhow!("audio capture join error: {}", e))??;
 
-        if samples_result.is_empty() {
-            return Ok(Some(String::new()));
-        }
+        let samples_result = match capture_result {
+            SpeechCapture::Empty => return Ok(Some(String::new())),
+            SpeechCapture::Transcript(t) => return Ok(Some(t)),
+            SpeechCapture::Samples(s) => s,
+        };
 
         // Inference on a blocking thread — whisper.cpp `full()` is CPU/GPU
         // synchronous and can take seconds.
@@ -317,6 +360,20 @@ impl VoiceInput for WhisperRsInput {
         } else {
             Ok(Some(transcript))
         }
+    }
+}
+
+#[async_trait]
+impl VoiceInput for WhisperRsInput {
+    async fn listen(&self) -> Result<Option<String>> {
+        self.listen_inner(None).await
+    }
+
+    async fn listen_with_speculative(
+        &self,
+        on_speculative: Box<dyn Fn(SpeculativeSignal) + Send + Sync>,
+    ) -> Result<Option<String>> {
+        self.listen_inner(Some(on_speculative)).await
     }
 
     fn prompt(&self) -> &str {
@@ -380,6 +437,42 @@ mod tests {
             result.is_ok(),
             "silence should not produce Err: {:?}",
             result
+        );
+    }
+
+    /// Q2-26 evidence: measures real whisper-rs inference wall time on a
+    /// known speech sample, to show how much of `DEFAULT_SILENCE_MS` (800ms)
+    /// the speculative-overlap change actually hides.
+    ///
+    /// To run:
+    /// ```bash
+    /// WHISPER_TEST_MODEL=/path/to/ggml-base.bin \
+    ///   cargo test -p pond-adapters-whisper --lib -- --ignored --nocapture speculative_overlap
+    /// ```
+    #[test]
+    #[ignore]
+    fn speculative_overlap_hides_inference_time_within_default_silence_window() {
+        let Some(model_env) = std::env::var_os("WHISPER_TEST_MODEL") else {
+            eprintln!("set WHISPER_TEST_MODEL to run this test");
+            return;
+        };
+        let model_path = PathBuf::from(model_env);
+        let input = WhisperRsInput::new(model_path).expect("model should load");
+
+        let wav_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/blobs/jfk.wav");
+        let wav_bytes = std::fs::read(&wav_path).expect("jfk.wav fixture missing");
+        let (samples, _rate) = decode_wav_mono_f32(&wav_bytes).expect("decode jfk.wav");
+
+        let start = std::time::Instant::now();
+        let transcript = input
+            .transcribe_pcm_blocking(&samples)
+            .expect("transcription should not error");
+        let elapsed = start.elapsed();
+
+        assert!(!transcript.trim().is_empty(), "jfk.wav should transcribe to real text");
+        println!(
+            "whisper inference wall time: {:?} (silence-confirmation window this overlaps with: {}ms)",
+            elapsed, DEFAULT_SILENCE_MS
         );
     }
 

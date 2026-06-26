@@ -10,6 +10,21 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
+/// Q2-26: signal emitted by `listen_with_speculative` before the final
+/// transcript is confirmed.
+///
+/// Implementations that overlap ASR with the silence-confirmation wait
+/// (e.g. `WhisperRsInput`) fire `Ready` the moment a provisional transcript
+/// is available, and `Invalidated` if speech resumes afterward (the
+/// provisional transcript covered a too-short clip). Callers may use
+/// `Ready` to speculatively start downstream work (e.g. the LLM call) and
+/// must cancel/discard that work on `Invalidated`.
+#[derive(Clone)]
+pub enum SpeculativeSignal {
+    Ready(String),
+    Invalidated,
+}
+
 /// Driving Port: VoiceInput
 #[async_trait]
 pub trait VoiceInput: Send + Sync {
@@ -18,6 +33,18 @@ pub trait VoiceInput: Send + Sync {
     /// Returns `Ok(None)` when the input stream is exhausted (EOF / device
     /// closed) — the caller should exit its loop cleanly.
     async fn listen(&self) -> Result<Option<String>>;
+
+    /// Like `listen()`, but invokes `on_speculative` with provisional
+    /// transcripts as they become available, before the final transcript is
+    /// confirmed (Q2-26). Implementations that don't support the overlap
+    /// just call `listen()` and never invoke the callback.
+    async fn listen_with_speculative(
+        &self,
+        on_speculative: Box<dyn Fn(SpeculativeSignal) + Send + Sync>,
+    ) -> Result<Option<String>> {
+        let _ = on_speculative;
+        self.listen().await
+    }
 
     /// Short label shown in the terminal prompt before each capture.
     ///

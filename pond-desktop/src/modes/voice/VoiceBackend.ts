@@ -35,8 +35,13 @@ export interface ToolCallData {
  */
 export interface VoiceBackend {
   // ── Recording ──────────────────────────────────────────
-  /** VAD-aware recording: opens mic, waits for speech, auto-stops on silence. */
-  recordWithVad(): Promise<Blob | null>;
+  /**
+   * VAD-aware recording: opens mic, waits for speech, auto-stops on silence.
+   * `authToken` and `sessionId` let implementations fire a speculative LLM
+   * request during the silence-confirmation wait (Q2-26). Backends that don't
+   * use them may ignore both parameters.
+   */
+  recordWithVad(authToken?: string, sessionId?: string): Promise<Blob | null>;
   /** Cancel in-progress recording without sending. */
   abortRecording(): void;
 

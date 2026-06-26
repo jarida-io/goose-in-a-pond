@@ -78,13 +78,28 @@ export class WebVoiceBackend implements VoiceBackend {
   private wakeStream: MediaStream | null = null;
   private wakeInterval: ReturnType<typeof setInterval> | null = null;
 
+  // Q2-26: ASR transcript computed speculatively during silence-confirm wait.
+  // Tagged with the Blob it belongs to; runPipeline() reuses it only for that
+  // exact blob (reference equality).
+  private speculative: { wav: Blob; transcript: string } | null = null;
+
+  // Q2-26: LLM fetch fired as soon as speculative ASR resolved (mid-window).
+  // runPipeline() drains it when the confirmed transcript matches.
+  private speculativeLlm: {
+    transcript: string;
+    response: Promise<Response>;
+    abort: AbortController;
+    firedAt: number;
+    silenceOnset: number;
+  } | null = null;
+
   constructor(serverUrl: string) { this.serverUrl = serverUrl; }
 
   // ════════════════════════════════════════════════════════════════
   // Public -- VoiceBackend interface
   // ════════════════════════════════════════════════════════════════
 
-  async recordWithVad(): Promise<Blob | null> {
+  async recordWithVad(authToken?: string, sessionId?: string): Promise<Blob | null> {
     this.closeMic();
     this.cancelled = false;
 
@@ -96,6 +111,12 @@ export class WebVoiceBackend implements VoiceBackend {
     const td = new Float32Array(ctx.analyser.fftSize);
     const t0 = Date.now();
 
+    // Q2-26: speculative transcribe overlap — fire the transcribe call the
+    // moment trailing silence starts (not yet confirmed), instead of
+    // starting it only after the full silenceTimeoutMs wait elapses. If
+    // speech resumes before confirmation, the result is discarded.
+    let speculative: Promise<string | null> | null = null;
+
     return new Promise<Blob | null>((resolve) => {
       ctx.levelPump = setInterval(() => {
         if (this.cancelled || !this.recording) {
@@ -105,9 +126,45 @@ export class WebVoiceBackend implements VoiceBackend {
         const rms = calculateRms(td);
         this.onAudioLevel?.(rms);
 
-        if (Date.now() - t0 >= DEFAULT_VAD_CONFIG.maxDurationMs
-            || advanceVad(vad, rms, Date.now(), DEFAULT_VAD_CONFIG)) {
-          this.endPump(ctx); resolve(this.blobFromCtx(ctx));
+        const wasSpeech = vad.phase === "speech";
+        const wasTrailingSilence = vad.phase === "trailing_silence";
+        const stop = advanceVad(vad, rms, Date.now(), DEFAULT_VAD_CONFIG);
+
+        if (wasSpeech && vad.phase === "trailing_silence") {
+          const silenceOnset = Date.now();
+          speculative = this.transcribe(this.collectWav());
+          // Q2-26 LLM overlap: fire the chat stream as soon as ASR resolves,
+          // still within the silence-confirmation window.
+          speculative.then((transcript) => {
+            if (!transcript || this.cancelled) return;
+            const llmAbort = new AbortController();
+            const firedAt = Date.now();
+            const headers: Record<string, string> = { "Content-Type": "application/json" };
+            if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
+            const responsePromise = fetch(`${this.serverUrl}/api/v1/chat/stream`, {
+              method: "POST",
+              headers,
+              body: JSON.stringify({ message: transcript, session_id: sessionId, voice_mode: true }),
+              signal: llmAbort.signal,
+            });
+            this.speculativeLlm = { transcript, response: responsePromise, abort: llmAbort, firedAt, silenceOnset };
+          });
+        } else if (wasTrailingSilence && vad.phase === "speech") {
+          // False pause — discard speculative work
+          speculative = null;
+          if (this.speculativeLlm) { this.speculativeLlm.abort.abort(); this.speculativeLlm = null; }
+        }
+
+        if (Date.now() - t0 >= DEFAULT_VAD_CONFIG.maxDurationMs || stop) {
+          this.endPump(ctx);
+          const blob = this.blobFromCtx(ctx);
+          if (speculative) {
+            speculative.then((transcript) => {
+              this.speculative = transcript ? { wav: blob, transcript } : null;
+            }).finally(() => resolve(blob));
+          } else {
+            resolve(blob);
+          }
         }
       }, 30);
     });
@@ -128,9 +185,21 @@ export class WebVoiceBackend implements VoiceBackend {
     this.abortController = ac;
 
     try {
-      // Step 1: Transcribe
-      let text = await this.transcribe(await wav.arrayBuffer());
+      // Step 1: Transcribe (Q2-26: reuse the speculative result if this is
+      // the same recording it was computed for — skips a redundant call).
+      const reusable = this.speculative?.wav === wav ? this.speculative.transcript : null;
+      this.speculative = null;
+      let text = reusable ?? (await this.transcribe(await wav.arrayBuffer()));
       if (this.cancelled || !text) { this.onStateChange?.("idle"); return; }
+
+      // Q2-26 LLM overlap: drain the pre-started response if transcript matches.
+      const specLlm = this.speculativeLlm;
+      this.speculativeLlm = null;
+      const preStartedLlm =
+        specLlm && specLlm.transcript === text && !specLlm.abort.signal.aborted
+          ? { response: specLlm.response, firedAt: specLlm.firedAt, silenceOnset: specLlm.silenceOnset }
+          : null;
+      if (specLlm && !preStartedLlm) specLlm.abort.abort();
 
       // Step 1a: Strip wake word
       if (opts.stripWakeWord) {
@@ -167,12 +236,12 @@ export class WebVoiceBackend implements VoiceBackend {
       const stopThink = playThinkingTone();
       this.stopThinkingFn = stopThink;
 
-      // Step 2: SSE chat stream
+      // Step 2: SSE chat stream (passes pre-started speculative response if any)
       await this.streamChat(text, opts, ac, () => {
         stopThink(); this.stopThinkingFn = null;
         // Stop quip if still playing so first real sentence starts immediately
         if (!quipDone) { stopTtsPlayback(); resetTtsInterrupt(); }
-      });
+      }, preStartedLlm);
 
       if (this.stopThinkingFn) { this.stopThinkingFn(); this.stopThinkingFn = null; }
       if (!this.cancelled) this.onStateChange?.("idle");
@@ -192,6 +261,7 @@ export class WebVoiceBackend implements VoiceBackend {
     this.cancelled = true;
     this.pipelineActive = false;
     this.abortController?.abort(); this.abortController = null;
+    if (this.speculativeLlm) { this.speculativeLlm.abort.abort(); this.speculativeLlm = null; }
     if (this.stopThinkingFn) { this.stopThinkingFn(); this.stopThinkingFn = null; }
     // Stop any in-progress TTS: kills the active source, resolves pending
     // promises, and sets the interrupted flag so queued sentences are skipped.
@@ -236,6 +306,7 @@ export class WebVoiceBackend implements VoiceBackend {
   private async openMic(): Promise<RecordingContext> {
     const stream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
     const audioContext = new AudioContext();
+    if (audioContext.state === "suspended") await audioContext.resume();
     const source = audioContext.createMediaStreamSource(stream);
     const analyser = audioContext.createAnalyser();
     analyser.fftSize = 2048;
@@ -322,20 +393,37 @@ export class WebVoiceBackend implements VoiceBackend {
   // ════════════════════════════════════════════════════════════════
 
   private async streamChat(
-    text: string, opts: PipelineOpts, controller: AbortController, onFirst: () => void,
+    text: string,
+    opts: PipelineOpts,
+    controller: AbortController,
+    onFirst: () => void,
+    preStarted?: { response: Promise<Response>; firedAt: number; silenceOnset: number } | null,
   ): Promise<void> {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (opts.authToken) headers["Authorization"] = `Bearer ${opts.authToken}`;
 
-    const res = await fetch(`${opts.serverUrl}/api/v1/chat/stream`, {
-      method: "POST", headers, signal: controller.signal,
-      body: JSON.stringify({ message: text, session_id: opts.sessionId, voice_mode: true }),
-    });
+    // Q2-26: use the pre-started speculative response if available, else fresh fetch.
+    const [res, llmFiredAt, silenceOnset, usedSpeculative] = await (async (): Promise<
+      [Response, number, number, boolean]
+    > => {
+      if (preStarted && !controller.signal.aborted) {
+        const specRes = await preStarted.response.catch(() => null);
+        if (specRes?.ok) return [specRes, preStarted.firedAt, preStarted.silenceOnset, true];
+      }
+      const firedAt = Date.now();
+      const freshRes = await fetch(`${opts.serverUrl}/api/v1/chat/stream`, {
+        method: "POST", headers, signal: controller.signal,
+        body: JSON.stringify({ message: text, session_id: opts.sessionId, voice_mode: true }),
+      });
+      return [freshRes, firedAt, firedAt, false];
+    })();
+
     if (!res.ok || !res.body) throw new Error(`Chat failed: ${res.status} ${res.statusText}`);
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let sseBuf = "", thinkIn = false, firstSent = false, ttsBuf = "";
+    let ttftLogged = false;
     const ttsQ: string[] = [];
     let playing = false;
 
@@ -361,6 +449,11 @@ export class WebVoiceBackend implements VoiceBackend {
       while (!this.cancelled) {
         const { value, done } = await reader.read();
         if (done) break;
+        if (!ttftLogged) {
+          const now = Date.now();
+          console.info(`[Q2-26 TTFT] from-fire=${now - llmFiredAt}ms from-silence=${now - silenceOnset}ms (${usedSpeculative ? "speculative" : "fresh"})`);
+          ttftLogged = true;
+        }
         sseBuf += decoder.decode(value, { stream: true });
         const lines = sseBuf.split("\n");
         sseBuf = lines.pop() ?? "";

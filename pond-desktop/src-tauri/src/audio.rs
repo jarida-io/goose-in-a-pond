@@ -13,6 +13,8 @@ use std::sync::{
 use std::thread;
 use std::time::Duration;
 
+use crate::commands::audio_cmd::TranscriptResult;
+
 /// Shared audio state — stored in Tauri's managed state map.
 /// All fields are Send + Sync so Tauri is happy.
 pub struct AudioState {
@@ -259,6 +261,104 @@ pub fn resample_linear(samples: &[i16], from_rate: u32, to_rate: u32) -> Vec<i16
     out
 }
 
+/// Decides when to fire (and discard) a speculative transcribe request
+/// during the end-of-speech silence wait, decoupled from cpal/mic I/O so
+/// the decision logic can be unit tested with synthetic RMS sequences.
+///
+/// Mirrors `pond-adapters-whisper`'s VAD-overlap idea from Q2-26: instead
+/// of waiting for `silence_ms` of confirmed silence before transcribing,
+/// this fires the transcribe HTTP call on the *first* silent poll,
+/// overlapping whisper's response time with the rest of the confirmation
+/// wait instead of paying for it serially afterward.
+#[derive(Debug, PartialEq, Eq)]
+enum SilenceEvent {
+    /// No state transition — caller does nothing.
+    None,
+    /// First silent poll after speech: caller should fire a speculative
+    /// transcribe request for the audio captured so far.
+    SpawnSpeculative,
+    /// Speech resumed before silence was confirmed: caller should discard
+    /// any in-flight speculative request — it covers a too-short clip.
+    DiscardSpeculative,
+    /// `silence_ms` of silence confirmed: caller should stop recording.
+    /// Whatever speculative request is in flight (if any) was spawned from
+    /// this exact silence run and is safe to use as the final transcript.
+    Confirmed,
+}
+
+struct VadSilenceTracker {
+    silent_for_ms: u64,
+    silence_ms: u64,
+    poll_ms: u64,
+}
+
+impl VadSilenceTracker {
+    fn new(silence_ms: u64, poll_ms: u64) -> Self {
+        Self {
+            silent_for_ms: 0,
+            silence_ms,
+            poll_ms,
+        }
+    }
+
+    fn on_rms(&mut self, rms: f32, silence_threshold: f32) -> SilenceEvent {
+        if rms < silence_threshold {
+            let was_speaking = self.silent_for_ms == 0;
+            self.silent_for_ms += self.poll_ms;
+            if self.silent_for_ms >= self.silence_ms {
+                SilenceEvent::Confirmed
+            } else if was_speaking {
+                SilenceEvent::SpawnSpeculative
+            } else {
+                SilenceEvent::None
+            }
+        } else {
+            let was_silent = self.silent_for_ms != 0;
+            self.silent_for_ms = 0;
+            if was_silent {
+                SilenceEvent::DiscardSpeculative
+            } else {
+                SilenceEvent::None
+            }
+        }
+    }
+}
+
+/// Posts `wav` to `{base_url}/api/v1/transcribe` and returns the transcript.
+/// Runs on the calling (blocking) thread — callers spawn it on its own
+/// `std::thread` to overlap it with the rest of the VAD confirmation wait.
+fn transcribe_via_http(base_url: &str, auth_token: &str, wav: Vec<u8>) -> Result<String, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+
+    let part = reqwest::blocking::multipart::Part::bytes(wav)
+        .file_name("audio.wav")
+        .mime_str("audio/wav")
+        .map_err(|e| e.to_string())?;
+    let form = reqwest::blocking::multipart::Form::new().part("audio", part);
+
+    let mut req = client
+        .post(format!("{base_url}/api/v1/transcribe"))
+        .multipart(form);
+    if !auth_token.is_empty() {
+        req = req.header("Authorization", format!("Bearer {auth_token}"));
+    }
+
+    let res = req
+        .send()
+        .map_err(|e| format!("Transcribe request failed: {e}"))?;
+    if !res.status().is_success() {
+        return Err(format!("Transcribe error: {}", res.status()));
+    }
+
+    let parsed: TranscriptResult = res
+        .json()
+        .map_err(|e| format!("Failed to parse transcript: {e}"))?;
+    Ok(parsed.text)
+}
+
 /// VAD-aware recording — mirrors the CLI's `record_mono_f32_vad`.
 ///
 /// Instead of the start/stop/countdown approach, this:
@@ -267,14 +367,27 @@ pub fn resample_linear(samples: &[i16], from_rate: u32, to_rate: u32) -> Vec<i16
 ///   3. Stops when the user pauses for `silence_ms` consecutive milliseconds
 ///   4. Hard cap at `max_record_secs` total recording time
 ///
+/// `base_url`/`auth_token`, if given, enable the Q2-26 speculative-transcribe
+/// overlap: the moment silence is first detected (not yet confirmed), a
+/// transcribe HTTP call is fired in the background. If that silence run goes
+/// on to be confirmed, its result is returned alongside the WAV bytes so the
+/// caller can skip a second, redundant transcribe call.
+///
 /// Emits `audio-level` events for waveform animation.
 /// Returns 16 kHz mono WAV bytes, or empty Vec if no speech detected.
+/// Called by the Tauri command when the speculative ASR result is ready
+/// (before silence is fully confirmed). Used to fire the LLM request early.
+pub type OnAsrReady = Box<dyn Fn(&str) + Send + 'static>;
+
 pub fn record_with_vad(
     app: &tauri::AppHandle,
     max_wait_secs: u32,
     max_record_secs: u32,
     silence_ms: u64,
-) -> Result<Vec<u8>, String> {
+    base_url: &str,
+    auth_token: &str,
+    on_asr_ready: Option<OnAsrReady>,
+) -> Result<(Vec<u8>, Option<String>), String> {
     const SPEECH_RMS: f32  = 0.010; // onset threshold — lowered for better sensitivity
     const SILENCE_RMS: f32 = 0.005; // end-of-speech threshold (hysteresis)
     const POLL_MS: u64     = 30;
@@ -365,13 +478,20 @@ pub fn record_with_vad(
 
     if !speech_detected {
         drop(stream);
-        return Ok(Vec::new()); // no speech → empty
+        return Ok((Vec::new(), None)); // no speech → empty
     }
 
     // ── Phase 2: record until end-of-speech ─────────────────────────────────
     let max_record_ms = max_record_secs as u64 * 1000;
     let mut recorded_ms: u64 = 0;
-    let mut silent_for: u64 = 0;
+    let mut vad = VadSilenceTracker::new(silence_ms, POLL_MS);
+    // Q2-26: channel carries the speculative ASR result from the worker thread.
+    // Using a channel (vs JoinHandle) lets the polling loop non-blocking check
+    // whether ASR finished early and fire on_asr_ready mid-window.
+    let mut asr_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>> = None;
+    let mut asr_text_early: Option<String> = None; // set when ASR resolves early
+    let mut confirmed = false;
+    let speculative_enabled = !base_url.is_empty();
 
     while recorded_ms < max_record_ms {
         thread::sleep(Duration::from_millis(POLL_MS));
@@ -384,14 +504,60 @@ pub fn record_with_vad(
             compute_rms(&buf[start..])
         };
 
-        if rms < SILENCE_RMS {
-            silent_for += POLL_MS;
-            if silent_for >= silence_ms {
-                tracing::debug!("VAD: end-of-speech after {}ms silence ({}ms recorded)", silent_for, recorded_ms);
+        // Non-blocking check: did speculative ASR finish before silence confirmed?
+        if asr_text_early.is_none() {
+            if let Some(ref rx) = asr_rx {
+                if let Ok(result) = rx.try_recv() {
+                    asr_rx = None; // consumed
+                    if let Ok(text) = result {
+                        tracing::debug!("Q2-26: speculative ASR ready early: {:?}", text);
+                        asr_text_early = Some(text.clone());
+                        if let Some(ref cb) = on_asr_ready {
+                            cb(&text);
+                        }
+                    }
+                }
+            }
+        }
+
+        match vad.on_rms(rms, SILENCE_RMS) {
+            SilenceEvent::SpawnSpeculative if speculative_enabled => {
+                let snapshot = samples.lock().unwrap().clone();
+                let pcm_16k = if native_rate != 16000 {
+                    resample_linear(&snapshot, native_rate, 16000)
+                } else {
+                    snapshot
+                };
+                let wav = match encode_wav(&pcm_16k, 16000) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        tracing::warn!("speculative WAV encode failed: {e}");
+                        continue;
+                    }
+                };
+                let (tx, rx) = std::sync::mpsc::channel();
+                asr_rx = Some(rx);
+                let bu = base_url.to_string();
+                let at = auth_token.to_string();
+                thread::spawn(move || {
+                    let _ = tx.send(transcribe_via_http(&bu, &at, wav));
+                });
+            }
+            SilenceEvent::SpawnSpeculative => {} // speculative overlap disabled (no base_url)
+            SilenceEvent::DiscardSpeculative => {
+                // False pause — drop the in-flight channel; thread exits on next send error
+                asr_rx = None;
+                asr_text_early = None;
+            }
+            SilenceEvent::Confirmed => {
+                tracing::debug!(
+                    "VAD: end-of-speech confirmed ({}ms recorded)",
+                    recorded_ms
+                );
+                confirmed = true;
                 break;
             }
-        } else {
-            silent_for = 0;
+            SilenceEvent::None => {}
         }
     }
 
@@ -399,7 +565,7 @@ pub fn record_with_vad(
 
     let recorded = samples.lock().unwrap().clone();
     if recorded.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
 
     // Resample to 16 kHz
@@ -409,7 +575,20 @@ pub fn record_with_vad(
         recorded
     };
 
-    encode_wav(&pcm_16k, 16000)
+    let wav = encode_wav(&pcm_16k, 16000)?;
+
+    let speculative_transcript = if confirmed {
+        if let Some(text) = asr_text_early {
+            Some(text) // callback already fired; transcript was ready early
+        } else {
+            // ASR thread still running — block until it finishes (at most a few ms)
+            asr_rx.and_then(|rx| rx.recv().ok().and_then(|r| r.ok()))
+        }
+    } else {
+        None
+    };
+
+    Ok((wav, speculative_transcript))
 }
 
 /// Start a background wake-word listening loop.
@@ -852,4 +1031,121 @@ pub fn encode_wav(samples: &[i16], sample_rate: u32) -> Result<Vec<u8>, String> 
         buf.extend_from_slice(&s.to_le_bytes());
     }
     Ok(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Q2-26 evidence: real wall-clock comparison of serial vs. overlapped
+    /// transcription, using the actual `transcribe_via_http` function
+    /// against a live pond-server (which proxies to whisper.cpp).
+    ///
+    /// To run (with pond-server + whisper-server already running):
+    /// ```bash
+    /// PIPELINE_TEST_BASE_URL=http://127.0.0.1:4000 \
+    ///   cargo test -- --ignored --nocapture speculative_overlap
+    /// ```
+    #[test]
+    #[ignore]
+    fn speculative_overlap_beats_serial_wall_time() {
+        let Some(base_url) = std::env::var("PIPELINE_TEST_BASE_URL").ok() else {
+            eprintln!("set PIPELINE_TEST_BASE_URL to run this test");
+            return;
+        };
+        let wav_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/blobs/jfk.wav");
+        let wav = std::fs::read(&wav_path).expect("jfk.wav fixture missing");
+        const SILENCE_MS: u64 = 400; // matches record_with_vad's confirmation window
+
+        // ── Old behavior: wait for confirmation, THEN transcribe ──────────
+        let serial_start = std::time::Instant::now();
+        thread::sleep(Duration::from_millis(SILENCE_MS));
+        let serial_transcript =
+            transcribe_via_http(&base_url, "", wav.clone()).expect("serial transcribe failed");
+        let serial_elapsed = serial_start.elapsed();
+
+        // ── New behavior: fire transcribe on first silence dip, overlapping
+        // it with the rest of the confirmation wait ──────────────────────
+        let overlapped_start = std::time::Instant::now();
+        let base_url_clone = base_url.clone();
+        let wav_clone = wav.clone();
+        let handle = thread::spawn(move || transcribe_via_http(&base_url_clone, "", wav_clone));
+        thread::sleep(Duration::from_millis(SILENCE_MS));
+        let overlapped_transcript = handle.join().unwrap().expect("overlapped transcribe failed");
+        let overlapped_elapsed = overlapped_start.elapsed();
+
+        assert_eq!(serial_transcript, overlapped_transcript, "same audio should transcribe identically");
+        println!(
+            "serial: {:?}  overlapped: {:?}  saved: {:?}",
+            serial_elapsed,
+            overlapped_elapsed,
+            serial_elapsed.saturating_sub(overlapped_elapsed)
+        );
+        assert!(
+            overlapped_elapsed < serial_elapsed,
+            "overlapped path should be faster: serial={:?} overlapped={:?}",
+            serial_elapsed,
+            overlapped_elapsed
+        );
+    }
+
+    const SPEECH: f32 = 1.0;
+    const QUIET: f32 = 0.0;
+    const THRESHOLD: f32 = 0.5;
+
+    #[test]
+    fn tracker_does_nothing_while_speech_continues() {
+        let mut vad = VadSilenceTracker::new(360, 30);
+        for _ in 0..10 {
+            assert_eq!(vad.on_rms(SPEECH, THRESHOLD), SilenceEvent::None);
+        }
+    }
+
+    #[test]
+    fn tracker_spawns_once_on_first_silent_poll_then_goes_quiet() {
+        let mut vad = VadSilenceTracker::new(360, 30);
+        vad.on_rms(SPEECH, THRESHOLD);
+        assert_eq!(vad.on_rms(QUIET, THRESHOLD), SilenceEvent::SpawnSpeculative);
+        assert_eq!(vad.on_rms(QUIET, THRESHOLD), SilenceEvent::None);
+        assert_eq!(vad.on_rms(QUIET, THRESHOLD), SilenceEvent::None);
+    }
+
+    #[test]
+    fn tracker_confirms_after_silence_ms_elapses() {
+        let mut vad = VadSilenceTracker::new(90, 30); // 3 polls to confirm
+        vad.on_rms(SPEECH, THRESHOLD);
+        assert_eq!(vad.on_rms(QUIET, THRESHOLD), SilenceEvent::SpawnSpeculative); // 30ms
+        assert_eq!(vad.on_rms(QUIET, THRESHOLD), SilenceEvent::None); // 60ms
+        assert_eq!(vad.on_rms(QUIET, THRESHOLD), SilenceEvent::Confirmed); // 90ms
+    }
+
+    #[test]
+    fn tracker_discards_speculative_on_resumed_speech() {
+        let mut vad = VadSilenceTracker::new(360, 30);
+        vad.on_rms(SPEECH, THRESHOLD);
+        assert_eq!(vad.on_rms(QUIET, THRESHOLD), SilenceEvent::SpawnSpeculative);
+        assert_eq!(vad.on_rms(QUIET, THRESHOLD), SilenceEvent::None);
+        // False pause — speech resumes before confirmation.
+        assert_eq!(vad.on_rms(SPEECH, THRESHOLD), SilenceEvent::DiscardSpeculative);
+        assert_eq!(vad.on_rms(SPEECH, THRESHOLD), SilenceEvent::None);
+    }
+
+    #[test]
+    fn tracker_spawns_a_fresh_job_for_each_new_silence_run() {
+        let mut vad = VadSilenceTracker::new(360, 30);
+        vad.on_rms(SPEECH, THRESHOLD);
+        assert_eq!(vad.on_rms(QUIET, THRESHOLD), SilenceEvent::SpawnSpeculative);
+        assert_eq!(vad.on_rms(SPEECH, THRESHOLD), SilenceEvent::DiscardSpeculative);
+        // New silence run after the false pause — spawns again, independent
+        // of the discarded one.
+        assert_eq!(vad.on_rms(QUIET, THRESHOLD), SilenceEvent::SpawnSpeculative);
+    }
+
+    #[test]
+    fn tracker_repeated_speech_after_speech_is_a_noop() {
+        let mut vad = VadSilenceTracker::new(360, 30);
+        assert_eq!(vad.on_rms(SPEECH, THRESHOLD), SilenceEvent::None);
+        assert_eq!(vad.on_rms(SPEECH, THRESHOLD), SilenceEvent::None);
+    }
 }

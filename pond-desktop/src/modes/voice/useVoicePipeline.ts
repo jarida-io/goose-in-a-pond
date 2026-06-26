@@ -202,7 +202,7 @@ export function useVoicePipeline(): VoicePipelineAPI {
       if (!backend) return;
 
       dispatch({ type: "SET_VOICE_STATE", payload: "recording" });
-      backend.recordWithVad().then((blob) => {
+      backend.recordWithVad(stateRef.current.sessionToken ?? undefined, stateRef.current.sessionId ?? undefined).then((blob) => {
         if (blob) {
           dispatch({ type: "SET_VOICE_STATE", payload: "thinking" });
           dispatch({
@@ -242,8 +242,9 @@ export function useVoicePipeline(): VoicePipelineAPI {
   useEffect(() => {
     if (state.voiceRequestId === 0) return;
     const decision = resolveVoiceDecision({
-      serverOnline: state.serverOnline,
-      voiceState: state.voiceState as VoiceState,
+      serverHealthy: state.serverOnline,
+      isRecording: state.voiceState === "recording",
+      isProcessing: state.voiceState === "thinking" || state.voiceState === "speaking",
     });
     if (decision === "start-recording") startRecording();
     else if (decision === "stop-and-send") stopAndSend();
@@ -280,7 +281,7 @@ export function useVoicePipeline(): VoicePipelineAPI {
     }, maxSecs * 1000);
 
     // VAD recording
-    backend.recordWithVad().then((blob) => {
+    backend.recordWithVad(stateRef.current.sessionToken ?? undefined, stateRef.current.sessionId ?? undefined).then((blob) => {
       clearTimers();
       if (blob) {
         dispatch({ type: "SET_VOICE_STATE", payload: "thinking" });

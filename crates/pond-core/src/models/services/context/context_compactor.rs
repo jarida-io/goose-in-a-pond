@@ -21,6 +21,7 @@ use anyhow::Result;
 const CHARS_PER_TOKEN: usize = 4;
 const KEEP_RECENT_MESSAGES: usize = 6;
 
+#[derive(Clone)]
 pub struct ContextCompactor {
     /// Fraction of the usable history budget that triggers compaction.
     /// Default: 0.80 (trigger when 80% full).

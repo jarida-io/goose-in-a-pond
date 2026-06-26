@@ -54,6 +54,14 @@ export class TauriVoiceBackend implements VoiceBackend {
   private readonly serverUrl: string;
   private readonly unlisteners: Promise<() => void>[] = [];
 
+  // Q2-26: transcript computed speculatively during the last recordWithVad()
+  // call's silence-confirmation wait, if any, tagged with the exact Blob it
+  // belongs to. runPipeline() only reuses it when passed that same Blob by
+  // reference — the wake-word path calls runPipeline() with audio captured
+  // independently in Rust, and must never pick up a stale transcript from
+  // an unrelated recordWithVad() call.
+  private speculative: { wav: Blob; transcript: string } | null = null;
+
   constructor(serverUrl: string) {
     this.serverUrl = serverUrl;
     this.registerListeners();
@@ -136,10 +144,15 @@ export class TauriVoiceBackend implements VoiceBackend {
 
   // ── Recording ─────────────────────────────────────────────
 
-  async recordWithVad(): Promise<Blob | null> {
-    const bytes = await invoke<number[]>("record_with_vad");
-    if (!bytes?.length) return null;
-    return new Blob([new Uint8Array(bytes)], { type: "audio/wav" });
+  async recordWithVad(authToken?: string, sessionId?: string): Promise<Blob | null> {
+    const result = await invoke<{ wav: number[]; transcript: string | null }>(
+      "record_with_vad",
+      { authToken: authToken ?? "", sessionId: sessionId ?? null },
+    );
+    if (!result.wav?.length) return null;
+    const blob = new Blob([new Uint8Array(result.wav)], { type: "audio/wav" });
+    this.speculative = result.transcript ? { wav: blob, transcript: result.transcript } : null;
+    return blob;
   }
 
   abortRecording(): void {
@@ -151,10 +164,13 @@ export class TauriVoiceBackend implements VoiceBackend {
   async runPipeline(wav: Blob, opts: PipelineOpts): Promise<void> {
     const buffer = await wav.arrayBuffer();
     const wavBytes = Array.from(new Uint8Array(buffer));
+    const transcript = this.speculative?.wav === wav ? this.speculative.transcript : null;
+    this.speculative = null;
     await invoke("run_voice_pipeline", {
       wavBytes,
       authToken: opts.authToken ?? "",
       sessionId: opts.sessionId ?? "",
+      transcript,
     });
   }
 

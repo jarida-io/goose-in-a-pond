@@ -7,6 +7,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
+// ── Q2-26 speculative LLM slot ─────────────────────────────────────────────
+// Holds a live HTTP response from a speculative POST to /api/v1/chat/stream
+// that was fired as soon as speculative ASR resolved (mid-silence window).
+// `run_voice_pipeline` consumes it so the LLM has already been running for
+// (silence_window − asr_latency) ms before the pipeline even starts.
+
+struct SpeculativeLlmEntry {
+    transcript: String,
+    response: reqwest::Response,
+    fired_at: std::time::Instant,
+}
+
+pub struct SpeculativeLlmSlot(pub Arc<tokio::sync::Mutex<Option<SpeculativeLlmEntry>>>);
+
+impl SpeculativeLlmSlot {
+    pub fn new() -> Self {
+        Self(Arc::new(tokio::sync::Mutex::new(None)))
+    }
+}
+
 /// Global audio kill switch — stops ALL Goose audio (TTS + thinking tone)
 /// when the wake word is detected. Checked by `play_wav_interruptible` every
 /// 50 ms during playback. Reset at the start of each voice pipeline run.
@@ -133,22 +153,86 @@ pub async fn abort_recording(
 
 /// VAD-aware recording — matches the CLI's recording technique.
 ///
-/// Opens the mic, waits for speech, records until silence, returns WAV bytes.
-/// No countdown timer, no manual stop needed. Emits `audio-level` events
-/// for waveform animation during recording.
+/// Opens the mic, waits for speech, records until silence, returns WAV bytes
+/// plus an optional pre-computed transcript. No countdown timer, no manual
+/// stop needed. Emits `audio-level` events for waveform animation during
+/// recording.
 ///
-/// Returns empty Vec if no speech is detected within the wait period.
+/// `transcript` is set (Q2-26) when a speculative transcribe call fired
+/// during the silence-confirmation wait, overlapping it with whisper's
+/// response time instead of starting it only after recording stops. The
+/// caller should pass it to `run_voice_pipeline` to skip a redundant,
+/// already-done transcribe call.
+///
+/// `wav`/`transcript` are both empty/`None` if no speech is detected within
+/// the wait period.
+#[derive(serde::Serialize)]
+pub struct VadRecording {
+    pub wav: Vec<u8>,
+    pub transcript: Option<String>,
+}
+
 #[tauri::command]
 pub async fn record_with_vad(
     app: AppHandle,
-) -> Result<Vec<u8>, String> {
+    auth_token: String,
+    // session_id must match the one passed to run_voice_pipeline so the
+    // speculative LLM fires against the correct conversation context.
+    session_id: Option<String>,
+    server: State<'_, ServerProcess>,
+    speculative_llm: State<'_, SpeculativeLlmSlot>,
+) -> Result<VadRecording, String> {
+    let base_url = server.get_url();
+
+    // Build the on_asr_ready callback that fires the LLM as soon as the
+    // speculative ASR resolves — before silence is fully confirmed.
+    let rt = tokio::runtime::Handle::current();
+    let slot = speculative_llm.0.clone();
+    let bu = base_url.clone();
+    let at = auth_token.clone();
+    let sid = session_id.clone();
+
+    let on_asr_ready: audio::OnAsrReady = Box::new(move |text: &str| {
+        let text = text.to_string();
+        let slot = slot.clone();
+        let bu = bu.clone();
+        let at = at.clone();
+        let sid = sid.clone();
+        rt.spawn(async move {
+            let client = reqwest::Client::new();
+            let mut req = client
+                .post(format!("{}/api/v1/chat/stream", bu))
+                .json(&serde_json::json!({
+                    "message": text,
+                    "session_id": sid,
+                    "voice_mode": true,
+                }));
+            if !at.is_empty() {
+                req = req.header("Authorization", format!("Bearer {}", at));
+            }
+            let fired_at = std::time::Instant::now();
+            match req.send().await {
+                Ok(response) => {
+                    tracing::debug!("Q2-26: speculative LLM request sent for {:?}", text);
+                    let mut guard = slot.lock().await;
+                    *guard = Some(SpeculativeLlmEntry { transcript: text, response, fired_at });
+                }
+                Err(e) => tracing::warn!("Q2-26: speculative LLM fetch failed: {e}"),
+            }
+        });
+    });
+
     tokio::task::spawn_blocking(move || {
         audio::record_with_vad(
             &app,
             10,   // max 10s waiting for speech to start
             30,   // hard cap on total recording
             400,  // end-of-speech silence threshold (ms)
+            &base_url,
+            &auth_token,
+            Some(on_asr_ready),
         )
+        .map(|(wav, transcript)| VadRecording { wav, transcript })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -251,9 +335,13 @@ pub async fn run_voice_pipeline(
     wav_bytes: Vec<u8>,
     auth_token: String,
     session_id: Option<String>,
+    // Q2-26: pre-computed transcript from `record_with_vad`'s speculative
+    // overlap. When present, the transcribe step below is skipped entirely.
+    transcript: Option<String>,
     server: State<'_, ServerProcess>,
     kill_switch: State<'_, AudioKillSwitch>,
     pipeline_flag: State<'_, PipelineActive>,
+    speculative_llm: State<'_, SpeculativeLlmSlot>,
 ) -> Result<(), String> {
     use crate::tts_text;
 
@@ -280,39 +368,44 @@ pub async fn run_voice_pipeline(
         Some(format!("Bearer {}", auth_token))
     };
 
-    // ── 1. Transcribe (quip starts AFTER, not before — avoids talking over user) ──
-    let part = multipart::Part::bytes(wav_bytes)
-        .file_name("audio.wav")
-        .mime_str("audio/wav")
-        .map_err(|e| e.to_string())?;
-    let form = multipart::Form::new().part("audio", part);
+    // ── 1. Transcribe (skip if Q2-26 already computed one during recording) ──
+    let raw_transcript = if let Some(t) = transcript {
+        t
+    } else {
+        let part = multipart::Part::bytes(wav_bytes)
+            .file_name("audio.wav")
+            .mime_str("audio/wav")
+            .map_err(|e| e.to_string())?;
+        let form = multipart::Form::new().part("audio", part);
 
-    let mut transcribe_req = client
-        .post(format!("{}/api/v1/transcribe", base_url))
-        .multipart(form);
-    if let Some(ref auth) = bearer {
-        transcribe_req = transcribe_req.header("Authorization", auth.as_str());
-    }
+        let mut transcribe_req = client
+            .post(format!("{}/api/v1/transcribe", base_url))
+            .multipart(form);
+        if let Some(ref auth) = bearer {
+            transcribe_req = transcribe_req.header("Authorization", auth.as_str());
+        }
 
-    let transcript_res = transcribe_req
-        .send()
-        .await
-        .map_err(|e| {
-            let msg = format!("Transcribe request failed: {e}");
+        let transcript_res = transcribe_req
+            .send()
+            .await
+            .map_err(|e| {
+                let msg = format!("Transcribe request failed: {e}");
+                let _ = app.emit("pipeline-error", &msg);
+                msg
+            })?;
+
+        if !transcript_res.status().is_success() {
+            let msg = format!("Transcribe error: {}", transcript_res.status());
             let _ = app.emit("pipeline-error", &msg);
-            msg
-        })?;
+            return Err(msg);
+        }
 
-    if !transcript_res.status().is_success() {
-        let msg = format!("Transcribe error: {}", transcript_res.status());
-        let _ = app.emit("pipeline-error", &msg);
-        return Err(msg);
-    }
-
-    let TranscriptResult { text: raw_transcript } = transcript_res
-        .json::<TranscriptResult>()
-        .await
-        .map_err(|e| format!("Failed to parse transcript: {e}"))?;
+        transcript_res
+            .json::<TranscriptResult>()
+            .await
+            .map_err(|e| format!("Failed to parse transcript: {e}"))?
+            .text
+    };
 
     // ── Strip Whisper artifacts (matching CLI's false-positive curbing) ──
     let transcript = tts_text::strip_whisper_artifacts(&raw_transcript);
@@ -359,21 +452,38 @@ pub async fn run_voice_pipeline(
         "voice_mode": true
     });
 
-    let mut chat_builder = client
-        .post(format!("{}/api/v1/chat/stream", base_url))
-        .json(&chat_req);
-    if let Some(ref auth) = bearer {
-        chat_builder = chat_builder.header("Authorization", auth.as_str());
-    }
-
-    let mut chat_res = chat_builder
-        .send()
-        .await
-        .map_err(|e| {
-            let msg = format!("Chat request failed: {e}");
-            let _ = app.emit("pipeline-error", &msg);
-            msg
-        })?;
+    // ── Q2-26: use speculative LLM response if transcript matches ─────────────
+    // The response was sent during the silence-confirm window (while we were
+    // still waiting to be sure the user stopped speaking), so the server has
+    // already been running inference for (window − asr_latency) ms.
+    let (mut chat_res, used_speculative, llm_fired_at) = {
+        let mut slot = speculative_llm.0.lock().await;
+        if slot.as_ref().map_or(false, |e| e.transcript == transcript) {
+            let entry = slot.take().unwrap();
+            tracing::debug!("Q2-26: reusing speculative LLM response (server had early start)");
+            (entry.response, true, entry.fired_at)
+        } else {
+            if slot.is_some() {
+                tracing::debug!("Q2-26: discarding stale speculative LLM slot");
+                *slot = None;
+            }
+            drop(slot);
+            let mut builder = client
+                .post(format!("{}/api/v1/chat/stream", base_url))
+                .json(&chat_req);
+            if let Some(ref auth) = bearer {
+                builder = builder.header("Authorization", auth.as_str());
+            }
+            let fired_at = std::time::Instant::now();
+            let response = builder.send().await.map_err(|e| {
+                let msg = format!("Chat request failed: {e}");
+                let _ = app.emit("pipeline-error", &msg);
+                msg
+            })?;
+            (response, false, fired_at)
+        }
+    };
+    let mut ttft_logged = false;
 
     // ── Thinking tone — loops on a separate thread while the LLM is working ──
     // A subtle rhythmic pulse that fills the silence between the quip and the
@@ -470,6 +580,16 @@ pub async fn run_voice_pipeline(
         .await
         .map_err(|e| format!("Stream error: {e}"))?
     {
+        if !ttft_logged {
+            let ttft_ms = llm_fired_at.elapsed().as_millis();
+            tracing::info!(
+                "[Q2-26 TTFT] {}ms ({})",
+                ttft_ms,
+                if used_speculative { "speculative" } else { "fresh" }
+            );
+            let _ = app.emit("ttft", serde_json::json!({ "ms": ttft_ms, "speculative": used_speculative }));
+            ttft_logged = true;
+        }
         line_buf.push_str(&String::from_utf8_lossy(&chunk));
 
         // Drain all complete lines from the buffer.
