@@ -35,7 +35,8 @@ fn is_dismissal_or_exit_phrase(text: &str) -> bool {
     let lower = lower.trim_end_matches(|c: char| c == '.' || c == '!');
     matches!(
         lower,
-        "bye" | "goodbye"
+        "bye"
+            | "goodbye"
             | "good bye"
             | "dismissed"
             | "go to sleep"
@@ -1309,7 +1310,11 @@ impl ChatService {
     /// - Announces MCP tool calls with a short spoken phrase before execution.
     /// - Speaking happens *inside* this method; callers must NOT call
     ///   `voice_output.speak()` on the returned text.
-    pub async fn chat_stream_once(&self, message: String, fired_at: std::time::Instant) -> Result<String> {
+    pub async fn chat_stream_once(
+        &self,
+        message: String,
+        fired_at: std::time::Instant,
+    ) -> Result<String> {
         // Persist user message
         let user_msg = ChatMessage::user(message.clone());
         let session_msg = SessionMessage::new(
@@ -1555,12 +1560,14 @@ impl ChatService {
     /// call, so barge-in still works during a speculative response.
     async fn listen_with_speculative_chat(
         &self,
-    ) -> Result<(Option<String>, Option<tokio::task::JoinHandle<Result<String>>>)> {
+    ) -> Result<(
+        Option<String>,
+        Option<tokio::task::JoinHandle<Result<String>>>,
+    )> {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SpeculativeSignal>();
-        let callback: Box<dyn Fn(SpeculativeSignal) + Send + Sync> =
-            Box::new(move |signal| {
-                let _ = tx.send(signal);
-            });
+        let callback: Box<dyn Fn(SpeculativeSignal) + Send + Sync> = Box::new(move |signal| {
+            let _ = tx.send(signal);
+        });
 
         let listen_fut = self.voice_input.listen_with_speculative(callback);
         tokio::pin!(listen_fut);
@@ -1908,7 +1915,8 @@ mod tests {
         let (transcript, handle) = service.listen_with_speculative_chat().await.unwrap();
         assert_eq!(transcript, Some("hello".to_string()));
 
-        let handle = handle.expect("confirmed, non-dismissal transcript must yield a speculative handle");
+        let handle =
+            handle.expect("confirmed, non-dismissal transcript must yield a speculative handle");
         let response = handle.await.unwrap().unwrap();
         assert_eq!(response, "Echo: hello");
     }

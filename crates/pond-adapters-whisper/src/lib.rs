@@ -749,10 +749,7 @@ pub(crate) fn record_mono_f32_vad(
                 speculative_ready = None;
             }
             VadEvent::Confirmed => {
-                tracing::debug!(
-                    "VAD: end-of-speech confirmed ({}ms total)",
-                    recorded_ms
-                );
+                tracing::debug!("VAD: end-of-speech confirmed ({}ms total)", recorded_ms);
                 confirmed = true;
                 break;
             }

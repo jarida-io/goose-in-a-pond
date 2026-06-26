@@ -334,7 +334,10 @@ impl WhisperRsInput {
                 if let Some(transcript) = speculative_transcript {
                     return Ok(SpeechCapture::Transcript(transcript));
                 }
-                Ok(SpeechCapture::Samples(resample_to_16k(&samples, sample_rate)))
+                Ok(SpeechCapture::Samples(resample_to_16k(
+                    &samples,
+                    sample_rate,
+                )))
             }
         })
         .await
@@ -469,7 +472,10 @@ mod tests {
             .expect("transcription should not error");
         let elapsed = start.elapsed();
 
-        assert!(!transcript.trim().is_empty(), "jfk.wav should transcribe to real text");
+        assert!(
+            !transcript.trim().is_empty(),
+            "jfk.wav should transcribe to real text"
+        );
         println!(
             "whisper inference wall time: {:?} (silence-confirmation window this overlaps with: {}ms)",
             elapsed, DEFAULT_SILENCE_MS
