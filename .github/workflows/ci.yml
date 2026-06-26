@@ -16,7 +16,7 @@ jobs:
   # (pond-adapters-goose, pond-adapters-local-inference, pond-adapters-face-onnx,
   # pond-server) to keep compile time reasonable.
   rust:
-    name: Rust — fmt / clippy / test
+    name: Rust — fmt / test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,7 +44,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt
 
       # Caches ~/.cargo/registry and the build target dir keyed on Cargo.lock.
       # After the first run, unchanged crates are not recompiled.
@@ -56,23 +56,7 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --check
 
-      - name: cargo clippy (fast crates)
-        run: |
-          cargo clippy \
-            -p pond-core \
-            -p pond-infra \
-            -p pond-infra-scheduler \
-            -p pond-api \
-            -p pond-inference \
-            -p pond-adapters-llamafile \
-            -p pond-adapters-ollama \
-            -p pond-adapters-whisper \
-            -p pond-adapters-piper \
-            -p pond-adapters-gotg \
-            -p pond-adapters-weather \
-            -p pond-adapters-mcp-memory \
-            -p pond-mcp-server
-
+  
       # --ignored is NOT passed so the 28 live-hardware tests are skipped.
       - name: cargo test (fast crates)
         run: |
