@@ -135,9 +135,16 @@ mod tests {
     /// (motion, presence, temperature, security, flood).
     fn is_device_actionable(msg: &str) -> bool {
         let lower = msg.to_lowercase();
-        ["motion detected", "lights", "temperature", "lock", "flood", "smoke"]
-            .iter()
-            .any(|kw| lower.contains(kw))
+        [
+            "motion detected",
+            "lights",
+            "temperature",
+            "lock",
+            "flood",
+            "smoke",
+        ]
+        .iter()
+        .any(|kw| lower.contains(kw))
     }
 
     // ── Concrete use case: alerts-triage agent ────────────────────────────────
@@ -152,8 +159,7 @@ mod tests {
         let device_agent = Arc::new(LabelledAgent("DeviceAgent"));
         let ack_agent = Arc::new(LabelledAgent("AlertAck"));
 
-        let triage = DelegatingAgent::new(ack_agent)
-            .route(is_device_actionable, device_agent);
+        let triage = DelegatingAgent::new(ack_agent).route(is_device_actionable, device_agent);
 
         // Device-actionable alert → DeviceAgent
         let device_resp = triage
@@ -249,8 +255,7 @@ mod tests {
         let device_agent = Arc::new(LabelledAgent("DeviceAgent"));
         let ack_agent = Arc::new(LabelledAgent("AlertAck"));
 
-        let triage = DelegatingAgent::new(ack_agent)
-            .route(is_device_actionable, device_agent);
+        let triage = DelegatingAgent::new(ack_agent).route(is_device_actionable, device_agent);
 
         let mut stream = triage
             .chat_stream(make_request("flood sensor triggered", session_id))
@@ -262,7 +267,9 @@ mod tests {
         while let Some(ev) = stream.next().await {
             match ev.unwrap() {
                 AgentStreamEvent::Text { content } => text_content = content,
-                AgentStreamEvent::Done { session_id: sid, .. } => done_session_id = sid,
+                AgentStreamEvent::Done {
+                    session_id: sid, ..
+                } => done_session_id = sid,
                 _ => {}
             }
         }

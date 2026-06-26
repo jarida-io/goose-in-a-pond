@@ -28,7 +28,10 @@ impl MemoryAwareAgent {
     async fn process(&self, message: &str, session_id: &str) -> String {
         let lower = message.to_lowercase();
         if let Some(_) = lower.strip_prefix("remember ") {
-            let fact = message["remember ".len()..].trim_end_matches('.').trim().to_string();
+            let fact = message["remember ".len()..]
+                .trim_end_matches('.')
+                .trim()
+                .to_string();
             let fragment = MemoryFragment::from_chat(
                 uuid::Uuid::new_v4().to_string(),
                 None::<String>,

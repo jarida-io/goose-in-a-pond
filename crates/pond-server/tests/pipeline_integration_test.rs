@@ -80,8 +80,7 @@ async fn text_mode_listen_think_speak() {
     storage.create_session(session_id.clone()).await.unwrap();
     let output = Arc::new(CapturingVoiceOutput::default());
 
-    let svc = ChatService::new(agent, session_id, storage)
-        .with_voice_output(output.clone());
+    let svc = ChatService::new(agent, session_id, storage).with_voice_output(output.clone());
 
     svc.chat_stream_once("What is the capital of France?".to_string())
         .await
@@ -141,14 +140,19 @@ async fn multi_turn_history_preserved_across_chat_once_calls() {
             .collect::<Vec<_>>()
     );
 
-    let contents: Vec<&str> = messages.iter().map(|m| m.message.content.as_str()).collect();
+    let contents: Vec<&str> = messages
+        .iter()
+        .map(|m| m.message.content.as_str())
+        .collect();
     assert!(
         contents.iter().any(|c| c.contains("What is your name?")),
         "first user turn must appear in storage; messages: {:?}",
         contents
     );
     assert!(
-        contents.iter().any(|c| c.contains("What did you say your name was?")),
+        contents
+            .iter()
+            .any(|c| c.contains("What did you say your name was?")),
         "second user turn must appear in storage; messages: {:?}",
         contents
     );
