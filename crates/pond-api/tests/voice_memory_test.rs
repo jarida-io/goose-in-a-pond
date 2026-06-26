@@ -23,9 +23,9 @@ use pond_core::user_data::mocks::mock_profile::MockProfileRepository;
 use pond_core::user_data::mocks::mock_sensor::{MockCameraStorage, MockSensorStorage};
 use pond_core::user_data::mocks::mock_session::InMemorySessionStorage;
 use pond_core::user_data::mocks::mock_settings::MockSettingsRepository;
-use pond_core::user_data::ports::session_storage::SessionStorage;
 use pond_core::user_data::ports::device_registry::{Device, DeviceRegistry, RegisterDeviceRequest};
 use pond_core::user_data::ports::onboarding::OnboardingRepository;
+use pond_core::user_data::ports::session_storage::SessionStorage;
 use pond_infra::mock_handshake::MockHandshake;
 use pond_infra::sqlite_session_storage::SqliteSessionStorage;
 use reqwest::Client as ReqwestClient;
@@ -192,7 +192,9 @@ async fn collect_text_from_sse(body: axum::body::Body) -> String {
         .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
         .filter_map(|ev| {
             if ev.get("type").and_then(|t| t.as_str()) == Some("text") {
-                ev.get("content").and_then(|c| c.as_str()).map(|s| s.to_string())
+                ev.get("content")
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.to_string())
             } else {
                 None
             }
