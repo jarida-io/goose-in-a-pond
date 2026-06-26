@@ -1,1 +1,130 @@
+name: CI
 
+on:
+  push:
+    branches: [main, hardening, "feat/**", "fix/**"]
+  pull_request:
+    branches: [main, hardening]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # 1: Rust ─────────────────────────────────────────────────────────────
+  # Checks formatting, lints, and runs the fast test suite.
+  # Excludes crates that depend on the Goose submodule or native system libs
+  # (pond-adapters-goose, pond-adapters-local-inference, pond-adapters-face-onnx,
+  # pond-server) to keep compile time reasonable.
+  rust:
+    name: Rust — fmt / clippy / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      # Reclaim ~25GB on the hosted runner before the heavy goose build, so the
+      # production-binary `cargo check` + the rust-cache save step don't ENOSPC.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /usr/local/share/boost /usr/local/share/powershell \
+            "$AGENT_TOOLSDIRECTORY" || true
+          sudo apt-get clean || true
+          df -h /
+
+      # Clone goose directly at the giap-patches branch HEAD.
+      # Bypasses submodule SHA pinning — the stored SHA may be unreachable after
+      # force-pushes to giap-patches.
+      - name: Checkout goose submodule
+        run: |
+          rm -rf goose
+          git clone --depth=1 --branch giap-patches https://github.com/jarida-io/Goose goose
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Caches ~/.cargo/registry and the build target dir keyed on Cargo.lock.
+      # After the first run, unchanged crates are not recompiled.
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: sudo apt-get install -y libasound2-dev
+
+      - name: cargo fmt
+        run: cargo fmt --check
+
+      - name: cargo clippy (fast crates)
+        run: |
+          cargo clippy \
+            -p pond-core \
+            -p pond-infra \
+            -p pond-infra-scheduler \
+            -p pond-api \
+            -p pond-inference \
+            -p pond-adapters-llamafile \
+            -p pond-adapters-ollama \
+            -p pond-adapters-whisper \
+            -p pond-adapters-piper \
+            -p pond-adapters-gotg \
+            -p pond-adapters-weather \
+            -p pond-adapters-mcp-memory \
+            -p pond-mcp-server
+
+      # --ignored is NOT passed so the 28 live-hardware tests are skipped.
+      - name: cargo test (fast crates)
+        run: |
+          cargo test \
+            -p pond-core \
+            -p pond-infra \
+            -p pond-infra-scheduler \
+            -p pond-api \
+            -p pond-inference \
+            -p pond-adapters-llamafile \
+            -p pond-adapters-ollama \
+            -p pond-adapters-whisper \
+            -p pond-adapters-piper \
+            -p pond-adapters-gotg \
+            -p pond-adapters-weather \
+            -p pond-adapters-mcp-memory \
+            -p pond-mcp-server
+
+      # Gate the PRODUCTION binary's compilation (pulls the Goose submodule).
+      # Without this, a path/API break in pond-server or the Goose adapter — the
+      # exact failure mode that motivated CI — passes unnoticed. Slow on a cold
+      # cache; rust-cache makes subsequent runs fast.
+      - name: cargo check (production binary — pond-server + goose adapter)
+        run: cargo check -p pond-server -p pond-adapters-goose
+
+  # 2: Frontend ─────────────────────────────────────────────────────────
+  # Runs Vitest unit tests and Playwright E2E tests.
+  # Playwright spins up the Vite dev server itself (no pond-server process needed —
+  # all API calls are intercepted by page.route() mocks in the test files).
+  frontend:
+    name: Frontend — vitest / playwright
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pond-desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: pond-desktop/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Vitest (unit tests)
+        run: npm test
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Playwright (E2E tests)
+        run: npx playwright test
