@@ -1983,6 +1983,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chat_stream_once_sets_voice_mode_true() {
+        // Regression test for Q2-23: voice_mode was hardcoded false, silently
+        // dropping the TTS-friendly prompt that the desktop voice path gets.
+        let agent = Arc::new(MockAgent::new());
+        let storage = Arc::new(InMemorySessionStorage::new());
+        let session_id = "test-session".to_string();
+        storage.create_session(session_id.clone()).await.unwrap();
+
+        let service = ChatService::new(agent.clone(), session_id.clone(), storage.clone());
+        service
+            .chat_stream_once("Hello!".to_string(), std::time::Instant::now())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn chat_persists_messages_to_storage() {
         let agent = Arc::new(MockAgent::new());
         let storage = Arc::new(InMemorySessionStorage::new());
