@@ -37,11 +37,7 @@ impl MockDeviceController {
     }
 
     /// Pre-register a device with a declared capability set (builder style).
-    pub fn with_device(
-        self,
-        id: impl Into<DeviceId>,
-        capabilities: Vec<DeviceCapability>,
-    ) -> Self {
+    pub fn with_device(self, id: impl Into<DeviceId>, capabilities: Vec<DeviceCapability>) -> Self {
         self.devices.lock().unwrap().insert(
             id.into(),
             MockDevice {
@@ -119,7 +115,10 @@ mod tests {
             .await
             .unwrap();
         let state = ctrl.query_state(&id).await.unwrap();
-        assert_eq!(state.get("brightness").and_then(DeviceStateValue::as_int), Some(80));
+        assert_eq!(
+            state.get("brightness").and_then(DeviceStateValue::as_int),
+            Some(80)
+        );
     }
 
     #[tokio::test]
@@ -141,6 +140,8 @@ mod tests {
     #[tokio::test]
     async fn usable_as_trait_object() {
         let ctrl: Arc<dyn DeviceController> = Arc::new(MockDeviceController::new());
-        ctrl.set_power(&DeviceId::new("lamp-1"), true).await.unwrap();
+        ctrl.set_power(&DeviceId::new("lamp-1"), true)
+            .await
+            .unwrap();
     }
 }
