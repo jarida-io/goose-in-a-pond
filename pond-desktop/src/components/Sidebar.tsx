@@ -22,6 +22,7 @@ import {
   Mic,
   ScanFace,
   Layers,
+  QrCode,
 } from "lucide-react";
 
 // ── Icon map — standard lucide icons matching each section's intent ──────────
@@ -31,6 +32,7 @@ const NAV_ICONS: Record<string, React.ElementType> = {
   home:       LayoutDashboard,
   chat:       MessageCircle,
   devices:    Monitor,
+  pairing:    QrCode,
   clock:      CalendarClock,
   memory:     Brain,
   skills:     Sparkles,

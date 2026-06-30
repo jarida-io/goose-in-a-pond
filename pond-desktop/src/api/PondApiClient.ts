@@ -184,7 +184,7 @@ export class PondApiClient {
     return this.get("/api/v1/health");
   }
 
-  getSystemInfo(): Promise<{ hostname: string; version: string; platform: string; arch: string }> {
+  getSystemInfo(): Promise<{ hostname: string; port: number; version: string; platform: string; arch: string }> {
     return this.get("/api/v1/system/info");
   }
 
@@ -527,6 +527,18 @@ export class PondApiClient {
     // 3. Fresh pairing.
     const res = await this.pair(clientId);
     return res.accepted ? res.session_token : null;
+  }
+
+  // ── Pairing ───────────────────────────────────────────────
+
+  /** Return the current unexpired pairing code, or null if none is active. Loopback-only. */
+  getPairingCode(): Promise<PairingCodeResponse> {
+    return this.handshakeFetch<PairingCodeResponse>("GET", "/api/v1/handshake/pairing-code");
+  }
+
+  /** Issue a fresh pairing code, replacing any existing one. Loopback-only. */
+  issuePairingCode(): Promise<PairingCodeResponse> {
+    return this.handshakeFetch<PairingCodeResponse>("POST", "/api/v1/handshake/pairing-code");
   }
 
   // ── Models ────────────────────────────────────────────────

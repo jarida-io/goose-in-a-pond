@@ -27,6 +27,7 @@ describe("desktopState", () => {
     expect(normalizeGuiSection("settings")).toBe("settings");
     expect(normalizeGuiSection("agent")).toBe("agent");
     expect(normalizeGuiSection("devices")).toBe("devices");
+    expect(normalizeGuiSection("pairing")).toBe("pairing");
     expect(normalizeGuiSection("schedules")).toBe("schedules");
     expect(normalizeGuiSection("memory")).toBe("memory");
     expect(normalizeGuiSection("skills")).toBe("skills");
@@ -37,14 +38,15 @@ describe("desktopState", () => {
   });
 
   it("DESKTOP_SECTIONS is a flat ordered list of all sidebar items", () => {
-    // 11 = dashboard, chat, devices, schedules, memory, skills, logs,
+    // 12 = dashboard, chat, devices, pairing, schedules, memory, skills, logs,
     // models, prompts, settings, extensions.
     // (canvas, faces, agent are hidden from sidebar but still routable)
-    expect(DESKTOP_SECTIONS).toHaveLength(11);
+    expect(DESKTOP_SECTIONS).toHaveLength(12);
     expect(DESKTOP_SECTIONS[0]).toEqual({ section: "dashboard", label: "Dashboard" });
     expect(DESKTOP_SECTIONS[1]).toEqual({ section: "chat", label: "Chat" });
     const sectionKeys = DESKTOP_SECTIONS.map((s) => s.section);
     expect(sectionKeys).toContain("devices");
+    expect(sectionKeys).toContain("pairing");
     expect(sectionKeys).toContain("schedules");
     expect(sectionKeys).toContain("memory");
     expect(sectionKeys).toContain("skills");

@@ -1594,13 +1594,18 @@ async fn get_session_messages(
     Ok(Json(json!({ "messages": list })))
 }
 
-async fn system_info() -> Json<Value> {
+async fn system_info(State(state): State<Arc<AppState>>) -> Json<Value> {
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
+    let hostname = hostname
+        .strip_suffix(".local")
+        .unwrap_or(&hostname)
+        .to_string();
 
     Json(json!({
         "hostname": hostname,
+        "port": state.api_port,
         "version": env!("CARGO_PKG_VERSION"),
         "platform": std::env::consts::OS,
         "arch": std::env::consts::ARCH,

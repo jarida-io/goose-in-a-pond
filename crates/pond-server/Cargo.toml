@@ -98,6 +98,8 @@ flate2 = "1"
 tar = "0.4"
 url = { workspace = true }
 sha2 = { workspace = true }
+mdns-sd = "0.11"
+qrcode  = "0.14"
 
 [dev-dependencies]
 wiremock   = { workspace = true }
