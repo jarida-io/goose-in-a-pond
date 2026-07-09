@@ -172,7 +172,6 @@ impl ExtensionManagerPort for GiapGooseExtensionManager {
                     timeout: None,
                     bundled: None,
                     available_tools: vec![],
-                    socket: None,
                 }
             }
             other => return Err(anyhow!("Unknown extension kind: {}", other)),

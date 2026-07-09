@@ -173,10 +173,6 @@ impl LocalInferenceLlmAdapter {
                                 source_url: String::new(),
                                 settings,
                                 size_bytes: 0,
-                                mmproj_path: None,
-                                mmproj_source_url: None,
-                                mmproj_size_bytes: 0,
-                                shard_files: vec![],
                             };
                             if let Err(e) = registry.add_model(entry) {
                                 tracing::warn!("Could not register GGUF model '{}': {}", stem, e);
@@ -231,10 +227,6 @@ impl LocalInferenceLlmAdapter {
                             source_url,
                             settings,
                             size_bytes: 0,
-                            mmproj_path: None,
-                            mmproj_source_url: None,
-                            mmproj_size_bytes: 0,
-                            shard_files: vec![],
                         };
                         if let Err(e) = registry.add_model(entry) {
                             tracing::warn!("Could not register GGUF model '{}': {}", id, e);
