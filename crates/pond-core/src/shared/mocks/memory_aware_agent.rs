@@ -34,7 +34,7 @@ impl MemoryAwareAgent {
                 .to_string();
             let fragment = MemoryFragment::from_chat(
                 uuid::Uuid::new_v4().to_string(),
-                None::<String>,
+                None,
                 Some(session_id.to_string()),
                 fact.clone(),
             );
