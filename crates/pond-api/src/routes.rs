@@ -2149,6 +2149,29 @@ async fn get_settings(
     Ok(Json(serde_json::to_value(settings).unwrap_or(json!({}))))
 }
 
+/// Decide whether a settings save should geocode the location name into
+/// coordinates, and if so, the (trimmed) name to look up.
+///
+/// Returns the name when it is non-empty, the caller did not set coordinates
+/// explicitly in this patch, and either the name changed or the coordinates are
+/// unset (0,0 — the onboarding default). Pure so the decision can be tested
+/// without a network call; the geocoding itself is covered in the weather crate.
+fn geocode_target(
+    merged_name: &str,
+    current_name: &str,
+    lat: f64,
+    lon: f64,
+    coords_in_patch: bool,
+) -> Option<String> {
+    let name = merged_name.trim();
+    if name.is_empty() || coords_in_patch {
+        return None;
+    }
+    let name_changed = merged_name != current_name;
+    let coords_unset = lat == 0.0 && lon == 0.0;
+    (name_changed || coords_unset).then(|| name.to_string())
+}
+
 async fn update_settings(
     State(state): State<Arc<AppState>>,
     body: Result<Json<serde_json::Value>, JsonRejection>,
@@ -2186,7 +2209,37 @@ async fn update_settings(
             base_obj.insert(k.clone(), v.clone());
         }
     }
-    let merged: Settings = serde_json::from_value(base).unwrap_or(current);
+    let mut merged: Settings = serde_json::from_value(base).unwrap_or_else(|_| current.clone());
+
+    // Geocode-on-save: turn a location name into coordinates so the Settings UI
+    // shows real lat/lon and the weather gate is satisfied without the user
+    // hand-entering coordinates. Runs when a name is present and either it
+    // changed or coordinates are unset — but never when the caller set
+    // coordinates explicitly in this patch (advanced users editing lat/lon
+    // directly). Best-effort: on failure we keep whatever coordinates were
+    // provided, since the weather adapter resolves the name on demand anyway.
+    let coords_in_patch =
+        patch.get("weather_latitude").is_some() || patch.get("weather_longitude").is_some();
+    if let Some(name) = geocode_target(
+        &merged.weather_location_name,
+        &current.weather_location_name,
+        merged.weather_latitude,
+        merged.weather_longitude,
+        coords_in_patch,
+    ) {
+        let geocoder = pond_adapters_weather::Geocoder::new(state.http_client.clone());
+        match geocoder.geocode(&name).await {
+            Ok(geo) => {
+                merged.weather_latitude = geo.latitude;
+                merged.weather_longitude = geo.longitude;
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                location = %name,
+                "geocode-on-save failed; keeping provided coordinates"
+            ),
+        }
+    }
 
     state.settings_repo.update(&merged).await.map_err(|e| {
         (
@@ -10423,6 +10476,46 @@ async fn clear_session_user_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── geocode-on-save decision ─────────────────────────────────
+
+    #[test]
+    fn geocodes_when_coordinates_are_unset() {
+        // The onboarding case: a name saved with 0,0 coordinates.
+        assert_eq!(
+            geocode_target("Nairobi", "Nairobi", 0.0, 0.0, false),
+            Some("Nairobi".to_string())
+        );
+    }
+
+    #[test]
+    fn geocodes_when_the_name_changed() {
+        // User edits the city; coordinates from the old city must be refreshed.
+        assert_eq!(
+            geocode_target("Kisumu", "Nairobi", -1.29, 36.82, false),
+            Some("Kisumu".to_string())
+        );
+    }
+
+    #[test]
+    fn does_not_geocode_an_unchanged_name_with_coordinates() {
+        assert_eq!(
+            geocode_target("Nairobi", "Nairobi", -1.29, 36.82, false),
+            None
+        );
+    }
+
+    #[test]
+    fn does_not_geocode_when_coordinates_are_set_in_the_patch() {
+        // Advanced user set lat/lon directly — respect them, don't override.
+        assert_eq!(geocode_target("Nairobi", "", 0.0, 0.0, true), None);
+    }
+
+    #[test]
+    fn does_not_geocode_an_empty_or_whitespace_name() {
+        assert_eq!(geocode_target("", "", 0.0, 0.0, false), None);
+        assert_eq!(geocode_target("   ", "x", 0.0, 0.0, false), None);
+    }
 
     // ── Memory-fit guard (Phase 6) ───────────────────────────────
 
