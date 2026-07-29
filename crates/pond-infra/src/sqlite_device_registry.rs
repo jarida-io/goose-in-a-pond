@@ -11,7 +11,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use pond_core::user_data::ports::device_registry::{Device, DeviceRegistry, RegisterDeviceRequest};
+use pond_core::user_data::ports::device_registry::{
+    Device, DeviceRegistry, RegisterDeviceRequest, UpdateDeviceRequest,
+};
 use serde_json;
 use sqlx::{Pool, Sqlite};
 use uuid::Uuid;
@@ -149,6 +151,38 @@ impl DeviceRegistry for SqliteDeviceRegistry {
             .await?;
         Ok(())
     }
+
+    async fn set_offline(&self, device_id: &str) -> Result<()> {
+        // `is_online` is derived at read-time from `last_seen` (see module docs),
+        // so "go offline" means backdating `last_seen` past the threshold rather
+        // than flipping a stored flag — this mirrors `heartbeat`, which marks
+        // online the same way (fresh `last_seen`).
+        let stale = (Utc::now() - Duration::seconds(ONLINE_THRESHOLD_SECS + 60))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        sqlx::query("UPDATE devices SET last_seen = ?, is_online = 0, updated_at = ? WHERE id = ?")
+            .bind(&stale)
+            .bind(&stale)
+            .bind(device_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn update(&self, device_id: &str, request: UpdateDeviceRequest) -> Result<Device> {
+        let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        sqlx::query("UPDATE devices SET name = ?, hostname = ?, room = ?, updated_at = ? WHERE id = ?")
+            .bind(&request.name)
+            .bind(&request.hostname)
+            .bind(&request.room)
+            .bind(&now_str)
+            .bind(device_id)
+            .execute(&self.pool)
+            .await?;
+        self.get_device(device_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("device '{device_id}' not found after update"))
+    }
 }
 
 #[cfg(test)]
@@ -235,5 +269,72 @@ mod tests {
         assert!(dev.room.is_none());
         let listed = reg.list_devices().await.unwrap();
         assert!(listed[0].room.is_none());
+    }
+
+    /// "Turn off" in the Devices UI: a freshly-registered device (last_seen =
+    /// now, so it would otherwise read online) must flip to offline.
+    #[tokio::test]
+    async fn set_offline_marks_a_freshly_registered_device_offline() {
+        let (reg, _tmp) = make_registry().await;
+        let dev = reg.register(req("Phone")).await.unwrap();
+        assert!(dev.is_online);
+
+        reg.set_offline(&dev.id).await.unwrap();
+        let updated = reg.get_device(&dev.id).await.unwrap().unwrap();
+        assert!(!updated.is_online);
+    }
+
+    /// "Turn on" after "Turn off": heartbeat must bring it back online.
+    #[tokio::test]
+    async fn heartbeat_reverses_a_previous_set_offline() {
+        let (reg, _tmp) = make_registry().await;
+        let dev = reg.register(req("Phone")).await.unwrap();
+        reg.set_offline(&dev.id).await.unwrap();
+        assert!(!reg.get_device(&dev.id).await.unwrap().unwrap().is_online);
+
+        reg.heartbeat(&dev.id).await.unwrap();
+        assert!(reg.get_device(&dev.id).await.unwrap().unwrap().is_online);
+    }
+
+    #[tokio::test]
+    async fn update_changes_name_hostname_and_room() {
+        let (reg, _tmp) = make_registry().await;
+        let dev = reg.register(req("Old Name")).await.unwrap();
+
+        let updated = reg
+            .update(
+                &dev.id,
+                UpdateDeviceRequest {
+                    name: "New Name".to_string(),
+                    hostname: Some("new.local".to_string()),
+                    room: Some("Kitchen".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(updated.name, "New Name");
+        assert_eq!(updated.hostname.as_deref(), Some("new.local"));
+        assert_eq!(updated.room.as_deref(), Some("Kitchen"));
+
+        let fetched = reg.get_device(&dev.id).await.unwrap().unwrap();
+        assert_eq!(fetched.name, "New Name");
+        assert_eq!(fetched.room.as_deref(), Some("Kitchen"));
+    }
+
+    #[tokio::test]
+    async fn update_unknown_device_errors() {
+        let (reg, _tmp) = make_registry().await;
+        let result = reg
+            .update(
+                "nonexistent",
+                UpdateDeviceRequest {
+                    name: "Whatever".to_string(),
+                    hostname: None,
+                    room: None,
+                },
+            )
+            .await;
+        assert!(result.is_err());
     }
 }

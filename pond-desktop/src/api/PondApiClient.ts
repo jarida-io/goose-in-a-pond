@@ -306,6 +306,24 @@ export class PondApiClient {
     return this.del(`/api/v1/devices/${encodeURIComponent(id)}`);
   }
 
+  /** Mark a device online ("Turn on" in the Devices UI) — refreshes its heartbeat. */
+  markDeviceOnline(id: string): Promise<void> {
+    return this.post(`/api/v1/devices/${encodeURIComponent(id)}/heartbeat`, {});
+  }
+
+  /** Mark a device offline ("Turn off" in the Devices UI). */
+  markDeviceOffline(id: string): Promise<void> {
+    return this.post(`/api/v1/devices/${encodeURIComponent(id)}/offline`, {});
+  }
+
+  /** Save edits from the Devices "Configure" panel (name, hostname, room). */
+  updateDevice(
+    id: string,
+    req: { name: string; hostname?: string; room?: string },
+  ): Promise<Device> {
+    return this.put<Device>(`/api/v1/devices/${encodeURIComponent(id)}`, req);
+  }
+
   // ── Schedules ─────────────────────────────────────────────
 
   listSchedules(): Promise<Schedule[]> {

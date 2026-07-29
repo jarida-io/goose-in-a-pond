@@ -114,8 +114,17 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/sessions/{session_id}/messages", get(get_session_messages))
         .route("/usage/summary", get(usage_summary))
         .route("/devices", get(list_devices).post(register_device))
+<<<<<<< Updated upstream
         .route("/devices/{id}", axum::routing::delete(unregister_device))
+=======
+        .route("/devices/commission", post(commission_device))
+        .route(
+            "/devices/{id}",
+            axum::routing::delete(unregister_device).put(update_device),
+        )
+>>>>>>> Stashed changes
         .route("/devices/{id}/heartbeat", post(device_heartbeat))
+        .route("/devices/{id}/offline", post(device_offline))
         // Push-notification token register/unregister for a paired device (#95).
         .route(
             "/devices/{id}/push-token",
@@ -2037,6 +2046,79 @@ async fn device_heartbeat(
         )
     })?;
     Ok(Json(json!({ "status": "ok" })))
+}
+
+/// `POST /api/v1/devices/{id}/offline` — the Devices UI's "Turn off" action.
+/// Mirrors `device_heartbeat` ("Turn on"): devices without a real liveness
+/// signal have no other way to report offline.
+async fn device_offline(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    state.device_registry.set_offline(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
+    Ok(Json(json!({ "status": "ok" })))
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateDeviceBody {
+    name: String,
+    hostname: Option<String>,
+    room: Option<String>,
+}
+
+/// `PUT /api/v1/devices/{id}` — the Devices UI's "Configure" save action.
+async fn update_device(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Result<Json<UpdateDeviceBody>, JsonRejection>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Json(req) = body.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("Invalid request: {}", e)})),
+        )
+    })?;
+    let name = req.name.trim().to_string();
+    if name.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "name is required"})),
+        ));
+    }
+    let device = state
+        .device_registry
+        .update(
+            &id,
+            pond_core::user_data::ports::device_registry::UpdateDeviceRequest {
+                name,
+                hostname: req.hostname.filter(|s| !s.trim().is_empty()),
+                room: req.room.filter(|s| !s.trim().is_empty()),
+            },
+        )
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?;
+    Ok(Json(json!({
+        "id":            device.id,
+        "name":          device.name,
+        "device_type":   device.device_type,
+        "hostname":      device.hostname,
+        "ip_address":    device.ip_address,
+        "capabilities":  device.capabilities,
+        "registered_at": device.registered_at,
+        "last_seen":     device.last_seen,
+        "is_online":     device.is_online,
+        "room":          device.room,
+    })))
 }
 
 #[derive(serde::Deserialize)]

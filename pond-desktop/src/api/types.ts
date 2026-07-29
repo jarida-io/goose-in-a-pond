@@ -231,6 +231,7 @@ export interface Device {
   id: string;
   name: string;
   device_type?: string;
+  hostname?: string;
   room?: string;
   is_online: boolean;
   last_seen?: string;

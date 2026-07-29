@@ -56,6 +56,13 @@ export function Devices() {
   const [busyId, setBusyId]           = useState<string | null>(null);
   const [detail, setDetail]           = useState<Device | null>(null);
 
+  // Configure-modal edit state
+  const [editName, setEditName]         = useState("");
+  const [editHostname, setEditHostname] = useState("");
+  const [editRoom, setEditRoom]         = useState("");
+  const [editSubmitting, setEditSubmitting] = useState(false);
+  const [editError, setEditError]       = useState<string | null>(null);
+
   function load() {
     setLoading(true);
     api.listDevices()
@@ -96,23 +103,55 @@ export function Devices() {
     }
   }
 
-  // Toggle device power via the device-control MCP tool (same path the Hub uses).
-  // There is no "wake"/"restart" primitive in the backend, so this is an honest
-  // on/off toggle: turn on when offline, off when online.
+  // Toggle registry connectivity directly (heartbeat / offline), not the
+  // giap-device-control MCP tool — that tool actuates a smart device's own
+  // power state (a light/plug), a different concept from whether the device
+  // itself is reachable. There is no "wake"/"restart" primitive in the
+  // backend, so this is an honest on/off toggle: turn on when offline, off
+  // when online.
   async function handlePower(d: Device) {
     setBusyId(d.id);
     try {
-      await api.invokeTool({
-        server: "giap-device-control",
-        tool: "set_device_state",
-        args: { device_id: d.id, power: !d.is_online },
-      });
+      if (d.is_online) {
+        await api.markDeviceOffline(d.id);
+      } else {
+        await api.markDeviceOnline(d.id);
+      }
       load();
       void refreshHomeData();
     } catch (e) {
       setError(String(e));
     } finally {
       setBusyId(null);
+    }
+  }
+
+  function openDetail(d: Device) {
+    setDetail(d);
+    setEditName(d.name);
+    setEditHostname(d.hostname ?? "");
+    setEditRoom(d.room ?? "");
+    setEditError(null);
+  }
+
+  async function handleUpdateDevice() {
+    if (!detail) return;
+    if (!editName.trim()) { setEditError("Name is required."); return; }
+    setEditSubmitting(true);
+    setEditError(null);
+    try {
+      const updated = await api.updateDevice(detail.id, {
+        name: editName.trim(),
+        hostname: editHostname.trim() || undefined,
+        room: editRoom.trim() || undefined,
+      });
+      setDetail(updated);
+      load();
+      void refreshHomeData();
+    } catch (e) {
+      setEditError(String(e));
+    } finally {
+      setEditSubmitting(false);
     }
   }
 
@@ -202,7 +241,7 @@ export function Devices() {
                 </button>
                 <button
                   className="device-card__action-btn"
-                  onClick={() => setDetail(d)}
+                  onClick={() => openDetail(d)}
                   type="button"
                 >
                   <Settings size={12} /> Configure
@@ -297,7 +336,7 @@ export function Devices() {
         <div className="sched-modal__overlay" onClick={() => setDetail(null)}>
           <div className="sched-modal__dialog" onClick={(e) => e.stopPropagation()}>
             <div className="sched-modal__header">
-              <h2 className="sched-modal__title">{detail.name}</h2>
+              <h2 className="sched-modal__title">{editName.trim() || detail.name}</h2>
               <button className="sched-modal__close" onClick={() => setDetail(null)} aria-label="Close">
                 <X size={16} />
               </button>
@@ -305,12 +344,37 @@ export function Devices() {
             <Separator />
             <div className="sched-modal__body">
               <div className="sched-modal__field">
-                <label className="sched-modal__label">Type</label>
-                <div className="muted-12">{detail.device_type ?? "—"}</div>
+                <label className="sched-modal__label">Name</label>
+                <input
+                  className="sched-modal__input"
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  disabled={editSubmitting}
+                />
               </div>
               <div className="sched-modal__field">
-                <label className="sched-modal__label">Room</label>
-                <div className="muted-12">{detail.room ?? "—"}</div>
+                <label className="sched-modal__label">Hostname <span className="sched-modal__cron-hint">(optional)</span></label>
+                <input
+                  className="sched-modal__input"
+                  placeholder="raspberrypi.local"
+                  value={editHostname}
+                  onChange={(e) => setEditHostname(e.target.value)}
+                  disabled={editSubmitting}
+                />
+              </div>
+              <div className="sched-modal__field">
+                <label className="sched-modal__label">Room <span className="sched-modal__cron-hint">(optional)</span></label>
+                <input
+                  className="sched-modal__input"
+                  placeholder="Living Room"
+                  value={editRoom}
+                  onChange={(e) => setEditRoom(e.target.value)}
+                  disabled={editSubmitting}
+                />
+              </div>
+              <div className="sched-modal__field">
+                <label className="sched-modal__label">Type</label>
+                <div className="muted-12">{detail.device_type ?? "—"}</div>
               </div>
               <div className="sched-modal__field">
                 <label className="sched-modal__label">Status</label>
@@ -324,6 +388,9 @@ export function Devices() {
                   {detail.metadata?.ip != null ? String(detail.metadata.ip) : "—"}
                 </code>
               </div>
+              {editError && (
+                <p className="text-error text-error--sm">{editError}</p>
+              )}
             </div>
             <Separator />
             <div className="sched-modal__footer">
@@ -335,6 +402,14 @@ export function Devices() {
                 onPress={() => handleUnregister(detail)}
               >
                 {busyId === detail.id ? "Removing…" : "Unregister device"}
+              </Button>
+              <Button
+                size="sm"
+                variant="primary"
+                isDisabled={editSubmitting || !editName.trim()}
+                onPress={handleUpdateDevice}
+              >
+                {editSubmitting ? "Saving…" : "Save"}
               </Button>
             </div>
           </div>
