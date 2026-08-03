@@ -43,7 +43,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Audio playback for TTS output
-rodio = { version = "0.17", default-features = false, features = ["wav", "mp3"] }
+rodio = { version = "0.22", default-features = false, features = ["wav", "mp3"] }
 
 # UUID generation (for session IDs)
 uuid = { version = "1", features = ["v4"] }
