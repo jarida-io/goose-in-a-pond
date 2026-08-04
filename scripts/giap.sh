@@ -449,6 +449,31 @@ doctor() {
         unk "cannot read a whisper backend string from the binary"
         DOC_UNK=$((DOC_UNK+1))
       fi
+      # Separate oracle for the GPU ARCHITECTURE, which the string check above
+      # cannot see: both a correctly-pinned binary and one built against a
+      # stale whisper.cpp tree print the same "CUDA backend enabled".
+      #
+      # CMAKE_CUDA_ARCHITECTURES is NOT in whisper-rs-sys's rerun-if-env-changed
+      # set (its build.rs registers only HIP_PATH, AMDGPU_TARGETS, VULKAN_SDK
+      # and BLAS_INCLUDE_DIRS), so changing the pin later does not by itself
+      # re-run the build script — the shipped SASS stays whatever the first
+      # CUDA build produced. Detect that rather than paying a forced rebuild on
+      # every deploy.
+      local cuda_cache="" cache
+      for cache in target/release/build/whisper-rs-sys-*/out/build/CMakeCache.txt; do
+        [ -f "$cache" ] || continue
+        grep -q '^GGML_CUDA:BOOL=ON' "$cache" 2>/dev/null && cuda_cache="$cache"
+      done
+      if [ -z "$cuda_cache" ]; then
+        unk "no CUDA whisper build tree found to check the GPU arch against"
+        DOC_UNK=$((DOC_UNK+1))
+      elif grep -q '^CMAKE_CUDA_ARCHITECTURES:.*=87' "$cuda_cache" 2>/dev/null; then
+        ok "whisper ggml-cuda built for sm_87"
+      else
+        bad "whisper ggml-cuda was NOT built for sm_87 — it runs via PTX JIT"
+        note "the arch pin is not change-tracked; force it with: cargo clean -p whisper-rs-sys"
+        DOC_FAIL=$((DOC_FAIL+1))
+      fi
       if [ -n "$D_STAMP" ]; then
         case "$D_STAMP" in
           *"cuda"*) ok "build stamp records a CUDA build" ;;

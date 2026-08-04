@@ -289,16 +289,33 @@ impl WhisperRsInput {
         // RTF < 1 means faster than real time. For the accurate profile the
         // number that matters is `elapsed_ms` against the 800 ms silence
         // window, not RTF — it is the overrun, if any, that the user feels.
-        tracing::debug!(
-            profile,
-            audio_ms = format_args!("{audio_ms:.0}"),
-            elapsed_ms = format_args!("{elapsed_ms:.0}"),
-            rtf = format_args!("{:.3}", elapsed_ms / audio_ms.max(1.0)),
-            n_threads,
-            audio_ctx = audio_ctx.unwrap_or(0),
-            ok = result.as_ref().map(|r| r.is_ok()).unwrap_or(false),
-            "ASR transcribe"
-        );
+        //
+        // Two levels on purpose. The accurate pass runs once per turn and its
+        // number is the one the design question turns on, so it stays at debug
+        // where the file log keeps it by default. The wake-word pass runs on
+        // every non-silent window — up to five a second, for the whole of a
+        // 24-154 s reply, since the mic hears the assistant speaking — and at
+        // debug it would bury the log it shares. `RUST_LOG` raises it when the
+        // KWS duty cycle is what you are actually measuring.
+        macro_rules! emit {
+            ($level:ident) => {
+                tracing::$level!(
+                    profile,
+                    audio_ms = format_args!("{audio_ms:.0}"),
+                    elapsed_ms = format_args!("{elapsed_ms:.0}"),
+                    rtf = format_args!("{:.3}", elapsed_ms / audio_ms.max(1.0)),
+                    n_threads,
+                    audio_ctx = audio_ctx.unwrap_or(0),
+                    ok = result.as_ref().map(|r| r.is_ok()).unwrap_or(false),
+                    "ASR transcribe"
+                )
+            };
+        }
+        if opts.beam_size.is_some() {
+            emit!(debug)
+        } else {
+            emit!(trace)
+        }
 
         match result {
             Ok(Ok(text)) => Ok(text),
