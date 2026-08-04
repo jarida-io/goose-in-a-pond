@@ -19,8 +19,15 @@
 //! avoided: AGPL-3.0 is incompatible with GIAP's Apache-2.0 license.
 //!
 //! Runtime: `ort` with `load-dynamic`, exactly like `pond-adapters-face-onnx`
-//! — the system ONNX Runtime is linked at startup (`ORT_DYLIB_PATH`), so
-//! Jetson deployments can use a CUDA/TensorRT build without recompiling.
+//! — the ONNX Runtime is `dlopen`ed at startup (`ORT_DYLIB_PATH`), so the
+//! runtime can be swapped without recompiling.
+//!
+//! **Swapping in a CUDA/TensorRT build does not make this adapter use the
+//! GPU.** An earlier version of this note implied it would. `ort` uses an
+//! execution provider only when one is explicitly registered on the
+//! `SessionBuilder`, and this crate registers none — the GPU runtime loads and
+//! then runs on the CPU, with no error to notice. See
+//! `pond-adapters-face-onnx` for the same caveat and what changing it costs.
 
 mod classifier;
 mod decode;

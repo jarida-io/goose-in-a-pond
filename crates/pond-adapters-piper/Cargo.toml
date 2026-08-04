@@ -15,12 +15,20 @@ license.workspace = true
 # LD_LIBRARY_PATH… the runtime EP probes the system". Every clause of that was
 # false, and it survived for months because a fallback to CPU is silent:
 #
-#   1. `ort` never probes. `SessionBuilder::pre_commit` applies exactly
+#   1. `ort` registers no execution provider unless one is explicitly added.
+#      `SessionBuilder::pre_commit` applies exactly
 #      `environment.execution_providers()`, which starts empty and is only
 #      populated by an explicit `with_execution_providers`. `piper-rs 0.2.0`
 #      builds its session with a bare `Session::builder()` (its lib.rs:52) and
 #      this workspace contains zero calls to `ort::init` or
-#      `with_execution_providers`. So the EP list is empty, by construction.
+#      `with_execution_providers`.
+#      The one selection `ort` does make unasked is
+#      `SessionOptionsSetEpSelectionPolicy(MaxEfficiency)` in
+#      `SessionBuilder::new` (ort's session/builder/mod.rs:131, compiled
+#      because api-24 implies api-22). It is documented as equivalent to
+#      prefer-NPU, this board has no NPU, and its result is discarded — so it
+#      does not change the conclusion. It is named here because "never probes"
+#      would be the same kind of convenient absolute this comment replaced.
 #   2. JetPack ships no `libonnxruntime.so` at all — only TensorRT's ONNX
 #      *parser*, `libnvonnxparser.so`, which is a different product. The only
 #      ONNX Runtime on a Jetson is the CPU build `ensure_onnx_runtime()`
@@ -30,11 +38,24 @@ license.workspace = true
 #      so there is no prebuilt CUDA ONNX Runtime for this target to fetch.
 #
 # Making TTS use the GPU needs all three of: an ONNX Runtime >= 1.24 for
-# aarch64/JetPack built with `--use_cuda`/`--use_tensorrt` (a source build —
-# `ort` hard-rejects anything below its MINOR_VERSION); `ORT_DYLIB_PATH`
+# aarch64/JetPack containing the CUDA/TensorRT providers (`ort` hard-rejects
+# anything below its MINOR_VERSION, which api-24 puts at 24); `ORT_DYLIB_PATH`
 # pointed at it; and this crate registering the EP via
-# `piper_rs::Piper::from_session` instead of `Piper::new`. Measure first: piper
-# already runs at RTF ~0.1 on an Orin Nano, roughly 9x faster than real time.
+# `piper_rs::Piper::from_session` instead of `Piper::new`. No `ort/cuda` cargo
+# feature is needed — `CUDAExecutionProvider::register` already compiles under
+# the `load-dynamic` this workspace has (ort's ep/cuda.rs:368).
+#
+# That runtime does NOT require a source build, contrary to what this comment
+# said when it was first corrected. Prebuilt aarch64 JetPack CUDA wheels ship a
+# standalone `libonnxruntime.so` alongside the provider `.so` files — extract
+# them into one directory and point `ORT_DYLIB_PATH` there. Verify with
+# `unzip -l` before trusting any particular wheel.
+#
+# None of which you should do for TTS. Piper measures RTF ~0.1 on an Orin Nano
+# — roughly 9x faster than real time — so there is no throughput problem to
+# solve, and `ort` is process-global: swapping the dylib changes it for
+# embeddings, face and vision simultaneously. If a GPU ONNX Runtime is worth
+# procuring, it is worth procuring for those, not for this.
 
 [features]
 default = []

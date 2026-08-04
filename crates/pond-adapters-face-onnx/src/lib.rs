@@ -24,8 +24,17 @@
 //!
 //! The `ort` crate is built with `load-dynamic`.  The ONNX Runtime shared
 //! library is resolved at startup via `dlopen`/`LoadLibrary` and can be
-//! overridden with `ORT_DYLIB_PATH`.  On Jetson, point this at a TensorRT-
-//! enabled ORT build to get CUDA acceleration for free.
+//! overridden with `ORT_DYLIB_PATH`.
+//!
+//! **Pointing that at a CUDA/TensorRT ONNX Runtime does NOT accelerate this
+//! adapter.**  An earlier version of this note said it did, "for free".  `ort`
+//! uses an execution provider only if one is explicitly registered on the
+//! `SessionBuilder`, and this crate registers none — so a GPU-capable runtime
+//! is loaded and then used on the CPU, silently and with no error.  Making it
+//! real means `.with_execution_providers([...])` on the session built here,
+//! plus a runtime that actually contains the provider (JetPack ships none, and
+//! `ort-sys` has no CUDA aarch64 distribution — a prebuilt JetPack wheel is
+//! the practical source).  Until that lands, treat this as CPU inference.
 
 pub mod alignment;
 pub mod antispoof;

@@ -413,14 +413,25 @@ fn synth_blocking(voice: Arc<Mutex<Piper>>, text: &str) -> Result<(Vec<u8>, u32)
         }
         _ => 0.0,
     };
-    tracing::debug!(
-        chars,
-        audio_ms = format_args!("{audio_ms:.0}"),
-        elapsed_ms = format_args!("{elapsed_ms:.0}"),
-        rtf = format_args!("{:.3}", elapsed_ms / audio_ms.max(1.0)),
-        ok = result.as_ref().map(|r| r.is_ok()).unwrap_or(false),
-        "TTS synthesize"
-    );
+    // rtf is omitted when there is no audio to divide by. Reporting
+    // `elapsed_ms / 1.0` in that case prints something like rtf=700.000, which
+    // reads as catastrophic synthesis performance when what actually happened
+    // is that synthesis failed and produced nothing.
+    if audio_ms > 0.0 {
+        tracing::debug!(
+            chars,
+            audio_ms = format_args!("{audio_ms:.0}"),
+            elapsed_ms = format_args!("{elapsed_ms:.0}"),
+            rtf = format_args!("{:.3}", elapsed_ms / audio_ms),
+            "TTS synthesize"
+        );
+    } else {
+        tracing::debug!(
+            chars,
+            elapsed_ms = format_args!("{elapsed_ms:.0}"),
+            "TTS synthesize produced no audio"
+        );
+    }
 
     match result {
         Ok(Ok(out)) => Ok(out),
