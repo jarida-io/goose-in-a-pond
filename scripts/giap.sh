@@ -261,7 +261,12 @@ detect_runtime() {
   # claims, so never guess.
   D_PORT=""
   [ -f "$D_DATA_DIR/.runtime_api_port" ] && D_PORT="$(cat "$D_DATA_DIR/.runtime_api_port" 2>/dev/null | tr -d ' \n')"
-  D_PROCS="$(pgrep -f '[p]ond-server' 2>/dev/null | wc -l | tr -d ' ')"
+  # -x on the process NAME, not -f on the command line. `pgrep -f` counted any
+  # process whose arguments merely mention the path — which includes the ssh
+  # command running this script during a deploy, so doctor reported "2
+  # pond-server processes running" against a single server. A check that fails
+  # while you are looking at it teaches people to ignore it.
+  D_PROCS="$(pgrep -x 'pond-server' 2>/dev/null | wc -l | tr -d ' ')"
   D_HEALTH="unknown"
   if [ -n "$D_PORT" ] && command -v curl >/dev/null 2>&1; then
     if curl -sf -m 2 -o /dev/null "http://127.0.0.1:$D_PORT/api/v1/health" 2>/dev/null; then D_HEALTH="200"
