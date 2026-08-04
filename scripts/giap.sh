@@ -109,7 +109,7 @@ D_DATA_DIR=""; D_PORT=""; D_HEALTH=""; D_PROCS=0
 D_RAM_TOTAL=""; D_RAM_AVAIL=""; D_DISK_FREE=""; D_TGT_DBG=""; D_TGT_REL=""
 D_PWR=""; D_OC=""; D_DISPLAY=""; D_SUDO=""
 D_ENGINE=""; D_SETTINGS=""
-D_ASR_MODEL=""; D_TTS_VOICE=""; D_WAKE=""; D_VOICE_LOCK=""
+D_ASR_MODEL=""; D_TTS_VOICE=""; D_TTS_STATE=""; D_TTS_ALT=""; D_WAKE=""; D_VOICE_LOCK=""
 
 human_mb() { # $1 = MB
   local m="${1:-0}"
@@ -356,7 +356,7 @@ sqlite_setting() { # $1 = key
 # that simply never speaks. Same for the ASR model, one layer earlier — no model,
 # no wake word, and the session looks like a microphone problem.
 detect_voice() {
-  D_ASR_MODEL=""; D_TTS_VOICE=""; D_WAKE=""; D_VOICE_LOCK=""
+  D_ASR_MODEL=""; D_TTS_VOICE=""; D_TTS_STATE=""; D_TTS_ALT=""; D_WAKE=""; D_VOICE_LOCK=""
   local models="$D_DATA_DIR/models"
 
   # ASR: whichever ggml-*.bin is present. The setting names a variant
@@ -371,13 +371,36 @@ detect_voice() {
       D_ASR_MODEL="$(basename "$m")"
       break
     done
-    # TTS: piper voices live in models/tts as <voice>.onnx with a sibling
-    # .onnx.json. A voice without its config cannot load, so require both.
+    # TTS. Check the voice the RUNTIME will resolve, not merely that some voice
+    # exists — those are different questions and the difference is the whole
+    # bug. Our own Jetson had three voices installed, two of them loadable, and
+    # was still silent, because the configured one was the third.
+    #
+    # A piper voice is <name>.onnx PLUS a sibling <name>.onnx.json. Without the
+    # config it cannot load, and the directory listing looks fine.
+    local configured; configured="$(sqlite_setting voice_tts_voice 2>/dev/null)"
+    [ -z "$configured" ] && configured="$(sqlite_setting active_tts_model 2>/dev/null)"
+    configured="${configured%.onnx}"
+    if [ -n "$configured" ]; then
+      D_TTS_VOICE="$configured"
+      if [ -f "$models/tts/$configured.onnx" ] && [ -f "$models/tts/$configured.onnx.json" ]; then
+        D_TTS_STATE="ok"
+      elif [ -f "$models/tts/$configured.onnx" ]; then
+        D_TTS_STATE="no-config"
+      else
+        D_TTS_STATE="missing"
+      fi
+    else
+      D_TTS_STATE="unset"
+    fi
+    # A loadable alternative, so a failure can name the way out instead of
+    # leaving you to list the directory yourself.
     local v
     for v in "$models"/tts/*.onnx; do
-      [ -f "$v" ] || continue
-      [ -f "$v.json" ] || continue
-      D_TTS_VOICE="$(basename "$v" .onnx)"
+      [ -f "$v" ] && [ -f "$v.json" ] || continue
+      local n; n="$(basename "$v" .onnx)"
+      [ "$n" = "$configured" ] && continue
+      D_TTS_ALT="$n"
       break
     done
   fi
@@ -617,19 +640,24 @@ doctor() {
     note "fetch one: ./target/release/pond-server setup --model base"
     DOC_WARN=$((DOC_WARN+1))
   fi
-  if [ -n "$D_TTS_VOICE" ]; then
-    ok "voice can speak ($D_TTS_VOICE)"
-  else
-    local orphan=""
-    orphan="$(ls "$D_DATA_DIR"/models/tts/*.onnx 2>/dev/null | head -1)"
-    if [ -n "$orphan" ]; then
-      bad "piper voice $(basename "$orphan" .onnx) has no .onnx.json — it cannot load"
-      note "replies will be printed, not spoken, with no error at runtime"
-    else
-      warn "no piper voice installed — replies are printed, not spoken"
-    fi
-    DOC_WARN=$((DOC_WARN+1))
-  fi
+  case "$D_TTS_STATE" in
+    ok)   ok "voice can speak ($D_TTS_VOICE)" ;;
+    no-config)
+      bad "configured voice '$D_TTS_VOICE' has no .onnx.json — it cannot load"
+      note "replies are PRINTED, not spoken, and nothing errors at runtime"
+      note "the .onnx alone looks installed in a directory listing; it is not"
+      [ -n "$D_TTS_ALT" ] && note "'$D_TTS_ALT' is installed and loadable — switch to it in Settings"
+      DOC_FAIL=$((DOC_FAIL+1)) ;;
+    missing)
+      bad "configured voice '$D_TTS_VOICE' is not installed — replies are printed"
+      [ -n "$D_TTS_ALT" ] && note "'$D_TTS_ALT' is installed and loadable — switch to it in Settings"
+      DOC_FAIL=$((DOC_FAIL+1)) ;;
+    unset)
+      warn "no TTS voice configured — replies are printed, not spoken"
+      [ -n "$D_TTS_ALT" ] && note "'$D_TTS_ALT' is installed and loadable"
+      DOC_WARN=$((DOC_WARN+1)) ;;
+    *) unk "could not determine the TTS voice state"; DOC_UNK=$((DOC_UNK+1)) ;;
+  esac
   [ -n "$D_VOICE_LOCK" ] && info "a voice session holds the microphone (pid $D_VOICE_LOCK)"
 
   # 7. disk / memory headroom for a build
@@ -1024,16 +1052,20 @@ action_voice() {
     note "fetch one: ./target/release/pond-server setup --model base"
     return 1
   fi
-  if [ -z "$D_TTS_VOICE" ]; then
-    warn "no installed piper voice — replies will be PRINTED, not spoken."
-    note "a voice needs BOTH <voice>.onnx and <voice>.onnx.json in models/tts;"
-    note "a voice missing its .json config is why 'installed' can still be silent"
-    note "install one from the Models tab, or via POST /api/v1/models/download"
+  if [ "$D_TTS_STATE" != "ok" ]; then
+    case "$D_TTS_STATE" in
+      no-config) warn "configured voice '$D_TTS_VOICE' has no .onnx.json — it cannot load." ;;
+      missing)   warn "configured voice '$D_TTS_VOICE' is not installed." ;;
+      *)         warn "no TTS voice configured." ;;
+    esac
+    note "replies will be PRINTED, not spoken — and nothing will error"
+    [ -n "$D_TTS_ALT" ] && note "'$D_TTS_ALT' is installed and loadable — switch to it in Settings"
     confirm "Start anyway (text replies)?" || return 1
   fi
 
   info "listen  ${D_ASR_MODEL}"
-  info "speak   ${D_TTS_VOICE:-off (replies printed)}"
+  if [ "$D_TTS_STATE" = "ok" ]; then info "speak   $D_TTS_VOICE"
+  else info "speak   off — replies printed (${D_TTS_STATE})"; fi
   info "wake    \"${D_WAKE}\""
   note "say \"${D_WAKE}\" and ask in the same breath — one utterance, not two"
   note "logs land in $(log_file_today), not on this console"
