@@ -295,7 +295,18 @@ impl WhisperRsInput {
                     }
                 }
             }
-            Ok(strip_whisper_artifacts(&out))
+            // Log what whisper actually said whenever stripping empties a
+            // non-empty decode. Without this the evidence is destroyed here and
+            // the caller sees only "", which the KWS loop then reports as
+            // "No speech in window" — so a discarded wake word is indistinguishable
+            // from silence in the log. 19% of energy-passing windows on the
+            // Jetson took that path, and there was no way to tell what any of
+            // them had been.
+            let stripped = strip_whisper_artifacts(&out);
+            if stripped.is_empty() && !out.trim().is_empty() {
+                tracing::debug!(raw = %out.trim(), "transcript discarded as artifact-only");
+            }
+            Ok(stripped)
         }));
 
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;

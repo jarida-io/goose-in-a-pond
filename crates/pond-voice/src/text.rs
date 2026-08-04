@@ -1683,11 +1683,91 @@ pub fn strip_whisper_artifacts(text: &str) -> String {
         return String::new();
     }
 
-    // Reject if the transcript is just the same word/syllable repeated.
+    // Collapse a transcript that is one word repeated, rather than deleting it.
+    //
+    // Deleting it was throwing wake words away. whisper's repetition-loop
+    // failure mode on a short clip emits the SAME word over and over, so a
+    // window where the user said "goose" comes back as "Goose. Goose. Goose."
+    // and was erased before the trigger matcher ever saw it. The two-word form
+    // ("a goose a goose a goose…") survived and fired, because its tokens are
+    // not all identical — so the same acoustic event succeeded or failed on
+    // whether whisper happened to insert an article.
+    //
+    // A repetition is still an artifact, and the repeated word is still the
+    // best available evidence of what was said. Collapsing keeps that evidence
+    // and preserves the original casing/punctuation of the first occurrence.
     let words: Vec<&str> = lower.split_whitespace().collect();
     if words.len() >= 2 && words.iter().all(|w| *w == words[0]) {
-        return String::new();
+        return cleaned
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_string();
     }
 
     cleaned.to_string()
+}
+
+#[cfg(test)]
+mod whisper_artifact_tests {
+    use super::*;
+
+    /// The bug this file exists to not repeat.
+    ///
+    /// On a 1.4 s wake-word window whisper's repetition-loop failure emits the
+    /// same word over and over. Deleting that transcript threw the wake word
+    /// away: on a real Jetson session, "a goose a goose a goose…" fired the
+    /// detector while "Goose. Goose. Goose." was erased before the matcher ran
+    /// — the same utterance, decided by whether whisper inserted an article.
+    #[test]
+    fn a_repeated_wake_word_collapses_instead_of_vanishing() {
+        assert_eq!(strip_whisper_artifacts("Goose. Goose. Goose."), "Goose.");
+        assert_eq!(strip_whisper_artifacts("goose goose goose"), "goose");
+        // Casing and punctuation of the FIRST occurrence survive, because the
+        // trigger matcher normalises and a caller may want to show it.
+        assert_eq!(strip_whisper_artifacts("Okay okay okay"), "Okay");
+    }
+
+    /// The collapsed word must survive the REST of the real pipeline, not just
+    /// the strip. The KWS loop does `strip_whisper_artifacts` ->
+    /// `normalize_transcript` -> `contains_trigger`, and only the middle step
+    /// removes the trailing period that a collapse preserves — so testing the
+    /// strip in isolation would have passed while production still failed.
+    #[test]
+    fn a_collapsed_repetition_still_matches_its_trigger() {
+        for raw in [
+            "Goose. Goose. Goose.",
+            "goose goose goose",
+            "Goose, Goose, Goose,",
+        ] {
+            let through_pipeline = normalize_transcript(&strip_whisper_artifacts(raw));
+            assert!(
+                contains_trigger(&through_pipeline, "goose"),
+                "{raw:?} -> {through_pipeline:?} no longer matches the trigger"
+            );
+        }
+    }
+
+    /// Collapsing must not resurrect genuine non-speech, which is what the
+    /// filter was originally for.
+    #[test]
+    fn bracketed_non_speech_is_still_removed_entirely() {
+        assert_eq!(strip_whisper_artifacts("[BLANK_AUDIO]"), "");
+        assert_eq!(strip_whisper_artifacts("[MUSIC] [MUSIC]"), "");
+        assert_eq!(strip_whisper_artifacts("(inaudible)"), "");
+    }
+
+    /// Ordinary speech is untouched — only all-identical token runs collapse.
+    #[test]
+    fn ordinary_speech_is_left_alone() {
+        assert_eq!(
+            strip_whisper_artifacts("what is the weather in Nairobi"),
+            "what is the weather in Nairobi"
+        );
+        // A legitimately repeated word inside a sentence is not a repetition run.
+        assert_eq!(
+            strip_whisper_artifacts("that is very very good"),
+            "that is very very good"
+        );
+    }
 }
