@@ -182,7 +182,12 @@ build_jetson_native() {
   local features=""
   if [ "$CUDA" = true ]; then
     log "CUDA enabled (sm_87 / Ampere)"
-    features="--features pond-adapters-local-inference/cuda"
+    # `cuda` is the pond-server alias covering BOTH the LLM and ASR adapters.
+    # Passing pond-adapters-local-inference/cuda alone builds the LLM for the
+    # GPU and leaves whisper on the CPU, silently.
+    features="--features pond-server/cuda"
+    export CMAKE_CUDA_ARCHITECTURES=87
+    export PATH="/usr/local/cuda/bin:$PATH"
   fi
 
   SQLX_OFFLINE=true cargo build -p pond-server $features --release

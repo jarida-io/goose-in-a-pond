@@ -426,15 +426,40 @@ doctor() {
   if [ "$D_IS_JETSON" = true ]; then
     if [ "$D_BIN_REL" != "present" ]; then
       warn "no release server binary yet"; DOC_WARN=$((DOC_WARN+1))
-    elif [ -n "$D_STAMP" ]; then
-      case "$D_STAMP" in
-        *"local-inference/cuda"*) ok "build stamp records a CUDA build" ;;
-        *) bad "build stamp has no cuda feature — this binary runs on CPU"; DOC_FAIL=$((DOC_FAIL+1)) ;;
-      esac
     else
-      unk "no build stamp — provenance of target/release/pond-server is unknown"
-      note "rebuild via menu 12 to record one"
-      DOC_UNK=$((DOC_UNK+1))
+      # Ask the BINARY, not the stamp. The three backend log strings in
+      # pond-adapters-whisper are cfg-gated and mutually exclusive, so exactly
+      # one of them is present and it names the branch that was compiled. This
+      # survives stripping and cannot go stale the way the stamp can.
+      #
+      # The stamp is the wrong oracle twice over: it is written per-build but
+      # the binary can be overwritten by a later build that never rewrites it,
+      # and it used to be matched on "local-inference/cuda" alone — which is
+      # satisfied by a half-CUDA build with the LLM on the GPU and ASR on the
+      # CPU. That exact binary shipped and doctor called it ok.
+      if strings -a target/release/pond-server 2>/dev/null \
+           | grep -qF 'WhisperRsInput: CUDA backend enabled'; then
+        ok "binary has ASR on CUDA (whisper compiled with the cuda feature)"
+      elif strings -a target/release/pond-server 2>/dev/null \
+             | grep -qF 'WhisperRsInput: CPU backend'; then
+        bad "binary has ASR on CPU — whisper was built without the cuda feature"
+        note "rebuild with --features pond-server/cuda (menu 12 / scripts/jetson.sh deploy)"
+        DOC_FAIL=$((DOC_FAIL+1))
+      else
+        unk "cannot read a whisper backend string from the binary"
+        DOC_UNK=$((DOC_UNK+1))
+      fi
+      if [ -n "$D_STAMP" ]; then
+        case "$D_STAMP" in
+          *"cuda"*) ok "build stamp records a CUDA build" ;;
+          *) warn "build stamp records no cuda feature (may be stale — trust the binary check above)"
+             DOC_WARN=$((DOC_WARN+1)) ;;
+        esac
+      else
+        unk "no build stamp — provenance of target/release/pond-server is unknown"
+        note "rebuild via menu 12 to record one"
+        DOC_UNK=$((DOC_UNK+1))
+      fi
     fi
     case "$D_ENGINE" in
       CUDA)   ok "last run used the CUDA path" ;;
@@ -564,7 +589,7 @@ server_features() {
   # The one canonical feature string per platform. Three of the repo's older
   # build paths omit at least one of these and none of the omissions error.
   if [ "$D_IS_JETSON" = true ] && [ "$D_CUDA_STATE" = "usable" ]; then
-    echo "pond-adapters-local-inference/cuda,pond-adapters-whisper/cuda"
+    echo "pond-server/cuda"
   else
     echo ""
   fi
@@ -700,7 +725,13 @@ action_build_server() {
   fi
   local cb; cb="$(cargo_bin)"
   if [ -n "$feats" ]; then
-    run_sh "PATH=\$HOME/.cargo/bin:/usr/local/cuda/bin:\$PATH SQLX_OFFLINE=true CMAKE_CUDA_ARCHITECTURES=87 \
+    # Exported, not set inline in the quoted sub-command. write_build_stamp
+    # reads CMAKE_CUDA_ARCHITECTURES from THIS shell, so an inline assignment
+    # was invisible to it and every correct sm_87 build still stamped
+    # `cuda_arch=unset` — sending anyone diagnosing an arch problem the wrong way.
+    export CMAKE_CUDA_ARCHITECTURES=87
+    run_sh "PATH=\$HOME/.cargo/bin:/usr/local/cuda/bin:\$PATH SQLX_OFFLINE=true \
+      CMAKE_CUDA_ARCHITECTURES=$CMAKE_CUDA_ARCHITECTURES \
       $cb build -p pond-server --features $feats --release"
   else
     run_sh "SQLX_OFFLINE=true $cb build -p pond-server --release"

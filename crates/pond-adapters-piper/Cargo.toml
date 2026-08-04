@@ -7,10 +7,34 @@ license.workspace = true
 
 # ── Build note ────────────────────────────────────────────────────────────────
 # In-process `piper-rs` (ONNX Runtime + espeak-ng phonemizer) is the only path.
-# CUDA on Jetson: piper-rs uses `ort` under the hood. ONNX Runtime CUDA EP is
-# loaded dynamically at runtime when JetPack's libonnxruntime.so is on
-# LD_LIBRARY_PATH. No cargo feature is wired here — the runtime EP probes the
-# system. macOS uses the bundled CPU runtime; CoreML EP can be added later.
+#
+# TTS RUNS ON THE ONNX RUNTIME **CPU** EXECUTION PROVIDER, ON EVERY PLATFORM.
+# This is not a configuration gap that the right environment fixes — it is what
+# the code does. An earlier version of this comment claimed a CUDA EP was
+# "loaded dynamically at runtime when JetPack's libonnxruntime.so is on
+# LD_LIBRARY_PATH… the runtime EP probes the system". Every clause of that was
+# false, and it survived for months because a fallback to CPU is silent:
+#
+#   1. `ort` never probes. `SessionBuilder::pre_commit` applies exactly
+#      `environment.execution_providers()`, which starts empty and is only
+#      populated by an explicit `with_execution_providers`. `piper-rs 0.2.0`
+#      builds its session with a bare `Session::builder()` (its lib.rs:52) and
+#      this workspace contains zero calls to `ort::init` or
+#      `with_execution_providers`. So the EP list is empty, by construction.
+#   2. JetPack ships no `libonnxruntime.so` at all — only TensorRT's ONNX
+#      *parser*, `libnvonnxparser.so`, which is a different product. The only
+#      ONNX Runtime on a Jetson is the CPU build `ensure_onnx_runtime()`
+#      downloads into the data dir.
+#   3. `ort-sys`'s `dist.txt` has exactly one `aarch64-unknown-linux-gnu` row
+#      and its variant is `none`. The `cu12` variants are x86_64/Windows only,
+#      so there is no prebuilt CUDA ONNX Runtime for this target to fetch.
+#
+# Making TTS use the GPU needs all three of: an ONNX Runtime >= 1.24 for
+# aarch64/JetPack built with `--use_cuda`/`--use_tensorrt` (a source build —
+# `ort` hard-rejects anything below its MINOR_VERSION); `ORT_DYLIB_PATH`
+# pointed at it; and this crate registering the EP via
+# `piper_rs::Piper::from_session` instead of `Piper::new`. Measure first: piper
+# already runs at RTF ~0.1 on an Orin Nano, roughly 9x faster than real time.
 
 [features]
 default = []

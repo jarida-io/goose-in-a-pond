@@ -22,7 +22,10 @@
 #
 # Output: target-jetson/release/pond-server  (aarch64 Linux ELF)
 # Deploy: scp it to the Jetson and run `./pond-server serve` — models download to
-#         the data dir on first boot; onnxruntime is loaded from JetPack at runtime.
+#         the data dir on first boot, and so does the ONNX Runtime. JetPack does
+#         NOT ship one (`libnvonnxparser` is TensorRT's ONNX parser, a different
+#         product); `ensure_onnx_runtime()` downloads Microsoft's CPU aarch64
+#         build into <data_dir>/lib and points ORT_DYLIB_PATH at it.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 

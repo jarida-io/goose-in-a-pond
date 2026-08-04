@@ -209,6 +209,26 @@ impl WhisperRsInput {
         let n_threads = opts.n_threads.unwrap_or_else(default_threads);
         let audio_ctx = opts.fit_audio_ctx.then(|| audio_ctx_for(samples.len()));
 
+        // Cost of this call, under the `pond_adapters_whisper` target — which
+        // the file log keeps at debug by default, and which the
+        // `whisper_rs=error` carve-out does not touch.
+        //
+        // Nothing timed ASR before this. That is why two questions the voice
+        // loop's design depends on had no answer: whether the accurate pass
+        // actually finishes inside the 800 ms end-of-speech window it is
+        // deliberately hidden behind (if it does, making it faster buys the
+        // user nothing), and what the always-on wake-word cycle really costs.
+        // Both are now a log line, on CPU and on CUDA alike.
+        let started = std::time::Instant::now();
+        let profile = if opts.beam_size.is_some() {
+            "accurate"
+        } else {
+            "wake_word"
+        };
+        // Input is always 16 kHz mono here — everything upstream resamples
+        // before calling in (`resample_to_16k`).
+        let audio_ms = (samples.len() as f64 / 16_000.0) * 1000.0;
+
         // Use a single std::thread + catch_unwind boundary: we can't catch_unwind
         // across an FFI panic on stable Rust without UnwindSafe, but the C++
         // panic boundary in whisper.cpp aborts the process anyway. We use
@@ -264,6 +284,21 @@ impl WhisperRsInput {
             }
             Ok(strip_whisper_artifacts(&out))
         }));
+
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        // RTF < 1 means faster than real time. For the accurate profile the
+        // number that matters is `elapsed_ms` against the 800 ms silence
+        // window, not RTF — it is the overrun, if any, that the user feels.
+        tracing::debug!(
+            profile,
+            audio_ms = format_args!("{audio_ms:.0}"),
+            elapsed_ms = format_args!("{elapsed_ms:.0}"),
+            rtf = format_args!("{:.3}", elapsed_ms / audio_ms.max(1.0)),
+            n_threads,
+            audio_ctx = audio_ctx.unwrap_or(0),
+            ok = result.as_ref().map(|r| r.is_ok()).unwrap_or(false),
+            "ASR transcribe"
+        );
 
         match result {
             Ok(Ok(text)) => Ok(text),

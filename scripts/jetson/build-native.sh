@@ -86,7 +86,15 @@ echo "Building pond-server (single executable — API + embedded UI)..."
 SERVER_FEATURES=""
 if [ "$CUDA" = true ]; then
   echo "  CUDA enabled — using GPU acceleration (sm_87 / Ampere)"
-  SERVER_FEATURES="--features pond-adapters-local-inference/cuda"
+  # `cuda` is the pond-server alias covering BOTH the LLM and ASR adapters.
+  # This script used to pass pond-adapters-local-inference/cuda alone, which
+  # built the LLM for the GPU and left whisper on the CPU with no error.
+  SERVER_FEATURES="--features pond-server/cuda"
+  # sm_87 is absent from ggml's default arch list; without this the build ships
+  # compute_80 PTX that the driver JIT-compiles at first model load. nvcc is
+  # also not on the non-login PATH this script inherits over ssh.
+  export CMAKE_CUDA_ARCHITECTURES=87
+  export PATH="/usr/local/cuda/bin:$PATH"
 fi
 
 SQLX_OFFLINE=true cargo build -p pond-server $SERVER_FEATURES --release
