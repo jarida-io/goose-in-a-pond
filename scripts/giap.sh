@@ -437,14 +437,18 @@ doctor() {
       # and it used to be matched on "local-inference/cuda" alone — which is
       # satisfied by a half-CUDA build with the LLM on the GPU and ASR on the
       # CPU. That exact binary shipped and doctor called it ok.
+      # ASR on the CPU is the intended default — `cuda` covers the LLM only.
+      # This reports which backend is actually in the binary rather than
+      # judging it, because both answers are legitimate: what was NOT
+      # legitimate, and what this check exists to end, was being unable to tell.
       if strings -a target/release/pond-server 2>/dev/null \
            | grep -qF 'WhisperRsInput: CUDA backend enabled'; then
-        ok "binary has ASR on CUDA (whisper compiled with the cuda feature)"
+        ok "binary has ASR on CUDA (built with cuda-asr — the opt-in path)"
+        note "measured 3.45x on transcription, but watch decode tok/s in turn_metrics:"
+        note "the wake detector's 2-thread cap does not apply on the GPU"
       elif strings -a target/release/pond-server 2>/dev/null \
              | grep -qF 'WhisperRsInput: CPU backend'; then
-        bad "binary has ASR on CPU — whisper was built without the cuda feature"
-        note "rebuild with --features pond-server/cuda (menu 12 / scripts/jetson.sh deploy)"
-        DOC_FAIL=$((DOC_FAIL+1))
+        ok "binary has ASR on CPU (the default; see the cuda-asr feature)"
       else
         unk "cannot read a whisper backend string from the binary"
         DOC_UNK=$((DOC_UNK+1))
@@ -459,14 +463,18 @@ doctor() {
       # re-run the build script — the shipped SASS stays whatever the first
       # CUDA build produced. Detect that rather than paying a forced rebuild on
       # every deploy.
+      # Only meaningful when ASR is actually on the GPU; skipped otherwise, so a
+      # default CPU-ASR build does not report an irrelevant unknown.
       local cuda_cache="" cache
-      for cache in target/release/build/whisper-rs-sys-*/out/build/CMakeCache.txt; do
-        [ -f "$cache" ] || continue
-        grep -q '^GGML_CUDA:BOOL=ON' "$cache" 2>/dev/null && cuda_cache="$cache"
-      done
+      if strings -a target/release/pond-server 2>/dev/null \
+           | grep -qF 'WhisperRsInput: CUDA backend enabled'; then
+        for cache in target/release/build/whisper-rs-sys-*/out/build/CMakeCache.txt; do
+          [ -f "$cache" ] || continue
+          grep -q '^GGML_CUDA:BOOL=ON' "$cache" 2>/dev/null && cuda_cache="$cache"
+        done
+      fi
       if [ -z "$cuda_cache" ]; then
-        unk "no CUDA whisper build tree found to check the GPU arch against"
-        DOC_UNK=$((DOC_UNK+1))
+        : # ASR is on the CPU, or no CUDA whisper tree exists — nothing to check
       elif grep -q '^CMAKE_CUDA_ARCHITECTURES:.*=87' "$cuda_cache" 2>/dev/null; then
         ok "whisper ggml-cuda built for sm_87"
       else

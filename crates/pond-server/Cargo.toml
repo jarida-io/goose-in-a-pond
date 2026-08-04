@@ -16,13 +16,14 @@ path = "src/lib.rs"
 [features]
 default = ["goose-agent", "local-inference", "pond-agent"]
 # The one canonical name for a GPU build. Every script that builds a Jetson
-# binary must pass exactly this and nothing else.
+# binary passes exactly this.
 #
-# It exists because the two adapters have to be enabled together and three of
-# the repo's build paths used to enable only the first, producing a binary with
-# the LLM on the GPU and ASR silently on six CPU cores. Nothing errored: cargo
-# does not warn, the build succeeds, the server starts, transcription still
-# works. The only tell was one INFO line nobody asserted on.
+# It covers the LLM only. ASR stays on the CPU — see `cuda-asr` below for the
+# measurement that settled it. The pairing is deliberate and it is the reason
+# this feature exists: three build paths used to pass
+# `pond-adapters-local-inference/cuda` by hand while a fourth also passed
+# `pond-adapters-whisper/cuda`, so which engines got the GPU depended on which
+# script you ran, and nothing errored either way. One name, one meaning.
 #
 # Pair it with CMAKE_CUDA_ARCHITECTURES=87 — sm_87 is NOT in ggml's default
 # architecture list, and whether the `native` fallback rescues you depends on
@@ -34,11 +35,38 @@ default = ["goose-agent", "local-inference", "pond-agent"]
 # that route enables the adapter but NOT `pond-api/local-inference`, which the
 # `local-inference` feature also turns on. Under `--no-default-features
 # --features cuda` the two would disagree.
-cuda = [
-    "local-inference",
-    "pond-adapters-local-inference/cuda",
-    "pond-adapters-whisper/cuda",
-]
+cuda = ["local-inference", "pond-adapters-local-inference/cuda"]
+# ASR on the GPU. Opt-in, and measured NOT to be worth it on an Orin Nano.
+#
+# It works, and it is genuinely faster — on ggml-base.en over an 11 s clip,
+# beam-5 transcription went 2023 ms on six A78AE cores to 587 ms on the GPU
+# (3.45x), transcripts byte-identical. Enable it and three things follow that
+# the benchmark could not see, because the benchmark ran with the server
+# stopped:
+#
+#   1. The wake detector loses its only throttle. It is deliberately pinned to
+#      `n_threads: Some(2)` because six threads starved inference. With
+#      `use_gpu(true)` that parameter gates only CPU-fallback ops, and there is
+#      no GPU-side equivalent to cap it with.
+#   2. The model load order inverts. `WhisperRsInput::new` loads its context
+#      eagerly during voice wiring; the LLM loads lazily at first inference. So
+#      whisper's allocations land in the NvMap carveout ahead of the LLM's
+#      ~586 MiB contiguous request, risking the documented 22.9 -> 12.5 tok/s
+#      decode cliff.
+#   3. It is all-or-nothing. One `WhisperContext` serves both the once-per-turn
+#      accurate pass and the always-on detector (`use_gpu` is set once, at
+#      context load), and the detector cannot be suspended because the
+#      wake-word race is the only live barge-in path.
+#
+# The prize is ~1.2 s of end-of-speech overrun on a turn measured at 24-154 s.
+# Before reaching for this, try `fit_audio_ctx: true` on
+# `TranscribeOpts::accurate()`: today a 3 s command pays a full 30 s mel encode,
+# and fitting the context is ~8x less encoder work on the CPU, with no second
+# CUDA context and no load-order hazard.
+#
+# If you do enable it, watch decode tok/s in `turn_metrics` against the
+# 8.7-18.1 baseline over ~20 real turns. That is the only way to see (1).
+cuda-asr = ["cuda", "pond-adapters-whisper/cuda"]
 # Enable the Goose agent backend (compiles Block's Goose from the submodule — slow first build).
 # Enabled by default. To build without Goose: cargo build -p pond-server --no-default-features
 goose-agent = ["dep:pond-adapters-goose"]
