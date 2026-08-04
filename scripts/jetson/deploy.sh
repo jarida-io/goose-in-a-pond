@@ -61,7 +61,7 @@ ssh "$HOST" "cd ~/${REMOTE_REPO} \
   && PATH=\$HOME/.cargo/bin:/usr/local/cuda/bin:\$PATH SQLX_OFFLINE=true \
      CMAKE_CUDA_ARCHITECTURES=87 \
      cargo build -p pond-server \
-       --features pond-adapters-local-inference/cuda,pond-adapters-whisper/cuda \
+       --features pond-server/cuda \
        --release"
 
 echo "==> [4/4] Restarting service + health check"

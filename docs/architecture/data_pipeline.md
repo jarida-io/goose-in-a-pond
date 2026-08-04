@@ -543,11 +543,23 @@ Index: `idx_biometric_audit_created_at` on `(created_at)` — prune after 30 day
 
 | Component | Crate | ARM64 | Notes |
 |-----------|-------|-------|-------|
-| Face inference | `ort` (ONNX Runtime) | Yes (TensorRT) | GPU-accelerated on Jetson via CUDA |
+| Face inference | `ort` (ONNX Runtime) | Yes | **CPU execution provider**, on every platform — see note below |
 | Face preprocessing | `image` + custom | Yes | Resize, normalize, BGR→RGB |
 | Speaker embedding | subprocess/HTTP | Yes | Resemblyzer or pyannote via HTTP service |
 | Vector similarity | `sqlite-vec` extension | Yes | SIMD-accelerated cosine in SQLite |
 | Constant-time comparison | `subtle` crate | Yes | Prevents timing side-channel on threshold |
+
+> **No ONNX workload in GIAP is GPU-accelerated today**, on any platform. This
+> row previously read "GPU-accelerated on Jetson via CUDA"; that was wrong. An
+> `ort` execution provider is used only if something calls
+> `with_execution_providers`, and nothing in this workspace does — not
+> `pond-adapters-face-onnx`, not `pond-adapters-vision-onnx`, not `piper-rs`,
+> not `fastembed`. All four share one process-global ONNX Runtime, which on a
+> Jetson is the CPU aarch64 build that `ensure_onnx_runtime()` downloads;
+> JetPack ships no ONNX Runtime, and no prebuilt CUDA one exists for this
+> target. Anyone who has sized a face or vision workload against the old claim
+> should re-measure. See `crates/pond-adapters-piper/Cargo.toml` for the full
+> account and what changing it would cost.
 
 ### Port Plan
 

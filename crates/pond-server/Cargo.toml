@@ -15,6 +15,30 @@ path = "src/lib.rs"
 
 [features]
 default = ["goose-agent", "local-inference", "pond-agent"]
+# The one canonical name for a GPU build. Every script that builds a Jetson
+# binary must pass exactly this and nothing else.
+#
+# It exists because the two adapters have to be enabled together and three of
+# the repo's build paths used to enable only the first, producing a binary with
+# the LLM on the GPU and ASR silently on six CPU cores. Nothing errored: cargo
+# does not warn, the build succeeds, the server starts, transcription still
+# works. The only tell was one INFO line nobody asserted on.
+#
+# Pair it with CMAKE_CUDA_ARCHITECTURES=87 — sm_87 is NOT in ggml's default
+# architecture list, and whether the `native` fallback rescues you depends on
+# which cmake is first on PATH (3.22 over ssh, 4.x in a login shell), so an
+# unpinned build is not reproducible.
+#
+# `local-inference` is listed explicitly rather than relying on
+# `pond-adapters-local-inference/cuda` to pull the optional dep in implicitly:
+# that route enables the adapter but NOT `pond-api/local-inference`, which the
+# `local-inference` feature also turns on. Under `--no-default-features
+# --features cuda` the two would disagree.
+cuda = [
+    "local-inference",
+    "pond-adapters-local-inference/cuda",
+    "pond-adapters-whisper/cuda",
+]
 # Enable the Goose agent backend (compiles Block's Goose from the submodule — slow first build).
 # Enabled by default. To build without Goose: cargo build -p pond-server --no-default-features
 goose-agent = ["dep:pond-adapters-goose"]

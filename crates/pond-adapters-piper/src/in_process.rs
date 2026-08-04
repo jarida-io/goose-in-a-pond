@@ -370,6 +370,18 @@ fn load_voice(model_path: &std::path::Path, config_path: &std::path::Path) -> Re
 /// thing in `catch_unwind` so a C-side panic in ort / espeak returns `Err`.
 fn synth_blocking(voice: Arc<Mutex<Piper>>, text: &str) -> Result<(Vec<u8>, u32)> {
     let text = text.to_string();
+    // Cost of one synthesis, under the `pond_adapters_piper` target — kept at
+    // debug in the file log and untouched by the third-party carve-outs.
+    //
+    // Nothing timed TTS before this. The first sentence of every reply is the
+    // one that matters: `speak()` must finish a whole `piper.create()` before
+    // any audio exists, so that call is the user's time-to-first-audio. Later
+    // sentences are pipelined against playback and are usually free. RTF also
+    // settles whether GPU synthesis is worth pursuing at all — it answers
+    // "how much slower than the speaker are we?", and if the answer stays
+    // well under 1.0 there is no throughput problem to solve.
+    let started = std::time::Instant::now();
+    let chars = text.chars().count();
     let result = catch_unwind(AssertUnwindSafe(move || -> Result<(Vec<u8>, u32)> {
         let mut guard = voice
             .lock()
@@ -389,6 +401,27 @@ fn synth_blocking(voice: Arc<Mutex<Piper>>, text: &str) -> Result<(Vec<u8>, u32)
         let wav = pcm_to_wav(&pcm, sample_rate);
         Ok((wav, sample_rate))
     }));
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    // Audio duration is derived from the WAV we just built rather than guessed
+    // from the text. `encode_wav_pcm16` writes a 44-byte header and mono
+    // 16-bit samples, so 2 bytes per frame (`pond_voice::dsp`).
+    const WAV_HEADER_BYTES: usize = 44;
+    const BYTES_PER_FRAME: f64 = 2.0;
+    let audio_ms = match result.as_ref() {
+        Ok(Ok((wav, rate))) if *rate > 0 && wav.len() > WAV_HEADER_BYTES => {
+            ((wav.len() - WAV_HEADER_BYTES) as f64 / BYTES_PER_FRAME / *rate as f64) * 1000.0
+        }
+        _ => 0.0,
+    };
+    tracing::debug!(
+        chars,
+        audio_ms = format_args!("{audio_ms:.0}"),
+        elapsed_ms = format_args!("{elapsed_ms:.0}"),
+        rtf = format_args!("{:.3}", elapsed_ms / audio_ms.max(1.0)),
+        ok = result.as_ref().map(|r| r.is_ok()).unwrap_or(false),
+        "TTS synthesize"
+    );
+
     match result {
         Ok(Ok(out)) => Ok(out),
         Ok(Err(e)) => Err(e),

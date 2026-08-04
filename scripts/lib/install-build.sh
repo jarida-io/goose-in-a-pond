@@ -55,8 +55,17 @@ build_server() {
   # Determine cargo features
   local features=""
   if [ "$MODE" = "jetson" ] && [ "$HAS_CUDA" = true ]; then
-    features="--features pond-adapters-local-inference/cuda"
-    log "CUDA detected -- enabling GPU acceleration"
+    # `pond-server/cuda` is the alias covering BOTH the LLM and ASR adapters.
+    # Passing pond-adapters-local-inference/cuda alone builds the LLM for the
+    # GPU and leaves whisper on the CPU, silently.
+    #
+    # The name stays package-qualified because both call sites below build more
+    # than one package (`--workspace`, and the four-`-p` fallback), and cargo
+    # rejects a bare feature name in a multi-package build.
+    features="--features pond-server/cuda"
+    export CMAKE_CUDA_ARCHITECTURES=87
+    export PATH="/usr/local/cuda/bin:$PATH"
+    log "CUDA detected -- enabling GPU acceleration (LLM + ASR, sm_87)"
   fi
 
   # SQLX_OFFLINE for Jetson cross-compile compatibility
