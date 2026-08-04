@@ -482,7 +482,17 @@ doctor() {
         note "the arch pin is not change-tracked; force it with: cargo clean -p whisper-rs-sys"
         DOC_FAIL=$((DOC_FAIL+1))
       fi
-      if [ -n "$D_STAMP" ]; then
+      # Staleness beats content. A stamp older than the binary describes a
+      # DIFFERENT build, and one that happens to contain "cuda" would otherwise
+      # report ok while describing something that no longer exists — the exact
+      # false confidence this whole check was rewritten to remove. Only giap.sh
+      # and deploy.sh write stamps; a hand-run `cargo build` leaves the old one
+      # in place, so this is the common case, not the corner case.
+      if [ -n "$D_STAMP" ] && [ target/release/pond-server -nt target/release/.giap-build-stamp ]; then
+        warn "build stamp is OLDER than the binary — it describes a previous build"
+        note "provenance below is not this binary's; the backend check above is"
+        DOC_WARN=$((DOC_WARN+1))
+      elif [ -n "$D_STAMP" ]; then
         case "$D_STAMP" in
           *"cuda"*) ok "build stamp records a CUDA build" ;;
           *) warn "build stamp records no cuda feature (may be stale — trust the binary check above)"

@@ -55,14 +55,27 @@ rsync -az --delete "${REPO_ROOT}/pond-desktop/dist/" "${HOST}:${REMOTE_REPO}/pon
 echo "==> [3/4] Release build on the Jetson (CUDA sm_87) — this is the slow step"
 # CMAKE_CUDA_ARCHITECTURES=87 makes ggml emit a real sm_87 cubin; without it the
 # build ships compute_80 PTX that the driver JIT-compiles at first model load.
-# whisper/cuda moves ASR decode onto the GPU (research R7: ~20s of audio in
-# ~1-2.6s instead of a multi-second all-6-core CPU burst).
+#
+# `cuda` is the LLM only. ASR stays on the CPU: measured 3.45x faster on the GPU
+# but it removes the wake detector's thread cap and loads whisper's context
+# ahead of the LLM's contiguous NvMap request. `cuda-asr` opts in — see
+# crates/pond-server/Cargo.toml for the numbers and the risks.
+#
+# The stamp is written here too. Without it, `giap.sh doctor` reports the
+# provenance of whatever build last ran through giap.sh, which after a deploy is
+# a different binary than the one on disk.
 ssh "$HOST" "cd ~/${REMOTE_REPO} \
   && PATH=\$HOME/.cargo/bin:/usr/local/cuda/bin:\$PATH SQLX_OFFLINE=true \
      CMAKE_CUDA_ARCHITECTURES=87 \
      cargo build -p pond-server \
        --features pond-server/cuda \
-       --release"
+       --release \
+  && printf 'features=%s cuda_arch=%s rustflags=%s git=%s goose=%s ui=%s built=%s\n' \
+       'pond-server/cuda' '87' 'inherited' \
+       \"\$(git rev-parse --short HEAD)\" \
+       \"\$(git -C goose rev-parse --short HEAD 2>/dev/null || echo '?')\" \
+       'built' \"\$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" \
+     > target/release/.giap-build-stamp"
 
 echo "==> [4/4] Restarting service + health check"
 ssh "$HOST" "systemctl --user restart goose-in-a-pond.service && sleep 4 \
