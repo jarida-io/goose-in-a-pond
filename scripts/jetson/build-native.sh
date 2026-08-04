@@ -86,9 +86,12 @@ echo "Building pond-server (single executable — API + embedded UI)..."
 SERVER_FEATURES=""
 if [ "$CUDA" = true ]; then
   echo "  CUDA enabled — using GPU acceleration (sm_87 / Ampere)"
-  # `cuda` is the pond-server alias covering BOTH the LLM and ASR adapters.
-  # This script used to pass pond-adapters-local-inference/cuda alone, which
-  # built the LLM for the GPU and left whisper on the CPU with no error.
+  # `cuda` is the pond-server alias for the LLM. ASR deliberately stays on the
+  # CPU — `cuda-asr` opts in, and crates/pond-server/Cargo.toml carries the
+  # measurement and the three reasons not to. The alias exists so that which
+  # engines get the GPU is one decision with one name, rather than a per-script
+  # accident: this script used to pass pond-adapters-local-inference/cuda while
+  # deploy.sh also passed the whisper feature.
   SERVER_FEATURES="--features pond-server/cuda"
   # sm_87 is absent from ggml's default arch list; without this the build ships
   # compute_80 PTX that the driver JIT-compiles at first model load. nvcc is

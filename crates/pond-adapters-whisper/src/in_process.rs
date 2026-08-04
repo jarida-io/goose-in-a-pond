@@ -206,6 +206,19 @@ impl WhisperRsInput {
         if samples.is_empty() {
             return Ok(String::new());
         }
+        // whisper.cpp drops anything under 100 ms and returns SUCCESS with zero
+        // segments (whisper.cpp:6846 — `if (seek_end < seek_start + delta_min)`
+        // logs a warning and `return 0`). Upstream, `chat.rs` reads the empty
+        // transcript as "nothing was heard", resets the turn and continues — so
+        // a real utterance disappears and the log records ok=true. Two such rows
+        // are in the device's own session log (84 ms and 85 ms). Name it.
+        if samples.len() * 1000 / 16_000 < 100 {
+            tracing::warn!(
+                samples = samples.len(),
+                ms = samples.len() * 1000 / 16_000,
+                "utterance shorter than whisper's 100 ms floor — it will transcribe to nothing"
+            );
+        }
         let n_threads = opts.n_threads.unwrap_or_else(default_threads);
         let audio_ctx = opts.fit_audio_ctx.then(|| audio_ctx_for(samples.len()));
 

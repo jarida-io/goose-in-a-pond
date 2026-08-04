@@ -375,6 +375,26 @@ pub(crate) fn record_mono_f32_vad(
     let mut recorded_ms: u64 = 0;
     let mut vad = SpeculativeVad::new(silence_ms, POLL_MS);
     let mut speculative: Option<std::thread::JoinHandle<Result<String>>> = None;
+    // Abandoned jobs, kept so we can tell whether they are still burning CPU.
+    //
+    // Dropping a `JoinHandle` DETACHES the thread; it does not stop it. Every
+    // abandoned speculative job therefore ran a full `TranscribeOpts::accurate()`
+    // — six threads, beam 5 — to completion, unwatched. And a new one was
+    // spawned on every micro-pause, because `SpawnSpeculative` fires on the
+    // first silent poll after speech. On a six-core Orin that put three and
+    // four of them on the CPU at once.
+    //
+    // Measured in the session log before this guard existed: isolated calls
+    // took 1.3-1.9 s regardless of clip length, while clustered ones — three or
+    // four starting within a second of each other, on snapshots of the SAME
+    // growing recording — stretched to 3.4 s and 5.5 s. 14 of 26 calls
+    // overlapped another. That contention, not the encoder and not the
+    // temperature ladder, was the ~2.6 s overrun past the 800 ms silence window.
+    let mut stale: Option<std::thread::JoinHandle<Result<String>>> = None;
+    // Below this, a snapshot is not worth a transcription: whisper.cpp drops
+    // anything under ~100 ms outright, and a fragment this short is a pause in
+    // the middle of a sentence rather than the end of one.
+    const MIN_SPECULATIVE_MS: usize = 400;
     // Set once the in-flight speculative job has been joined and the caller
     // notified via `Ready` — retained so a later `Confirmed` can reuse it
     // without re-joining, and so a later `DiscardSpeculative` knows to fire
@@ -396,9 +416,29 @@ pub(crate) fn record_mono_f32_vad(
         match vad.on_rms(rms, SILENCE_RMS) {
             VadEvent::SpawnSpeculative => {
                 if let Some(spawn) = speculative_spawn {
+                    // Retire a finished abandoned job so it stops blocking.
+                    if stale.as_ref().is_some_and(|h| h.is_finished()) {
+                        stale = None;
+                    }
                     let snapshot = samples.lock().unwrap().clone();
-                    speculative = Some(spawn(snapshot, sample_rate));
-                    speculative_ready = None;
+                    let snapshot_ms = snapshot.len() * 1000 / sample_rate.max(1) as usize;
+                    // Skipping a spawn is correctness-neutral. If no speculative
+                    // transcript exists, `listen_inner` falls through to the
+                    // confirmed pass, which transcribes the FULL recording with
+                    // the same settings and strictly more audio — so the worst
+                    // case is the latency we had before speculation, never a
+                    // worse transcript.
+                    if stale.is_some() || speculative.is_some() {
+                        tracing::debug!(
+                            snapshot_ms,
+                            "skipping speculative spawn: one is still in flight"
+                        );
+                    } else if snapshot_ms < MIN_SPECULATIVE_MS {
+                        tracing::debug!(snapshot_ms, "skipping speculative spawn: clip too short");
+                    } else {
+                        speculative = Some(spawn(snapshot, sample_rate));
+                        speculative_ready = None;
+                    }
                 }
             }
             VadEvent::DiscardSpeculative => {
@@ -407,7 +447,15 @@ pub(crate) fn record_mono_f32_vad(
                         cb(SpeculativeSignal::Invalidated);
                     }
                 }
-                speculative = None; // abandon the in-flight job, it covered a too-short clip
+                // Move it aside rather than dropping it. We cannot cancel a
+                // whisper.cpp call in flight, but we can decline to start a
+                // second one while it is still running — which is the whole
+                // difference between one job and four.
+                if let Some(h) = speculative.take() {
+                    if !h.is_finished() {
+                        stale = Some(h);
+                    }
+                }
                 speculative_ready = None;
             }
             VadEvent::Confirmed => {
