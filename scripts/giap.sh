@@ -3,12 +3,18 @@
 # giap.sh — one entry point for building, installing, running and repairing GIAP.
 #
 #   bash scripts/giap.sh              # interactive menu
-#   bash scripts/giap.sh install      # first-time install on this host
-#   bash scripts/giap.sh install -y   # ... without the confirmation prompts
-#   bash scripts/giap.sh doctor       # non-interactive: health report, exit 1 on FAIL
-#   bash scripts/giap.sh status       # non-interactive: detection banner only
-#   bash scripts/giap.sh build        # non-interactive: build UI + server for THIS host
+#   bash scripts/giap.sh voice        # headless voice mode — no desktop, no display
+#   bash scripts/giap.sh doctor       # health report, exit 1 on FAIL
+#   bash scripts/giap.sh status       # detection banner only
+#   bash scripts/giap.sh install -y   # first-time install, no confirmation prompts
+#   bash scripts/giap.sh build        # build UI + server for THIS host
 #   bash scripts/giap.sh --dry-run …  # print every command instead of running it
+#
+# Full command list (each is also a menu entry — the two are kept in step):
+#   diagnose   doctor · status · repair-submodule · reclaim · kill-strays · power
+#   build      install · build · build-ui · build-server · build-desktop · deploy
+#   service    service-install · service-remove · start · stop · restart · serve
+#   run        voice · gui · logs
 #
 # It auto-detects the host (Jetson / Linux / macOS), whether CUDA is usable, and
 # the known bad states BEFORE you hit them. It delegates to the existing scripts
@@ -103,6 +109,7 @@ D_DATA_DIR=""; D_PORT=""; D_HEALTH=""; D_PROCS=0
 D_RAM_TOTAL=""; D_RAM_AVAIL=""; D_DISK_FREE=""; D_TGT_DBG=""; D_TGT_REL=""
 D_PWR=""; D_OC=""; D_DISPLAY=""; D_SUDO=""
 D_ENGINE=""; D_SETTINGS=""
+D_ASR_MODEL=""; D_TTS_VOICE=""; D_WAKE=""; D_VOICE_LOCK=""
 
 human_mb() { # $1 = MB
   local m="${1:-0}"
@@ -341,10 +348,59 @@ sqlite_setting() { # $1 = key
     "SELECT value FROM settings WHERE key='$1' LIMIT 1;" 2>/dev/null
 }
 
+# Everything voice mode needs before it can be anything other than silent.
+#
+# The failure this exists to prevent: a voice session whose configured TTS voice
+# is not installed does not error. It prints "Speak off — replies are printed"
+# once, in a banner nobody re-reads, and then behaves like a working assistant
+# that simply never speaks. Same for the ASR model, one layer earlier — no model,
+# no wake word, and the session looks like a microphone problem.
+detect_voice() {
+  D_ASR_MODEL=""; D_TTS_VOICE=""; D_WAKE=""; D_VOICE_LOCK=""
+  local models="$D_DATA_DIR/models"
+
+  # ASR: whichever ggml-*.bin is present. The setting names a variant
+  # ("base.en"); the file is what actually loads.
+  if [ -d "$models" ]; then
+    # No `ls | xargs basename`: the macOS data dir is under "Application
+    # Support", and xargs splits on that space — it reported the model as
+    # "Application". (`xargs -r` is also GNU-only and absent on macOS.)
+    local m
+    for m in "$models"/ggml-*.bin; do
+      [ -e "$m" ] || continue
+      D_ASR_MODEL="$(basename "$m")"
+      break
+    done
+    # TTS: piper voices live in models/tts as <voice>.onnx with a sibling
+    # .onnx.json. A voice without its config cannot load, so require both.
+    local v
+    for v in "$models"/tts/*.onnx; do
+      [ -f "$v" ] || continue
+      [ -f "$v.json" ] || continue
+      D_TTS_VOICE="$(basename "$v" .onnx)"
+      break
+    done
+  fi
+
+  D_WAKE="$(sqlite_setting voice_wake_word 2>/dev/null)"
+  [ -z "$D_WAKE" ] && D_WAKE="goose"
+
+  # The singleton. voice_lock.rs flocks this path in the TEMP dir, not the data
+  # dir — a POND_DATA_DIR scratch profile takes the same physical microphone, so
+  # a data-dir lock would permit exactly the collision it exists to prevent.
+  local lock="${TMPDIR:-/tmp}/giap-voice-$(id -u).lock"
+  if [ -f "$lock" ]; then
+    local holder; holder="$(head -1 "$lock" 2>/dev/null | tr -dc '0-9')"
+    # The file outlives the process — flock releases on death however it dies,
+    # so a pid that is gone means a free lock, not a stale one to clean up.
+    if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then D_VOICE_LOCK="$holder"; fi
+  fi
+}
+
 detect_all() {
   detect_host; detect_accel; detect_toolchain; detect_repo; detect_ui
   detect_binaries; detect_service; detect_runtime; detect_resources
-  detect_jetson_power; detect_capabilities; detect_engine
+  detect_jetson_power; detect_capabilities; detect_engine; detect_voice
 }
 
 # ── banner ───────────────────────────────────────────────────────────────────
@@ -546,6 +602,35 @@ doctor() {
   else
     info "no pond-server running"
   fi
+
+  # 6b. can voice mode actually hear and speak?
+  #
+  # Both halves fail silently at runtime, which is the whole reason to assert
+  # them here. A missing voice does not error: the session prints "Speak off"
+  # into a startup banner and then behaves like a working assistant that never
+  # speaks. A voice present WITHOUT its sibling .onnx.json is the same outcome
+  # from a state that looks correct in a file listing.
+  if [ -n "$D_ASR_MODEL" ]; then
+    ok "voice can hear ($D_ASR_MODEL, wake word \"$D_WAKE\")"
+  else
+    warn "no whisper model installed — voice mode cannot hear"
+    note "fetch one: ./target/release/pond-server setup --model base"
+    DOC_WARN=$((DOC_WARN+1))
+  fi
+  if [ -n "$D_TTS_VOICE" ]; then
+    ok "voice can speak ($D_TTS_VOICE)"
+  else
+    local orphan=""
+    orphan="$(ls "$D_DATA_DIR"/models/tts/*.onnx 2>/dev/null | head -1)"
+    if [ -n "$orphan" ]; then
+      bad "piper voice $(basename "$orphan" .onnx) has no .onnx.json — it cannot load"
+      note "replies will be printed, not spoken, with no error at runtime"
+    else
+      warn "no piper voice installed — replies are printed, not spoken"
+    fi
+    DOC_WARN=$((DOC_WARN+1))
+  fi
+  [ -n "$D_VOICE_LOCK" ] && info "a voice session holds the microphone (pid $D_VOICE_LOCK)"
 
   # 7. disk / memory headroom for a build
   if [ "${D_DISK_FREE:-0}" -lt 10 ] 2>/dev/null; then
@@ -893,6 +978,74 @@ action_serve_foreground() {
   run ./target/release/pond-server serve --port "$port"
 }
 
+# Headless voice mode — the terminal voice loop, no desktop, no display.
+# This is the same command the Tauri shell spawns as a child; the difference is
+# that here you get the human-readable banner instead of NDJSON.
+action_voice() {
+  head1 "Voice mode (headless)"
+  [ -f target/release/pond-server ] || { bad "no release binary — build first (menu 12)"; return 1; }
+
+  # 1. The singleton. The binary refuses on its own and names the holder, but
+  #    saying so here costs nothing and saves a model load before the refusal.
+  if [ -n "$D_VOICE_LOCK" ]; then
+    bad "another voice session already owns the microphone (pid $D_VOICE_LOCK)"
+    note "voice needs sole use of the mic and speaker; two sessions answer in"
+    note "different voices and take the audio device from each other"
+    note "stop it with: kill $D_VOICE_LOCK"
+    return 1
+  fi
+
+  # 2. Memory. `chat` is not a client of `serve` — it builds its own agent and
+  #    loads its own model, so running both means two copies of a multi-GB model
+  #    in one pool. On an 8 GB Jetson that is the OOM, not a slowdown.
+  if [ "$D_SVC_ACTIVE" = "active" ] || [ "${D_PROCS:-0}" -gt 0 ] 2>/dev/null; then
+    warn "a server is running — voice mode loads a SECOND copy of the model."
+    # D_RAM_* are MiB; human_mb renders them. macOS reports no MemAvailable.
+    if [ -n "$D_RAM_AVAIL" ]; then
+      info "RAM: $(human_mb "$D_RAM_AVAIL") available of $(human_mb "$D_RAM_TOTAL")"
+    else
+      info "RAM: $(human_mb "${D_RAM_TOTAL:-0}") total"
+    fi
+    if [ "$D_IS_JETSON" = true ]; then
+      note "on this board that is usually an OOM kill, not a slowdown"
+    fi
+    if confirm "Stop the service for this voice session?"; then
+      svc_ctl stop; detect_service; detect_runtime
+      RESTART_SVC_AFTER_VOICE=true
+    else
+      confirm "Continue anyway?" || return 1
+    fi
+  fi
+
+  # 3. Will it be able to hear, and will it be able to speak? Both are silent
+  #    failures at runtime, which is exactly why they are checked before launch.
+  if [ -z "$D_ASR_MODEL" ]; then
+    bad "no whisper model in $D_DATA_DIR/models — voice mode cannot hear"
+    note "fetch one: ./target/release/pond-server setup --model base"
+    return 1
+  fi
+  if [ -z "$D_TTS_VOICE" ]; then
+    warn "no installed piper voice — replies will be PRINTED, not spoken."
+    note "a voice needs BOTH <voice>.onnx and <voice>.onnx.json in models/tts;"
+    note "a voice missing its .json config is why 'installed' can still be silent"
+    note "install one from the Models tab, or via POST /api/v1/models/download"
+    confirm "Start anyway (text replies)?" || return 1
+  fi
+
+  info "listen  ${D_ASR_MODEL}"
+  info "speak   ${D_TTS_VOICE:-off (replies printed)}"
+  info "wake    \"${D_WAKE}\""
+  note "say \"${D_WAKE}\" and ask in the same breath — one utterance, not two"
+  note "logs land in $(log_file_today), not on this console"
+  say ""
+  run ./target/release/pond-server chat --input whisper
+
+  if [ "${RESTART_SVC_AFTER_VOICE:-false}" = true ]; then
+    RESTART_SVC_AFTER_VOICE=false
+    confirm "Restart the service?" && { svc_ctl start; detect_service; detect_runtime; }
+  fi
+}
+
 action_launch_gui() {
   head1 "Launch the desktop GUI"
   local bin="pond-desktop/src-tauri/target/release/pond-desktop"
@@ -1026,6 +1179,9 @@ show_menu() {
   say "  24) Remove the service"
   say "  25) Run the server in the foreground"
   say ""
+  say "  ${C_B}Voice${C_RST}"
+  say "  26) Start voice mode (headless — no desktop, no display)"
+  say ""
   say "  ${C_B}Desktop${C_RST}"
   say "  31) Build the desktop app (with custom-protocol)"
   say "  32) Launch the GUI on this machine's display"
@@ -1060,6 +1216,7 @@ menu_loop() {
       23) svc_ctl restart; detect_service; detect_runtime; pause ;;
       24) action_service_remove; pause ;;
       25) action_serve_foreground; pause ;;
+      26) action_voice; pause ;;
       31) action_build_desktop; pause ;;
       32) action_launch_gui; pause ;;
       40) action_logs; pause ;;
@@ -1075,7 +1232,11 @@ menu_loop() {
 }
 
 usage() {
-  sed -n '3,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  # Print the header block up to the first blank comment line that follows the
+  # command list, rather than a hard-coded line range: the previous `3,14p`
+  # silently truncated the help the moment the header grew.
+  sed -n '3,/^# It auto-detects/p' "${BASH_SOURCE[0]}" \
+    | sed '$d' | sed 's/^# \{0,1\}//' | sed -e :a -e '/^$/{$d;N;ba' -e '}'
 }
 
 # ── entry ────────────────────────────────────────────────────────────────────
@@ -1091,6 +1252,11 @@ done
 
 detect_all
 
+# Every menu action has a name here. The asymmetry was its own bug source:
+# anything reachable only from the menu cannot be scripted, put in a systemd
+# unit, or run over ssh — which is most of how this project is actually
+# operated — so those paths got hand-typed cargo invocations instead, and that
+# is how three build scripts drifted apart on which CUDA features they passed.
 case "$CMD" in
   "")        menu_loop ;;
   status)    banner ;;
@@ -1098,9 +1264,21 @@ case "$CMD" in
   install)   action_install ;;
   build)     action_build_ui; action_build_server ;;
   build-ui)  action_build_ui ;;
+  build-server) action_build_server ;;
   build-desktop) action_build_desktop ;;
   deploy)    action_deploy ;;
   logs)      action_logs ;;
   gui)       action_launch_gui ;;
+  voice)     action_voice ;;
+  serve)     action_serve_foreground ;;
+  start)     svc_ctl start;   detect_service; detect_runtime ;;
+  stop)      svc_ctl stop;    detect_service; detect_runtime ;;
+  restart)   svc_ctl restart; detect_service; detect_runtime ;;
+  service-install) action_service_install ;;
+  service-remove)  action_service_remove ;;
+  repair-submodule) action_repair_submodule ;;
+  reclaim)   action_reclaim_disk ;;
+  kill-strays) action_kill_strays ;;
+  power)     action_jetson_power ;;
   *)         bad "unknown command: $CMD"; usage; exit 1 ;;
 esac
