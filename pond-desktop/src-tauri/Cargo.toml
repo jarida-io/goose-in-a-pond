@@ -30,7 +30,7 @@ tauri-plugin-autostart = "2"
 tauri-plugin-shell = "2"
 
 # Native audio capture — same cpal version as pond-adapters-whisper
-cpal = "0.15"
+cpal = "0.17"
 
 # HTTP client for talking to pond-server
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream", "blocking"] }
