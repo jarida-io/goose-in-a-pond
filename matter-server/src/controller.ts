@@ -8,6 +8,7 @@
  */
 
 import { Endpoint, Environment, Seconds, ServerNode, type ClientNode } from "@matter/main";
+import { QrPairingCodeCodec } from "@matter/types";
 
 import { log, describeError, setupCodeKind } from "./log.js";
 import { nodeToDevice } from "./mapping/devices.js";
@@ -44,6 +45,45 @@ import {
  * wait.
  */
 const DISCOVER_TIMEOUT = Seconds(8);
+
+/** What `peers.commission()` accepts: a passcode (with an optional discriminator to
+ * narrow the mDNS browse), or a manual pairing code string. There is no third,
+ * QR-aware shape on that API — see `commissionOptionsFor`. */
+type CommissionOptions = { passcode: number; discriminator?: number } | { pairingCode: string };
+
+/**
+ * Turn a trimmed setup code into what `peers.commission()` actually accepts.
+ *
+ * The QR ("MT:") case is decoded here rather than handed through as a `pairingCode`
+ * string: `@matter/node`'s `CommissioningClient.PasscodeOptions` always runs a
+ * `pairingCode` value through `ManualPairingCodeCodec`, which strips every non-digit
+ * character and then requires exactly 11 or 21 digits left over — a QR payload's
+ * base-38 letters get stripped along with everything else, so it almost never lands
+ * on that length and fails in milliseconds with "Invalid pairing code", before any
+ * network activity. There is no QR-aware option on that API; decoding the payload
+ * with `QrPairingCodeCodec` ourselves and passing the resulting passcode/discriminator
+ * through the `passcode` path is the only way a QR code actually commissions.
+ */
+export function commissionOptionsFor(trimmed: string, kind: ReturnType<typeof setupCodeKind>): CommissionOptions {
+  if (trimmed.startsWith("MT:")) {
+    let payload: { passcode: number; discriminator?: number } | undefined;
+    try {
+      [payload] = QrPairingCodeCodec.decode(trimmed);
+    } catch (error) {
+      throw new OpError("commission_failed", describeError(error));
+    }
+    if (payload === undefined) {
+      throw new OpError("commission_failed", "the QR code contained no onboarding payload");
+    }
+    return payload.discriminator === undefined
+      ? { passcode: payload.passcode }
+      : { passcode: payload.passcode, discriminator: payload.discriminator };
+  }
+  if (kind === "passcode") {
+    return { passcode: Number(trimmed.replace(/[\s-]/g, "")) };
+  }
+  return { pairingCode: trimmed.replace(/\s/g, "") };
+}
 
 /**
  * Which clusters a snapshot reads.
@@ -263,9 +303,9 @@ export class Controller {
   /**
    * Pair a device by its setup code.
    *
-   * Both forms find the device over mDNS. A pairing code or QR payload carries the
-   * discriminator so matter.js can narrow the browse; a bare passcode cannot, so that
-   * form pairs with whatever is in commissioning mode — which is how development
+   * Both forms find the device over mDNS. A manual pairing code or QR payload carries
+   * the discriminator so matter.js can narrow the browse; a bare passcode cannot, so
+   * that form pairs with whatever is in commissioning mode — which is how development
    * devices such as Google's Matter Virtual Device are paired, since they show only a
    * passcode.
    */
@@ -274,10 +314,7 @@ export class Controller {
     const kind = setupCodeKind(trimmed);
     log.info("commission_started", "commissioning a device", { code_kind: kind });
 
-    const options =
-      kind === "passcode"
-        ? { passcode: Number(trimmed.replace(/[\s-]/g, "")) }
-        : { pairingCode: trimmed.replace(/\s/g, "") };
+    const options = commissionOptionsFor(trimmed, kind);
 
     let peer: ClientNode;
     try {

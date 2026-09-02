@@ -15,6 +15,7 @@
   "dependencies": {
     "@matter/main": "0.17.9",
     "@matter/nodejs": "0.17.9",
+    "@matter/types": "0.17.9",
     "tsx": "4.20.6",
     "ws": "8.18.3"
   },

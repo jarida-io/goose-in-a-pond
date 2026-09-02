@@ -50,6 +50,61 @@ const NOTHING_IN_PAIRING_MODE: &str =
     "No device found in pairing mode. Put the device into pairing mode and try again — a Matter \
      device stops accepting new connections about 15 minutes after it starts.";
 
+/// What the user is told when the controller rejects the setup code itself
+/// (matter.js decodes the manual pairing code's built-in check digit before
+/// any network activity, so this comes back in a couple of milliseconds —
+/// fast enough that it is easy to mistake for a system fault rather than a
+/// mistyped digit). GIAP's own `parse_setup_code` only checks length and
+/// character set, not the check digit, so a code that passes that gate can
+/// still fail here.
+const SETUP_CODE_REJECTED: &str =
+    "That setup code isn't valid — a single mistyped or misread digit anywhere in the code will \
+     cause this. Double-check it against the device's label, or scan its QR code instead of \
+     typing the manual code by hand.";
+
+/// Whether `e` is matter.js rejecting the setup code's own shape (bad check
+/// digit, malformed QR payload) rather than a discovery/attestation/network
+/// failure. `commission_failed` on the controller side is a catch-all — see
+/// the comment at its call site — so this matches on the message text
+/// matter.js actually produces, the same way `CODE_NOTHING_PAIRABLE` is
+/// matched on its dedicated code.
+fn is_setup_code_rejection(e: &anyhow::Error) -> bool {
+    let msg = describe(e).to_lowercase();
+    msg.contains("invalid pairing code")
+        || msg.contains("invalid manual pairing code")
+        || msg.contains("invalid qr code")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bad_check_digit_is_recognised_as_a_setup_code_rejection() {
+        // The exact wording matter.js produces for a manual pairing code whose
+        // check digit doesn't match — this is what a mistyped/misread digit
+        // anywhere in the code looks like on the wire.
+        let e = anyhow::anyhow!("commission_failed").context("Invalid pairing code");
+        assert!(is_setup_code_rejection(&e));
+    }
+
+    #[test]
+    fn a_malformed_qr_payload_is_also_recognised() {
+        let e = anyhow::anyhow!("commission_failed").context("Invalid QR code");
+        assert!(is_setup_code_rejection(&e));
+    }
+
+    #[test]
+    fn a_genuine_reachability_failure_is_not_mistaken_for_a_bad_code() {
+        // Same generic `commission_failed` code as a rejected setup code, but a
+        // completely different cause — this must NOT get the "check your code"
+        // advice.
+        let e = anyhow::anyhow!("commission_failed")
+            .context("Operative reconnection with device failed: Peer has been unreachable");
+        assert!(!is_setup_code_rejection(&e));
+    }
+}
+
 pub struct MatterCommissioner {
     client: Arc<MatterClient>,
     notifier: MatterNotifier,
@@ -141,15 +196,26 @@ impl DeviceCommissioningPort for MatterCommissioner {
                     error = %describe(&e),
                     "matter: commissioning failed"
                 );
-                // The controller's own wording, except for the one failure that
-                // has better advice than "it failed".
+                // The controller's own wording, except for the failures that have
+                // better advice than "it failed". `commission_failed` is a
+                // catch-all on the controller side (matter.js does not give GIAP
+                // a distinct code for "the check digit doesn't match"), so a
+                // rejected setup code is told apart from a real discovery/network
+                // failure by matching on the controller's message text instead.
                 let told = if code == CODE_NOTHING_PAIRABLE {
                     NOTHING_IN_PAIRING_MODE.to_string()
+                } else if is_setup_code_rejection(&e) {
+                    SETUP_CODE_REJECTED.to_string()
                 } else {
                     describe(&e)
                 };
                 self.notifier.pairing_failed(&told).await;
-                return Err(e).context("commissioning failed");
+                // `told` is also what the HTTP caller sees (`{e:#}` in
+                // `commission_device`, `pond-api/src/routes.rs`) — without this,
+                // the friendlier wording only ever reached the push notifier and
+                // the synchronous commission-form error stayed on the raw
+                // controller text.
+                return Err(anyhow::anyhow!(told)).context("commissioning failed");
             }
         };
 
