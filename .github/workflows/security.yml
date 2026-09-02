@@ -155,18 +155,66 @@ jobs:
             --lockfile=extensions/music/package-lock.json
 
   secrets:
-    name: Secrets — gitleaks (full history)
+    name: Secrets — gitleaks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
-          # Full history so a secret committed and later "deleted" still fails.
+          # Full history. Both modes below need it: the full scan obviously, and
+          # the PR scan because a commit RANGE cannot be resolved from a shallow
+          # clone that does not contain the base.
           fetch-depth: 0
           submodules: false
 
       # Pinned gitleaks CLI via the official image (the gitleaks GitHub Action
       # requires an org license; the CLI does not).
-      - name: gitleaks detect
+      #
+      # Two modes, because the two events are asking different questions.
+      #
+      # A pull request asks "does this change introduce a secret". The history
+      # behind it is the same history that was already scanned when it landed on
+      # main, so re-reading every blob in every commit on every push to every PR
+      # buys nothing and is the most expensive job in this file — it grows with
+      # the age of the repository rather than with the size of the change.
+      #
+      # Pushes to main and the weekly run still read everything, which is where
+      # the "committed and later deleted" guarantee actually lives. A secret that
+      # slips through a PR scan is caught seconds later when the merge lands.
+      - name: gitleaks — the commits this PR adds
+        if: github.event_name == 'pull_request'
+        env:
+          # Through the environment, not interpolated into the script. These are
+          # hex SHAs today, but `run:` interpolation of anything from the event
+          # payload is the shape of a shell-injection bug and is worth not
+          # writing even when the value is safe.
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          # gitleaks FAILS OPEN on a range it cannot resolve. Measured: given a
+          # malformed `--log-opts`, it prints "failed to scan Git repository",
+          # then "no leaks found", and exits 0. A secrets gate that reports
+          # success because it could not run is worse than not having one, so
+          # both halves are checked here rather than trusted.
+          test -n "$BASE_SHA" -a -n "$HEAD_SHA" || {
+            echo "::error::empty base/head SHA — refusing to report a pass on a scan that cannot run"
+            exit 1
+          }
+
+          out=$(docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.21.2 \
+            detect --source /repo --no-banner --redact --exit-code 1 \
+            --log-opts "$BASE_SHA..$HEAD_SHA" 2>&1) && status=0 || status=$?
+          echo "$out"
+
+          if grep -qi "failed to scan" <<<"$out"; then
+            echo "::error::gitleaks could not scan the range $BASE_SHA..$HEAD_SHA"
+            exit 1
+          fi
+          exit "$status"
+
+      - name: gitleaks — full history
+        if: github.event_name != 'pull_request'
         run: |
           docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.21.2 \
             detect --source /repo --no-banner --redact --exit-code 1

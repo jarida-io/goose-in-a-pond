@@ -1,0 +1,11 @@
+# Findings gitleaks is right to flag and wrong to fail on.
+#
+# One line per finding, as `commit:file:rule:line`. Pinned to the commit
+# because a full-history scan reads the blob as it was THEN — an inline
+# `gitleaks:allow` in the working tree cannot reach back and annotate it.
+
+# A synthetic GitHub PAT in the test that asserts the redactor RECOGNISES
+# GitHub PATs. It sits beside "sk-abcdef..." and "AKIAIOSFODNN7EXAMPLE", which
+# is AWS's own documented example key, in `a_credential_is_a_credential`.
+# Removing it would delete the coverage that stops a real token reaching a log.
+8f2721ac34f5520308130f6feadf90211ab52e7d:crates/pond-core/src/security/domain/redaction.rs:github-pat:509
