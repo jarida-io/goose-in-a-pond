@@ -61,6 +61,15 @@ const CONTROLLER_READY_TIMEOUT: Duration = Duration::from_secs(120);
 /// the bound only exists so a wedged reconciler cannot hang process exit.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long to wait for a killed controller to actually exit.
+///
+/// Deliberately shorter than [`SHUTDOWN_TIMEOUT`], which this runs inside: a
+/// teardown that spent the whole shutdown budget waiting on one child would
+/// leave nothing for the rest of it. Generous even so — the signal is SIGKILL,
+/// so a process that has not gone in three seconds is wedged in the kernel and
+/// waiting longer will not help.
+const KILL_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// The live [`MatterDeviceControl`], or `None` while Matter is off or
 /// unreachable. Read by [`SwitchableDeviceControl`] on every call.
 type ControlCell = Arc<RwLock<Option<Arc<MatterDeviceControl>>>>;
@@ -508,6 +517,39 @@ pub(crate) async fn stop_controller(child: &SharedServerChild, data_dir: &std::p
     if let Some(mut running) = child.lock().await.take() {
         tracing::info!("matter: stopping the controller GIAP started");
         let _ = running.start_kill();
+
+        // AWAITED, not merely signalled. `start_kill` sends the signal and
+        // returns, so this function used to report a stopped controller while
+        // the process was still bound to the port -- and the very next thing a
+        // restart does is probe that port. It found the dying controller,
+        // which resets the connection on its way out, classified that as
+        // `Occupant::Foreign`, and refused to start:
+        //
+        //     matter: the controller port belongs to something else
+        //     port 5580 is already in use by something that is not a
+        //     giap-matter controller ... Connection reset by peer
+        //
+        // Matter then sat `unreachable` with a message blaming a process that
+        // did not exist. Latent until now, because the only thing that
+        // restarted a controller was a URL change -- which usually means a
+        // different port, so nothing raced. Toggling BLE restarts on the SAME
+        // port, which made it routine.
+        //
+        // Bounded because shutdown must not hang, though SIGKILL cannot be
+        // refused: the timeout is for a process wedged in the kernel, not for
+        // one that might ignore us.
+        if tokio::time::timeout(KILL_TIMEOUT, running.wait())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                target: "giap::trace",
+                kind = "matter_controller_kill_timeout",
+                timeout_secs = KILL_TIMEOUT.as_secs(),
+                "matter: the controller did not exit after being killed; its port may still be held"
+            );
+        }
+
         // Cleared on the way out so the next start has nothing stale to
         // classify. Losing this file is harmless — the pid check would find the
         // process gone — but leaving it costs a `ps` on every start.
@@ -696,5 +738,57 @@ impl DeviceControlPort for SwitchableDeviceControl {
             .await?
             .set_position(device_id, percent_open)
             .await
+    }
+}
+
+#[cfg(test)]
+mod controller_lifetime_tests {
+    use super::*;
+
+    /// Is a pid still known to the OS? `kill -0` is POSIX and, crucially,
+    /// SUCCEEDS on a zombie — a child that was signalled but never reaped —
+    /// which is exactly the state this test exists to rule out.
+    fn pid_exists(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// The controller is GONE when `stop_controller` returns, not merely
+    /// signalled.
+    ///
+    /// `start_kill` sends the signal and returns, so this reported a stopped
+    /// controller while the process still held the Matter port. A restart
+    /// probes that port immediately, found the dying controller resetting
+    /// connections on its way out, classified it `Occupant::Foreign` and
+    /// refused to start — leaving Matter `unreachable` with a message blaming a
+    /// process that no longer existed. Found by toggling BLE, which restarts on
+    /// the same port; a URL change usually moves the port, which is why this
+    /// stayed hidden.
+    #[tokio::test]
+    async fn stopping_the_controller_waits_for_it_to_actually_exit() {
+        let spawned = tokio::process::Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("sleep must be available");
+        let pid = spawned.id().expect("a freshly spawned child has a pid");
+        assert!(pid_exists(pid), "the child must be running to begin with");
+
+        let child: SharedServerChild = Arc::new(tokio::sync::Mutex::new(Some(spawned)));
+        stop_controller(&child, std::path::Path::new("/nonexistent")).await;
+
+        assert!(
+            !pid_exists(pid),
+            "pid {pid} still exists after stop_controller returned — it was signalled \
+             but not reaped, so its port is still held"
+        );
+        assert!(
+            child.lock().await.is_none(),
+            "the handle must be taken, so nothing kills a pid that has been reused"
+        );
     }
 }
