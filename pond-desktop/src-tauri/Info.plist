@@ -11,10 +11,12 @@
          without this key. Verified — the crash report reads, verbatim, "This app
          has crashed because it attempted to access privacy-sensitive data
          without a usage description. The app's Info.plist must contain an
-         NSBluetoothAlwaysUsageDescription key". The Matter controller is a child
-         process with no bundle of its own, so the permission is attributed here.
-         BLE is how a device that has never been on the network is paired at all,
-         and it stays off until the user turns it on. -->
+         NSBluetoothAlwaysUsageDescription key". The Matter controller is a bare
+         `node` with no bundle of its own, so macOS attributes the permission to
+         the responsible process at the root of its tree -- this app, when it is
+         the app that launched pond-server. BLE is how a device that has never
+         been on the network is paired at all, and it stays off until the user
+         turns it on. -->
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>Goose In A Pond uses Bluetooth to set up new smart-home devices, which announce themselves over Bluetooth before they are on your network.</string>
 

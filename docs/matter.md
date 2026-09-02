@@ -292,11 +292,22 @@ Verified — the crash report says so in as many words:
 > NSBluetoothAlwaysUsageDescription key with a string value explaining to the
 > user how the app uses this data.
 
-`pond-desktop/src-tauri/Info.plist` carries it. The controller is a child process
-with no bundle of its own, so the permission is attributed to the parent app —
-which means **BLE cannot work when pond-server is run straight from a terminal in
-development**: there is no bundle, and the controller is SIGKILLed seconds after
-it starts.
+`pond-desktop/src-tauri/Info.plist` carries it.
+
+The controller is a bare `node`, so what matters is not its own bundle but the
+**responsible process** macOS attributes it to — the app at the root of the
+process tree. Two measurements, both real:
+
+- Launched from a shell whose responsible app had no Bluetooth grant, the
+  controller was **SIGKILLed** within seconds of registering the transport.
+- Launched by `pond-server` from a terminal whose responsible app *did* have the
+  grant, it came up and stayed up: `ble_enabled`, then
+  `matter_controller_ready … ble=true`, then `matter_connected … ble=true`.
+
+So "run it from a terminal and BLE dies" is not a rule — it depends on what that
+terminal is allowed to do, which the user may have granted at some earlier
+prompt. The bundled app is the case GIAP controls, and the Info.plist key is what
+makes it work; everything else is the host's business.
 
 That is why `ensure_running` **falls back**. A controller that will not start with
 BLE is started again without it, logging `matter_ble_start_failed` and then
