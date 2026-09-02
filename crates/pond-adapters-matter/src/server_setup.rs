@@ -48,9 +48,20 @@ use crate::protocol::{check_greeting, PROTOCOL_NAME};
 /// own controller, or Matter is off.
 pub type SharedServerChild = Arc<AsyncMutex<Option<Child>>>;
 
-/// matter.js 0.17 requires Node 20.19+, 22.13+ or 24+. The floor is the oldest
-/// of those; anything newer satisfies it.
+/// matter.js 0.17's own engine range, verbatim: `>=20.19.0 <22.0.0 || >=22.13.0`.
+///
+/// It is a range with a HOLE in it, not a floor, and that is the whole point of
+/// spelling it out here: Node 22.0 through 22.12 satisfies "20.19 or newer" and
+/// does NOT satisfy matter.js. Treated as a floor, GIAP installed a controller
+/// onto a Node it cannot run on, and the failure arrived as whatever the runtime
+/// happened to throw first rather than as "this Node is not supported".
+///
+/// `MIN_NODE` is still the number the guidance quotes, because it is the oldest
+/// Node that works and "install 20.19+" is the sentence a person can act on.
 pub const MIN_NODE: (u32, u32) = (20, 19);
+
+/// The excluded range: 22.0 up to, but not including, 22.13.
+const EXCLUDED_NODE: ((u32, u32), (u32, u32)) = ((22, 0), (22, 13));
 
 /// How many lines of the controller's stderr to keep.
 ///
@@ -71,9 +82,36 @@ pub fn parse_node_version(output: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
-/// Tuple ordering gives the right comparison: (22,13) >= (20,19) >= MIN.
+/// Does this Node satisfy matter.js's engine range?
+///
+/// Not `version >= MIN_NODE`: see [`MIN_NODE`] for the hole that comparison
+/// misses. Tuple ordering still does the work, twice.
 pub fn meets_min_node(version: (u32, u32)) -> bool {
-    version >= MIN_NODE
+    if version < MIN_NODE {
+        return false;
+    }
+    let (excluded_from, excluded_until) = EXCLUDED_NODE;
+    !(version >= excluded_from && version < excluded_until)
+}
+
+/// Why this Node will not do, in a sentence a person can act on.
+///
+/// The excluded range needs its own wording: "Node 22.5 is on PATH but the
+/// controller needs 20.19+" reads as a contradiction, and a user who checks
+/// their version against that sentence concludes GIAP is broken.
+fn node_version_objection(version: (u32, u32)) -> String {
+    let (from, until) = EXCLUDED_NODE;
+    if version >= from && version < until {
+        format!(
+            "Node {}.{} is on PATH, and matter.js does not support {}.{} to {}.{} — the range              is 20.19 or newer, EXCEPT 22.0 through 22.12. Upgrade to {}.{} or newer",
+            version.0, version.1, from.0, from.1, until.0, until.1 - 1, until.0, until.1
+        )
+    } else {
+        format!(
+            "Node {}.{} is on PATH but the Matter controller needs {}.{}+. Upgrade it",
+            version.0, version.1, MIN_NODE.0, MIN_NODE.1
+        )
+    }
 }
 
 /// The loopback port to auto-start for, or `None` when the URL points at another
@@ -240,14 +278,10 @@ async fn find_node() -> Result<PathBuf> {
                 return Ok(PathBuf::from("node"));
             }
             return Err(anyhow!(
-                "Node {}.{} is on PATH but the Matter controller needs {}.{}+. Upgrade it \
-                 (Debian/Jetson: `curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash - \
-                 && sudo apt-get install -y nodejs`; macOS: `brew install node`), or run your own \
-                 controller and point matter_ws_url at it.",
-                version.0,
-                version.1,
-                MIN_NODE.0,
-                MIN_NODE.1
+                "{} (Debian/Jetson: `curl -fsSL https://deb.nodesource.com/setup_22.x | sudo \
+                 bash - && sudo apt-get install -y nodejs`; macOS: `brew install node`), or run \
+                 your own controller and point matter_ws_url at it.",
+                node_version_objection(version)
             ));
         }
     }
@@ -686,17 +720,22 @@ type StderrTail = Arc<Mutex<VecDeque<String>>>;
 
 /// Spawn the controller. The child is `kill_on_drop`, so holding the handle ties
 /// its lifetime to pond-server: drop it and the controller goes away too.
-fn spawn_server(data_dir: &Path, port: u16) -> Result<(Child, StderrTail)> {
+fn spawn_server(data_dir: &Path, port: u16, ble: bool) -> Result<(Child, StderrTail)> {
     let storage = storage_dir(data_dir);
     std::fs::create_dir_all(&storage).with_context(|| format!("creating {}", storage.display()))?;
 
-    let mut child = Command::new("node")
+    let mut command = Command::new("node");
+    command
         .arg("--import")
         .arg("tsx")
         .arg(entrypoint(data_dir))
         .args(["--port", &port.to_string()])
         .arg("--storage-path")
-        .arg(&storage)
+        .arg(&storage);
+    if ble {
+        command.arg("--ble");
+    }
+    let mut child = command
         .current_dir(app_dir(data_dir))
         // Piped rather than sent to a file nobody reads. The controller writes
         // structured NDJSON here, so the relay below can re-emit each record at
@@ -856,6 +895,7 @@ pub async fn ensure_running(
     ready_timeout: Duration,
     notifier: &MatterNotifier,
     url: &str,
+    ble: bool,
 ) -> Result<Option<Child>> {
     // Before the probe, or an orphan would be found healthy and adopted.
     reap_orphan(data_dir).await;
@@ -887,12 +927,62 @@ pub async fn ensure_running(
 
     tracing::info!(port, "matter: no controller found; setting one up");
     ensure_installed(data_dir, notifier).await?;
-    let (child, stderr_tail) = spawn_server(data_dir, port)?;
+
+    match start_and_wait(data_dir, port, ready_timeout, ble).await {
+        Ok(child) => Ok(Some(child)),
+        // BLE is optional, and asking for it must never cost the controller.
+        //
+        // On macOS the OS KILLS a process that touches CoreBluetooth without an
+        // `NSBluetoothAlwaysUsageDescription` in its bundle's Info.plist -- SIGKILL,
+        // from TCC, with the reason only in a crash report. The controller cannot
+        // catch that, so `ble.ts`'s try/catch does not help: the process is simply
+        // gone. Left alone, the supervisor would respawn it and it would be killed
+        // again, forever, and Matter would be unusable BECAUSE a transport was
+        // switched on.
+        //
+        // So the second attempt drops it. IP-only is the behaviour every install had
+        // before BLE existed, and it is strictly better than a crash loop.
+        Err(first) if ble => {
+            tracing::warn!(
+                target: "giap::trace",
+                kind = "matter_ble_start_failed",
+                port,
+                error = %format!("{first:#}"),
+                "matter: the controller would not start with BLE; retrying over IP only"
+            );
+            let child = start_and_wait(data_dir, port, ready_timeout, false)
+                .await
+                .map_err(|second| ble_and_ip_both_failed(&first, &second))?;
+            tracing::warn!(
+                target: "giap::trace",
+                kind = "matter_ble_disabled",
+                port,
+                "matter: BLE is off for this controller; a device that has never been on \
+                 the network cannot be paired until the cause above is fixed"
+            );
+            Ok(Some(child))
+        }
+        Err(only) => Err(only),
+    }
+}
+
+/// Spawn a controller and wait for it to accept connections.
+///
+/// Split out of [`ensure_running`] so the BLE fallback can run it twice without
+/// repeating the readiness loop or the stderr reporting.
+async fn start_and_wait(
+    data_dir: &Path,
+    port: u16,
+    ready_timeout: Duration,
+    ble: bool,
+) -> Result<Child> {
+    let (child, stderr_tail) = spawn_server(data_dir, port, ble)?;
     tracing::info!(
         target: "giap::trace",
         kind = "matter_controller_spawned",
         port,
         pid = child.id(),
+        ble,
         "matter: controller started"
     );
 
@@ -904,9 +994,10 @@ pub async fn ensure_running(
                 target: "giap::trace",
                 kind = "matter_controller_ready",
                 port,
+                ble,
                 "matter: controller ready"
             );
-            return Ok(Some(child));
+            return Ok(child);
         }
     }
 
@@ -921,6 +1012,7 @@ pub async fn ensure_running(
         target: "giap::trace",
         kind = "matter_controller_exited",
         port,
+        ble,
         stderr_tail = %reason,
         "matter: controller did not become ready"
     );
@@ -929,6 +1021,16 @@ pub async fn ensure_running(
         ready_timeout,
         explain_startup_failure(&reason, &app_dir(data_dir))
     ))
+}
+
+/// Both attempts failed, so BLE was not the problem. Carries both reasons: the
+/// second is the real fault, and the first is what a reader would otherwise be
+/// left blaming.
+fn ble_and_ip_both_failed(with_ble: &anyhow::Error, without: &anyhow::Error) -> anyhow::Error {
+    anyhow!(
+        "{without} (it also failed with BLE enabled, which is therefore not the cause: \
+         {with_ble})"
+    )
 }
 
 /// What a revival attempt actually did, so the caller can tell "the controller
@@ -958,6 +1060,7 @@ pub async fn revive_local_controller(
     url: &str,
     child: &SharedServerChild,
     ready_timeout: Duration,
+    ble: bool,
 ) -> Result<Revival> {
     let Some(port) = local_port_from_ws_url(url) else {
         return Ok(Revival::NotLocal);
@@ -971,6 +1074,7 @@ pub async fn revive_local_controller(
         ready_timeout,
         &MatterNotifier::disabled(),
         url,
+        ble,
     )
     .await?
     {
@@ -1005,6 +1109,7 @@ mod tests {
             "ws://192.168.1.50:5580/giap",
             &child,
             Duration::from_millis(1),
+            false,
         )
         .await
         .unwrap();
@@ -1050,6 +1155,7 @@ mod tests {
             &format!("ws://127.0.0.1:{port}/giap"),
             &child,
             Duration::from_millis(1),
+            false,
         )
         .await
         .unwrap();
@@ -1076,6 +1182,43 @@ mod tests {
         // Node 20.18 satisfies "20+" and does not satisfy matter.js.
         assert!(!meets_min_node((20, 18)));
         assert!(!meets_min_node((18, 20)));
+    }
+
+    /// matter.js's engine range has a HOLE in it, and the gate treated it as a
+    /// floor: `>=20.19.0 <22.0.0 || >=22.13.0` excludes 22.0 through 22.12.
+    ///
+    /// Node 22 is what NodeSource's `setup_22.x` installs — the very command
+    /// GIAP's own guidance tells a user to run — so an early 22 is not a
+    /// contrived case. It was green-lit, the controller was installed onto it,
+    /// and the failure surfaced as whatever matter.js threw first.
+    #[test]
+    fn the_hole_in_matter_js_engine_range_is_not_a_floor() {
+        assert!(!meets_min_node((22, 0)), "22.0 is excluded");
+        assert!(!meets_min_node((22, 5)), "22.5 is excluded");
+        assert!(!meets_min_node((22, 12)), "22.12 is the last excluded");
+        assert!(meets_min_node((22, 13)), "22.13 is where support resumes");
+        // And the two ends of the range are untouched.
+        assert!(meets_min_node((21, 7)), "21.x is inside >=20.19 <22.0");
+        assert!(meets_min_node((24, 14)));
+    }
+
+    /// A refusal a person can act on. "Needs 20.19+" against a Node 22.5 that
+    /// IS 20.19-or-newer reads as a contradiction, and a user checking their
+    /// version against that sentence concludes GIAP is broken.
+    #[test]
+    fn an_excluded_node_is_refused_in_its_own_words() {
+        let excluded = node_version_objection((22, 5));
+        assert!(excluded.contains("22.5"), "{excluded}");
+        assert!(
+            excluded.contains("22.0") && excluded.contains("22.12"),
+            "the excluded range has to be named: {excluded}"
+        );
+        assert!(excluded.contains("22.13"), "{excluded}");
+
+        // Below the floor keeps the simpler sentence.
+        let old = node_version_objection((18, 20));
+        assert!(old.contains("18.20") && old.contains("20.19+"), "{old}");
+        assert!(!old.contains("EXCEPT"), "{old}");
     }
 
     #[test]
@@ -1212,6 +1355,7 @@ mod tests {
             Duration::from_millis(1),
             &MatterNotifier::disabled(),
             &url,
+            false,
         )
         .await
         .expect_err("adopting it would leave Matter permanently broken");

@@ -46,6 +46,14 @@ pub struct Greeting {
     pub fabric_id: Option<u64>,
     #[serde(default)]
     pub matter_js: String,
+    /// Whether the controller loaded a BLE transport, so a device that has
+    /// never been on the network can be paired.
+    ///
+    /// `default` means a controller predating the field reads as "no BLE",
+    /// which is what such a controller has — so no `PROTOCOL_VERSION` bump is
+    /// owed, by that rule's own terms.
+    #[serde(default)]
+    pub ble: bool,
 }
 
 /// Check a greeting frame, naming what was found when it is not ours.
@@ -620,6 +628,24 @@ mod tests {
 
         let newer = check_greeting(r#"{"protocol":"giap-matter","version":99}"#).unwrap_err();
         assert!(newer.contains("different releases"), "got: {newer}");
+    }
+
+    /// A controller predating the field reads as "no BLE", which is what such a
+    /// controller has — so the field earns no `PROTOCOL_VERSION` bump, by that
+    /// rule's own terms, and neither side breaks against the other.
+    #[test]
+    fn ble_is_read_when_stated_and_absent_means_no() {
+        let with_ble = check_greeting(
+            r#"{"protocol":"giap-matter","version":1,"fabric_id":1,"matter_js":"0.17.9","ble":true}"#,
+        )
+        .unwrap();
+        assert!(with_ble.ble);
+
+        let older = check_greeting(
+            r#"{"protocol":"giap-matter","version":1,"fabric_id":1,"matter_js":"0.17.9"}"#,
+        )
+        .unwrap();
+        assert!(!older.ble, "absent must not read as available");
     }
 
     #[test]

@@ -83,6 +83,12 @@ pub struct SupervisorConfig {
     /// The controller GIAP started, if any. A respawn replaces the dead handle
     /// here, so the reconciler's teardown still kills the live process.
     pub child: SharedServerChild,
+    /// Whether the respawned controller should be asked for BLE again.
+    ///
+    /// Carried rather than re-read: a respawn that quietly dropped a transport
+    /// the user asked for would leave a Pond that pairs new devices until the
+    /// first reconnect and then silently stops.
+    pub ble: bool,
 }
 
 /// Should the reconnect about to be made (1-based `attempt`) re-run controller
@@ -436,6 +442,7 @@ pub async fn run_matter_supervisor(
         url,
         data_dir,
         child,
+        ble,
     } = config;
 
     // Owned out here, not inside the bridge: a reconnect must not re-publish a
@@ -479,7 +486,8 @@ pub async fn run_matter_supervisor(
                 // be notified every time the controller restarted normally.
                 notifier.controller_unreachable(&url).await;
 
-                match revive_local_controller(&data_dir, &url, &child, RESPAWN_READY_TIMEOUT).await
+                match revive_local_controller(&data_dir, &url, &child, RESPAWN_READY_TIMEOUT, ble)
+                    .await
                 {
                     Ok(Revival::Restarted) => tracing::info!(
                         target: "giap::trace",

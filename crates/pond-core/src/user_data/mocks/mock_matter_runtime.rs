@@ -6,7 +6,9 @@
 use crate::user_data::ports::device_commissioning::{
     CommissionedDevice, DeviceCommissioningPort, SetupCode,
 };
-use crate::user_data::ports::matter_runtime::{MatterRuntimePort, MatterState, MatterStatus};
+use crate::user_data::ports::matter_runtime::{
+    MatterConfig, MatterRuntimePort, MatterState, MatterStatus,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
@@ -44,7 +46,7 @@ impl DeviceCommissioningPort for StubCommissioner {
 pub struct StubMatterRuntime {
     status: Mutex<MatterStatus>,
     commissioner: Option<Arc<dyn DeviceCommissioningPort>>,
-    applied: Mutex<Vec<String>>,
+    applied: Mutex<Vec<MatterConfig>>,
     shutdowns: Mutex<usize>,
 }
 
@@ -96,8 +98,18 @@ impl StubMatterRuntime {
         }
     }
 
-    /// Every `(enabled, url)` pair the runtime was asked to converge to.
+    /// Every URL the runtime was asked to converge to, in order.
     pub fn applied(&self) -> Vec<String> {
+        self.applied
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|config| config.url.clone())
+            .collect()
+    }
+
+    /// Every request in full, for a test that cares about more than the URL.
+    pub fn applied_configs(&self) -> Vec<MatterConfig> {
         self.applied.lock().unwrap().clone()
     }
 
@@ -109,8 +121,8 @@ impl StubMatterRuntime {
 
 #[async_trait]
 impl MatterRuntimePort for StubMatterRuntime {
-    fn apply(&self, url: String) {
-        self.applied.lock().unwrap().push(url);
+    fn apply(&self, config: MatterConfig) {
+        self.applied.lock().unwrap().push(config);
     }
 
     async fn status(&self) -> MatterStatus {

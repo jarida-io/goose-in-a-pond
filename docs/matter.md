@@ -248,6 +248,76 @@ lsof -nP -iUDP:5540
 
 ---
 
+## Bluetooth, and the devices that cannot pair without it
+
+**A device fresh out of its box has no Wi-Fi credentials, so it cannot advertise
+on mDNS and IP commissioning cannot see it at all.** The first conversation has to
+happen over Bluetooth Low Energy, and the commissioner hands the network
+credentials across during it. Without BLE, GIAP can only pair a device something
+else has already onboarded — which reads, from the Devices tab, as "No device
+found in pairing mode".
+
+It is **off by default**, and the default is not timidity:
+
+- The radio comes from `@stoprocent/noble`, a native module, itself an optional
+  dependency of `@matter/nodejs-ble`, itself optional here. `npm ci --omit=dev`
+  on a Jetson with no build toolchain installs neither, and that degrades to
+  IP-only rather than failing the install. The transport is imported
+  **dynamically inside a try/catch** for the same reason: the package installs
+  fine when noble does not build, and then *importing* it throws.
+- It needs permission a headless service does not have.
+
+Turn it on with **Settings → Devices → Matter → Pair over Bluetooth**. The
+controller is restarted, because `--ble` is an argument to that process.
+
+### What it needs, per platform
+
+**Linux and the Jetson.** The radio needs raw socket access. Either grant it to
+the Node binary once:
+
+```bash
+sudo setcap cap_net_raw+eip "$(readlink -f "$(which node)")"
+```
+
+…or run pond-server as root, which is worse. `setcap` is per-binary, so a Node
+upgrade undoes it and BLE goes quietly back to unavailable — the controller logs
+`ble_unavailable` with the reason when that happens.
+
+**macOS.** The bundle must declare `NSBluetoothAlwaysUsageDescription`, and the
+consequence of omitting it is not a refused radio: **the OS kills the process.**
+Verified — the crash report says so in as many words:
+
+> This app has crashed because it attempted to access privacy-sensitive data
+> without a usage description. The app's Info.plist must contain an
+> NSBluetoothAlwaysUsageDescription key with a string value explaining to the
+> user how the app uses this data.
+
+`pond-desktop/src-tauri/Info.plist` carries it. The controller is a child process
+with no bundle of its own, so the permission is attributed to the parent app —
+which means **BLE cannot work when pond-server is run straight from a terminal in
+development**: there is no bundle, and the controller is SIGKILLed seconds after
+it starts.
+
+That is why `ensure_running` **falls back**. A controller that will not start with
+BLE is started again without it, logging `matter_ble_start_failed` and then
+`matter_ble_disabled`. A SIGKILL cannot be caught in-process, so without the
+fallback the supervisor would respawn the controller and the OS would kill it
+again, forever — and Matter would be unusable *because* a transport was switched
+on. IP-only is what every install had before BLE existed.
+
+### What the greeting says
+
+The controller reports what it actually loaded, not what was asked for:
+`{"protocol":"giap-matter", …, "ble":true}`. The Rust side needs it, because the
+pre-flight "is anything in pairing mode" probe is an mDNS browse and cannot
+settle the question for a device advertising over Bluetooth — so with BLE active
+that shortcut is skipped rather than allowed to refuse a device sitting in
+pairing mode a metre away.
+
+No `PROTOCOL_VERSION` bump is owed: an un-updated client ignores the field, and
+an un-updated controller omits it, which reads as "no BLE" — which is what such a
+controller has.
+
 ## Commissioning
 
 A device is paired by its setup code, entered in **Register device**. A QR

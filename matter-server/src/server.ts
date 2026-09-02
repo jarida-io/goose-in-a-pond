@@ -17,6 +17,7 @@ import { readFileSync } from "node:fs";
 import { LogFormat, Logger } from "@matter/main";
 import { WebSocketServer, type WebSocket } from "ws";
 
+import { enableBle, type BleStatus } from "./ble.js";
 import { Controller } from "./controller.js";
 import { log, describeError, onLog, redactSetupCode, type LogRecord } from "./log.js";
 import { VERBS, type Verb } from "./mapping/control.js";
@@ -69,6 +70,18 @@ function parsePort(argv: string[]): number {
   return port;
 }
 
+/**
+ * `--ble` asks for the Bluetooth transport. Absent means off.
+ *
+ * A flag rather than a default: BLE needs a native module that may not be
+ * installed and permission a headless service does not have, and turning a radio
+ * on is not something to do to someone's machine because a controller started.
+ * See `ble.ts`.
+ */
+function parseBle(argv: string[]): boolean {
+  return argv.includes("--ble");
+}
+
 function parseStoragePath(argv: string[]): string {
   const raw = flag(argv, "--storage-path");
   if (raw === undefined || raw.trim().length === 0) {
@@ -100,6 +113,10 @@ async function main(): Promise<void> {
   const port = parsePort(argv);
   const storagePath = parseStoragePath(argv);
   routeMatterLogsToStderr();
+  // Before the ServerNode exists: matter.js resolves `Ble` out of the environment
+  // when the node is created, so registering it afterwards registers it for
+  // nothing. See `ble.ts`.
+  const ble: BleStatus = parseBle(argv) ? await enableBle() : "off";
   const clients = new Set<WebSocket>();
 
   const broadcast = (name: EventName, payload: unknown): void => {
@@ -137,6 +154,9 @@ async function main(): Promise<void> {
       version: PROTOCOL_VERSION,
       fabric_id: controller.fabricId(),
       matter_js: matterJsVersion(),
+      // What the transport actually IS, not what was asked for: `unavailable`
+      // reads as off to a client, which is the truth about what it can pair.
+      ble: ble === "on",
     };
     socket.send(JSON.stringify(greeting));
     log.info("client_connected", "a client attached to the controller", {

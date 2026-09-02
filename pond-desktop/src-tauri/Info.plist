@@ -6,6 +6,17 @@
     <string>Goose In A Pond uses the microphone for voice commands and wake word detection.</string>
     <key>NSCameraUsageDescription</key>
     <string>Goose In A Pond uses the camera for face-based user recognition during enrollment and wake-on-face identification.</string>
+    <!-- Required, not optional, and the consequence of omitting it is not a
+         refused radio: macOS SIGKILLs a process that touches CoreBluetooth
+         without this key. Verified — the crash report reads, verbatim, "This app
+         has crashed because it attempted to access privacy-sensitive data
+         without a usage description. The app's Info.plist must contain an
+         NSBluetoothAlwaysUsageDescription key". The Matter controller is a child
+         process with no bundle of its own, so the permission is attributed here.
+         BLE is how a device that has never been on the network is paired at all,
+         and it stays off until the user turns it on. -->
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Goose In A Pond uses Bluetooth to set up new smart-home devices, which announce themselves over Bluetooth before they are on your network.</string>
 
     <!-- Launch Services / Finder integration. Without these the .app can copy
          into /Applications but Finder won't index it (so it never appears in

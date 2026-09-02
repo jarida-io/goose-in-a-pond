@@ -283,6 +283,8 @@ export interface Settings {
   // the removal is ignored on read rather than honoured, because an install that
   // had it off would otherwise have no way back once the toggle went.
   matter_ws_url?: string;
+  /** Whether the controller pairs over Bluetooth as well as over the network. */
+  matter_ble_enabled?: boolean;
 
   // Inference stats display
   show_turn_stats?: boolean;

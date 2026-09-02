@@ -22,7 +22,9 @@ use pond_core::user_data::ports::device_control::{
     DeviceControlOutcome, DeviceControlPort, DeviceStatePatch,
 };
 use pond_core::user_data::ports::device_registry::{Device, DeviceRegistry, RegisterDeviceRequest};
-use pond_core::user_data::ports::matter_runtime::{MatterRuntimePort, MatterState, MatterStatus};
+use pond_core::user_data::ports::matter_runtime::{
+    MatterConfig, MatterRuntimePort, MatterState, MatterStatus,
+};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
@@ -68,6 +70,18 @@ type Answer = Arc<dyn Fn(&Value) -> Value + Send + Sync>;
 /// probes the port with a bare TCP connect before the runtime connects properly,
 /// so a mock that accepted once, or that unwrapped the handshake, would spend
 /// its only connection on the probe and then fail the test it was set up for.
+/// `apply` with BLE off, which is what every test here means.
+///
+/// A helper rather than a `MatterConfig { .. }` literal at thirteen call sites:
+/// none of these tests is about the transport, and the noise would bury what
+/// they are about.
+fn ip_only(url: impl Into<String>) -> MatterConfig {
+    MatterConfig {
+        url: url.into(),
+        ble: false,
+    }
+}
+
 async fn mock_controller(
     snapshot: Value,
     events: Vec<Value>,
@@ -744,6 +758,7 @@ async fn the_supervisor_reconnects_after_the_connection_drops() {
             url: url.clone(),
             data_dir: std::path::PathBuf::from("/nonexistent"),
             child: Arc::new(tokio::sync::Mutex::new(None)),
+            ble: false,
         },
         control.client_handle(),
         client,
@@ -1029,7 +1044,7 @@ async fn settle_waits_for_the_apply_that_was_just_made() {
     let (url, _) = mock_controller(snapshot(vec![light()], vec![]), vec![], None).await;
     let runtime = runtime_for();
 
-    runtime.apply(url.clone());
+    runtime.apply(ip_only(url.clone()));
     let settled = runtime.settle(Duration::from_secs(10)).await;
 
     assert!(
@@ -1044,7 +1059,7 @@ async fn enabling_connects_and_exposes_a_commissioner() {
     let (url, _) = mock_controller(snapshot(vec![light()], vec![]), vec![], None).await;
     let runtime = runtime_for();
 
-    runtime.apply(url.clone());
+    runtime.apply(ip_only(url.clone()));
     let status = wait_for(&runtime, MatterState::is_connected).await;
 
     assert!(status.enabled);
@@ -1060,7 +1075,7 @@ async fn re_applying_the_same_address_while_connected_does_not_churn() {
     let (url, received) = mock_controller(snapshot(vec![light()], vec![]), vec![], None).await;
     let runtime = runtime_for();
 
-    runtime.apply(url.clone());
+    runtime.apply(ip_only(url.clone()));
     wait_for(&runtime, MatterState::is_connected).await;
     let subscribes = || {
         received
@@ -1072,7 +1087,7 @@ async fn re_applying_the_same_address_while_connected_does_not_churn() {
     };
     let before = subscribes();
 
-    runtime.apply(url.clone());
+    runtime.apply(ip_only(url.clone()));
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     assert!(runtime.status().await.state.is_connected());
@@ -1087,7 +1102,7 @@ async fn an_unreachable_controller_reports_the_failure_not_off() {
     // A name that cannot resolve, so this fails promptly and — being non-loopback
     // — never sends the runtime off to install a controller for someone else's
     // address. A blackholed IP would do neither: it would hang on the connect.
-    runtime.apply("ws://controller.invalid:5580/giap".to_string());
+    runtime.apply(ip_only("ws://controller.invalid:5580/giap".to_string()));
 
     let status = wait_for(&runtime, |s| matches!(s, MatterState::Unreachable { .. })).await;
     assert!(status.enabled, "unreachable is not the same as off");
@@ -1098,7 +1113,7 @@ async fn an_empty_controller_address_is_reported_plainly() {
     // An install predating the Matter section could have been enabled with no
     // address. The fix is to fill the field in, so say that.
     let runtime = runtime_for();
-    runtime.apply(String::new());
+    runtime.apply(ip_only(String::new()));
 
     let status = wait_for(&runtime, |s| matches!(s, MatterState::Unreachable { .. })).await;
     let MatterState::Unreachable { error } = status.state else {
@@ -1120,7 +1135,7 @@ async fn re_applying_after_a_failure_retries() {
     drop(listener); // nothing is serving it yet
 
     let runtime = runtime_for();
-    runtime.apply(url.clone());
+    runtime.apply(ip_only(url.clone()));
     wait_for(&runtime, |s| matches!(s, MatterState::Unreachable { .. })).await;
 
     // Bring a controller up on that exact port, then retry.
@@ -1147,7 +1162,7 @@ async fn re_applying_after_a_failure_retries() {
         }
     });
 
-    runtime.apply(url);
+    runtime.apply(ip_only(url));
     wait_for(&runtime, MatterState::is_connected).await;
 }
 
@@ -1156,7 +1171,7 @@ async fn shutdown_clears_the_runtime() {
     let (url, _) = mock_controller(snapshot(vec![light()], vec![]), vec![], None).await;
     let runtime = runtime_for();
 
-    runtime.apply(url);
+    runtime.apply(ip_only(url));
     wait_for(&runtime, MatterState::is_connected).await;
 
     runtime.shutdown().await;
@@ -1259,7 +1274,7 @@ async fn control_switches_to_matter_once_connected() {
     let runtime = runtime_for();
     let control = runtime.device_control(fallback.clone());
 
-    runtime.apply(url);
+    runtime.apply(ip_only(url));
     wait_for(&runtime, MatterState::is_connected).await;
 
     control.set_power("matter-2", true).await.unwrap();

@@ -3583,7 +3583,10 @@ async fn run_server(
         matter
             .attach_notifications(notification_sender.clone())
             .await;
-        matter.apply(settings.matter_ws_url.trim().to_string());
+        matter.apply(pond_core::user_data::ports::matter_runtime::MatterConfig {
+            url: settings.matter_ws_url.trim().to_string(),
+            ble: settings.matter_ble_enabled,
+        });
 
         // Bounded, so the Matter lines belong to the startup log rather than
         // arriving after the "listening" banner as though something had

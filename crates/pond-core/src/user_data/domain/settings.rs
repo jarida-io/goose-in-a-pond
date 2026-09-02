@@ -413,6 +413,24 @@ pub struct Settings {
     #[serde(default = "Settings::default_matter_ws_url")]
     pub matter_ws_url: String,
 
+    /// Whether the Matter controller pairs over Bluetooth as well as IP.
+    ///
+    /// Off by default, and the default is not timidity. BLE is the only way a
+    /// device that has never been on the network can be paired at all — out of
+    /// its box it holds no Wi-Fi credentials, so it cannot advertise on mDNS,
+    /// and the commissioner hands the credentials over during the BLE
+    /// conversation. But the radio needs a native module that may not be
+    /// installed (`@stoprocent/noble`, optional twice over) and permission a
+    /// headless service does not have by default: `cap_net_raw` on Linux, and on
+    /// macOS an `NSBluetoothAlwaysUsageDescription` in the bundle's Info.plist,
+    /// without which the OS kills the process outright rather than refusing the
+    /// radio. Turning a radio on, and risking that, is not something to do to
+    /// someone's machine because a controller started.
+    ///
+    /// Changing it restarts the controller: it is an argument to that process.
+    #[serde(default = "Settings::default_matter_ble_enabled")]
+    pub matter_ble_enabled: bool,
+
     // ── Private mesh (#132) ────────────────────────────────────────────────
     /// Whether to start the private mesh transport (a trust-scoped P2P link
     /// to this Pond's own other devices / trusted peers). Off by default —
@@ -1184,6 +1202,7 @@ impl Default for Settings {
             vision_motion_threshold: Self::default_vision_motion_threshold(),
             vision_classifier_model: Self::default_vision_classifier_model(),
             matter_ws_url: Self::default_matter_ws_url(),
+            matter_ble_enabled: Self::default_matter_ble_enabled(),
             mesh_enabled: Self::default_mesh_enabled(),
             lightning_enabled: Self::default_lightning_enabled(),
             mesh_settlement_millisats_per_token: Self::default_mesh_settlement_millisats_per_token(
@@ -1400,6 +1419,11 @@ impl Settings {
     }
     fn default_matter_ws_url() -> String {
         DEFAULT_MATTER_WS_URL.to_string()
+    }
+    /// Off. See [`Settings::matter_ble_enabled`] for why that is the default
+    /// rather than a hedge.
+    fn default_matter_ble_enabled() -> bool {
+        false
     }
     fn default_mesh_enabled() -> bool {
         false
@@ -2487,6 +2511,7 @@ mod tests {
             "llm_max_tokens",
             "llm_provider",
             "llm_temperature",
+            "matter_ble_enabled",
             "matter_ws_url",
             "memory_archive_threshold",
             "memory_cleanup_enabled",

@@ -699,6 +699,11 @@ export const CATALOGUE: CatalogueCategory[] = [
             // round-trip rather than instead of it.
             validate: optional(url(["ws://", "wss://"], "ws://127.0.0.1:5580/giap")),
           },
+          {
+            key: "matter_ble_enabled", label: "Pair over Bluetooth",
+            description: "Needed for a brand-new device, which announces itself over Bluetooth before it is on your network.",
+            control: { kind: "toggle" }, consumer: "live",
+          },
         ],
       },
     ],

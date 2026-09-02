@@ -43,6 +43,12 @@ pub struct MatterClient {
     tx: mpsc::Sender<Message>,
     pending: Pending,
     next_id: AtomicU64,
+    /// Whether this controller has a BLE transport, as its greeting said.
+    ///
+    /// Kept because the commissioning pre-flight has to reason about it: that
+    /// probe is an mDNS browse, and a device out of its box advertises over BLE
+    /// and not on mDNS at all. See `refuse_when_nothing_is_pairable`.
+    ble: bool,
 }
 
 impl MatterClient {
@@ -84,6 +90,7 @@ impl MatterClient {
             url,
             fabric_id = greeting.fabric_id,
             matter_js = %greeting.matter_js,
+            ble = greeting.ble,
             "connected to the Matter controller"
         );
 
@@ -158,9 +165,19 @@ impl MatterClient {
                 tx: out_tx,
                 pending,
                 next_id: AtomicU64::new(1),
+                ble: greeting.ble,
             }),
             event_rx,
         ))
+    }
+
+    /// Does this controller pair over Bluetooth as well as over IP?
+    ///
+    /// What the controller actually loaded, not what was asked for: a request
+    /// that could not be honoured reads as `false` here, which is the truth
+    /// about what it can reach.
+    pub fn has_ble(&self) -> bool {
+        self.ble
     }
 
     /// Send `op` and await its response, using the default timeout.

@@ -75,6 +75,27 @@ impl MatterCommissioner {
     /// an unexpected payload or a slow controller falls through to the real
     /// commission rather than inventing a reason to refuse.
     async fn refuse_when_nothing_is_pairable(&self) -> Result<()> {
+        // With BLE on, the probe cannot settle the question. It is an mDNS
+        // browse, and a device out of its box holds no Wi-Fi credentials at all
+        // -- it advertises over Bluetooth and is invisible to mDNS, which is
+        // the whole reason BLE commissioning exists. Refusing on a zero there
+        // would turn the one transport that CAN pair a new device into
+        // "No device found in pairing mode", for a device sitting in pairing
+        // mode a metre away.
+        //
+        // So the shortcut applies only where it is sound. The cost of skipping
+        // it is the discovery wait this exists to save; the cost of not
+        // skipping it is a device that can never be paired.
+        if self.client.has_ble() {
+            tracing::debug!(
+                target: "giap::trace",
+                kind = "matter_pairing_probe_skipped",
+                reason = "ble_active",
+                "matter: BLE is active, so an mDNS probe cannot say nothing is pairable"
+            );
+            return Ok(());
+        }
+
         let found = match self
             .client
             .send_with_timeout("discover", json!({}), DISCOVER_TIMEOUT)

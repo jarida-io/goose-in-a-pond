@@ -70,6 +70,28 @@ impl MatterStatus {
     }
 }
 
+/// What the Matter integration is being asked to be.
+///
+/// A struct rather than a widening argument list. `apply(url, true)` at the call
+/// site says nothing about what the flag turns on, and a second bool after it
+/// would be worse — the field name is the documentation, and it travels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatterConfig {
+    /// WebSocket address of the controller. A loopback address is one GIAP will
+    /// install and run itself; anything else is someone else's controller.
+    pub url: String,
+    /// Whether to ask the controller for a Bluetooth transport.
+    ///
+    /// Off by default, and worth the setting rather than always-on. BLE is how a
+    /// device that has never been on the network is paired at all — out of its
+    /// box it has no Wi-Fi credentials, so it cannot advertise on mDNS — but the
+    /// radio needs a native module that may not be installed and permission a
+    /// headless service does not have: `cap_net_raw` on Linux, and on macOS an
+    /// `NSBluetoothAlwaysUsageDescription` in the bundle's Info.plist, without
+    /// which the OS kills the process outright.
+    pub ble: bool,
+}
+
 /// Driven Port: reconcile the Matter integration to a desired state.
 #[async_trait]
 pub trait MatterRuntimePort: Send + Sync {
@@ -80,7 +102,7 @@ pub trait MatterRuntimePort: Send + Sync {
     /// install plus startup), and the settings write that triggers it must not
     /// block on that. Idempotent — asking for the state already in effect does
     /// nothing, so repeated saves do not churn the connection.
-    fn apply(&self, url: String);
+    fn apply(&self, config: MatterConfig);
 
     /// What the runtime is currently doing.
     async fn status(&self) -> MatterStatus;

@@ -23,6 +23,21 @@ export interface Greeting {
   /** The controller's own fabric, for the operator's benefit when reading logs. */
   fabric_id: number | null;
   matter_js: string;
+  /**
+   * Whether a BLE transport is loaded, so a device that has never been on the
+   * network can be paired.
+   *
+   * Reported rather than assumed, because the client has to reason about it: its
+   * pre-flight probe for "is anything in pairing mode" is an mDNS browse, and an
+   * out-of-box device advertises over BLE and not on mDNS at all. Refusing on a
+   * zero from that probe is right with BLE off and wrong with it on.
+   *
+   * No `PROTOCOL_VERSION` bump: an un-updated client ignores the field and keeps
+   * today's behaviour, and an un-updated controller leaves it absent, which an
+   * updated client reads as "off" -- also today's behaviour. Neither direction
+   * breaks, which is the documented bar for a bump.
+   */
+  ble: boolean;
 }
 
 // ── Domain types ─────────────────────────────────────────────────────────────

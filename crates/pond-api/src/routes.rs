@@ -4693,9 +4693,13 @@ async fn update_settings(
     // over the whole of Settings, so validating unconditionally would let a bad
     // stored value block every unrelated save (renaming the home, changing a
     // model) until someone fixed a field they were not touching.
+    // `matter_ble_enabled` counts as touching Matter: it is an argument to the
+    // controller's own process, so turning it on does nothing at all until that
+    // process is replaced. Left out, the toggle saved and appeared to work, and
+    // BLE arrived on the next server restart -- or never, if nothing restarted it.
     let touches_matter = patch
         .as_object()
-        .is_some_and(|o| o.contains_key("matter_ws_url"));
+        .is_some_and(|o| o.contains_key("matter_ws_url") || o.contains_key("matter_ble_enabled"));
     let matter_url = merged.matter_ws_url.trim();
     if touches_matter && !(matter_url.starts_with("ws://") || matter_url.starts_with("wss://")) {
         // An empty address and a malformed one are different mistakes and read
@@ -4812,7 +4816,10 @@ async fn update_settings(
     // explicitly, so it is a `touches_matter` save by construction.
     if touches_matter {
         if let Some(matter) = &state.matter {
-            matter.apply(merged.matter_ws_url.trim().to_string());
+            matter.apply(pond_core::user_data::ports::matter_runtime::MatterConfig {
+                url: merged.matter_ws_url.trim().to_string(),
+                ble: merged.matter_ble_enabled,
+            });
         }
     }
 

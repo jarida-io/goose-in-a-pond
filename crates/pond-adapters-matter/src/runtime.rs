@@ -38,7 +38,9 @@ use pond_core::user_data::ports::device_control::{
     DeviceControlOutcome, DeviceControlPort, DeviceDescription, DeviceState,
 };
 use pond_core::user_data::ports::device_registry::DeviceRegistry;
-use pond_core::user_data::ports::matter_runtime::{MatterRuntimePort, MatterState, MatterStatus};
+use pond_core::user_data::ports::matter_runtime::{
+    MatterConfig, MatterRuntimePort, MatterState, MatterStatus,
+};
 use tokio::sync::{watch, RwLock};
 use tokio::task::JoinHandle;
 
@@ -73,6 +75,9 @@ type ControlCell = Arc<RwLock<Option<Arc<MatterDeviceControl>>>>;
 #[derive(Clone, PartialEq, Eq)]
 struct Desired {
     url: String,
+    /// Whether the controller should be asked for a Bluetooth transport. A
+    /// change to it restarts the controller, because it is a spawn argument.
+    ble: bool,
     shutdown: bool,
     nonce: u64,
 }
@@ -100,6 +105,7 @@ impl MatterRuntime {
     ) -> Arc<Self> {
         let (desired, desired_rx) = watch::channel(Desired {
             url: String::new(),
+            ble: false,
             shutdown: false,
             nonce: 0,
         });
@@ -191,7 +197,7 @@ impl MatterRuntime {
 
 #[async_trait]
 impl MatterRuntimePort for MatterRuntime {
-    fn apply(&self, url: String) {
+    fn apply(&self, config: MatterConfig) {
         let nonce = self
             .nonce
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -199,7 +205,8 @@ impl MatterRuntimePort for MatterRuntime {
         // A closed channel means the reconciler is gone (shutdown); dropping
         // the request is correct — there is nothing left to converge.
         let _ = self.desired.send(Desired {
-            url,
+            url: config.url,
+            ble: config.ble,
             shutdown: false,
             nonce,
         });
@@ -223,6 +230,7 @@ impl MatterRuntimePort for MatterRuntime {
             .desired
             .send(Desired {
                 url: String::new(),
+                ble: false,
                 shutdown: true,
                 nonce,
             })
@@ -275,6 +283,7 @@ async fn reconcile_loop(mut rx: watch::Receiver<Desired>, r: Reconciler) {
     // decide whether anything needs to change.
     let mut current = Desired {
         url: String::new(),
+        ble: false,
         shutdown: false,
         nonce: 0,
     };
@@ -314,7 +323,11 @@ async fn reconcile_loop(mut rx: watch::Receiver<Desired>, r: Reconciler) {
         // connected are a no-op, but the same values while unreachable are a
         // retry — which is what the UI's retry affordance sends.
         let healthy = r.status.read().await.state.is_connected();
-        let changed = want.url != current.url;
+        // BLE too, not just the URL: it is an argument to the controller's own
+        // process, so turning it on has no effect at all until that process is
+        // replaced. Comparing the URL alone made the setting look like it saved and
+        // did nothing until the next restart.
+        let changed = want.url != current.url || want.ble != current.ble;
         if changed || !healthy {
             teardown(&mut running, &r).await;
             current = want.clone();
@@ -332,7 +345,7 @@ async fn reconcile_loop(mut rx: watch::Receiver<Desired>, r: Reconciler) {
                 tokio::select! {
                     biased;
                     _ = rx.changed() => continue,
-                    result = connect(&r, &want.url) => match result {
+                    result = connect(&r, &want.url, want.ble) => match result {
                         Ok(connected) => {
                             running.child = connected.child;
                             running.supervisor = Some(connected.supervisor);
@@ -398,7 +411,7 @@ struct Connected {
 
 /// Start a controller if this URL is ours to manage, connect to it, and put the
 /// bridge under supervision.
-async fn connect(r: &Reconciler, url: &str) -> Result<Connected> {
+async fn connect(r: &Reconciler, url: &str, ble: bool) -> Result<Connected> {
     // An install predating the Matter section could have been enabled with no
     // address. Named plainly rather than left to surface as an opaque WebSocket
     // parse failure — the fix is to fill the field in.
@@ -416,6 +429,7 @@ async fn connect(r: &Reconciler, url: &str) -> Result<Connected> {
                 CONTROLLER_READY_TIMEOUT,
                 &r.notifier,
                 url,
+                ble,
             )
             .await?
         }
@@ -449,6 +463,7 @@ async fn connect(r: &Reconciler, url: &str) -> Result<Connected> {
             url: url.to_string(),
             data_dir: r.data_dir.clone(),
             child: child.clone(),
+            ble,
         },
         control.client_handle(),
         client,
