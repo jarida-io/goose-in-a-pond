@@ -207,6 +207,14 @@ impl SettingsRepository for SqliteSettingsRepository {
         upsert!("vision_classifier_model", &settings.vision_classifier_model);
         // Matter (#195)
         upsert!("matter_ws_url", &settings.matter_ws_url);
+        upsert!(
+            "matter_ble_enabled",
+            if settings.matter_ble_enabled {
+                "true"
+            } else {
+                "false"
+            }
+        );
         // Private mesh (#132)
         upsert!(
             "mesh_enabled",
@@ -922,6 +930,7 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
             }
         }
         // Private mesh (#132)
+        "matter_ble_enabled" => s.matter_ble_enabled = value == "true",
         "mesh_enabled" => s.mesh_enabled = value == "true",
         "lightning_enabled" => s.lightning_enabled = value == "true",
         "mesh_settlement_millisats_per_token" => {
