@@ -233,6 +233,55 @@ pub(crate) fn resolve_binary_path(
     candidate_binary_paths(resource_dir, binary_name)
         .into_iter()
         .find(|p| p.exists())
+        .or_else(|| {
+            // `stage-server-sidecar.sh` stages the dev sidecar with a Rust
+            // target-triple suffix (e.g. `pond-server-aarch64-apple-darwin`) --
+            // that is Tauri's own `externalBin` convention, and the exact
+            // triple is only known at STAGE time via `rustc -vV`, not
+            // something to hardcode or recompute here. The bundler strips
+            // that suffix when it copies the sidecar into a packaged app
+            // (which is why `current_exe_sibling` above finds a bare name),
+            // but nothing un-suffixed it for `tauri dev`, so a freshly staged
+            // sidecar sat in `binaries/` invisible to every candidate above.
+            candidate_binary_dirs(resource_dir)
+                .into_iter()
+                .find_map(|dir| find_triple_suffixed_binary(&dir, binary_name))
+        })
+}
+
+/// Directories searched for `binary_name`, in priority order. Kept separate
+/// from `candidate_binary_paths` so the triple-suffixed fallback can scan the
+/// same directories without duplicating this list.
+fn candidate_binary_dirs(resource_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    vec![
+        resource_dir.to_path_buf(),
+        resource_dir.join("..").join("binaries"),
+        std::path::PathBuf::from("binaries"),
+    ]
+}
+
+/// Find a sidecar in `dir` named `binary_name` with a target-triple suffix
+/// inserted before any extension, e.g. `pond-server-aarch64-apple-darwin` or
+/// (Windows) `pond-server-x86_64-pc-windows-msvc.exe`. Exactly one triple is
+/// ever staged on a given dev machine, so the first match wins.
+fn find_triple_suffixed_binary(
+    dir: &std::path::Path,
+    binary_name: &str,
+) -> Option<std::path::PathBuf> {
+    let (stem, ext) = match binary_name.rsplit_once('.') {
+        Some((s, e)) => (s, Some(e)),
+        None => (binary_name, None),
+    };
+    let prefix = format!("{stem}-");
+    std::fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
+        let name = entry.file_name();
+        let name = name.to_str()?;
+        let matches_ext = match ext {
+            Some(e) => name.ends_with(&format!(".{e}")),
+            None => !name.contains('.'),
+        };
+        (name.starts_with(&prefix) && matches_ext).then(|| entry.path())
+    })
 }
 
 /// Path to a binary sitting next to the currently-running executable, if it
@@ -248,16 +297,18 @@ fn candidate_binary_paths(
     resource_dir: &std::path::Path,
     binary_name: &str,
 ) -> Vec<std::path::PathBuf> {
-    vec![
-        resource_dir.join(binary_name),
-        resource_dir.join("..").join("binaries").join(binary_name),
-        std::path::PathBuf::from("binaries").join(binary_name),
-    ]
+    candidate_binary_dirs(resource_dir)
+        .into_iter()
+        .map(|dir| dir.join(binary_name))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{candidate_binary_paths, current_exe_sibling, dev_repo_root, resolve_binary_path};
+    use super::{
+        candidate_binary_paths, current_exe_sibling, dev_repo_root, find_triple_suffixed_binary,
+        resolve_binary_path,
+    };
 
     /// These tests mutate the process-global `POND_SERVER_BIN` env var, which is
     /// not safe to interleave with other tests reading it. Rust runs tests in a
@@ -361,5 +412,84 @@ mod tests {
         std::fs::remove_file(&override_bin).expect("should remove override binary");
 
         assert_eq!(resolved, Some(override_bin));
+    }
+
+    /// `stage-server-sidecar.sh` stages exactly this shape --
+    /// `pond-server-<rustc-host-triple>` -- and nothing un-suffixes it for
+    /// `tauri dev`. Without the fallback this is invisible to
+    /// `candidate_binary_paths`, which only ever looks for the bare name, so
+    /// `ensure_running` fails with "no binary found" even though a freshly
+    /// staged sidecar is sitting right there.
+    #[test]
+    fn finds_a_triple_suffixed_sidecar() {
+        let dir = std::env::temp_dir().join(format!("pond-triple-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("should create probe dir");
+
+        let sidecar = dir.join("pond-server-aarch64-apple-darwin");
+        std::fs::write(&sidecar, b"#!/bin/sh\n").expect("should write triple-suffixed probe");
+
+        let resolved = find_triple_suffixed_binary(&dir, "pond-server");
+
+        std::fs::remove_dir_all(&dir).expect("should remove probe dir");
+
+        assert_eq!(resolved, Some(sidecar));
+    }
+
+    /// The suffix goes before the extension, not after -- `pond-server.exe`
+    /// becomes `pond-server-<triple>.exe`, never `pond-server.exe-<triple>`.
+    #[test]
+    fn finds_a_triple_suffixed_sidecar_with_an_extension() {
+        let dir = std::env::temp_dir().join(format!("pond-triple-exe-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("should create probe dir");
+
+        let sidecar = dir.join("pond-server-x86_64-pc-windows-msvc.exe");
+        std::fs::write(&sidecar, b"").expect("should write triple-suffixed probe");
+        // A same-stemmed file with the wrong extension must not match.
+        std::fs::write(dir.join("pond-server-x86_64-pc-windows-msvc.txt"), b"")
+            .expect("should write decoy file");
+
+        let resolved = find_triple_suffixed_binary(&dir, "pond-server.exe");
+
+        std::fs::remove_dir_all(&dir).expect("should remove probe dir");
+
+        assert_eq!(resolved, Some(sidecar));
+    }
+
+    /// A no-extension `binary_name` (the Unix case) must not match a
+    /// same-stemmed file that happens to carry an extension -- otherwise a
+    /// stray `pond-server-notes.txt` in `binaries/` would resolve as the
+    /// sidecar.
+    #[test]
+    fn an_extensioned_decoy_does_not_match_an_extensionless_binary_name() {
+        let dir = std::env::temp_dir().join(format!("pond-triple-decoy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("should create probe dir");
+        std::fs::write(dir.join("pond-server-notes.txt"), b"").expect("should write decoy");
+
+        let resolved = find_triple_suffixed_binary(&dir, "pond-server");
+
+        std::fs::remove_dir_all(&dir).expect("should remove probe dir");
+
+        assert_eq!(resolved, None);
+    }
+
+    /// End-to-end through `resolve_binary_path`: a triple-suffixed sidecar in
+    /// the `binaries/` fallback directory is found even though the bare name
+    /// candidates all miss.
+    #[test]
+    fn resolve_binary_path_falls_back_to_a_triple_suffixed_sidecar() {
+        let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+
+        let resource_dir =
+            std::env::temp_dir().join(format!("pond-resolve-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&resource_dir).expect("should create resource dir");
+
+        let sidecar = resource_dir.join("pond-server-aarch64-apple-darwin");
+        std::fs::write(&sidecar, b"#!/bin/sh\n").expect("should write triple-suffixed probe");
+
+        let resolved = resolve_binary_path(&resource_dir, "pond-server");
+
+        std::fs::remove_dir_all(&resource_dir).expect("should remove probe dir");
+
+        assert_eq!(resolved, Some(sidecar));
     }
 }
