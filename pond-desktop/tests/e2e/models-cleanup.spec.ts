@@ -15,8 +15,8 @@ async function goToModels(page: import("@playwright/test").Page) {
     .or(page.locator('[title="Models"]'))
     .first();
   await modelsBtn.click({ timeout: 10_000 });
-  // Models defaults to "Set up" view; switch to "Manage" where cleanup controls live
-  await page.getByRole("button", { name: "Manage" }).click({ timeout: 5_000 });
+  // No tab hop any more — the "Manage" tab was removed with the Models
+  // redesign; the cleanup controls sit on the section itself.
 }
 
 test.describe("Models cleanup", () => {

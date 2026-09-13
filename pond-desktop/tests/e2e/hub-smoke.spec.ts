@@ -16,7 +16,7 @@ test("Hub shell renders from Settings preview button", async ({ page }) => {
   await expect(page.locator(".irail")).toBeVisible();
 
   // Home view content
-  await expect(page.locator(".home2")).toBeVisible();
+  await expect(page.locator(".dash")).toBeVisible();
   await expect(page.locator(".askgoose")).toBeVisible();
   await expect(page.locator(".rpills")).toBeVisible();
 });
@@ -32,7 +32,7 @@ test("Hub rail navigation works", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.locator(".ghub"), "Hub shell renders").toBeVisible({ timeout: 10_000 });
-  await expect(page.locator(".home2"), "Home view renders").toBeVisible();
+  await expect(page.locator(".dash"), "Home view renders").toBeVisible();
 
   // Navigate to Routines
   await page.getByRole("button", { name: "Routines" }).click();
@@ -44,7 +44,7 @@ test("Hub rail navigation works", async ({ page }) => {
 
   // Back to Home
   await page.getByRole("button", { name: "Home" }).click();
-  await expect(page.locator(".home2")).toBeVisible();
+  await expect(page.locator(".dash")).toBeVisible();
 });
 
 test("Hub route persists to localStorage", async ({ page }) => {

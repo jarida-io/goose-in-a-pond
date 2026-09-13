@@ -4,7 +4,7 @@ import { mockAllApiRoutes } from "./helpers/api-mocks";
 /** Tour by clicking the IconRail then drilling into Settings sub-rows.
  *  Reload is avoided because addInitScript would reset the route. */
 const TOP_TOUR: Array<{ rail: string; label: string; check: string }> = [
-  { rail: "Home",     label: "Home",          check: ".home2" },
+  { rail: "Home",     label: "Home",          check: ".dash" },
   { rail: "Goose",    label: "Chat",          check: ".chat2" },
   { rail: "Canvas",   label: "Canvas",        check: ".mcpc" },
   { rail: "Routines", label: "Routines",      check: ".rt" },
@@ -122,7 +122,7 @@ test("Hub responsive — narrow viewport collapses sidebar grids", async ({ page
   // The design's media query: @media (max-width: 1080px) → ambient sidebar collapses
   await page.setViewportSize({ width: 1000, height: 900 });
   await page.goto("/");
-  await expect(page.locator(".home2")).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator(".dash")).toBeVisible({ timeout: 10_000 });
   await page.waitForTimeout(300);
   await page.screenshot({ path: "/tmp/hub-tour/responsive_narrow_Home.png" });
 
@@ -147,7 +147,7 @@ test("Hub compact density mode", async ({ page }) => {
   });
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
-  await expect(page.locator(".home2")).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator(".dash")).toBeVisible({ timeout: 10_000 });
   await page.waitForTimeout(300);
   await page.screenshot({ path: "/tmp/hub-tour/density_compact_Home.png" });
 
@@ -165,7 +165,7 @@ test("Hub visual tour — accent variants on Home", async ({ page }) => {
   });
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
-  await expect(page.locator(".home2")).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator(".dash")).toBeVisible({ timeout: 10_000 });
 
   const ACCENTS: Array<{ name: string; rgb: [string, string, string, string] }> = [
     { name: "Blue",    rgb: ["#2563EB", "#1D4ED8", "#DBEAFE", "#EFF6FF"] },
@@ -195,7 +195,7 @@ test("Hub interaction smoke — tile toggle + routine run + bell shortcut", asyn
   });
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
-  await expect(page.locator(".home2")).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator(".dash")).toBeVisible({ timeout: 10_000 });
 
   // First favourite light tile — capture state before/after click
   const firstTile = page.locator(".dtile").first();

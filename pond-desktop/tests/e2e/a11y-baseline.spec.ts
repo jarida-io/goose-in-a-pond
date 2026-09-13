@@ -25,7 +25,7 @@ test.describe("a11y baseline (WCAG 2 A/AA)", () => {
     });
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/");
-    await expect(page.locator(".home2")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator(".dash")).toBeVisible({ timeout: 10_000 });
     await scanAndAssert(page, "Home");
   });
 
@@ -38,7 +38,7 @@ test.describe("a11y baseline (WCAG 2 A/AA)", () => {
     });
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/");
-    await expect(page.locator(".home2")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator(".dash")).toBeVisible({ timeout: 10_000 });
     await page.getByRole("button", { name: "Canvas", exact: true }).first().click();
     await expect(page.locator(".mcpc")).toBeVisible({ timeout: 10_000 });
     await scanAndAssert(page, "Canvas");
@@ -53,7 +53,7 @@ test.describe("a11y baseline (WCAG 2 A/AA)", () => {
     });
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/");
-    await expect(page.locator(".home2")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator(".dash")).toBeVisible({ timeout: 10_000 });
     await page.getByRole("button", { name: "Routines", exact: true }).first().click();
     await expect(page.locator(".rt")).toBeVisible({ timeout: 10_000 });
 

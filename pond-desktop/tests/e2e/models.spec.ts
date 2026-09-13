@@ -21,8 +21,10 @@ async function goToModels(page: Parameters<typeof mockAllApiRoutes>[0]) {
     .or(page.locator('[title="Models"]'))
     .first();
   await modelsBtn.click({ timeout: 10_000 });
-  // Models defaults to "Set up" view; switch to "Manage" where roles/memory/downloads live
-  await page.getByRole("button", { name: "Manage" }).click({ timeout: 5_000 });
+  // No tab hop any more. The screen used to open on a guided-setup wizard with
+  // the real view behind a "Manage" tab; that split was removed deliberately —
+  // see the header comment in `src/sections/Models.tsx` — so roles, memory and
+  // downloads are on the section itself now.
 }
 
 test.describe("Models section", () => {
@@ -62,7 +64,7 @@ test.describe("Models section", () => {
     ).toBeVisible({ timeout: 10_000 });
   });
 
-  test("memory status shows total MB when non-zero", async ({ page }) => {
+  test("memory status reports the budget a model can actually have", async ({ page }) => {
     await page.route("**/api/v1/models/memory-status", (route) =>
       route.fulfill({
         json: {
@@ -75,8 +77,14 @@ test.describe("Models section", () => {
 
     await goToModels(page);
 
-    // Memory total should appear somewhere (8192 MB or 8 GB or similar)
-    await expect(page.getByText(/8192|8,192|8\.0|8 GB/i).first()).toBeVisible({ timeout: 10_000 });
+    // The header reports what a model can ACTUALLY have — 4096 MB of budget,
+    // rendered "4.0 GB" beside "for models" — not the 8192 MB device total.
+    // That is deliberate: the fit meters measure against the usable figure,
+    // and `fitReading` keeps the bar and the sentence agreeing about the same
+    // model. So the raw total is not on this screen to assert.
+    await expect(
+      page.locator(".mdl-stat", { hasText: "for models" }),
+    ).toContainText("4.0 GB", { timeout: 10_000 });
   });
 
   test("memory status shows loaded model name when a model is hot", async ({ page }) => {
@@ -152,12 +160,18 @@ test.describe("Models section", () => {
 
     await goToModels(page);
 
-    // The spill warning badge appears for the too-large model.
-    await expect(page.locator(".fit-badge").first()).toBeVisible({ timeout: 10_000 });
-    await expect(page.locator(".fit-badge").first()).toContainText(/too large/i);
+    // The fit meter is now inline on every row rather than a badge that only
+    // appears on a spill, and it carries its verdict in `title` (see
+    // `fitReading` in src/sections/models/modelsView.ts). So the assertion is
+    // no longer "how many badges" but "what does each row's meter say".
+    const meters = page.locator(".mdl-row__fit");
+    await expect(meters.first()).toBeVisible({ timeout: 10_000 });
 
-    // Exactly one badge — the fitting model must NOT be flagged.
-    await expect(page.locator(".fit-badge")).toHaveCount(1);
+    // The too-large model reports a spill; the fitting one must not.
+    await expect(
+      page.locator(".mdl-row__fit[title*='Bigger than']"),
+    ).toHaveCount(1);
+    await expect(page.locator(".mdl-row__fit[title*='Uses']")).toHaveCount(1);
   });
 
   test("memory-fit guard: no warning when budget is unavailable (Mac/dev)", async ({ page }) => {
@@ -191,9 +205,15 @@ test.describe("Models section", () => {
 
     await goToModels(page);
 
-    // The model list renders, but no spill badge appears (budget unknown).
+    // The model list renders, and the meter declines to give a verdict rather
+    // than drawing a confident bar from nothing — "a confident bar drawn from
+    // nothing is worse than no bar" (src/sections/Models.tsx). The element is
+    // present either way now, so the claim is about what it says.
     await expect(page.getByText(/gemma3n e2b/i).first()).toBeVisible({ timeout: 10_000 });
-    await expect(page.locator(".fit-badge")).toHaveCount(0);
+    await expect(
+      page.locator(".mdl-row__fit[title*='Size unknown']"),
+    ).toHaveCount(1);
+    await expect(page.locator(".mdl-row__fit[title*='Bigger than']")).toHaveCount(0);
   });
 
   test("download progress bar visible when download in progress", async ({ page }) => {
@@ -237,11 +257,13 @@ test.describe("Models section", () => {
 
     await goToModels(page);
 
-    // A progress indicator should be visible (progress bar or percentage text)
+    // The bar carries a role and an accessible name now, so it can be named
+    // directly. The old `.or(getByText(/%|progress/))` fallback dated from
+    // markup that had neither, and matched both the bar and its own "26%"
+    // label — two elements, which is a strict-mode violation rather than a
+    // missing indicator.
     await expect(
-      page
-        .locator('[role="progressbar"]')
-        .or(page.getByText(/downloading|%|progress/i).first())
+      page.getByRole("progressbar", { name: /llama3\.2-3b\.gguf download progress/i }),
     ).toBeVisible({ timeout: 10_000 });
   });
 });

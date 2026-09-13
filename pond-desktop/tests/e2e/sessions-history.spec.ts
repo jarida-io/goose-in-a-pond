@@ -48,8 +48,13 @@ async function goToChat(page: Parameters<typeof mockAllApiRoutes>[0]) {
 }
 
 async function openHistory(page: Parameters<typeof mockAllApiRoutes>[0]) {
-  await page.getByRole("button", { name: /session history/i }).click();
-  await expect(page.getByText("Conversations")).toBeVisible({ timeout: 10_000 });
+  // No toggle to click any more: the conversation list is part of the chat
+  // sidebar rather than a panel behind a "session history" button, and that
+  // button no longer exists anywhere in the source. Waiting on the heading
+  // still pins the thing these tests actually need — that the list rendered.
+  await expect(
+    page.getByRole("heading", { name: "Conversations" }),
+  ).toBeVisible({ timeout: 10_000 });
 }
 
 test.describe("Chat history sidebar", () => {
@@ -71,12 +76,13 @@ test.describe("Chat history sidebar", () => {
 
     // Stored title renders verbatim.
     await expect(page.getByText("Weekend weather plan")).toBeVisible();
-    // Titleless session falls back to a short id label — never the full id.
-    await expect(page.getByText(/^Session sess-bbb/)).toBeVisible();
+    // A titleless session falls back to "Untitled" (ChatHistory.tsx). The claim
+    // that matters is unchanged and still asserted below: never the raw id.
+    await expect(page.getByText("Untitled")).toBeVisible();
     await expect(page.getByText("sess-bbbbbbbb-2222", { exact: true })).toHaveCount(0);
-    // Badge shows the message count.
-    await expect(page.getByTitle("6 messages")).toBeVisible();
-    await expect(page.getByTitle("2 messages")).toBeVisible();
+    // The count is card text now rather than a `title` attribute.
+    await expect(page.getByText("6 messages")).toBeVisible();
+    await expect(page.getByText("2 messages")).toBeVisible();
   });
 
   test("inline rename issues PATCH with the new title", async ({ page }) => {
@@ -94,12 +100,17 @@ test.describe("Chat history sidebar", () => {
     await goToChat(page);
     await openHistory(page);
 
-    // Hover the first row to reveal the actions, then click rename.
-    const row = page.locator(".session-dropdown__item").filter({ hasText: "Weekend weather plan" });
-    await row.hover();
-    await row.getByRole("button", { name: /rename conversation/i }).click();
+    // Renaming is no longer a row action. The chat header's title carries the
+    // edit, and Chat.tsx notes it is "the ONLY way to set a name by hand now
+    // that the history dropdown is gone" — so the conversation has to be open
+    // for there to be a name to set. The behaviour under test is unchanged:
+    // a hand-typed name issues the PATCH.
+    await page
+      .getByRole("button", { name: /Open conversation: Weekend weather plan/ })
+      .click();
+    await page.getByRole("button", { name: /Weekend weather plan/ }).click();
 
-    const editInput = page.getByRole("textbox", { name: /rename conversation/i });
+    const editInput = page.getByRole("textbox", { name: "Conversation name" });
     await expect(editInput).toBeVisible();
     await editInput.fill("Trip planning");
     await editInput.press("Enter");
@@ -123,16 +134,18 @@ test.describe("Chat history sidebar", () => {
     await goToChat(page);
     await openHistory(page);
 
-    const row = page.locator(".session-dropdown__item").filter({ hasText: "Weekend weather plan" });
-    await row.hover();
-    await row.getByRole("button", { name: /delete conversation/i }).click();
+    // The actions are always in the DOM now rather than revealed on hover, so
+    // there is nothing to hover first.
+    const row = page.locator(".chist__card").filter({ hasText: "Weekend weather plan" });
+    await row.locator(".chist__del").click();
 
-    // A confirmation step appears — nothing deleted yet.
-    await expect(page.getByText(/delete this conversation\?/i)).toBeVisible();
+    // The confirmation is an inline Delete/Keep pair rather than a prompt, so
+    // the assertion is that it appeared and that nothing has been deleted yet.
+    await expect(row.locator(".chist__confirm")).toBeVisible();
     expect(deleteUrl).toBeNull();
 
     // Confirm.
-    await page.getByRole("button", { name: /confirm delete/i }).click();
+    await row.locator(".chist__confirmYes").click();
 
     await expect.poll(() => deleteUrl).not.toBeNull();
     expect(deleteUrl).toContain("/api/v1/sessions/sess-aaaaaaaa-1111");

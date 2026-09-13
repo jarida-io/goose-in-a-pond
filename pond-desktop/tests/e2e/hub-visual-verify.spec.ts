@@ -19,7 +19,7 @@ test("Hub visual screenshot", async ({ page }) => {
   });
   await page.goto("/");
   await page.waitForSelector(".ghub", { timeout: 15000 });
-  await page.waitForSelector(".home2", { timeout: 10000 });
+  await page.waitForSelector(".dash", { timeout: 10000 });
   // Let animations settle
   await page.waitForTimeout(800);
 

@@ -86,6 +86,7 @@ async fn a_chat_turn_over_an_unavailable_mesh_surfaces_a_clean_error() {
         canvas_mode: false,
         profile_scope: ProfileScope::Household,
         profile_context: None,
+        // Not a recipe run, so nothing restricts this turn's tool groups.
         tool_group_allowlist: None,
         warmup: false,
     };

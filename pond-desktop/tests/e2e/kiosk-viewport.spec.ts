@@ -227,7 +227,7 @@ test.describe("Hub UI — 1024×600", () => {
     await page.waitForLoadState("networkidle");
     await checkNoHorizOverflow(page);
     const hasHub = await page.evaluate(
-      () => !!document.querySelector(".ghub") || !!document.querySelector(".irail") || !!document.querySelector(".home2"),
+      () => !!document.querySelector(".ghub") || !!document.querySelector(".irail") || !!document.querySelector(".dash"),
     );
     // If hub loaded, verify its icon rail
     if (hasHub) {

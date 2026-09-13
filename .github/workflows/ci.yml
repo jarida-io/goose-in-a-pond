@@ -94,7 +94,13 @@ jobs:
         # `update` first: the runner image ships a cached apt index, and when a
         # mirror supersedes a package version the stale index 404s the install
         # (this flaked both PR #188 and #189 on 2026-07-16).
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        #
+        # protobuf-compiler is for the lightning steps below: breez-sdk-spark
+        # pulls spark-token-primitives, whose build script compiles its own
+        # .proto files and fails with "Could not find `protoc`" without it. The
+        # runner image does not ship one, and a developer machine usually does,
+        # which is why this only ever broke in CI.
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev protobuf-compiler
 
       - name: cargo fmt
         run: cargo fmt --check
