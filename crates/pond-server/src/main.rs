@@ -71,7 +71,6 @@ use pond_core::user_data::services::onboarding::OnboardingService;
 use pond_infra::db::Database;
 use pond_infra::onboarding::SqlxOnboardingRepository;
 use pond_infra::sqlite_device_registry::SqliteDeviceRegistry;
-use pond_infra::sqlite_draft::SqliteDraftRepository;
 use pond_infra::sqlite_event_log::{SqliteEventLog, SqliteOperationalLog};
 use pond_infra::sqlite_handshake::SqliteHandshakeAdapter;
 use pond_infra::sqlite_mcp_servers::SqliteMcpServerRepository;
@@ -1728,10 +1727,7 @@ async fn run_server(
     // demand leaves a member staring at an empty panel until the next scheduled
     // pass, which is the shape of "the button did nothing".
     let index_reindex_requested = Arc::new(tokio::sync::Notify::new());
-    let vector_model_id = embedding_provider.as_ref().map(|p| {
-        use pond_core::models::ports::embedding::EmbeddingProvider as _;
-        p.model_id()
-    });
+    let vector_model_id = embedding_provider.as_ref().map(|p| p.model_id());
 
     // Chokepoint 1: every memory write, whatever wrote it. Wrapping the one
     // construction covers extraction, the giap-memory MCP tool, POST /memories

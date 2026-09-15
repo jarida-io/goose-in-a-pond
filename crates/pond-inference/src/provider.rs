@@ -266,10 +266,6 @@ fn generation_task(
     // matches, we skip re-decoding thousands of tokens (system prompt + tools).
     // If no cached context exists (first call), create a fresh one.
 
-    let mut ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(ctx_size as u32));
-    ctx_params = ctx_params.with_n_batch(512);
-    ctx_params = ctx_params.with_flash_attention_policy(1);
-
     // Helper: create a fresh context sized for the current prompt.
     let create_fresh_ctx = |model: &llama_cpp_2::model::LlamaModel,
                             backend: &LlamaBackend,

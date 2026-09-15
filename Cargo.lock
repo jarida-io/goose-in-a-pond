@@ -11578,7 +11578,6 @@ dependencies = [
  "croner",
  "futures",
  "pond-core",
- "reqwest 0.13.3",
  "serde",
  "serde_json",
  "tempfile",

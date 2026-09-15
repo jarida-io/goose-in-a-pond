@@ -9,7 +9,6 @@ use goose::session::SessionManager;
 use goose_providers::errors::ProviderError;
 use goose_providers::model::ModelConfig;
 use rmcp::model::Tool;
-use serde_json::json;
 use std::sync::Arc;
 
 /// A mock provider that simply prints out the payloads it receives
