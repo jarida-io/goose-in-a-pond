@@ -1768,8 +1768,23 @@ export class PondApiClient {
     return this.get(`/api/v1/extensions/${encodeURIComponent(name)}/secrets`);
   }
 
-  async setExtensionSecrets(name: string, secrets: Record<string, string>): Promise<void> {
-    await this.post(`/api/v1/extensions/${encodeURIComponent(name)}/secrets`, secrets);
+  /**
+   * Stores an extension's credentials and restarts it so the running process
+   * picks them up.
+   *
+   * `restarted` is false with no `restart_error` when there was deliberately
+   * nothing to restart — the extension is not installed, or is disabled.
+   * A non-null `restart_error` means the credentials are stored but the
+   * extension is not running, so callers must surface it.
+   */
+  async setExtensionSecrets(
+    name: string,
+    secrets: Record<string, string>,
+  ): Promise<{ stored: number; restarted: boolean; restart_error: string | null }> {
+    return await this.post<{ stored: number; restarted: boolean; restart_error: string | null }>(
+      `/api/v1/extensions/${encodeURIComponent(name)}/secrets`,
+      secrets,
+    );
   }
 
   // ── Secrets ──────────────────────────────────────────────

@@ -456,6 +456,39 @@ Enable or disable an extension without removing its config. Disabled extensions 
 
 ---
 
+#### `POST /extensions/{name}/secrets`
+
+Store an extension's credentials and restart it so the running process picks them up. A stdio extension reads its credentials from the environment it was spawned with, so storing alone changes nothing until the process is replaced.
+
+**Request** — a flat map of secret key to value.
+```json
+{ "SPOTIFY_CLIENT_ID": "…", "SPOTIFY_CLIENT_SECRET": "…" }
+```
+
+**Response 200**
+```json
+{ "stored": 2, "restarted": true, "restart_error": null }
+```
+
+The credentials are stored before the restart is attempted, so a 200 does not by itself mean the extension is working. Read all three fields:
+
+| `restarted` | `restart_error` | Meaning |
+|-------------|-----------------|---------|
+| `true` | `null` | Stored, and the extension is running with them. |
+| `false` | `null` | Stored. Nothing to restart — the extension is not installed, or is disabled. |
+| `false` | a string | Stored, but the extension is **not** running with them. Surface this; the reason is in the string. |
+
+Restarting is deliberately limited to extensions that are installed and enabled, so storing credentials never starts something the caller did not install.
+
+| Code | Meaning |
+|------|---------|
+| 400 | Body is not a flat string-to-string map |
+| 404 | Extension not found in the marketplace |
+| 500 | A secret could not be stored — nothing was applied |
+| 503 | Secret storage not available |
+
+---
+
 #### `GET /agent/tools`
 
 List all MCP tools currently available across all loaded extensions.

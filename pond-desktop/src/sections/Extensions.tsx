@@ -1277,12 +1277,40 @@ export function Extensions() {
 
   async function handleSecretEditComplete(secrets: Record<string, string>) {
     if (!secretEditState) return;
-    if (Object.keys(secrets).length > 0) {
-      await api.setExtensionSecrets(secretEditState.extName, secrets);
-    }
     const extName = secretEditState.extName;
-    flash(`Credentials updated for ${extName}.`);
     setSecretEditState(null);
+
+    if (Object.keys(secrets).length === 0) {
+      flash(`Credentials updated for ${extName}.`);
+      return;
+    }
+
+    let result;
+    try {
+      result = await api.setExtensionSecrets(extName, secrets);
+    } catch (err) {
+      // Nothing was stored, so there is no new state to reflect anywhere.
+      flash(`Could not save credentials for ${extName}: ${String(err)}`, false);
+      return;
+    }
+
+    if (result.restart_error) {
+      // Stored, but the extension is not running with them — the state that
+      // used to be reported as a plain success. `load()` brings the
+      // extension's own error status onto its card, where it persists after
+      // this message has gone.
+      flash(
+        `Credentials saved, but ${extName} did not restart: ${result.restart_error}`,
+        false,
+      );
+      load();
+    } else if (result.restarted) {
+      flash(`Credentials updated for ${extName}. Restarted to apply them.`);
+      load();
+    } else {
+      flash(`Credentials updated for ${extName}.`);
+    }
+
     // Refresh the auth status badge for this extension
     api.getExtensionSecrets(extName)
       .then((res) => {
