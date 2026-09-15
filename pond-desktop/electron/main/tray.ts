@@ -62,7 +62,9 @@ export function createTray(t: TrayTargets): Tray {
 
 /** Reflect server reachability in the tooltip. */
 export function setTrayStatus(online: boolean): void {
-  tray?.setToolTip(online ? "Goose In A Pond" : "Goose In A Pond - server offline");
+  tray?.setToolTip(
+    online ? "Goose In A Pond" : "Goose In A Pond - server offline",
+  );
 }
 
 export function destroyTray(): void {

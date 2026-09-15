@@ -44,7 +44,8 @@ vi.mock("../api/PondApiClient", () => ({
     reattachRun: vi.fn(),
     cancelRun: vi.fn(),
     sessionAttachmentUrl: vi.fn(
-      (sessionId: string, id: string) => `/api/v1/sessions/${sessionId}/attachments/${id}`,
+      (sessionId: string, id: string) =>
+        `/api/v1/sessions/${sessionId}/attachments/${id}`,
     ),
   },
 }));
@@ -74,7 +75,9 @@ function deferredStream() {
     for (;;) {
       while (pending.length > 0) yield pending.shift()!;
       if (done) return;
-      await new Promise<void>((r) => { wake = r; });
+      await new Promise<void>((r) => {
+        wake = r;
+      });
     }
   })();
 
@@ -82,12 +85,14 @@ function deferredStream() {
     gen,
     async push(ev: ChatEvent) {
       pending.push(ev);
-      wake?.(); wake = null;
+      wake?.();
+      wake = null;
       await flush();
     },
     async end() {
       done = true;
-      wake?.(); wake = null;
+      wake?.();
+      wake = null;
       await flush();
     },
   };
@@ -184,9 +189,9 @@ describe("a turn nobody is watching", () => {
   it("drains its queue with nothing mounted", async () => {
     const first = deferredStream();
     vi.mocked(api.chatStream).mockReturnValueOnce(first.gen as never);
-    vi.mocked(api.chatStream).mockReturnValueOnce(stream([
-      { type: "text", content: "and second" } as ChatEvent,
-    ]) as never);
+    vi.mocked(api.chatStream).mockReturnValueOnce(
+      stream([{ type: "text", content: "and second" } as ChatEvent]) as never,
+    );
 
     sendTurn({ text: "first" });
     sendTurn({ text: "second" });
@@ -206,15 +211,17 @@ describe("talking back to the app", () => {
   it("forwards the session and the model that answered", async () => {
     const b = bridge();
     setChatRunBridge(b);
-    vi.mocked(api.chatStream).mockReturnValue(stream([
-      {
-        done: true,
-        session_id: "sess-9",
-        model_role: "chat",
-        model_name: "gemma",
-        usage: { prompt_tokens: 5, completion_tokens: 7 },
-      } as ChatEvent,
-    ]) as never);
+    vi.mocked(api.chatStream).mockReturnValue(
+      stream([
+        {
+          done: true,
+          session_id: "sess-9",
+          model_role: "chat",
+          model_name: "gemma",
+          usage: { prompt_tokens: 5, completion_tokens: 7 },
+        } as ChatEvent,
+      ]) as never,
+    );
 
     sendTurn({ text: "hi" });
     await flush();
@@ -231,15 +238,23 @@ describe("talking back to the app", () => {
   it("forwards a tool call as a context card", async () => {
     const b = bridge();
     setChatRunBridge(b);
-    vi.mocked(api.chatStream).mockReturnValue(stream([
-      { type: "tool_call", tool: "get_current_weather", id: "t1" } as ChatEvent,
-    ]) as never);
+    vi.mocked(api.chatStream).mockReturnValue(
+      stream([
+        {
+          type: "tool_call",
+          tool: "get_current_weather",
+          id: "t1",
+        } as ChatEvent,
+      ]) as never,
+    );
 
     sendTurn({ text: "weather?" });
     await flush();
 
     expect(b.onContextCard).toHaveBeenCalledTimes(1);
-    expect(getChatRun().messages[1].cards?.[0].tool).toBe("get_current_weather");
+    expect(getChatRun().messages[1].cards?.[0].tool).toBe(
+      "get_current_weather",
+    );
     expect(getChatRun().messages[1].status).toBe("Checking the weather…");
   });
 
@@ -247,10 +262,12 @@ describe("talking back to the app", () => {
     // The client holds its own token and refreshes it, so a bridgeless send
     // degrades to "the client authenticates itself", not to a failed send.
     __resetChatRunForTests();
-    vi.mocked(api.chatStream).mockReturnValue(stream([
-      { type: "text", content: "fine" } as ChatEvent,
-      { done: true, session_id: "s" } as ChatEvent,
-    ]) as never);
+    vi.mocked(api.chatStream).mockReturnValue(
+      stream([
+        { type: "text", content: "fine" } as ChatEvent,
+        { done: true, session_id: "s" } as ChatEvent,
+      ]) as never,
+    );
 
     expect(() => sendTurn({ text: "hi" })).not.toThrow();
     await flush();
@@ -344,7 +361,9 @@ describe("a run the conversation has left behind", () => {
 
 describe("image previews", () => {
   it("revokes only the previews it created", () => {
-    const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const revoke = vi
+      .spyOn(URL, "revokeObjectURL")
+      .mockImplementation(() => {});
     vi.mocked(api.chatStream).mockReturnValue(deferredStream().gen as never);
 
     sendTurn({
@@ -370,9 +389,9 @@ describe("image previews", () => {
 
 describe("truncateFrom", () => {
   it("drops the message and everything after it", async () => {
-    vi.mocked(api.chatStream).mockReturnValue(stream([
-      { type: "text", content: "answer" } as ChatEvent,
-    ]) as never);
+    vi.mocked(api.chatStream).mockReturnValue(
+      stream([{ type: "text", content: "answer" } as ChatEvent]) as never,
+    );
     sendTurn({ text: "question" });
     await flush();
 
@@ -401,7 +420,10 @@ describe("resuming a run this window never started", () => {
   };
 
   function leaveAPointer(over: Partial<typeof POINTER> = {}) {
-    localStorage.setItem("giap-chat-run", JSON.stringify({ ...POINTER, ...over }));
+    localStorage.setItem(
+      "giap-chat-run",
+      JSON.stringify({ ...POINTER, ...over }),
+    );
   }
 
   it("does nothing at all on an ordinary cold start", async () => {
@@ -423,7 +445,13 @@ describe("resuming a run this window never started", () => {
     leaveAPointer();
     vi.mocked(api.getActiveRun).mockResolvedValue(null);
     vi.mocked(api.getSessionMessages).mockResolvedValue([
-      { id: "m1", session_id: "sess-live", role: "user", content: "still here", created_at: "" },
+      {
+        id: "m1",
+        session_id: "sess-live",
+        role: "user",
+        content: "still here",
+        created_at: "",
+      },
     ] as never);
 
     await resumeActiveRun();
@@ -436,7 +464,13 @@ describe("resuming a run this window never started", () => {
   it("picks up a turn that is still being written", async () => {
     leaveAPointer();
     vi.mocked(api.getSessionMessages).mockResolvedValue([
-      { id: "m1", session_id: "sess-live", role: "user", content: "why a V", created_at: "" },
+      {
+        id: "m1",
+        session_id: "sess-live",
+        role: "user",
+        content: "why a V",
+        created_at: "",
+      },
     ] as never);
     vi.mocked(api.getActiveRun).mockResolvedValue({
       run_id: "run-7",
@@ -556,7 +590,13 @@ describe("remembering the run", () => {
     await held.end();
 
     vi.mocked(api.getSessionMessages).mockResolvedValue([
-      { id: "m1", session_id: "sess-gap", role: "user", content: "hi", created_at: "" },
+      {
+        id: "m1",
+        session_id: "sess-gap",
+        role: "user",
+        content: "hi",
+        created_at: "",
+      },
     ] as never);
     const gapped = deferredStream();
     vi.mocked(api.chatStream).mockReturnValue(gapped.gen as never);

@@ -58,7 +58,12 @@ describe("health()", () => {
 
 describe("getSettings()", () => {
   it("GETs /api/v1/settings", async () => {
-    const payload = { assistant_name: "Goose", user_name: "Jerry", agent_memory_inject: true, prompt_style: "balanced" };
+    const payload = {
+      assistant_name: "Goose",
+      user_name: "Jerry",
+      agent_memory_inject: true,
+      prompt_style: "balanced",
+    };
     fetchMock.mockResolvedValueOnce(okJson(payload));
     const s = await client().getSettings();
     expect(s.assistant_name).toBe("Goose");
@@ -67,13 +72,20 @@ describe("getSettings()", () => {
 
 describe("updateSettings()", () => {
   it("PUTs the partial patch and returns updated settings", async () => {
-    const payload = { assistant_name: "Puck", user_name: "Jerry", agent_memory_inject: false, prompt_style: "concise" };
+    const payload = {
+      assistant_name: "Puck",
+      user_name: "Jerry",
+      agent_memory_inject: false,
+      prompt_style: "concise",
+    };
     fetchMock.mockResolvedValueOnce(okJson(payload));
     const s = await client().updateSettings({ assistant_name: "Puck" });
     expect(s.assistant_name).toBe("Puck");
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(init.method).toBe("PUT");
-    expect(JSON.parse(init.body as string)).toMatchObject({ assistant_name: "Puck" });
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      assistant_name: "Puck",
+    });
   });
 });
 
@@ -81,7 +93,9 @@ describe("updateSettings()", () => {
 
 describe("listDevices()", () => {
   it("returns an array of devices", async () => {
-    fetchMock.mockResolvedValueOnce(okJson([{ id: "d1", name: "Lamp", is_online: true }]));
+    fetchMock.mockResolvedValueOnce(
+      okJson([{ id: "d1", name: "Lamp", is_online: true }]),
+    );
     const devices = await client().listDevices();
     expect(devices).toHaveLength(1);
     expect(devices[0].name).toBe("Lamp");
@@ -100,12 +114,20 @@ describe("listMemories()", () => {
 
 describe("addMemory()", () => {
   it("POSTs content and optional tags", async () => {
-    const frag = { id: "m1", content: "prefer Celsius", tags: ["prefs"], created_at: "2026-01-01" };
+    const frag = {
+      id: "m1",
+      content: "prefer Celsius",
+      tags: ["prefs"],
+      created_at: "2026-01-01",
+    };
     fetchMock.mockResolvedValueOnce(okJson(frag));
     const res = await client().addMemory("prefer Celsius", ["prefs"]);
     expect(res.content).toBe("prefer Celsius");
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(JSON.parse(init.body as string)).toEqual({ content: "prefer Celsius", tags: ["prefs"] });
+    expect(JSON.parse(init.body as string)).toEqual({
+      content: "prefer Celsius",
+      tags: ["prefs"],
+    });
   });
 });
 
@@ -129,7 +151,13 @@ describe("listSessions()", () => {
     fetchMock.mockResolvedValueOnce(
       okJson({
         sessions: [
-          { id: "s1", title: "Weather plan", message_count: 4, created_at: "", updated_at: "" },
+          {
+            id: "s1",
+            title: "Weather plan",
+            message_count: 4,
+            created_at: "",
+            updated_at: "",
+          },
         ],
       }),
     );
@@ -141,7 +169,9 @@ describe("listSessions()", () => {
   });
 
   it("tolerates a bare array response", async () => {
-    fetchMock.mockResolvedValueOnce(okJson([{ id: "s2", created_at: "", updated_at: "" }]));
+    fetchMock.mockResolvedValueOnce(
+      okJson([{ id: "s2", created_at: "", updated_at: "" }]),
+    );
     const sessions = await client().listSessions();
     expect(sessions[0].id).toBe("s2");
   });
@@ -149,7 +179,9 @@ describe("listSessions()", () => {
 
 describe("renameSession()", () => {
   it("PATCHes /sessions/:id with the new title", async () => {
-    fetchMock.mockResolvedValueOnce(okJson({ session_id: "s1", title: "Renamed" }));
+    fetchMock.mockResolvedValueOnce(
+      okJson({ session_id: "s1", title: "Renamed" }),
+    );
     await client().renameSession("s1", "Renamed");
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toContain("/api/v1/sessions/s1");
@@ -170,7 +202,13 @@ describe("deleteSession()", () => {
 describe("compactSession()", () => {
   it("POSTs /sessions/:id/compact", async () => {
     fetchMock.mockResolvedValueOnce(
-      okJson({ session_id: "s1", status: "compacted", reason: null, outcome: "refreshed", context: {} }),
+      okJson({
+        session_id: "s1",
+        status: "compacted",
+        reason: null,
+        outcome: "refreshed",
+        context: {},
+      }),
     );
     const res = await client().compactSession("s1");
     expect(fetchMock.mock.calls[0][0]).toContain("/api/v1/sessions/s1/compact");
@@ -183,7 +221,13 @@ describe("compactSession()", () => {
     // of a server fault, so the client must NOT model a refusal as an error —
     // being refused is the common path.
     fetchMock.mockResolvedValueOnce(
-      okJson({ session_id: "s1", status: "skipped", reason: "cooling_down", outcome: null, context: {} }),
+      okJson({
+        session_id: "s1",
+        status: "skipped",
+        reason: "cooling_down",
+        outcome: null,
+        context: {},
+      }),
     );
     const res = await client().compactSession("s1");
     expect(res.reason).toBe("cooling_down");
@@ -210,7 +254,9 @@ describe("listSkills()", () => {
 
 describe("updatePrompt()", () => {
   it("PUTs content to the named prompt endpoint", async () => {
-    fetchMock.mockResolvedValueOnce(okJson({ name: "balanced", content: "new content", is_system: true }));
+    fetchMock.mockResolvedValueOnce(
+      okJson({ name: "balanced", content: "new content", is_system: true }),
+    );
     const res = await client().updatePrompt("balanced", "new content");
     expect(res.content).toBe("new content");
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
@@ -228,7 +274,9 @@ describe("setToken()", () => {
     c.setToken("my-token");
     await c.health();
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect((init.headers as Record<string, string>)["Authorization"]).toBe("Bearer my-token");
+    expect((init.headers as Record<string, string>)["Authorization"]).toBe(
+      "Bearer my-token",
+    );
   });
 
   it("omits Authorization header when token is null", async () => {
@@ -237,7 +285,9 @@ describe("setToken()", () => {
     c.setToken(null);
     await c.health();
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect((init.headers as Record<string, string>)["Authorization"]).toBeUndefined();
+    expect(
+      (init.headers as Record<string, string>)["Authorization"],
+    ).toBeUndefined();
   });
 });
 
@@ -257,7 +307,9 @@ describe("ApiError", () => {
   });
 
   it("falls back to statusText when response body is not JSON", async () => {
-    fetchMock.mockResolvedValueOnce(new Response("Bad Gateway", { status: 502, statusText: "Bad Gateway" }));
+    fetchMock.mockResolvedValueOnce(
+      new Response("Bad Gateway", { status: 502, statusText: "Bad Gateway" }),
+    );
     await expect(client().health()).rejects.toMatchObject({ status: 502 });
   });
 });
@@ -318,7 +370,9 @@ describe("chatStream()", () => {
     // Never closes on its own: only a cancel can end this one.
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(encoder.encode('data: {"type":"text","content":"a"}\n'));
+        controller.enqueue(
+          encoder.encode('data: {"type":"text","content":"a"}\n'),
+        );
       },
       cancel(reason) {
         cancelled = reason ?? null;
@@ -405,7 +459,15 @@ describe("searchGgufModels()", () => {
   });
 
   it("returns model list", async () => {
-    const models = [{ id: "unsloth/gemma-4-E2B-it-GGUF", downloads: 5000, likes: 12, tags: ["gguf"], url: "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF" }];
+    const models = [
+      {
+        id: "unsloth/gemma-4-E2B-it-GGUF",
+        downloads: 5000,
+        likes: 12,
+        tags: ["gguf"],
+        url: "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF",
+      },
+    ];
     fetchMock.mockResolvedValueOnce(okJson({ models }));
     const res = await client().searchGgufModels("gemma");
     expect(res.models).toHaveLength(1);
@@ -423,7 +485,13 @@ describe("listHfModelFiles()", () => {
   });
 
   it("returns file list", async () => {
-    const files = [{ filename: "model.Q4_K_M.gguf", size_mb: 1400, url: "https://huggingface.co/..." }];
+    const files = [
+      {
+        filename: "model.Q4_K_M.gguf",
+        size_mb: 1400,
+        url: "https://huggingface.co/...",
+      },
+    ];
     fetchMock.mockResolvedValueOnce(okJson({ files }));
     const res = await client().listHfModelFiles("unsloth/gemma-4-E2B-it-GGUF");
     expect(res.files).toHaveLength(1);
@@ -434,12 +502,20 @@ describe("listHfModelFiles()", () => {
 describe("downloadModelFromUrl()", () => {
   it("POSTs to /models/download/url with correct body", async () => {
     fetchMock.mockResolvedValueOnce(okJson({ status: "download_started" }));
-    const res = await client().downloadModelFromUrl("https://hf.co/file.gguf", "gguf", "file.gguf");
+    const res = await client().downloadModelFromUrl(
+      "https://hf.co/file.gguf",
+      "gguf",
+      "file.gguf",
+    );
     expect(fetchMock).toHaveBeenCalledWith(
       "http://localhost:4000/api/v1/models/download/url",
       expect.objectContaining({
         method: "POST",
-        body: JSON.stringify({ url: "https://hf.co/file.gguf", category: "gguf", filename: "file.gguf" }),
+        body: JSON.stringify({
+          url: "https://hf.co/file.gguf",
+          category: "gguf",
+          filename: "file.gguf",
+        }),
       }),
     );
     expect(res.status).toBe("download_started");
@@ -459,7 +535,13 @@ describe("getDownloadProgress()", () => {
 
   it("returns in-progress downloads", async () => {
     const downloads = [
-      { filename: "model.gguf", category: "gguf", downloaded_bytes: 42, total_bytes: 100, status: "downloading" },
+      {
+        filename: "model.gguf",
+        category: "gguf",
+        downloaded_bytes: 42,
+        total_bytes: 100,
+        status: "downloading",
+      },
     ];
     fetchMock.mockResolvedValueOnce(okJson({ downloads }));
     const res = await client().getDownloadProgress();
@@ -481,8 +563,12 @@ describe("deleteModel()", () => {
   });
 
   it("throws ApiError 409 when model is active", async () => {
-    fetchMock.mockResolvedValueOnce(errJson(409, "model is active in role chat"));
-    await expect(client().deleteModel("gguf", "active-model")).rejects.toSatisfy(
+    fetchMock.mockResolvedValueOnce(
+      errJson(409, "model is active in role chat"),
+    );
+    await expect(
+      client().deleteModel("gguf", "active-model"),
+    ).rejects.toSatisfy(
       (e: unknown) => e instanceof ApiError && (e as ApiError).status === 409,
     );
   });
@@ -509,7 +595,9 @@ describe("listOllamaModels()", () => {
   });
 
   it("returns error string when Ollama not running", async () => {
-    fetchMock.mockResolvedValueOnce(okJson({ models: [], error: "Ollama not running or not installed" }));
+    fetchMock.mockResolvedValueOnce(
+      okJson({ models: [], error: "Ollama not running or not installed" }),
+    );
     const res = await client().listOllamaModels();
     expect(res.error).toContain("Ollama");
   });
@@ -538,14 +626,16 @@ describe("pullOllamaModel()", () => {
 
 describe("calibrateWakeWord()", () => {
   it("POSTs multipart form to /voice/calibrate", async () => {
-    fetchMock.mockResolvedValueOnce(okJson({
-      transcript: "hey goose",
-      normalized: "hey goose",
-      all_variants: ["hey goose"],
-      sample_count: 1,
-      target_count: 5,
-      complete: false,
-    }));
+    fetchMock.mockResolvedValueOnce(
+      okJson({
+        transcript: "hey goose",
+        normalized: "hey goose",
+        all_variants: ["hey goose"],
+        sample_count: 1,
+        target_count: 5,
+        complete: false,
+      }),
+    );
     const wav = new Uint8Array([0, 1, 2, 3]).buffer;
     const res = await client().calibrateWakeWord(wav);
     expect(res.sample_count).toBe(1);
@@ -568,19 +658,23 @@ describe("calibrateWakeWord()", () => {
   });
 
   it("attaches Bearer token when set", async () => {
-    fetchMock.mockResolvedValueOnce(okJson({
-      transcript: "goose",
-      normalized: "goose",
-      all_variants: ["goose"],
-      sample_count: 1,
-      target_count: 5,
-      complete: false,
-    }));
+    fetchMock.mockResolvedValueOnce(
+      okJson({
+        transcript: "goose",
+        normalized: "goose",
+        all_variants: ["goose"],
+        sample_count: 1,
+        target_count: 5,
+        complete: false,
+      }),
+    );
     const c = client();
     c.setToken("tok-123");
     await c.calibrateWakeWord(new Uint8Array([0]).buffer);
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect((init.headers as Record<string, string>)["Authorization"]).toBe("Bearer tok-123");
+    expect((init.headers as Record<string, string>)["Authorization"]).toBe(
+      "Bearer tok-123",
+    );
   });
 });
 
@@ -615,7 +709,14 @@ describe("searchLlamafileModels()", () => {
   });
 
   it("returns release list", async () => {
-    const models = [{ name: "gemma-2b-it.llamafile", size_mb: 1400, download_url: "https://github.com/...", tag: "0.9.1" }];
+    const models = [
+      {
+        name: "gemma-2b-it.llamafile",
+        size_mb: 1400,
+        download_url: "https://github.com/...",
+        tag: "0.9.1",
+      },
+    ];
     fetchMock.mockResolvedValueOnce(okJson({ models }));
     const res = await client().searchLlamafileModels("gemma");
     expect(res.models[0].name).toBe("gemma-2b-it.llamafile");
@@ -644,9 +745,16 @@ describe("re-authentication after a rejected token", () => {
     fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
       if (url.includes("/handshake/refresh")) {
         refreshCalls += 1;
-        return okJson({ accepted: true, session_token: "fresh", refresh_token: "r2", expires_at: future });
+        return okJson({
+          accepted: true,
+          session_token: "fresh",
+          refresh_token: "r2",
+          expires_at: future,
+        });
       }
-      const auth = (init?.headers as Record<string, string> | undefined)?.["Authorization"];
+      const auth = (init?.headers as Record<string, string> | undefined)?.[
+        "Authorization"
+      ];
       // The stale token is rejected; the refreshed one succeeds.
       return auth === "Bearer stale"
         ? errJson(401, "Invalid or expired token")
@@ -656,8 +764,11 @@ describe("re-authentication after a rejected token", () => {
     const api = client();
     // Five concurrent calls all carry the stale token and 401 together.
     await Promise.all([
-      api.listDevices(), api.listDevices(), api.listDevices(),
-      api.listDevices(), api.listDevices(),
+      api.listDevices(),
+      api.listDevices(),
+      api.listDevices(),
+      api.listDevices(),
+      api.listDevices(),
     ]);
 
     // Coalesced: one refresh for the whole burst, not one per request.
@@ -676,16 +787,27 @@ describe("re-authentication after a rejected token", () => {
     fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
       if (url.includes("/handshake/refresh")) {
         refreshCalls += 1;
-        return okJson({ accepted: true, session_token: "fresh", refresh_token: "r2", expires_at: future });
+        return okJson({
+          accepted: true,
+          session_token: "fresh",
+          refresh_token: "r2",
+          expires_at: future,
+        });
       }
-      const auth = (init?.headers as Record<string, string> | undefined)?.["Authorization"];
+      const auth = (init?.headers as Record<string, string> | undefined)?.[
+        "Authorization"
+      ];
       // The chat stream is rejected on the stale token, accepted on the fresh one.
-      return auth === "Bearer stale" ? errJson(401, "Invalid or expired token") : emptySse();
+      return auth === "Bearer stale"
+        ? errJson(401, "Invalid or expired token")
+        : emptySse();
     });
 
     // Consuming the stream must not throw — it recovers and completes.
     const api = client();
-    for await (const _ of api.chatStream("hi", undefined, "stale")) { /* drain */ }
+    for await (const _ of api.chatStream("hi", undefined, "stale")) {
+      /* drain */
+    }
     expect(refreshCalls).toBe(1);
   });
 
@@ -693,9 +815,16 @@ describe("re-authentication after a rejected token", () => {
     seedStaleSession();
     fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
       if (url.includes("/handshake/refresh")) {
-        return okJson({ accepted: true, session_token: "fresh", refresh_token: "r2", expires_at: future });
+        return okJson({
+          accepted: true,
+          session_token: "fresh",
+          refresh_token: "r2",
+          expires_at: future,
+        });
       }
-      const auth = (init?.headers as Record<string, string> | undefined)?.["Authorization"];
+      const auth = (init?.headers as Record<string, string> | undefined)?.[
+        "Authorization"
+      ];
       return auth === "Bearer stale"
         ? errJson(401, "Invalid or expired token")
         : okJson([{ id: "d1", name: "Lamp", is_online: true }]);
@@ -713,13 +842,19 @@ describe("per-instance client id", () => {
   function mockPairing(): () => string | undefined {
     let sentClientId: string | undefined;
     fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
-      if (url.includes("/handshake/pairing-code")) return okJson({ code: "123456", expires_at: future });
+      if (url.includes("/handshake/pairing-code"))
+        return okJson({ code: "123456", expires_at: future });
       if (url.includes("/handshake/init")) {
         sentClientId = JSON.parse(String(init?.body)).client_id;
         return okJson({ challenge: "ch", challenge_id: "cid" });
       }
       if (url.includes("/handshake/verify")) {
-        return okJson({ accepted: true, session_token: "t", refresh_token: "r", expires_at: future });
+        return okJson({
+          accepted: true,
+          session_token: "t",
+          refresh_token: "r",
+          expires_at: future,
+        });
       }
       return okJson({});
     });
@@ -748,5 +883,41 @@ describe("per-instance client id", () => {
     const second = mockPairing();
     await client().pair();
     expect(second()).toBe(id1);
+  });
+});
+
+// One call redirects the whole singleton, which is what lets the shell correct
+// a fallback port without reloading the renderer.
+describe("setBase", () => {
+  it("follows the shell's server URL for requests it has not sent yet", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ status: "ok" }),
+      text: async () => "{}",
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new PondApiClient("http://127.0.0.1:4000");
+    client.setBase("http://127.0.0.1:4001");
+    await client.health().catch(() => undefined);
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("127.0.0.1:4001");
+    vi.unstubAllGlobals();
+  });
+
+  it("trims a trailing slash, the way the constructor does", async () => {
+    const client = new PondApiClient("http://127.0.0.1:4000");
+    client.setBase("http://127.0.0.1:4001/");
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ status: "ok" }),
+      text: async () => "{}",
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await client.health().catch(() => undefined);
+    expect(String(fetchMock.mock.calls[0]?.[0])).not.toContain("//api");
+    vi.unstubAllGlobals();
   });
 });

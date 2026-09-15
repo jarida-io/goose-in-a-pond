@@ -6,8 +6,10 @@ import {
 } from "../desktopState";
 import type { ScheduleRunNotification, DebriefContext } from "../api/types";
 import { defaultServerUrl } from "../api/PondApiClient";
+import { isDesktopShell } from "../shell";
 
-export type VoiceState = "idle" | "wait" | "recording" | "thinking" | "speaking" | "error";
+export type VoiceState =
+  "idle" | "wait" | "recording" | "thinking" | "speaking" | "error";
 
 export interface TranscriptMessage {
   id: number;
@@ -85,7 +87,10 @@ export type AppAction =
   | { type: "APPEND_AGENT_TOKEN"; payload: { token: string; done: boolean } }
   | { type: "CLEAR_TRANSCRIPT" }
   | { type: "PUSH_CONTEXT_CARD"; payload: ContextCard }
-  | { type: "UPDATE_CONTEXT_CARD"; payload: { callId: string; data: Record<string, unknown>; tool?: string } }
+  | {
+      type: "UPDATE_CONTEXT_CARD";
+      payload: { callId: string; data: Record<string, unknown>; tool?: string };
+    }
   | { type: "CLEAR_CONTEXT_CARDS" }
   | { type: "VOICE_ACTIVATE" }
   | { type: "SET_LAST_RESPONSE_META"; payload: LastResponseMeta }
@@ -94,7 +99,15 @@ export type AppAction =
   | { type: "DISMISS_TOAST"; payload: string }
   | { type: "SET_SCHEDULE_RUNS"; payload: ScheduleRunNotification[] }
   | { type: "ADD_SCHEDULE_RUN"; payload: ScheduleRunNotification }
-  | { type: "UPDATE_SCHEDULE_RUN"; payload: { id: string; status: "completed" | "failed"; result?: string; error?: string } }
+  | {
+      type: "UPDATE_SCHEDULE_RUN";
+      payload: {
+        id: string;
+        status: "completed" | "failed";
+        result?: string;
+        error?: string;
+      };
+    }
   | { type: "MARK_RUN_READ"; payload: string }
   | { type: "MARK_ALL_RUNS_READ" }
   | { type: "SET_DEBRIEF_CONTEXT"; payload: DebriefContext | null }
@@ -102,8 +115,12 @@ export type AppAction =
 
 let _transcriptIdCounter = 0;
 let _cardIdCounter = 0;
-export function nextTranscriptId(): number { return ++_transcriptIdCounter; }
-export function nextCardId(): number { return ++_cardIdCounter; }
+export function nextTranscriptId(): number {
+  return ++_transcriptIdCounter;
+}
+export function nextCardId(): number {
+  return ++_cardIdCounter;
+}
 
 export function buildInitialState(): AppState {
   const storedMode = normalizeDesktopMode(localStorage.getItem("giap-mode"));
@@ -117,7 +134,16 @@ export function buildInitialState(): AppState {
   const forceHub = localStorage.getItem("giap-force-hub") === "1";
   const storedSection: GuiSection =
     rawSection === "hub" && !forceHub ? "dashboard" : rawSection;
-  const storedUrl = localStorage.getItem("giap-server-url") || defaultServerUrl();
+  // In the desktop shell the injected URL wins over anything persisted: the
+  // shell knows which port its own sidecar bound, and a stored value is at best
+  // stale. Anyone who hit the double-spawn bug has 127.0.0.1:4001 saved here,
+  // and without this the fixed build would still talk to a dead port. In a
+  // plain browser the stored value is the point -- that is where a user types
+  // a LAN address.
+  const injectedUrl = defaultServerUrl();
+  const storedUrl = isDesktopShell()
+    ? injectedUrl
+    : localStorage.getItem("giap-server-url") || injectedUrl;
   const storedToken = localStorage.getItem("giap-session-token") || null;
 
   return {
@@ -198,9 +224,10 @@ export function reducer(state: AppState, action: AppAction): AppState {
 
     case "APPEND_TRANSCRIPT": {
       const updated = [...state.transcript, action.payload];
-      const trimmed = updated.length > TRANSCRIPT_CAP
-        ? updated.slice(updated.length - TRANSCRIPT_CAP)
-        : updated;
+      const trimmed =
+        updated.length > TRANSCRIPT_CAP
+          ? updated.slice(updated.length - TRANSCRIPT_CAP)
+          : updated;
       return { ...state, transcript: trimmed };
     }
 
@@ -213,9 +240,10 @@ export function reducer(state: AppState, action: AppAction): AppState {
         ...state.transcript.slice(0, -1),
         { ...last, text: last.text + token },
       ];
-      const trimmed = updated.length > TRANSCRIPT_CAP
-        ? updated.slice(updated.length - TRANSCRIPT_CAP)
-        : updated;
+      const trimmed =
+        updated.length > TRANSCRIPT_CAP
+          ? updated.slice(updated.length - TRANSCRIPT_CAP)
+          : updated;
       void done; // token streaming is complete when done=true, no state change needed
       return { ...state, transcript: trimmed };
     }
@@ -224,7 +252,10 @@ export function reducer(state: AppState, action: AppAction): AppState {
       return { ...state, transcript: [], contextCards: [] };
 
     case "PUSH_CONTEXT_CARD":
-      return { ...state, contextCards: [...state.contextCards, action.payload] };
+      return {
+        ...state,
+        contextCards: [...state.contextCards, action.payload],
+      };
 
     case "UPDATE_CONTEXT_CARD": {
       // Merge data into the most-recent card matching the callId.
@@ -276,7 +307,8 @@ export function reducer(state: AppState, action: AppAction): AppState {
       // If this is a completion event, replace the "running" toast for same schedule
       if (incoming.status !== "running") {
         existing = existing.filter(
-          (t) => !(t.status === "running" && t.schedule_id === incoming.schedule_id)
+          (t) =>
+            !(t.status === "running" && t.schedule_id === incoming.schedule_id),
         );
       }
       return {
@@ -289,7 +321,9 @@ export function reducer(state: AppState, action: AppAction): AppState {
     case "DISMISS_TOAST":
       return {
         ...state,
-        scheduleToasts: state.scheduleToasts.filter((t) => t.id !== action.payload),
+        scheduleToasts: state.scheduleToasts.filter(
+          (t) => t.id !== action.payload,
+        ),
       };
 
     case "SET_SCHEDULE_RUNS": {

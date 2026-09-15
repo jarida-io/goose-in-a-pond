@@ -39,7 +39,8 @@ export function parseBounds(raw: string | null): Bounds | null {
   if (typeof value !== "object" || value === null) return null;
   const b = value as Record<string, unknown>;
   const nums = ["x", "y", "width", "height"].map((k) => b[k]);
-  if (!nums.every((n) => typeof n === "number" && Number.isFinite(n))) return null;
+  if (!nums.every((n) => typeof n === "number" && Number.isFinite(n)))
+    return null;
   const [x, y, width, height] = nums as number[];
   // A zero or negative size is not a window; treat it as no state at all.
   if (width! <= 0 || height! <= 0) return null;
@@ -52,7 +53,10 @@ export function parseBounds(raw: string | null): Bounds | null {
  * Overlap rather than containment, deliberately: a window half off the edge of
  * a screen is a position the user chose and can still reach.
  */
-export function isOnSomeDisplay(bounds: Bounds, displays: readonly Display[]): boolean {
+export function isOnSomeDisplay(
+  bounds: Bounds,
+  displays: readonly Display[],
+): boolean {
   return displays.some(
     (d) =>
       bounds.x + bounds.width > d.x &&

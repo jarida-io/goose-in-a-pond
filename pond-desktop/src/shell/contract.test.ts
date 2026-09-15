@@ -24,6 +24,7 @@ const EVERY_COMMAND: Record<ShellCommand, true> = {
 const EVERY_EVENT: Record<ShellEvent, true> = {
   "server-status": true,
   "server-starting": true,
+  "server-url": true,
   "desktop-summon": true,
   "canvas-toggle": true,
   "switch-to-voice": true,
@@ -130,7 +131,10 @@ describe("inside the desktop shell", () => {
     window.giap = bridge;
 
     const returned = listen("voice-ready", () => {});
-    expect(bridge.listen).toHaveBeenCalledWith("voice-ready", expect.any(Function));
+    expect(bridge.listen).toHaveBeenCalledWith(
+      "voice-ready",
+      expect.any(Function),
+    );
     returned();
     expect(unlisten).toHaveBeenCalledTimes(1);
   });

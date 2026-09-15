@@ -7,7 +7,12 @@
 import { BrowserWindow, screen, shell } from "electron";
 import { join } from "node:path";
 import { rendererEntryUrl } from "./protocol";
-import { usableBounds, readState, writeState, stateFilePath } from "./windowState";
+import {
+  usableBounds,
+  readState,
+  writeState,
+  stateFilePath,
+} from "./windowState";
 
 /** Below this the panel is a kiosk display, not a desktop. */
 const SMALL_W = 1100;
@@ -33,7 +38,10 @@ export interface Geometry {
  * panel we drop the chrome and take the whole screen; on a roomy desktop we
  * keep a normal window.
  */
-export function windowGeometry(workArea: { width: number; height: number }): Geometry {
+export function windowGeometry(workArea: {
+  width: number;
+  height: number;
+}): Geometry {
   const kiosk = workArea.width <= SMALL_W || workArea.height <= SMALL_H;
   return {
     width: Math.min(PREFERRED_W, workArea.width),

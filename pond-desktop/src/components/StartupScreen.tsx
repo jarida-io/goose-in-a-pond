@@ -31,13 +31,16 @@ export function StartupScreen({ onReady }: Props) {
     const inShell = isDesktopShell();
 
     if (inShell) {
-      try {
-        await invoke("ensure_server_running");
-      } catch (e) {
-        // The command may fail if no binary is found — we still try polling
-        // in case the user has a manually running server.
+      // Deliberately NOT awaited. A cold start loading face recognition,
+      // Whisper and TTS routinely takes over a minute, and this call does not
+      // resolve until the server answers -- awaiting it held this screen blank
+      // for the whole budget before the poll below even began. Kick it and
+      // poll concurrently; the polling is what decides when we are ready.
+      void invoke("ensure_server_running").catch((e: unknown) => {
+        // May fail when no binary is found. We still poll, in case the user
+        // has a server running by hand.
         console.warn("[GIAP] ensure_server_running error:", e);
-      }
+      });
     }
 
     setPhase("connecting");
@@ -61,7 +64,11 @@ export function StartupScreen({ onReady }: Props) {
         }
       }
       setPhase("error");
-      setError("Could not reach pond-server at " + serverUrl + ". Make sure it is running.");
+      setError(
+        "Could not reach pond-server at " +
+          serverUrl +
+          ". Make sure it is running.",
+      );
       return;
     }
 
@@ -101,10 +108,13 @@ export function StartupScreen({ onReady }: Props) {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const statusLabel =
-    phase === "starting"   ? `Starting pond-server${dots}` :
-    phase === "connecting" ? `Connecting${dots}` :
-    phase === "ready"      ? "Ready" :
-    "Failed to start";
+    phase === "starting"
+      ? `Starting pond-server${dots}`
+      : phase === "connecting"
+        ? `Connecting${dots}`
+        : phase === "ready"
+          ? "Ready"
+          : "Failed to start";
 
   return (
     <div style={styles.root}>

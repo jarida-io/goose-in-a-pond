@@ -52,7 +52,8 @@ class FakeChild extends EventEmitter {
 /** Let the event loop drain readline's queued 'line' and 'close' events. */
 function tick(times = 4): Promise<void> {
   let p = Promise.resolve();
-  for (let i = 0; i < times; i++) p = p.then(() => new Promise((r) => setImmediate(r)));
+  for (let i = 0; i < times; i++)
+    p = p.then(() => new Promise((r) => setImmediate(r)));
   return p;
 }
 
@@ -95,7 +96,13 @@ function harness(over: Partial<VoiceChildDeps> = {}): Harness {
     ...over,
   };
 
-  return { voice: new VoiceChildProcess(deps), emitted, children, spawnArgs, removePid };
+  return {
+    voice: new VoiceChildProcess(deps),
+    emitted,
+    children,
+    spawnArgs,
+    removePid,
+  };
 }
 
 describe("spawning", () => {
@@ -202,11 +209,16 @@ describe("the stderr tail reaching the renderer", () => {
     const c = h.children[0]!;
 
     for (let i = 1; i <= 25; i++) c.logErr(`log line ${i}`);
-    c.logErr("Error: migration 29 was previously applied but is missing in the resolved migrations");
+    c.logErr(
+      "Error: migration 29 was previously applied but is missing in the resolved migrations",
+    );
     await tick();
     await c.exit(1);
 
-    const ended = h.emitted.at(-1)!.payload as { reason: string; detail: string };
+    const ended = h.emitted.at(-1)!.payload as {
+      reason: string;
+      detail: string;
+    };
     expect(ended.reason).toBe("failed_to_start");
 
     const lines = ended.detail.split("\n");
@@ -227,7 +239,10 @@ describe("the stderr tail reaching the renderer", () => {
     await tick();
     await c.exit(null);
 
-    expect(h.emitted.at(-1)!.payload).toMatchObject({ reason: "crashed", detail: null });
+    expect(h.emitted.at(-1)!.payload).toMatchObject({
+      reason: "crashed",
+      detail: null,
+    });
   });
 
   // "close" fires only after stdio has closed; "exit" fires before. Binding to
@@ -241,7 +256,9 @@ describe("the stderr tail reaching the renderer", () => {
     // The process object reports exit before its pipes have drained.
     c.emit("exit", 1);
     await tick();
-    expect(h.emitted.filter((e) => e.name === "voice-session-ended")).toHaveLength(0);
+    expect(
+      h.emitted.filter((e) => e.name === "voice-session-ended"),
+    ).toHaveLength(0);
 
     await c.exit(1);
     expect((h.emitted.at(-1)!.payload as { detail: string }).detail).toContain(
@@ -274,7 +291,9 @@ describe("the stale-reader guard", () => {
     // Only now does the dead child's close arrive.
     await a.exit(null);
 
-    expect(h.emitted.filter((e) => e.name === "voice-session-ended")).toHaveLength(0);
+    expect(
+      h.emitted.filter((e) => e.name === "voice-session-ended"),
+    ).toHaveLength(0);
     expect(h.voice.isActive).toBe(true);
     expect(h.voice.sessionId).toBe("session-B");
 

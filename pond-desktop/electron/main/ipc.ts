@@ -29,7 +29,8 @@ export function registerIpc(t: IpcTargets): void {
   handle("ensure_server_running", () => t.server.ensureRunning());
 
   handle("start_voice_session", (args) => {
-    const sessionId = (args as { sessionId?: string | null } | undefined)?.sessionId ?? null;
+    const sessionId =
+      (args as { sessionId?: string | null } | undefined)?.sessionId ?? null;
     return t.voice.start(sessionId);
   });
 

@@ -1,7 +1,7 @@
 {
   "name": "pond-desktop",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Privacy-first, fully local AI smart home assistant",
   "author": "Jarida Open Source Community",
   "license": "Apache-2.0",

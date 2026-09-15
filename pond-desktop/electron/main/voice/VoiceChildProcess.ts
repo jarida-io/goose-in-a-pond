@@ -19,14 +19,20 @@ import { spawn as realSpawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import type { ShellEvent, ShellEvents } from "../../../src/shell/contract";
-import { classifyLine, classifyEnd, sessionToJoin, STDERR_TAIL_LINES } from "./ndjson";
+import {
+  classifyLine,
+  classifyEnd,
+  sessionToJoin,
+  STDERR_TAIL_LINES,
+} from "./ndjson";
 import {
   writePidfile,
   removePidfile,
   reapPidfileOrphan,
   realOrphanDeps,
   type OrphanDeps,
-} from "./orphan";
+  VOICE_CHILD,
+} from "../orphan";
 
 /** How long to wait after closing stdin before escalating to a kill. */
 export const GRACEFUL_STOP_MS = 3_000;
@@ -119,7 +125,7 @@ export class VoiceChildProcess {
 
   /** Reap a child orphaned by a hard kill of a previous run. */
   cleanupOrphans(): void {
-    reapPidfileOrphan(this.deps.orphanDeps ?? realOrphanDeps);
+    reapPidfileOrphan(VOICE_CHILD, this.deps.orphanDeps ?? realOrphanDeps);
   }
 
   /**
@@ -146,17 +152,23 @@ export class VoiceChildProcess {
       const id = sessionToJoin(resume, this.deps.newSessionId ?? randomUUID);
       const spawnFn = this.deps.spawn ?? realSpawn;
 
-      this.log.info(`spawning voice child: ${binary} chat --voice --json-events --session-id ${id}`);
+      this.log.info(
+        `spawning voice child: ${binary} chat --voice --json-events --session-id ${id}`,
+      );
 
       // `--voice` replaced `--input whisper`. A staged sidecar older than that
       // rename dies on "unexpected argument" before emitting a single NDJSON
       // line -- the same symptom as a sidecar older than the database's
       // migrations, and the same fix: re-stage it. The stderr tail attached to
       // voice-session-ended carries the message that names the flag.
-      const child = spawnFn(binary, ["chat", "--voice", "--json-events", "--session-id", id], {
-        stdio: ["pipe", "pipe", "pipe"],
-        ...(this.deps.cwd ? { cwd: this.deps.cwd } : {}),
-      });
+      const child = spawnFn(
+        binary,
+        ["chat", "--voice", "--json-events", "--session-id", id],
+        {
+          stdio: ["pipe", "pipe", "pipe"],
+          ...(this.deps.cwd ? { cwd: this.deps.cwd } : {}),
+        },
+      );
 
       const session: Session = {
         child,
@@ -172,7 +184,10 @@ export class VoiceChildProcess {
       this.session = session;
 
       if (typeof child.pid === "number") {
-        (this.deps.writePid ?? writePidfile)(child.pid);
+        (
+          this.deps.writePid ??
+          ((pid: number) => writePidfile(VOICE_CHILD, pid))
+        )(child.pid);
       }
 
       child.once("error", (e: Error) => {
@@ -204,7 +219,10 @@ export class VoiceChildProcess {
 
   private attachStderr(session: Session): void {
     if (!session.child.stderr) return;
-    const rl = createInterface({ input: session.child.stderr, crlfDelay: Infinity });
+    const rl = createInterface({
+      input: session.child.stderr,
+      crlfDelay: Infinity,
+    });
     rl.on("line", (line) => {
       if (line.trim() === "") return;
       this.log.debug(`[voice child stderr] ${line}`);
@@ -213,7 +231,8 @@ export class VoiceChildProcess {
       // banner macro is compiled to a no-op under --json-events, so stdout
       // carries nothing at all.
       session.stderrTail.push(line);
-      if (session.stderrTail.length > STDERR_TAIL_LINES) session.stderrTail.shift();
+      if (session.stderrTail.length > STDERR_TAIL_LINES)
+        session.stderrTail.shift();
     });
   }
 
@@ -222,14 +241,19 @@ export class VoiceChildProcess {
       session.stdoutClosed = true;
       return;
     }
-    const rl = createInterface({ input: session.child.stdout, crlfDelay: Infinity });
+    const rl = createInterface({
+      input: session.child.stdout,
+      crlfDelay: Infinity,
+    });
 
     rl.on("line", (line) => {
       const result = classifyLine(line);
       if (!result.ok) {
         // A non-contract line is an ordinary event on this stream. Warn, never
         // crash, and read the next one.
-        this.log.warn(`ignoring non-contract voice child line (${result.error}): ${line}`);
+        this.log.warn(
+          `ignoring non-contract voice child line (${result.error}): ${line}`,
+        );
         return;
       }
       const value = result.value;
@@ -284,11 +308,13 @@ export class VoiceChildProcess {
     if (detail !== null) {
       // At warn, not debug: this is the whole explanation for a voice mode
       // that will not start, and a debug-level stream is what hid it before.
-      this.log.warn(`voice child failed to start; child stderr tail:\n${detail}`);
+      this.log.warn(
+        `voice child failed to start; child stderr tail:\n${detail}`,
+      );
     }
 
     this.session = null;
-    (this.deps.removePid ?? removePidfile)();
+    (this.deps.removePid ?? (() => removePidfile(VOICE_CHILD)))();
 
     this.deps.emit("voice-session-ended", {
       code: session.exitCode,
@@ -314,7 +340,8 @@ export class VoiceChildProcess {
 
       session.child.stdin?.end();
 
-      const deadline = Date.now() + (this.deps.gracefulStopMs ?? GRACEFUL_STOP_MS);
+      const deadline =
+        Date.now() + (this.deps.gracefulStopMs ?? GRACEFUL_STOP_MS);
       const poll = this.deps.pollMs ?? GRACEFUL_POLL_MS;
       while (Date.now() < deadline) {
         if (this.session !== session) {
@@ -325,7 +352,9 @@ export class VoiceChildProcess {
       }
 
       if (this.session === session) {
-        this.log.warn("voice child did not exit within the grace period; killing");
+        this.log.warn(
+          "voice child did not exit within the grace period; killing",
+        );
         this.killNow();
       }
     });
@@ -348,7 +377,7 @@ export class VoiceChildProcess {
     } catch {
       // Already gone.
     }
-    (this.deps.removePid ?? removePidfile)();
+    (this.deps.removePid ?? (() => removePidfile(VOICE_CHILD)))();
     this.log.info("voice child killed");
   }
 }
