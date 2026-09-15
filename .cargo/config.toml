@@ -1,10 +1,19 @@
 # .cargo/config.toml — workspace-level Cargo configuration
 #
-# This file sets the linker for cross-compilation targets.
-# When building natively (macOS dev, Jetson native), this section is ignored.
+# Sets the linker for cross-compilation targets (ignored when building natively
+# on the macOS dev box or on the Jetson), the Jetson performance rustflags, and
+# how Cargo authenticates to the private llama-cpp fork.
 
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
 
 [build]
 rustflags = ["-C", "target-cpu=native"]
+
+[net]
+# llama-cpp-2 / llama-cpp-sys-2 come from the private jarida-io/llama-cpp-rs-giap
+# fork. Cargo's bundled libgit2 cannot read a macOS keychain credential or the
+# `http.extraheader` token that actions/checkout installs, so it reports the rev
+# as "not found" followed by "failed to authenticate". Shelling out to the git
+# CLI reuses whatever credentials git itself already has.
+git-fetch-with-cli = true
