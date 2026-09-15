@@ -88,6 +88,45 @@ const GOOSE_MAX_TURNS_MESSAGE: &str = "I've reached the maximum number of action
 const GOOSE_EMPTY_TURN_MESSAGE: &str =
     "The model returned an empty response. Please resend your message to continue.";
 
+/// The prefix of the notification goose emits each time it re-arms the
+/// completeness check.
+///
+/// Goose yields `SystemNotification(InlineMessage, "Goal: {goal}")` every time
+/// the check re-arms (`agents/agent.rs`, the goal-nudge arm). GIAP has always
+/// received that content and dropped it on the floor -- it is not text, so
+/// `as_concat_text()` is empty and nothing downstream sees it. Counting it is
+/// how the loop below observes the check directly rather than guessing at it
+/// from repeated arguments. Matched verbatim, like [`GOOSE_MAX_TURNS_MESSAGE`],
+/// with a canary test so a fork sync that reworded it fails loudly.
+const GOOSE_GOAL_NOTIFICATION_PREFIX: &str = "Goal: ";
+
+/// How many times the completeness check may re-arm within one turn.
+///
+/// The check asks the model whether it actually answered, and re-arms every
+/// time the model does more work. That is the mechanism rather than a defect --
+/// it is what turns a four-call turn into the seven calls that produced a real
+/// answer -- but it had no bound at all, and an unbounded "are you finished?"
+/// against a model that reflexively re-calls a tool is a loop. Measured: 25
+/// identical weather calls in one turn on gemma-4-E4B at Q2, every repetition
+/// streamed to the household.
+///
+/// Two re-checks means up to three passes, which covers both wins the fork's
+/// patch notes record (a turn that fired the check three times, and one that
+/// went from four tool calls to seven and an answer) while cutting the runaway
+/// case at pass three instead of pass twenty-five.
+const MAX_GOAL_RECHECKS_PER_TURN: u32 = 2;
+
+/// How many times one tool may be called with byte-identical arguments in a turn.
+///
+/// The backstop for a loop the completeness check did not cause. Three allows a
+/// legitimate retry after a transient failure and one more besides; nothing a
+/// household asks for needs a third identical call with identical arguments.
+///
+/// Counted per turn rather than consecutively, deliberately. The observed loop
+/// interleaved an answer between every call, and a model alternating two tools
+/// never produces two adjacent identical calls at all.
+const MAX_IDENTICAL_TOOL_CALLS_PER_TURN: usize = 3;
+
 /// How many times GIAP re-engages the model after a turn that produced no text
 /// and no tool call.
 ///
@@ -95,6 +134,67 @@ const GOOSE_EMPTY_TURN_MESSAGE: &str =
 /// real wait. Two buys the recovery without turning a bad turn into a minute of
 /// silence.
 const MAX_EMPTY_TURN_REENGAGEMENTS: usize = 2;
+
+/// A stable fingerprint for one tool call's arguments.
+///
+/// Two calls with the same arguments must hash the same however the model
+/// happened to order the keys -- a small model reorders them freely, and a
+/// guard defeated by key order is no guard.
+///
+/// The keys are sorted here rather than left to `serde_json::Map`, because in
+/// this workspace `Map` is NOT ordered. Something in the dependency graph turns
+/// on `serde_json/preserve_order` (the lock shows serde_json depending on
+/// indexmap), so `Map` is insertion-ordered and serialising it preserves
+/// whatever order the model emitted. Nothing in this repo asks for that feature
+/// and nothing would notice if it went away, which is exactly why this must not
+/// depend on it in either direction. A test builds the same object two ways and
+/// asserts they agree.
+fn canonical_args_fingerprint(args: Option<&serde_json::Map<String, serde_json::Value>>) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    /// Render a value with every object's keys in sorted order, at every depth.
+    fn canonical(value: &serde_json::Value, out: &mut String) {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                out.push('{');
+                for (i, k) in keys.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&serde_json::Value::String((*k).clone()).to_string());
+                    out.push(':');
+                    canonical(&map[*k], out);
+                }
+                out.push('}');
+            }
+            // Arrays keep their order: [1,2] and [2,1] are different arguments.
+            serde_json::Value::Array(items) => {
+                out.push('[');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    canonical(item, out);
+                }
+                out.push(']');
+            }
+            other => out.push_str(&other.to_string()),
+        }
+    }
+
+    let mut rendered = String::new();
+    match args {
+        // A tool that takes no arguments -- `music__status` is one -- can only
+        // ever repeat identically, which is exactly what this counts.
+        None => {}
+        Some(map) => canonical(&serde_json::Value::Object(map.clone()), &mut rendered),
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    rendered.hash(&mut hasher);
+    hasher.finish()
+}
 
 /// GIAP's own tag names, injected into every turn's `<system-context>` (see
 /// `goose_agent.rs`'s `user_text` construction). None of them can ever be a
@@ -4404,6 +4504,15 @@ impl GooseAdapter {
             let mut last_inference_end: Option<std::time::Instant> = None;
             let mut tools_since_inference: u32 = 0;
 
+            // ── Repetition guard ─────────────────────────────────────────────
+            //
+            // Declared OUTSIDE `'attempts`: a re-engagement is the same user
+            // question, so a repeat that straddles an attempt boundary is still
+            // a repeat and must not get a fresh budget.
+            let mut goal_rechecks: u32 = 0;
+            let mut tool_call_counts: HashMap<(String, u64), usize> = HashMap::new();
+            let mut guard_tripped = false;
+
             tracing::info!(
                 target: "giap::trace",
                 kind = "turn_start",
@@ -4629,6 +4738,50 @@ impl GooseAdapter {
                                                     );
                                                     continue;
                                                 }
+                                                // Repetition backstop. Counted here, after the
+                                                // allow-set admits the call and before it is
+                                                // surfaced, so a suppressed call never counts
+                                                // against the budget.
+                                                let fingerprint = canonical_args_fingerprint(
+                                                    tool_call.arguments.as_ref(),
+                                                );
+                                                let seen = tool_call_counts
+                                                    .entry((tool_name.clone(), fingerprint))
+                                                    .or_insert(0);
+                                                *seen += 1;
+                                                if *seen > MAX_IDENTICAL_TOOL_CALLS_PER_TURN {
+                                                    let repeats = *seen;
+                                                    tracing::warn!(
+                                                        tool = %tool_name,
+                                                        repeats,
+                                                        "the model called one tool with identical arguments {repeats} times in a turn; stopping it",
+                                                    );
+                                                    tracing::info!(
+                                                        target: "giap::trace",
+                                                        kind = "turn_repetition_guard",
+                                                        session_id = %session_id,
+                                                        reason = "identical_tool_call",
+                                                        tool = %tool_name,
+                                                        repeats,
+                                                        goal_rechecks,
+                                                    );
+                                                    // Disarm before leaving, or the goal survives
+                                                    // in the engine's session map and the NEXT
+                                                    // turn starts already armed with this
+                                                    // question. Goose clears it on its own exit
+                                                    // arm, and this breaks out from under that.
+                                                    agent_clone.set_session_goal(&turn_goose_sid, None).await;
+                                                    guard_tripped = true;
+                                                    yield Ok(AgentStreamEvent::TurnLimitReached {
+                                                        max_turns: MAX_IDENTICAL_TOOL_CALLS_PER_TURN as u32,
+                                                    });
+                                                    // Cancel rather than just dropping the stream:
+                                                    // goose checks the token at the top of its
+                                                    // loop, so it unwinds cleanly and its
+                                                    // in-flight history writes settle.
+                                                    cancel_token.cancel();
+                                                    break 'engine;
+                                                }
                                                 tool_id_to_name.insert(tr.id.clone(), tool_name.clone());
                                                 tool_call_starts.insert(tr.id.clone(), std::time::Instant::now());
                                                 // Attributes the NEXT round-trip: a provider call
@@ -4648,6 +4801,36 @@ impl GooseAdapter {
                                                     tool: tool_name,
                                                     input: tool_call.arguments.clone().map(serde_json::Value::Object),
                                                 });
+                                            }
+                                        }
+                                        goose::conversation::message::MessageContent::SystemNotification(n)
+                                            if n.msg.starts_with(GOOSE_GOAL_NOTIFICATION_PREFIX) =>
+                                        {
+                                            // The completeness check re-armed. This content has
+                                            // always arrived here and always been dropped; it is
+                                            // the loop's own control signal, which is why it is a
+                                            // better thing to count than repeated arguments -- a
+                                            // legitimate multi-tool turn emits none of these.
+                                            goal_rechecks += 1;
+                                            if goal_rechecks > MAX_GOAL_RECHECKS_PER_TURN {
+                                                tracing::warn!(
+                                                    goal_rechecks,
+                                                    "the completeness check re-armed {goal_rechecks} times in one turn; stopping it re-answering",
+                                                );
+                                                tracing::info!(
+                                                    target: "giap::trace",
+                                                    kind = "turn_repetition_guard",
+                                                    session_id = %session_id,
+                                                    reason = "goal_recheck",
+                                                    goal_rechecks,
+                                                );
+                                                agent_clone.set_session_goal(&turn_goose_sid, None).await;
+                                                guard_tripped = true;
+                                                yield Ok(AgentStreamEvent::TurnLimitReached {
+                                                    max_turns: MAX_GOAL_RECHECKS_PER_TURN,
+                                                });
+                                                cancel_token.cancel();
+                                                break 'engine;
                                             }
                                         }
                                         goose::conversation::message::MessageContent::ToolResponse(tr) => {
@@ -4921,6 +5104,14 @@ impl GooseAdapter {
                     // something first. The user already has the reason; a fallback
                     // claiming nothing could be produced would contradict it.
                     if stream_failed {
+                        break 'attempts;
+                    }
+                    // A turn the repetition guard stopped must not be re-engaged.
+                    // In practice `produced_visible` below is already true -- the
+                    // guard cannot trip before a tool call was surfaced -- but
+                    // relying on that leaves the empty-turn recovery one edge away
+                    // from restarting a turn we deliberately cut short.
+                    if guard_tripped {
                         break 'attempts;
                     }
                     if produced_visible {
@@ -8226,6 +8417,161 @@ mod tests {
             )),
             "Goose's MAX_TURNS_MESSAGE no longer matches GOOSE_MAX_TURNS_MESSAGE — \
              update the constant in goose_agent.rs or turn-limit detection is dead"
+        );
+    }
+
+    /// Canary for [`GOOSE_GOAL_NOTIFICATION_PREFIX`], the same shape as the one
+    /// above and for the same reason: the repetition guard counts the engine's
+    /// own completeness-check notification, and a fork sync that reworded it
+    /// would leave the guard counting nothing at all.
+    #[test]
+    fn goose_still_announces_a_completeness_recheck_as_a_goal_notification() {
+        let agent_rs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../goose/crates/goose/src/agents/agent.rs");
+        let Ok(source) = std::fs::read_to_string(&agent_rs) else {
+            eprintln!("skipping: {} unavailable", agent_rs.display());
+            return;
+        };
+        assert!(
+            source.contains("format!(\"Goal: {goal}\")"),
+            "Goose no longer announces a completeness re-check as `Goal: {{goal}}` — \
+             update GOOSE_GOAL_NOTIFICATION_PREFIX or the repetition guard counts nothing"
+        );
+    }
+
+    /// Two calls with the same arguments must fingerprint the same however the
+    /// model happened to order the keys, or the guard is defeated by a model
+    /// that reorders them -- which a small one does freely.
+    #[test]
+    fn a_repeated_identical_tool_call_is_the_same_fingerprint_whatever_the_key_order() {
+        let mut a = serde_json::Map::new();
+        a.insert("location".into(), serde_json::json!("Nairobi"));
+        a.insert("units".into(), serde_json::json!("metric"));
+        let mut b = serde_json::Map::new();
+        b.insert("units".into(), serde_json::json!("metric"));
+        b.insert("location".into(), serde_json::json!("Nairobi"));
+        assert_eq!(
+            canonical_args_fingerprint(Some(&a)),
+            canonical_args_fingerprint(Some(&b)),
+            "key order changed the fingerprint — has serde_json/preserve_order been enabled?"
+        );
+    }
+
+    #[test]
+    fn two_calls_with_different_arguments_are_different_fingerprints() {
+        let mut a = serde_json::Map::new();
+        a.insert("location".into(), serde_json::json!("Nairobi"));
+        let mut b = serde_json::Map::new();
+        b.insert("location".into(), serde_json::json!("Mombasa"));
+        assert_ne!(
+            canonical_args_fingerprint(Some(&a)),
+            canonical_args_fingerprint(Some(&b))
+        );
+    }
+
+    /// `music__status` takes no arguments at all, which is what makes it the
+    /// perfect loop victim: a model pushed to do more work can only re-call it
+    /// identically. That case must still be countable.
+    #[test]
+    fn a_tool_that_takes_no_arguments_fingerprints_the_same_every_time() {
+        assert_eq!(
+            canonical_args_fingerprint(None),
+            canonical_args_fingerprint(None)
+        );
+        let empty = serde_json::Map::new();
+        assert_eq!(
+            canonical_args_fingerprint(Some(&empty)),
+            canonical_args_fingerprint(Some(&empty))
+        );
+    }
+
+    /// Nested objects must canonicalise too, or a model that reorders a nested
+    /// key slips past the guard while calling the same thing.
+    #[test]
+    fn nested_arguments_canonicalise_at_every_depth() {
+        let a: serde_json::Value = serde_json::json!({"q": {"x": 1, "y": 2}});
+        let b: serde_json::Value = serde_json::json!({"q": {"y": 2, "x": 1}});
+        assert_eq!(
+            canonical_args_fingerprint(a.as_object()),
+            canonical_args_fingerprint(b.as_object())
+        );
+    }
+
+    /// Two different tools must not pool their budgets, or a turn that calls
+    /// three tools once each looks like a repeat and gets cut short.
+    #[test]
+    fn the_repetition_budget_is_per_tool_and_not_shared() {
+        let mut counts: std::collections::HashMap<(String, u64), usize> =
+            std::collections::HashMap::new();
+        let fp = canonical_args_fingerprint(None);
+        for tool in [
+            "giap-weather__get_current_weather",
+            "music__status",
+            "giap-device__get_user_profile",
+        ] {
+            *counts.entry((tool.to_string(), fp)).or_insert(0) += 1;
+        }
+        assert_eq!(
+            counts.len(),
+            3,
+            "three different tools collapsed into one budget"
+        );
+        assert!(
+            counts
+                .values()
+                .all(|n| *n <= MAX_IDENTICAL_TOOL_CALLS_PER_TURN),
+            "one call each must never trip the guard"
+        );
+    }
+
+    /// The guard is keyed on whatever tool the model called, so it covers tools
+    /// that do not exist yet. It must not special-case the two that happened to
+    /// expose the bug -- a hardcoded name here would be a guard for weather and
+    /// music and nothing else.
+    #[test]
+    fn the_repetition_guard_names_no_particular_tool() {
+        let body = stream_body_code();
+        let guard_region: String = body
+            .iter()
+            .skip_while(|l| !l.contains("canonical_args_fingerprint("))
+            .take(40)
+            .cloned()
+            .collect::<Vec<String>>()
+            .join("\n");
+        assert!(
+            !guard_region.is_empty(),
+            "the repetition backstop is gone from the stream body (stream_body_code \
+             strips comments, so this anchors on the fingerprint call itself)"
+        );
+        for named in ["weather", "music__", "get_current_weather", "status"] {
+            assert!(
+                !guard_region.contains(named),
+                "the repetition guard special-cases {named:?}; it must key on whatever \
+                 tool the model called so it covers every tool, including future ones"
+            );
+        }
+    }
+
+    /// The budgets are rails, not preferences. If someone widens them past the
+    /// point where a loop is still bounded well inside `agent_max_turns`, the
+    /// guard stops being a guard.
+    #[test]
+    fn the_repetition_budgets_stay_well_inside_the_turn_cap() {
+        assert!(
+            MAX_GOAL_RECHECKS_PER_TURN >= 2,
+            "too tight to allow a real multi-tool turn"
+        );
+        assert!(
+            MAX_GOAL_RECHECKS_PER_TURN <= 4,
+            "a completeness check this patient is a loop"
+        );
+        assert!(
+            MAX_IDENTICAL_TOOL_CALLS_PER_TURN >= 2,
+            "one retry after a transient failure is legitimate"
+        );
+        assert!(
+            MAX_IDENTICAL_TOOL_CALLS_PER_TURN <= 5,
+            "nothing a household asks needs this many identical calls"
         );
     }
 
