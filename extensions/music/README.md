@@ -6,7 +6,40 @@ MCP extension for music playback and playlist management via the Spotify Web API
 
 Install from the GIAP Extensions marketplace with one click. Click **Sign in with Spotify** to authorize playback control -- GIAP handles the entire OAuth flow.
 
+## Playback behaviour
+
+`play` starts music **and keeps it going**. A song is played *inside its album*
+— `PUT /me/player/play` with `context_uri` set to the album and `offset` set to
+the track — so the requested song starts and the album follows on. When the
+release is a single or a two-track EP, more by the same artist is queued behind
+it, because an album context is no help when the album is one song long.
+
+This matters because Spotify's play endpoint takes either `uris` or
+`context_uri`, never both, and a `uris` list is an ad-hoc queue that Spotify
+plays and then **stops**. Passing a single track URI as `uris: [track]` is
+therefore a playlist of exactly one song, which is why playback used to fall
+silent with nothing left in the queue.
+
+Two constraints worth knowing before changing any of this:
+
+- `offset` is only valid when the context is an **album or playlist**. Spotify
+  rejects it for an artist context, so "play this song within the artist"
+  cannot be expressed.
+- The obvious source for follow-ups, `GET /artists/{id}/top-tracks`, answers
+  **403** for this app — see the withdrawn-endpoint list in
+  `src/providers/spotify.ts`. Follow-ups come from a field-filtered `/search`
+  instead, narrowed to the seed track's artist id.
+
+`queue` is unchanged and still appends without interrupting.
+
 ## Available Tools
+
+> **This table is out of date** and is kept only until it is rewritten. The
+> tools actually served are `play`, `queue`, `play_playlist`, `playlists`,
+> `library`, `devices`, `status` and `control` — see `TOOLS` in `src/server.ts`,
+> which is the only authority. Several rows below name provider methods that
+> were deleted (playlist writes and library writes are refused by Spotify for
+> this app).
 
 | Tool | Description |
 |------|-------------|
