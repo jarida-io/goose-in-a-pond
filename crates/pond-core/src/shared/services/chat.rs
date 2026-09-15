@@ -1,4 +1,4 @@
-use crate::models::domain::message::{ChatMessage, Role};
+use crate::models::domain::message::{ChatMessage, Role, ToolCallRecord};
 use crate::models::ports::agent::Agent;
 use crate::models::ports::provider::LlmProvider;
 use crate::models::ports::speech_energy::SpeechEnergy;
@@ -1025,23 +1025,52 @@ impl ChatService {
         usage: Option<(u32, u32)>,
         model_name: Option<&str>,
     ) -> Result<()> {
-        // Extract tool names for activity events before the loop below consumes
-        // `tool_results`. Each entry is JSON carrying a `"tool"` field (built in
-        // the chat handler); entries that don't parse are skipped, not fatal.
-        let tool_names: Vec<String> = tool_results
+        // Each entry is JSON carrying `tool`, `tool_call_id` and `arguments`
+        // (built in the chat handler). Parsed ONCE here: the same fields feed
+        // the activity events, the tool rows' `tool_call_id`, and the assistant
+        // row's tool-call records.
+        //
+        // An entry that does not parse is skipped rather than fatal, and still
+        // persists its content -- a malformed blob must not lose the result.
+        let parsed: Vec<Option<serde_json::Value>> = tool_results
             .iter()
-            .filter_map(|s| {
-                serde_json::from_str::<serde_json::Value>(s)
-                    .ok()
-                    .and_then(|v| v.get("tool").and_then(|t| t.as_str()).map(bare_tool_name))
+            .map(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .collect();
+
+        let field = |v: &Option<serde_json::Value>, key: &str| -> Option<String> {
+            v.as_ref()
+                .and_then(|v| v.get(key))
+                .and_then(|t| t.as_str())
+                .map(str::to_string)
+        };
+
+        let tool_names: Vec<String> = parsed
+            .iter()
+            .filter_map(|v| field(v, "tool").map(|t| bare_tool_name(&t)))
+            .collect();
+
+        // The calls this turn made, linked to the results below by id.
+        //
+        // Written because nothing wrote them: across a real installation's whole
+        // history there were 508 assistant rows, 0 with tool calls, against 488
+        // tool rows -- every stored result an orphan with no record of who asked
+        // for it. The read path in the REST API has always served both fields.
+        let tool_calls: Vec<ToolCallRecord> = parsed
+            .iter()
+            .filter_map(|v| {
+                Some(ToolCallRecord {
+                    id: field(v, "tool_call_id")?,
+                    name: field(v, "tool")?,
+                    arguments: field(v, "arguments").unwrap_or_else(|| "{}".to_string()),
+                })
             })
             .collect();
 
-        for content in tool_results {
+        for (content, v) in tool_results.into_iter().zip(parsed.iter()) {
             let sm = SessionMessage::new(
                 Uuid::new_v4().to_string(),
                 self.session_id.clone(),
-                ChatMessage::tool_result(content, String::new()),
+                ChatMessage::tool_result(content, field(v, "tool_call_id").unwrap_or_default()),
             );
             self.session_storage
                 .add_message(self.session_id.clone(), sm)
@@ -1051,7 +1080,7 @@ impl ChatService {
         let sm = SessionMessage::new(
             assistant_id.clone(),
             self.session_id.clone(),
-            ChatMessage::assistant(assistant_text),
+            ChatMessage::assistant_with_tool_calls(assistant_text, tool_calls),
         )
         .with_token_counts(usage.map(|(p, _)| p), usage.map(|(_, c)| c));
         self.session_storage

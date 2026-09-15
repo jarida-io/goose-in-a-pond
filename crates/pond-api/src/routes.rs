@@ -1641,6 +1641,11 @@ struct TurnAccumulator {
     full_text: String,
     /// One JSON row per tool result, as persisted.
     tool_results: Vec<String>,
+    /// Tool-call id -> the arguments the model produced, kept from the
+    /// `ToolCall` event so the result blob can carry them to persistence. The
+    /// `ToolResult` event does not repeat them, and without them a stored
+    /// tool-call record names a call nobody can reproduce.
+    tool_call_inputs: std::collections::HashMap<String, String>,
     /// When the first visible token arrived, as a fallback for an engine that
     /// reports no TTFT of its own.
     ttft: Option<std::time::Instant>,
@@ -1661,6 +1666,7 @@ impl TurnAccumulator {
             thought,
             full_text: String::new(),
             tool_results: Vec::new(),
+            tool_call_inputs: std::collections::HashMap::new(),
             ttft: None,
             tool_call_start: None,
             last_tool_name: None,
@@ -1697,6 +1703,13 @@ impl TurnAccumulator {
             AgentStreamEvent::ToolCall { tool, id, input } => {
                 self.tool_call_start = Some(std::time::Instant::now());
                 self.last_tool_name = Some(tool.clone());
+                self.tool_call_inputs.insert(
+                    id.clone(),
+                    input
+                        .as_ref()
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "{}".to_string()),
+                );
                 StreamStep::Frame(
                     json!({"type": "tool_call", "tool": tool, "id": id, "input": input})
                         .to_string(),
@@ -1712,6 +1725,10 @@ impl TurnAccumulator {
                         "tool_call_id": id,
                         "tool": tool,
                         "content": clean_content,
+                        "arguments": self
+                            .tool_call_inputs
+                            .remove(&id)
+                            .unwrap_or_else(|| "{}".to_string()),
                     })
                     .to_string(),
                 );
@@ -17671,6 +17688,11 @@ mod tests {
                 "tool_call_id": "call-1",
                 "tool": "giap-weather__get_weather",
                 "content": "24C and clear",
+                // Carried from the ToolCall event, which is the only place they
+                // appear -- the ToolResult event does not repeat them. Without
+                // this the stored tool-call record names a call nobody can
+                // reproduce.
+                "arguments": "{\"location\":\"Nairobi\"}",
             }),
             "the persisted row is replayed into the next prompt as the model's own \
              tool history; a row whose id and name are transposed teaches the model \
