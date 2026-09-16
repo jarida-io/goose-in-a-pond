@@ -1,0 +1,403 @@
+/* ════════════════════════════════════════════════════════════
+   SUGGESTION QUEUE — Home's left column, its "Waiting on you"
+   overlay, and the one toast an answer produces.
+
+   Owns the `sq` prefix and nothing else. Colours are tokens only
+   (--pp, --color-*, --grey-200); the two #fff are the design's own
+   literals, on an accent fill where a token would be wrong.
+   ════════════════════════════════════════════════════════════ */
+
+/* ── the column ── */
+
+.sq {
+  flex: 0 0 396px;
+  box-sizing: border-box;
+  padding: 24px 22px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 16px;
+  position: relative;
+  min-height: 0;
+}
+
+.sq__eyebrow {
+  margin: 0;
+  font: 500 12px/1 "JetBrains Mono", ui-monospace, monospace;
+  color: var(--color-text-secondary);
+}
+
+.sq__quiet {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.45;
+  color: var(--color-text-secondary);
+  max-width: 34ch;
+}
+
+.sq__summary {
+  margin: 0;
+  font-family: "Comfortaa", Quicksand, sans-serif;
+  font-weight: 700;
+  font-size: 30px;
+  line-height: 1.24;
+  letter-spacing: -0.01em;
+  text-wrap: pretty;
+}
+
+.sq__why {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.45;
+  color: var(--color-text-secondary);
+  max-width: 34ch;
+  text-wrap: pretty;
+}
+
+.sq__error {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--color-text);
+  max-width: 34ch;
+}
+
+/* ── answering ── */
+
+.sq__actions {
+  display: flex;
+  gap: 10px;
+  padding-top: 2px;
+}
+
+.sq__go {
+  min-height: 44px;
+  padding: 0 18px;
+  border: 2px solid var(--color-text);
+  border-radius: 10px;
+  background: var(--pp);
+  color: #fff;
+  font: 700 15px Quicksand, sans-serif;
+  box-shadow: 4px 4px 0 var(--color-text);
+  cursor: pointer;
+}
+
+.sq__go:active {
+  box-shadow: 0 0 0 var(--color-text);
+  transform: translate(4px, 4px);
+}
+
+.sq__no {
+  min-height: 44px;
+  padding: 0 18px;
+  border: 2px solid var(--color-text);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--color-text);
+  font: 600 15px Quicksand, sans-serif;
+  cursor: pointer;
+}
+
+.sq__no:active {
+  transform: translate(1px, 1px);
+}
+
+/* ── the peek: at most two, progressively faded ── */
+
+.sq__peek {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sq__peek-row {
+  min-height: 44px; /* the design drew ~40; the touch floor wins */
+  border-radius: 12px;
+  background: var(--color-surface);
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  /* The global button rule centres content; these rows are read left-edge
+     first, so the override has to be written out. */
+  justify-content: flex-start;
+  gap: 10px;
+  cursor: pointer;
+  border: 0;
+  text-align: left;
+  font: inherit;
+  color: var(--color-text);
+}
+
+.sq__peek-row:nth-child(1) {
+  opacity: 0.55;
+}
+
+.sq__peek-row:nth-child(2) {
+  opacity: 0.32;
+}
+
+.sq__peek-summary {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sq__peek-time {
+  font: 500 11px "JetBrains Mono", monospace;
+  color: var(--color-text-secondary);
+}
+
+/* ── the count that opens the overlay ── */
+
+.sq__more {
+  align-self: flex-start;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.sq__more:hover {
+  opacity: 0.8;
+}
+
+.sq__more-count {
+  width: 36px;
+  height: 36px;
+  flex: none;
+  border-radius: 999px;
+  border: 2px solid var(--color-text);
+  background: var(--color-surface);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 700 14px "JetBrains Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
+}
+
+.sq__more-label {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  text-align: left;
+}
+
+/* ── "Waiting on you" overlay ── */
+
+.sq__scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 3;
+  /* The scrim dims the whole dashboard, not just this column, so it is fixed
+     rather than positioned against .sq. */
+  background: rgba(23, 22, 22, 0.42);
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  display: block;
+  cursor: pointer;
+}
+
+.sq__panel {
+  position: fixed;
+  /* 74px = the 60px ShellBar plus the design's 14px. The design assumed it
+     owned the whole 1024x600 frame; this shell does not. */
+  top: 74px;
+  bottom: 14px;
+  left: 14px;
+  z-index: 4;
+  width: 396px;
+  background: var(--color-surface);
+  border: 2px solid var(--color-text);
+  border-radius: 20px;
+  box-shadow: 4px 4px 0 var(--pp);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sq__panel-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 18px 10px;
+}
+
+.sq__panel-title {
+  margin: 0;
+  font-family: "Comfortaa", Quicksand, sans-serif;
+  font-weight: 700;
+  font-size: 22px;
+}
+
+.sq__panel-close {
+  width: 44px; /* the design drew 36; the touch floor wins */
+  height: 44px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--color-hover);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.sq__panel-close:active {
+  background: var(--color-pressed);
+}
+
+.sq__panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px 14px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  scrollbar-width: none;
+}
+
+.sq__panel-body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* ── one row per suggestion, the cursor's row raised ── */
+
+.sq__row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--color-hover);
+  border: 0;
+  box-shadow: none;
+}
+
+.sq__row[data-active] {
+  background: var(--color-surface);
+  border: 2px solid var(--color-text);
+  box-shadow: 2px 2px 0 var(--pp);
+}
+
+.sq__row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sq__row-title {
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  text-align: left;
+  font: 600 15px Quicksand, sans-serif;
+  line-height: 1.3;
+  color: var(--color-text);
+  cursor: pointer;
+  text-wrap: pretty;
+}
+
+.sq__row-time {
+  flex: none;
+  font: 500 11px "JetBrains Mono", monospace;
+  color: var(--color-text-secondary);
+}
+
+.sq__row-why {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--color-text-secondary);
+  text-wrap: pretty;
+}
+
+.sq__row-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Same two answers, drawn as pills at row scale. */
+.sq__row-actions .sq__go,
+.sq__row-actions .sq__no {
+  min-height: 44px;
+  padding: 0 14px;
+  border: 2px solid var(--color-text);
+  border-radius: 999px;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.sq__row-actions .sq__go {
+  background: var(--pp);
+  color: #fff;
+  font: 700 13px Quicksand, sans-serif;
+}
+
+.sq__row-actions .sq__go:active {
+  box-shadow: none;
+  transform: translate(1px, 1px);
+}
+
+.sq__row-actions .sq__no {
+  background: transparent;
+  color: var(--color-text);
+  font: 600 13px Quicksand, sans-serif;
+}
+
+/* ── the toast ── */
+
+.sq__toast {
+  position: fixed;
+  top: 74px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 0 18px;
+  border-radius: 999px;
+  background: var(--color-text);
+  color: var(--color-bg);
+  font: 600 14px Quicksand, sans-serif;
+  box-shadow: 4px 4px 0 var(--pp);
+  animation: sq-toast-in var(--dur-base) var(--ink-ease);
+}
+
+@keyframes sq-toast-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -12px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sq__toast {
+    animation-duration: 0.01ms;
+  }
+}

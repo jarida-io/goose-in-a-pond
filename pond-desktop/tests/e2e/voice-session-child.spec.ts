@@ -26,6 +26,7 @@
 
 import { test, expect, type Page } from "@playwright/test";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
+import { navigateTo } from "./helpers/nav";
 
 // ── Shell bridge stub ─────────────────────────────────────────────────────────
 //
@@ -92,10 +93,8 @@ async function navigateToVoiceMode(page: Page): Promise<void> {
   await page.goto("/");
   // Wait for the server to be "online" (server_health probe returns true)
   await page.waitForTimeout(500);
-  // Find and click the voice mode button in the sidebar
-  const voiceBtn = page.locator('[aria-label="Voice mode"]');
-  await expect(voiceBtn).toBeVisible({ timeout: 15_000 });
-  await voiceBtn.click();
+  // Voice lives under "Pond" in the drawer.
+  await navigateTo(page, "Voice");
   // Give the component a moment to mount and register listeners
   await page.waitForTimeout(500);
 }
@@ -287,7 +286,7 @@ test.describe("Voice session child-process mode (Architecture A)", () => {
     if (await backBtn.isVisible()) {
       await backBtn.click();
       await expect(
-        page.locator('aside[aria-label="Navigation"]'),
+        page.locator('[aria-label="Open menu"]'),
       ).toBeVisible({ timeout: 5_000 });
     }
   });

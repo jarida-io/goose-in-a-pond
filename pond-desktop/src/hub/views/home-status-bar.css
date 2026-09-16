@@ -1,0 +1,155 @@
+/* ────────────────────────────────────────────────────────────
+   Home's status strip -- the half of the design's 60px header that the
+   shell does not already draw. `ShellBar` owns the hamburger and the bell
+   above it; what is left is the arrange control, its caption, the
+   temperature, the clock and the avatar, at 44px instead of 60.
+
+   One cluster, flush right, in the design's order. There is deliberately no
+   left-hand slot: the shell's own left cluster starts at x=20 on the row
+   above, so a child at this strip's left edge would sit directly under the
+   hamburger -- the position the design leaves empty.
+
+   Colour discipline (DESIGN.md §2): purple appears here exactly once, as
+   the 16px check on the arrange pill while arranging. Nothing here paints
+   text with it.
+   ──────────────────────────────────────────────────────────── */
+
+.hbar {
+  flex: none;
+  height: 44px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 20px;
+}
+
+/* `min-width: 0` so the caption inside can actually shrink; without it the
+   cluster's automatic minimum size is the sum of its children at full width
+   and the pill would be pushed off the left of the strip instead. */
+.hbar__right {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 16px;
+}
+
+/* ── Arrange ──────────────────────────────────────────────── */
+
+/* `justify-content: flex-start` is not decoration: the global `button` rule
+   in styles/base.css sets `center`, which would re-centre icon and label
+   together every time the label changes length between "Arrange" and
+   "Done arranging", so the pencil would walk sideways on every toggle.
+
+   `flex: none` protects the label instead of the caption. The label is the
+   button's accessible name, so it is the one thing on this strip that must
+   never be clipped; the caption beside it ellipsises and can afford to. */
+.hbar__arrange {
+  flex: none;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: 600 14px var(--font-body, "Quicksand", sans-serif);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ink-ease);
+}
+
+/* Layered rather than swapped. Both state tokens are translucent, so setting
+   either as the background would dissolve the pill's face into the panel's
+   gradient instead of tinting it; stacking them over the surface tints, and
+   stays correct when the dark ramp inverts both. */
+.hbar__arrange:hover {
+  background:
+    linear-gradient(var(--color-hover), var(--color-hover)),
+    var(--color-surface);
+}
+
+.hbar__arrange:active {
+  background:
+    linear-gradient(var(--color-pressed), var(--color-pressed)),
+    var(--color-surface);
+}
+
+/* `min-width: 0` so the ellipsis can actually engage -- a flex item's
+   automatic minimum size otherwise refuses to shrink below its text. */
+.hbar__caption {
+  margin: 0;
+  min-width: 0;
+  font: 500 12px/1 var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Weather, clock, avatar ───────────────────────────────── */
+
+.hbar__temp {
+  font: 600 15px var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
+}
+
+.hbar__stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1;
+}
+
+.hbar__date {
+  font: 500 10px/1 var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
+  letter-spacing: 0.14em;
+  color: var(--color-text-secondary);
+}
+
+/* 20px where the design says 24px: the strip is 44px tall, not 60, and a
+   24px cap height plus the date above it does not sit inside it. */
+.hbar__time {
+  margin-top: 4px;
+  font: 700 20px/1 var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  color: var(--color-text);
+}
+
+.hbar__avatar {
+  width: 40px;
+  height: 40px;
+  flex: none;
+  border-radius: 999px;
+  background: var(--color-accent-soft);
+  border: 2px solid var(--color-border-strong);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 700 15px var(--font-body, "Quicksand", sans-serif);
+  color: var(--color-text);
+}
+
+/* ── Narrow ───────────────────────────────────────────────── */
+
+/* The strip spans the whole view, so the viewport is the right question
+   here rather than a container query. Two steps, in the order the pond
+   can most afford to lose them: the caption is a hint about a mode the
+   household is already in and can be read off the arrows themselves; the
+   date is the last thing to go, because the time alone still answers the
+   question a wall panel is usually asked. */
+@media (max-width: 640px) {
+  .hbar__caption {
+    display: none;
+  }
+}
+
+@media (max-width: 480px) {
+  .hbar__date {
+    display: none;
+  }
+}

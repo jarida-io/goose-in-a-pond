@@ -1,0 +1,214 @@
+/* ────────────────────────────────────────────────────────────
+   Home controls — the design's device tiles, on real readings.
+
+   Two materials and no hues: an inverted ink tile is on, a paper tile is off or
+   silent. The mockup's four saturated per-kind gradients encoded what the name
+   and the icon already say, and left the one thing you scan a wall panel for —
+   is it on? — to be inferred from which colour happened to be showing.
+
+   Nothing here paints a number. Brightness, wattage, setpoint and lock text have
+   no source in the pond (DESIGN.md §3), so no rule below has anywhere to put one.
+   ──────────────────────────────────────────────────────────── */
+
+.hcc {
+  box-sizing: border-box;
+  height: 100%;
+  border-radius: 12px;
+  background: var(--color-surface);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ── Head ─────────────────────────────────────────────────── */
+
+.hcc__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hcc__title {
+  font: 600 15px Quicksand, sans-serif;
+  color: var(--color-text);
+}
+
+.hcc__count {
+  margin-left: auto;
+  font: 500 12px "JetBrains Mono", monospace;
+  color: var(--color-text-secondary);
+}
+
+/* ── Tiles ────────────────────────────────────────────────── */
+
+/* auto-fit, not a fixed two-column grid: the card answers the cell it was given
+   rather than the viewport, so the same component is honest at every widget size
+   the track hands it. */
+.hcc__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+/* align-items and flex-direction are written out because the global button rule
+   in base.css sets inline-flex + justify-content:center on every button; a tile
+   that inherits it centres its name and value into one stacked lump. */
+.hcc__tile {
+  box-sizing: border-box;
+  min-height: 92px;
+  padding: 12px;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-start;
+  text-align: left;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+  transition: opacity var(--dur-fast, 120ms) var(--ink-ease, ease);
+}
+
+.hcc__tile[data-state="on"],
+.hcc__tile[data-state="pending"][data-last="on"] {
+  background: var(--color-text);
+  color: var(--color-bg);
+}
+
+.hcc__tile[data-state="off"],
+.hcc__tile[data-state="unknown"],
+.hcc__tile[data-state="pending"][data-last="off"],
+.hcc__tile[data-state="pending"][data-last="unknown"],
+.hcc__static {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  color: var(--color-text);
+}
+
+/* The write is in flight and the label still reads what the device last said.
+   Dimming is the whole signal: repainting the tile to the requested state would
+   be the card asserting an outcome it has not been told. */
+.hcc__tile[data-state="pending"] {
+  opacity: 0.6;
+}
+
+.hcc__static {
+  cursor: default;
+}
+
+.hcc__name {
+  font: 600 14px Quicksand, sans-serif;
+}
+
+.hcc__value {
+  font: 500 13px "JetBrains Mono", monospace;
+}
+
+/* Opacity on the inverted tile, colour on the paper one — the same contrast step
+   in the two materials, exactly as drawn. */
+.hcc__tile[data-state="on"] .hcc__value,
+.hcc__tile[data-state="pending"][data-last="on"] .hcc__value {
+  opacity: 0.72;
+}
+
+.hcc__tile[data-state="off"] .hcc__value,
+.hcc__tile[data-state="unknown"] .hcc__value,
+.hcc__tile[data-state="pending"][data-last="off"] .hcc__value,
+.hcc__tile[data-state="pending"][data-last="unknown"] .hcc__value {
+  color: var(--color-text-secondary);
+}
+
+/* A device with no power capability has no value line to show, so the room takes
+   that slot: real, already on the wire, and the thing that tells two identically
+   named sensors apart. Quicksand rather than the mono of a value, so it does not
+   read as a reading. */
+.hcc__room {
+  font: 500 12px Quicksand, sans-serif;
+  color: var(--color-text-secondary);
+}
+
+/* ── Waiting, and failing ─────────────────────────────────── */
+
+/* The read is still out. One quiet line rather than skeleton tiles: a skeleton
+   draws a shape for a house we have not been told the size of, and the household
+   would count the placeholders. */
+.hcc__quiet {
+  font: 500 13px Quicksand, sans-serif;
+  color: var(--color-text-secondary);
+}
+
+/* Left-aligned and stacked, because the sub line is a sentence. The icon sits on
+   its own row above the title, which is why this is a column rather than the
+   head's row. */
+.hcc__note {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 8px;
+}
+
+.hcc__note-title {
+  font: 600 14px Quicksand, sans-serif;
+  color: var(--color-text);
+}
+
+.hcc__note-sub {
+  font: 500 13px Quicksand, sans-serif;
+  line-height: 1.35;
+  color: var(--color-text-secondary);
+}
+
+/* 44px is the panel's touch floor, not the type's ask. The two explicit rules
+   below override the global button rule in base.css, which would otherwise centre
+   the label against a left-aligned sentence and round the corner to --radius-md
+   while every other surface on this card is 12px. */
+.hcc__retry {
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 12px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: 600 14px Quicksand, sans-serif;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.hcc__retry:hover {
+  background: var(--color-hover);
+}
+
+.hcc__retry:active {
+  background: var(--color-pressed);
+}
+
+/* ── Empty ────────────────────────────────────────────────── */
+
+.hcc__empty {
+  min-height: 44px;
+  width: 100%;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 12px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: 600 14px Quicksand, sans-serif;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.hcc__empty:hover {
+  background: var(--color-hover);
+}
+
+.hcc__empty:active {
+  background: var(--color-pressed);
+}

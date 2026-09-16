@@ -33,11 +33,32 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     route.fulfill({ json: { token: "e2e-test-token", session_id: "e2e-session" } }),
   );
 
-  // Direct tool invoke (Hub device control bypasses the LLM)
+  // Direct tool invoke (Hub device control bypasses the LLM).
+  //
+  // The device-control tools answer for real, because the card under test reads
+  // rather than assumes: it writes with `set_device_state` and then ASKS with
+  // `get_device_state`, and displays the answer. A mock that returned a bare
+  // "ok" to the read would put every tile in its "Not reporting" branch, which
+  // is correct behaviour against a backend that says nothing and no test of a
+  // toggle at all. The switch position is held here so the re-read reflects the
+  // write, the same way a real device would.
+  const power = new Map<string, boolean>();
   await page.route("**/api/v1/tools/invoke", (route) => {
-    const body = route.request().postDataJSON() as { server?: string; tool?: string };
+    const body = route.request().postDataJSON() as {
+      server?: string;
+      tool?: string;
+      args?: { device_id?: string; power?: boolean };
+    };
+    const id = body.args?.device_id ?? "";
+    if (body.tool === "set_device_state" && typeof body.args?.power === "boolean") {
+      power.set(id, body.args.power);
+    }
+    const content =
+      body.tool === "get_device_state" || body.tool === "set_device_state"
+        ? `device: ${id}\npower: ${power.get(id) ? "on" : "off"}`
+        : "ok";
     return route.fulfill({
-      json: { tool: `${body.server ?? ""}__${body.tool ?? ""}`, success: true, content: "ok" },
+      json: { tool: `${body.server ?? ""}__${body.tool ?? ""}`, success: true, content },
     });
   });
 
@@ -151,9 +172,28 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     route.fulfill({ json: { status: "ok" } }),
   );
 
-  // Devices
+  // Devices.
+  //
+  // One real device, not an empty list. Home no longer substitutes a demo house
+  // when the pond has none, so an empty answer here means every device test
+  // asserts against an empty state and none of them can exercise a control.
+  // `capabilities` is load-bearing: Home offers a switch only to a device that
+  // says it has one.
   await page.route("**/api/v1/devices", (route) =>
-    route.fulfill({ json: { devices: [] } }),
+    route.fulfill({
+      json: {
+        devices: [
+          {
+            id: "driveway",
+            name: "Driveway Light",
+            device_type: "light",
+            is_online: true,
+            room: "Outdoor",
+            capabilities: ["power"],
+          },
+        ],
+      },
+    }),
   );
   // The Devices tab reads this on mount for its Matter section. Off is the
   // default a fresh Pond is in.
@@ -233,9 +273,40 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     route.fulfill({ json: [] }),
   );
 
-  // Recipes
+  // Recipes.
+  //
+  // One real recipe, not an empty list. This used to answer [] and the Routines
+  // screen still showed five routines, because hubDataStore substituted a
+  // fixture whenever the list came back empty -- so every routine assertion in
+  // this suite was passing against invented data. That substitution is gone,
+  // which is correct, and it left those tests with nothing to click. A mocked
+  // backend that answers with a recipe is a mock; a product that invents one
+  // when the backend says "none" was the bug.
   await page.route("**/api/v1/recipes", (route) =>
-    route.fulfill({ json: [] }),
+    route.fulfill({
+      json: [
+        {
+          id: "recipe-morning",
+          name: "Morning Check",
+          description: "Read the briefing, report the weather",
+          yaml: "title: Morning Check\ninstructions: read the briefing\n",
+          title: "Morning Check",
+          active: true,
+        },
+      ],
+    }),
+  );
+
+  // Warmup.
+  //
+  // Opening Chat asks the pond to precompile the prompt prefix. It was the only
+  // endpoint the shell reaches that this file did not answer, so the request
+  // went to the real 127.0.0.1:4000 and was refused -- two console errors that
+  // tripped the strict console gate in hub-visual-verify and looked, for a
+  // while, like a Vite HMR port conflict. It is neither: it is a route that was
+  // added to the client and never to the mock.
+  await page.route("**/api/v1/warmup", (route) =>
+    route.fulfill({ json: { warmed: false, reason: "no model in the test environment" } }),
   );
 
   // Transcribe (for voice pipeline)

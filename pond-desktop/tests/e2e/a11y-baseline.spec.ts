@@ -1,11 +1,12 @@
 import { test, expect } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
+import { navigateTo } from "./helpers/nav";
 
 /**
  * WCAG 2 A/AA baseline scan for the core flows called out in the a11y pass:
- * Home dashboard, Canvas, the sidebar/IconRail nav, and an open modal
- * (routine builder, via HubModal + useDialogFocusTrap).
+ * Home dashboard, Canvas, the drawer nav, and an open modal (routine builder,
+ * via HubModal + useDialogFocusTrap).
  */
 
 async function scanAndAssert(page: import("@playwright/test").Page, label: string) {
@@ -25,21 +26,49 @@ test.describe("a11y baseline (WCAG 2 A/AA)", () => {
     });
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/");
-    await expect(page.locator(".home2")).toBeVisible({ timeout: 10_000 });
+    // `.dash` is Home's root on both surfaces. The old `.home2` gate named a
+    // class that stopped rendering when Home was pared back, so this scan was
+    // timing out rather than scanning anything.
+    await expect(page.locator(".dash")).toBeVisible({ timeout: 10_000 });
     await scanAndAssert(page, "Home");
   });
 
-  test("Canvas section has no violations", async ({ page }) => {
+  /**
+   * Arrange mode brings up two sets of controls at once — a toolbar on every
+   * widget and a row per card in the sheet — and they share accessible names
+   * because they are the same acts. That is correct and it is also exactly the
+   * shape that produces unlabelled icon buttons if anything drifts.
+   */
+  test("Home while arranging has no violations", async ({ page }) => {
     await mockAllApiRoutes(page);
     await page.addInitScript(() => {
       localStorage.setItem("giap-section", "hub");
       localStorage.setItem("giap-force-hub", "1");
       localStorage.setItem("goosehub_route", "home");
     });
+    await page.setViewportSize({ width: 1024, height: 600 });
+    await page.goto("/");
+    await expect(page.locator(".dash")).toBeVisible({ timeout: 10_000 });
+    await page.getByRole("button", { name: "Arrange", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Page 1" })).toBeVisible({ timeout: 10_000 });
+    await scanAndAssert(page, "Home (arranging)");
+  });
+
+  /**
+   * Canvas is the one screen the drawer cannot reach. It is a hidden section
+   * (`HIDDEN_SECTIONS` in desktopState.ts) whose only route in the hub is a
+   * notification's "View on Canvas", so this lands on it by its persisted route
+   * rather than by a click that no longer exists anywhere.
+   */
+  test("Canvas section has no violations", async ({ page }) => {
+    await mockAllApiRoutes(page);
+    await page.addInitScript(() => {
+      localStorage.setItem("giap-section", "hub");
+      localStorage.setItem("giap-force-hub", "1");
+      localStorage.setItem("goosehub_route", "canvas");
+    });
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/");
-    await expect(page.locator(".home2")).toBeVisible({ timeout: 10_000 });
-    await page.getByRole("button", { name: "Canvas", exact: true }).first().click();
     await expect(page.locator(".mcpc")).toBeVisible({ timeout: 10_000 });
     await scanAndAssert(page, "Canvas");
   });
@@ -53,8 +82,11 @@ test.describe("a11y baseline (WCAG 2 A/AA)", () => {
     });
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/");
-    await expect(page.locator(".home2")).toBeVisible({ timeout: 10_000 });
-    await page.getByRole("button", { name: "Routines", exact: true }).first().click();
+    // The gate is the drawer's trigger, because the drawer is what this test
+    // navigates with. Routines is the "Schedules" chip under Manage: the hub
+    // renders that section as its routines route.
+    await expect(page.locator('[aria-label="Open menu"]')).toBeVisible({ timeout: 10_000 });
+    await navigateTo(page, "Schedules");
     await expect(page.locator(".rt")).toBeVisible({ timeout: 10_000 });
 
     await page.getByRole("button", { name: /new routine/i }).first().click();

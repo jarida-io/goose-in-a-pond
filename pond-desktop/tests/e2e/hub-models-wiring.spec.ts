@@ -9,6 +9,7 @@
  */
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
+import { navigateTo } from "./helpers/nav";
 
 const MOCK_MODELS = {
   gguf: [
@@ -161,9 +162,9 @@ async function goToModelsScreen(page: Page) {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
   await page.waitForSelector(".ghub", { timeout: 10_000 });
-  await page.getByRole("button", { name: "Settings", exact: true }).first().click();
-  await page.waitForSelector(".set", { timeout: 5_000 });
-  await page.getByRole("button", { name: /^Models$/ }).first().click();
+  // The rail is a drawer now: Models is a chip under "Manage", and in the hub
+  // it resolves to the Models detail screen directly, without the Settings list.
+  await navigateTo(page, "Models");
   await page.waitForTimeout(600);
 }
 

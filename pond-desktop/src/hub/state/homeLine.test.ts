@@ -47,8 +47,70 @@ describe("what it leads with", () => {
   });
 
   it("says the good outcome once, after dark", () => {
-    const d = [dev({ id: "Front Door", kind: "lock", locked: true })];
+    const d = [
+      dev({ id: "Front Door", kind: "lock", locked: true }),
+      dev({ id: "Lamp", kind: "light", on: false }),
+    ];
     expect(line(d, at(22))).toBe("All locked, and everything is off.");
+  });
+
+  /**
+   * The half that is known, when the other half is not. A lock that answered
+   * says something; a lamp that never did says nothing, and "everything is
+   * off" would be speaking for it.
+   */
+  it("says only the locks when nothing else reported", () => {
+    const d = [
+      dev({ id: "Front Door", kind: "lock", locked: true }),
+      dev({ id: "Lamp", kind: "light" }),
+    ];
+    expect(line(d, at(22))).toBe("The doors are all locked.");
+  });
+});
+
+/**
+ * Nothing read it, so nothing may be said about it.
+ *
+ * `GET /api/v1/devices` returns identity and capabilities and no state at all,
+ * and the store used to paper over that with defaults — `locked` to true, `on`
+ * to false. These are the sentences that produced: a reassurance about doors
+ * nobody had touched, on a panel, after dark.
+ */
+describe("what it will not claim about a house that has not reported", () => {
+  /** The devices exactly as the API describes them: no on, no locked. */
+  const silent = [
+    dev({ id: "Front Door", kind: "lock" }),
+    dev({ id: "Hall Lamp", kind: "light" }),
+  ];
+
+  it("does not say the doors are locked when no lock was read", () => {
+    const s = line(silent, at(21));
+    expect(s).not.toContain("locked");
+    expect(s).not.toBe("All locked, and everything is off.");
+  });
+
+  it("does not say everything is off when no light was read", () => {
+    expect(line(silent, at(14))).not.toContain("off");
+  });
+
+  /** One silent lock is enough: "all" is a word about every door, not most. */
+  it("will not say all locked when one lock stayed silent", () => {
+    const d = [
+      dev({ id: "Front Door", kind: "lock", locked: true }),
+      dev({ id: "Back Door", kind: "lock" }),
+      dev({ id: "Lamp", kind: "light", on: false }),
+    ];
+    expect(line(d, at(22))).not.toContain("All locked");
+  });
+
+  /** And a silent lock is not an unlocked one — the count is over what answered. */
+  it("counts unlocked doors over the locks that answered", () => {
+    const d = [
+      dev({ id: "Front Door", kind: "lock", locked: false }),
+      dev({ id: "Back Door", kind: "lock", locked: true }),
+      dev({ id: "Side Door", kind: "lock" }),
+    ];
+    expect(line(d, at(21))).toBe("1 of 2 doors are still unlocked.");
   });
 });
 
@@ -81,10 +143,22 @@ describe("what is on", () => {
 
   /**
    * `on` is undefined for devices that do not report it. Undefined is not off,
-   * and guessing either way would state something the pond does not know.
+   * and guessing either way would state something the pond does not know — so
+   * the line drops to the sky rather than reporting on a lamp that never spoke.
+   * It used to say "Everything is off." here, which is the guess this test was
+   * written to forbid.
    */
   it("does not count a light that never said", () => {
     const d = [dev({ id: "A", kind: "light" })];
+    expect(line(d)).toBe("Partly cloudy, 64° out.");
+  });
+
+  /** One light reporting off is a fact about that light, and enough to say it. */
+  it("says everything is off when every light said so", () => {
+    const d = [
+      dev({ id: "A", kind: "light", on: false }),
+      dev({ id: "B", kind: "light", on: false }),
+    ];
     expect(line(d)).toBe("Everything is off.");
   });
 });
@@ -116,6 +190,45 @@ describe("a pond with no devices in it", () => {
   /** The small hours are the one place the household's own name earns its space. */
   it("uses their name in the small hours", () => {
     expect(homeLine({ user: "Jerry", devices: [], weather, now: at(3) })).toContain("Jerry");
+  });
+});
+
+/**
+ * A pond with no weather to report.
+ *
+ * The slice handed over in that state is `NO_WEATHER` — zeroes, including a
+ * zero temperature. Printing it gave ", 0° out.", a reading nobody took, on a
+ * screen whose whole claim is that it only says what the pond knows.
+ */
+describe("a pond with no weather in it", () => {
+  const nothing: WeatherData = {
+    temp: 0, cond: "", icon: "", hi: 0, lo: 0,
+    hum: 0, wind: 0, sunrise: "", sunset: "", forecast: [],
+  };
+
+  const noWeatherLine = (now: Date) =>
+    homeLine({ user: "Jerry", devices: [], weather: nothing, now });
+
+  it("never prints a temperature it does not have", () => {
+    for (const now of [at(3), at(9), at(14), at(21)]) {
+      expect(noWeatherLine(now)).not.toContain("0°");
+      expect(noWeatherLine(now)).not.toContain("°");
+    }
+  });
+
+  it("says what time it is instead", () => {
+    expect(noWeatherLine(at(9))).toBe("Good morning, Jerry.");
+    expect(noWeatherLine(at(14))).toBe("Good afternoon, Jerry.");
+    expect(noWeatherLine(at(21))).toBe("Good evening, Jerry.");
+    expect(noWeatherLine(at(3))).toBe("The house is quiet, Jerry.");
+  });
+
+  /** Devices that reported nothing land here too, not on a sentence about them. */
+  it("holds for a house whose devices all stayed silent", () => {
+    const d = [dev({ id: "Front Door", kind: "lock" }), dev({ id: "Lamp", kind: "light" })];
+    expect(homeLine({ user: "Jerry", devices: d, weather: nothing, now: at(21) })).toBe(
+      "Good evening, Jerry.",
+    );
   });
 });
 

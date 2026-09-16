@@ -52,103 +52,6 @@
 
 .ghub__main::-webkit-scrollbar { width: 0; }
 
-/* ─── Icon rail ─── */
-.irail {
-  width: 86px;
-  flex-shrink: 0;
-  background: var(--color-surface);
-  border-right: 1px solid var(--line);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 16px 0;
-}
-
-.irail__brand { margin-bottom: 22px; }
-
-.irail__logo {
-  width: 44px;
-  height: 44px;
-  border-radius: 14px;
-  background: linear-gradient(150deg, var(--pp), var(--pp-600));
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: 0 6px 16px rgba(140, 75, 255, 0.32);
-  overflow: hidden;
-}
-
-.irail__logo img {
-  width: 32px;
-  height: 32px;
-  object-fit: contain;
-}
-
-.irail__nav {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  flex: 1;
-}
-
-.irail__item {
-  width: 64px;
-  padding: 9px 0 7px;
-  border: none;
-  background: none;
-  cursor: pointer;
-  border-radius: 16px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 5px;
-  font-family: inherit;
-  transition: background 0.15s;
-}
-
-.irail__item:hover { background: var(--pp-50); }
-
-.irail__icobox {
-  width: 46px;
-  height: 34px;
-  border-radius: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: background 0.15s;
-}
-
-.irail__item[data-active="true"] .irail__icobox {
-  background: var(--pp-50);
-}
-
-.irail__label {
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--color-text-tertiary);
-  letter-spacing: 0.2px;
-}
-
-.irail__item[data-active="true"] .irail__label {
-  color: var(--pp);
-}
-
-.irail__foot { margin-top: auto; }
-
-.irail__avatar {
-  width: 42px;
-  height: 42px;
-  border-radius: 50%;
-  border: none;
-  background: linear-gradient(150deg, #FCD34D, #F59E0B);
-  color: #fff;
-  font-size: 16px;
-  font-weight: 800;
-  cursor: pointer;
-  font-family: inherit;
-  box-shadow: 0 4px 12px rgba(245, 158, 11, 0.3);
-}
-
 /* ════════ HOME VIEW ════════ */
 
 /* Ask Goose */
@@ -1279,7 +1182,6 @@ body,
 }
 
 /* Components that need explicit dark-mode overrides */
-:root[data-theme="dark"] .irail,
 :root[data-theme="dark"] .hseg {
   background: var(--hub-bg);
   border-color: var(--line);
@@ -1960,25 +1862,12 @@ body,
   .debrief-body { padding: 12px; gap: 10px; }
 
   /* Icon rail: tighten */
-  .irail { padding: 10px 0; }
-  .irail__brand { margin-bottom: 14px; }
-  .irail__logo { width: 36px; height: 36px; border-radius: 11px; }
-  .irail__logo img { width: 24px; height: 24px; }
-  .irail__item { padding: 7px 0 5px; min-height: 44px; }
-  .irail__label { font-size: 10px; }
-  .irail__icobox { width: 38px; height: 28px; }
-  .irail__avatar { width: 34px; height: 34px; font-size: 14px; }
 }
 
 /* ── 2. Kiosk: icon-rail + short height (≤1100w, ≤640h) ──────────────────── */
 @media (max-width: 1100px) and (max-height: 640px) {
 
   /* Collapse icon rail further to 72px */
-  .irail { width: 72px; }
-  .irail__logo { width: 32px; height: 32px; border-radius: 10px; }
-  .irail__logo img { width: 22px; height: 22px; }
-  .irail__item { width: 54px; }
-  .irail__icobox { width: 34px; height: 28px; border-radius: 10px; }
 
   /* Home view collapses to single column (override existing 1080px rule) */
   /* Routines: 2 col */
@@ -1988,7 +1877,6 @@ body,
   .roles-grid { grid-template-columns: repeat(3, 1fr); }
 
   /* Touch targets: icon rail items */
-  .irail__item { min-height: 44px; }
 
   /* Set row / srow: 40px minimum */
   .set-row { min-height: 40px; }
@@ -2007,14 +1895,6 @@ body,
   /* Collapse aside on 480px height: not enough room */
   /* Tiles: keep 2 col */
   /* Icon rail: minimal */
-  .irail { width: 60px; padding: 8px 0; }
-  .irail__brand { margin-bottom: 10px; }
-  .irail__logo { width: 30px; height: 30px; border-radius: 9px; }
-  .irail__logo img { width: 20px; height: 20px; }
-  .irail__item { padding: 6px 0 4px; width: 48px; min-height: 40px; }
-  .irail__label { display: none; }
-  .irail__icobox { width: 32px; height: 26px; border-radius: 9px; }
-  .irail__avatar { width: 30px; height: 30px; font-size: 12px; }
 
   /* View head: smaller title */
   .view-title { font-size: 19px; }
@@ -2377,3 +2257,9 @@ body,
 }
 .sugg__more:hover { text-decoration: underline; }
 .sugg__more:focus-visible { outline: 2px solid var(--pp); outline-offset: 2px; }
+
+/* ─── Stacked shell ───
+   The icon rail was a flex ROW's first child. The drawer is not a child of the
+   layout at all -- it is an overlay -- so the shell stacks: the bar, then the
+   view. */
+.ghub--stacked { flex-direction: column; }

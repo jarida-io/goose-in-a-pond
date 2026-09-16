@@ -17,6 +17,7 @@ const SEG_COLOR: Record<MemorySegment, string> = {
   correction:   "#D97706",
   relationship: "#DC2626",
   project:      "#2563EB",
+  routine:      "#A855F7",
   knowledge:    "#16A34A",
   context:      "#6B7280",
 };
@@ -27,6 +28,7 @@ const SEG_LABEL: Record<MemorySegment, string> = {
   correction:   "Correction",
   relationship: "Relationship",
   project:      "Project",
+  routine:      "Routine",
   knowledge:    "Knowledge",
   context:      "Context",
 };

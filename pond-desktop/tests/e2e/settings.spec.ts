@@ -1,15 +1,12 @@
 import { test, expect } from "@playwright/test";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
+import { navigateTo } from "./helpers/nav";
 
 // ── Helper ────────────────────────────────────────────────────
 
 async function goToSettings(page: import("@playwright/test").Page) {
-  const btn = page
-    .getByRole("button")
-    .filter({ hasText: /settings/i })
-    .or(page.locator('[title="Settings"]'))
-    .first();
-  await btn.click();
+  // Settings sits in the drawer's top list, so it takes an open before a click.
+  await navigateTo(page, "Settings");
 }
 
 // ── Tests ─────────────────────────────────────────────────────

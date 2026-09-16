@@ -179,10 +179,11 @@ and that board runs headless by design (GNOME held 2.6 GB of nvmap, see
 | `src/styles/` | Jarida design tokens and base CSS (offline fonts via fontsource) |
 | `src/state/` | `AppState` reducer + `AppContext` (the shell's non-voice event listeners), and `chatRunStore` — the live chat turn (see below) |
 | `src/api/` | `PondApiClient` — single class for all REST calls |
-| `src/modes/` | `GuiMode` (sidebar app), `VoiceMode` (full-window orb) |
+| `src/modes/` | `GuiMode` (drawer-navigated app), `VoiceMode` (full-window orb) |
 | `src/sections/` | 10 GUI sections: Dashboard, Chat, Devices, Schedules, Memory, Skills, Models, Prompts, Settings, Agent |
 | `src/canvas/` | `CanvasOverlay` — frosted-glass floating window |
-| `src/components/` | Shared: `Sidebar`, `VoiceOrb`, `TranscriptFeed`, `ContextCard`, `StartupScreen` |
+| `src/components/` | Shared: `VoiceOrb`, `TranscriptFeed`, `ContextCard`, `StartupScreen` |
+| `src/hub/` | `Hub` shell, plus `HubDrawer` + `ShellBar` — the navigation BOTH shells render |
 
 **Window behaviour.** The window hides to the tray on close rather than
 quitting, and remembers its position between runs — but only restores it when
@@ -192,7 +193,7 @@ then unplugging that monitor cannot strand it off-screen. On a small panel
 fullscreen instead, and no saved position applies.
 
 **Three modes:**
-- **GUI mode** — sidebar navigation app (1280×820 window)
+- **GUI mode** — drawer navigation app (1280×820 window)
 - **Voice mode** — full-window voice orb with transcript feed
 - **Canvas mode** — always-on-top translucent overlay for ambient display
 
@@ -252,8 +253,8 @@ start refusing turns halfway through.
 
 ### The chat turn is owned by the module, not the view
 
-`GuiMode` picks a section with a `switch`, not a router, so pressing anything in
-the sidebar **unmounts the section that was showing**. A chat turn cannot live in
+`GuiMode` picks a section with a `switch`, not a router, so picking anything in
+the drawer **unmounts the section that was showing**. A chat turn cannot live in
 that component: leaving Chat mid-answer would throw away the transcript, the
 queued follow-ups and the streaming bubble, while the stream itself kept running
 and decoded its tokens into state updates on a dead component, which React drops

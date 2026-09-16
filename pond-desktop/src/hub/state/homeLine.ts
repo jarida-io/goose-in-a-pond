@@ -16,6 +16,15 @@
 // inferred about mood, habit or intent — DESIGN.md §3, "never invent meaning
 // the data lacks". If the house has nothing to say, the line says something
 // true about the hour instead of manufacturing significance.
+//
+// SILENCE IS NOT A STATE. Every device field here is optional, and undefined
+// means "nothing read this", not "off" and certainly not "locked". The rule
+// below is that a sentence about N devices may only be said when all N of them
+// reported — "All locked, and everything is off." was being printed off a
+// store that defaulted `locked` to true, i.e. it was a reassurance about doors
+// nothing had touched, and no real-world state could falsify it. Saying less is
+// the correct answer when the alternative is a confident falsehood about
+// whether a door is locked.
 // ────────────────────────────────────────────────────────────
 
 import type { DeviceData, WeatherData } from "../data/mockHome";
@@ -32,9 +41,23 @@ function litLights(devices: DeviceData[]): DeviceData[] {
   return devices.filter((d) => d.kind === "light" && d.on === true);
 }
 
-function locks(devices: DeviceData[]): { total: number; locked: number } {
+/**
+ * The locks, split by what is known about them.
+ *
+ * `known` is the only denominator any sentence may use, and `total` is what
+ * says whether a sentence may be spoken at all: one silent lock and "all" is a
+ * word about a door nobody read.
+ */
+function locks(devices: DeviceData[]): { total: number; known: number; locked: number } {
   const all = devices.filter((d) => d.kind === "lock");
-  return { total: all.length, locked: all.filter((d) => d.locked === true).length };
+  const known = all.filter((d) => typeof d.locked === "boolean");
+  return { total: all.length, known: known.length, locked: known.filter((d) => d.locked).length };
+}
+
+/** Devices that have a notion of being on, and whether each one said. */
+function powered(devices: DeviceData[]): { total: number; known: number } {
+  const all = devices.filter((d) => d.kind === "light" || d.kind === "plug");
+  return { total: all.length, known: all.filter((d) => typeof d.on === "boolean").length };
 }
 
 /**
@@ -61,23 +84,31 @@ function names(devices: DeviceData[]): string {
 export function homeLine({ user, devices, weather, now }: HomeLineInput): string {
   const hour = now.getHours();
   const evening = hour >= 19 || hour < 6;
-  const { total: lockTotal, locked } = locks(devices);
+  const { total: lockTotal, known: lockKnown, locked } = locks(devices);
   const lit = litLights(devices);
+  const pow = powered(devices);
+  // Every lock answered, and every one of them is shut. Two conditions, not
+  // one: a house where three locks reported and a fourth did not is a house
+  // this sentence has nothing to say about.
+  const allLocked = lockTotal > 0 && lockKnown === lockTotal && locked === lockTotal;
+  // Same rule for the things that can be on.
+  const allOff = pow.total > 0 && pow.known === pow.total && lit.length === 0;
 
   // 1. An unlocked door after dark. The one thing worth interrupting for, and
   //    still phrased as a report — the household can see the locks on screen.
-  if (evening && lockTotal > 0 && locked < lockTotal) {
-    const open = lockTotal - locked;
-    return open === lockTotal
+  //    Counted over the locks that answered; a silent lock is not an open one.
+  if (evening && lockKnown > 0 && locked < lockKnown) {
+    const open = lockKnown - locked;
+    return open === lockKnown && lockKnown === lockTotal
       ? "Nothing is locked yet tonight."
-      : `${open} of ${lockTotal} doors are still unlocked.`;
+      : `${open} of ${lockKnown} doors are still unlocked.`;
   }
 
-  // 2. Everything shut, after dark. The good outcome, said once.
-  if (evening && lockTotal > 0 && locked === lockTotal && lit.length === 0) {
+  // 2. Everything shut, after dark. The good outcome, said once — and only when
+  //    the house actually said so.
+  if (evening && allLocked && allOff) {
     return "All locked, and everything is off.";
   }
-
   // 3. What is on. The most common useful thing, and the one a person is most
   //    likely to act on from across a room.
   if (lit.length > 0) {
@@ -86,14 +117,20 @@ export function homeLine({ user, devices, weather, now }: HomeLineInput): string
       : `${lit.length} lights are on — ${names(lit)}.`;
   }
 
-  // 4. Nothing is on, in the daytime.
-  if (devices.length > 0) {
-    return lockTotal > 0 && locked === lockTotal
-      ? "Everything is off, and the doors are locked."
-      : "Everything is off.";
+  // 4. Nothing is on, in the daytime — when everything that can be on has said
+  //    it is not. This used to fire on `devices.length > 0`, which meant a
+  //    house full of devices that had never reported anything was told
+  //    everything was off.
+  if (allOff) {
+    return allLocked ? "Everything is off, and the doors are locked." : "Everything is off.";
   }
+  // 4b. The locks all answered but something that can be on did not. Say the
+  //     half that is known rather than the whole that is not. This is also the
+  //     evening branch for that shape, since 2 needs both halves.
+  if (allLocked) return "The doors are all locked.";
 
-  // 5. No devices at all. The pond still knows the sky and the hour, and a
+  // 5. Nothing the house said is worth a sentence — no devices at all, or none
+  //    of them reporting. The pond still knows the sky and the hour, and a
   //    household that has not added anything yet is exactly who should not be
   //    told their house is empty.
   return skyLine(weather, hour, user);
@@ -105,8 +142,14 @@ export function homeLine({ user, devices, weather, now }: HomeLineInput): string
  * Uses the weather and the hour because those are true without a single device
  * paired. It is the first thing a new household sees on this screen, so it
  * reports something real rather than apologising for being empty.
+ *
+ * And when there is no weather either — a pond with no location, or one whose
+ * provider could not be reached — the slice it is handed is ZEROES, not a
+ * reading. Printing it gave ", 0° out.", a temperature nobody measured. The
+ * hour is the one thing still true in that state, so the hour is what it says.
  */
 function skyLine(weather: WeatherData, hour: number, user: string): string {
+  if (!weather.cond && !weather.icon) return hourLine(hour, user);
   const cond = (weather.cond || "").toLowerCase();
   const wet = /rain|drizzle|shower|storm/.test(cond);
   const clear = /clear|sun/.test(cond);
@@ -116,4 +159,15 @@ function skyLine(weather: WeatherData, hour: number, user: string): string {
   if (clear && hour < 12) return `Clear and ${weather.temp}° this morning.`;
   if (clear) return `Clear and ${weather.temp}° out.`;
   return `${weather.cond}, ${weather.temp}° out.`;
+}
+
+/**
+ * The last thing left when the pond knows nothing yet: what time it is, and
+ * who it is talking to. A greeting claims nothing about the house.
+ */
+function hourLine(hour: number, user: string): string {
+  if (hour < 6)  return `The house is quiet, ${user}.`;
+  if (hour < 12) return `Good morning, ${user}.`;
+  if (hour < 18) return `Good afternoon, ${user}.`;
+  return `Good evening, ${user}.`;
 }

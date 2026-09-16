@@ -57,87 +57,6 @@
 /* A control already tall enough does not need the pseudo-element at all. */
 .reach:where([data-tall="true"])::after { display: none; }
 
-/* ── Sidebar: the signature of the merge ──────────────────────────────────
- *
- * The most-seen surface in the app and the one that most betrayed the density
- * gap. It takes the hub's icon-tile idiom — a tinted rounded square holding
- * the glyph — which is what makes a 44px row read as designed for a hand
- * rather than as a small row that was stretched.
- *
- * Restyled through the existing `.sidebar__icon` element, so there is no JSX
- * churn and the collapsed state keeps working untouched.
- */
-
-.sidebar__item {
-  min-height: var(--tap-min);
-  gap: 12px;
-  padding: 6px 10px;
-  border-radius: var(--radius-md);
-  /* 15px, not 13px: a 44px target with a 13px label reads as a small control
-     that grew rather than one designed at this size. */
-  font-size: var(--text-md);
-}
-
-.sidebar__icon {
-  width: var(--tile-sm);
-  height: var(--tile-sm);
-  border-radius: var(--tile-radius);
-  background: var(--grey-100);
-  color: var(--grey-600);
-  transition: background var(--transition-fast), color var(--transition-fast);
-}
-
-.sidebar__item:hover .sidebar__icon {
-  background: var(--grey-200);
-}
-
-.sidebar__item.is-active .sidebar__icon {
-  background: var(--color-accent-soft);
-  color: var(--color-accent);
-}
-
-/* The eyebrow that ties this to the settings catalogue's tier labels — the
-   one type detail shared across both designs. */
-.sidebar__group-label {
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-medium);
-  letter-spacing: 0.14em;
-  color: var(--color-text-tertiary);
-  /* Tight: thirteen 44px rows plus chrome overflow a 700px window, and the nav
-     then scrolls. Buying vertical space back from the eyebrows is free, where
-     shrinking the rows below the touch floor would not be. */
-  padding: 10px 10px 4px;
-}
-
-/* Thirteen 44px rows plus chrome can exceed a short window, so the nav is the
-   part that scrolls — the brand, quick actions and footer stay put. */
-.sidebar__nav {
-  overflow-y: auto;
-  min-height: 0;
-  flex: 1 1 auto;
-  scrollbar-width: thin;
-}
-
-/* Quick actions and the footer controls, previously 32px and 14px. */
-.sidebar__quick .button,
-.sidebar__bottom-nav .sidebar__item {
-  min-height: var(--tap-min);
-}
-
-.sidebar__collapse-btn {
-  min-width: var(--tap-min);
-  min-height: var(--tap-min);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-md);
-}
-
-.sidebar__collapse-btn:hover { background: var(--color-hover); }
-
-.sidebar__avatar-wrap { min-height: var(--tap-min); }
-
 /* ── Buttons ──────────────────────────────────────────────────────────────
  * HeroUI's default sizes land at 32px. Raised to the floor for the default
  * and to --tap-dense for the explicitly-small variant, which is only used
@@ -264,7 +183,6 @@ label:has(> .native-checkbox) {
     min-height: var(--tap-min);
   }
 
-  .sidebar__item { min-height: 48px; }
 }
 
 /* ── Second pass: the tail ────────────────────────────────────────────────
@@ -399,105 +317,6 @@ label:has(> .native-checkbox) {
 .dtile__dots::after { height: var(--tap-dense); }
 .dtile__dots:hover { background: var(--color-hover); }
 
-/* ── Sidebar padding: one rhythm, both states ─────────────────────────────
- *
- * Measured before changing anything. Expanded, four different left insets ran
- * down the rail — brand 16px, nav pills 10px, footer 14px, the Voice/Canvas
- * row 0px — so nothing shared a left edge and the eye had no line to follow.
- * Collapsed was worse than untidy: the avatar sat at inset 0 (hard against the
- * edge, 24px of air on its right) and the 44px collapse button this pass
- * introduced was pinned to the right of a 52px rail, leaving 8px.
- *
- * One token per state fixes both. Every child aligns to it, so the logo, the
- * nav tiles and the avatar share a left edge — and collapsed, everything
- * centres on the rail instead of keeping a two-column layout it has no room
- * for.
- *
- * The footer's top border stays full-bleed: it is a divider between regions,
- * not a boxed element, and insetting it would read as a stray line.
- */
-
-.sidebar {
-  --sidebar-inset: var(--space-3);           /* 12px */
-  --sidebar-inset-collapsed: 6px;
-}
-
-.sidebar__brand,
-.sidebar__actions,
-.sidebar__group,
-.sidebar__bottom-nav {
-  padding-left: var(--sidebar-inset);
-  padding-right: var(--sidebar-inset);
-}
-
-/* The footer keeps its full-bleed border and insets only its contents. */
-.sidebar__footer {
-  padding-left: var(--sidebar-inset);
-  padding-right: var(--sidebar-inset);
-}
-
-/* The nav pill spans the full inner width; its own padding positions the tile
-   and label, so the inset must not be applied twice. */
-.sidebar__nav .sidebar__item,
-.sidebar__bottom-nav .sidebar__item {
-  padding-left: var(--space-2);
-  padding-right: var(--space-2);
-}
-
-/* ── Collapsed ───────────────────────────────────────────────────────────
- * A 52px rail has room for one centred column and nothing else. */
-
-.sidebar.is-collapsed {
-  --sidebar-inset: var(--sidebar-inset-collapsed);
-}
-
-.sidebar.is-collapsed .sidebar__nav .sidebar__item,
-.sidebar.is-collapsed .sidebar__bottom-nav .sidebar__item {
-  padding-left: 6px;
-  padding-right: 0;
-  justify-content: flex-start;
-}
-
-/* Footer: stack instead of holding a two-column row in 52px, so the avatar
-   stops being crushed against the left edge. */
-.sidebar.is-collapsed .sidebar__footer {
-  flex-direction: column;
-  gap: var(--space-2);
-  justify-content: center;
-}
-
-.sidebar.is-collapsed .sidebar__avatar-wrap {
-  justify-content: center;
-  width: 100%;
-}
-
-/* 40px, not 44: in a 52px rail a 44px control leaves 4px a side and reads as
-   overflowing. The row still clears the touch floor on height, which is the
-   axis a finger actually misses on here. */
-.sidebar.is-collapsed .sidebar__collapse-btn {
-  min-width: 40px;
-  width: 40px;
-  margin: 0 auto;
-}
-
-/* `.sidebar__nav` carries its own 10px horizontal padding, which stacked with
- * the group inset and put nav pills at 22px while the bottom-nav pills — which
- * have no such wrapper — sat at 12px. The inset belongs to one element per
- * region, so the scroll container gives its up and the group keeps it. */
-.sidebar__nav {
-  padding-left: 0;
-  padding-right: 0;
-}
-
-/* 6px, so the tile column lands close enough to the brand logo for the eye to
- * read one rail. The pill still has clear breathing room from the sidebar edge,
- * which is what stops an active row looking like a full-bleed band. */
-.sidebar__nav .sidebar__item,
-.sidebar__bottom-nav .sidebar__item {
-  padding-left: 6px;
-  padding-right: 6px;
-}
-
 /* ── Focus ring: the two cases the global rule cannot cover ──────────────
  *
  * `base.css` already carries an app-wide `:focus-visible` safety net with
@@ -511,12 +330,6 @@ label:has(> .native-checkbox) {
 :where(.switch):has(input:focus-visible) .switch__control {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
-}
-
-/* Inside the 52px collapsed rail a 2px ring offset outwards is clipped by the
-   edge, so it tucks inwards instead of disappearing. */
-.sidebar.is-collapsed :where(button, [role="button"]):focus-visible {
-  outline-offset: -2px !important;
 }
 
 /* ── Quality floor: reduced motion ───────────────────────────────────────
@@ -537,24 +350,6 @@ label:has(> .native-checkbox) {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
-}
-
-/* ── The icon column ─────────────────────────────────────────────────────
- *
- * The brand logo sat at 12px while the nav tiles started at 18px (the pill's
- * own 6px inner padding), so the vertical run of icons stepped in below the
- * logo. Giving the brand the same inner padding puts every glyph in the
- * sidebar on one column — the detail that makes the rail read as designed
- * rather than assembled.
- */
-
-.sidebar__brand {
-  padding-left: calc(var(--sidebar-inset) + 6px);
-}
-
-.sidebar.is-collapsed .sidebar__brand {
-  padding-left: var(--sidebar-inset);
-  padding-right: var(--sidebar-inset);
 }
 
 /* ── The settings catalogue ───────────────────────────────────────────────

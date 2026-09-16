@@ -1,7 +1,19 @@
-// ─── Routines Data ─────────────────────────────────────────────
+// ─── Routines: the shape, and a design fixture ─────────────────
 // Ported from goose-hub-settings.jsx ROUTINE_DETAIL constant.
 // Routines are on-demand scenes/macros that execute immediately on tap.
 // They are NOT time-triggered schedules — see Phase 6 notes in scratchpad.md.
+//
+// `ROUTINES` below is a FIXTURE and must never reach a household. It used to:
+// `hubDataStore` seeded it and returned it whenever the recipe list came back
+// empty, so a fresh pond — and any pond whose server was unreachable — listed
+// five routines it did not have, in the drawer and on Routines, each offering
+// to run. Tapping one wrote it into the household's real recipes and sent its
+// prompt to the agent. The store now maps recipes and only recipes; the one
+// remaining consumer is `sections/Schedules.tsx`, which looks a `RoutineId` up
+// by id and finds nothing for a recipe-derived routine, which is correct.
+//
+// Note the `time` strings in particular. Recipes carry no schedule, so every
+// one of these is a claim no record in the pond can support.
 
 import { sunEl, filmEl, focusEl } from "../primitives/HubIco";
 import { HP_PATHS } from "../primitives/icons";

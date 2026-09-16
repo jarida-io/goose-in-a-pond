@@ -9,6 +9,7 @@
  */
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
+import { navigateTo } from "./helpers/nav";
 
 // ─── Shared mock settings ─────────────────────────────────────
 
@@ -141,7 +142,8 @@ async function setupRoutes(
 
 // ─── Navigation helpers ───────────────────────────────────────
 
-async function navigateTo(page: Page) {
+// Renamed from navigateTo — that name now belongs to the shared drawer helper.
+async function bootHub(page: Page) {
   await page.addInitScript(() => {
     localStorage.setItem("giap-section", "hub");
     localStorage.setItem("giap-force-hub", "1");
@@ -153,16 +155,18 @@ async function navigateTo(page: Page) {
 }
 
 async function goToPrivacyScreen(page: Page) {
-  await navigateTo(page);
-  await page.getByRole("button", { name: "Settings", exact: true }).first().click();
+  await bootHub(page);
+  // The hub's icon rail is gone; Settings now lives in the drawer.
+  await navigateTo(page, "Settings");
   await page.waitForSelector(".set", { timeout: 5_000 });
   await page.getByRole("button", { name: /^Privacy$/ }).first().click();
   await page.waitForTimeout(500);
 }
 
 async function goToAccountScreen(page: Page) {
-  await navigateTo(page);
-  await page.getByRole("button", { name: "Settings", exact: true }).first().click();
+  await bootHub(page);
+  // The hub's icon rail is gone; Settings now lives in the drawer.
+  await navigateTo(page, "Settings");
   await page.waitForSelector(".set", { timeout: 5_000 });
   await page.getByRole("button", { name: /^Account$/ }).first().click();
   await page.waitForTimeout(500);

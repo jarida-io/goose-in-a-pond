@@ -120,189 +120,19 @@
 }
 .page-header__action { display: flex; align-items: center; gap: var(--space-2); }
 .mem-count-chip { min-width: 90px; justify-content: center; }
+
+/* What the batch extraction engine is doing, said where a person will see it */
+.mem-extraction { margin-bottom: var(--space-3); }
+.mem-extraction__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--grey-600);
+  font-size: var(--text-sm);
+}
+.mem-extraction__text { flex: 1; line-height: 1.45; }
+.mem-extraction__warn { color: var(--warning, #d97706); flex: none; }
 .mem-header__sep { width: 1px; height: 16px; background: var(--grey-200); flex-shrink: 0; }
-
-/* ─── Sidebar ─── */
-.sidebar {
-  background: var(--color-surface);
-  border-right: 1px solid var(--grey-200);
-  display: flex;
-  flex-direction: column;
-  padding: 14px 0 12px;
-  overflow: hidden;
-  width: var(--sidebar-width);
-  min-width: var(--sidebar-width);
-  transition: var(--sidebar-transition);
-}
-.sidebar.is-collapsed {
-  width: var(--sidebar-width-collapsed);
-  min-width: var(--sidebar-width-collapsed);
-  padding-right: 0;
-}
-.sidebar.is-collapsed .sidebar__brand {
-  justify-content: center;
-  padding: var(--space-2) 0 var(--space-4);
-}
-.sidebar.is-collapsed .sidebar__actions {
-  flex-direction: column;
-  align-items: center;
-  padding: 0 0 10px;
-  margin-bottom: 4px;
-  gap: 4px;
-  border-bottom: 1px solid var(--grey-200);
-}
-.sidebar.is-collapsed .sidebar__action-btn {
-  flex: none;
-}
-.sidebar.is-collapsed .sidebar__nav {
-  padding: 4px 0;
-}
-.sidebar.is-collapsed .sidebar__item {
-  justify-content: center;
-  padding: 7px 0;
-}
-.sidebar.is-collapsed .sidebar__footer {
-  padding: 10px 0 8px;
-  align-items: center;
-}
-
-.sidebar__brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: var(--space-2) var(--space-4) var(--space-4);
-}
-.sidebar__logo {
-  width: 34px; height: 34px;
-  border-radius: 10px;
-  background: linear-gradient(150deg, var(--pp), var(--pp-600));
-  box-shadow: 0 4px 12px rgba(140, 75, 255, 0.30);
-  display: grid;
-  place-items: center;
-  overflow: hidden;
-  flex-shrink: 0;
-}
-.sidebar__logo img { width: 26px; height: 26px; object-fit: contain; }
-.sidebar__brand-name {
-  font-family: var(--font-heading);
-  font-weight: var(--weight-bold);
-  font-size: 14px;
-  color: var(--fg);
-  letter-spacing: -0.015em;
-  line-height: var(--leading-snug);
-}
-
-.sidebar__nav {
-  flex: 1;
-  overflow-y: auto;
-  padding: 4px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-.sidebar__nav::-webkit-scrollbar { width: 6px; }
-.sidebar__nav::-webkit-scrollbar-thumb { background: var(--grey-200); border-radius: 6px; }
-
-.sidebar__group { display: flex; flex-direction: column; gap: 2px; }
-.sidebar__group-label {
-  font-size: var(--text-xs);
-  font-weight: var(--weight-semibold);
-  letter-spacing: 0.08em;
-  color: var(--grey-500);
-  padding: 8px 8px 4px;
-  text-transform: uppercase;
-  line-height: var(--leading-snug);
-}
-.sidebar__item {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 10px;
-  padding: 7px 10px;
-  border-radius: 8px;
-  border: 0;
-  background: transparent;
-  color: var(--grey-700);
-  font-size: var(--text-base);
-  font-family: var(--font-body);
-  font-weight: var(--weight-medium);
-  line-height: var(--leading-snug);
-  cursor: pointer;
-  text-align: left;
-  width: 100%;
-  transition: background var(--transition-fast);
-}
-.sidebar__item.is-active {
-  color: var(--pp);
-}
-.sidebar__item.is-active .sidebar__icon { color: var(--pp); }
-.sidebar__icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--grey-500);
-  width: 18px;
-  height: 18px;
-  flex-shrink: 0;
-}
-.sidebar__icon svg {
-  width: 16px;
-  height: 16px;
-}
-
-/* Notifications button pinned above the footer */
-.sidebar__bottom-nav {
-  padding: 4px 8px 4px;
-  border-top: 1px solid var(--grey-200);
-}
-
-.sidebar__footer {
-  padding: 8px 14px 10px;
-  border-top: 1px solid var(--grey-200);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-/* User avatar */
-.sidebar__avatar-wrap {
-  display: flex; align-items: center; gap: 8px;
-  flex: 1; min-width: 0;
-}
-.sidebar__avatar {
-  width: 28px; height: 28px; border-radius: 50%;
-  background: linear-gradient(150deg, var(--color-accent, #8C4BFF), #6e2bff);
-  color: #fff;
-  font-size: 12px; font-weight: 800;
-  display: flex; align-items: center; justify-content: center;
-  flex-shrink: 0;
-  position: relative;
-  box-shadow: 0 2px 8px rgba(140, 75, 255, 0.28);
-}
-.sidebar__avatar-dot {
-  position: absolute; bottom: -1px; right: -1px;
-  width: 8px; height: 8px; border-radius: 50%;
-  background: var(--grey-400);
-  border: 1.5px solid var(--color-surface);
-}
-.sidebar__avatar-dot.is-online {
-  background: var(--color-success);
-}
-.sidebar__avatar-name {
-  font-size: 11px; font-weight: 600; color: var(--grey-600);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  flex: 1; min-width: 0;
-}
-.sidebar__actions { display: flex; gap: 6px; }
-.sidebar__action-btn {
-  flex: 1; min-width: 0;
-  font-size: 12px !important;
-  height: var(--row-height-sm) !important;
-  border-radius: 8px !important;
-  border: 1px solid var(--grey-300) !important;
-  font-weight: var(--weight-medium) !important;
-  gap: 5px;
-}
 
 /* ─── Generic screen + cards ─── */
 .screen { display: flex; flex-direction: column; gap: 20px; max-width: 880px; }
@@ -1373,6 +1203,8 @@
   --mem-relationship-bg: rgba(34, 197, 94, 0.08);
   --mem-project:      #f97316;
   --mem-project-bg:   rgba(249, 115, 22, 0.08);
+  --mem-routine:      #a855f7;
+  --mem-routine-bg:   rgba(168, 85, 247, 0.08);
   --mem-knowledge:    #14b8a6;
   --mem-knowledge-bg: rgba(20, 184, 166, 0.08);
   --mem-context:      #9ca3af;
@@ -1575,6 +1407,7 @@
 .mem-seg-badge--correction  { background: var(--mem-correction-bg);   color: var(--mem-correction); }
 .mem-seg-badge--relationship{ background: var(--mem-relationship-bg); color: var(--mem-relationship); }
 .mem-seg-badge--project     { background: var(--mem-project-bg);      color: var(--mem-project); }
+.mem-seg-badge--routine     { background: var(--mem-routine-bg);      color: var(--mem-routine); }
 .mem-seg-badge--knowledge   { background: var(--mem-knowledge-bg);    color: var(--mem-knowledge); }
 .mem-seg-badge--context     { background: var(--mem-context-bg);      color: var(--mem-context); }
 .mem-seg-badge--none        { background: var(--grey-100);            color: var(--grey-500); }
@@ -1585,6 +1418,7 @@
 .mem-card__seg-icon--correction  { background: var(--mem-correction-bg);   color: var(--mem-correction); }
 .mem-card__seg-icon--relationship{ background: var(--mem-relationship-bg); color: var(--mem-relationship); }
 .mem-card__seg-icon--project     { background: var(--mem-project-bg);      color: var(--mem-project); }
+.mem-card__seg-icon--routine     { background: var(--mem-routine-bg);      color: var(--mem-routine); }
 .mem-card__seg-icon--knowledge   { background: var(--mem-knowledge-bg);    color: var(--mem-knowledge); }
 .mem-card__seg-icon--context     { background: var(--mem-context-bg);      color: var(--mem-context); }
 .mem-card__seg-icon--none        { background: var(--grey-100);            color: var(--grey-400); }
@@ -2641,7 +2475,6 @@
 
 /* ─── Settings ─── */
 .settings-tabs { padding: 0; }
-
 
 .settings-body {
   display: flex;
@@ -5982,32 +5815,12 @@
   /* Role grid: keep 2 cols but shrink chip padding */
   .role-chip__body { padding: 6px 8px; }
 
-  /* Sidebar: tighten vertical spacing */
-  .sidebar {
-    padding: 8px 0 8px;
-  }
-  .sidebar__brand {
-    padding: var(--space-1) var(--space-3) var(--space-2);
-  }
-  .sidebar__logo { width: 28px; height: 28px; }
-  .sidebar__logo img { width: 20px; height: 20px; }
-  .sidebar__brand-name { font-size: 13px; }
-  .sidebar__nav {
-    padding: 2px 8px;
-    gap: 10px;
-  }
-  .sidebar__group-label {
-    padding: 4px 8px 2px;
-  }
+  
+  
+  
+  
 
-  /* Sidebar items: 40px touch target minimum */
-  .sidebar__item {
-    padding: 9px 10px;
-    min-height: 40px;
-  }
-
-  .sidebar__bottom-nav { padding: 2px 8px; }
-  .sidebar__footer { padding: 6px 12px 8px; }
+  
 
   /* Schedules / devices grids: 2-col at short height to see more on screen */
   .sched-card { padding: 12px; gap: 10px; }
@@ -6041,53 +5854,12 @@
 /* ── 2. Kiosk width (≤ 1100px) combined with short height ────────────────── */
 @media (max-width: 1100px) and (max-height: 640px) {
 
-  /* Sidebar: collapse to icon-rail style at this combined breakpoint */
-  .sidebar {
-    width: var(--sidebar-width-collapsed);
-    min-width: var(--sidebar-width-collapsed);
-    padding-right: 0;
-  }
-  .sidebar__brand {
-    justify-content: center;
-    padding: var(--space-1) 0 var(--space-2);
-  }
-  .sidebar__brand-name { display: none; }
-  .sidebar__actions { flex-direction: column; align-items: center; padding: 0; gap: 3px; }
-  .sidebar__action-btn { flex: none; }
-  .sidebar__nav { padding: 2px 0; }
-  .sidebar__item {
-    justify-content: center;
-    padding: 9px 0;
-    min-height: 44px;
-  }
-  /* Hide label text + group labels — only icon shown at 52px */
-  .sidebar__item > span:not(.sidebar__icon),
-  .sidebar__group-label,
-  .sidebar__brand-name,
-  .sidebar__avatar-name {
-    display: none !important;
-  }
-  /* Action buttons: icon-only by hiding text via font-size trick.
-     SVG uses px width/height so is unaffected by font-size: 0. */
-  .sidebar__action-btn {
-    font-size: 0 !important;
-    overflow: hidden;
-    width: 36px !important;
-    min-width: 36px !important;
-    max-width: 36px !important;
-    flex: none !important;
-    padding: 0 !important;
-    justify-content: center;
-  }
-  .sidebar__actions {
-    justify-content: center;
-    gap: 4px;
-    padding-bottom: 8px;
-    margin-bottom: 3px;
-    border-bottom: 1px solid var(--grey-200);
-  }
-  .sidebar__footer { padding: 6px 0 6px; align-items: center; }
-  .sidebar__bottom-nav { padding: 2px 0; }
+  
+  
+  
+  
+  
+  
 
   /* Dashboard: stack to single column */
   .dash-grid { grid-template-columns: 1fr; }
@@ -6117,20 +5889,10 @@
   .voice-card { gap: 10px; }
   .voice-card__cta { padding-top: 8px; margin-top: 8px; }
 
-  /* Sidebar: shrink to 44px icon strip */
-  .sidebar {
-    width: 44px;
-    min-width: 44px;
-  }
-  .sidebar__item {
-    padding: 8px 0;
-    min-height: 40px;
-  }
-  .sidebar__logo { width: 26px; height: 26px; }
-  .sidebar__logo img { width: 18px; height: 18px; }
+  
+  
 
   /* Hide sidebar group labels */
-  .sidebar__group-label { display: none; }
 
   /* Metrics: 2 cols */
   .metrics { grid-template-columns: repeat(2, 1fr); }
@@ -6154,8 +5916,7 @@
 /* ── 4. Touch target safety net (all kiosk viewports) ────────────────────── */
 @media (max-width: 1100px) and (max-height: 640px) {
 
-  /* Ensure all sidebar nav items, quick-actions, and notif rows meet 40px */
-  .sidebar__item,
+  /* Ensure quick-actions and notif rows meet 40px */
   .quick-action,
   .notif-row,
   .session-dropdown__item,
@@ -6171,12 +5932,6 @@
   /* HeroUI buttons: enforce 40px tap height */
   .button--sm { height: 36px !important; min-height: 36px !important; }
   .button--md { height: 40px !important; min-height: 40px !important; }
-
-  /* Sidebar footer actions */
-  .sidebar__action-btn { height: 40px !important; }
-
-  /* Hub icon rail items */
-  .irail__item { min-height: 44px; }
 
   /* Notif badge CTA */
   .notif-row__cta { min-height: 32px; padding: 4px 2px; }

@@ -13,16 +13,15 @@
  */
 import { test, expect } from "@playwright/test";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
+import { navigateTo } from "./helpers/nav";
 
 async function goToModels(page: Parameters<typeof mockAllApiRoutes>[0]) {
   await page.goto("/");
-  const modelsBtn = page
-    .getByRole("button", { name: /models/i })
-    .or(page.locator('[title="Models"]'))
-    .first();
-  await modelsBtn.click({ timeout: 10_000 });
-  // Models defaults to "Set up" view; switch to "Manage" where roles/memory/downloads live
-  await page.getByRole("button", { name: "Manage" }).click({ timeout: 5_000 });
+  // Models sits behind the drawer's "Manage" group; navigateTo expands it.
+  await navigateTo(page, "Models");
+  // No in-page view switch any more. The Set up / Manage toggle this helper
+  // used to click was removed when the page was rebuilt (d516c82d); Models is
+  // now a single scroll, so arriving at the section IS arriving at the content.
 }
 
 test.describe("Models section", () => {
@@ -256,8 +255,7 @@ test.describe("Models — live provider tests", () => {
   test("live memory status shows real data", async ({ page }) => {
     await page.goto(process.env.GIAP_SERVER_URL!);
 
-    const modelsBtn = page.getByRole("button", { name: /models/i }).first();
-    await modelsBtn.click({ timeout: 10_000 });
+    await navigateTo(page, "Models");
 
     // Memory status section should show non-zero data or "external"
     await expect(

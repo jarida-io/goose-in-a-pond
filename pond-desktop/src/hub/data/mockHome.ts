@@ -1,5 +1,13 @@
-// ─── Mock Home Data ────────────────────────────────────────────
-// Ported verbatim from home-v2-components.jsx lines 64-120
+// ─── Home data shapes, and the two fixtures ────────────────────
+//
+// `HOME` is the demo house, ported verbatim from home-v2-components.jsx. It is
+// a DEVELOPMENT fixture and nothing else: it must never be the value a running
+// store hands to a screen, because a household cannot tell it from their own
+// house. The store seeds `EMPTY_HOME` instead — see hubDataStore's `state`.
+//
+// Keep `HOME` for the surfaces that are genuinely drawing a demo (hubStore's
+// device-state seed) and for tests that need a populated shape, and reach for
+// `EMPTY_HOME` everywhere the answer is "the pond has not said yet".
 
 export interface WeatherForecastDay {
   d: string;
@@ -40,6 +48,12 @@ export interface DeviceData {
   value?: number;
   target?: number;
   room: string;
+  /**
+   * What the backend says this device can do, verbatim from `GET /api/v1/devices`.
+   * A contact sensor's list is empty, and that is the only thing that stops Home
+   * offering it a power switch it cannot perform.
+   */
+  capabilities?: string[];
 }
 
 export interface CameraData {
@@ -82,12 +96,28 @@ export interface NowPlayingData {
   error?: string;
   /** Human-readable explanation for `error`. */
   message?: string;
+  /**
+   * Position and length in milliseconds, exactly as Spotify sent them.
+   *
+   * `elapsed` is the fraction derived from the same two numbers and is what the
+   * rail binds to; these are what mm:ss labels need, and they are null rather
+   * than 0 whenever nobody reported them — a zero here would be read as the
+   * start of a track.
+   */
+  progressMs: number | null;
+  durationMs: number | null;
 }
 
-export interface TodoItem {
-  t: string;
-  done: boolean;
-}
+/**
+ * What the pond last said about weather, which is not the same question as
+ * whether weather is switched on.
+ *
+ * "off" is a household decision; "unreachable" is a 502 from the provider, an
+ * egress refusal, a timeout or a dead socket; "unknown" is the state before
+ * anything has been asked. Collapsing the last two into "off" is how a panel
+ * ends up telling a household to set a location that is already set.
+ */
+export type WeatherStatus = "on" | "off" | "unreachable" | "unknown";
 
 export interface HomeData {
   user: string;
@@ -98,9 +128,88 @@ export interface HomeData {
   categories: CategoryData[];
   scenes: SceneData[];
   nowPlaying: NowPlayingData;
-  todos: TodoItem[];
   gooseSuggestions: string[];
+  /**
+   * The pond answered with a location and weather turned on. False also covers
+   * "has not answered yet", which is why nothing keyed on it may render a
+   * temperature: the slice is zeroed in that state, not merely stale.
+   *
+   * It is a narrower question than it looks — read `weatherStatus` before
+   * writing copy about it. A card that says "set your location" off this
+   * boolean alone says it to a household whose location is set and whose
+   * provider answered 502.
+   */
+  weatherEnabled: boolean;
+  /** Why `weatherEnabled` reads the way it does. */
+  weatherStatus: WeatherStatus;
+  /** The devices in this snapshot came from the pond rather than from this file. */
+  devicesAreReal: boolean;
 }
+
+/**
+ * The slice that is rendered when there is no weather to render.
+ *
+ * Nothing may paint from this: it is zeroes, and a zero here is a temperature.
+ * It exists so `WeatherData` stays a required field instead of becoming a null
+ * that every caller has to re-check, and it is shared so the store and the
+ * pre-load seed cannot drift into two different ideas of "no weather".
+ */
+export const NO_WEATHER: WeatherData = {
+  temp: 0,
+  cond: "",
+  icon: "",
+  hi: 0,
+  lo: 0,
+  hum: 0,
+  wind: 0,
+  sunrise: "",
+  sunset: "",
+  forecast: [],
+};
+
+/** Nothing playing, and nothing claimed about why. */
+const SILENT_PLAYER: NowPlayingData = {
+  track: "",
+  artist: "",
+  elapsed: 0,
+  hue: 265,
+  connected: false,
+  playing: false,
+  progressMs: null,
+  durationMs: null,
+};
+
+/**
+ * What a household sees before their pond has answered.
+ *
+ * Empty, not plausible. The store used to seed the demo house below, so the
+ * first screen of a fresh install listed six rooms and ten devices nobody
+ * owned, and every consumer had to remember to check `devicesAreReal` to avoid
+ * repeating them. One consumer forgot, which is the whole reason this exists:
+ * an empty fixture is the only one that cannot be mistaken for a house.
+ *
+ * `user` and `gooseSuggestions` survive because neither claims anything about
+ * this home — a name to greet and four things you could say out loud.
+ */
+export const EMPTY_HOME: HomeData = {
+  user: "Jerry",
+  weather: NO_WEATHER,
+  rooms: [],
+  devices: [],
+  cameras: [],
+  categories: [],
+  scenes: [],
+  nowPlaying: SILENT_PLAYER,
+  weatherEnabled: false,
+  weatherStatus: "unknown",
+  devicesAreReal: false,
+  gooseSuggestions: [
+    "Goose, what can you do?",
+    "Goose, is the front door locked?",
+    "Goose, make a new sticky note",
+    "Goose, what is the weather today?",
+  ],
+};
 
 export const HOME: HomeData = {
   user: "Jerry",
@@ -160,12 +269,19 @@ export const HOME: HomeData = {
     { id: "away",    name: "Away",         icon: "away",  active: false },
     { id: "focus",   name: "Focus",        icon: "focus", active: false },
   ],
-  nowPlaying: { track: "Weightless", artist: "Marconi Union", elapsed: 0.42, hue: 265, connected: false, playing: true },
-  todos: [
-    { t: "Water the plants",    done: true },
-    { t: "Call plumber re: leak", done: false },
-    { t: "Order coffee beans",  done: false },
-  ],
+  nowPlaying: {
+    track: "Weightless",
+    artist: "Marconi Union",
+    elapsed: 0.42,
+    hue: 265,
+    connected: false,
+    playing: true,
+    progressMs: null,
+    durationMs: null,
+  },
+  weatherEnabled: false,
+  weatherStatus: "unknown",
+  devicesAreReal: false,
   gooseSuggestions: [
     "Goose, set the house to Movie Time",
     "Goose, is the front door locked?",

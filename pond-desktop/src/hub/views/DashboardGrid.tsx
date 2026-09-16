@@ -1,74 +1,71 @@
 // ────────────────────────────────────────────────────────────
-// Home — what needs me, then what's on, arranged by the household.
+// Home — what needs me on the left, what is on to the right of it.
 //
 // One component, rendered by BOTH surfaces: `hub/views/Home.tsx` (touch panel)
-// and `sections/Dashboard.tsx` (desktop). They were already deliberate twins —
-// same primitives, same order, same header comment — so a redesign that landed
-// on one of them would give a household two different Homes depending on how
-// they got in.
+// and `sections/Dashboard.tsx` (desktop). They were already deliberate twins,
+// so a redesign landing on one of them would give a household two different
+// Homes depending on how they got in. The pages are identical on both; the
+// extra room on the desktop widens the widgets rather than adding any, which
+// is WidgetTrack's single container query and not a breakpoint here.
 //
-// Three things are new and each answers a real question:
+// THE SHAPE. A fixed 396px column that asks, and a paged track that reports.
+// The asking column never pages and never scrolls: one suggestion is open, the
+// rest are a peek and a count. The track is the household's own arrangement,
+// held in `state/dashboardLayout.ts` — which page, which order, which size.
 //
-//   SEARCH  — reaching a device that is deliberately NOT on Home. The screen
-//             was pared back on purpose; search is what makes that affordable
-//             without putting every device back on it.
-//   ROOMS   — `devices[].room` and `rooms[]` are real data, so grouping by room
-//             asserts nothing the pond does not know (DESIGN.md §3).
-//   EDIT    — the pared-back Home is one household's compromise. Which cards
-//             belong is a question only they can answer; see
-//             `state/dashboardLayout.ts` for why the DEFAULT is unchanged.
+// GONE, and both deliberately:
 //
-// What is deliberately NOT here: a results page, a drag-only reorder, and any
-// card backed by data the pond does not have.
+//   SEARCH and the ROOM FILTER. They existed to reach a device kept off Home
+//   on purpose. That reach is now the Devices screen the empty state already
+//   points at, and a results list has nowhere honest to go in a layout that is
+//   396px of prose beside a track of paged cards — it would either cover the
+//   suggestion or reflow the pages the household arranged.
+//
+//   THE CAMERA, SCENE, ROUTINE and TO-DO cards. See the catalogue's own header
+//   for why each one could not be made true.
+//
+// What is deliberately NOT here: any card backed by data the pond does not
+// have, and any control labelled with a verb it cannot perform.
 // ────────────────────────────────────────────────────────────
 
-import { useMemo, useState } from "react";
-import { Mic, Pencil, Search as SearchIcon, X } from "lucide-react";
-import {
-  InkBudget,
-  InkButton,
-  InkCard,
-  InkInput,
-  InkSegmented,
-  InkSheet,
-  InkStack,
-  InkText,
-} from "@jarida/ink/react";
-import { DeviceTile } from "../primitives/DeviceTile";
+import { Fragment, useState, type ReactElement, type ReactNode } from "react";
+import { InkButton, InkSegmented, InkSheet, InkStack, InkText } from "@jarida/ink/react";
+import { HubIco, micEl } from "../primitives/HubIco";
+import { HP_PATHS } from "../primitives/icons";
+import { SuggestionQueue } from "../primitives/SuggestionQueue";
 import { WeatherWidget } from "../primitives/WeatherWidget";
-import { NowPlaying } from "../primitives/NowPlaying";
-import { Suggestion } from "../primitives/Suggestion";
-import { useHomeData, useRoutines } from "../state/hubDataStore";
+import { HomeStatusBar } from "./HomeStatusBar";
+import { HomeControlsCard } from "./widgets/HomeControlsCard";
+import { MediaCard } from "./widgets/MediaCard";
+import { WidgetTrack } from "./widgets/WidgetTrack";
+import { AddWidgetButton, WidgetFrame } from "./widgets/WidgetFrame";
+import { useHomeData } from "../state/hubDataStore";
 import { homeLine } from "../state/homeLine";
-import { formatHubDate, greetingForHour, useNow } from "../state/useNow";
+import { greetingForHour, useNow } from "../state/useNow";
 import {
   CARDS,
+  MAX_PAGES,
   hideCard,
   moveCard,
+  moveCardToPage,
+  placedCards,
   resetLayout,
+  setCardSize,
   showCard,
   useDashboardLayout,
   type CardId,
+  type CardSize,
+  type PlacedCard,
 } from "../state/dashboardLayout";
-import type { DeviceData } from "../data/mockHome";
 import type { GuiSection } from "../../desktopState";
 import "./dashboard-grid.css";
 
-/** Devices shown before the household has narrowed anything. More than this is a list, not a glance. */
-const GLANCE_LIMIT = 8;
-
-/**
- * At or below this many devices, the report cards spread out instead of leaving
- * empty columns. Four is one row of tiles at every size this screen supports.
- */
-const SPARSE_LIMIT = 4;
-
-/** The room filter's "everything" option. Not a room id, so it cannot collide with one. */
-const ALL_ROOMS = "__all__";
+/** Tiles a device card shows at each size. Beyond six it is a list, not a glance. */
+const TILE_LIMIT: Record<CardSize, number> = { s: 2, m: 4, l: 6 };
 
 export interface DashboardGridProps {
   /**
-   * Where the empty state sends people. Typed as `GuiSection` rather than
+   * Where the empty states send people. Typed as `GuiSection` rather than
    * `string` on purpose: the first draft used `string` and pointed two cards at
    * "routines" and "cameras", neither of which is a section. The union caught
    * it; a looser type would have shipped two buttons that navigate nowhere.
@@ -76,420 +73,302 @@ export interface DashboardGridProps {
   onNavigate: (section: GuiSection) => void;
   /** Starts a voice turn. The surfaces reach voice mode differently. */
   onTalk: () => void;
-  /** The chat session the suggestion belongs to. Null before one is opened. */
+  /** The chat session the suggestions belong to. Null before one is opened. */
   sessionId: string | null;
 }
 
-export function DashboardGrid({ onNavigate, onTalk, sessionId }: DashboardGridProps) {
+export function DashboardGrid({ onNavigate, onTalk, sessionId }: DashboardGridProps): ReactElement {
   const home = useHomeData();
   const now = useNow();
   const layout = useDashboardLayout();
 
-  const [query, setQuery] = useState("");
-  const [room, setRoom] = useState<string>(ALL_ROOMS);
-  const [editing, setEditing] = useState(false);
+  // Two flags, not one. `arranging` is the frames' toolbars; `sheetOpen` is the
+  // panel. Turning Arrange on opens both, but closing the sheet leaves the
+  // toolbars up, because the arrows on the widgets themselves are the faster
+  // way to reorder once the household can see what they are moving.
+  const [arranging, setArranging] = useState(false);
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [requestedPage, setRequestedPage] = useState(0);
 
-  const searching = query.trim().length > 0;
+  const pageCount = layout.pages.length;
+  // The store refuses to hide the last card left anywhere on Home, and the
+  // sheet's own remove is disabled for it. The frame's x has to agree, or one
+  // Arrange session shows two controls of the same name disagreeing about
+  // whether the act is available and one of them silently does nothing.
+  const placedCount = placedCards(layout).length;
+  // Clamped at render rather than corrected in an effect: a page that stopped
+  // existing (the household emptied it) must not leave the track pointing past
+  // its own end for a frame.
+  const page = Math.min(requestedPage, Math.max(0, pageCount - 1));
 
-  // Only rooms that actually hold a device. A room the household created and
-  // then emptied is not a filter worth offering, and an option that always
-  // yields nothing teaches people the filter is broken.
-  const rooms = useMemo(() => {
-    const populated = new Set(home.devices.map((d) => d.room).filter(Boolean));
-    return home.rooms.filter((r) => populated.has(r.name) || populated.has(r.id));
-  }, [home.rooms, home.devices]);
+  function toggleArrange(): void {
+    const next = !arranging;
+    setArranging(next);
+    setSheetOpen(next);
+  }
 
-  const devices = useMemo(
-    () => filterDevices(home.devices, query, searching ? ALL_ROOMS : room),
-    [home.devices, query, room, searching],
-  );
+  // Before the first load lands, `devices` is this file's demo house. Passing it
+  // to homeLine would put a sentence about ten invented lamps on the screen for
+  // as long as the load takes.
+  const devices = home.devicesAreReal ? home.devices : [];
 
-  const greeting = greetingForHour(now.getHours());
+  // homeLine's last resort is a sentence about the sky, and there is no sky to
+  // report when weather is off — the slice is zeroed, so it would read ", 0°
+  // out.". The hour and the name are true without either.
+  const quietLine =
+    devices.length === 0 && !home.weatherEnabled
+      ? `${greetingForHour(now.getHours())}, ${home.user}.`
+      : homeLine({ user: home.user, devices, weather: home.weather, now });
 
-  // "Few" rather than "none": a house with two lamps has the same problem as a
-  // house with none — a devices card that occupies two columns to show one row
-  // of tiles, and three empty ones beside it.
-  const sparse = home.devices.length <= SPARSE_LIMIT;
-  const playing = home.nowPlaying.connected && home.nowPlaying.playing;
-  const line = homeLine({
-    user: home.user,
-    devices: home.devices,
-    weather: home.weather,
-    now,
-  });
+  function renderCard(card: PlacedCard): ReactNode {
+    switch (card.id) {
+      case "weather":
+        // Reused untouched rather than rebuilt to the design's literal
+        // #60A5FA gradient. Its skies are contrast-tested at 4.5:1 by
+        // weatherSky.test.ts against a scrim whose alpha that test proves is no
+        // more opaque than it has to be; an untested gradient would trade a
+        // measured floor for a mockup.
+        return home.weatherEnabled ? (
+          <WeatherWidget variant={card.size === "s" ? "card" : "hero"} />
+        ) : (
+          <div className="dash__gap">
+            <span className="dash__gap-line">Set your location to see weather</span>
+            <button type="button" className="dash__gap-btn" onClick={() => onNavigate("settings")}>
+              Open Settings
+            </button>
+          </div>
+        );
+
+      case "devices":
+        return (
+          <HomeControlsCard
+            limit={TILE_LIMIT[card.size]}
+            onManageDevices={() => onNavigate("devices")}
+          />
+        );
+
+      case "nowPlaying":
+        return <MediaCard onOpenSettings={() => onNavigate("settings")} />;
+    }
+  }
+
+  const pages: ReactNode[] = layout.pages.map((cards, pageIndex) => (
+    <Fragment key={pageIndex}>
+      {cards.map((card, i) => (
+        <WidgetFrame
+          key={card.id}
+          title={titleOf(card.id)}
+          size={card.size}
+          arranging={arranging}
+          onSize={(size) => setCardSize(card.id, size)}
+          onRemove={() => hideCard(card.id)}
+          onMoveUp={() => moveCard(card.id, -1)}
+          onMoveDown={() => moveCard(card.id, 1)}
+          canMoveUp={i > 0}
+          canMoveDown={i < cards.length - 1}
+          canRemove={placedCount > 1}
+        >
+          {renderCard(card)}
+        </WidgetFrame>
+      ))}
+
+      {/* Only on the last page, and only when there is something to add. The
+          design's label names cameras, scenes and to-do; this build has none of
+          the three, so it names nothing. It reopens the sheet rather than
+          picking a card on the household's behalf. */}
+      {arranging && layout.hidden.length > 0 && pageIndex === pageCount - 1 && (
+        <AddWidgetButton label="Add a widget" onClick={() => setSheetOpen(true)} />
+      )}
+    </Fragment>
+  ));
 
   return (
-    // Two raised surfaces is the budget (DESIGN.md §3, "spend the offset about
-    // twice per screen"). Held here rather than remembered: InkBudget warns in
-    // development when a third card mounts raised.
-    <InkBudget max={2}>
-      <div className="dash" data-editing={editing || undefined}>
-        <header className="dash__head">
-          <div className="dash__greet-block">
-            <h1 className="dash__greet">
-              {greeting}, <span>{home.user}</span>
-            </h1>
-            <p className="dash__sub">
-              {formatHubDate(now)} · {home.weather.cond}, {home.weather.temp}°
-            </p>
-          </div>
+    <div className="dash" data-arranging={arranging || undefined}>
+      <HomeStatusBar
+        arranging={arranging}
+        onToggleArrange={toggleArrange}
+        temp={home.weatherEnabled ? home.weather.temp : null}
+        userName={home.user}
+      />
 
-          {/*
-            No `aria-label` here: InkButton does not forward it. The button's
-            accessible name is the text below, which is why the small-panel rule
-            clips that text rather than removing it.
-          */}
-          <InkButton variant="quiet" onPress={() => setEditing(true)}>
-            <Pencil size={18} strokeWidth={2.2} aria-hidden="true" />
-            <span className="dash__btn-label">Arrange</span>
-          </InkButton>
-        </header>
-
-        {/*
-          Chrome, so it stays on a hairline and never takes the ink edge
-          (DESIGN.md §3, "the edge marks content, never chrome"). If the filters
-          start shouting, nothing on the page is loud any more.
-        */}
-        <div className="dash__toolbar" role="search">
-          <div className="dash__search">
-            <InkInput
-              label="Search your home"
-              placeholder="Search devices, rooms, scenes"
-              value={query}
-              onChange={setQuery}
-              type="search"
-              lead={<SearchIcon size={18} strokeWidth={2.2} aria-hidden="true" />}
-              trail={
-                query ? (
-                  <button
-                    type="button"
-                    className="dash__clear"
-                    onClick={() => setQuery("")}
-                    aria-label="Clear search"
-                  >
-                    <X size={16} strokeWidth={2.4} aria-hidden="true" />
-                  </button>
-                ) : undefined
-              }
-            />
-          </div>
-
-          {/*
-            Hidden while searching, deliberately: a search is a question about
-            the whole house, and leaving a room filter applied to it silently
-            hides matches the household can see are missing.
-          */}
-          {!searching && rooms.length > 1 && (
-            <InkSegmented
-              label="Room"
-              value={room}
-              onChange={setRoom}
-              shape="pill"
-              options={[
-                { value: ALL_ROOMS, label: "All" },
-                ...rooms.map((r) => ({ value: r.name, label: r.name })),
-              ]}
-            />
-          )}
+      <div className="dash__body">
+        <SuggestionQueue sessionId={sessionId} quietLine={quietLine} />
+        <div className="dash__track">
+          <WidgetTrack pages={pages} page={page} onPageChange={setRequestedPage} />
         </div>
-
-        <div className="dash__grid">
-          {layout.order.map((id) => (
-            <DashCard
-              key={id}
-              id={id}
-              devices={devices}
-              playing={playing}
-              sparse={sparse}
-              line={line}
-              searching={searching}
-              query={query}
-              sessionId={sessionId}
-              onNavigate={onNavigate}
-            />
-          ))}
-        </div>
-
-        {/* Last, because it is how you answer everything above it. */}
-        <button className="dash__talk" onClick={onTalk}>
-          <Mic size={16} strokeWidth={2.2} aria-hidden="true" />
-          Start talking
-        </button>
-
-        <ArrangeSheet open={editing} onClose={() => setEditing(false)} />
       </div>
-    </InkBudget>
+
+      {/* Floats over both columns. The track's pages carry 88px of bottom
+          padding for exactly this, and the left column clears it by being
+          vertically centred in a taller box than its own content. */}
+      <div className="dash__dock">
+        <button type="button" className="dash__voice" aria-label="Talk to Goose" onClick={onTalk}>
+          {/* micEl, not HP_PATHS.mic: that entry is a compound sentinel string
+              and renders nothing at all as a path. */}
+          <HubIco d={micEl} size={26} color="#fff" sw={2} />
+        </button>
+        <button
+          type="button"
+          className="dash__chat"
+          aria-label="Type to Goose"
+          onClick={() => onNavigate("chat")}
+        >
+          <HubIco d={HP_PATHS.railChat} size={22} color="var(--color-text)" sw={2} />
+        </button>
+      </div>
+
+      <ArrangeSheet
+        open={sheetOpen}
+        onClose={() => setSheetOpen(false)}
+        onGoToPage={setRequestedPage}
+      />
+    </div>
   );
 }
 
-/**
- * Match a device against what the household typed.
- *
- * Name, room and kind, because those are the three things a person says out
- * loud about a device — "the hall lamp", "kitchen", "the locks". Substring and
- * case-insensitive; no fuzzy matching, because a near-miss that silently
- * returns the wrong lamp is worse than no match on a screen whose whole job is
- * to be trusted at a glance.
- */
-function filterDevices(devices: DeviceData[], query: string, room: string): DeviceData[] {
-  const q = query.trim().toLowerCase();
-  return devices.filter((d) => {
-    if (room !== ALL_ROOMS && d.room !== room) return false;
-    if (!q) return true;
-    return (
-      d.name.toLowerCase().includes(q) ||
-      (d.room ?? "").toLowerCase().includes(q) ||
-      d.kind.toLowerCase().includes(q)
-    );
-  });
+function titleOf(id: CardId): string {
+  return CARDS.find((c) => c.id === id)?.title ?? id;
 }
 
-interface DashCardProps {
-  id: CardId;
-  devices: DeviceData[];
-  /** Something is actually playing, so the music card earns its width. */
-  playing: boolean;
-  /** Few or no devices — the report cards spread into the space instead. */
-  sparse: boolean;
-  /** The one sentence about this house, computed where the data lives. */
-  line: string;
-  searching: boolean;
-  query: string;
-  sessionId: string | null;
-  onNavigate: (section: GuiSection) => void;
-}
-
-/**
- * One card. Every branch is backed by a slice of `HomeData` that the pond
- * actually populates — there is no placeholder card for data we do not have.
- */
-function DashCard({ id, devices, playing, sparse, line, searching, query, sessionId, onNavigate }: DashCardProps) {
-  switch (id) {
-    case "suggestion":
-      // The only element on the screen that asks for anything, and one of the
-      // two that may spend the offset.
-      return searching ? null : (
-        <section className="dash__cell dash__cell--wide">
-          <Suggestion
-            sessionId={sessionId}
-            quiet={<p className="dash__line">{line}</p>}
-          />
-        </section>
-      );
-
-    case "devices":
-      return (
-        <section className="dash__cell dash__cell--wide" aria-labelledby="dash-devices">
-          <h2 className="dash__label" id="dash-devices">
-            {searching ? `Matching "${query.trim()}"` : "Devices"}
-          </h2>
-          {devices.length > 0 ? (
-            <div className="dash__tiles">
-              {devices.slice(0, searching ? devices.length : GLANCE_LIMIT).map((d) => (
-                <DeviceTile key={d.id} device={d} />
-              ))}
-            </div>
-          ) : searching ? (
-            // An empty result is not an error and does not offer to fix itself
-            // — the household knows what they typed.
-            <InkCard raised={false}>
-              <InkText>Nothing here matches that. Try a room, or part of a name.</InkText>
-            </InkCard>
-          ) : (
-            <button className="dash__empty" onClick={() => onNavigate("devices")}>
-              Add your first device
-            </button>
-          )}
-        </section>
-      );
-
-    case "weather":
-      // A house with nothing paired still has a sky. Rather than leaving three
-      // empty columns beside a single "add a device" prompt, the weather takes
-      // the room — it is the one card that is always true, and a new household
-      // should meet a screen that looks finished rather than unfurnished.
-      return searching ? null : (
-        <section className={`dash__cell${sparse ? " dash__cell--wide" : ""}`}>
-          <WeatherWidget />
-        </section>
-      );
-
-    case "nowPlaying":
-      // Form carries data (DESIGN.md §3): the card is wide while something is
-      // actually playing and ordinary when it is not. A music card that is
-      // always large is decoration; one that grows when there is a track to
-      // show is reporting.
-      return searching ? null : (
-        <section
-          className={`dash__cell${playing ? " dash__cell--wide" : ""}`}
-          data-playing={playing || undefined}
-        >
-          <NowPlaying variant="tile" />
-        </section>
-      );
-
-    // Cards the household can add. Each opens its own destination rather than
-    // duplicating it here — Home stopped being a copy of the rail, and adding a
-    // card should not undo that.
-    case "scenes":
-    case "cameras":
-    case "routines":
-    case "todos":
-      return searching ? null : (
-        <section className="dash__cell">
-          <ExtraCard id={id} />
-        </section>
-      );
-
-    default:
-      return null;
-  }
-}
-
-/**
- * The cards a household can add, each showing what it is named for.
- *
- * These were links at first — a card that said "Cameras" and navigated. Two of
- * them pointed at sections that do not exist, which the `GuiSection` union
- * caught, and fixing the type made the deeper problem obvious: a card whose
- * whole content is its own title earns none of the space it takes. Every one
- * now reports from `HomeData`, or does not render at all.
- *
- * A card with nothing to say renders nothing rather than an empty frame. An
- * empty frame on a panel read from across a room is indistinguishable from a
- * card that failed to load.
- */
-function ExtraCard({ id }: { id: CardId }) {
-  const home = useHomeData();
-  const routines = useRoutines();
-
-  if (id === "scenes") {
-    if (home.scenes.length === 0) return null;
-    return (
-      <InkCard raised={false}>
-        <InkStack gap={2}>
-          <h2 className="dash__label">Scenes</h2>
-          <div className="dash__chips">
-            {home.scenes.map((sc) => (
-              <span key={sc.id} className="dash__chip" data-on={sc.active || undefined}>
-                {sc.name}
-              </span>
-            ))}
-          </div>
-        </InkStack>
-      </InkCard>
-    );
-  }
-
-  if (id === "cameras") {
-    if (home.cameras.length === 0) return null;
-    return (
-      <InkCard raised={false}>
-        <InkStack gap={1}>
-          <h2 className="dash__label">Cameras</h2>
-          <InkText>
-            {home.cameras.length} {home.cameras.length === 1 ? "camera" : "cameras"}
-          </InkText>
-          <InkText tone="secondary">{home.cameras.map((c) => c.name).join(", ")}</InkText>
-        </InkStack>
-      </InkCard>
-    );
-  }
-
-  if (id === "routines") {
-    if (routines.length === 0) return null;
-    return (
-      <InkCard raised={false}>
-        <InkStack gap={1}>
-          <h2 className="dash__label">Routines</h2>
-          {routines.slice(0, 3).map((r) => (
-            <InkText key={r.id} tone="secondary">
-              {r.name}
-            </InkText>
-          ))}
-        </InkStack>
-      </InkCard>
-    );
-  }
-
-  if (id === "todos") {
-    if (home.todos.length === 0) return null;
-    return (
-      <InkCard raised={false}>
-        <InkStack gap={1}>
-          <h2 className="dash__label">To-do</h2>
-          {home.todos.slice(0, 4).map((t, i) => (
-            <InkText key={i} tone="secondary">
-              {typeof t === "string" ? t : (t as { text?: string }).text ?? ""}
-            </InkText>
-          ))}
-        </InkStack>
-      </InkCard>
-    );
-  }
-
-  return null;
-}
+const SIZE_OPTIONS: { value: CardSize; label: string }[] = [
+  { value: "s", label: "Small" },
+  { value: "m", label: "Medium" },
+  { value: "l", label: "Large" },
+];
 
 /**
  * Arranging Home.
  *
- * Move up / move down / show / hide, as buttons. A drag would be fewer taps for
- * someone holding a mouse and unusable for everyone else: DESIGN.md §6 makes
- * keyboard operability a floor, and a thumb dragging a card on a 480px-tall
- * panel is a worse gesture than two taps. Drag can be added over this later; it
- * cannot replace it.
+ * Buttons, not a drag. A drag is fewer taps for someone holding a mouse and
+ * unusable for everyone else: DESIGN.md §6 makes keyboard operability a floor,
+ * and a thumb dragging a card on a 480px-tall panel is a worse gesture than two
+ * taps. Drag can be added over this later; it cannot replace it.
+ *
+ * "Move to page" is its own control rather than a side effect of the arrows.
+ * With pages in the model, "up" past the top of a page could silently mean "the
+ * previous page" — a move nobody asked for and nobody can see happen from the
+ * sheet. Crossing a page is an explicit act with its own button and its own
+ * name.
  */
-function ArrangeSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
+function ArrangeSheet({
+  open,
+  onClose,
+  onGoToPage,
+}: {
+  open: boolean;
+  onClose: () => void;
+  /** Follows a card that just crossed a page, so the household sees where it went. */
+  onGoToPage: (page: number) => void;
+}): ReactElement {
   const layout = useDashboardLayout();
   const spec = (id: CardId) => CARDS.find((c) => c.id === id);
+  const placed = placedCards(layout);
+  // The page an Available card is added to. Adding to page 1 from a sheet that
+  // cannot show the track is the least surprising of the options, and the row
+  // says which page it means.
+  const addTo = 0;
 
   return (
     <InkSheet open={open} onClose={onClose} title="Arrange Home" side="right">
       <InkStack gap={4}>
-        <section>
-          <h3 className="dash__sheet-label">On Home</h3>
-          <ul className="dash__arrange">
-            {layout.order.map((id, i) => {
-              const c = spec(id);
-              if (!c) return null;
-              return (
-                <li key={id} className="dash__arrange-row">
-                  <div className="dash__arrange-text">
-                    <InkText weight="semibold">{c.title}</InkText>
-                    <InkText tone="secondary">{c.hint}</InkText>
-                  </div>
-                  <div className="dash__arrange-acts">
-                    <button
-                      className="dash__icon-btn"
-                      onClick={() => moveCard(id, -1)}
-                      disabled={i === 0}
-                      aria-label={`Move ${c.title} up`}
-                    >
-                      ↑
-                    </button>
-                    <button
-                      className="dash__icon-btn"
-                      onClick={() => moveCard(id, 1)}
-                      disabled={i === layout.order.length - 1}
-                      aria-label={`Move ${c.title} down`}
-                    >
-                      ↓
-                    </button>
-                    <button
-                      className="dash__icon-btn"
-                      onClick={() => hideCard(id)}
-                      disabled={layout.order.length === 1}
-                      aria-label={`Remove ${c.title} from Home`}
-                    >
-                      <X size={16} strokeWidth={2.4} aria-hidden="true" />
-                    </button>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        </section>
+        {layout.pages.map((cards, pageIndex) => (
+          <section key={pageIndex}>
+            <h3 className="dash__sheet-label">Page {pageIndex + 1}</h3>
+            <ul className="dash__arrange">
+              {cards.map((card, i) => {
+                const c = spec(card.id);
+                if (!c) return null;
+                const others = layout.pages
+                  .map((_, p) => p)
+                  .filter((p) => p !== pageIndex)
+                  // One page beyond the last, so a household can spread out
+                  // without hunting for an "add a page" control.
+                  .concat(layout.pages.length < MAX_PAGES ? [layout.pages.length] : []);
+                return (
+                  <li key={card.id} className="dash__arrange-row">
+                    <div className="dash__arrange-text">
+                      <InkText weight="semibold">{c.title}</InkText>
+                      <InkText tone="secondary">{c.hint}</InkText>
+                    </div>
+
+                    <div className="dash__arrange-acts">
+                      <button
+                        type="button"
+                        className="dash__icon-btn"
+                        onClick={() => moveCard(card.id, -1)}
+                        disabled={i === 0}
+                        aria-label={`Move ${c.title} up`}
+                      >
+                        <HubIco
+                          d={HP_PATHS.chevD}
+                          size={18}
+                          color="var(--color-text)"
+                          sw={2.4}
+                          className="dash__up"
+                        />
+                      </button>
+                      <button
+                        type="button"
+                        className="dash__icon-btn"
+                        onClick={() => moveCard(card.id, 1)}
+                        disabled={i === cards.length - 1}
+                        aria-label={`Move ${c.title} down`}
+                      >
+                        <HubIco d={HP_PATHS.chevD} size={18} color="var(--color-text)" sw={2.4} />
+                      </button>
+                      <button
+                        type="button"
+                        className="dash__icon-btn"
+                        onClick={() => hideCard(card.id)}
+                        disabled={placed.length === 1}
+                        aria-label={`Remove ${c.title} from Home`}
+                      >
+                        <HubIco d={HP_PATHS.x} size={16} color="var(--color-text)" sw={2.4} />
+                      </button>
+                    </div>
+
+                    {/* A radiogroup named for the card, so a segment reads
+                        "Large" inside "Weather size" rather than a bare "L"
+                        belonging to nothing. InkSegmented's `label` is the
+                        group's accessible name and is never drawn. */}
+                    <div className="dash__arrange-size">
+                      <InkSegmented
+                        label={`${c.title} size`}
+                        value={card.size}
+                        onChange={(size) => setCardSize(card.id, size)}
+                        shape="pill"
+                        options={SIZE_OPTIONS}
+                      />
+                    </div>
+
+                    {others.length > 0 && (
+                      <div className="dash__arrange-pages">
+                        {others.map((p) => (
+                          <button
+                            key={p}
+                            type="button"
+                            className="dash__page-btn"
+                            aria-label={`Move ${c.title} to page ${p + 1}`}
+                            onClick={() => {
+                              // Follow the card, not the button. Emptying this
+                              // page drops it and shifts every later page down,
+                              // so `p` is the page that was asked for and the
+                              // return is the page the card is actually on.
+                              const landedOn = moveCardToPage(card.id, p);
+                              if (landedOn !== null) onGoToPage(landedOn);
+                            }}
+                          >
+                            Page {p + 1}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        ))}
 
         {layout.hidden.length > 0 && (
           <section>
@@ -504,9 +383,17 @@ function ArrangeSheet({ open, onClose }: { open: boolean; onClose: () => void })
                       <InkText weight="semibold">{c.title}</InkText>
                       <InkText tone="secondary">{c.hint}</InkText>
                     </div>
-                    <InkButton variant="quiet" onPress={() => showCard(id)}>
-                      Add
-                    </InkButton>
+                    <button
+                      type="button"
+                      className="dash__page-btn"
+                      aria-label={`Add ${c.title} to page ${addTo + 1}`}
+                      onClick={() => {
+                        showCard(id, addTo);
+                        onGoToPage(addTo);
+                      }}
+                    >
+                      Add to page {addTo + 1}
+                    </button>
                   </li>
                 );
               })}

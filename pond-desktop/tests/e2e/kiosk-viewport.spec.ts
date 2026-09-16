@@ -7,15 +7,23 @@
  *
  * Checks:
  *   1. No horizontal overflow (body.scrollWidth === viewport width).
- *   2. Sidebar is in icon-only mode, at the width the design token names.
- *   3. Content area fills the remaining width without clipping.
- *   4. Key interactive targets meet the 40px minimum height.
- *   5. Both classic sections UI (app-shell) and hub UI (ghub/.irail) are
- *      visually verified via screenshot.
+ *   2. The shell spends no horizontal space on navigation at all.
+ *   3. The drawer, open, fits inside the panel and is scrollable rather than
+ *      clipped.
+ *   4. Key interactive targets meet the touch minimum.
+ *   5. Both shells (app-shell and ghub) are screenshotted.
+ *
+ * What this file used to check, and why it no longer can: the sidebar's
+ * collapsed width, that its brand name and group labels were display:none at
+ * kiosk sizes, and that the hub rail stayed under 86px. All three were
+ * measuring the same thing -- how little horizontal space navigation could be
+ * squeezed into -- and the answer is now none, because navigation is a drawer.
+ * The property survives as check 2; the pixel counts do not survive at all.
  */
 
 import { test, expect, Page } from "@playwright/test";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
+import { navigateTo, openDrawer } from "./helpers/nav";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -24,76 +32,69 @@ async function checkNoHorizOverflow(page: Page): Promise<void> {
   expect(overflow, "No horizontal overflow expected").toBe(false);
 }
 
-/** Widest the collapsed rail may get before it stops being a rail. */
-const RAIL_CEILING_PX = 72;
-
-async function checkSidebarCompact(page: Page): Promise<void> {
-  // Measured against the token rather than a literal. This assertion was
-  // pinned at ≤52px, which is a pixel count standing in for "the rail is
-  // icon-only" — so a 4px design change to the rail failed a kiosk test that
-  // was not about rail width, and the number in docs/design-system.md drifted
-  // out of date at the same time with nothing to catch it. The property this
-  // file actually cares about is asserted directly by "sidebar is icon-only
-  // (no text labels visible)" below, which checks the brand name and group
-  // labels are display:none.
-  const measured = await page.evaluate(() => {
-    const s = document.querySelector(".sidebar");
-    if (!s) return null;
-    const token = getComputedStyle(document.documentElement)
-      .getPropertyValue("--sidebar-width-collapsed")
-      .trim();
-    return { width: s.getBoundingClientRect().width, token };
-  });
-  if (measured === null) return;
-
-  const tokenPx = Number.parseFloat(measured.token);
-  expect(
-    Number.isFinite(tokenPx),
-    `--sidebar-width-collapsed should be a px length, got "${measured.token}"`,
-  ).toBe(true);
-
-  // No WIDER than the token. Equality would be wrong: the 1024x600 rule sets
-  // .sidebar { width: var(--sidebar-width-collapsed) }, but the very-short-panel
-  // rule (@media max-height:500px, the 800x480 target) narrows it further to a
-  // hardcoded 44px. So the token is the ceiling, and anything above it means
-  // something is overriding the rail wider than intended — the regression this
-  // is for.
-  expect(
-    measured.width,
-    `Collapsed rail (${measured.width}px) should be no wider than ` +
-      `--sidebar-width-collapsed (${tokenPx}px) at kiosk viewport`,
-  ).toBeLessThanOrEqual(tokenPx + 0.5);
-
-  expect(
-    tokenPx,
-    `--sidebar-width-collapsed (${tokenPx}px) is too wide to still be an icon rail`,
-  ).toBeLessThanOrEqual(RAIL_CEILING_PX);
+/**
+ * The shell gives navigation no width of its own.
+ *
+ * Asserted as "content starts at the left edge" rather than "no .sidebar
+ * exists", because the absence of a class is satisfied by a blank page.
+ */
+async function checkNoPersistentNav(page: Page, contentSelector: string): Promise<void> {
+  const left = await page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    return el ? el.getBoundingClientRect().left : null;
+  }, contentSelector);
+  expect(left, `${contentSelector} should be on screen`).not.toBeNull();
+  expect(left as number, "Content starts at the left edge -- no nav column").toBeLessThanOrEqual(1);
 }
 
-async function checkIrailCompact(page: Page): Promise<void> {
-  const irailW = await page.evaluate(() => {
-    const r = document.querySelector(".irail");
-    return r ? r.getBoundingClientRect().width : null;
-  });
-  if (irailW !== null) {
-    // Hub icon rail should be ≤86px (normal max) — our rules shrink it to ≤72px
-    expect(irailW, "Icon rail should be ≤86px at kiosk viewport").toBeLessThanOrEqual(86);
-  }
-}
-
+/** The drawer's controls are the finger's targets, so they carry the floor. */
 async function checkTouchTargets(page: Page): Promise<void> {
-  // Sidebar nav items should be ≥40px tall
-  const minHeight = await page.evaluate(() => {
-    const items = document.querySelectorAll(".sidebar__item");
-    if (!items.length) return 99; // no sidebar — pass
+  const trigger = await page.evaluate(() => {
+    const el = document.querySelector('[aria-label="Open menu"]');
+    return el ? el.getBoundingClientRect().height : 0;
+  });
+  expect(trigger, "The drawer's trigger should be ≥44px tall").toBeGreaterThanOrEqual(44);
+
+  await openDrawer(page);
+  const minRow = await page.evaluate(() => {
+    const rows = document.querySelectorAll(".hdrawer__item, .hdrawer__routine");
+    if (!rows.length) return 99;
     let min = Infinity;
-    items.forEach((el) => {
+    rows.forEach((el) => {
       const h = el.getBoundingClientRect().height;
       if (h > 0 && h < min) min = h;
     });
     return min === Infinity ? 99 : min;
   });
-  expect(minHeight, "Sidebar items should be ≥40px tall (touch target)").toBeGreaterThanOrEqual(40);
+  expect(minRow, "Drawer rows should be ≥44px tall (touch target)").toBeGreaterThanOrEqual(44);
+  await page.keyboard.press("Escape");
+}
+
+/** Open, and prove the panel is inside the viewport and scrolls rather than clips. */
+async function checkDrawerFits(page: Page): Promise<void> {
+  await openDrawer(page);
+  const box = await page.evaluate(() => {
+    const el = document.querySelector<HTMLElement>(".hdrawer");
+    const body = document.querySelector<HTMLElement>(".hdrawer__body");
+    if (!el || !body) return null;
+    const r = el.getBoundingClientRect();
+    return {
+      left: r.left, right: r.right, top: r.top, bottom: r.bottom,
+      vw: window.innerWidth, vh: window.innerHeight,
+      scrolls: body.scrollHeight > body.clientHeight,
+      clientH: body.clientHeight,
+    };
+  });
+  expect(box, "Drawer should be in the DOM when open").not.toBeNull();
+  const b = box as NonNullable<typeof box>;
+  expect(b.left, "Drawer inside the left edge").toBeGreaterThanOrEqual(0);
+  expect(b.right, "Drawer inside the right edge").toBeLessThanOrEqual(b.vw);
+  expect(b.top, "Drawer inside the top edge").toBeGreaterThanOrEqual(0);
+  expect(b.bottom, "Drawer inside the bottom edge").toBeLessThanOrEqual(b.vh);
+  // Taller than the panel is expected and fine; clipped is not. The body must
+  // be the thing that scrolls.
+  expect(b.clientH, "Drawer body has height to scroll in").toBeGreaterThan(0);
+  await page.keyboard.press("Escape");
 }
 
 // ── Classic sections UI — 1024×600 ───────────────────────────────────────────
@@ -109,60 +110,42 @@ test.describe("Classic sections UI — 1024×600", () => {
     await page.goto("/");
     await page.waitForSelector(".app-shell", { timeout: 8000 });
     await checkNoHorizOverflow(page);
-    await checkSidebarCompact(page);
     await checkTouchTargets(page);
     await page.screenshot({ path: "kiosk-screenshots/sections-dashboard-1024x600.png" });
   });
 
-  test("sidebar is icon-only (no text labels visible)", async ({ page }) => {
+  test("the shell spends no width on navigation", async ({ page }) => {
     await page.goto("/");
-    await page.waitForSelector(".sidebar", { timeout: 8000 });
-
-    // Brand name should not be visible (display: none via kiosk CSS)
-    const brandNameVisible = await page.evaluate(() => {
-      const el = document.querySelector(".sidebar__brand-name");
-      if (!el) return false;
-      const style = getComputedStyle(el);
-      return style.display !== "none" && style.visibility !== "hidden";
-    });
-    expect(brandNameVisible, "Brand name should be hidden in kiosk mode").toBe(false);
-
-    // Group labels should not be visible
-    const groupLabelVisible = await page.evaluate(() => {
-      const els = document.querySelectorAll(".sidebar__group-label");
-      return Array.from(els).some((el) => {
-        const style = getComputedStyle(el);
-        return style.display !== "none" && style.visibility !== "hidden";
-      });
-    });
-    expect(groupLabelVisible, "Group labels should be hidden in kiosk mode").toBe(false);
+    await page.waitForSelector(".app-main", { timeout: 8000 });
+    await checkNoPersistentNav(page, ".app-main");
   });
 
-  test("content area uses full remaining width", async ({ page }) => {
+  test("the drawer fits the panel", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForSelector(".app-shell", { timeout: 8000 });
+    await checkDrawerFits(page);
+  });
+
+  test("content area uses the full width", async ({ page }) => {
     await page.goto("/");
     await page.waitForSelector(".app-content", { timeout: 8000 });
 
-    const { sidebarW, contentLeft, contentW, viewportW } = await page.evaluate(() => {
-      const sidebar = document.querySelector(".sidebar");
+    const { contentLeft, contentW, viewportW } = await page.evaluate(() => {
       const content = document.querySelector(".app-content");
       return {
-        sidebarW: sidebar ? sidebar.getBoundingClientRect().width : 0,
         contentLeft: content ? content.getBoundingClientRect().left : 0,
         contentW: content ? content.getBoundingClientRect().width : 0,
         viewportW: window.innerWidth,
       };
     });
 
-    // Content should start right where sidebar ends
-    expect(contentLeft, "Content starts after sidebar").toBeCloseTo(sidebarW, 1);
-    // Content should fill the rest of the viewport
-    expect(contentW + sidebarW, "Content + sidebar = viewport width").toBeCloseTo(viewportW, 1);
+    expect(contentLeft, "Content starts at the left edge").toBeCloseTo(0, 1);
+    expect(contentW, "Content fills the viewport").toBeCloseTo(viewportW, 1);
   });
 
   test("models page renders without overflow", async ({ page }) => {
     await page.goto("/");
-    await page.waitForSelector(".sidebar__item[aria-label='Models']", { timeout: 8000 });
-    await page.click(".sidebar__item[aria-label='Models']");
+    await navigateTo(page, "Models");
     await page.waitForTimeout(500);
     await checkNoHorizOverflow(page);
     await page.screenshot({ path: "kiosk-screenshots/sections-models-1024x600.png" });
@@ -170,8 +153,7 @@ test.describe("Classic sections UI — 1024×600", () => {
 
   test("settings page renders without overflow", async ({ page }) => {
     await page.goto("/");
-    await page.waitForSelector(".sidebar__item[aria-label='Settings']", { timeout: 8000 });
-    await page.click(".sidebar__item[aria-label='Settings']");
+    await navigateTo(page, "Settings");
     await page.waitForTimeout(500);
     await checkNoHorizOverflow(page);
     await page.screenshot({ path: "kiosk-screenshots/sections-settings-1024x600.png" });
@@ -191,19 +173,13 @@ test.describe("Classic sections UI — 800×480", () => {
     await page.goto("/");
     await page.waitForSelector(".app-shell", { timeout: 8000 });
     await checkNoHorizOverflow(page);
-    await checkSidebarCompact(page);
     await page.screenshot({ path: "kiosk-screenshots/sections-dashboard-800x480.png" });
   });
 
-  test("sidebar is narrower than 1024×600 variant", async ({ page }) => {
+  test("the drawer fits the smaller panel", async ({ page }) => {
     await page.goto("/");
-    await page.waitForSelector(".sidebar", { timeout: 8000 });
-
-    const sidebarW = await page.evaluate(
-      () => document.querySelector(".sidebar")?.getBoundingClientRect().width ?? 0,
-    );
-    // At max-height: 500px the sidebar shrinks to 44px
-    expect(sidebarW, "Sidebar ≤44px at 800×480").toBeLessThanOrEqual(44);
+    await page.waitForSelector(".app-shell", { timeout: 8000 });
+    await checkDrawerFits(page);
   });
 });
 
@@ -214,25 +190,17 @@ test.describe("Hub UI — 1024×600", () => {
 
   test.beforeEach(async ({ page }) => {
     await mockAllApiRoutes(page);
-    // Force hub section via localStorage flag
     await page.addInitScript(() => {
-      localStorage.setItem("giap-active-section", "hub");
+      localStorage.setItem("giap-section", "hub");
+      localStorage.setItem("giap-force-hub", "1");
     });
   });
 
   test("hub home renders without horizontal overflow", async ({ page }) => {
     await page.goto("/");
-    // Hub may or may not load depending on localStorage section flag
-    // — just check that the page renders and no overflow
-    await page.waitForLoadState("networkidle");
+    await page.waitForSelector(".ghub", { timeout: 10_000 });
     await checkNoHorizOverflow(page);
-    const hasHub = await page.evaluate(
-      () => !!document.querySelector(".ghub") || !!document.querySelector(".irail") || !!document.querySelector(".home2"),
-    );
-    // If hub loaded, verify its icon rail
-    if (hasHub) {
-      await checkIrailCompact(page);
-    }
+    await checkNoPersistentNav(page, ".ghub__main");
     await page.screenshot({ path: "kiosk-screenshots/hub-home-1024x600.png" });
   });
 });
@@ -245,20 +213,15 @@ test.describe("Hub UI — 800×480", () => {
   test.beforeEach(async ({ page }) => {
     await mockAllApiRoutes(page);
     await page.addInitScript(() => {
-      localStorage.setItem("giap-active-section", "hub");
+      localStorage.setItem("giap-section", "hub");
+      localStorage.setItem("giap-force-hub", "1");
     });
   });
 
   test("hub renders without horizontal overflow at 800×480", async ({ page }) => {
     await page.goto("/");
-    await page.waitForLoadState("networkidle");
+    await page.waitForSelector(".ghub", { timeout: 10_000 });
     await checkNoHorizOverflow(page);
-    const hasHub = await page.evaluate(
-      () => !!document.querySelector(".ghub") || !!document.querySelector(".irail"),
-    );
-    if (hasHub) {
-      await checkIrailCompact(page);
-    }
     await page.screenshot({ path: "kiosk-screenshots/hub-home-800x480.png" });
   });
 });

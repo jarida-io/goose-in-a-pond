@@ -8,6 +8,7 @@
  */
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
+import { navigateTo } from "./helpers/nav";
 
 const MOCK_PROMPTS = [
   { name: "balanced",  content: "Balanced prompt body.",  is_system: true },
@@ -125,9 +126,9 @@ async function goToPromptsScreen(page: Page) {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
   await page.waitForSelector(".ghub", { timeout: 10_000 });
-  await page.getByRole("button", { name: "Settings", exact: true }).first().click();
-  await page.waitForSelector(".set", { timeout: 5_000 });
-  await page.getByRole("button", { name: /^Prompts$/ }).first().click();
+  // The rail is a drawer now: Prompts is a chip under "Manage", and in the hub
+  // it resolves to the Prompts detail screen directly, without the Settings list.
+  await navigateTo(page, "Prompts");
   await page.waitForTimeout(600);
 }
 
