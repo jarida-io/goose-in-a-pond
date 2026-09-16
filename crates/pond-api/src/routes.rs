@@ -383,7 +383,18 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/logs/export", get(export_logs_csv))
         // ── Memories ──────────────────────────────────────────────────────────
         .route("/memories", get(list_memories).post(save_memory))
+        // Before the `{id}` route, or axum matches "extraction-status" as an id.
+        .route("/memories/extraction-status", get(extraction_status))
         .route("/memories/{id}", delete(delete_memory).put(update_memory))
+        // ── Reminders ─────────────────────────────────────────────────────────
+        //
+        // The literal segment comes first here for the same reason
+        // `extraction-status` does above. Nothing under `/reminders/` is a bare
+        // `{id}` today -- `dismiss` is a literal suffix -- but the next route
+        // added here is exactly where that stops being true, and the ordering
+        // costs nothing to keep. `live-test.sh` asserts it from outside.
+        .route("/reminders", get(list_reminders))
+        .route("/reminders/{id}/dismiss", post(dismiss_reminder))
         // ── Memory Consolidation ─────────────────────────────────────────────
         .route("/memory/consolidate", post(start_consolidation))
         .route("/memory/consolidate/stop", post(stop_consolidation))
@@ -1973,12 +1984,6 @@ async fn drive_turn(
     // below calls `record_thinking` unconditionally; this is what decides
     // whether anything comes of it.
     .with_thinking(settings.persist_thinking);
-    if let (Some(ext), Some(svc)) = (
-        state.memory_extractor.clone(),
-        state.memory_extraction_service.clone(),
-    ) {
-        chat_service = chat_service.with_memory_extraction(ext, svc, state.memory_repo.clone());
-    }
     if let Some(event_log) = state.event_log.clone() {
         chat_service = chat_service.with_event_log(event_log);
     }
@@ -2309,11 +2314,12 @@ async fn drive_turn(
         }
     }
 
-    // ── Persist assistant turn + memory extraction ────────────────────
-    // `persist_assistant_turn_with_extraction` owns both concerns: it
-    // writes tool results / assistant text / usage to session_messages,
-    // then spawns memory extraction in the background. The handler cannot
-    // accidentally omit extraction by refactoring this block.
+    // ── Persist the assistant turn ────────────────────────────────────
+    // Persistence is now the whole of what a handler owes memory. The turn is
+    // written to `session_messages`, and the batch engine reads it out of
+    // there in the pond's idle time -- which is also why the voice loop and
+    // `/chat`, which never extracted inline, now contribute like everything
+    // else.
     // Nothing was said, and nothing is coming.
     //
     // The user's message was committed before inference began. Leaving it shows
@@ -2349,12 +2355,11 @@ async fn drive_turn(
         }
     } else {
         let _ = chat_service
-            .persist_assistant_turn_with_extraction(
+            .persist_assistant_turn(
                 std::mem::take(&mut turn.tool_results),
                 &turn.full_text,
                 Some((usage_prompt_tokens, usage_completion_tokens)),
                 Some(&model_name_for_done),
-                &req.message,
             )
             .await;
     }
@@ -10739,20 +10744,6 @@ async fn agent_chat_stream(
         )
         .with_profile_scope(turn_scope.clone())
         .with_thinking(persist_thinking);
-        // PAI-5 P7 parity. `/chat/stream` has owned extraction since it was
-        // written; this route persisted its turns and never extracted from them,
-        // so a whole conversation held here contributed nothing to memory.
-        // Guarded exactly as the other handler guards it, so a pond with no
-        // extractor configured behaves as it did before.
-        if let (Some(ext), Some(svc)) =
-            (state.memory_extractor.clone(), state.memory_extraction_service.clone())
-        {
-            chat_service = chat_service.with_memory_extraction(
-                ext,
-                svc,
-                state.memory_repo.clone(),
-            );
-        }
         if let Some(event_log) = state.event_log.clone() {
             chat_service = chat_service.with_event_log(event_log);
         }
@@ -10761,10 +10752,6 @@ async fn agent_chat_stream(
             yield Ok(Event::default().data(json!({"error": format!("Failed to persist user message: {}", e)}).to_string()));
             return;
         }
-
-        // `message` is moved into the `AgentRequest` below, and extraction needs
-        // the user's own words when the turn ends.
-        let user_message_for_extraction = message.clone();
 
         // The same accumulator `/chat/stream` uses, so both routes fold an
         // engine event into a turn the one way. This route never captures
@@ -10883,17 +10870,14 @@ async fn agent_chat_stream(
         }
 
         // ── Persist assistant turn ──────────────────────────────────────────
-        // PAI-5 P7. `persist_assistant_turn_with_extraction` owns both concerns,
-        // which is why this route calls it rather than persisting and then
-        // extracting: a handler cannot accidentally drop extraction by
-        // refactoring the block, because there is no separate call to drop.
-        // That is the same reason `/chat/stream` uses it.
-        let _ = chat_service.persist_assistant_turn_with_extraction(
+        // And that is all. Extraction is no longer a thing a handler can forget
+        // to wire: the batch engine walks `session_messages`, so a turn that
+        // was persisted is a turn that will be read.
+        let _ = chat_service.persist_assistant_turn(
             std::mem::take(&mut turn.tool_results),
             &turn.full_text,
             None,
             None,
-            &user_message_for_extraction,
         ).await;
     };
 
@@ -13044,6 +13028,99 @@ async fn update_memory(
     }
 }
 
+/// `GET /api/v1/memories/extraction-status` -- what the batch engine is doing.
+///
+/// Exists because the failure this engine can have is silent by construction. A
+/// pond whose embedder never loaded, one whose model cannot emit the schema,
+/// and one that has finished reading its whole history all look identical from
+/// the outside: no new memories appear. `blocked_on` is the difference, and a
+/// field that only ever reached a `tracing` line is not a surface -- an index
+/// that was 2% full survived six landed phases that way.
+///
+/// `unattributed_sessions` is the other silent one, and it is not a failure of
+/// the engine: on a pond with more than one member, a conversation nothing has
+/// identified is never mined at all rather than mined under one of their names,
+/// and the surface that produces most of them cannot be fixed from here. The
+/// voice child is spawned as its own process with no HTTP request behind it, so
+/// none of the three things that bind a session to a member -- a paired
+/// device's token, a face match, a member picking themselves -- ever reaches
+/// it. The number is a total over the store, not a count of what one pass
+/// looked at, because the pond it matters most on is the one where a pass full
+/// of identified typed chats would otherwise report zero.
+///
+/// `sessions_pending` is deliberately APPROXIMATE, and cheap. It counts
+/// conversations whose activity is newer than the last time the walk looked at
+/// them, which is one indexed read per conversation. The exact answer would
+/// need the message count and the watermark's position for every conversation
+/// in the store -- three queries each, on a status endpoint a panel polls.
+async fn extraction_status(
+    State(state): State<Arc<AppState>>,
+) -> impl axum::response::IntoResponse {
+    use pond_core::user_data::services::memory_extraction::is_eligible_session;
+
+    let sessions = state
+        .session_storage
+        .list_sessions()
+        .await
+        .unwrap_or_default();
+    let mut sessions_total = 0usize;
+    let mut sessions_pending = 0usize;
+    for session in &sessions {
+        if !is_eligible_session(&session.id) {
+            continue;
+        }
+        sessions_total += 1;
+        let cursor = state
+            .session_storage
+            .extraction_cursor(&session.id)
+            .await
+            .unwrap_or_else(|_| {
+                pond_core::user_data::domain::session::ExtractionCursor::unstarted()
+            });
+        // Never looked at, or looked at before the conversation last moved.
+        if cursor.extracted_at.is_none_or(|at| session.updated_at > at) {
+            sessions_pending += 1;
+        }
+    }
+
+    let engine = match &state.extraction_status {
+        Some(status) => Some(status.read().await.clone()),
+        None => None,
+    };
+
+    // `null` rather than a zeroed pass when the engine is not running in this
+    // process at all. "It has read nothing" and "it does not exist here" are
+    // different answers and the caller is owed the true one.
+    Json(json!({
+        "sessions_total": sessions_total,
+        "sessions_pending": sessions_pending,
+        "mode": engine.as_ref().map(|e| e.mode.clone()),
+        "last_pass_at": engine.as_ref().and_then(|e| e.last_pass_at),
+        "last_pass_windows": engine.as_ref().map(|e| e.last_pass_windows),
+        "last_pass_written": engine.as_ref().map(|e| e.last_pass_written),
+        // What the date rule refused, and what that cost. `dates_lost` above
+        // zero means no reminder row was written for the window, so that date
+        // is gone -- either because the model answered half the schema, or
+        // because the store would not take the row. The two are told apart by
+        // `last_pass_reminders_lost`, which speaks only for the second.
+        //
+        // Zero is NOT a receipt that anything was kept, and no caller may read
+        // it as one: what was kept is `last_pass_reminders_written` and only
+        // that. The distinction is the whole defect this pair was added for --
+        // for one release nothing stored a reminder at all, so every refused
+        // date was gone while this number sat honestly at zero.
+        "last_pass_dated": engine.as_ref().map(|e| e.last_pass_dated),
+        "last_pass_dates_lost": engine.as_ref().map(|e| e.last_pass_dates_lost),
+        // Reminder rows the last pass wrote, and candidates it could not store.
+        // The rows themselves are readable at `GET /api/v1/reminders`.
+        "last_pass_reminders_written": engine.as_ref().map(|e| e.last_pass_reminders_written),
+        "last_pass_reminders_lost": engine.as_ref().map(|e| e.last_pass_reminders_lost),
+        "unattributed_sessions": engine.as_ref().map(|e| e.unattributed_sessions),
+        "blocked_on": engine.as_ref().and_then(|e| e.blocked_on.clone()),
+        "running": engine.is_some(),
+    }))
+}
+
 async fn delete_memory(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -13055,6 +13132,158 @@ async fn delete_memory(
             Json(json!({"error": e.to_string()})),
         )
             .into_response(),
+    }
+}
+
+// ── Reminders ────────────────────────────────────────────────────────────────
+//
+// Where a dated utterance ends up, and until now the one thing on this pond
+// that could not be looked at. The extraction gate refuses any memory whose note
+// carries a one-off calendar date, and that refusal is affordable only because
+// the date is kept as a `reminders` row (migration 0057) instead. A row nothing
+// can read is not a place the date was kept; it is a quieter way of losing it.
+//
+// # No member gate, deliberately, and it is the opposite call from `/proposals`
+//
+// `proposal_caller` refuses anything that is not one household member, because a
+// proposal is ADDRESSED to somebody and invariant 4 forbids a broadcast. A
+// reminder is not addressed to anybody: `profile_id` is NULL on every row a live
+// pond has, which is precisely why the table exists rather than the proposal
+// queue alone. Gating this read behind an audience would make the surface
+// unusable on every pond it was written for, and would leave the date in a table
+// only SQL could reach. It sits behind the same auth as `/memories`, which is
+// the panel this belongs beside.
+
+/// The reminder store, built from the pool `AppState` already holds -- same
+/// story as [`proposal_repo`], and the same one-line swap when it moves onto
+/// `AppState` proper.
+fn reminder_repo(state: &Arc<AppState>) -> pond_infra::sqlite_reminder::SqliteReminderRepository {
+    pond_infra::sqlite_reminder::SqliteReminderRepository::new(state.db.system.clone())
+}
+
+/// The wire shape of a reminder.
+///
+/// Built field by field rather than by serialising the domain type, so the JSON
+/// is a decision. `when_said` goes out as the words it is -- there is no
+/// `due_at` here because there is no `due_at` column, and inventing one at the
+/// edge would be the guess the whole design refuses.
+fn reminder_json(r: &pond_core::user_data::domain::reminder::CapturedReminder) -> Value {
+    json!({
+        "id": r.id,
+        "about": r.about,
+        "when_said": r.when_said,
+        "subject": r.subject,
+        "profile_id": r.profile_id,
+        // Both stamps, because they answer different questions and differ by the
+        // whole length of a backlog walk: when it was said, and when the pond
+        // got to it.
+        "said_at": r.said_at.to_rfc3339(),
+        "captured_at": r.captured_at.to_rfc3339(),
+        "disposition": r.disposition.as_str(),
+        // Provenance. `session_id` may name a conversation that has since been
+        // deleted -- the table has no foreign key on it on purpose -- so a client
+        // must treat this as a label, not a link it can always follow.
+        "session_id": r.session_id,
+        "window_id": r.window_id,
+    })
+}
+
+/// How many to return. Bounded rather than unbounded for the ordinary reason:
+/// a first backlog walk over a year of history can file a lot of these.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListRemindersQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// The largest page this route will answer with, and what it answers without a
+/// `limit`.
+const REMINDERS_PAGE_MAX: usize = 500;
+const REMINDERS_PAGE_DEFAULT: usize = 100;
+
+/// `GET /api/v1/reminders` -- the dates the pond is holding and nothing has
+/// acted on, most recently SAID first.
+///
+/// Pending only, because that is the question: what is still live. The port has
+/// no "list everything" read and this route does not want one -- a dismissed
+/// reminder is a decision the household already made, and showing it back would
+/// be asking again.
+async fn list_reminders(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ListRemindersQuery>,
+) -> impl axum::response::IntoResponse {
+    use pond_core::user_data::ports::reminder_repository::ReminderRepository;
+
+    let limit = query
+        .limit
+        .unwrap_or(REMINDERS_PAGE_DEFAULT)
+        .clamp(1, REMINDERS_PAGE_MAX);
+
+    match reminder_repo(&state).list_pending(limit).await {
+        Ok(reminders) => Json(json!({
+            "reminders": reminders.iter().map(reminder_json).collect::<Vec<_>>(),
+            // What was asked for, so a client that got exactly `limit` rows
+            // knows there may be more rather than guessing.
+            "limit": limit,
+        }))
+        .into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list reminders");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "could not read reminders"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// `POST /api/v1/reminders/{id}/dismiss` -- somebody said no.
+///
+/// The only disposition this edge may write. `proposed` belongs to the
+/// promotion run and `expired` to 0057's profile-delete trigger; both are the
+/// pond saying what happened, and neither is a thing a person does. Dismissing
+/// is.
+///
+/// Nothing expires a reminder for being old. There is no time-based sweep in
+/// this pond, so a reminder whose day has passed stays `pending` and stays
+/// listed until somebody dismisses it -- which makes dismissal the only way one
+/// ever leaves the list. This said "and to time" before, and meant a path that
+/// was never built.
+///
+/// 404 when nothing moved -- an unknown id, or one already decided. The store
+/// answers that rather than this handler guessing, because a check followed by a
+/// write would let two callers disagree about which decision stuck.
+async fn dismiss_reminder(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl axum::response::IntoResponse {
+    use pond_core::user_data::domain::reminder::ReminderDisposition;
+    use pond_core::user_data::ports::reminder_repository::ReminderRepository;
+
+    match reminder_repo(&state)
+        .set_disposition(&id, ReminderDisposition::Dismissed, chrono::Utc::now())
+        .await
+    {
+        Ok(true) => Json(json!({"id": id, "disposition": "dismissed"})).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": "no reminder is waiting under that id",
+                "hint": "it may have been dismissed already, proposed, or expired with the \
+                         member it belonged to",
+            })),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not dismiss a reminder");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "could not dismiss that reminder"})),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -15644,13 +15873,50 @@ async fn resolve_turn_scope(
             "could not read this device's household member; treating the speaker as \
              unidentified rather than assuming one"
         ),
-        DeviceRung::Member(profile_id) => tracing::debug!(
-            target: "giap::trace",
-            kind = "turn_device_identified",
-            session_id,
-            profile_id = %profile_id,
-            "the paired device this turn arrived on belongs to a household member"
-        ),
+        DeviceRung::Member(profile_id) => {
+            tracing::debug!(
+                target: "giap::trace",
+                kind = "turn_device_identified",
+                session_id,
+                profile_id = %profile_id,
+                "the paired device this turn arrived on belongs to a household member"
+            );
+            // Write it back onto the session, because a background job cannot
+            // reconstruct it.
+            //
+            // This rung is a property of the REQUEST -- a bearer token from a
+            // paired device -- and until now it was used for the turn and then
+            // thrown away: only the face and pairing routes ever persisted an
+            // identity. That was harmless while extraction happened inside the
+            // turn that resolved it. It is not harmless now: batch extraction
+            // has no request, reads `SessionIdentity` to decide whose
+            // conversation a window is, and on a multi-member pond a window it
+            // cannot attribute is deliberately never mined at all. Without this
+            // line an identified member's chats would be the ones the pond
+            // refuses to remember.
+            //
+            // `_if_stronger` rather than a plain write: the comparison happens
+            // inside the write, so a face match landing a millisecond later
+            // cannot downgrade a cryptographic binding to a probabilistic one.
+            // A refusal is a normal outcome and is not logged as a failure.
+            let proposed = SessionIdentity {
+                profile_id: Some(profile_id.clone()),
+                source: IdentificationSource::PairedDevice,
+                confidence: None,
+            };
+            if let Err(e) = state
+                .session_storage
+                .set_session_identity_if_stronger(session_id, &proposed)
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    session_id,
+                    "could not record which household member this turn's device belongs to; \
+                     batch extraction will read this conversation as unattributed"
+                );
+            }
+        }
         DeviceRung::NoDevice | DeviceRung::Unattributed => {}
     }
 

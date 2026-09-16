@@ -26,6 +26,7 @@ import {
   AlertTriangle,
   Check,
   Minus,
+  Repeat,
 } from "lucide-react";
 import { api } from "../api/PondApiClient";
 import { PageHeader, useConfirm, SkeletonList } from "../components/shared";
@@ -33,6 +34,7 @@ import type {
   ContextCorpus,
   ContextCorpusCoverage,
   ContextIndexHealth,
+  ExtractionStatus,
   MemoryFragment,
   MemorySegment,
   MemoryTier,
@@ -54,6 +56,7 @@ const SEGMENTS: Record<
   correction:   { label: "Correction",   icon: <Wrench size={13} strokeWidth={1.8} />,    cssClass: "correction",   importanceDefault: 0.9 },
   relationship: { label: "Relationship", icon: <Heart size={13} strokeWidth={1.8} />,     cssClass: "relationship", importanceDefault: 0.7 },
   project:      { label: "Project",      icon: <FolderOpen size={13} strokeWidth={1.8} />,cssClass: "project",      importanceDefault: 0.6 },
+  routine:      { label: "Routine",      icon: <Repeat size={13} strokeWidth={1.8} />,    cssClass: "routine",      importanceDefault: 0.65 },
   knowledge:    { label: "Knowledge",    icon: <BookOpen size={13} strokeWidth={1.8} />,  cssClass: "knowledge",    importanceDefault: 0.5 },
   context:      { label: "Context",      icon: <Clock size={13} strokeWidth={1.8} />,     cssClass: "context",      importanceDefault: 0.3 },
 };
@@ -64,6 +67,7 @@ const SEGMENT_IMPORT_FILL: Record<MemorySegment, string> = {
   correction:   "var(--mem-correction)",
   relationship: "var(--mem-relationship)",
   project:      "var(--mem-project)",
+  routine:      "var(--mem-routine)",
   knowledge:    "var(--mem-knowledge)",
   context:      "var(--mem-context)",
 };
@@ -1034,6 +1038,148 @@ export function IndexCoveragePanel() {
   );
 }
 
+// ── What the extraction engine is doing ───────────────────────
+
+/// How long the engine may go without a successful pass before the household is
+/// told. A day: passes need the house to be quiet for fifteen minutes and then
+/// to win a tick against five other background jobs, so a few hours of silence
+/// is ordinary and a full day is not.
+const STALE_PASS_MS = 24 * 60 * 60 * 1000;
+
+/// A warning where a person will see it, rather than a field in a JSON body.
+///
+/// The failures this covers are quiet ones. A pond whose embedder never loaded
+/// reads nothing and looks exactly like a pond with nothing left to read. A
+/// pond with several members and no way to tell them apart skips one person's
+/// conversations forever and keeps working perfectly for everybody else. Both
+/// cost months of history, and neither announces itself.
+export function ExtractionBanner({ status }: { status: ExtractionStatus | null }) {
+  if (!status) return null;
+
+  const stale =
+    status.running &&
+    status.last_pass_at !== null &&
+    Date.now() - new Date(status.last_pass_at).getTime() > STALE_PASS_MS;
+
+  // Said plainly, and only about what is actually known. A blocked engine and a
+  // stale one are different sentences because they call for different things.
+  let warning: string | null = null;
+  if (!status.running) {
+    warning =
+      "Nothing is reading conversations into memory on this pond. The batch engine is not " +
+      "running here, so new conversations will not be remembered.";
+  } else if (status.blocked_on === "no_embedder") {
+    warning =
+      "Memory extraction is stopped: no embedding model is loaded, so the pond cannot tell a " +
+      "new memory from one it already has. Nothing new is being remembered.";
+  } else if (status.blocked_on === "no_provider" || status.blocked_on === "provider_error") {
+    warning =
+      "Memory extraction is stopped: the language model could not be reached on the last pass.";
+  } else if (status.blocked_on === "unnameable_subject") {
+    // Deliberately no sentence of its own: `skipping` below says the same
+    // thing with the count and with what releases it, and it says it whether
+    // or not the pass managed to read something else.
+    warning = null;
+  } else if (stale) {
+    warning =
+      "Memory extraction has not completed a pass in over a day. It only runs when the house " +
+      "is quiet, so this can be ordinary — but nothing new has been remembered since then.";
+  }
+
+  // Said whether or not anything else is wrong, and not only when the rest of
+  // the pond looks healthy. A pond can be reading typed conversations perfectly
+  // and never remembering a word anybody says out loud: the voice surface runs
+  // as its own process with no request behind it, so nothing on its path can
+  // say who is speaking, and on a household with more than one member every one
+  // of those conversations is left alone rather than filed under a guess. That
+  // is the case where this number reads highest and the banner used to hide it.
+  const skipping =
+    (status.unattributed_sessions ?? 0) > 0
+      ? `${status.unattributed_sessions} conversation(s) are not being remembered at all, ` +
+        "because more than one person lives here and nothing said whose they are. Anything " +
+        "spoken to the pond is the usual reason. Identifying one — a paired phone, a face, or " +
+        "choosing the person in the conversation — is what releases it."
+      : null;
+
+  // Every date the last pass threw away, counted per refused note by the engine
+  // and rendered here for the first time. It used to be computed, exposed over
+  // HTTP, documented in the TS interface, and drawn by nothing: on a pond whose
+  // model puts dates in notes and files no reminders at all — one measured model
+  // did that on 432 of 432 opportunities — the two numbers this panel did read
+  // were both 0, so it showed no banner while every refused date was discarded.
+  //
+  // The cause clause is here because the two causes need different answers: a
+  // write that failed is the POND, and somebody can go and look at the store; no
+  // reminder filed at all is the MODEL, and the answer is a different model.
+  const remindersLost = status.last_pass_reminders_lost ?? 0;
+  const datesGone = status.last_pass_dates_lost ?? 0;
+  // Both halves of the pair, because the ratio is the thing: 1 of 20 is a model
+  // slipping and 20 of 20 is a model that never files a reminder at all.
+  const datesRefused = Math.max(status.last_pass_dated ?? 0, datesGone);
+  const datesLost =
+    datesGone > 0
+      ? `${datesGone} of the ${datesRefused} date(s) the last pass refused were not kept ` +
+        "anywhere. A one-off date is never kept as a memory — it is kept as a reminder " +
+        "instead — and no saved reminder matches the notes those dates were in. " +
+        (remindersLost > 0
+          ? `The pond could not save ${remindersLost} reminder(s) from that pass.`
+          : "The model filed no reminder for them.")
+      : null;
+
+  // The same failure where no dated note was involved at all: the model filed a
+  // reminder, the store would not take it, and nothing else on this panel has a
+  // symptom for that. Only when the sentence above is not already saying it.
+  const remindersFailed =
+    remindersLost > 0 && datesGone === 0
+      ? `${remindersLost} reminder(s) from the last pass could not be saved.`
+      : null;
+
+  // The other half of the same sentence, and the half that was missing. Saying
+  // only what was lost lets a silent panel mean either "nothing was refused" or
+  // "everything was refused and nothing was kept" — and for one release it
+  // always meant the second, because nothing stored a reminder at all. This is
+  // the pond saying what it actually has: a count of rows it wrote, not an
+  // inference from a zero somewhere else.
+  const datesKept =
+    (status.last_pass_reminders_written ?? 0) > 0
+      ? `${status.last_pass_reminders_written} date(s) from the last pass were kept as ` +
+        "reminders rather than as memories — a one-off date read back months later would be " +
+        "false, so the pond keeps the words that were said and not a date it worked out."
+      : null;
+
+  return (
+    <Card className="mem-extraction">
+      <CardContent>
+        <div className="mem-extraction__row">
+          {warning || skipping || datesLost || remindersFailed ? (
+            <AlertTriangle size={14} strokeWidth={1.8} className="mem-extraction__warn" />
+          ) : (
+            <BrainCircuit size={14} strokeWidth={1.8} />
+          )}
+          <span className="mem-extraction__text">
+            {warning ?? (
+              <>
+                {status.sessions_pending} of {status.sessions_total} conversation(s) still to
+                read. The pond reads them in its own time, when the house is quiet — a long
+                history takes a few nights.
+              </>
+            )}
+            {skipping ? ` ${skipping}` : ""}
+            {datesLost ? ` ${datesLost}` : ""}
+            {remindersFailed ? ` ${remindersFailed}` : ""}
+            {datesKept ? ` ${datesKept}` : ""}
+          </span>
+          {status.mode === "shadow" && (
+            <Chip size="sm" variant="soft">
+              reading only
+            </Chip>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 // ── Main Memory component ─────────────────────────────────────
 
 export function Memory() {
@@ -1051,6 +1197,7 @@ export function Memory() {
   const [inlineAdding, setInlineAdding] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
   const [memSettings, setMemSettings] = useState<Partial<Settings>>({});
+  const [extraction, setExtraction] = useState<ExtractionStatus | null>(null);
 
   // Consolidation state
   const [consolidationStatus, setConsolidationStatus] = useState<ConsolidationStatus>("idle");
@@ -1072,7 +1219,13 @@ export function Memory() {
       .catch(() => {}); // non-fatal
   }
 
-  useEffect(() => { load(); loadSettings(); }, []);
+  function loadExtraction() {
+    api.getExtractionStatus()
+      .then(setExtraction)
+      .catch(() => setExtraction(null)); // an older server has no such route
+  }
+
+  useEffect(() => { load(); loadSettings(); loadExtraction(); }, []);
 
   async function handleToggleSetting(key: string, value: boolean) {
     const patch = { [key]: value } as Partial<Settings>;
@@ -1301,6 +1454,9 @@ export function Memory() {
           </>
         }
       />
+
+      {/* What the extraction engine is doing, and what it cannot do */}
+      <ExtractionBanner status={extraction} />
 
       {/* Add memory modal */}
       {showAddModal && (

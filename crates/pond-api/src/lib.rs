@@ -261,13 +261,21 @@ pub struct AppState {
     /// Answer Reviewer — adversarial post-inference review that evaluates
     /// answer quality and triggers revision when below threshold.
     pub answer_reviewer: Option<Arc<dyn pond_core::models::ports::answer_reviewer::AnswerReviewer>>,
-    /// Memory Extractor — extracts durable facts from conversation turns.
-    /// `None` when `memory_extraction_enabled` is false.
-    pub memory_extractor:
-        Option<Arc<dyn pond_core::user_data::ports::memory_extractor::MemoryExtractor>>,
-    /// Shared extraction service instance (rate limiter + dedup state).
-    pub memory_extraction_service:
-        Option<Arc<pond_core::user_data::services::memory_extraction::MemoryExtractionService>>,
+    /// Live state of the BATCH extraction engine, written by its lane job in
+    /// `pond-server` and read by `GET /api/v1/memories/extraction-status`.
+    ///
+    /// `None` on CLI paths and in tests, which the route reports as "not
+    /// running" rather than as a zeroed pass that never happened. The two are
+    /// different answers and a household deserves the true one: a pond whose
+    /// embedder never loaded looks identical, from the outside, to one with
+    /// nothing left to extract.
+    pub extraction_status: Option<
+        Arc<
+            tokio::sync::RwLock<
+                pond_core::user_data::services::memory_extraction::ExtractionEngineStatus,
+            >,
+        >,
+    >,
     /// Timestamp of the last user request — used by the inactivity-based
     /// consolidation scheduler. Updated on every chat/API call.
     pub last_user_activity: Arc<tokio::sync::RwLock<std::time::Instant>>,

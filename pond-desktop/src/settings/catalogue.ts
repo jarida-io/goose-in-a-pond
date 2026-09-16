@@ -338,9 +338,9 @@ export const CATALOGUE: CatalogueCategory[] = [
         entries: [
           { key: "agent_memory_inject", label: "Use memories in replies", description: "Let it recall what it knows about you when answering.", control: { kind: "toggle" }, consumer: "live" },
           { key: "agent_memory_limit", label: "Memories per reply", description: "How many remembered things it may bring to a single answer.", control: { kind: "number", min: 0, max: 100 }, consumer: "live", validate: all(integer, range(0, 100)) },
-          { key: "memory_extraction_enabled", label: "Learn from conversations", description: "Remember lasting facts from your conversations.", control: { kind: "toggle" }, consumer: "live" },
-          { key: "memory_extraction_max_facts", label: "Facts kept per conversation", description: "How many things it may remember from one exchange.", control: { kind: "number", min: 0, max: 50 }, consumer: "live", validate: all(integer, range(0, 50)) },
-          { key: "memory_extraction_interval_secs", label: "Wait between learning", description: "How long to wait between remembering, so it does not do it constantly.", control: { kind: "number", min: 0, unit: "seconds" }, consumer: "live", validate: all(integer, atLeast(0, "seconds")) },
+          { key: "memory_extraction_enabled", label: "Learn from conversations", description: "Read your conversations back in quiet moments and remember what lasts. Nothing is remembered while you are talking, so this takes a while to show up \u2014 and a long history takes a few nights.", control: { kind: "toggle" }, consumer: "live" },
+          { key: "memory_extraction_max_facts", label: "Most things kept at once", description: "How many things it may remember from one stretch of conversation. Fewer is better: a store full of near-misses crowds out what matters.", control: { kind: "number", min: 0, max: 50 }, consumer: "live", validate: all(integer, range(0, 50)) },
+          { key: "memory_extraction_interval_secs", label: "Wait between readings", description: "The shortest gap between two readings. It only ever makes them rarer.", control: { kind: "number", min: 0, unit: "seconds" }, consumer: "live", validate: all(integer, atLeast(0, "seconds")) },
         ],
       },
       {

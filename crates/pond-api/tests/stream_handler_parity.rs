@@ -156,24 +156,40 @@ fn position(body: &str, needle: &str, handler: &str) -> usize {
     })
 }
 
-/// Both handlers hand the turn to `ChatService` for persistence AND extraction.
-/// `persist_assistant_turn_with_extraction` owns both concerns on purpose, so
-/// there is no separate extraction call to drop. A handler calling the plain
-/// `persist_assistant_turn` has silently opted out of memory.
+/// Neither handler extracts inside the turn, and that is the new contract.
+///
+/// This test used to assert the opposite, and inverting it rather than deleting
+/// it is the point: the old rule was "a handler that calls the plain
+/// `persist_assistant_turn` has silently opted out of memory", and it was true
+/// while a per-turn extractor existed to opt out of. The cutover moved
+/// extraction to a batch walk over `session_messages`, so persistence IS the
+/// whole of what a handler owes memory, and a handler that spawned extraction
+/// of its own would now be a second writer racing the one that is supposed to
+/// own the store.
+///
+/// The parity being guarded is unchanged in kind: the two handlers must agree.
+/// What they agree about is the opposite of what it was.
 #[test]
-fn both_stream_handlers_extract_memory_from_the_turn() {
+fn neither_stream_handler_extracts_inline() {
     for handler in [CHAT, AGENT] {
         let body = handler_body(handler);
         assert!(
-            body.contains("persist_assistant_turn_with_extraction"),
-            "{handler} persists its turn without extracting from it, so a conversation held \
-             there contributes nothing to memory"
+            body.contains("persist_assistant_turn("),
+            "{handler} no longer persists its turn at all, so the batch walk has nothing \
+             to read and the conversation is lost to memory entirely"
         );
-        assert!(
-            body.contains("with_memory_extraction"),
-            "{handler} never wires the extractor onto its ChatService, so \
-             persist_assistant_turn_with_extraction has nothing to spawn"
-        );
+        for gone in [
+            "persist_assistant_turn_with_extraction",
+            "with_memory_extraction",
+            "memory_extraction_service",
+        ] {
+            assert!(
+                !body.contains(gone),
+                "{handler} still reaches for `{gone}`: the per-turn extraction path was \
+                 removed, and a handler that extracts inline writes memories the batch \
+                 engine will then offer again"
+            );
+        }
     }
 }
 
@@ -212,10 +228,14 @@ fn the_two_handler_bodies_are_really_two_different_handlers() {
     );
 }
 
-/// The scope must be resolved BEFORE the `ChatService` is built, or extraction is
-/// attributed to `ProfileScope::Household` whoever was actually speaking.
+/// The scope must be resolved BEFORE the `ChatService` is built, or the turn is
+/// answered as `ProfileScope::Household` whoever was actually speaking.
 /// Presence of both calls is not enough: a handler can contain
 /// `resolve_turn_scope` and a `ChatService` and still resolve too late.
+///
+/// `resolve_turn_scope` also writes the resolved member back onto the session,
+/// which is what batch extraction reads to decide whose conversation a window
+/// is -- so resolving late now costs the memory as well as the answer.
 #[test]
 fn agent_chat_stream_knows_who_is_speaking_before_it_builds_the_service() {
     let body = handler_body(AGENT);
@@ -375,7 +395,7 @@ fn neither_handler_scopes_its_service_from_a_literal() {
 #[test]
 fn chat_stream_persists_the_turn_before_it_closes_the_stream() {
     let body = handler_body(CHAT);
-    let persisted = position(body, "persist_assistant_turn_with_extraction", CHAT);
+    let persisted = position(body, ".persist_assistant_turn(", CHAT);
     let done = position(body, "\"done\": true", CHAT);
 
     assert!(
@@ -514,8 +534,7 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         notification_sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         answer_reviewer: None,
-        memory_extractor: None,
-        memory_extraction_service: None,
+        extraction_status: None,
         last_user_activity: Arc::new(tokio::sync::RwLock::new(std::time::Instant::now())),
         consolidation_cancel: Arc::new(tokio::sync::RwLock::new(None)),
         consolidation_event_tx: tokio::sync::broadcast::channel(16).0,

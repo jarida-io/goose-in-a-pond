@@ -8,7 +8,8 @@ use base64::Engine as _;
 use pond_core::models::domain::image_limits::extension_for_mime;
 use pond_core::models::domain::message::{ChatMessage, ImageAttachment, Role, ToolCallRecord};
 use pond_core::user_data::domain::session::{
-    IdentificationSource, MessageAttachment, Session, SessionIdentity, SessionMessage,
+    ExtractionCursor, IdentificationSource, MessageAttachment, Session, SessionIdentity,
+    SessionMessage,
 };
 use pond_core::user_data::ports::session_storage::{SessionStorage, SessionStorageError};
 use sqlx::{Pool, Row, Sqlite};
@@ -51,6 +52,20 @@ fn parse_dt(s: &str) -> chrono::DateTime<chrono::Utc> {
     chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
         .map(|ndt| ndt.and_utc())
         .unwrap_or_else(|_| chrono::Utc::now())
+}
+
+/// Same parse, but an unreadable stamp reads as absent rather than as now.
+///
+/// The extraction cursor's stamp orders the backlog, and [`parse_dt`]'s
+/// fallback would silently move a conversation with a malformed stamp to the
+/// *back* of the queue -- i.e. a row the engine cannot read the time of would
+/// be the last one it ever got to. `None` sorts to the front instead, which is
+/// where a conversation of unknown status belongs.
+fn parse_dt_opt(s: Option<String>) -> Option<chrono::DateTime<chrono::Utc>> {
+    let s = s?;
+    chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .map(|ndt| ndt.and_utc())
 }
 
 fn role_to_str(role: &Role) -> &'static str {
@@ -856,6 +871,87 @@ impl SessionStorage for SqliteSessionStorage {
         .map_err(|e| SessionStorageError::StorageError(e.to_string()))?;
 
         Ok(())
+    }
+
+    async fn extraction_cursor(
+        &self,
+        session_id: &str,
+    ) -> Result<ExtractionCursor, SessionStorageError> {
+        // Deliberately not guarded on session existence, like `count_messages`:
+        // a session that is not there has not been examined, and that is the
+        // answer the walk wants rather than an error it would have to decide
+        // what to do with.
+        let row: Option<(Option<String>, Option<String>, i64)> = sqlx::query_as(
+            "SELECT extracted_through_id, extracted_at, extraction_attempts \
+             FROM sessions WHERE id = ?",
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| SessionStorageError::StorageError(e.to_string()))?;
+
+        Ok(match row {
+            Some((through_message_id, extracted_at, attempts)) => ExtractionCursor {
+                through_message_id,
+                extracted_at: parse_dt_opt(extracted_at),
+                attempts: attempts.max(0) as u32,
+            },
+            None => ExtractionCursor::unstarted(),
+        })
+    }
+
+    /// Move (or clear) the extraction watermark.
+    ///
+    /// Same `updated_at` reasoning as [`set_derived_title`] and
+    /// [`set_generated_title`], and it matters more here: this writer runs on
+    /// EVERY window of every conversation in the backlog. If it stamped
+    /// `updated_at`, the pass's own activity watcher would read its own
+    /// bookkeeping as somebody coming back, cancel the pass, and push the idle
+    /// clock forward -- so the engine would cancel itself mid-run, forever, and
+    /// the idle gate that admitted it would never open again.
+    async fn set_extraction_cursor(
+        &self,
+        session_id: &str,
+        through_message_id: Option<&str>,
+    ) -> Result<(), SessionStorageError> {
+        match through_message_id {
+            // A watermark that moved is a watermark nothing has failed against
+            // yet, so the attempt count goes with it.
+            Some(id) => sqlx::query(
+                "UPDATE sessions SET extracted_through_id = ?, \
+                     extracted_at = datetime('now'), extraction_attempts = 0 WHERE id = ?",
+            )
+            .bind(id)
+            .bind(session_id),
+            // Back to unstarted, stamp included: a conversation that has to be
+            // re-walked from message one has not been examined, and keeping the
+            // stamp would sort it to the back of a backlog it has not started.
+            None => sqlx::query(
+                "UPDATE sessions SET extracted_through_id = NULL, \
+                 extracted_at = NULL, extraction_attempts = 0 WHERE id = ?",
+            )
+            .bind(session_id),
+        }
+        .execute(&self.pool)
+        .await
+        .map_err(|e| SessionStorageError::StorageError(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn note_extraction_attempt(&self, session_id: &str) -> Result<u32, SessionStorageError> {
+        // Increment and read back in one statement. Two statements would race
+        // nothing today -- one lane slot, one writer -- but the RETURNING form
+        // is the same cost and does not depend on that staying true.
+        let attempts: Option<i64> = sqlx::query_scalar(
+            "UPDATE sessions SET extraction_attempts = extraction_attempts + 1 \
+             WHERE id = ? RETURNING extraction_attempts",
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| SessionStorageError::StorageError(e.to_string()))?;
+
+        Ok(attempts.unwrap_or(0).max(0) as u32)
     }
 
     async fn delete_session(&self, session_id: &str) -> Result<(), SessionStorageError> {
@@ -1766,6 +1862,147 @@ mod tests {
         assert!(
             s.get_session("sess-1").await.unwrap().updated_at > before,
             "a person renaming a conversation IS activity"
+        );
+    }
+
+    /// The extraction cursor round-trips, and clearing it really does mean
+    /// unstarted rather than "examined, found nothing".
+    ///
+    /// The two states are told apart by the STAMP, not by the id: the backlog
+    /// is ordered `extracted_at IS NULL` first, so a cleared cursor that kept
+    /// its stamp would sort a conversation that has to be re-walked from
+    /// message one to the back of a queue it has not started.
+    #[tokio::test]
+    async fn the_extraction_cursor_round_trips_and_clears_to_unstarted() {
+        let (s, _tmp) = make_storage().await;
+        s.create_session("sess-1".to_string()).await.unwrap();
+
+        let fresh = s.extraction_cursor("sess-1").await.unwrap();
+        assert_eq!(fresh, ExtractionCursor::unstarted());
+
+        s.set_extraction_cursor("sess-1", Some("msg-7"))
+            .await
+            .unwrap();
+        let moved = s.extraction_cursor("sess-1").await.unwrap();
+        assert_eq!(moved.through_message_id.as_deref(), Some("msg-7"));
+        assert!(
+            moved.extracted_at.is_some(),
+            "a watermark that moved carries the time it moved"
+        );
+        assert_eq!(moved.attempts, 0);
+
+        s.set_extraction_cursor("sess-1", None).await.unwrap();
+        assert_eq!(
+            s.extraction_cursor("sess-1").await.unwrap(),
+            ExtractionCursor::unstarted(),
+            "clearing the cursor must clear the stamp with it"
+        );
+
+        // A session that does not exist has not been examined. That is a real
+        // answer, not a missing one, and the walk depends on getting it rather
+        // than an error it would have to decide what to do with.
+        assert_eq!(
+            s.extraction_cursor("never-existed").await.unwrap(),
+            ExtractionCursor::unstarted()
+        );
+    }
+
+    /// Attempts count against the watermark, and moving the watermark clears
+    /// them.
+    ///
+    /// The give-up rung depends on both halves. Without the increment a model
+    /// that never emits parseable JSON re-reads one window forever; without the
+    /// reset, three failures anywhere in a conversation's past would
+    /// permanently disqualify it.
+    #[tokio::test]
+    async fn extraction_attempts_count_against_the_watermark_and_reset_when_it_moves() {
+        let (s, _tmp) = make_storage().await;
+        s.create_session("sess-1".to_string()).await.unwrap();
+
+        assert_eq!(s.note_extraction_attempt("sess-1").await.unwrap(), 1);
+        assert_eq!(s.note_extraction_attempt("sess-1").await.unwrap(), 2);
+        assert_eq!(s.extraction_cursor("sess-1").await.unwrap().attempts, 2);
+
+        // An attempt must NOT move the watermark: the window was read, not
+        // examined, and advancing past it would lose a real conversation to a
+        // parser failure.
+        assert_eq!(
+            s.extraction_cursor("sess-1")
+                .await
+                .unwrap()
+                .through_message_id,
+            None
+        );
+
+        s.set_extraction_cursor("sess-1", Some("msg-3"))
+            .await
+            .unwrap();
+        assert_eq!(s.extraction_cursor("sess-1").await.unwrap().attempts, 0);
+
+        // A missing session reports zero rather than erroring, so the give-up
+        // rung reads "no failures here" for a conversation that has been
+        // deleted underneath the walk.
+        assert_eq!(s.note_extraction_attempt("gone").await.unwrap(), 0);
+    }
+
+    /// The same invariant the title writers carry, on the writer that runs most
+    /// often.
+    ///
+    /// `sessions.updated_at` is one of the two activity sources the idle gate
+    /// reads. The extraction cursor is written once per window of every
+    /// conversation in the backlog, so if it stamped that column the pass's own
+    /// watcher would read its bookkeeping as somebody coming back, cancel the
+    /// pass mid-run, and shove the idle clock forward -- every time, forever.
+    #[tokio::test]
+    async fn extraction_cursor_writes_are_not_mistaken_for_user_activity() {
+        let (s, _tmp) = make_storage().await;
+        s.create_session("sess-1".to_string()).await.unwrap();
+        let before = s.get_session("sess-1").await.unwrap().updated_at;
+
+        // SQLite's datetime('now') has one-second resolution, so without this
+        // a bump inside the same second would be invisible and the test would
+        // pass against code that does bump.
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+        s.set_extraction_cursor("sess-1", Some("msg-4"))
+            .await
+            .unwrap();
+        assert_eq!(
+            s.get_session("sess-1").await.unwrap().updated_at,
+            before,
+            "advancing the extraction watermark must not read as user activity"
+        );
+
+        s.note_extraction_attempt("sess-1").await.unwrap();
+        assert_eq!(
+            s.get_session("sess-1").await.unwrap().updated_at,
+            before,
+            "a failed extraction attempt must not read as user activity either"
+        );
+
+        s.set_extraction_cursor("sess-1", None).await.unwrap();
+        assert_eq!(
+            s.get_session("sess-1").await.unwrap().updated_at,
+            before,
+            "clearing the cursor must not read as user activity either"
+        );
+
+        // Vacuity control: this storage really does bump `updated_at` when
+        // something real happens, so the three assertions above are decisions
+        // and not a column nobody writes.
+        s.add_message(
+            "sess-1".to_string(),
+            SessionMessage::new(
+                "m1".to_string(),
+                "sess-1".to_string(),
+                ChatMessage::user("hello".to_string()),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(
+            s.get_session("sess-1").await.unwrap().updated_at > before,
+            "somebody sending a message IS activity"
         );
     }
 

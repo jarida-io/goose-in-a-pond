@@ -236,6 +236,7 @@ fn segment_to_str(s: &MemorySegment) -> &'static str {
         MemorySegment::Correction => "correction",
         MemorySegment::Relationship => "relationship",
         MemorySegment::Project => "project",
+        MemorySegment::Routine => "routine",
         MemorySegment::Knowledge => "knowledge",
         MemorySegment::Context => "context",
     }

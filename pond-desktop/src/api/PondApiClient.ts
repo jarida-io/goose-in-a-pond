@@ -1101,6 +1101,11 @@ export class PondApiClient {
     return this.get("/api/v1/models/memory-status");
   }
 
+  /** What the batch memory-extraction engine is doing, and why it is not. */
+  getExtractionStatus(): Promise<import("./types").ExtractionStatus> {
+    return this.get("/api/v1/memories/extraction-status");
+  }
+
   /** Prefix warm-up status — is the pond ready for a first message yet. */
   getWarmupStatus(): Promise<import("./types").WarmupStatus> {
     return this.get("/api/v1/warmup");

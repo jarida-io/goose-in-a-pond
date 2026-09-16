@@ -13,10 +13,7 @@ use crate::shared::domain::agent::{AgentRequest, AgentStreamEvent, WorkflowEvent
 use crate::shared::services::print_output::PrintOutput;
 use crate::shared::services::stdin_input::StdinInput;
 use crate::user_data::domain::session::SessionMessage;
-use crate::user_data::ports::memory_extractor::MemoryExtractor;
-use crate::user_data::ports::memory_repository::MemoryRepository;
 use crate::user_data::ports::session_storage::SessionStorage;
-use crate::user_data::services::memory_extraction::MemoryExtractionService;
 use anyhow::Result;
 use futures::StreamExt as _;
 use std::io::{self, Write};
@@ -444,12 +441,6 @@ pub struct ChatService {
     system_prompt: String,
     /// Optional Answer Reviewer — adversarial post-inference quality gate.
     answer_reviewer: Option<Arc<dyn crate::models::ports::answer_reviewer::AnswerReviewer>>,
-    /// Optional memory extraction pipeline. When all three are set,
-    /// `persist_assistant_turn` spawns extraction automatically so handlers
-    /// cannot accidentally omit it.
-    memory_extractor: Option<Arc<dyn MemoryExtractor>>,
-    memory_extraction_service: Option<Arc<MemoryExtractionService>>,
-    memory_repo: Option<Arc<dyn MemoryRepository>>,
     /// Optional unified activity log. When set, `persist_assistant_turn` records
     /// one Agent event, one Inference event (when token usage is known), and one
     /// Tool event per tool call — so the activity feed reflects chat activity,
@@ -538,9 +529,6 @@ impl ChatService {
             session_storage,
             system_prompt: SYSTEM_PROMPT.to_string(),
             answer_reviewer: None,
-            memory_extractor: None,
-            memory_extraction_service: None,
-            memory_repo: None,
             event_log: None,
             event_sink: None,
             stdout_diagnostics: true,
@@ -623,15 +611,17 @@ impl ChatService {
         self
     }
 
-    /// Attach the memory extraction pipeline so `persist_assistant_turn`
-    /// automatically triggers extraction. Handlers that omit this call simply
-    /// skip extraction — no silent data loss, no handler-level boilerplate.
     /// The scope this session's turns are attributed to.
     ///
     /// Set by the handler from the same resolution that fills
-    /// `AgentRequest.profile_scope`, so a turn's memory is written under the
-    /// same identity it was read under. Defaults to `Household`, which is what
-    /// every path did before PAI-1.
+    /// `AgentRequest.profile_scope`, so a turn is answered under the identity
+    /// it was asked under. Defaults to `Household`, which is what every path
+    /// did before PAI-1.
+    ///
+    /// It no longer decides who a memory is written for: extraction left the
+    /// turn, and the batch engine resolves that from the session's persisted
+    /// identity instead. Which is why `resolve_turn_scope` now writes that
+    /// identity back -- the two answers have to be the same answer.
     pub fn with_profile_scope(mut self, scope: ProfileScope) -> Self {
         self.profile_scope = scope;
         self
@@ -678,18 +668,6 @@ impl ChatService {
             }
         }
         decision
-    }
-
-    pub fn with_memory_extraction(
-        mut self,
-        extractor: Arc<dyn MemoryExtractor>,
-        service: Arc<MemoryExtractionService>,
-        repo: Arc<dyn MemoryRepository>,
-    ) -> Self {
-        self.memory_extractor = Some(extractor);
-        self.memory_extraction_service = Some(service);
-        self.memory_repo = Some(repo);
-        self
     }
 
     /// Attach an Answer Reviewer for post-inference adversarial quality review.
@@ -1244,45 +1222,6 @@ impl ChatService {
                 "Derived session title (deterministic fallback)"
             );
         }
-    }
-
-    /// Like `persist_assistant_turn` but also triggers memory extraction in a
-    /// background task. Use this instead of the inline `tokio::spawn` pattern
-    /// in HTTP handlers — the extraction cannot be accidentally omitted.
-    pub async fn persist_assistant_turn_with_extraction(
-        &self,
-        tool_results: Vec<String>,
-        assistant_text: &str,
-        usage: Option<(u32, u32)>,
-        model_name: Option<&str>,
-        user_message: &str,
-    ) -> Result<()> {
-        self.persist_assistant_turn(tool_results, assistant_text, usage, model_name)
-            .await?;
-
-        if let (Some(ext), Some(svc), Some(repo)) = (
-            self.memory_extractor.clone(),
-            self.memory_extraction_service.clone(),
-            self.memory_repo.clone(),
-        ) {
-            let user_msg = user_message.to_string();
-            let asst_resp = assistant_text.to_string();
-            let sid = self.session_id.clone();
-            let scope = self.profile_scope.clone();
-            tokio::spawn(async move {
-                svc.run(
-                    ext.as_ref(),
-                    repo.as_ref(),
-                    &user_msg,
-                    &asst_resp,
-                    Some(&sid),
-                    &scope,
-                )
-                .await;
-            });
-        }
-
-        Ok(())
     }
 
     /// Streaming chat — routes through the Agent, chunks TTS by sentence,

@@ -1,0 +1,1047 @@
+//! The live [`ConversationExtractor`]: read one window of a conversation with
+//! the local model.
+//!
+//! # What this prompt is for, and what the old one could not ask
+//!
+//! The per-turn prompt this replaced asked "extract durable facts about the
+//! USER from this conversation turn". It was a good prompt for the question it
+//! asked, and the question was the wrong one twice over. A turn cannot show a
+//! habit, so "is this a pattern, a standing way they do things?" -- a third of
+//! what a household actually wants remembered -- was unanswerable by
+//! construction. And a turn has no room for what the pond already knows, so a
+//! model restating something better than it was first written had no way to say
+//! so: the restatement came back as a near-duplicate and was thrown away.
+//!
+//! This prompt names the subject, asks what was memorable, asks the habit
+//! question outright, draws the line between a habit's timing and a one-off
+//! date, and shows what is already known so new evidence can build on it.
+//!
+//! # Why the date rule reads the way it does
+//!
+//! It was measured, not imagined. 432 live replies through this prompt and this
+//! parser, across six local models. Every date that turned up inside a `note`
+//! was in a class that carries one: a recurring habit, a recurring clock time,
+//! a version year, an appointment, a biographical year, a date mid-sentence.
+//! The classes that carry no date -- preference, relationship, correction,
+//! context, a number that is not a date, a window with nothing in it -- were
+//! 0 for 207. The models do not need telling about those, and telling them
+//! would only spend budget.
+//!
+//! The recurring class is the one the old wording got wrong. "NO dates" asked
+//! the models to write "swims each Saturday" without the Saturday, and they
+//! would not: the shipped model and the larger one kept the weekday in all 12
+//! recurring windows between them, at greedy and at both seeds, and granite did
+//! the same. They were right to. A recurrence names no day on any calendar,
+//! nothing in it can become false, and it is the pattern the `routine` kind
+//! exists to capture -- so the rule now carves it out, and the write gate
+//! agrees with it (`memory.rs`'s `recurrence_positions`).
+//!
+//! What is left forbidden is the one-off, which is what a reminder is for. On
+//! the shipped model the split works: 31 reminders across its 36 dated windows,
+//! not one date lost entirely, and every `when` was the household's own words
+//! rather than a date the model worked out.
+//!
+//! The closing paragraph earns its line the same way. The shipped model
+//! invented a memory on 5 of 6 windows that held nothing -- "Jerry checked if
+//! Goose was awake" -- which fills a store with noise no date rule ever
+//! touches. The larger model was 6 of 6 correct on the same windows, so this is
+//! a prompt problem rather than a gate problem, and it is addressed where the
+//! problem is.
+//!
+//! # The two design rules encoded here rather than remembered
+//!
+//! 1. **The first line must diverge from the chat system prompt's first line.**
+//!    `prefill_plan` tests `ReusePrefix` BEFORE the sacrificial check
+//!    (`inference_engine.rs:514-536`, `REUSE_MIN_TOKENS = 256`), and
+//!    `ReusePrefix` decodes into the LIVE session context -- so an extraction
+//!    call that shared 256 leading tokens with the chat prompt would overwrite
+//!    the household's retained prefix and the next person to speak would pay a
+//!    cold prefill. The chat prompt opens `<identity>`; this one opens `You are
+//!    reading`. `the_extraction_prompt_diverges_from_every_chat_prompt` makes
+//!    that a property rather than a coincidence.
+//!
+//! 2. **No worked example.** `project_functiongemma_behaviour` records that
+//!    models at this size copy parameter descriptions into values verbatim, and
+//!    `memory.rs`'s `EchoedExample` gate exists because the old prompt's own
+//!    Florence-in-Kisumu example reached the live store as a fact about a family
+//!    that does not exist. The schema skeleton shows shape, never content, and
+//!    the `"when"` placeholder is `"..."` with the instruction in prose for
+//!    exactly the same reason.
+//!
+//! # Why the parse salvage moved here
+//!
+//! `strip_thinking` and the first-`{`-to-last-`}` recovery are measured
+//! behaviour against real local models, not guesses, so they were carried over
+//! verbatim. What changed is the disposition of a total failure: the per-turn
+//! path returned `Ok(vec![])`, indistinguishable from "nothing worth keeping".
+//! In a batch design that silently advances a cursor past a window nobody read,
+//! so it is [`ExtractionError::Unparseable`] here.
+//!
+//! This module is also the only remaining definition of `strip_thinking`: both
+//! consolidators call it here, where they used to call a copy in the extractor
+//! that has since been deleted.
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use pond_core::models::domain::message::ChatMessage;
+use pond_core::models::ports::provider::LlmProvider;
+use pond_core::user_data::ports::conversation_extractor::{
+    estimated_tokens, ConversationExtractor, ExtractedMemory, ExtractedReminder, ExtractionError,
+    ExtractionWindow, MemoryKind, WindowExtraction, EXTRACTION_PROMPT_BUDGET_TOKENS,
+};
+use tokio::sync::RwLock;
+
+/// The system prompt, rendered per window.
+///
+/// `{subject}` is the resolved window subject -- a member's display name,
+/// `settings.user_name`, or literally `the user` on a pond where nobody has
+/// given a name. `{assistant}` is `settings.assistant_name`. `{n}` is
+/// `memory_extraction_max_facts`.
+///
+/// The reminders paragraph and the `"reminders"` key are dropped whole for a
+/// window older than the staleness cutoff, which saves about seventy tokens on
+/// the backlog windows that make up nearly all of a first run.
+const EXTRACTION_PROMPT: &str = "\
+You are reading one conversation between {subject} and {assistant}, to
+decide what is worth remembering about {subject}.
+
+For each thing, ask: would this still be useful in six months, with the
+conversation gone? And: is it a one-off, or is it a habit, a pattern, a
+standing way {subject} does things? If it is a standing way, its kind is
+\"routine\".
+
+Reply with JSON and nothing else:
+{skeleton}
+
+note:
+- Third person. Never \"I\", \"me\", \"my\", \"we\". Say \"{subject}\" by name.
+- Stands alone: name every person and place. Never \"there\", \"that place\",
+  \"the latter\", or an opening \"He\", \"She\", \"It\", \"They\".
+- One plain sentence. No label prefix.
+- A habit keeps its timing: \"every Saturday\", \"each morning at six\" are
+  part of the habit. Keep them.
+- NO one-off dates: no year, no \"on Tuesday\", no \"next week\", no
+  \"tomorrow\", no \"at six\" for something that happens once. Write the
+  memory without it, or leave the memory out. A date is a reminder.
+
+kind, one of exactly these five:
+- relationship  a person or pet {subject} knows, and who they are to them
+- preference    how {subject} likes things: style, defaults, likes, dislikes
+- routine       something {subject} does again and again: a habit, a pattern
+- correction    {subject} fixed something that was wrong
+- context       who {subject} is: role, home, the work they are living through
+
+Some of this may already be known. If the conversation adds weight to
+something in \"Already remembered\", write that memory again as the BETTER
+version of itself: same subject, said more exactly. Do not repeat one
+unchanged.
+{reminders}
+Say nothing about {assistant}'s replies, nothing {subject} asked for only
+once, nothing you are guessing at. Most conversations hold nothing worth
+keeping: a greeting, a question answered, a sum worked out -- for those,
+answer {empty}. At most {n} memories; fewer is better.";
+
+/// The schema skeleton when reminders are wanted.
+const SKELETON_WITH_REMINDERS: &str =
+    "{\"memories\":[{\"note\":\"...\",\"kind\":\"relationship\"}],\
+     \"reminders\":[{\"about\":\"...\",\"when\":\"...\"}]}";
+
+/// The skeleton for a window too old to propose anything from.
+const SKELETON_MEMORIES_ONLY: &str =
+    "{\"memories\":[{\"note\":\"...\",\"kind\":\"relationship\"}]}";
+
+/// The reminders paragraph, dropped entirely alongside the `"reminders"` key.
+const REMINDERS_PARAGRAPH: &str = "\n\
+reminders: anything that happens on one named day or at one named time. In\n\
+\"when\", put {subject}'s own words about the timing, copied from the\n\
+conversation -- do not work out the actual date, and do not invent one.\n";
+
+/// The hard ceiling on the rendered system prompt, in characters.
+///
+/// A budget rather than a hope: the window, the known-memories block and this
+/// prompt share one prompt-side clamp, and the two that grow with the
+/// conversation are the ones that must be trimmed when something has to give.
+/// This one is authored, so it is the one that can be asserted.
+pub const EXTRACTION_PROMPT_CEILING: usize = 2_300;
+
+/// How much of an unparseable reply is carried into the error.
+///
+/// Bounded because this reaches a log file, and an unbounded model reply in a
+/// log is a household's conversation written to a second place with none of the
+/// store's scoping, retention or redaction.
+const RAW_HEAD_CHARS: usize = 240;
+
+pub struct LlmConversationExtractor {
+    live_provider: Arc<RwLock<Option<Arc<dyn LlmProvider>>>>,
+}
+
+impl LlmConversationExtractor {
+    pub fn new(live_provider: Arc<RwLock<Option<Arc<dyn LlmProvider>>>>) -> Self {
+        Self { live_provider }
+    }
+}
+
+/// Render the system prompt for one window.
+pub fn render_extraction_prompt(
+    subject: &str,
+    assistant: &str,
+    max_memories: usize,
+    allow_reminders: bool,
+) -> String {
+    let (skeleton, reminders, empty) = if allow_reminders {
+        (
+            SKELETON_WITH_REMINDERS,
+            REMINDERS_PARAGRAPH.replace("{subject}", subject),
+            "{\"memories\":[],\"reminders\":[]}",
+        )
+    } else {
+        (SKELETON_MEMORIES_ONLY, String::new(), "{\"memories\":[]}")
+    };
+
+    EXTRACTION_PROMPT
+        .replace("{skeleton}", skeleton)
+        .replace("{reminders}", &reminders)
+        .replace("{empty}", empty)
+        .replace("{subject}", subject)
+        .replace("{assistant}", assistant)
+        .replace("{n}", &max_memories.to_string())
+}
+
+/// Render the one user message: what is already known, then the conversation.
+///
+/// # The budget is spent here, and it is spent in one direction
+///
+/// `budget_tokens` is what is left of [`EXTRACTION_PROMPT_BUDGET_TOKENS`] after
+/// the system prompt, and this is the last place anything can be dropped before
+/// the call. The conversation is never what gets dropped: it is what the call
+/// exists to read, and `carve_window` has already bounded it. The
+/// known-memories block is, one whole row at a time from the least relevant end
+/// -- never truncated mid-sentence, because half a remembered sentence shown to
+/// a model at this size is one it will finish in its own words.
+///
+/// A budget that was declared and never measured is what let a 40 KB pasted log
+/// reach a provider with an 8192-token clamp.
+pub fn render_window_message(window: &ExtractionWindow<'_>, budget_tokens: usize) -> String {
+    let mut conversation = String::from("Conversation:\n");
+    for message in window.messages {
+        let speaker = if message.is_user() {
+            window.subject.name.as_str()
+        } else {
+            window.assistant_name
+        };
+        conversation.push_str(&format!("{speaker}: {}\n", message.content.trim()));
+    }
+
+    let mut spent = estimated_tokens(&conversation);
+    if spent > budget_tokens {
+        // Not reachable through `carve_window`, which refuses an exchange
+        // larger than the window budget outright. It is a warning rather than a
+        // silent overrun because reaching it means the carve bound and this
+        // budget have come apart, and the symptom at the other end is a
+        // truncated prompt that loses the schema and comes back unparseable.
+        tracing::warn!(
+            tokens = spent,
+            budget = budget_tokens,
+            "[batch-extraction] one window's conversation alone overruns the prompt budget"
+        );
+    }
+
+    let mut known_block = String::new();
+    if !window.known.is_empty() {
+        let header = format!("Already remembered about {}:\n", window.subject.name);
+        // The header plus the blank line that closes the block. Both are paid
+        // for before the first row is admitted, so the block cannot fit itself
+        // and then overrun on its own punctuation.
+        let header_cost = estimated_tokens(&header) + 1;
+        let mut rows = String::new();
+        let mut kept = 0usize;
+        for known in window.known {
+            // The asterisk marks an established memory so the model can tell
+            // what it is adding weight to from what it is seeing once. Nothing
+            // counts observations yet, so nothing carries one.
+            let mark = if known.pattern { "*" } else { "" };
+            let line = format!(
+                "{}. [{}{}] {}\n",
+                kept + 1,
+                known.kind_label,
+                mark,
+                known.note
+            );
+            let cost = estimated_tokens(&line);
+            if spent + header_cost + cost > budget_tokens {
+                break;
+            }
+            spent += cost;
+            rows.push_str(&line);
+            kept += 1;
+        }
+        // The header is written only if something ended up under it. A header
+        // with nothing beneath it is an invitation to a small model to fill it
+        // in, which is the same failure an empty store already guards against.
+        if kept > 0 {
+            known_block.push_str(&header);
+            known_block.push_str(&rows);
+            known_block.push('\n');
+        }
+    }
+
+    known_block + &conversation
+}
+
+#[async_trait]
+impl ConversationExtractor for LlmConversationExtractor {
+    async fn extract_window(
+        &self,
+        window: ExtractionWindow<'_>,
+    ) -> Result<WindowExtraction, ExtractionError> {
+        let provider = {
+            let guard = self.live_provider.read().await;
+            guard.as_ref().cloned().ok_or(ExtractionError::NoProvider)?
+        };
+
+        let system = render_extraction_prompt(
+            &window.subject.name,
+            window.assistant_name,
+            window.max_memories,
+            window.allow_reminders,
+        );
+        // What is left of the budget once the authored half is paid for. The
+        // system prompt is the one component whose size is known in advance, so
+        // it is the one that is never trimmed and always subtracted.
+        let user = render_window_message(
+            &window,
+            EXTRACTION_PROMPT_BUDGET_TOKENS.saturating_sub(estimated_tokens(&system)),
+        );
+
+        let response = provider
+            .complete(&system, vec![ChatMessage::user(user)])
+            .await
+            .map_err(ExtractionError::Provider)?;
+
+        parse_window_response(
+            &response.content,
+            window.max_memories,
+            window.allow_reminders,
+        )
+    }
+}
+
+/// Whether a parsed value is an answer to the question that was asked.
+///
+/// An array is the old schema's memories list and is lifted into the new shape.
+/// An object is accepted only if it carries at least one of the two keys --
+/// otherwise it is a reply to some other question, and reading it as "nothing
+/// was worth keeping" would advance a cursor past a window nobody read.
+fn usable_shape(value: serde_json::Value) -> Option<serde_json::Value> {
+    match value {
+        serde_json::Value::Array(items) => Some(serde_json::json!({ "memories": items })),
+        other if other.get("memories").is_some() || other.get("reminders").is_some() => Some(other),
+        _ => None,
+    }
+}
+
+/// Parse what came back, salvaging what the measured failures call for.
+///
+/// Three shapes are accepted, in this order: the object as written, the object
+/// recovered from between the first `{` and the last `}` (a model that added a
+/// preamble), and a bare `[...]` read as the `memories` array (a model that
+/// answered the shape of the old prompt). Anything else is
+/// [`ExtractionError::Unparseable`] -- NOT an empty result, which in a batch
+/// design would advance a cursor past a window nobody read.
+pub fn parse_window_response(
+    raw: &str,
+    max_memories: usize,
+    allow_reminders: bool,
+) -> Result<WindowExtraction, ExtractionError> {
+    let cleaned = strip_thinking(raw.trim());
+
+    let unparseable = || ExtractionError::Unparseable {
+        raw_head: cleaned.chars().take(RAW_HEAD_CHARS).collect(),
+    };
+
+    // Three candidate slices, tried in order, and the first that yields a
+    // USABLE shape wins. "Usable" is doing the load-bearing work: a slice that
+    // parses as JSON but carries neither key is a model answering a schema
+    // nobody asked for, and accepting it would produce an `Ok` with nothing in
+    // it -- which moves the watermark past a window that was perfectly
+    // readable. That is the failure `Unparseable` exists to prevent, and it
+    // arrives through the parser rather than through the model.
+    let brace = cleaned
+        .find('{')
+        .zip(cleaned.rfind('}'))
+        .filter(|(a, b)| a < b)
+        .map(|(a, b)| &cleaned[a..=b]);
+
+    // A bare `[...]` is the shape the per-turn prompt asked for, and a local
+    // model that has seen both will sometimes answer in the older one.
+    //
+    // Only when the text OPENS with the array, though. Every well-formed reply
+    // in the new schema also contains `[` and `]`, so an unconditional bracket
+    // salvage would reach inside `{"facts":[...]}` -- the old schema's wrapper
+    // -- pull out its array, and read a list of objects that carry none of the
+    // fields this parser wants as though the model had answered correctly.
+    let bracket = match (cleaned.find('['), cleaned.find('{')) {
+        (Some(open), brace_at) if brace_at.is_none_or(|b| open < b) => cleaned
+            .rfind(']')
+            .filter(|c| open < *c)
+            .map(|c| &cleaned[open..=c]),
+        _ => None,
+    };
+
+    let value = [Some(cleaned.as_str()), brace, bracket]
+        .into_iter()
+        .flatten()
+        .filter_map(|slice| serde_json::from_str::<serde_json::Value>(slice).ok())
+        .find_map(usable_shape)
+        .ok_or_else(unparseable)?;
+
+    let mut extraction = WindowExtraction::default();
+
+    if let Some(items) = value.get("memories").and_then(|m| m.as_array()) {
+        for item in items {
+            if extraction.memories.len() >= max_memories {
+                break;
+            }
+            let Some(note) = item
+                .get("note")
+                .or_else(|| item.get("content"))
+                .and_then(|n| n.as_str())
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+            else {
+                continue;
+            };
+            // An unknown kind is REJECTED, never defaulted. Defaulting is
+            // measurably how five third-party biography facts entered the live
+            // store: the old parser mapped everything it did not recognise onto
+            // `knowledge`, so a model answering the wrong question still got a
+            // row. A rejection is counted, so a prompt the model is
+            // systematically misreading shows up as a number.
+            let Some(kind) = item
+                .get("kind")
+                .and_then(|k| k.as_str())
+                .and_then(MemoryKind::parse)
+            else {
+                extraction.rejected += 1;
+                continue;
+            };
+            extraction.memories.push(ExtractedMemory {
+                note: note.to_string(),
+                kind,
+            });
+        }
+    }
+
+    // A window too old to propose anything from was not shown the reminders
+    // half of the schema. A model that produced them anyway is answering from
+    // its own idea of the task, and honouring that would put a proposal in
+    // front of somebody about a conversation from months ago.
+    if allow_reminders {
+        if let Some(items) = value.get("reminders").and_then(|r| r.as_array()) {
+            for item in items {
+                let about = item
+                    .get("about")
+                    .and_then(|a| a.as_str())
+                    .map(str::trim)
+                    .unwrap_or_default();
+                let when = item
+                    .get("when")
+                    .and_then(|w| w.as_str())
+                    .map(str::trim)
+                    .unwrap_or_default();
+                if about.is_empty() {
+                    continue;
+                }
+                extraction.reminders.push(ExtractedReminder {
+                    about: about.to_string(),
+                    when_said: when.to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(extraction)
+}
+
+/// Strip `<think>…</think>` and `<|channel>…<channel|>` tokens.
+///
+/// Carried verbatim from the per-turn extractor that was deleted with the
+/// per-turn path. It is measured behaviour against the local families, not a
+/// guess, so it moved rather than being rewritten -- and it is the ONE
+/// definition now: both consolidators call this, where they used to call a
+/// copy.
+pub fn strip_thinking(text: &str) -> String {
+    let mut result = text.to_string();
+
+    while let Some(start) = result.find("<think>") {
+        if let Some(end) = result.find("</think>") {
+            result = format!("{}{}", &result[..start], &result[end + 8..]);
+        } else {
+            // Unclosed think block — strip from <think> to end.
+            result = result[..start].to_string();
+            break;
+        }
+    }
+
+    while let Some(start) = result.find("<|channel>") {
+        if let Some(end) = result.find("<channel|>") {
+            result = format!("{}{}", &result[..start], &result[end + 10..]);
+        } else {
+            result = result[..start].to_string();
+            break;
+        }
+    }
+
+    result.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pond_core::user_data::ports::conversation_extractor::{
+        KnownMemory, WindowMessage, WindowSubject,
+    };
+
+    fn rendered() -> String {
+        render_extraction_prompt("Jerry", "Goose", 3, true)
+    }
+
+    /// The prompt fits the budget it claims.
+    ///
+    /// The window and the known-memories block both grow with the
+    /// conversation; this is the one component that is authored, so it is the
+    /// one whose size can be asserted rather than hoped for.
+    #[test]
+    fn the_prompt_fits_its_stated_ceiling() {
+        let prompt = rendered();
+        assert!(
+            prompt.len() <= EXTRACTION_PROMPT_CEILING,
+            "the extraction prompt is {} chars against a ceiling of {}",
+            prompt.len(),
+            EXTRACTION_PROMPT_CEILING
+        );
+        // Roughly four characters per token, and the whole call is budgeted at
+        // EXTRACTION_PROMPT_BUDGET_TOKENS. If the system half alone approached
+        // that, the window would be trimmed to nothing to fit.
+        assert!(prompt.len() / 4 < EXTRACTION_PROMPT_BUDGET_TOKENS / 3);
+    }
+
+    /// Nothing is left unrendered.
+    ///
+    /// A placeholder that survives rendering is shown to the model as literal
+    /// text, and a model at this size copies what it is shown -- so `{subject}`
+    /// in the output would become `{subject}` in a stored memory.
+    #[test]
+    fn every_placeholder_is_filled() {
+        for allow in [true, false] {
+            let prompt = render_extraction_prompt("Jerry", "Goose", 3, allow);
+            for placeholder in [
+                "{subject}",
+                "{assistant}",
+                "{n}",
+                "{skeleton}",
+                "{reminders}",
+                "{empty}",
+            ] {
+                assert!(
+                    !prompt.contains(placeholder),
+                    "{placeholder} survived rendering (allow_reminders={allow})"
+                );
+            }
+        }
+    }
+
+    /// The first line must diverge from every chat system prompt's first line.
+    ///
+    /// This is the `ReusePrefix` rule, and it is the difference between an
+    /// extraction call that costs one window and one that clobbers the
+    /// household's retained KV prefix so the next person to speak pays a cold
+    /// prefill. `prefill_plan` compares from token zero and fires at 256
+    /// shared tokens; a shared opening is the only way a call this short could
+    /// get near that.
+    #[test]
+    fn the_extraction_prompt_diverges_from_every_chat_prompt() {
+        use pond_core::prompts::{
+            PROMPT_BALANCED, PROMPT_CONCISE, PROMPT_TECHNICAL, PROMPT_WARM, SYSTEM_PROMPT,
+        };
+
+        let prompt = rendered();
+        for chat in [
+            SYSTEM_PROMPT,
+            PROMPT_BALANCED,
+            PROMPT_CONCISE,
+            PROMPT_TECHNICAL,
+            PROMPT_WARM,
+        ] {
+            let shared = prompt
+                .as_bytes()
+                .iter()
+                .zip(chat.as_bytes())
+                .take_while(|(a, b)| a == b)
+                .count();
+            assert!(
+                shared < 16,
+                "the extraction prompt shares {shared} leading bytes with a chat prompt. \
+                 `prefill_plan` tests ReusePrefix before the sacrificial check, and \
+                 ReusePrefix decodes into the LIVE session context -- a shared opening is \
+                 how a background call comes to overwrite the household's retained prefix."
+            );
+        }
+    }
+
+    /// The prompt shows a SHAPE, never a fact.
+    ///
+    /// The old prompt's worked example ("my mom florence lives in kisumu")
+    /// reached the live store as two facts about a family that does not exist,
+    /// which is why `memory.rs` carries an `EchoedExample` gate naming those
+    /// exact sentences. A schema skeleton with `...` for every value cannot be
+    /// copied into a memory, because there is nothing there to copy.
+    #[test]
+    fn the_prompt_carries_no_worked_example() {
+        let prompt = rendered();
+        for leak in ["florence", "kisumu", "nairobi", "sourdough"] {
+            assert!(
+                !prompt.to_lowercase().contains(leak),
+                "{leak:?} is content, and a model at this size copies content it is shown"
+            );
+        }
+        // The `when` placeholder is the sharpest case: a sentence there
+        // ("what {user} said about timing") would appear verbatim as a
+        // reminder. `project_functiongemma_behaviour` records exactly that.
+        assert!(prompt.contains("\"when\":\"...\""));
+    }
+
+    /// The prompt and the echo gate agree, in both directions.
+    ///
+    /// `memory.rs` refuses a fact verbatim-equal to anything in
+    /// `EXTRACTION_EXAMPLE_FACTS`, because a model at this size copies what it
+    /// is shown: the old prompt's Florence-in-Kisumu demonstration reached the
+    /// live store as two facts about a family that does not exist.
+    ///
+    /// The two have to be coupled both ways, and this is the only place that
+    /// can see both. A demonstration with no entry is that same failure
+    /// returning. An entry with no demonstration is worse in the quiet
+    /// direction: it refuses a true memory forever, for a prompt that no longer
+    /// exists, and nothing would ever say so.
+    ///
+    /// Today the list is EMPTY and the prompt shows no worked example, which is
+    /// the pairing this asserts.
+    #[test]
+    fn the_prompt_and_the_echo_gate_agree_about_examples() {
+        use pond_core::user_data::domain::memory::EXTRACTION_EXAMPLE_FACTS;
+
+        let prompt = rendered();
+        for example in EXTRACTION_EXAMPLE_FACTS {
+            assert!(
+                prompt.contains(example),
+                "{example:?} is refused as an echo of the prompt's own example, but the \
+                 prompt does not demonstrate it -- so this entry only loses a true memory"
+            );
+        }
+        // And the other way: the prompt demonstrates nothing, so the list is
+        // empty. A worked example added above must add its output to the list
+        // in the same change.
+        assert!(
+            EXTRACTION_EXAMPLE_FACTS.is_empty(),
+            "the prompt carries no worked example, so nothing can be echoed from it"
+        );
+    }
+
+    /// The date rule is stated in the prompt the gate enforces, BOTH halves of
+    /// it.
+    ///
+    /// The halves are a pair and neither survives alone. Forbidding dates
+    /// without carving out the habit asks for "swims each Saturday" with the
+    /// Saturday taken out, which all six measured models refuse to write and
+    /// the gate no longer wants; carving out the habit without forbidding the
+    /// one-off gives the store "the dentist is on Tuesday" forever.
+    ///
+    /// Matched on fragments rather than whole sentences: the lines wrap in the
+    /// constant, and an assertion across a wrap fails on a reflow that changed
+    /// nothing.
+    #[test]
+    fn the_prompt_states_both_halves_of_the_date_rule() {
+        let prompt = rendered();
+        assert!(prompt.contains("A habit keeps its timing"));
+        assert!(prompt.contains("NO one-off dates"));
+        assert!(prompt.contains("A date is a reminder."));
+    }
+
+    /// The prompt says out loud that most windows hold nothing.
+    ///
+    /// Measured: the shipped model wrote a memory on 5 of 6 windows that held
+    /// none -- a greeting, a unit conversion -- and every one of those would be
+    /// injected into later turns for the life of the pond. No date rule and no
+    /// write gate touches that failure; only this line does.
+    #[test]
+    fn the_prompt_says_that_most_windows_hold_nothing() {
+        for allow in [true, false] {
+            let prompt = render_extraction_prompt("Jerry", "Goose", 3, allow);
+            assert!(prompt.contains("Most conversations hold nothing worth"));
+            // And the empty answer is shown in the same breath, in the shape
+            // the parser wants for this window.
+            assert!(prompt.contains("answer {\"memories\":[]"));
+        }
+    }
+
+    /// Every kind the parser accepts is named in the prompt, and nothing else
+    /// is.
+    ///
+    /// A catalogue the model is not shown is a catalogue it cannot choose from;
+    /// a label in the prompt the parser rejects is a memory the pond throws
+    /// away for a wording it asked for.
+    #[test]
+    fn the_prompt_and_the_parser_agree_on_the_catalogue() {
+        let prompt = rendered();
+        for kind in MemoryKind::ALL {
+            assert!(
+                prompt.contains(kind.as_str()),
+                "{} is accepted by the parser and never shown to the model",
+                kind.as_str()
+            );
+        }
+        for gone in ["identity", "project", "knowledge"] {
+            assert!(
+                !prompt.contains(gone),
+                "{gone:?} is in the prompt but the parser rejects it"
+            );
+        }
+    }
+
+    /// A stale window is not shown the reminders half at all.
+    #[test]
+    fn a_stale_window_is_never_asked_for_a_reminder() {
+        let prompt = render_extraction_prompt("Jerry", "Goose", 3, false);
+        assert!(!prompt.contains("reminders"));
+        assert!(!prompt.contains("\"when\""));
+        assert!(prompt.contains("{\"memories\":[]}"));
+        assert!(
+            prompt.len() < rendered().len(),
+            "dropping the paragraph is also worth about seventy tokens on every backlog \
+             window, which is nearly all of a first run"
+        );
+    }
+
+    // ── Parsing ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_clean_reply_parses() {
+        let raw = r#"{"memories":[{"note":"Jerry waters the greenhouse before work.","kind":"routine"}],"reminders":[{"about":"the dentist","when":"next Tuesday"}]}"#;
+        let out = parse_window_response(raw, 3, true).unwrap();
+        assert_eq!(out.memories.len(), 1);
+        assert_eq!(out.memories[0].kind, MemoryKind::Routine);
+        assert_eq!(out.reminders.len(), 1);
+        assert_eq!(out.reminders[0].when_said, "next Tuesday");
+    }
+
+    /// The measured salvages, kept because they were measured.
+    #[test]
+    fn a_preamble_and_a_thinking_block_are_salvaged() {
+        let raw = "<think>hmm, what did they say</think>Here you go:\n\
+                   {\"memories\":[{\"note\":\"Jerry's sister is Amara.\",\"kind\":\"relationship\"}]}\n\
+                   Hope that helps!";
+        let out = parse_window_response(raw, 3, true).unwrap();
+        assert_eq!(out.memories.len(), 1);
+    }
+
+    /// A model answering the shape of the old prompt still gets read.
+    /// A model answering the shape of the old prompt still gets read.
+    ///
+    /// The subtle half: a bare array IS valid JSON, so it parses on the first
+    /// attempt and lands as an array `Value`. Treating the array-recovery as a
+    /// later salvage branch means it is never reached, and every array reply
+    /// comes back as an `Ok` with no memories in it -- which advances the
+    /// cursor past a window that was perfectly readable.
+    #[test]
+    fn a_bare_array_is_read_as_the_memories_list() {
+        let raw = r#"[{"note":"Jerry prefers short answers.","kind":"preference"}]"#;
+        let out = parse_window_response(raw, 3, true).unwrap();
+        assert_eq!(out.memories.len(), 1);
+        assert_eq!(out.memories[0].kind, MemoryKind::Preference);
+
+        // With a preamble in front of it, which is the form that actually
+        // arrives from a local model.
+        let with_preamble = format!("Here is what I found:\n{raw}");
+        assert_eq!(
+            parse_window_response(&with_preamble, 3, true)
+                .unwrap()
+                .memories
+                .len(),
+            1
+        );
+    }
+
+    /// An object answering a schema nobody asked for is a parse failure, not an
+    /// empty answer.
+    ///
+    /// `{"facts":[...]}` is the OLD prompt's shape, and the pond will be
+    /// running both prompts against the same model for the length of the
+    /// cutover. Reading it as "nothing worth keeping" would move the watermark
+    /// past every window in the store, once, and never come back.
+    #[test]
+    fn an_object_with_neither_key_is_a_parse_failure() {
+        let raw =
+            r#"{"facts":[{"content":"Jerry prefers short answers.","segment":"preference"}]}"#;
+        assert!(matches!(
+            parse_window_response(raw, 3, true),
+            Err(ExtractionError::Unparseable { .. })
+        ));
+
+        // Vacuity control: the same object under the right key parses, so the
+        // refusal above is about the SCHEMA and not about the parser having
+        // stopped working.
+        let right = r#"{"memories":[{"note":"Jerry prefers short answers.","kind":"preference"}]}"#;
+        assert_eq!(
+            parse_window_response(right, 3, true)
+                .unwrap()
+                .memories
+                .len(),
+            1
+        );
+    }
+
+    /// The type change this port exists for.
+    ///
+    /// An unreadable reply and an empty one must not be the same value. In the
+    /// per-turn path both are `Ok(vec![])` and the cost is one turn's facts; in
+    /// a batch design the cursor advances past a window nobody read and the
+    /// conversation is never revisited.
+    #[test]
+    fn an_unreadable_reply_is_not_an_empty_one() {
+        let empty = parse_window_response(r#"{"memories":[],"reminders":[]}"#, 3, true).unwrap();
+        assert!(empty.is_empty());
+
+        let err = parse_window_response("Sure! I had a look and nothing stood out.", 3, true)
+            .expect_err("no JSON is recoverable here");
+        assert!(matches!(err, ExtractionError::Unparseable { .. }));
+    }
+
+    /// The raw head in the error is bounded.
+    ///
+    /// It reaches a log file, and an unbounded model reply in a log is a
+    /// household's conversation written somewhere with none of the store's
+    /// scoping, retention or redaction.
+    #[test]
+    fn the_unparseable_error_carries_a_bounded_excerpt() {
+        let long = "not json ".repeat(400);
+        let err = parse_window_response(&long, 3, true).expect_err("unparseable");
+        match err {
+            ExtractionError::Unparseable { raw_head } => {
+                assert!(raw_head.chars().count() <= RAW_HEAD_CHARS);
+            }
+            other => panic!("expected Unparseable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_kind_is_counted_and_dropped() {
+        let raw = r#"{"memories":[
+            {"note":"William Ruto is the president of Kenya.","kind":"knowledge"},
+            {"note":"Jerry prefers short answers.","kind":"preference"}
+        ]}"#;
+        let out = parse_window_response(raw, 3, true).unwrap();
+        assert_eq!(out.memories.len(), 1);
+        assert_eq!(out.rejected, 1);
+    }
+
+    /// A reminder from a window that was never asked for one is discarded.
+    #[test]
+    fn reminders_from_a_stale_window_are_discarded() {
+        let raw = r#"{"memories":[],"reminders":[{"about":"the dentist","when":"next Tuesday"}]}"#;
+        let out = parse_window_response(raw, 3, false).unwrap();
+        assert!(out.reminders.is_empty());
+
+        // Vacuity control: the same reply DOES produce a reminder when the
+        // window was asked for one.
+        assert_eq!(
+            parse_window_response(raw, 3, true).unwrap().reminders.len(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_memory_cap_is_honoured() {
+        let raw = r#"{"memories":[
+            {"note":"Jerry prefers short answers.","kind":"preference"},
+            {"note":"Jerry's sister is Amara.","kind":"relationship"},
+            {"note":"Jerry waters the greenhouse before work.","kind":"routine"},
+            {"note":"Jerry runs the standup.","kind":"routine"}
+        ]}"#;
+        assert_eq!(
+            parse_window_response(raw, 2, true).unwrap().memories.len(),
+            2
+        );
+    }
+
+    // ── The user message ─────────────────────────────────────────────────
+
+    #[test]
+    fn the_window_message_names_the_speakers_and_what_is_known() {
+        let subject = WindowSubject::named("Jerry");
+        let messages = vec![
+            WindowMessage {
+                id: "m1".to_string(),
+                role: "user".to_string(),
+                content: "the starter lives in the pantry".to_string(),
+                created_at: chrono::Utc::now(),
+            },
+            WindowMessage {
+                id: "m2".to_string(),
+                role: "assistant".to_string(),
+                content: "noted".to_string(),
+                created_at: chrono::Utc::now(),
+            },
+        ];
+        let known = vec![KnownMemory {
+            note: "Jerry waters the greenhouse before work.".to_string(),
+            kind_label: "routine".to_string(),
+            pattern: false,
+        }];
+        let rendered = render_window_message(
+            &ExtractionWindow {
+                subject: &subject,
+                assistant_name: "Goose",
+                session_id: "sess-1",
+                window_id: "m2",
+                messages: &messages,
+                known: &known,
+                max_memories: 3,
+                allow_reminders: true,
+            },
+            EXTRACTION_PROMPT_BUDGET_TOKENS,
+        );
+
+        assert!(rendered.contains("Already remembered about Jerry:"));
+        assert!(rendered.contains("1. [routine] Jerry waters the greenhouse before work."));
+        assert!(rendered.contains("Jerry: the starter lives in the pantry"));
+        assert!(rendered.contains("Goose: noted"));
+        // Nothing counts observations yet, so nothing is marked established.
+        assert!(!rendered.contains("[routine*]"));
+    }
+
+    /// The known block is dropped row by row to fit the budget.
+    ///
+    /// `EXTRACTION_PROMPT_BUDGET_TOKENS` had exactly one reader before this:
+    /// its own test, asserting the SYSTEM half. Nothing measured the assembled
+    /// prompt, and the two components that grow with the conversation were the
+    /// two nobody bounded. This is the last place anything can be dropped
+    /// before the call, and what gets dropped is never the conversation -- that
+    /// is what the call exists to read.
+    #[test]
+    fn the_known_block_is_dropped_row_by_row_to_fit_the_budget() {
+        let subject = WindowSubject::named("Jerry");
+        let messages = vec![WindowMessage {
+            id: "m1".to_string(),
+            role: "user".to_string(),
+            content: "the starter lives in the pantry".to_string(),
+            created_at: chrono::Utc::now(),
+        }];
+        let known: Vec<KnownMemory> = (0..8)
+            .map(|i| KnownMemory {
+                note: format!("Jerry remembers thing {i}. {}", "long ".repeat(60)),
+                kind_label: "routine".to_string(),
+                pattern: false,
+            })
+            .collect();
+        let window = ExtractionWindow {
+            subject: &subject,
+            assistant_name: "Goose",
+            session_id: "sess-1",
+            window_id: "m1",
+            messages: &messages,
+            known: &known,
+            max_memories: 3,
+            allow_reminders: true,
+        };
+
+        let budget = 200;
+        let rendered = render_window_message(&window, budget);
+        assert!(
+            estimated_tokens(&rendered) <= budget,
+            "the assembled user message is {} tokens against a budget of {budget}",
+            estimated_tokens(&rendered)
+        );
+        // Whole rows only. A truncated remembered sentence is one a model at
+        // this size finishes in its own words.
+        assert!(rendered.contains("thing 0"));
+        assert!(!rendered.contains("thing 7"));
+        assert!(
+            rendered.contains("the starter lives in the pantry"),
+            "the conversation is never what gets dropped to fit"
+        );
+
+        // Vacuity control: with the real budget every row is shown, so the
+        // drops above are about the BUDGET and not about the renderer having
+        // stopped rendering.
+        let full = render_window_message(&window, EXTRACTION_PROMPT_BUDGET_TOKENS);
+        assert!(full.contains("thing 7"));
+    }
+
+    /// A budget that leaves no room for the block leaves no header either.
+    ///
+    /// A header with nothing under it is an invitation to a small model to fill
+    /// it in -- the same failure `an_empty_store_renders_no_already_remembered_header`
+    /// guards against, arriving by a different route.
+    #[test]
+    fn a_spent_budget_drops_the_header_with_the_rows() {
+        let subject = WindowSubject::named("Jerry");
+        let messages = vec![WindowMessage {
+            id: "m1".to_string(),
+            role: "user".to_string(),
+            content: "hello".to_string(),
+            created_at: chrono::Utc::now(),
+        }];
+        let known = vec![KnownMemory {
+            note: "Jerry waters the greenhouse before work.".to_string(),
+            kind_label: "routine".to_string(),
+            pattern: false,
+        }];
+        let rendered = render_window_message(
+            &ExtractionWindow {
+                subject: &subject,
+                assistant_name: "Goose",
+                session_id: "sess-1",
+                window_id: "m1",
+                messages: &messages,
+                known: &known,
+                max_memories: 3,
+                allow_reminders: true,
+            },
+            // Enough for the conversation and nothing else.
+            5,
+        );
+        assert!(!rendered.contains("Already remembered"));
+        assert!(rendered.starts_with("Conversation:"));
+    }
+
+    /// An empty store does not produce a header with nothing under it.
+    ///
+    /// "Already remembered about Jerry:" followed by a blank is an invitation
+    /// to a small model to fill it in.
+    #[test]
+    fn an_empty_store_renders_no_already_remembered_header() {
+        let subject = WindowSubject::anonymous();
+        let messages = vec![WindowMessage {
+            id: "m1".to_string(),
+            role: "user".to_string(),
+            content: "hello".to_string(),
+            created_at: chrono::Utc::now(),
+        }];
+        let rendered = render_window_message(
+            &ExtractionWindow {
+                subject: &subject,
+                assistant_name: "Goose",
+                session_id: "sess-1",
+                window_id: "m1",
+                messages: &messages,
+                known: &[],
+                max_memories: 3,
+                allow_reminders: true,
+            },
+            EXTRACTION_PROMPT_BUDGET_TOKENS,
+        );
+        assert!(!rendered.contains("Already remembered"));
+        assert!(rendered.starts_with("Conversation:"));
+    }
+}

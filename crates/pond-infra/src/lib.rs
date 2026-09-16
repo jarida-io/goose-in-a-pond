@@ -30,6 +30,7 @@ pub mod sqlite_prompt_template;
 pub mod sqlite_proposal;
 pub mod sqlite_push_token;
 pub mod sqlite_recipe;
+pub mod sqlite_reminder;
 pub mod sqlite_security_policy;
 pub mod sqlite_sensor;
 pub mod sqlite_session_storage;

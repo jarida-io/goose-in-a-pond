@@ -74,6 +74,21 @@ pub enum LaneJob {
     /// that `run_index_maintenance` asserts, to save a few milliseconds of
     /// `COUNT(*)`.
     IndexMaintenance,
+    /// Read one window of one conversation and decide what is worth
+    /// remembering about the person in it.
+    ///
+    /// Declared LAST, and that is not a style choice: declaration order is the
+    /// tie-break, and this is the job that should lose every tie it is in. It
+    /// is the most expensive per pass (three model calls of ~2,240 tokens
+    /// each), the least urgent (a conversation from last March does not get
+    /// staler), and the only one whose work is safely resumable -- its cursor
+    /// means a lost tick costs nothing but the tick. The summary refresh, by
+    /// contrast, maintains the context the NEXT turn is answered from.
+    ///
+    /// It is in the lane rather than keeping its own loop for the obvious
+    /// reason and one less obvious one: it spends the single inference slot,
+    /// and it is the job most likely to be mid-call when somebody comes back.
+    MemoryExtraction,
 }
 
 impl LaneJob {
@@ -85,6 +100,7 @@ impl LaneJob {
             LaneJob::ProactiveReview => "proactive_review",
             LaneJob::SummaryRefresh => "summary_refresh",
             LaneJob::IndexMaintenance => "index_maintenance",
+            LaneJob::MemoryExtraction => "memory_extraction",
         }
     }
 }
@@ -501,6 +517,43 @@ mod tests {
             job(LaneJob::IndexMaintenance, Some(500), 0),
         ];
         assert_eq!(tick(&jobs), LaneDecision::Run(LaneJob::SummaryRefresh));
+    }
+
+    /// Batch memory extraction is declared last, and must stay there.
+    ///
+    /// The tie-break is declaration order, so where this variant sits IS the
+    /// policy for every tie it takes part in. Last is the correct place for
+    /// three reasons that all point the same way: it is the most expensive pass
+    /// in the lane, the least urgent (a conversation from last March does not
+    /// get staler), and the only one that keeps a durable cursor -- so a tick it
+    /// loses costs exactly that tick, whereas a tick the summary refresh loses
+    /// is a tick the next turn is answered without its context.
+    ///
+    /// Inserting a variant after it silently reverses that, which is why this
+    /// is asserted rather than left to the comment above.
+    #[test]
+    fn the_most_expensive_job_loses_every_tie() {
+        assert!(
+            LaneJob::IndexMaintenance < LaneJob::MemoryExtraction,
+            "declaration order is the tie-break the runner sorts by, so this ordering IS the \
+             policy: a variant added after MemoryExtraction silently reverses it"
+        );
+
+        // Presented in the order the runner produces, which sorts by `LaneJob`.
+        let jobs = [
+            job(LaneJob::IndexMaintenance, Some(500), 0),
+            job(LaneJob::MemoryExtraction, Some(500), 0),
+        ];
+        assert_eq!(tick(&jobs), LaneDecision::Run(LaneJob::IndexMaintenance));
+
+        // Losing ties is not starving. The moment it has waited longer than the
+        // other job, it wins outright -- which is the property that makes
+        // "declared last" a cost ordering rather than a permanent refusal.
+        let starved = [
+            job(LaneJob::IndexMaintenance, Some(500), 0),
+            job(LaneJob::MemoryExtraction, Some(9_000), 0),
+        ];
+        assert_eq!(tick(&starved), LaneDecision::Run(LaneJob::MemoryExtraction));
     }
 
     /// The index sweep is a lane citizen like any other, and the property that

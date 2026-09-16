@@ -87,13 +87,22 @@ def call(method, path, body=None, token=None):
 
 
 def expect(label, code, want, body, *predicates):
-    """Status first, then body predicates. Returns True only if all held."""
+    """Status first, then body predicates. Returns True only if all held.
+
+    A predicate is CALLED with the body. It used to be passed straight to
+    `check`, and every caller passes a lambda -- `bool(<function>)` is True, so
+    every body assertion in this file reported PASS without ever running. The
+    route-ordering check that says `extraction-status` is "not a memory row" was
+    one of them: it would have passed against a memory. Callables are called; a
+    plain value is still read as the boolean it is.
+    """
     if code != want:
         check(label, False, "HTTP %s (wanted %s): %s" % (code, want, body))
         return False
     ok = True
     for sublabel, predicate in predicates:
-        ok &= check(label + " / " + sublabel, predicate, str(body))
+        verdict = predicate(body) if callable(predicate) else predicate
+        ok &= check(label + " / " + sublabel, verdict, str(body))
     if not predicates:
         check(label, True)
     return ok
@@ -812,6 +821,236 @@ def section_policy_telemetry():
     )
 
 
+# ── The batch memory-extraction engine ───────────────────────────────────────
+
+
+def section_memory_extraction():
+    """Phase 2: nothing else extracts memories now, so the engine has to answer.
+
+    Three things this can see and no unit test can. The route is registered --
+    it sits before `/memories/{id}` in the router and axum would otherwise match
+    `extraction-status` as an id. The cursor columns migration 0056 added are on
+    a real database file with rows already in it. And the engine reports its own
+    absence honestly: this pond has no embedding model, so it must say so rather
+    than look identical to a pond with nothing left to read.
+    """
+    print("\n=== memory extraction: the engine answers for itself ===")
+
+    code, body = call("GET", "/api/v1/memories/extraction-status")
+    expect(
+        "the extraction status route is registered",
+        code,
+        200,
+        body,
+        ("answers with an object", lambda b: isinstance(b, dict)),
+        # The ordering trap: `/memories/{id}` would match "extraction-status" as
+        # an id and return a memory, or a 404, rather than this.
+        ("is not a memory row", lambda b: "sessions_total" in b),
+        ("says whether the engine is running here", lambda b: "running" in b),
+        ("says why it is not, when it is not", lambda b: "blocked_on" in b),
+        # The loss that is invisible from every other angle: a pond with more
+        # than one member never mines a conversation nobody has identified, and
+        # the voice child cannot be identified at all -- it is a separate
+        # process with no request, so none of the three things that bind a
+        # session to a member can reach it. The count has to be on the wire or
+        # the household has no way to see it.
+        (
+            "says how many conversations nobody can name",
+            lambda b: "unattributed_sessions" in b,
+        ),
+    )
+
+    if not isinstance(body, dict):
+        return
+
+    # A pond with no embedder must SAY it is not extracting. The failure this
+    # guards is the quiet one: reading nothing looks exactly like having nothing
+    # left to read, and the difference is a household's whole history.
+    if not body.get("running"):
+        check(
+            "a pond with no engine says so rather than reporting a zeroed pass",
+            body.get("blocked_on") is not None or body.get("last_pass_at") is None,
+            "running=%s blocked_on=%r" % (body.get("running"), body.get("blocked_on")),
+        )
+
+    # The cursor is a real column on a real row, not a default a mock returned.
+    seed_session("sess-extraction-cursor")
+    con = db()
+    cols = {r[1] for r in con.execute("PRAGMA table_info(sessions)")}
+    con.close()
+    for col in ("extracted_through_id", "extracted_at", "extraction_attempts"):
+        check(
+            "migration 0056 put %s on the sessions table" % col,
+            col in cols,
+            "columns: %s" % sorted(cols),
+        )
+
+    code, body = call("GET", "/api/v1/memories/extraction-status")
+    check(
+        "a newly seeded conversation is counted as still to read",
+        code == 200 and body.get("sessions_pending", 0) >= 1,
+        "HTTP %s: %s" % (code, body),
+    )
+
+    # Where a refused date goes. The gate refuses any memory carrying a one-off
+    # calendar date on the understanding that the date is kept as a reminder
+    # instead, and for one release nothing was: the candidate was counted and
+    # dropped. A unit test builds this table by applying every migration to an
+    # empty file; this asks the real database file, after a restart, whether the
+    # table and its dedup guard are actually there.
+    con = db()
+    tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    check(
+        "migration 0057 created the reminders table",
+        "reminders" in tables,
+        "tables: %s" % sorted(tables),
+    )
+    if "reminders" in tables:
+        cols = {r[1] for r in con.execute("PRAGMA table_info(reminders)")}
+        for col in ("about", "when_said", "session_id", "window_id", "disposition"):
+            check(
+                "the reminders table carries %s" % col,
+                col in cols,
+                "columns: %s" % sorted(cols),
+            )
+        # The re-walk guard. Without it the engine files the same reminder again
+        # every time a cleared cursor sends it back over a window it has read.
+        uniques = [
+            r[1]
+            for r in con.execute("PRAGMA index_list(reminders)")
+            if r[2] == 1
+        ]
+        unique_cols = set()
+        for name in uniques:
+            unique_cols.update(r[2] for r in con.execute("PRAGMA index_info(%s)" % name))
+        check(
+            "the reminders table refuses the same window's reminder twice",
+            {"window_id", "about_key"} <= unique_cols,
+            "unique indexes over: %s" % sorted(unique_cols),
+        )
+    con.close()
+
+    # The two numbers that say whether the date rule is costing anything. The
+    # panel used to imply that dates_lost = 0 meant the date had been moved,
+    # while nothing moved it -- so the counters have to be on the wire before
+    # anything can claim that again.
+    check(
+        "the status route says what the last pass kept and what it lost",
+        "last_pass_reminders_written" in body and "last_pass_reminders_lost" in body,
+        str(body),
+    )
+
+
+# ── The reminders surface ────────────────────────────────────────────────────
+
+
+def section_reminders_surface():
+    """A stored reminder can be read and dismissed over real HTTP.
+
+    The table landing was only half of keeping the date. A row nothing can reach
+    is a quieter way of losing it than not writing it, and the route that
+    reaches it is registered in `routes.rs` beside `/memories/{id}` -- the exact
+    neighbourhood where `extraction-status` was once matched as an id. Route
+    registration is the thing no unit test sees: every Rust test builds the
+    router by hand or not at all.
+
+    The row is seeded through SQL rather than by running an extraction pass,
+    because this pond has no embedding model and the engine is therefore not
+    running here at all. What is under test is the surface, not the producer.
+    """
+    print("\n=== reminders: the date can be seen and disposed of ===")
+
+    con = db()
+    tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "reminders" not in tables:
+        check("the reminders surface has a table to read", False, "no reminders table")
+        con.close()
+        return
+    con.execute(
+        "INSERT OR REPLACE INTO reminders "
+        "(id, about, when_said, about_key, session_id, window_id, subject, "
+        " profile_id, said_at, captured_at, disposition) "
+        "VALUES ('live-r1', 'the dentist', 'next Tuesday', 'the dentist', "
+        "        'sess-live-reminder', 'win-live-1', 'LiveTest', NULL, "
+        "        strftime('%Y-%m-%dT%H:%M:%SZ','now'), "
+        "        strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'pending')"
+    )
+    con.commit()
+    con.close()
+
+    code, body = call("GET", "/api/v1/reminders")
+    ok = expect(
+        "the reminders route is registered",
+        code,
+        200,
+        body,
+        ("answers with an object", lambda b: isinstance(b, dict)),
+        (
+            "returns the pending reminder",
+            lambda b: isinstance(b, dict)
+            and any(r.get("id") == "live-r1" for r in b.get("reminders", [])),
+        ),
+    )
+    if ok:
+        row = next(r for r in body["reminders"] if r["id"] == "live-r1")
+        check(
+            "the timing is the words that were said, not a date",
+            row.get("when_said") == "next Tuesday" and "due_at" not in row,
+            str(row),
+        )
+        check(
+            "a reminder nobody owns is still readable",
+            row.get("profile_id") is None,
+            "profile_id=%r -- this is the state of every row on a live pond" % row.get("profile_id"),
+        )
+        check(
+            "it says which conversation it came from",
+            row.get("session_id") == "sess-live-reminder",
+            str(row),
+        )
+
+    # The ordering trap, from the other side. `/reminders` must reach its own
+    # handler, and a literal segment under `/memories/` must not be read as an
+    # id. The second is already asserted in the extraction section; this is the
+    # one route added since, in the same neighbourhood.
+    code, body = call("GET", "/api/v1/memories/extraction-status")
+    check(
+        "a literal path segment is still not matched as an id",
+        code == 200 and isinstance(body, dict) and "sessions_total" in body,
+        "HTTP %s: %s" % (code, body),
+    )
+
+    code, body = call("POST", "/api/v1/reminders/live-r1/dismiss")
+    check(
+        "a reminder can be dismissed",
+        code == 200 and isinstance(body, dict) and body.get("disposition") == "dismissed",
+        "HTTP %s: %s" % (code, body),
+    )
+
+    code, body = call("GET", "/api/v1/reminders")
+    check(
+        "a dismissed reminder is not offered again",
+        code == 200
+        and isinstance(body, dict)
+        and not any(r.get("id") == "live-r1" for r in body.get("reminders", [])),
+        "HTTP %s: %s" % (code, body),
+    )
+
+    # The pond must not say it dismissed something it did not. Both of these are
+    # the same answer on purpose: an id that never existed and one already
+    # decided are both "there is nothing waiting under that id".
+    for label, rid in (
+        ("one already dismissed", "live-r1"),
+        ("one that never existed", "live-r-nobody"),
+    ):
+        code, body = call("POST", "/api/v1/reminders/%s/dismiss" % rid)
+        check(
+            "dismissing %s is a 404, not a second success" % label,
+            code == 404,
+            "HTTP %s: %s" % (code, body),
+        )
+
+
 def main():
     """Auth is NOT checked here.
 
@@ -842,6 +1081,8 @@ def main():
         # zero on a fresh process by design -- so on the restart pass it would
         # assert nothing the first pass has not already asserted better.
         section_policy_telemetry()
+        section_memory_extraction()
+        section_reminders_surface()
 
     failed = [label for label, ok, _ in results if not ok]
     print("\n%d checks run, %d failed" % (len(results), len(failed)))

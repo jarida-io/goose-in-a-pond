@@ -428,6 +428,40 @@ impl SettingsRepository for SqliteSettingsRepository {
             "memory_extraction_interval_secs",
             settings.memory_extraction_interval_secs.to_string()
         );
+        // Batch memory extraction
+        upsert!(
+            "memory_extraction_sessions_per_pass",
+            settings.memory_extraction_sessions_per_pass.to_string()
+        );
+        upsert!(
+            "memory_extraction_window_messages",
+            settings.memory_extraction_window_messages.to_string()
+        );
+        upsert!(
+            "memory_extraction_idle_secs",
+            settings.memory_extraction_idle_secs.to_string()
+        );
+        upsert!(
+            "memory_reinforce_threshold",
+            settings.memory_reinforce_threshold.to_string()
+        );
+        upsert!(
+            "memory_relate_threshold",
+            settings.memory_relate_threshold.to_string()
+        );
+        upsert!(
+            "memory_date_proposals_enabled",
+            if settings.memory_date_proposals_enabled {
+                "true"
+            } else {
+                "false"
+            }
+        );
+        upsert!("memory_extraction_mode", &settings.memory_extraction_mode);
+        upsert!(
+            "memory_extraction_first_pass_at",
+            &settings.memory_extraction_first_pass_at
+        );
         // Scheduling
         upsert!(
             "schedule_result_notify",
@@ -1013,6 +1047,35 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
                 s.memory_extraction_interval_secs = v;
             }
         }
+        // Batch memory extraction
+        "memory_extraction_sessions_per_pass" => {
+            if let Ok(v) = value.parse() {
+                s.memory_extraction_sessions_per_pass = v;
+            }
+        }
+        "memory_extraction_window_messages" => {
+            if let Ok(v) = value.parse() {
+                s.memory_extraction_window_messages = v;
+            }
+        }
+        "memory_extraction_idle_secs" => {
+            if let Ok(v) = value.parse() {
+                s.memory_extraction_idle_secs = v;
+            }
+        }
+        "memory_reinforce_threshold" => {
+            if let Ok(v) = value.parse() {
+                s.memory_reinforce_threshold = v;
+            }
+        }
+        "memory_relate_threshold" => {
+            if let Ok(v) = value.parse() {
+                s.memory_relate_threshold = v;
+            }
+        }
+        "memory_date_proposals_enabled" => s.memory_date_proposals_enabled = value == "true",
+        "memory_extraction_mode" => s.memory_extraction_mode = value.to_string(),
+        "memory_extraction_first_pass_at" => s.memory_extraction_first_pass_at = value.to_string(),
         // Scheduling
         "schedule_result_notify" => s.schedule_result_notify = value == "true",
         "schedule_max_concurrent" => {

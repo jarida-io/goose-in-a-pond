@@ -515,8 +515,67 @@ export type MemorySegment =
   | "correction"
   | "relationship"
   | "project"
+  // Something the household does again and again. Written only by batch
+  // extraction, which is the one path that sees more than a single turn.
+  | "routine"
   | "knowledge"
   | "context";
+
+/// What the batch memory-extraction engine is doing, and why it is not.
+///
+/// `running` is false when the engine is not wired into this process at all --
+/// a CLI path, or a pond with no embedder. That is a different answer from "it
+/// has read nothing", and the two must not render the same: a pond whose
+/// embedder never loaded looks identical, from the outside, to one with nothing
+/// left to extract, and the difference is months of history.
+export interface ExtractionStatus {
+  sessions_total: number;
+  sessions_pending: number;
+  mode: string | null;
+  last_pass_at: string | null;
+  last_pass_windows: number | null;
+  last_pass_written: number | null;
+  /// Memories the last pass refused for carrying a date, and how many of those
+  /// left no reminder behind. Nothing edits a note on its way to the store, so
+  /// a dated note is refused whole -- affordable exactly as long as the date is
+  /// kept somewhere else, which is a row in the `reminders` table, readable at
+  /// `GET /api/v1/reminders`.
+  ///
+  /// `last_pass_dates_lost` counts refused NOTES that no stored reminder could
+  /// be matched to -- one per note, not one per window. Those dates are gone
+  /// from the pond entirely.
+  ///
+  /// The match is a coarse shared-content-word test on the engine side, and it
+  /// answers "not covered" wherever it cannot tell. So this number over-reports
+  /// loss rather than under-reporting it: a note whose reminder was filed in
+  /// quite different words can be counted here. It is the direction chosen on
+  /// purpose, because an over-count is a banner somebody can check and an
+  /// under-count is a date discarded in silence.
+  ///
+  /// Two different things cause a loss, told apart by
+  /// `last_pass_reminders_lost` below: above zero it is the POND, a store that
+  /// would not take the write; at zero it is the MODEL, which answered half the
+  /// schema and filed no reminder to write.
+  last_pass_dated: number | null;
+  last_pass_dates_lost: number | null;
+  /// Reminder rows the last pass wrote, and candidates that reached no store at
+  /// all. The first is the only positive evidence on this object that a refused
+  /// date was kept; the second is a pass losing every date it refuses, which
+  /// nothing else here shows.
+  ///
+  /// A re-walk that recognised its own earlier row counts in neither: nothing
+  /// was written and nothing was lost.
+  last_pass_reminders_written: number | null;
+  last_pass_reminders_lost: number | null;
+  /// Conversations in the store that nobody can say whose they are, and which
+  /// are therefore never remembered. A total over the store, not a count of
+  /// what one pass looked at: most of them come from the voice surface, which
+  /// runs as its own process with no request and so cannot be told who is
+  /// speaking at all.
+  unattributed_sessions: number | null;
+  blocked_on: string | null;
+  running: boolean;
+}
 
 export type MemoryTier = "short" | "long" | "permanent";
 export type MemoryLifecycle = "active" | "archived" | "merged";

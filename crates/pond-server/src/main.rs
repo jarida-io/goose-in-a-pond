@@ -19,13 +19,13 @@
 
 mod asset_root;
 mod composite_model_catalog_provider;
+mod conversation_extractor;
 mod filesystem_model_storage;
 mod http_model_downloader;
 mod inference_lane_runner;
 mod kokoro_control;
 mod llamafile_process;
 mod llm_memory_consolidator;
-mod llm_memory_extractor;
 mod mdns_advertiser;
 mod model_download;
 mod node_path;
@@ -1058,6 +1058,21 @@ const INDEX_MAINTENANCE_DELAY_SECS: u64 = 60;
 /// household does, or should have to.
 const INDEX_MAINTENANCE_POLL_SECS: u64 = 15 * 60;
 
+/// How often the batch memory-extraction engine CONSIDERS a pass.
+///
+/// A minute, which is also the floor on how often a pass may actually run. The
+/// gate in front of it is much longer -- fifteen minutes of household quiet --
+/// so this is not "every minute", it is "within a minute of the household
+/// having been quiet long enough".
+const MEMORY_EXTRACTION_POLL_SECS: u64 = 60;
+
+/// How long after boot the engine first considers a pass.
+///
+/// Same reasoning as the index sweep's delay, and the same number: a
+/// household's first turn after an upgrade must not be slow because the pond
+/// chose that moment to start reading its own history.
+const MEMORY_EXTRACTION_DELAY_SECS: u64 = 60;
+
 /// Say so, loudly, when this binary cannot reach the accelerator this host has.
 ///
 /// Called at startup for its side effect only. The check is cheap and the case
@@ -2007,28 +2022,6 @@ async fn run_server(
             dyn pond_core::models::ports::answer_reviewer::AnswerReviewer,
         >);
 
-    // Memory extractor — background extraction of durable facts from conversations.
-    // The service is built here but wrapped in an Arc further down, once the
-    // embedding provider exists, so extracted facts can be embedded at write.
-    let (memory_extractor_for_http, memory_extraction_service_unwired) =
-        if settings.memory_extraction_enabled {
-            let extractor: Arc<dyn pond_core::user_data::ports::memory_extractor::MemoryExtractor> =
-                Arc::new(llm_memory_extractor::LlmMemoryExtractor::new(
-                    llm_provider.clone(),
-                    settings.memory_extraction_max_facts,
-                ));
-            let service =
-                pond_core::user_data::services::memory_extraction::MemoryExtractionService::new(
-                    settings.memory_extraction_interval_secs,
-                );
-            tracing::info!(
-                "memory extraction enabled — facts will be auto-extracted from conversations"
-            );
-            (Some(extractor), Some(service))
-        } else {
-            (None, None)
-        };
-
     let db = Arc::new(db);
 
     // Spawn background TTL pruning task (runs every 6 hours). Reads the user's
@@ -2835,16 +2828,6 @@ async fn run_server(
         Arc<dyn pond_core::mcp::ports::mcp_knowledge::McpKnowledgePort + Send + Sync>,
     > = None;
 
-    // Finish the extraction service now that the embedder is known — every fact
-    // it stores is embedded at write, so it is searchable on the next turn
-    // instead of waiting for a backfill.
-    let memory_extraction_service_for_http = memory_extraction_service_unwired.map(|service| {
-        Arc::new(match &embedding_provider {
-            Some(provider) => service.with_embedding_provider(provider.clone()),
-            None => service,
-        })
-    });
-
     // ── Embedding backfill ───────────────────────────────────────────────────
     // Extraction stored `embedding: None` before Phase A, and `search_similar`
     // ignores unembedded rows entirely — so without this pass the semantic
@@ -2901,6 +2884,9 @@ async fn run_server(
 
         let index = vector_index.clone();
         let storage = session_storage.clone();
+        // Step 2c's repairer. The startup backfill above runs once; this is what
+        // keeps an unembedded row from surviving until the next restart.
+        let sweep_memories = memory_repo.clone();
         let cancel = index_maintenance_cancel.clone();
         let sweep_lane = inference_lane.clone();
         let sweep_activity = last_user_activity.clone();
@@ -3040,6 +3026,7 @@ async fn run_server(
                 let report = run_index_maintenance(
                     &index,
                     storage.as_ref(),
+                    sweep_memories.as_ref(),
                     provider.as_ref(),
                     &pass,
                     tick.budget,
@@ -3062,12 +3049,354 @@ async fn run_server(
                         adopted = report.adopted,
                         summaries = report.summaries_indexed,
                         context = report.context_indexed,
+                        memories = report.memories_indexed,
                         still_missing = report.still_missing,
                         "personal-context index pass finished"
                     );
                 }
             }
         });
+    }
+
+    // ── Batch memory extraction ──────────────────────────────────────────────
+    //
+    // This is now the ONLY thing that writes an extracted memory. It reads one
+    // window of one conversation per lane slot, in the pond's idle time, and
+    // there is no longer a per-turn path above it: every surface that persists
+    // a turn -- including `/chat` and the voice loop, which never extracted at
+    // all -- reaches memory through this walk.
+    //
+    // The whole block is gated on an embedder being present. Without one there
+    // is no cosine, so there is no dedup: every candidate would look new, and
+    // the pond would fill its own store with restatements of things it already
+    // knows. Reading nothing is the better failure, and it is the one that says
+    // so out loud through `blocked_on`.
+    let extraction_status = Arc::new(tokio::sync::RwLock::new(
+        pond_core::user_data::services::memory_extraction::ExtractionEngineStatus {
+            mode: pond_core::user_data::services::memory_extraction::ExtractionMode::parse(
+                &settings.memory_extraction_mode,
+            )
+            .as_str()
+            .to_string(),
+            ..Default::default()
+        },
+    ));
+    if let Some(provider) = embedding_provider.clone() {
+        use pond_core::user_data::services::consolidation_schedule as sched;
+        use pond_core::user_data::services::inference_lane::LaneJob;
+        use pond_core::user_data::services::memory_extraction::{
+            BatchExtractionConfig, BatchExtractionService, HouseholdRoster,
+        };
+        use pond_core::user_data::services::reminder_proposal;
+
+        /// How many pending reminders one tick will consider.
+        ///
+        /// Bounded for the same reason the pass itself is: a first walk over a
+        /// year of history can file a great many, and the daily cap means only a
+        /// handful of them could become proposals anyway.
+        const REMINDER_PROMOTION_LIMIT: usize = 50;
+
+        // Where a dated utterance goes once the date rule has refused it as a
+        // memory. Wired here rather than left to a later phase because the
+        // engine is the only producer: without it the refusal throws the date
+        // away, which is the one outcome the rule was justified on not having.
+        let reminder_repo: Arc<
+            dyn pond_core::user_data::ports::reminder_repository::ReminderRepository + Send + Sync,
+        > = Arc::new(pond_infra::sqlite_reminder::SqliteReminderRepository::new(
+            db.system.clone(),
+        ));
+
+        // The same store the engine writes through, kept for the promotion run
+        // below. One store, so a reminder written by the pass is one the
+        // promotion can see in the same tick.
+        let promotion_reminders = reminder_repo.clone();
+        let promotion_proposals = Arc::new(
+            pond_infra::sqlite_proposal::SqliteProposalRepository::new(db.system.clone()),
+        );
+
+        let service = Arc::new(
+            BatchExtractionService::new()
+                .with_embedding_provider(provider)
+                .with_reminder_repository(reminder_repo),
+        );
+        let extraction_storage = session_storage.clone();
+        let extraction_repo = memory_repo.clone();
+        let extraction_settings = settings_repo.clone();
+        let extraction_activity = last_user_activity.clone();
+        let extraction_lane = inference_lane.clone();
+        let extraction_provider = llm_provider.clone();
+        let extraction_profiles = profile_repo.clone();
+        let status = extraction_status.clone();
+
+        // Baselines for the "never on startup" guard, captured before the
+        // server binds so no request can have been served yet.
+        let started_at = std::time::Instant::now();
+        let started_at_utc = chrono::Utc::now();
+
+        tokio::spawn(async move {
+            use crate::conversation_extractor::LlmConversationExtractor;
+
+            let poll = std::time::Duration::from_secs(MEMORY_EXTRACTION_POLL_SECS);
+            tokio::time::sleep(std::time::Duration::from_secs(MEMORY_EXTRACTION_DELAY_SECS)).await;
+
+            let extractor = LlmConversationExtractor::new(extraction_provider);
+
+            loop {
+                tokio::time::sleep(poll).await;
+
+                let settings = match extraction_settings.get().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::debug!("[batch-extraction] settings read failed: {e}");
+                        continue;
+                    }
+                };
+                // Who lives here, read fresh each pass. It decides whether an
+                // unattributed conversation may be mined under the pond-wide
+                // name or has to be left alone, so a stale roster is the
+                // difference between remembering somebody's habits and filing
+                // them under the wrong person.
+                //
+                // A failed read is treated as SEVERAL members. That is the
+                // narrowing direction: it makes every unattributed window
+                // unnameable, so the pass reads nothing rather than attributing
+                // everything to one name on the strength of a query that did
+                // not answer.
+                let roster = match extraction_profiles.list().await {
+                    Ok(profiles) => HouseholdRoster::new(
+                        profiles
+                            .into_iter()
+                            .map(|p| (p.id, p.display_name))
+                            .collect(),
+                    ),
+                    Err(e) => {
+                        tracing::debug!("[batch-extraction] profile list failed: {e}");
+                        HouseholdRoster::new(vec![
+                            ("unreadable-a".to_string(), String::new()),
+                            ("unreadable-b".to_string(), String::new()),
+                        ])
+                    }
+                };
+                let config = BatchExtractionConfig::from_settings(&settings).with_household(roster);
+
+                let db_activity = newest_session_activity(extraction_storage.as_ref()).await;
+                let in_process_at = *extraction_activity.read().await;
+                let now = chrono::Utc::now();
+                let saw_activity_since_start = sched::saw_activity_since_start(
+                    started_at,
+                    in_process_at,
+                    started_at_utc,
+                    db_activity,
+                );
+                let idle_for = sched::combined_idle_for(in_process_at, db_activity, now);
+
+                let Some(slot) = extraction_lane
+                    .acquire(
+                        LaneJob::MemoryExtraction,
+                        // Health, never emptiness. The rejected predicate --
+                        // "stand down while any memory row lacks a vector" --
+                        // is a latch that cannot re-open inside a process:
+                        // three ordinary paths mint unembedded rows and only a
+                        // one-shot startup backfill fills them, so the design's
+                        // own restate path would have disabled the engine
+                        // permanently.
+                        settings.memory_extraction_enabled && service.embedder_is_usable(),
+                        // The poll is the floor, unless the operator has asked
+                        // for a longer one. The key now has exactly one reader
+                        // and one meaning -- how rarely a pass may take the
+                        // slot -- and taking the larger of the two keeps it
+                        // one-directional: it can make passes rarer than the
+                        // tick and never more frequent.
+                        poll.max(std::time::Duration::from_secs(
+                            settings.memory_extraction_interval_secs as u64,
+                        )),
+                        saw_activity_since_start,
+                        idle_for,
+                        std::time::Duration::from_secs(settings.memory_extraction_idle_secs as u64),
+                        // Never exempt. No turn since boot means no conversation
+                        // anybody is waiting to have remembered, and this is the
+                        // most expensive job in the lane to spend on a guess.
+                        false,
+                    )
+                    .await
+                else {
+                    continue;
+                };
+
+                // One token for the whole pass, checked before each window: a
+                // pass that loses the household mid-window loses at most that
+                // one window's inference rather than three windows' worth of
+                // work nobody will use.
+                let cancel = tokio_util::sync::CancellationToken::new();
+                let watcher_cancel = cancel.clone();
+                let watcher_activity = extraction_activity.clone();
+                let baseline = in_process_at;
+                let watcher = tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        if watcher_cancel.is_cancelled() {
+                            break;
+                        }
+                        // The in-process clock only: it is written the moment a
+                        // turn starts, whereas the database one lags by however
+                        // long that turn takes to persist. This is the signal
+                        // that says somebody is here NOW.
+                        if *watcher_activity.read().await > baseline {
+                            tracing::debug!(
+                                "user activity resumed — ending the memory-extraction pass"
+                            );
+                            watcher_cancel.cancel();
+                            break;
+                        }
+                    }
+                });
+
+                let report = service
+                    .run_pass(
+                        extraction_storage.as_ref(),
+                        extraction_repo.as_ref(),
+                        &extractor,
+                        &config,
+                        &cancel,
+                    )
+                    .await;
+                watcher.abort();
+
+                status.write().await.record(config.mode, &report);
+
+                // What a stored reminder can become, attempted after the pass
+                // rather than inside it. The table is the durable half and it
+                // has already been written by this point; this is the best-effort
+                // half, and running it separately is what keeps a proposal
+                // failure from ever being a reason a date was not kept.
+                //
+                // On a pond with no profile rows -- every pond today -- this
+                // promotes nothing and says so per reminder, because
+                // `ProposalAudience` cannot address `Household`. That is the
+                // expected answer here, not a fault, and the reminder stays
+                // pending and readable either way.
+                match reminder_proposal::promote_pending_reminders(
+                    promotion_reminders.as_ref(),
+                    promotion_proposals.as_ref(),
+                    REMINDER_PROMOTION_LIMIT,
+                    chrono::Utc::now(),
+                )
+                .await
+                {
+                    Ok(promotion) if promotion.considered > 0 => {
+                        // Counts only. The reminder's own sentence is the
+                        // household's private words and never rises above DEBUG,
+                        // the same rule the pass line above follows.
+                        tracing::info!(
+                            target: "giap::trace",
+                            kind = "reminder_promotion",
+                            considered = promotion.considered,
+                            proposed = promotion.proposed,
+                            // Expected on a pond with nobody on file, and the
+                            // reason the table is the deliverable.
+                            unaddressable = promotion.unaddressable,
+                            capped = promotion.capped,
+                            // The only one of the four that is a fault.
+                            failed = promotion.failed,
+                            "pending reminders considered for the proposal queue"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        // The dates are still in the table. Said at WARN anyway:
+                        // a promotion that never runs is a queue the household
+                        // never sees fill.
+                        tracing::warn!(
+                            "[reminders] could not consider pending reminders for proposals: {e}"
+                        );
+                    }
+                }
+
+                // Anything that SPENT the slot is logged, not only anything
+                // that succeeded. A pass whose every call came back unparseable
+                // examines no window and is not blocked -- the model is
+                // answering, just not in the schema -- and gating this line on
+                // success would make the most expensive failure mode the
+                // quietest one.
+                if report.model_calls > 0 || report.blocked_on.is_some() {
+                    // Counts and bands only. The notes themselves go to DEBUG
+                    // inside the service and never to INFO: INFO is what the
+                    // on-disk log under <data_dir>/logs keeps, and a would-be
+                    // memory written there is the household's private sentence
+                    // in a second place with none of the store's scoping,
+                    // retention or redaction.
+                    tracing::info!(
+                        target: "giap::trace",
+                        kind = "memory_extraction_pass",
+                        mode = config.mode.as_str(),
+                        windows = report.windows_examined,
+                        // What the pass actually spent on the inference slot.
+                        // Logged beside `windows` because the two differ
+                        // exactly when something is wrong, and the gap is the
+                        // number worth watching.
+                        model_calls = report.model_calls,
+                        deadline_reached = report.deadline_reached,
+                        skipped = report.windows_skipped,
+                        oversized = report.windows_oversized,
+                        already_mined = report.windows_already_mined,
+                        provider_failures = report.provider_failures,
+                        unattributed_sessions = report.sessions_unnameable,
+                        written = report.memories_written,
+                        dropped = report.memories_dropped,
+                        refused = report.memories_refused,
+                        // What the date rule cost, and what it cost that
+                        // nothing else recovered. `dates_lost` above zero is a
+                        // model ignoring the reminders half of the prompt.
+                        dated = report.memories_dated,
+                        dates_lost = report.memories_dates_lost,
+                        demoted = report.memories_demoted,
+                        reminders_captured = report.reminders_captured,
+                        // What the pass KEPT, beside what it read. The two
+                        // differ when the store refused a write, and that gap
+                        // is a date the pond no longer has -- invisible from
+                        // every other number on this line.
+                        reminders_written = report.reminders_written,
+                        reminders_lost = report.reminders_lost,
+                        offered = report.memories_offered,
+                        reminders = report.reminders_offered,
+                        rejected = report.rejected_kinds,
+                        parse_failures = report.parse_failures,
+                        gave_up = report.gave_up,
+                        resets = report.cursor_resets,
+                        band_same = report.bands.same,
+                        band_related = report.bands.related,
+                        band_new = report.bands.fresh,
+                        band_unscored = report.bands.unscored,
+                        blocked_on = report.blocked_on.as_deref().unwrap_or(""),
+                        "memory extraction pass finished"
+                    );
+                }
+
+                // Dropping the guard records the run and releases the slot, on
+                // every path out. That is the whole reason it is a guard: a job
+                // that returns early without recording a run keeps
+                // `since_last_run: None`, which the lane treats as infinitely
+                // starved, so it would win every tick forever and lock every
+                // other job out.
+                drop(slot);
+            }
+        });
+        tracing::info!(
+            "batch memory extraction active (mode={}) — reads one window per pass after {} min \
+             of household quiet",
+            settings.memory_extraction_mode,
+            settings.memory_extraction_idle_secs / 60,
+        );
+    } else {
+        // Said in the status as well as the log. A field nobody reads is not a
+        // surface, and from the outside a pond whose embedder never loaded is
+        // indistinguishable from one with nothing left to extract.
+        extraction_status.write().await.blocked_on = Some("no_embedder".to_string());
+        tracing::info!(
+            "batch memory extraction inactive — no embedding provider, so nothing could be \
+             deduplicated and the pond would store a restatement of everything it already \
+             knows. NOTHING else extracts memories now, so this pond is not learning."
+        );
     }
 
     // ── Agent backend ────────────────────────────────────────────────────────────
@@ -4312,8 +4641,7 @@ async fn run_server(
         // so connected phones never starve interactive chat SSE (#99 audit).
         notification_sse_semaphore: Arc::new(tokio::sync::Semaphore::new(32)),
         answer_reviewer: answer_reviewer_for_http,
-        memory_extractor: memory_extractor_for_http,
-        memory_extraction_service: memory_extraction_service_for_http,
+        extraction_status: Some(extraction_status),
         last_user_activity: last_user_activity.clone(),
         consolidation_cancel: consolidation_cancel.clone(),
         consolidation_event_tx: consolidation_event_tx.clone(),
