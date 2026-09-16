@@ -32,6 +32,14 @@ We welcome contributions from Rust developers, embedded systems engineers, AI/ML
 - **Rust** stable — install via [rustup](https://rustup.rs)
 - **Node.js** 20+ and **npm** — for desktop app work
 - **Git** with submodule support
+- **GitHub credentials for `jarida-io`** — `llama-cpp-2` and `llama-cpp-sys-2` resolve
+  to the private `jarida-io/llama-cpp-rs-giap` fork, and Cargo resolves the whole
+  workspace graph even for a single-crate build. Any git credential that can read that
+  repo will do (`gh auth login`, an osxkeychain entry, or an SSH key plus a
+  `url."git@github.com:".insteadOf` rewrite). `.cargo/config.toml` sets
+  `net.git-fetch-with-cli = true` so Cargo reuses them — without it, Cargo's bundled
+  libgit2 cannot see a keychain credential and reports the pinned rev as
+  `revision ... not found`, then `failed to authenticate when downloading repository`.
 
 ### Clone
 

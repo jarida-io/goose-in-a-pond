@@ -28,6 +28,15 @@ GIAP Server
 
 When GIAP starts, it loads all persisted extension configs and connects to each one. The Goose agent sees tools from all extensions in a unified namespace, prefixed by extension name (e.g. `my-ext__my_tool`).
 
+### The extension session
+
+Extensions are not owned by a chat. They are added to and removed from one dedicated engine session named `giap-extensions`, and chat sessions inherit the tools from it. Two properties of that session matter when debugging an extension that will not start:
+
+- **Its `working_dir` is the cwd your stdio extension is spawned in.** It is re-pinned to the server's current working directory every time the session is resolved, so it does not go stale across restarts launched from different directories.
+- **It is found by name, not by id.** The name is the identity, which is what makes the row safe: deleting a chat cascades to that chat's engine session, and only rows named after a chat's UUID are ever deleted, so no user action can remove the extension session. If the row is missing when an extension operation runs — deleted by hand, or the engine store was wiped — it is recreated on the spot and the operation proceeds.
+
+Both behaviours live in `resolve_extension_session` (`crates/pond-adapters-goose/src/extension_manager.rs`). A log line reading `bound the extension manager to a session` records which session id is in use, and `the cached extension session is gone — re-resolving` records a recovery.
+
 ## Creating an Extension
 
 ### Step 1: Implement the MCP Protocol
@@ -453,6 +462,39 @@ Enable or disable an extension without removing its config. Disabled extensions 
 |------|---------|
 | 404 | Extension not found |
 | 503 | Extension manager not available |
+
+---
+
+#### `POST /extensions/{name}/secrets`
+
+Store an extension's credentials and restart it so the running process picks them up. A stdio extension reads its credentials from the environment it was spawned with, so storing alone changes nothing until the process is replaced.
+
+**Request** — a flat map of secret key to value.
+```json
+{ "SPOTIFY_CLIENT_ID": "…", "SPOTIFY_CLIENT_SECRET": "…" }
+```
+
+**Response 200**
+```json
+{ "stored": 2, "restarted": true, "restart_error": null }
+```
+
+The credentials are stored before the restart is attempted, so a 200 does not by itself mean the extension is working. Read all three fields:
+
+| `restarted` | `restart_error` | Meaning |
+|-------------|-----------------|---------|
+| `true` | `null` | Stored, and the extension is running with them. |
+| `false` | `null` | Stored. Nothing to restart — the extension is not installed, or is disabled. |
+| `false` | a string | Stored, but the extension is **not** running with them. Surface this; the reason is in the string. |
+
+Restarting is deliberately limited to extensions that are installed and enabled, so storing credentials never starts something the caller did not install.
+
+| Code | Meaning |
+|------|---------|
+| 400 | Body is not a flat string-to-string map |
+| 404 | Extension not found in the marketplace |
+| 500 | A secret could not be stored — nothing was applied |
+| 503 | Secret storage not available |
 
 ---
 

@@ -101,9 +101,10 @@ async function connect(page) {
 //
 // `detached` puts Electron in its own process group so the cleanup below can
 // signal the WHOLE tree. Without it, SIGKILLing the main process orphans any
-// pond-server it spawned -- SIGKILL skips `before-quit`, which is where the
-// shell shuts its sidecar down. That is a genuine property of the app, not a
-// harness quirk, and it is why the voice child carries a pidfile reaper.
+// pond-server it spawned: the shell takes its children down on before-quit,
+// will-quit, SIGINT/SIGTERM and the exit hook, and SIGKILL is the one signal
+// that reaches none of them. That is a genuine property of the app, not a
+// harness quirk, and it is why the children carry pidfile reapers.
 const child = spawn(electron, [APP_DIR, `--remote-debugging-port=${PORT}`], {
   env: { ...process.env, POND_SERVER_BIN: "/nonexistent-on-purpose" },
   stdio: ["ignore", "pipe", "pipe"],

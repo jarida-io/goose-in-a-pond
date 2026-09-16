@@ -126,8 +126,8 @@ export function useDeviceState(
   return [state, set, control];
 }
 
-// Expose raw setDevice + backend actuation for non-React contexts (e.g. event
-// handlers from CategoryDock that toggle multiple devices at once).
+// Expose raw setDevice + backend actuation for non-React contexts — event
+// handlers that toggle several devices at once and are not inside a component.
 export {
   setDevice as hubSetDevice,
   getDevice as hubGetDevice,

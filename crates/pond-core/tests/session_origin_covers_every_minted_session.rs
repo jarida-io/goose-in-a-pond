@@ -61,6 +61,17 @@ const KNOWN_MINTERS: &[(&str, &str)] = &[
          store that the observer never reads",
     ),
     (
+        "crates/pond-adapters-goose/src/extension_manager.rs",
+        "the same reason as `goose_agent.rs` above -- this is the SAME goose \
+         `SessionManager`, and the call simply moved here. It mints one row, the \
+         `giap-extensions` session that MCP extensions are added to, resolved by name \
+         and re-created only when that row is missing. It lands in goose's sessions.db, \
+         which the observer never reads: every activity-watcher path is fed \
+         `SqliteSessionStorage::new(db.system.clone())` (pond-server/src/main.rs), not \
+         the forwarding `session_adapter`. So it cannot fabricate presence -- and its \
+         id is goose's `YYYYMMDD_n`, which would look human if it ever were read.",
+    ),
+    (
         "crates/pond-adapters-goose/src/session_adapter.rs",
         "the same reason as `goose_agent.rs` above, one layer down: this is a \
          `SessionStorage` impl that FORWARDS to goose's `session_manager`, so every id \

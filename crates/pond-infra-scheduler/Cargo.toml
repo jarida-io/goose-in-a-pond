@@ -20,7 +20,6 @@ croner          = { workspace = true }
 tracing         = { workspace = true }
 tokio-cron-scheduler = { workspace = true }
 uuid            = { workspace = true }
-reqwest         = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

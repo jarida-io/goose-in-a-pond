@@ -76,6 +76,14 @@ export interface ShellEvents {
   "server-status": boolean;
   /** The shell has begun starting pond-server. */
   "server-starting": void;
+  /**
+   * pond-server bound a port other than the one the shell assumed.
+   *
+   * `--port` is a start port for the server's bind_with_fallback, so a server
+   * that finds 4000 taken binds 4001 and says nothing. Without this the
+   * renderer keeps talking to a port nothing is listening on.
+   */
+  "server-url": string;
   /** The summon hotkey or tray item was used. */
   "desktop-summon": void;
   /** Toggle the Canvas section. */
@@ -124,6 +132,7 @@ export const SHELL_COMMANDS = [
 export const SHELL_EVENTS = [
   "server-status",
   "server-starting",
+  "server-url",
   "desktop-summon",
   "canvas-toggle",
   "switch-to-voice",

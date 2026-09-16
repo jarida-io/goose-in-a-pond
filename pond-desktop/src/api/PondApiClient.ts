@@ -99,7 +99,8 @@ export function defaultServerUrl(): string {
 const COMMISSION_TIMEOUT_MS = 190_000;
 
 export class PondApiClient {
-  private readonly base: string;
+  /** Mutable: the shell can correct this when the sidecar binds a fallback port. */
+  private base: string;
   private token: string | null;
   private refreshToken: string | null = null;
   private tokenExpiresAt: number | null = null;
@@ -146,7 +147,9 @@ export class PondApiClient {
       if (typeof crypto !== "undefined" && crypto.randomUUID) {
         return crypto.randomUUID().slice(0, 8);
       }
-    } catch { /* fall through */ }
+    } catch {
+      /* fall through */
+    }
     return Math.random().toString(36).slice(2, 10);
   }
 
@@ -165,7 +168,9 @@ export class PondApiClient {
       this.refreshToken = localStorage.getItem(PondApiClient.LS_REFRESH);
       const exp = localStorage.getItem(PondApiClient.LS_EXPIRES);
       this.tokenExpiresAt = exp ? Number(exp) || null : null;
-    } catch { /* no localStorage (tests / SSR) */ }
+    } catch {
+      /* no localStorage (tests / SSR) */
+    }
   }
 
   /** Persist the current token triple (no-op if localStorage is unavailable). */
@@ -175,8 +180,13 @@ export class PondApiClient {
         v ? localStorage.setItem(k, v) : localStorage.removeItem(k);
       set(PondApiClient.LS_SESSION, this.token);
       set(PondApiClient.LS_REFRESH, this.refreshToken);
-      set(PondApiClient.LS_EXPIRES, this.tokenExpiresAt ? String(this.tokenExpiresAt) : null);
-    } catch { /* ignore */ }
+      set(
+        PondApiClient.LS_EXPIRES,
+        this.tokenExpiresAt ? String(this.tokenExpiresAt) : null,
+      );
+    } catch {
+      /* ignore */
+    }
   }
 
   /**
@@ -185,10 +195,22 @@ export class PondApiClient {
    * only the bearer token while preserving the known expiry (used by callers
    * that just need the header). Pass `null` to clear the expiry.
    */
+  /**
+   * Point the client at a different server.
+   *
+   * Every request builder reads `this.base` at call time, so one call here
+   * redirects the whole singleton -- which is why the shell can correct a
+   * fallback port without reloading the renderer or rebuilding the client.
+   */
+  setBase(url: string): void {
+    this.base = url.replace(/\/$/, "");
+  }
+
   setToken(token: string | null, expiresAt?: string | null): void {
     this.token = token;
     if (expiresAt !== undefined) {
-      this.tokenExpiresAt = token && expiresAt ? Date.parse(expiresAt) || null : null;
+      this.tokenExpiresAt =
+        token && expiresAt ? Date.parse(expiresAt) || null : null;
     }
     this.persistTokens();
   }
@@ -200,31 +222,51 @@ export class PondApiClient {
     if (this.refreshPromise) return this.refreshPromise;
     // Use a token-less fetch (handshakeFetch) so this can't recurse back into
     // ensureTokenFresh via request().
-    this.refreshPromise = this.handshakeFetch<HandshakeResponse>("POST", "/api/v1/handshake/refresh", {
-      refresh_token: this.refreshToken,
-    })
+    this.refreshPromise = this.handshakeFetch<HandshakeResponse>(
+      "POST",
+      "/api/v1/handshake/refresh",
+      {
+        refresh_token: this.refreshToken,
+      },
+    )
       .then((res) => {
         if (res.accepted && res.session_token) {
           this.refreshToken = res.refresh_token ?? this.refreshToken;
           this.setToken(res.session_token, res.expires_at ?? null); // persists all three
         }
       })
-      .catch(() => { /* refresh failed — continue with current token */ })
-      .finally(() => { this.refreshPromise = null; });
+      .catch(() => {
+        /* refresh failed — continue with current token */
+      })
+      .finally(() => {
+        this.refreshPromise = null;
+      });
     return this.refreshPromise;
   }
 
   // ── Internal helpers ───────────────────────────────────────
 
-  private headers(method: string, extra?: Record<string, string>): Record<string, string> {
+  private headers(
+    method: string,
+    extra?: Record<string, string>,
+  ): Record<string, string> {
     // Content-Type on a bodyless GET forces an unnecessary CORS preflight on
     // every read call — omit it there; POST/PUT/PATCH bodies still need it.
-    const h: Record<string, string> = method === "GET" ? { ...extra } : { "Content-Type": "application/json", ...extra };
+    const h: Record<string, string> =
+      method === "GET"
+        ? { ...extra }
+        : { "Content-Type": "application/json", ...extra };
     if (this.token) h["Authorization"] = `Bearer ${this.token}`;
     return h;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, timeout?: number, _retry = false): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    timeout?: number,
+    _retry = false,
+  ): Promise<T> {
     await this.ensureTokenFresh();
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout ?? 30_000);
@@ -244,12 +286,17 @@ export class PondApiClient {
       }
       if (!res.ok) {
         let msg = res.statusText;
-        try { msg = (await res.json()).error ?? msg; } catch { /* ignore */ }
+        try {
+          msg = (await res.json()).error ?? msg;
+        } catch {
+          /* ignore */
+        }
         throw new ApiError(res.status, msg);
       }
       // 204 No Content and any other empty body — return undefined cast to T
       const ct = res.headers.get("content-type") ?? "";
-      if (res.status === 204 || !ct.includes("json")) return undefined as unknown as T;
+      if (res.status === 204 || !ct.includes("json"))
+        return undefined as unknown as T;
       return res.json() as Promise<T>;
     } catch (e) {
       clearTimeout(timeoutId);
@@ -260,11 +307,21 @@ export class PondApiClient {
     }
   }
 
-  private get<T>(path: string): Promise<T>                       { return this.request<T>("GET", path); }
-  private post<T>(path: string, body?: unknown, timeout?: number): Promise<T> { return this.request<T>("POST", path, body, timeout); }
-  private put<T>(path: string, body?: unknown): Promise<T>        { return this.request<T>("PUT", path, body); }
-  private patch<T = void>(path: string, body?: unknown): Promise<T> { return this.request<T>("PATCH", path, body); }
-  private del<T = void>(path: string): Promise<T>                 { return this.request<T>("DELETE", path); }
+  private get<T>(path: string): Promise<T> {
+    return this.request<T>("GET", path);
+  }
+  private post<T>(path: string, body?: unknown, timeout?: number): Promise<T> {
+    return this.request<T>("POST", path, body, timeout);
+  }
+  private put<T>(path: string, body?: unknown): Promise<T> {
+    return this.request<T>("PUT", path, body);
+  }
+  private patch<T = void>(path: string, body?: unknown): Promise<T> {
+    return this.request<T>("PATCH", path, body);
+  }
+  private del<T = void>(path: string): Promise<T> {
+    return this.request<T>("DELETE", path);
+  }
 
   // ── Health ────────────────────────────────────────────────
 
@@ -272,13 +329,26 @@ export class PondApiClient {
     return this.get("/api/v1/health");
   }
 
-  getSystemInfo(): Promise<{ hostname: string; port: number; version: string; platform: string; arch: string }> {
+  getSystemInfo(): Promise<{
+    hostname: string;
+    /** LAN IPv4 a phone should use when it cannot resolve `<hostname>.local`. Null when the host has no LAN route. */
+    lan_address: string | null;
+    port: number;
+    version: string;
+    platform: string;
+    arch: string;
+  }> {
     return this.get("/api/v1/system/info");
   }
 
   // ── Onboarding ────────────────────────────────────────────
 
-  getOnboardingStatus(): Promise<{ onboarded: boolean; current_step: string; steps_completed: number; total_steps: number }> {
+  getOnboardingStatus(): Promise<{
+    onboarded: boolean;
+    current_step: string;
+    steps_completed: number;
+    total_steps: number;
+  }> {
     return this.get("/api/v1/onboard/status");
   }
 
@@ -289,7 +359,12 @@ export class PondApiClient {
    */
   recordOnboardingStep(
     step: string,
-  ): Promise<{ onboarded: boolean; current_step: string; steps_completed: number; total_steps: number }> {
+  ): Promise<{
+    onboarded: boolean;
+    current_step: string;
+    steps_completed: number;
+    total_steps: number;
+  }> {
     return this.post(`/api/v1/onboard/step/${encodeURIComponent(step)}`);
   }
 
@@ -301,7 +376,12 @@ export class PondApiClient {
    * Reset onboarding back to the first step ("Start over"). Clears persisted
    * progress and re-arms the onboarding guard so the wizard shows again.
    */
-  resetOnboarding(): Promise<{ onboarded: boolean; current_step: string; steps_completed: number; total_steps: number }> {
+  resetOnboarding(): Promise<{
+    onboarded: boolean;
+    current_step: string;
+    steps_completed: number;
+    total_steps: number;
+  }> {
     return this.post("/api/v1/onboard/reset");
   }
 
@@ -319,7 +399,11 @@ export class PondApiClient {
     });
     if (!res.ok) {
       let msg = res.statusText;
-      try { msg = (await res.json()).error ?? msg; } catch { /* ignore */ }
+      try {
+        msg = (await res.json()).error ?? msg;
+      } catch {
+        /* ignore */
+      }
       throw new ApiError(res.status, msg);
     }
     return res.arrayBuffer();
@@ -379,8 +463,9 @@ export class PondApiClient {
   // ── Devices ───────────────────────────────────────────────
 
   listDevices(): Promise<Device[]> {
-    return this.get<{ devices: Device[] } | Device[]>("/api/v1/devices").then((r) =>
-      Array.isArray(r) ? r : (r as { devices: Device[] }).devices ?? [],
+    return this.get<{ devices: Device[] } | Device[]>("/api/v1/devices").then(
+      (r) =>
+        Array.isArray(r) ? r : ((r as { devices: Device[] }).devices ?? []),
     );
   }
 
@@ -466,9 +551,12 @@ export class PondApiClient {
     peerId: string,
     amountMillisats: number,
   ): Promise<{ peer_id: string; credit_balance_millisats: number }> {
-    return this.post(`/api/v1/mesh/peers/${encodeURIComponent(peerId)}/credit`, {
-      amount_millisats: amountMillisats,
-    });
+    return this.post(
+      `/api/v1/mesh/peers/${encodeURIComponent(peerId)}/credit`,
+      {
+        amount_millisats: amountMillisats,
+      },
+    );
   }
 
   getMeshSelf(): Promise<MeshSelf> {
@@ -479,7 +567,9 @@ export class PondApiClient {
    * every call, not cached (a peer's Lightning wallet or backing model can
    * flip between two calls). 503s when mesh isn't enabled on this Pond. */
   getMeshPeerCapabilities(peerId: string): Promise<MeshPeerCapabilities> {
-    return this.get(`/api/v1/mesh/peers/${encodeURIComponent(peerId)}/capabilities`);
+    return this.get(
+      `/api/v1/mesh/peers/${encodeURIComponent(peerId)}/capabilities`,
+    );
   }
 
   /** Read-only settlement-job status — see MeshSettlementStatus's own docs
@@ -491,26 +581,31 @@ export class PondApiClient {
   // ── Schedules ─────────────────────────────────────────────
 
   listSchedules(): Promise<Schedule[]> {
-    return this.get<Array<Record<string, unknown>>>("/api/v1/schedules").then((items) =>
-      (Array.isArray(items) ? items : []).map((t) => {
-        // Extract prompt from kind.prompt or legacy payload.prompt
-        const kind = t.kind as Record<string, unknown> | undefined;
-        const payload = t.payload as Record<string, unknown> | undefined;
-        const prompt = (kind?.prompt as string) ?? (payload?.prompt as string) ?? "";
-        return {
-          id: t.id as string,
-          name: (t.label ?? t.name ?? "") as string,
-          cron: t.cron as string,
-          fire_at: t.fire_at as string | null | undefined,
-          prompt,
-          enabled: t.paused !== undefined ? !(t.paused as boolean) : (t.enabled as boolean ?? true),
-          timezone: (t.timezone as string) ?? "UTC",
-          kind: t.kind as Schedule["kind"],
-          last_run: t.last_run as string | undefined,
-          next_run: t.next_run as string | undefined,
-          created_at: t.created_at as string | undefined,
-        };
-      }),
+    return this.get<Array<Record<string, unknown>>>("/api/v1/schedules").then(
+      (items) =>
+        (Array.isArray(items) ? items : []).map((t) => {
+          // Extract prompt from kind.prompt or legacy payload.prompt
+          const kind = t.kind as Record<string, unknown> | undefined;
+          const payload = t.payload as Record<string, unknown> | undefined;
+          const prompt =
+            (kind?.prompt as string) ?? (payload?.prompt as string) ?? "";
+          return {
+            id: t.id as string,
+            name: (t.label ?? t.name ?? "") as string,
+            cron: t.cron as string,
+            fire_at: t.fire_at as string | null | undefined,
+            prompt,
+            enabled:
+              t.paused !== undefined
+                ? !(t.paused as boolean)
+                : ((t.enabled as boolean) ?? true),
+            timezone: (t.timezone as string) ?? "UTC",
+            kind: t.kind as Schedule["kind"],
+            last_run: t.last_run as string | undefined,
+            next_run: t.next_run as string | undefined,
+            created_at: t.created_at as string | undefined,
+          };
+        }),
     );
   }
 
@@ -549,7 +644,13 @@ export class PondApiClient {
 
   async updateSchedule(
     id: string,
-    patch: { name?: string; cron?: string; prompt?: string; timezone?: string; once?: boolean },
+    patch: {
+      name?: string;
+      cron?: string;
+      prompt?: string;
+      timezone?: string;
+      once?: boolean;
+    },
   ): Promise<Schedule> {
     const t = await this.put<Record<string, unknown>>(
       `/api/v1/schedules/${encodeURIComponent(id)}`,
@@ -573,7 +674,9 @@ export class PondApiClient {
   }
 
   getScheduleRuns(id: string, limit = 10): Promise<ScheduleRun[]> {
-    return this.get<ScheduleRun[]>(`/api/v1/schedules/${encodeURIComponent(id)}/runs?limit=${limit}`);
+    return this.get<ScheduleRun[]>(
+      `/api/v1/schedules/${encodeURIComponent(id)}/runs?limit=${limit}`,
+    );
   }
 
   getUpcomingSchedules(limit = 10): Promise<Schedule[]> {
@@ -581,13 +684,18 @@ export class PondApiClient {
   }
 
   /** Fetch recent runs across all schedules, merged and sorted by start time. */
-  async getAllRecentRuns(perScheduleLimit = 5): Promise<Array<ScheduleRun & { schedule_name: string }>> {
+  async getAllRecentRuns(
+    perScheduleLimit = 5,
+  ): Promise<Array<ScheduleRun & { schedule_name: string }>> {
     const schedules = await this.listSchedules();
     const runSets = await Promise.all(
       schedules.map(async (s) => {
         try {
           const runs = await this.getScheduleRuns(s.id, perScheduleLimit);
-          return runs.map((r) => ({ ...r, schedule_name: s.name || s.label || s.id }));
+          return runs.map((r) => ({
+            ...r,
+            schedule_name: s.name || s.label || s.id,
+          }));
         } catch {
           return [];
         }
@@ -609,8 +717,14 @@ export class PondApiClient {
   }
 
   /** Execute an MCP tool by name with arguments. Returns the tool result. */
-  async callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
-    return this.post<unknown>("/api/v1/mcp/tools/call", { name, arguments: args });
+  async callTool(
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<unknown> {
+    return this.post<unknown>("/api/v1/mcp/tools/call", {
+      name,
+      arguments: args,
+    });
   }
 
   /**
@@ -664,7 +778,9 @@ export class PondApiClient {
   // ── Consolidation ─────────────────────────────────────────
 
   /** Start manual consolidation. Returns an SSE stream of ConsolidationEvent. */
-  async *streamConsolidation(): AsyncGenerator<import("./types").ConsolidationEvent> {
+  async *streamConsolidation(): AsyncGenerator<
+    import("./types").ConsolidationEvent
+  > {
     const res = await fetch(`${this.base}/api/v1/memory/consolidate`, {
       method: "POST",
       headers: this.headers("POST"),
@@ -685,7 +801,9 @@ export class PondApiClient {
         if (!data) continue;
         try {
           yield JSON.parse(data) as import("./types").ConsolidationEvent;
-        } catch { /* skip malformed */ }
+        } catch {
+          /* skip malformed */
+        }
       }
     }
   }
@@ -857,7 +975,10 @@ export class PondApiClient {
    * conversation is consent about that conversation.
    */
   retitleSession(sessionId: string): Promise<RetitleOneResult> {
-    return this.post(`/api/v1/sessions/${encodeURIComponent(sessionId)}/retitle`, {});
+    return this.post(
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/retitle`,
+      {},
+    );
   }
 
   // ── Skills ────────────────────────────────────────────────
@@ -866,7 +987,12 @@ export class PondApiClient {
     return this.get(`/api/v1/skills${all ? "?all=true" : ""}`);
   }
 
-  addSkill(name: string, description: string, content: string, icon = "sparkles"): Promise<UserSkill> {
+  addSkill(
+    name: string,
+    description: string,
+    content: string,
+    icon = "sparkles",
+  ): Promise<UserSkill> {
     return this.post("/api/v1/skills", { name, description, content, icon });
   }
 
@@ -876,7 +1002,12 @@ export class PondApiClient {
 
   updateSkill(
     id: string,
-    patch: { name?: string; description?: string; content?: string; icon?: string },
+    patch: {
+      name?: string;
+      description?: string;
+      content?: string;
+      icon?: string;
+    },
   ): Promise<UserSkill> {
     return this.put(`/api/v1/skills/${id}`, patch);
   }
@@ -891,7 +1022,11 @@ export class PondApiClient {
    * Token-less fetch for the public handshake endpoints. Deliberately bypasses
    * `request()`/`ensureTokenFresh()` so refresh/pairing can't recurse.
    */
-  private async handshakeFetch<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async handshakeFetch<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<T> {
     const res = await fetch(`${this.base}${path}`, {
       method,
       headers: { "Content-Type": "application/json" },
@@ -902,9 +1037,15 @@ export class PondApiClient {
   }
 
   /** HMAC-SHA256(pairingCode, challenge ‖ clientId) → lowercase hex (Web Crypto). */
-  private async computeMac(code: string, challengeB64: string, clientId: string): Promise<string> {
+  private async computeMac(
+    code: string,
+    challengeB64: string,
+    clientId: string,
+  ): Promise<string> {
     const enc = new TextEncoder();
-    const challenge = Uint8Array.from(atob(challengeB64), (c) => c.charCodeAt(0));
+    const challenge = Uint8Array.from(atob(challengeB64), (c) =>
+      c.charCodeAt(0),
+    );
     const idBytes = enc.encode(clientId);
     const msg = new Uint8Array(challenge.length + idBytes.length);
     msg.set(challenge);
@@ -935,24 +1076,41 @@ export class PondApiClient {
     // same-host desktop is trusted to mint its own code — this is what makes
     // silent auto-pair actually reliable instead of failing once the operator's
     // startup code lapses.
-    let pc = await this.handshakeFetch<PairingCodeResponse>("GET", "/api/v1/handshake/pairing-code");
+    let pc = await this.handshakeFetch<PairingCodeResponse>(
+      "GET",
+      "/api/v1/handshake/pairing-code",
+    );
     if (!pc.code) {
-      pc = await this.handshakeFetch<PairingCodeResponse>("POST", "/api/v1/handshake/pairing-code");
+      pc = await this.handshakeFetch<PairingCodeResponse>(
+        "POST",
+        "/api/v1/handshake/pairing-code",
+      );
     }
     if (!pc.code) {
-      throw new ApiError(409, "could not obtain a pairing code from the local server");
+      throw new ApiError(
+        409,
+        "could not obtain a pairing code from the local server",
+      );
     }
-    const init = await this.handshakeFetch<ChallengeResponse>("POST", "/api/v1/handshake/init", {
-      client_id: clientId,
-      client_type: "desktop",
-      client_version: "1.0.0",
-    });
+    const init = await this.handshakeFetch<ChallengeResponse>(
+      "POST",
+      "/api/v1/handshake/init",
+      {
+        client_id: clientId,
+        client_type: "desktop",
+        client_version: "1.0.0",
+      },
+    );
     const mac = await this.computeMac(pc.code, init.challenge, clientId);
-    const res = await this.handshakeFetch<HandshakeResponse>("POST", "/api/v1/handshake/verify", {
-      challenge_id: init.challenge_id,
-      mac,
-      device_name: "Pond Desktop",
-    });
+    const res = await this.handshakeFetch<HandshakeResponse>(
+      "POST",
+      "/api/v1/handshake/verify",
+      {
+        challenge_id: init.challenge_id,
+        mac,
+        device_name: "Pond Desktop",
+      },
+    );
     if (res.accepted && res.session_token) {
       this.refreshToken = res.refresh_token ?? null;
       this.setToken(res.session_token, res.expires_at ?? null); // persists all three
@@ -983,29 +1141,41 @@ export class PondApiClient {
     this.reauthPromise = (async () => {
       this.setToken(null); // force connect() past its "still-valid token" path
       return this.connect(clientId); // connect() defaults to the per-instance id
-    })().finally(() => { this.reauthPromise = null; });
+    })().finally(() => {
+      this.reauthPromise = null;
+    });
     return this.reauthPromise;
   }
 
   async connect(clientId?: string): Promise<string | null> {
     clientId = clientId ?? this.clientId();
     // 1. Stored session token still comfortably valid.
-    if (this.token && this.tokenExpiresAt && Date.now() < this.tokenExpiresAt - 60_000) {
+    if (
+      this.token &&
+      this.tokenExpiresAt &&
+      Date.now() < this.tokenExpiresAt - 60_000
+    ) {
       return this.token;
     }
     // 2. Refresh with a stored refresh token — survives restarts for 30 days
     //    without ever needing the pairing code again.
     if (this.refreshToken) {
       try {
-        const r = await this.handshakeFetch<HandshakeResponse>("POST", "/api/v1/handshake/refresh", {
-          refresh_token: this.refreshToken,
-        });
+        const r = await this.handshakeFetch<HandshakeResponse>(
+          "POST",
+          "/api/v1/handshake/refresh",
+          {
+            refresh_token: this.refreshToken,
+          },
+        );
         if (r.accepted && r.session_token) {
           this.refreshToken = r.refresh_token ?? this.refreshToken;
           this.setToken(r.session_token, r.expires_at ?? null);
           return r.session_token;
         }
-      } catch { /* fall through to a fresh pair */ }
+      } catch {
+        /* fall through to a fresh pair */
+      }
     }
     // 3. Fresh pairing.
     const res = await this.pair(clientId);
@@ -1016,12 +1186,18 @@ export class PondApiClient {
 
   /** Return the current unexpired pairing code, or null if none is active. Loopback-only. */
   getPairingCode(): Promise<PairingCodeResponse> {
-    return this.handshakeFetch<PairingCodeResponse>("GET", "/api/v1/handshake/pairing-code");
+    return this.handshakeFetch<PairingCodeResponse>(
+      "GET",
+      "/api/v1/handshake/pairing-code",
+    );
   }
 
   /** Issue a fresh pairing code, replacing any existing one. Loopback-only. */
   issuePairingCode(): Promise<PairingCodeResponse> {
-    return this.handshakeFetch<PairingCodeResponse>("POST", "/api/v1/handshake/pairing-code");
+    return this.handshakeFetch<PairingCodeResponse>(
+      "POST",
+      "/api/v1/handshake/pairing-code",
+    );
   }
 
   // ── Models ────────────────────────────────────────────────
@@ -1029,7 +1205,9 @@ export class PondApiClient {
   listModels(): Promise<ModelEntry[]> {
     // Backend returns { gguf: [...], llamafile: [...], tts: [...], whisper: [...] }
     // each entry has: name, category, active, ram_estimate_mb, recommended_role, description
-    return this.get<ModelEntry[] | Record<string, unknown[]>>("/api/v1/models").then((r) => {
+    return this.get<ModelEntry[] | Record<string, unknown[]>>(
+      "/api/v1/models",
+    ).then((r) => {
       if (Array.isArray(r)) return r;
       // Flatten grouped object into ModelEntry[]
       const entries: ModelEntry[] = [];
@@ -1044,14 +1222,18 @@ export class PondApiClient {
             // legitimately does. Title from the id instead: `af_heart` →
             // `Af_Heart`, with the description left for the row's subtitle.
             display_name:
-              ((item.category as string | undefined) ?? category) === "tts_kokoro"
+              ((item.category as string | undefined) ?? category) ===
+              "tts_kokoro"
                 ? voiceTitle(item.name as string)
-                : ((item.description as string | undefined) ?? (item.name as string)),
+                : ((item.description as string | undefined) ??
+                  (item.name as string)),
             is_active: (item.active as boolean | undefined) ?? false,
             ram_estimate_mb: item.ram_estimate_mb as number | undefined,
             recommended_role: item.recommended_role as string | undefined,
-            context_length: (item.context_length as number | null | undefined) ?? undefined,
-            quantization: (item.quantization as string | null | undefined) ?? undefined,
+            context_length:
+              (item.context_length as number | null | undefined) ?? undefined,
+            quantization:
+              (item.quantization as string | null | undefined) ?? undefined,
             downloaded: item.downloaded as boolean | undefined,
             description: item.description as string | undefined,
             size_mb: item.size_mb as number | undefined,
@@ -1114,12 +1296,20 @@ export class PondApiClient {
   getActiveRoles(): Promise<ModelActiveRoles> {
     // Backend may return { model_id: "provider/name" } for ASR/TTS instead of { provider, model }.
     // Normalize all roles to { provider, model } | null.
-    return this.get<Record<string, unknown>>("/api/v1/models/active-roles").then((raw) => {
-      function normalize(r: unknown): { provider: string; model: string } | null {
+    return this.get<Record<string, unknown>>(
+      "/api/v1/models/active-roles",
+    ).then((raw) => {
+      function normalize(
+        r: unknown,
+      ): { provider: string; model: string } | null {
         if (!r || typeof r !== "object") return null;
         const obj = r as Record<string, unknown>;
         // Already has provider + model
-        if (obj.provider && obj.model) return { provider: obj.provider as string, model: obj.model as string };
+        if (obj.provider && obj.model)
+          return {
+            provider: obj.provider as string,
+            model: obj.model as string,
+          };
         // Has model_id like "whisper/base.en" or "gguf/gemma-2b"
         if (typeof obj.model_id === "string" && obj.model_id.includes("/")) {
           const [provider, ...rest] = obj.model_id.split("/");
@@ -1128,17 +1318,20 @@ export class PondApiClient {
         return null;
       }
       return {
-        chat:      normalize(raw.chat),
-        tool:      raw.tool ?? null,
-        asr:       normalize(raw.asr),
-        tts:       normalize(raw.tts),
+        chat: normalize(raw.chat),
+        tool: raw.tool ?? null,
+        asr: normalize(raw.asr),
+        tts: normalize(raw.tts),
         embedding: normalize(raw.embedding),
       } as ModelActiveRoles;
     });
   }
 
   activateModel(provider: string, name: string, role: string): Promise<void> {
-    return this.post(`/api/v1/models/${encodeURIComponent(provider)}/${encodeURIComponent(name)}/activate`, { role });
+    return this.post(
+      `/api/v1/models/${encodeURIComponent(provider)}/${encodeURIComponent(name)}/activate`,
+      { role },
+    );
   }
 
   // ── Suggestions (proactive proposals) ─────────────────────
@@ -1168,35 +1361,51 @@ export class PondApiClient {
   // ── Sessions ──────────────────────────────────────────────
 
   listSessions(): Promise<SessionSummary[]> {
-    return this.get<{ sessions: SessionSummary[] } | SessionSummary[]>("/api/v1/sessions").then((r) =>
-      Array.isArray(r) ? r : (r as { sessions: SessionSummary[] }).sessions ?? [],
+    return this.get<{ sessions: SessionSummary[] } | SessionSummary[]>(
+      "/api/v1/sessions",
+    ).then((r) =>
+      Array.isArray(r)
+        ? r
+        : ((r as { sessions: SessionSummary[] }).sessions ?? []),
     );
   }
 
   /** `limit` with no `offset`: server returns the N most recent messages
    *  (newest-aware), not an old-first page — see get_session_messages. */
-  getSessionMessages(sessionId: string, limit?: number): Promise<SessionMessage[]> {
-    const qs = limit != null ? `?limit=${encodeURIComponent(String(limit))}` : "";
-    return this.get<{ messages: Array<Record<string, unknown>> } | Array<Record<string, unknown>>>(
-      `/api/v1/sessions/${encodeURIComponent(sessionId)}/messages${qs}`,
-    ).then((r) => {
-      const raw = Array.isArray(r) ? r : (r as { messages: Array<Record<string, unknown>> }).messages ?? [];
-      return raw.map((m): SessionMessage => ({
-        id: m.id as string,
-        session_id: m.session_id as string,
-        role: m.role as SessionMessage["role"],
-        content: (m.content as string) ?? "",
-        created_at: m.created_at as string,
-        tool_calls: m.tool_calls as SessionMessageToolCall[] | undefined,
-        tool_call_id: m.tool_call_id as string | undefined,
-        images: m.images as SessionMessage["images"],
-        liked: m.liked as boolean | null | undefined,
-      }));
-    });
+  getSessionMessages(
+    sessionId: string,
+    limit?: number,
+  ): Promise<SessionMessage[]> {
+    const qs =
+      limit != null ? `?limit=${encodeURIComponent(String(limit))}` : "";
+    return this.get<
+      | { messages: Array<Record<string, unknown>> }
+      | Array<Record<string, unknown>>
+    >(`/api/v1/sessions/${encodeURIComponent(sessionId)}/messages${qs}`).then(
+      (r) => {
+        const raw = Array.isArray(r)
+          ? r
+          : ((r as { messages: Array<Record<string, unknown>> }).messages ??
+            []);
+        return raw.map((m): SessionMessage => ({
+          id: m.id as string,
+          session_id: m.session_id as string,
+          role: m.role as SessionMessage["role"],
+          content: (m.content as string) ?? "",
+          created_at: m.created_at as string,
+          tool_calls: m.tool_calls as SessionMessageToolCall[] | undefined,
+          tool_call_id: m.tool_call_id as string | undefined,
+          images: m.images as SessionMessage["images"],
+          liked: m.liked as boolean | null | undefined,
+        }));
+      },
+    );
   }
 
   renameSession(sessionId: string, title: string): Promise<void> {
-    return this.patch(`/api/v1/sessions/${encodeURIComponent(sessionId)}`, { title });
+    return this.patch(`/api/v1/sessions/${encodeURIComponent(sessionId)}`, {
+      title,
+    });
   }
 
   deleteSession(sessionId: string): Promise<void> {
@@ -1214,7 +1423,9 @@ export class PondApiClient {
    * being refused is the common case rather than the exceptional one.
    */
   compactSession(sessionId: string): Promise<CompactionReport> {
-    return this.post(`/api/v1/sessions/${encodeURIComponent(sessionId)}/compact`);
+    return this.post(
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/compact`,
+    );
   }
 
   /** Delete a message and every later message in the same session — the
@@ -1227,7 +1438,11 @@ export class PondApiClient {
 
   /** Set (`true`/`false`) or clear (`null`) the like/dislike training-feedback
    *  flag on one message. */
-  setMessageFeedback(sessionId: string, messageId: string, liked: boolean | null): Promise<void> {
+  setMessageFeedback(
+    sessionId: string,
+    messageId: string,
+    liked: boolean | null,
+  ): Promise<void> {
     return this.put(
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}/feedback`,
       { liked },
@@ -1375,7 +1590,10 @@ export class PondApiClient {
 
   /** Stop a run on purpose — the only way, now that hanging up is not one. */
   async cancelRun(runId: string): Promise<void> {
-    await this.request("POST", `/api/v1/chat/runs/${encodeURIComponent(runId)}/cancel`);
+    await this.request(
+      "POST",
+      `/api/v1/chat/runs/${encodeURIComponent(runId)}/cancel`,
+    );
   }
 
   /** Stop whatever run this session is driving, without knowing its id. */
@@ -1430,7 +1648,9 @@ export class PondApiClient {
   ): AsyncGenerator<ChatEvent> {
     const method = opts?.method ?? "POST";
     await this.ensureTokenFresh();
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
     const tok = token ?? this.token;
     if (tok) headers["Authorization"] = `Bearer ${tok}`;
 
@@ -1485,7 +1705,11 @@ export class PondApiClient {
 
     if (!res.ok) {
       let msg = res.statusText;
-      try { msg = (await res.json()).error ?? msg; } catch { /* ignore */ }
+      try {
+        msg = (await res.json()).error ?? msg;
+      } catch {
+        /* ignore */
+      }
       throw new ApiError(res.status, msg);
     }
 
@@ -1518,7 +1742,9 @@ export class PondApiClient {
             if (trimmed === "data: [DONE]") yield { type: "done", done: true };
             continue;
           }
-          const data = trimmed.startsWith("data: ") ? trimmed.slice(6) : trimmed;
+          const data = trimmed.startsWith("data: ")
+            ? trimmed.slice(6)
+            : trimmed;
           try {
             const event = JSON.parse(data) as ChatEvent;
             yield lastSeq === undefined ? event : { ...event, seq: lastSeq };
@@ -1569,11 +1795,21 @@ export class PondApiClient {
   }
 
   listHfModelFiles(repo: string): Promise<{ files: HfModelFile[] }> {
-    return this.get(`/api/v1/models/search/gguf/files?repo=${encodeURIComponent(repo)}`);
+    return this.get(
+      `/api/v1/models/search/gguf/files?repo=${encodeURIComponent(repo)}`,
+    );
   }
 
-  downloadModelFromUrl(url: string, category: string, filename: string): Promise<{ status: string }> {
-    return this.post("/api/v1/models/download/url", { url, category, filename });
+  downloadModelFromUrl(
+    url: string,
+    category: string,
+    filename: string,
+  ): Promise<{ status: string }> {
+    return this.post("/api/v1/models/download/url", {
+      url,
+      category,
+      filename,
+    });
   }
 
   /**
@@ -1584,7 +1820,10 @@ export class PondApiClient {
    * throws it away. Resume starts the same transfer again — the Hugging Face
    * cache finds the partial and re-requests with a range header.
    */
-  controlDownload(filename: string, action: "pause" | "resume" | "cancel"): Promise<{ status: string }> {
+  controlDownload(
+    filename: string,
+    action: "pause" | "resume" | "cancel",
+  ): Promise<{ status: string }> {
     return this.post("/api/v1/models/download/control", { filename, action });
   }
 
@@ -1608,12 +1847,16 @@ export class PondApiClient {
 
   // Delete model file from disk (409 ApiError if model is active in a role)
   deleteModel(category: string, name: string): Promise<void> {
-    return this.del(`/api/v1/models/${encodeURIComponent(category)}/${encodeURIComponent(name)}`);
+    return this.del(
+      `/api/v1/models/${encodeURIComponent(category)}/${encodeURIComponent(name)}`,
+    );
   }
 
   // Trigger async download of a catalog model by category and name
   downloadModel(category: string, name: string): Promise<{ status: string }> {
-    return this.post(`/api/v1/models/${encodeURIComponent(category)}/${encodeURIComponent(name)}/download`);
+    return this.post(
+      `/api/v1/models/${encodeURIComponent(category)}/${encodeURIComponent(name)}/download`,
+    );
   }
 
   // ── Ollama ────────────────────────────────────────────────
@@ -1642,7 +1885,9 @@ export class PondApiClient {
   // `face-onnx` cargo feature; without it pond-server returns 503 which
   // bubbles up as ApiError(503).
 
-  listProfiles(): Promise<{ profiles: Array<{ id: string; display_name: string; avatar_emoji: string }> }> {
+  listProfiles(): Promise<{
+    profiles: Array<{ id: string; display_name: string; avatar_emoji: string }>;
+  }> {
     return this.get("/api/v1/profiles");
   }
 
@@ -1654,8 +1899,13 @@ export class PondApiClient {
     return p.preferences ?? {};
   }
 
-  createProfile(displayName: string, avatarEmoji?: string): Promise<{
-    id: string; display_name: string; avatar_emoji: string;
+  createProfile(
+    displayName: string,
+    avatarEmoji?: string,
+  ): Promise<{
+    id: string;
+    display_name: string;
+    avatar_emoji: string;
     preferences: Record<string, string>;
   }> {
     return this.post("/api/v1/profiles", {
@@ -1683,12 +1933,24 @@ export class PondApiClient {
   updateProfilePrefs(
     profileId: string,
     preferences: Record<string, string>,
-  ): Promise<{ id: string; display_name: string; preferences: Record<string, string> }> {
-    return this.patch(`/api/v1/profiles/${encodeURIComponent(profileId)}`, { preferences });
+  ): Promise<{
+    id: string;
+    display_name: string;
+    preferences: Record<string, string>;
+  }> {
+    return this.patch(`/api/v1/profiles/${encodeURIComponent(profileId)}`, {
+      preferences,
+    });
   }
 
-  async registerFace(profileId: string, frame: Blob): Promise<{
-    id: string; profile_id: string; model_dims: number; created_at: string;
+  async registerFace(
+    profileId: string,
+    frame: Blob,
+  ): Promise<{
+    id: string;
+    profile_id: string;
+    model_dims: number;
+    created_at: string;
   }> {
     const form = new FormData();
     form.append("profile_id", profileId);
@@ -1710,23 +1972,40 @@ export class PondApiClient {
 
   listFaceEnrollments(profileId: string): Promise<{
     profile_id: string;
-    enrollments: Array<{ id: string; profile_id: string; model_dims: number; created_at: string }>;
+    enrollments: Array<{
+      id: string;
+      profile_id: string;
+      model_dims: number;
+      created_at: string;
+    }>;
     count: number;
   }> {
     return this.get(`/api/v1/faces/profile/${encodeURIComponent(profileId)}`);
   }
 
-  deleteUserBiometrics(profileId: string): Promise<{ profile_id: string; face_embeddings_deleted: number }> {
-    return this.del(`/api/v1/users/${encodeURIComponent(profileId)}/biometrics`);
+  deleteUserBiometrics(
+    profileId: string,
+  ): Promise<{ profile_id: string; face_embeddings_deleted: number }> {
+    return this.del(
+      `/api/v1/users/${encodeURIComponent(profileId)}/biometrics`,
+    );
   }
 
   private async postMultipart<T>(path: string, form: FormData): Promise<T> {
     const headers: Record<string, string> = {};
     if (this.token) headers["Authorization"] = `Bearer ${this.token}`;
-    const res = await fetch(`${this.base}${path}`, { method: "POST", headers, body: form });
+    const res = await fetch(`${this.base}${path}`, {
+      method: "POST",
+      headers,
+      body: form,
+    });
     if (!res.ok) {
       let message = `HTTP ${res.status}`;
-      try { message = (await res.text()) || message; } catch { /* ignore */ }
+      try {
+        message = (await res.text()) || message;
+      } catch {
+        /* ignore */
+      }
       throw new ApiError(res.status, message);
     }
     return res.json() as Promise<T>;
@@ -1746,7 +2025,9 @@ export class PondApiClient {
   }
 
   toggleExtension(name: string, enabled: boolean): Promise<void> {
-    return this.patch(`/api/v1/extensions/${encodeURIComponent(name)}`, { enabled });
+    return this.patch(`/api/v1/extensions/${encodeURIComponent(name)}`, {
+      enabled,
+    });
   }
 
   addExtension(req: AddExtensionRequest): Promise<Extension> {
@@ -1760,21 +2041,49 @@ export class PondApiClient {
   // ── Marketplace ─────────────────────────────────────────
 
   async listMarketplace(): Promise<MarketplaceExtension[]> {
-    const res = await this.get<{ extensions: MarketplaceExtension[] }>("/api/v1/marketplace");
+    const res = await this.get<{ extensions: MarketplaceExtension[] }>(
+      "/api/v1/marketplace",
+    );
     return res.extensions;
   }
 
-  async installMarketplaceExtension(id: string, secrets?: Record<string, string>): Promise<Extension> {
+  async installMarketplaceExtension(
+    id: string,
+    secrets?: Record<string, string>,
+  ): Promise<Extension> {
     const body = secrets ? { secrets } : undefined;
-    return this.post<Extension>(`/api/v1/marketplace/${encodeURIComponent(id)}/install`, body);
+    return this.post<Extension>(
+      `/api/v1/marketplace/${encodeURIComponent(id)}/install`,
+      body,
+    );
   }
 
-  async getExtensionSecrets(name: string): Promise<{ requirements: SecretRequirement[]; fulfilled: Record<string, boolean> }> {
+  async getExtensionSecrets(
+    name: string,
+  ): Promise<{
+    requirements: SecretRequirement[];
+    fulfilled: Record<string, boolean>;
+  }> {
     return this.get(`/api/v1/extensions/${encodeURIComponent(name)}/secrets`);
   }
 
-  async setExtensionSecrets(name: string, secrets: Record<string, string>): Promise<void> {
-    await this.post(`/api/v1/extensions/${encodeURIComponent(name)}/secrets`, secrets);
+  /**
+   * Stores an extension's credentials and restarts it so the running process
+   * picks them up.
+   *
+   * `restarted` is false with no `restart_error` when there was deliberately
+   * nothing to restart — the extension is not installed, or is disabled.
+   * A non-null `restart_error` means the credentials are stored but the
+   * extension is not running, so callers must surface it.
+   */
+  async setExtensionSecrets(
+    name: string,
+    secrets: Record<string, string>,
+  ): Promise<{ stored: number; restarted: boolean; restart_error: string | null }> {
+    return await this.post<{ stored: number; restarted: boolean; restart_error: string | null }>(
+      `/api/v1/extensions/${encodeURIComponent(name)}/secrets`,
+      secrets,
+    );
   }
 
   // ── Secrets ──────────────────────────────────────────────
@@ -1785,7 +2094,9 @@ export class PondApiClient {
   }
 
   async checkSecret(key: string): Promise<boolean> {
-    const res = await this.get<{ exists: boolean }>(`/api/v1/secrets/${encodeURIComponent(key)}/exists`);
+    const res = await this.get<{ exists: boolean }>(
+      `/api/v1/secrets/${encodeURIComponent(key)}/exists`,
+    );
     return res.exists;
   }
 
@@ -1799,7 +2110,9 @@ export class PondApiClient {
 
   // ── Activity ──────────────────────────────────────────────
 
-  listActivity(params?: import("./types").ActivityQueryParams): Promise<import("./types").ActivityResponse> {
+  listActivity(
+    params?: import("./types").ActivityQueryParams,
+  ): Promise<import("./types").ActivityResponse> {
     const qs = new URLSearchParams();
     if (params?.limit !== undefined) qs.set("limit", String(params.limit));
     if (params?.since) qs.set("since", params.since);
@@ -1809,7 +2122,9 @@ export class PondApiClient {
     return this.get(`/api/v1/activity${q ? `?${q}` : ""}`);
   }
 
-  getActivitySummary(window?: "hour" | "day" | "week"): Promise<import("./types").ActivitySummary> {
+  getActivitySummary(
+    window?: "hour" | "day" | "week",
+  ): Promise<import("./types").ActivitySummary> {
     const q = window ? `?window=${window}` : "";
     return this.get(`/api/v1/activity/summary${q}`);
   }
@@ -1830,7 +2145,10 @@ export class PondApiClient {
 
   // ── Transcription ─────────────────────────────────────────
 
-  async transcribe(wav: ArrayBuffer, token?: string): Promise<TranscribeResponse> {
+  async transcribe(
+    wav: ArrayBuffer,
+    token?: string,
+  ): Promise<TranscribeResponse> {
     const headers: Record<string, string> = {};
     const tok = token ?? this.token;
     if (tok) headers["Authorization"] = `Bearer ${tok}`;
@@ -1846,7 +2164,11 @@ export class PondApiClient {
 
     if (!res.ok) {
       let msg = res.statusText;
-      try { msg = (await res.json()).error ?? msg; } catch { /* ignore */ }
+      try {
+        msg = (await res.json()).error ?? msg;
+      } catch {
+        /* ignore */
+      }
       throw new ApiError(res.status, msg);
     }
 
@@ -1871,7 +2193,11 @@ export class PondApiClient {
 
     if (!res.ok) {
       let msg = res.statusText;
-      try { msg = (await res.json()).error ?? msg; } catch { /* ignore */ }
+      try {
+        msg = (await res.json()).error ?? msg;
+      } catch {
+        /* ignore */
+      }
       throw new ApiError(res.status, msg);
     }
 
@@ -1886,8 +2212,14 @@ export class PondApiClient {
   // ── OAuth PKCE ──────────────────────────────────────────────
 
   /** Start an OAuth PKCE flow. Returns the authorization URL to open in a browser. */
-  async initiateOAuth(provider: string, extensionId?: string): Promise<{ auth_url: string; state: string }> {
-    return this.post("/api/v1/oauth/authorize", { provider, extension_id: extensionId });
+  async initiateOAuth(
+    provider: string,
+    extensionId?: string,
+  ): Promise<{ auth_url: string; state: string }> {
+    return this.post("/api/v1/oauth/authorize", {
+      provider,
+      extension_id: extensionId,
+    });
   }
 
   /**
@@ -1897,7 +2229,9 @@ export class PondApiClient {
    * `failed`. `unknown` means the nonce was never issued by the running server
    * (it restarted) or its outcome aged out.
    */
-  async getOAuthStatus(state: string): Promise<import("./types").OAuthFlowStatus> {
+  async getOAuthStatus(
+    state: string,
+  ): Promise<import("./types").OAuthFlowStatus> {
     return this.get(`/api/v1/oauth/status/${encodeURIComponent(state)}`);
   }
 
@@ -1907,8 +2241,12 @@ export class PondApiClient {
   }
 
   /** List supported OAuth providers. */
-  async listOAuthProviders(): Promise<{ id: string; display_name: string; scopes: string[] }[]> {
-    const res = await this.get<{ providers: { id: string; display_name: string; scopes: string[] }[] }>("/api/v1/oauth/providers");
+  async listOAuthProviders(): Promise<
+    { id: string; display_name: string; scopes: string[] }[]
+  > {
+    const res = await this.get<{
+      providers: { id: string; display_name: string; scopes: string[] }[];
+    }>("/api/v1/oauth/providers");
     return res.providers;
   }
 }

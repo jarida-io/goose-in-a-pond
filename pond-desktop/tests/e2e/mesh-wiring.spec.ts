@@ -15,7 +15,12 @@ async function openMeshSection(page: import("@playwright/test").Page) {
 
 test("mesh section shows disabled state when mesh is off", async ({ page }) => {
   await openMeshSection(page);
-  await expect(page.locator(".empty-state")).toContainText("Mesh is disabled");
+  // Two `.empty-state` blocks legitimately coexist on this screen — "mesh is
+  // off" and "no peers yet" — so the assertion names the one under test rather
+  // than matching the class and tripping strict mode.
+  await expect(
+    page.locator(".empty-state").filter({ hasText: "Mesh is disabled" }),
+  ).toBeVisible();
 });
 
 test("mesh section lists trusted peers from the API", async ({ page }) => {

@@ -4,14 +4,17 @@ import { join } from "node:path";
 import { readFileSync, rmSync, existsSync } from "node:fs";
 import {
   cmdlineIsVoiceChild,
+  cmdlineIsServerChild,
+  SERVER_CHILD,
   readPidfile,
-  pidIsVoiceChild,
+  pidIsChildOfKind,
   reapPidfileOrphan,
   pidfilePath,
   writePidfile,
   removePidfile,
   realOrphanDeps,
   type OrphanDeps,
+  VOICE_CHILD,
 } from "./orphan";
 
 function deps(over: Partial<OrphanDeps> = {}): OrphanDeps {
@@ -26,30 +29,90 @@ function deps(over: Partial<OrphanDeps> = {}): OrphanDeps {
   };
 }
 
+describe("cmdlineIsServerChild", () => {
+  it("matches a pond-server sidecar", () => {
+    // The exact production invocation.
+    expect(cmdlineIsServerChild("/opt/app/pond-server serve --port 4000")).toBe(
+      true,
+    );
+    // A macOS bundle sidecar path.
+    expect(
+      cmdlineIsServerChild(
+        "/Applications/Goose In A Pond.app/Contents/Resources/pond-server serve --port 4000",
+      ),
+    ).toBe(true);
+    // Keyed on the subcommand and never on --port, so a sidecar that fell back
+    // past 4000 -- the very symptom that led here -- is still recognised.
+    expect(cmdlineIsServerChild("/opt/app/pond-server serve --port 4001")).toBe(
+      true,
+    );
+    expect(cmdlineIsServerChild("target/debug/pond-server serve")).toBe(true);
+  });
+
+  it("does not match the voice child or unrelated processes", () => {
+    expect(
+      cmdlineIsServerChild("/opt/app/pond-server chat --voice --json-events"),
+    ).toBe(false);
+    expect(cmdlineIsServerChild("/usr/bin/serve --port 4000")).toBe(false);
+    expect(cmdlineIsServerChild("pond-server-helper serveries")).toBe(false);
+    expect(cmdlineIsServerChild("")).toBe(false);
+  });
+});
+
+// Both children are a `pond-server`, so matching the binary alone would have
+// each reaper killing the other's process.
+describe("the two child kinds", () => {
+  it("never claim each other's processes", () => {
+    const sidecar = "/opt/app/pond-server serve --port 4000";
+    const voice = "/opt/app/pond-server chat --voice --session-id abc";
+    expect(SERVER_CHILD.matches(sidecar)).toBe(true);
+    expect(VOICE_CHILD.matches(sidecar)).toBe(false);
+    expect(VOICE_CHILD.matches(voice)).toBe(true);
+    expect(SERVER_CHILD.matches(voice)).toBe(false);
+  });
+
+  it("keep their pidfiles apart, so reaping one never touches the other", () => {
+    expect(pidfilePath(SERVER_CHILD)).not.toBe(pidfilePath(VOICE_CHILD));
+    expect(pidfilePath(SERVER_CHILD).split("/").pop()).toMatch(
+      /^giap-server-[A-Za-z0-9_]+\.pid$/,
+    );
+  });
+});
+
 describe("cmdlineIsVoiceChild", () => {
   it("matches a voice child", () => {
     // The exact production invocation.
     expect(
-      cmdlineIsVoiceChild("/opt/app/pond-server chat --voice --json-events --session-id abc"),
+      cmdlineIsVoiceChild(
+        "/opt/app/pond-server chat --voice --json-events --session-id abc",
+      ),
     ).toBe(true);
     // A macOS bundle sidecar path.
     expect(
-      cmdlineIsVoiceChild("/Applications/Goose In A Pond.app/Contents/MacOS/pond-server chat --voice"),
+      cmdlineIsVoiceChild(
+        "/Applications/Goose In A Pond.app/Contents/MacOS/pond-server chat --voice",
+      ),
     ).toBe(true);
     // The pre-rename invocation still matches, because orphan recovery has to
     // reap a child spawned by a shell that was running before an upgrade. The
     // matcher keys on the binary and the subcommand, never the flags, and that
     // is exactly what makes an upgrade survivable.
     expect(
-      cmdlineIsVoiceChild("/opt/app/pond-server chat --input whisper --json-events --session-id abc"),
+      cmdlineIsVoiceChild(
+        "/opt/app/pond-server chat --input whisper --json-events --session-id abc",
+      ),
     ).toBe(true);
   });
 
   it("does not match the dashboard server or unrelated processes", () => {
     // `serve` must never be reaped as a voice child.
-    expect(cmdlineIsVoiceChild("/opt/app/pond-server serve --port 4000")).toBe(false);
+    expect(cmdlineIsVoiceChild("/opt/app/pond-server serve --port 4000")).toBe(
+      false,
+    );
     // `chat` as a substring of another token is not the subcommand.
-    expect(cmdlineIsVoiceChild("/usr/bin/pond-server-chatterbox serve")).toBe(false);
+    expect(cmdlineIsVoiceChild("/usr/bin/pond-server-chatterbox serve")).toBe(
+      false,
+    );
     expect(cmdlineIsVoiceChild("/usr/bin/node /some/other/app.js")).toBe(false);
     expect(cmdlineIsVoiceChild("")).toBe(false);
     // `chat` with no pond-server token must not match a reused pid running
@@ -84,18 +147,20 @@ describe("readPidfile", () => {
   });
 });
 
-describe("pidIsVoiceChild", () => {
+describe("pidIsChildOfKind", () => {
   it("confirms a live pond-server chat process", () => {
     const d = deps({
       isAlive: vi.fn().mockReturnValue(true),
-      commandLine: vi.fn().mockReturnValue("/opt/app/pond-server chat --voice\n"),
+      commandLine: vi
+        .fn()
+        .mockReturnValue("/opt/app/pond-server chat --voice\n"),
     });
-    expect(pidIsVoiceChild(4242, d)).toBe(true);
+    expect(pidIsChildOfKind(4242, VOICE_CHILD, d)).toBe(true);
   });
 
   it("reports a dead pid without spawning ps at all", () => {
     const d = deps({ isAlive: vi.fn().mockReturnValue(false) });
-    expect(pidIsVoiceChild(4242, d)).toBe(false);
+    expect(pidIsChildOfKind(4242, VOICE_CHILD, d)).toBe(false);
     // The common case is a stale pidfile naming a long-dead pid. Paying for a
     // subprocess there is exactly what fails on a memory-pressured board.
     expect(d.commandLine).not.toHaveBeenCalled();
@@ -106,7 +171,7 @@ describe("pidIsVoiceChild", () => {
       isAlive: vi.fn().mockReturnValue(true),
       commandLine: vi.fn().mockReturnValue("/usr/bin/node server.js"),
     });
-    expect(pidIsVoiceChild(4242, d)).toBe(false);
+    expect(pidIsChildOfKind(4242, VOICE_CHILD, d)).toBe(false);
   });
 
   it("stays indeterminate when the command line cannot be read", () => {
@@ -114,7 +179,7 @@ describe("pidIsVoiceChild", () => {
       isAlive: vi.fn().mockReturnValue(true),
       commandLine: vi.fn().mockReturnValue(null),
     });
-    expect(pidIsVoiceChild(4242, d)).toBe(null);
+    expect(pidIsChildOfKind(4242, VOICE_CHILD, d)).toBe(null);
   });
 
   it("stays indeterminate when the liveness check itself fails", () => {
@@ -123,12 +188,12 @@ describe("pidIsVoiceChild", () => {
         throw new Error("EMFILE");
       }),
     });
-    expect(pidIsVoiceChild(4242, d)).toBe(null);
+    expect(pidIsChildOfKind(4242, VOICE_CHILD, d)).toBe(null);
   });
 
   it("never confirms a non-positive pid", () => {
-    expect(pidIsVoiceChild(0, deps())).toBe(false);
-    expect(pidIsVoiceChild(-1, deps())).toBe(false);
+    expect(pidIsChildOfKind(0, VOICE_CHILD, deps())).toBe(false);
+    expect(pidIsChildOfKind(-1, VOICE_CHILD, deps())).toBe(false);
   });
 });
 
@@ -137,7 +202,7 @@ describe("reapPidfileOrphan", () => {
 
   it("does nothing when there is no pidfile", () => {
     const d = deps();
-    reapPidfileOrphan(d, PATH);
+    reapPidfileOrphan(VOICE_CHILD, d, PATH);
     expect(d.kill).not.toHaveBeenCalled();
     expect(d.removeFile).not.toHaveBeenCalled();
   });
@@ -148,7 +213,7 @@ describe("reapPidfileOrphan", () => {
       isAlive: vi.fn().mockReturnValue(true),
       commandLine: vi.fn().mockReturnValue("/opt/app/pond-server chat --voice"),
     });
-    reapPidfileOrphan(d, PATH);
+    reapPidfileOrphan(VOICE_CHILD, d, PATH);
     expect(d.kill).toHaveBeenCalledWith(4242);
     expect(d.removeFile).toHaveBeenCalledWith(PATH);
   });
@@ -158,7 +223,7 @@ describe("reapPidfileOrphan", () => {
       readFile: vi.fn().mockReturnValue("4242"),
       isAlive: vi.fn().mockReturnValue(false),
     });
-    reapPidfileOrphan(d, PATH);
+    reapPidfileOrphan(VOICE_CHILD, d, PATH);
     expect(d.kill).not.toHaveBeenCalled();
     expect(d.removeFile).toHaveBeenCalledWith(PATH);
   });
@@ -172,15 +237,17 @@ describe("reapPidfileOrphan", () => {
       isAlive: vi.fn().mockReturnValue(true),
       commandLine: vi.fn().mockReturnValue(null),
     });
-    reapPidfileOrphan(d, PATH);
+    reapPidfileOrphan(VOICE_CHILD, d, PATH);
     expect(d.kill).not.toHaveBeenCalled();
     expect(d.removeFile).not.toHaveBeenCalled();
-    expect(d.warn).toHaveBeenCalledWith(expect.stringContaining("retry recovery"));
+    expect(d.warn).toHaveBeenCalledWith(
+      expect.stringContaining("retry recovery"),
+    );
   });
 
   it("never kills on a malformed pidfile", () => {
     const d = deps({ readFile: vi.fn().mockReturnValue("0") });
-    reapPidfileOrphan(d, PATH);
+    reapPidfileOrphan(VOICE_CHILD, d, PATH);
     expect(d.kill).not.toHaveBeenCalled();
   });
 });
@@ -190,22 +257,22 @@ describe("the real pidfile primitives", () => {
 
   it("round-trips write, read and remove, and remove is idempotent", () => {
     rmSync(PATH, { force: true });
-    writePidfile(4242, PATH);
+    writePidfile(VOICE_CHILD, 4242, PATH);
     expect(readPidfile(readFileSync(PATH, "utf8"))).toBe(4242);
-    removePidfile(PATH);
+    removePidfile(VOICE_CHILD, PATH);
     expect(existsSync(PATH)).toBe(false);
     // A second remove is a no-op, never a throw.
-    expect(() => removePidfile(PATH)).not.toThrow();
+    expect(() => removePidfile(VOICE_CHILD, PATH)).not.toThrow();
   });
 
   it("scopes the path per user, with a filesystem-safe name", () => {
-    const name = pidfilePath().split("/").pop() ?? "";
+    const name = pidfilePath(VOICE_CHILD).split("/").pop() ?? "";
     expect(name).toMatch(/^giap-voice-child-[A-Za-z0-9_]+\.pid$/);
   });
 
   it("reports this very process as alive, and pid 1 as not ours", () => {
     expect(realOrphanDeps.isAlive(process.pid)).toBe(true);
     // pid 1 exists on every POSIX host but is launchd/init, never our child.
-    expect(pidIsVoiceChild(1, realOrphanDeps)).toBe(false);
+    expect(pidIsChildOfKind(1, VOICE_CHILD, realOrphanDeps)).toBe(false);
   });
 });

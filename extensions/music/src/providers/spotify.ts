@@ -1,13 +1,171 @@
-import type { MusicProvider, TrackInfo, PlaylistInfo, AlbumInfo, DeviceInfo, RepeatState, ArtistInfo, TimeRange } from './types.js';
+import type { MusicProvider, TrackInfo, PlaylistInfo, AlbumInfo, DeviceInfo, RepeatState, ArtistInfo, TimeRange, PlayTarget, FollowUpResult } from './types.js';
 import { describeError, log } from '../log.js';
 
 interface SpotifyTrack {
   id: string;
   name: string;
-  artists: Array<{ name: string }>;
-  album: { name: string };
+  /**
+   * `id` matters as much as `name`: it is the only reliable way to tell this
+   * artist's tracks from covers and same-titled songs when following up a
+   * search by artist name.
+   */
+  artists: Array<{ id?: string; name: string }>;
+  /**
+   * Everything but `name` was previously declared away, which is how the bug
+   * happened: the fields arrive on every search response, but a narrowed type
+   * made them invisible and `parseTrack` dropped them. `uri` is what lets a
+   * track play inside its album instead of alone.
+   *
+   * All optional because `GET /me/player` and `GET /me/player/queue` return a
+   * thinner track object than `/search` does.
+   */
+  album: {
+    name: string;
+    id?: string;
+    uri?: string;
+    total_tracks?: number;
+    album_type?: string;
+  };
   duration_ms: number;
   uri: string;
+}
+
+/**
+ * The body for `PUT /v1/me/player/play`.
+ *
+ * Pure, and exported, so the one decision that caused the "Spotify goes
+ * silent" bug can be pinned by tests without a fake Spotify. The rest of this
+ * file is I/O; this is the part worth asserting on.
+ *
+ * Spotify's play endpoint takes **either** shape, never both:
+ *
+ * - `uris` — an ad-hoc list. Spotify plays exactly those tracks and then
+ *   STOPS. A one-element list is a playlist of one song, which is why asking
+ *   for a single track used to end in silence with nothing left in the queue.
+ * - `context_uri` — an album, playlist or artist. Playback runs through the
+ *   context and, on Premium, Spotify's own autoplay carries on past the end.
+ *
+ * So a track is played *inside* its album, positioned with `offset`.
+ *
+ * The constraint that shapes all of this: **`offset` is only valid when the
+ * context is an album or a playlist.** Spotify rejects it for an artist
+ * context, so "play this song within the artist" cannot be expressed — the
+ * album is the only context that both starts on the requested track and
+ * continues afterwards. `an_offset_is_never_sent_with_an_artist_context` pins
+ * that.
+ *
+ * A track whose album is unknown still falls back to `uris`. That is the old
+ * behaviour, kept deliberately: a missing field should cost the continuation,
+ * not the music.
+ */
+export function buildPlayBody(target?: PlayTarget): Record<string, unknown> {
+  if (!target) return {};
+
+  if (typeof target === 'string') {
+    // A bare track URI has no album to play inside; anything else already is
+    // a context.
+    return target.startsWith('spotify:track:')
+      ? { uris: [target] }
+      : { context_uri: target };
+  }
+
+  if (target.album_uri) {
+    return { context_uri: target.album_uri, offset: { uri: target.uri } };
+  }
+  return { uris: [target.uri] };
+}
+
+/**
+ * A Spotify track object mapped to our own shape.
+ *
+ * Exported and module-level because this mapping is where the "Spotify goes
+ * silent" bug actually lived: the album fields arrive on every search
+ * response, but a narrowed type hid them and this function dropped them, so
+ * the album context never reached the point where playback was started.
+ * Keeping it testable is the guard against that happening again.
+ */
+export function parseTrack(track: SpotifyTrack): TrackInfo {
+    return {
+      id: track.id,
+      name: track.name,
+      artist: track.artists.map(a => a.name).join(', '),
+      album: track.album.name,
+      duration_ms: track.duration_ms,
+      uri: track.uri,
+      // The album context, carried rather than dropped. `album_uri` is what
+      // `buildPlayBody` needs to keep playback going after the requested
+      // track; the other three decide whether a release is too short to be
+      // worth continuing. None costs an extra request -- they are already in
+      // the response we just parsed.
+      album_uri: track.album.uri,
+      album_total_tracks: track.album.total_tracks,
+      album_type: track.album.album_type,
+      artist_ids: track.artists.map(a => a.id).filter((id): id is string => !!id),
+    };
+}
+
+/**
+ * Whether a release is too short for "the rest of the album" to mean anything.
+ *
+ * A single is the case that defeats an album context: playing track 1 of 1 and
+ * continuing through the album still leaves silence one song later. Both
+ * signals come free with the search response, so asking costs no request.
+ *
+ * `total_tracks` is checked as well as `album_type` because compilations and
+ * two-track releases are typed `album` yet run out just as fast, and because
+ * `album_type` is absent from the thinner track object the player endpoints
+ * return.
+ */
+export function isShortRelease(track: TrackInfo): boolean {
+  if (track.album_type === 'single') return true;
+  return track.album_total_tracks !== undefined && track.album_total_tracks <= SHORT_RELEASE_TRACKS;
+}
+
+/** At or below this many tracks, a release gets topped up. */
+const SHORT_RELEASE_TRACKS = 2;
+
+/** How many follow-ups to queue behind a short release. */
+const FOLLOW_UP_LIMIT = 10;
+
+/** How many candidates to fetch before filtering them down to the artist's own. */
+const FOLLOW_UP_SEARCH_LIMIT = 20;
+
+/**
+ * Follow-up tracks to queue behind a short release, newest search first.
+ *
+ * Pure so the filtering can be tested: it is the part that goes wrong. Keeps
+ * only tracks that genuinely share an artist id with the seed, which is what
+ * stops covers, tributes and same-titled songs by other artists from being
+ * queued as though they were the artist's own work. Falls back to matching on
+ * the artist *name* only when the seed carried no ids, since the player
+ * endpoints omit them.
+ */
+export function pickFollowUps(
+  seed: TrackInfo,
+  candidates: TrackInfo[],
+  limit: number,
+): TrackInfo[] {
+  const seedIds = new Set(seed.artist_ids ?? []);
+  // Seeded with the requested track: a single and its album cut are the same
+  // recording under two ids, and the single is precisely the case that reaches
+  // this function, so without the seed in here the song the user asked for gets
+  // queued behind itself and plays twice.
+  const seen = new Set([seed.name]);
+  const out: TrackInfo[] = [];
+
+  for (const c of candidates) {
+    if (out.length >= limit) break;
+    if (c.uri === seed.uri || c.id === seed.id) continue;
+    const sharesArtist = seedIds.size > 0
+      ? (c.artist_ids ?? []).some(id => seedIds.has(id))
+      : c.artist === seed.artist;
+    if (!sharesArtist) continue;
+    if (seen.has(c.name)) continue;
+    seen.add(c.name);
+    out.push(c);
+  }
+
+  return out;
 }
 
 interface SpotifyAlbum {
@@ -234,16 +392,6 @@ export class SpotifyProvider implements MusicProvider {
     return JSON.parse(text) as T;
   }
 
-  private parseTrack(track: SpotifyTrack): TrackInfo {
-    return {
-      id: track.id,
-      name: track.name,
-      artist: track.artists.map(a => a.name).join(', '),
-      album: track.album.name,
-      duration_ms: track.duration_ms,
-      uri: track.uri,
-    };
-  }
 
   private parseAlbum(album: SpotifyAlbum): AlbumInfo {
     return {
@@ -272,20 +420,14 @@ export class SpotifyProvider implements MusicProvider {
     };
   }
 
-  async play(uri?: string): Promise<string> {
-    const body: Record<string, unknown> = {};
-
-    if (uri) {
-      if (uri.startsWith('spotify:track:')) {
-        body.uris = [uri];
-      } else {
-        // Album, playlist, or artist URI -- use as context
-        body.context_uri = uri;
-      }
-    }
+  async play(target?: PlayTarget): Promise<string> {
+    const body = buildPlayBody(target);
 
     await this.command('PUT', '/me/player/play', Object.keys(body).length > 0 ? body : undefined);
-    return uri ? `Playing ${uri}` : 'Resumed playback';
+
+    if (!target) return 'Resumed playback';
+    const uri = typeof target === 'string' ? target : target.uri;
+    return `Playing ${uri}`;
   }
 
   async pause(): Promise<string> {
@@ -379,7 +521,7 @@ export class SpotifyProvider implements MusicProvider {
     return (data.items || [])
       .map(i => i.track)
       .filter((t): t is SpotifyTrack => !!t)
-      .map(t => this.parseTrack(t));
+      .map(t => parseTrack(t));
   }
 
 
@@ -394,7 +536,7 @@ export class SpotifyProvider implements MusicProvider {
       'GET',
       `/me/top/tracks?time_range=${range}&limit=${clamped}`
     );
-    return (data.items || []).map(t => this.parseTrack(t));
+    return (data.items || []).map(t => parseTrack(t));
   }
 
   async getTopArtists(range: TimeRange, limit: number = 20): Promise<ArtistInfo[]> {
@@ -425,7 +567,7 @@ export class SpotifyProvider implements MusicProvider {
     return (data.items || [])
       .map(i => i.track)
       .filter((t): t is SpotifyTrack => !!t)
-      .map(t => this.parseTrack(t));
+      .map(t => parseTrack(t));
   }
 
   async getNowPlaying(): Promise<TrackInfo | null> {
@@ -445,11 +587,96 @@ export class SpotifyProvider implements MusicProvider {
     const data = await this.api<PlayerState>('GET', '/me/player');
     if (!data || !data.item) return null;
 
-    const track = this.parseTrack(data.item);
+    const track = parseTrack(data.item);
     track.is_playing = data.is_playing;
     track.progress_ms = data.progress_ms;
     track.volume_percent = data.device?.volume_percent;
     return track;
+  }
+
+  /**
+   * Looks up one track, so a bare URI can be played inside its album too.
+   *
+   * `GET /tracks/{id}` is a catalog read: unscoped, and not one of the
+   * endpoints Spotify withdrew. Only used on the URI-given path, where there
+   * is no search response to take the album from — the common path already has
+   * it and spends no request here.
+   */
+  async getTrack(uri: string): Promise<TrackInfo | null> {
+    const id = uri.startsWith('spotify:track:') ? uri.slice('spotify:track:'.length) : uri;
+    if (!id) return null;
+    const track = await this.api<SpotifyTrack>('GET', `/tracks/${encodeURIComponent(id)}`);
+    // An empty body parses to `{}`, which has no uri to play.
+    if (!track || !track.uri) return null;
+    return parseTrack(track);
+  }
+
+  /**
+   * Queues more of the same artist behind a short release.
+   *
+   * An album context is enough for an album, but not for a single: playing
+   * track 1 of 1 and running to the end of the album still leaves silence one
+   * song later. This fills that gap.
+   *
+   * Deliberately NOT `GET /artists/{id}/top-tracks`, which would be the
+   * obvious source — see the withdrawn-endpoint list above. It answers 403 for
+   * this app, permanently, and no amount of re-consenting changes that. Plain
+   * `/search` is unscoped and unaffected, so the artist's catalogue is reached
+   * with a field-filtered query instead. `fieldFilteredQuery` only rewrites
+   * "title by artist", so an `artist:"…"` filter passes through to Spotify
+   * untouched.
+   *
+   * Returns how many tracks were queued, so the caller can say so — or say
+   * nothing, if none were.
+   */
+  async queueFollowUps(seed: TrackInfo, limit: number = FOLLOW_UP_LIMIT): Promise<FollowUpResult> {
+    // The joined `artist` string can hold several names; Spotify indexes the
+    // primary one, and the id filter in `pickFollowUps` does the real work of
+    // rejecting wrong matches.
+    const primaryArtist = seed.artist.split(',')[0].trim();
+    let picks: TrackInfo[] = [];
+    let source: FollowUpResult['source'] = 'artist';
+
+    if (primaryArtist) {
+      const byArtist = await this.searchTracks(`artist:"${primaryArtist}"`, FOLLOW_UP_SEARCH_LIMIT);
+      picks = pickFollowUps(seed, byArtist, limit);
+    }
+
+    if (picks.length === 0) {
+      source = 'listener';
+      // Nothing found for the artist -- fall back to what this listener
+      // actually likes. `/me/top/tracks` is granted (`user-top-read`) and is
+      // not one of the withdrawn endpoints.
+      const top = await this.getTopTracks('medium_term', FOLLOW_UP_SEARCH_LIMIT);
+      picks = top.filter(t => t.uri !== seed.uri).slice(0, limit);
+    }
+
+    let queued = 0;
+    for (const track of picks) {
+      try {
+        await this.addToQueue(track.uri);
+        queued += 1;
+      } catch (err) {
+        // Stop at the first refusal rather than hammering. `request()` has no
+        // 429 handling and no Retry-After respect, and this loop is the
+        // largest burst this extension makes, so a rate limit or a device
+        // going away must end the loop, not repeat into it.
+        log.warn('follow_up_queue_stopped', 'stopped queueing follow-ups', {
+          queued,
+          remaining: picks.length - queued,
+          source,
+          error: describeError(err),
+        });
+        break;
+      }
+    }
+
+    log.debug('follow_ups_queued', 'queued follow-ups behind a short release', {
+      seed: seed.uri,
+      queued,
+      source,
+    });
+    return { queued, source };
   }
 
   /**
@@ -484,13 +711,13 @@ export class SpotifyProvider implements MusicProvider {
     const tracks: TrackInfo[] = [];
 
     if (data.currently_playing) {
-      const current = this.parseTrack(data.currently_playing);
+      const current = parseTrack(data.currently_playing);
       current.is_playing = true;
       tracks.push(current);
     }
 
     for (const item of data.queue || []) {
-      tracks.push(this.parseTrack(item));
+      tracks.push(parseTrack(item));
     }
 
     return tracks;
@@ -535,7 +762,7 @@ export class SpotifyProvider implements MusicProvider {
         'GET',
         `/search?type=track&q=${encodeURIComponent(q)}&limit=${clamped}`
       );
-      return (data.tracks?.items || []).map(t => this.parseTrack(t));
+      return (data.tracks?.items || []).map(t => parseTrack(t));
     };
 
     // Try the precise form first, but never let it lose results: a strict

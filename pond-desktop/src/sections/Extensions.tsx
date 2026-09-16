@@ -1275,15 +1275,16 @@ export function Extensions() {
     setSecretEditState({ extName, mktExt, fulfilledMap });
   }
 
-  async function handleSecretEditComplete(secrets: Record<string, string>) {
-    if (!secretEditState) return;
-    if (Object.keys(secrets).length > 0) {
-      await api.setExtensionSecrets(secretEditState.extName, secrets);
-    }
-    const extName = secretEditState.extName;
-    flash(`Credentials updated for ${extName}.`);
-    setSecretEditState(null);
-    // Refresh the auth status badge for this extension
+  /**
+   * Refresh the auth status badge for one extension.
+   *
+   * Every path out of `handleSecretEditComplete` that stored or completed
+   * something has to call this, including the OAuth-only path where the modal
+   * completes with `{}` - that is the normal payload when the only requirement
+   * is an `oauth_flow` one, so skipping it left the badge stale on exactly the
+   * extension the user had just finished authorising.
+   */
+  function refreshSecretBadge(extName: string) {
     api.getExtensionSecrets(extName)
       .then((res) => {
         const allFulfilled = Object.values(res.fulfilled).length > 0 && Object.values(res.fulfilled).every(Boolean);
@@ -1293,6 +1294,52 @@ export function Extensions() {
         }));
       })
       .catch(() => {});
+  }
+
+  async function handleSecretEditComplete(secrets: Record<string, string>) {
+    if (!secretEditState) return;
+    const extName = secretEditState.extName;
+    setSecretEditState(null);
+
+    if (Object.keys(secrets).length === 0) {
+      flash(`Credentials updated for ${extName}.`);
+      refreshSecretBadge(extName);
+      return;
+    }
+
+    let result;
+    try {
+      result = await api.setExtensionSecrets(extName, secrets);
+    } catch (err) {
+      // Nothing was stored, so there is no new state to reflect anywhere.
+      flash(`Could not save credentials for ${extName}: ${String(err)}`, false);
+      return;
+    }
+
+    // `request()` hands back undefined for a 204 or any non-JSON 2xx, so a
+    // server that predates this route's response body - a stale staged sidecar,
+    // most likely - would throw a TypeError here, outside the catch above, with
+    // the modal already unmounted and no message shown at all.
+    const outcome = result ?? { stored: 0, restarted: false, restart_error: null };
+
+    if (outcome.restart_error) {
+      // Stored, but the extension is not running with them — the state that
+      // used to be reported as a plain success. `load()` brings the
+      // extension's own error status onto its card, where it persists after
+      // this message has gone.
+      flash(
+        `Credentials saved, but ${extName} did not restart: ${outcome.restart_error}`,
+        false,
+      );
+      load();
+    } else if (outcome.restarted) {
+      flash(`Credentials updated for ${extName}. Restarted to apply them.`);
+      load();
+    } else {
+      flash(`Credentials updated for ${extName}.`);
+    }
+
+    refreshSecretBadge(extName);
   }
 
   function handleInstallFromMarketplace(ext: Extension) {

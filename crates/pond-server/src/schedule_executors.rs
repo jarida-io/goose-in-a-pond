@@ -192,9 +192,15 @@ impl ScheduleExecutor for AgentScheduleExecutor {
             TaskKind::AgentPrompt { prompt } => self.run_agent_prompt(task_id, prompt).await,
             TaskKind::Webhook { webhook_url } => {
                 tracing::info!("[scheduler] firing webhook for task {task_id}: {webhook_url}");
-                // PAI-2 P5. There are TWO webhook executors and they are not
-                // the same code path -- gating only one is exactly the drift the
-                // egress guard test exists to catch.
+                // PAI-2 P5. A scheduled webhook POSTs to a URL the user typed
+                // in: the most direct exfiltration path in the tree. `begin`
+                // gates and starts the clock, `finish` records the outcome
+                // either way, so a webhook that times out is still in the feed.
+                //
+                // There used to be a second, never-constructed executor in
+                // pond-infra-scheduler carrying a copy of this gating. It was
+                // deleted rather than kept in sync: two paths to gate is how
+                // one of them ends up ungated.
                 let call = pond_core::shared::services::egress::begin(webhook_url, "POST")
                     .map_err(|e| anyhow::anyhow!("task {task_id}: {e}"))?;
 

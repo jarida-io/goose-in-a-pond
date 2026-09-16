@@ -88,10 +88,14 @@ which city. Never guess weather or shell out for it.")]
         );
 
         match &self.weather {
-            None => Ok(CallToolResult::success(vec![Content::text(
-                "The weather service is not configured on this GIAP instance. \
-                 Inform the user that they need to configure a weather location in their settings. \
-                 DO NOT attempt to fetch weather using any other tool, shell command, or external request.",
+            // An error, not a success. The household prompt's one anti-repeat
+            // rule is conditioned on a failure ("an error, an empty result or a
+            // 'not found' is NOT an answer ... never the same tool with the same
+            // parameters again"), so returning a failure as a success put the
+            // rule out of scope for exactly the results that needed it.
+            None => Ok(CallToolResult::error(vec![Content::text(
+                "Weather is not configured on this pond: no location is set in settings. \
+                 No other tool, shell command or external request can supply it.",
             )])),
             Some(w) => {
                 let result = match &location {
@@ -121,9 +125,8 @@ which city. Never guess weather or shell out for it.")]
                     }
                     Err(e) => {
                         tracing::warn!("weather: fetch failed: {e}");
-                        Ok(CallToolResult::success(vec![Content::text(format!(
-                            "Weather fetch failed: {e}. Tell the user the weather service \
-                             is temporarily unavailable and suggest they try again shortly."
+                        Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Weather fetch failed: {e}"
                         ))]))
                     }
                 }
@@ -155,10 +158,11 @@ location for the configured home. Never guess data.")]
         );
 
         match &self.weather {
-            None => Ok(CallToolResult::success(vec![Content::text(
-                "The weather service is not configured on this GIAP instance. \
-                 Inform the user that they need to configure a weather location in their settings. \
-                 DO NOT attempt to fetch forecasts using any other tool, shell command, or external request.",
+            // A failure, reported as one -- see the note on the current-weather
+            // tool above.
+            None => Ok(CallToolResult::error(vec![Content::text(
+                "Weather is not configured on this pond: no location is set in settings. \
+                 No other tool, shell command or external request can supply a forecast.",
             )])),
             Some(w) => {
                 let result = match &location {
@@ -199,9 +203,8 @@ location for the configured home. Never guess data.")]
                     }
                     Err(e) => {
                         tracing::warn!("weather: forecast fetch failed: {e}");
-                        Ok(CallToolResult::success(vec![Content::text(format!(
-                            "Forecast fetch failed: {e}. Tell the user the weather service \
-                             is temporarily unavailable and suggest they try again shortly."
+                        Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Forecast fetch failed: {e}"
                         ))]))
                     }
                 }
@@ -383,5 +386,72 @@ mod tests {
             resolve_forecast_location(&params),
             Some("Eldoret".to_string())
         );
+    }
+}
+
+#[cfg(test)]
+mod result_wording_tests {
+    //! A tool result is data the model reads, and the household prompt tells it
+    //! to act on what a result names. So a result that speaks to the model in
+    //! the second person about the user is an instruction in all but name --
+    //! which is how "suggest they try again shortly" became a reason to try
+    //! again, repeatedly.
+
+    /// The tool bodies only -- everything before the first test module.
+    ///
+    /// The source is the record here because these strings are built inline in
+    /// the tool bodies and reaching them needs a live weather service. The cut
+    /// matters: without it this scans its own assertion list and fails on the
+    /// phrases it is looking for.
+    fn tool_bodies() -> &'static str {
+        let src = include_str!("weather.rs");
+        let end = src.find("#[cfg(test)]").unwrap_or(src.len());
+        &src[..end]
+    }
+
+    #[test]
+    fn no_weather_result_tells_the_model_what_to_tell_the_user() {
+        let src = tool_bodies();
+        for phrase in [
+            "Tell the user",
+            "Inform the user",
+            "suggest they try again",
+            "DO NOT attempt",
+        ] {
+            assert!(
+                !src.contains(phrase),
+                "a weather result still instructs the model ({phrase:?}); state the fact and                  let the prompt decide what to do with it"
+            );
+        }
+    }
+
+    /// A failed fetch must be a failed tool result, not a successful one whose
+    /// text happens to describe a failure. goose branches on `is_error`, and
+    /// the prompt's anti-repeat rule is conditioned on the failure branch.
+    #[test]
+    fn every_weather_failure_path_returns_an_error_result() {
+        let bodies = tool_bodies();
+        for needle in [
+            "Weather fetch failed",
+            "Forecast fetch failed",
+            "Weather is not configured on this pond",
+        ] {
+            let at = bodies.find(needle).expect("failure path missing");
+            // Walk back to the CallToolResult constructor for this path.
+            let before = &bodies[..at];
+            let ctor = before
+                .rfind("CallToolResult::")
+                .expect("no constructor before the text");
+            assert!(
+                before[ctor..].starts_with("CallToolResult::error"),
+                "the failure path for {needle:?} still returns CallToolResult::success, so the \
+                 prompt's anti-repeat rule never applies to it"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unconfigured_weather_service_states_the_fact() {
+        assert!(tool_bodies().contains("Weather is not configured on this pond"));
     }
 }

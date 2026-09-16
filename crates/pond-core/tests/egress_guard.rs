@@ -87,7 +87,6 @@ const EGRESS_TRACKED: &[&str] = &[
     "crates/pond-adapters-weather/src/lib.rs",
     "crates/pond-hf-cache/src/lib.rs",
     "crates/pond-infra/src/fcm_push_relay.rs",
-    "crates/pond-infra-scheduler/src/webhook_executor.rs",
     "crates/pond-mcp-server/src/http.rs",
     "crates/pond-server/src/main.rs",
     "crates/pond-server/src/model_download.rs",
@@ -98,6 +97,11 @@ const EGRESS_TRACKED: &[&str] = &[
 struct Exempt {
     file: &'static str,
     /// Why this is not egress. Read by a human, in a review.
+    ///
+    /// Never read by code, deliberately: the value of writing it down is that a
+    /// reviewer sees the justification next to the exemption. Marked rather than
+    /// left to warn, so the warning list stays a list of things to fix.
+    #[allow(dead_code, reason = "documentation for a human reviewer, not an input")]
     reason: &'static str,
     /// Non-loopback URLs the file contains that are NOT request targets --
     /// install instructions, catalogue entries other code fetches. Every entry

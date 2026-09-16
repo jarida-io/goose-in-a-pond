@@ -1652,6 +1652,11 @@ struct TurnAccumulator {
     full_text: String,
     /// One JSON row per tool result, as persisted.
     tool_results: Vec<String>,
+    /// Tool-call id -> the arguments the model produced, kept from the
+    /// `ToolCall` event so the result blob can carry them to persistence. The
+    /// `ToolResult` event does not repeat them, and without them a stored
+    /// tool-call record names a call nobody can reproduce.
+    tool_call_inputs: std::collections::HashMap<String, String>,
     /// When the first visible token arrived, as a fallback for an engine that
     /// reports no TTFT of its own.
     ttft: Option<std::time::Instant>,
@@ -1672,6 +1677,7 @@ impl TurnAccumulator {
             thought,
             full_text: String::new(),
             tool_results: Vec::new(),
+            tool_call_inputs: std::collections::HashMap::new(),
             ttft: None,
             tool_call_start: None,
             last_tool_name: None,
@@ -1708,6 +1714,13 @@ impl TurnAccumulator {
             AgentStreamEvent::ToolCall { tool, id, input } => {
                 self.tool_call_start = Some(std::time::Instant::now());
                 self.last_tool_name = Some(tool.clone());
+                self.tool_call_inputs.insert(
+                    id.clone(),
+                    input
+                        .as_ref()
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "{}".to_string()),
+                );
                 StreamStep::Frame(
                     json!({"type": "tool_call", "tool": tool, "id": id, "input": input})
                         .to_string(),
@@ -1723,6 +1736,10 @@ impl TurnAccumulator {
                         "tool_call_id": id,
                         "tool": tool,
                         "content": clean_content,
+                        "arguments": self
+                            .tool_call_inputs
+                            .remove(&id)
+                            .unwrap_or_else(|| "{}".to_string()),
                     })
                     .to_string(),
                 );
@@ -3948,6 +3965,53 @@ async fn get_session_attachment(
     }
 }
 
+/// The LAN address a phone on the same network should use to reach this hub.
+///
+/// A mDNS hostname is the nicer thing to hand out — it survives a DHCP lease
+/// change, where a baked-in address does not — but Android's resolver does not
+/// do mDNS, so `<host>.local` simply fails to resolve there. The pairing QR
+/// carries both and lets the client fall back.
+///
+/// Found by asking the routing table which source address it would use to reach
+/// the mDNS group, which is the same question the phone is really asking. No
+/// packet is sent: `connect` on a UDP socket only fixes the route. That is also
+/// why the destination is the multicast group rather than a public address —
+/// routing to the internet may well go out of a VPN, which is the one interface
+/// that cannot carry LAN discovery.
+///
+/// Returns `None` rather than a guess when there is no LAN route to speak of.
+fn lan_address() -> Option<String> {
+    use std::net::UdpSocket;
+
+    // The mDNS group first, then RFC1918 gateways for hosts whose multicast
+    // route is unusual. Each is only a routing probe.
+    for probe in [
+        "224.0.0.251:5353",
+        "192.168.0.1:80",
+        "10.0.0.1:80",
+        "172.16.0.1:80",
+    ] {
+        let Ok(socket) = UdpSocket::bind("0.0.0.0:0") else {
+            continue;
+        };
+        if socket.connect(probe).is_err() {
+            continue;
+        }
+        let Ok(addr) = socket.local_addr() else {
+            continue;
+        };
+        let std::net::IpAddr::V4(v4) = addr.ip() else {
+            continue;
+        };
+        // Loopback and link-local (169.254/16, a failed DHCP) reach nobody.
+        if v4.is_loopback() || v4.is_link_local() || v4.is_unspecified() {
+            continue;
+        }
+        return Some(v4.to_string());
+    }
+    None
+}
+
 async fn system_info(State(state): State<Arc<AppState>>) -> Json<Value> {
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
@@ -3959,6 +4023,9 @@ async fn system_info(State(state): State<Arc<AppState>>) -> Json<Value> {
 
     Json(json!({
         "hostname": hostname,
+        // Null when the host has no LAN route. Clients that cannot resolve
+        // `<hostname>.local` — Android, notably — use this instead.
+        "lan_address": lan_address(),
         "port": state.api_port,
         "version": env!("CARGO_PKG_VERSION"),
         "platform": std::env::consts::OS,
@@ -11543,6 +11610,89 @@ async fn get_extension_secrets_handler(
 /// Accepts a JSON object `{ "KEY": "value", ... }` and stores each entry in the
 /// secret repository. The extension name is used for validation (must exist in
 /// the marketplace) but secrets are stored globally by key name.
+/// Restarts a marketplace extension so its child process picks up whatever
+/// credentials are currently in the secret store.
+///
+/// A stdio extension reads its credentials from the environment it was spawned
+/// with, so a credential change has no effect at all until the process is
+/// replaced. Every caller here has just changed one.
+///
+/// Returns `Err` with a reason whenever the restart could not be carried out,
+/// so no caller can report success over an extension that is not running. The
+/// three collaborators being absent is one of those reasons rather than a
+/// silent no-op: on a backend that has no extension manager the credentials
+/// are stored and nothing is listening for them, which the user has to be told.
+///
+/// This restarts whatever it is asked to, including an extension that is not
+/// installed yet — the install flow signs in before it installs, so refusing
+/// would break it. Deciding whether an extension *should* be started is the
+/// caller's policy; see `set_extension_secrets_handler`.
+async fn restart_extension_with_secrets(state: &AppState, ext_id: &str) -> Result<(), String> {
+    let (Some(mgr), Some(mp), Some(secret_repo)) = (
+        &state.extension_manager,
+        &state.marketplace,
+        &state.secret_repo,
+    ) else {
+        return Err("This build cannot start extensions: no extension manager is running.".into());
+    };
+
+    let ext = match mp.get_by_id(ext_id).await {
+        Ok(Some(ext)) => ext,
+        Ok(None) => return Err(format!("'{ext_id}' is not in the marketplace.")),
+        Err(e) => return Err(format!("Could not look up '{ext_id}': {e}")),
+    };
+
+    let mut env = std::collections::HashMap::new();
+    for sr in &ext.required_secrets {
+        if let Ok(Some(val)) = secret_repo.get(&sr.key).await {
+            env.insert(sr.key.clone(), val);
+        }
+    }
+    env.insert(
+        crate::oauth_callback::INTERNAL_TOKEN_ENV_KEY.to_string(),
+        crate::oauth_callback::internal_extension_token().to_string(),
+    );
+    env.insert(
+        crate::oauth_callback::GIAP_SERVER_URL_ENV_KEY.to_string(),
+        crate::oauth_callback::local_server_url(state.api_port),
+    );
+
+    // Best-effort: this fails routinely and harmlessly when the extension was
+    // not running, which is the normal case on a fresh install.
+    if let Err(e) = mgr.remove_extension(ext_id).await {
+        tracing::debug!(
+            extension = %ext_id,
+            error = %e,
+            "could not stop the extension before restarting it"
+        );
+    }
+
+    let req = pond_core::mcp::ports::extension_manager::AddExtensionRequest {
+        name: ext.id.clone(),
+        kind: ext.kind.clone(),
+        description: ext.description.clone(),
+        command: ext.command.clone(),
+        args: ext.args.clone(),
+        env,
+        uri: ext.uri.clone(),
+    };
+
+    match mgr.add_extension(req).await {
+        Ok(_) => {
+            tracing::info!(extension = %ext_id, "restarted the extension with fresh credentials");
+            Ok(())
+        }
+        Err(e) => {
+            tracing::warn!(
+                extension = %ext_id,
+                error = %e,
+                "failed to restart the extension after its credentials changed"
+            );
+            Err(e.to_string())
+        }
+    }
+}
+
 async fn set_extension_secrets_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -11599,7 +11749,51 @@ async fn set_extension_secrets_handler(
         }
     }
 
-    Json(json!({"stored": secrets.len()})).into_response()
+    // Storing is only half the job: a stdio extension reads its credentials
+    // from the environment of the process it was spawned in, so until it is
+    // restarted the new values change nothing. Both outcomes are reported
+    // because the store has already succeeded — the caller needs to know the
+    // secrets are safe AND whether anything is actually using them yet.
+    // Applying credentials is only ever meant to fix something the user
+    // already runs. Starting an extension they never installed, or one they
+    // deliberately disabled, would be a side effect nobody asked for — this
+    // endpoint is reachable independently of the install flow.
+    let should_restart =
+        match &state.mcp_server_repo {
+            Some(repo) => match repo.list().await {
+                Ok(saved) => saved.iter().any(|s| s.name == name && s.enabled),
+                Err(e) => return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "stored": secrets.len(),
+                        "error": format!("Stored, but could not read installed extensions: {e}"),
+                    })),
+                )
+                    .into_response(),
+            },
+            None => false,
+        };
+
+    let (restarted, restart_error) = if should_restart {
+        match restart_extension_with_secrets(&state, &name).await {
+            Ok(()) => (true, None),
+            Err(e) => (false, Some(e)),
+        }
+    } else {
+        tracing::info!(
+            extension = %name,
+            "stored credentials for an extension that is not installed and enabled; \
+             nothing to restart"
+        );
+        (false, None)
+    };
+
+    Json(json!({
+        "stored": secrets.len(),
+        "restarted": restarted,
+        "restart_error": restart_error,
+    }))
+    .into_response()
 }
 
 // ── OAuth PKCE handlers ──────────────────────────────────────────────────────
@@ -11843,60 +12037,10 @@ async fn oauth_callback_handler(
 
             // If this OAuth flow was triggered by an extension install, restart
             // the extension so the child process picks up the new tokens.
-            let mut restart_error: Option<String> = None;
-            if let Some(ext_id) = &session.extension_id {
-                if let (Some(mgr), Some(mp), Some(secret_repo)) = (
-                    &state.extension_manager,
-                    &state.marketplace,
-                    &state.secret_repo,
-                ) {
-                    if let Ok(Some(ext)) = mp.get_by_id(ext_id).await {
-                        // Build env map with all resolved secrets
-                        let mut env = std::collections::HashMap::new();
-                        for sr in &ext.required_secrets {
-                            if let Ok(Some(val)) = secret_repo.get(&sr.key).await {
-                                env.insert(sr.key.clone(), val);
-                            }
-                        }
-                        env.insert(
-                            crate::oauth_callback::INTERNAL_TOKEN_ENV_KEY.to_string(),
-                            crate::oauth_callback::internal_extension_token().to_string(),
-                        );
-                        env.insert(
-                            crate::oauth_callback::GIAP_SERVER_URL_ENV_KEY.to_string(),
-                            crate::oauth_callback::local_server_url(state.api_port),
-                        );
-
-                        // Remove the running extension and re-add with new env
-                        let _ = mgr.remove_extension(ext_id).await;
-
-                        let req = pond_core::mcp::ports::extension_manager::AddExtensionRequest {
-                            name: ext.id.clone(),
-                            kind: ext.kind.clone(),
-                            description: ext.description.clone(),
-                            command: ext.command.clone(),
-                            args: ext.args.clone(),
-                            env,
-                            uri: ext.uri.clone(),
-                        };
-
-                        match mgr.add_extension(req).await {
-                            Ok(_) => tracing::info!(
-                                extension = %ext_id,
-                                "restarted extension with OAuth tokens"
-                            ),
-                            Err(e) => {
-                                tracing::warn!(
-                                    extension = %ext_id,
-                                    error = %e,
-                                    "failed to restart extension after OAuth"
-                                );
-                                restart_error = Some(e.to_string());
-                            }
-                        }
-                    }
-                }
-            }
+            let restart_error = match &session.extension_id {
+                Some(ext_id) => restart_extension_with_secrets(&state, ext_id).await.err(),
+                None => None,
+            };
 
             // The tokens are stored either way, but if the extension could not be
             // started there is nothing working on the other side — say so rather
@@ -17937,6 +18081,11 @@ mod tests {
                 "tool_call_id": "call-1",
                 "tool": "giap-weather__get_weather",
                 "content": "24C and clear",
+                // Carried from the ToolCall event, which is the only place they
+                // appear -- the ToolResult event does not repeat them. Without
+                // this the stored tool-call record names a call nobody can
+                // reproduce.
+                "arguments": "{\"location\":\"Nairobi\"}",
             }),
             "the persisted row is replayed into the next prompt as the model's own \
              tool history; a row whose id and name are transposed teaches the model \

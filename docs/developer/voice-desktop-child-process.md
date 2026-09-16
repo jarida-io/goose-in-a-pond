@@ -31,7 +31,7 @@ fetches, double event dispatch into the reducer, no-op `abort_recording`).
 | Event types | `crates/pond-core/src/shared/domain/agent.rs` | `WorkflowEvent` serde-serializes to the NDJSON contract (`tag = "event"`, snake_case) |
 | Process manager | `pond-desktop/electron/main/voice/VoiceChildProcess.ts` | Spawn with held-open piped stdin, a readline reader on stdout, orphan cleanup, kill on app exit |
 | Line classification | `pond-desktop/electron/main/voice/ndjson.ts` | Pure: one line in, one event or exit notice out. Where the 30-odd golden tests live |
-| Orphan reaping | `pond-desktop/electron/main/voice/orphan.ts` | Pidfile + liveness + identity, for a child that outlived a hard kill of the shell |
+| Orphan reaping | `pond-desktop/electron/main/orphan.ts` | Pidfile + liveness + identity, for a child that outlived a hard kill of the shell. Shared with the pond-server sidecar, which is why it is parameterised over a `ChildKind`: both children are a `pond-server`, so the voice predicate requires the `chat` subcommand and the sidecar's requires `serve`, and neither can reap the other |
 | IPC | `pond-desktop/electron/main/ipc.ts` | `start_voice_session` (returns the session uuid), `stop_voice_session` (stdin EOF, then kill after 3s) |
 | Frontend | `pond-desktop/src/modes/voice/useVoiceSession.ts` | Single owner of all `voice-*` events; `VoiceMode.tsx` picks the child-process path when `isDesktopShell()` and the unchanged `WebVoiceBackend` pipeline in a plain browser |
 

@@ -166,21 +166,6 @@ pub(crate) fn safe_stream_end(text: &str) -> usize {
         .min(tail_hold)
 }
 
-/// Extract the content portion of the generated text (everything before
-/// tool calls). Returns the original text if no tool calls are found.
-pub(crate) fn extract_content(text: &str) -> String {
-    if let Some((content, _)) = split_llama3_tool_calls(text) {
-        return content;
-    }
-    if let Some((content, _)) = split_xml_tool_calls(text) {
-        return content;
-    }
-    if let Some((content, _)) = split_json_content_and_tool_calls(text) {
-        return content;
-    }
-    text.to_string()
-}
-
 // ── Format 1: Standard JSON ─────────────────────────────────────────────────
 
 /// Extract the JSON tool_calls object from the end of the text.
@@ -221,37 +206,6 @@ fn extract_json_tool_calls(text: &str) -> Option<String> {
 
 /// Split text into (content, tool_calls_json).
 #[allow(clippy::string_slice)]
-fn split_json_content_and_tool_calls(text: &str) -> Option<(String, String)> {
-    let trimmed = text.trim_end();
-    if !trimmed.ends_with('}') {
-        return None;
-    }
-
-    let bytes = trimmed.as_bytes();
-    let mut depth = 0i32;
-    let mut json_start = None;
-    for i in (0..bytes.len()).rev() {
-        match bytes[i] {
-            b'}' => depth += 1,
-            b'{' => {
-                depth -= 1;
-                if depth == 0 {
-                    json_start = Some(i);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let start = json_start?;
-    let json_str = &trimmed[start..];
-    let parsed: Value = serde_json::from_str(json_str).ok()?;
-    parsed.get("tool_calls")?.as_array()?;
-
-    let content = trimmed[..start].trim_end().to_string();
-    Some((content, json_str.to_string()))
-}
 
 /// Parse tool calls from a JSON string containing `"tool_calls"` array.
 fn parse_json_tool_calls(json_str: &str) -> Vec<ParsedToolCall> {
@@ -700,26 +654,6 @@ mod tests {
     fn safe_stream_end_plain_text() {
         let text = "plain text here";
         assert_eq!(safe_stream_end(text), text.len());
-    }
-
-    #[test]
-    fn extract_content_with_json_tool() {
-        let text = "Here is the result.\n{\"tool_calls\": [{\"name\": \"x\", \"arguments\": {}}]}";
-        let content = extract_content(text);
-        assert_eq!(content, "Here is the result.");
-    }
-
-    #[test]
-    fn extract_content_no_tools() {
-        let text = "Just a normal response.";
-        assert_eq!(extract_content(text), text);
-    }
-
-    #[test]
-    fn extract_content_with_xml_tool() {
-        let text = "Answer:\n<tool_call>\n<function=foo>\n<parameter=x>1</parameter>\n</function>\n</tool_call>";
-        let content = extract_content(text);
-        assert_eq!(content, "Answer:");
     }
 
     #[test]

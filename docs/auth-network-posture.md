@@ -16,7 +16,10 @@ same network (e.g. a GOTG phone).
   rejected with **401** otherwise, **except** the public allowlist: `/health`,
   `/handshake`, `/handshake/{init,verify,refresh,revoke,pairing-code}`,
   onboarding routes, and a few local dev/test pages
-  (`crates/pond-api/src/middleware/mod.rs::is_public_route`).
+  (`crates/pond-api/src/middleware/mod.rs::route_exposure`). The allowlist is
+  state-scoped rather than flat: each entry in `PUBLIC_ROUTES` carries an
+  `Exposure` of `Always`, `UntilOnboarded`, or `UntilOnboardedThenHostOnly`, so a
+  route open during onboarding can close afterwards.
 - Tokens are validated against the DB-backed `SqliteHandshakeAdapter`
   (`validate_token`): only unrevoked, unexpired session tokens pass.
 - Session tokens expire after 24h; refresh tokens after 30d. Clients rotate via
@@ -33,8 +36,17 @@ Two-phase, HMAC-based — the 6-digit pairing code is **never sent over the wire
    `POST /handshake/verify {challenge_id, mac}` → `{session_token, refresh_token,
    expires_at}`.
 
-Codes are single-use, expire in 10 min, and lock out after 5 failed attempts.
-Only sha256 hashes of codes/tokens are persisted.
+Codes are single-use and expire in 10 min; a challenge expires in 60 s. Only
+sha256 hashes of codes/tokens are persisted.
+
+**There is no failed-attempt lockout, and its absence is deliberate.** A bad MAC
+burns the *challenge*, not the code: `verify_handshake` consumes the challenge
+before it checks the MAC (`sqlite_handshake.rs:355-371`) and returns
+`invalid_mac` with the pairing code untouched (`:414-419`), which is consumed
+only on success (`:435-439`). The `pairing_codes` table has no attempt counter,
+and `bad_mac_attempts_do_not_lock_out_pairing_code` (`:955`) asserts a
+legitimate pairing still succeeds after ten bad guesses. A lockout would hand
+any guest on the wifi a denial of service against the operator's own pairing.
 
 ### Token contract
 
@@ -80,7 +92,37 @@ not apply to them.
 
 ## Rate limiting
 
-Per-client IP rate limiting (600 req / 60 s) applies to remote clients,
-including handshake attempts. Loopback is exempt from throttling (first-party
-host); brute-forcing a pairing code is independently stopped by the 5-attempt
-lockout.
+Three buckets, not one. The first two are mutually exclusive — handshake traffic
+is selected into its own bucket and never touches the general allowance
+(`pond-api/src/lib.rs:653-657`).
+
+| Bucket | Limit | Covers | Loopback |
+|---|---|---|---|
+| General | 600 / 60 s per IP | everything except `/api/v1/handshake*` (`lib.rs:536-539`) | exempt |
+| Pairing | 30 / 60 s per IP | every `/api/v1/handshake*` route (`lib.rs:544-547`) | exempt |
+| Verify | 10 / 60 s per IP | `/handshake/verify` only (`routes.rs:590-595`) | **not exempt** |
+
+Pairing was split out in `a2c86a93` because a chatty client spending the shared
+allowance would lock a device out of `/handshake` — the recovery path. The verify
+limiter sits inside the handler rather than the middleware, so it applies to
+loopback too: the endpoint is security-sensitive regardless of origin.
+
+The 429 does not have one shape. General and pairing go through
+`AuthError::RateLimitExceeded` and set a `Retry-After` **header**
+(`middleware/mod.rs:49-53`); verify is built in the handler and puts the same
+figure in a `retry_after_secs` **JSON body field** with no header
+(`routes.rs:681-688`). A pairing client has to read both, and since verify is
+the tighter bucket it is the 429 such a client will actually see. Making the
+two uniform is a behaviour change and belongs in its own PR.
+
+Brute force is bounded by that verify limiter plus one-challenge-per-attempt, not
+by a lockout. The bound is **per source IP**, like the table above: the limiter
+keys on the TCP peer address (`routes.rs:676-678`), so every distinct address
+gets its own bucket. At 10 attempts / 60 s against a code that lives 10 minutes,
+one address is worth roughly 100 guesses out of 1,000,000 — about 0.01% of the
+key space — and each guess burns its own challenge, so attempts cannot be
+pipelined. An attacker holding N addresses gets 100N. That matters for the threat
+model named above: a wifi guest cannot spoof a source address through a TCP
+handshake, but can hold several without effort — a second DHCP lease, a static
+address in the subnet, or IPv6 privacy addresses, which rotate on their own. On a
+typical /24 the worst case is nearer 2.5% of the key space than 0.01%.

@@ -2,22 +2,23 @@ import { test, expect } from "@playwright/test";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
 import { navigateTo } from "./helpers/nav";
 
-// PRE-EXISTING, and not caused by the drawer: there is no "Preview Goose Hub
-// redesign" button anywhere in the UI. A grep over src/ finds the string in no
-// component, and `desktopState.ts`'s comment -- "hub is hidden from the classic
-// sidebar; entry is via Settings > Preview Goose Hub" -- describes a control
-// that does not exist. The hub is reachable only by setting `giap-force-hub`
-// in localStorage, which is what every other test in this file does.
-//
-// Unskip when the hub gets an entry point a person can reach.
-test.fixme("Hub shell renders from Settings preview button", async ({ page }) => {
+// There is no "Preview Goose Hub redesign" button anywhere in src/ -- the
+// comment in desktopState.ts that named one described a control that does not
+// exist, and this test used to click it. It forces the hub through
+// `giap-force-hub` like every other test in this file instead, which is what
+// main did while this branch only skipped it.
+test("Hub shell renders", async ({ page }) => {
   await mockAllApiRoutes(page);
+  // The classic UI is the default and a persisted "hub" is coerced to
+  // "dashboard" on launch, so the hub is entered the same way the two tests
+  // below do it. There is no Settings button to click: the preview entry point
+  // survives only in comments.
+  await page.addInitScript(() => {
+    localStorage.setItem("giap-section", "hub");
+    localStorage.setItem("giap-force-hub", "1");
+    localStorage.setItem("goosehub_route", "home");
+  });
   await page.goto("/");
-
-  await navigateTo(page, "Settings");
-
-  // Click "Preview Goose Hub redesign"
-  await page.getByRole("button", { name: /preview goose hub redesign/i }).click();
 
   // Hub shell, and the drawer's trigger rather than a rail
   await expect(page.locator(".ghub")).toBeVisible({ timeout: 10_000 });

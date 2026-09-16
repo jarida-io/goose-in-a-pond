@@ -55,86 +55,18 @@
 /* ════════ HOME VIEW ════════ */
 
 /* Ask Goose */
-.askgoose {
-  display: flex;
-  align-items: center;
-  gap: 15px;
-  width: 100%;
-  border: none;
-  cursor: pointer;
-  font-family: inherit;
-  text-align: left;
-  background: linear-gradient(110deg, var(--pp) 0%, var(--pp) 60%, var(--pp-600) 100%);
-  border-radius: 20px;
-  padding: 16px 20px;
-  box-shadow: 0 10px 28px rgba(140, 75, 255, 0.30);
-  transition: transform 0.12s;
-}
 
-.askgoose:hover { transform: translateY(-1px); }
-.askgoose:active { transform: translateY(0) scale(0.995); }
 
-.askgoose__mic {
-  position: relative;
-  width: 50px;
-  height: 50px;
-  border-radius: 15px;
-  background: rgba(255, 255, 255, 0.18);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
 
-.askgoose__pulse {
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  border: 2px solid rgba(255, 255, 255, 0.5);
-  animation: goosepulse 2.2s ease-out infinite;
-}
 
 @keyframes goosepulse {
   0%   { transform: scale(1); opacity: 0.8; }
   100% { transform: scale(1.35); opacity: 0; }
 }
 
-.askgoose__text {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  flex: 1;
-  min-width: 0;
-}
 
-.askgoose__hint {
-  font-size: 11.5px;
-  font-weight: 700;
-  color: rgba(255, 255, 255, 0.78);
-  text-transform: uppercase;
-  letter-spacing: 0.9px;
-}
 
-.askgoose__say {
-  font-size: 16px;
-  font-weight: 700;
-  color: #fff;
-  line-height: 1.3;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 
-.askgoose__kb {
-  width: 40px;
-  height: 40px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.14);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
 
 .ghost-btn {
   display: flex;
@@ -292,32 +224,8 @@
 .phead__title { font-size: 15px; font-weight: 700; color: var(--ink); }
 
 /* ─── Room pills ─── */
-.rpills { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 2px; }
-.rpills::-webkit-scrollbar { height: 0; }
 
-.rpill {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  flex-shrink: 0;
-  padding: 8px 15px;
-  border-radius: 999px;
-  border: 1px solid var(--pp-100);
-  background: var(--color-surface);
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--pp);
-  transition: all 0.15s;
-}
 
-.rpill[data-active="true"] {
-  background: var(--pp);
-  border-color: var(--pp);
-  color: #fff;
-  box-shadow: 0 4px 12px rgba(140, 75, 255, 0.28);
-}
 
 /* ─── Device tile ─── */
 .dtile-wrap { position: relative; display: flex; }
@@ -426,33 +334,9 @@
 }
 
 /* ─── Category dock ─── */
-.cdock { display: flex; gap: 9px; }
-.cdock--scroll { overflow-x: auto; }
 
-.cdock__pill {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex: 1;
-  min-width: 0;
-  padding: 10px 13px;
-  border-radius: 14px;
-  border: 1px solid var(--line);
-  background: var(--color-surface);
-  cursor: pointer;
-  font-family: inherit;
-  transition: all 0.15s;
-}
 
-.cdock__pill:hover {
-  border-color: var(--pp-100);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
-}
 
-.cdock__icon { width: 34px; height: 34px; border-radius: 10px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-.cdock__text { display: flex; flex-direction: column; min-width: 0; }
-.cdock__label { font-size: 13px; font-weight: 700; color: var(--ink); white-space: nowrap; }
-.cdock__status { font-size: 11px; font-weight: 600; color: var(--mut); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ─── Weather ─── */
 .wx {
@@ -508,246 +392,36 @@
 }
 
 /* ─── Sticky note ─── */
-.sticky {
-  background: linear-gradient(165deg, #FEF08A, #FDE047);
-  border-radius: 14px;
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  box-shadow: 0 6px 16px rgba(250, 204, 21, 0.3);
-  transform: rotate(-1.4deg);
-  min-height: 130px;
-}
 
-.sticky__body {
-  font-family: 'Comfortaa', var(--font-body-alt), cursive;
-  font-size: 15px;
-  font-weight: 600;
-  color: #713F12;
-  line-height: 1.45;
-  font-style: italic;
-}
 
-.sticky__cta {
-  align-self: flex-start;
-  margin-top: 10px;
-  background: rgba(0, 0, 0, 0.06);
-  border: none;
-  border-radius: 8px;
-  padding: 6px 11px;
-  font-family: inherit;
-  font-size: 12px;
-  font-weight: 700;
-  color: #854D0E;
-  cursor: pointer;
-}
 
 /* Sticky — edit mode */
-.sticky--editing {
-  transform: rotate(0deg);
-}
 
-.sticky__textarea {
-  width: 100%;
-  border: none;
-  background: transparent;
-  font-family: 'Comfortaa', var(--font-body-alt), cursive;
-  font-size: 14px;
-  font-weight: 600;
-  color: #713F12;
-  resize: none;
-  outline: none;
-  line-height: 1.45;
-  font-style: italic;
-  flex: 1;
-}
 
-.sticky__textarea::placeholder { color: rgba(113, 63, 18, 0.45); }
 
-.sticky__actions {
-  display: flex;
-  gap: 7px;
-  margin-top: 10px;
-}
 
-.sticky__actions--filled {
-  opacity: 0;
-  transition: opacity 0.15s;
-}
 
-.sticky--filled:hover .sticky__actions--filled,
-.sticky--filled:focus-within .sticky__actions--filled {
-  opacity: 1;
-}
 
-.sticky__save {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  background: rgba(0, 0, 0, 0.14);
-  border: none;
-  border-radius: 8px;
-  padding: 5px 10px;
-  font-family: inherit;
-  font-size: 12px;
-  font-weight: 700;
-  color: #854D0E;
-  cursor: pointer;
-}
 
-.sticky__cancel {
-  background: transparent;
-  border: none;
-  border-radius: 8px;
-  padding: 5px 10px;
-  font-family: inherit;
-  font-size: 12px;
-  font-weight: 600;
-  color: #A16207;
-  cursor: pointer;
-  opacity: 0.7;
-}
 
-.sticky__edit,
-.sticky__del {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  background: rgba(0, 0, 0, 0.06);
-  border: none;
-  border-radius: 7px;
-  padding: 4px 9px;
-  font-family: inherit;
-  font-size: 11px;
-  font-weight: 700;
-  color: #854D0E;
-  cursor: pointer;
-}
 
 /* ─── To-do ─── */
-.todo {
-  background: var(--color-surface);
-  border: 1px solid var(--line);
-  border-radius: 18px;
-  padding: 15px;
-  display: flex;
-  flex-direction: column;
-}
 
-.todo__head {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 13.5px;
-  font-weight: 700;
-  color: var(--ink);
-  margin-bottom: 11px;
-}
 
-.todo__items { display: flex; flex-direction: column; gap: 7px; flex: 1; }
 
-.todo__item {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  border: none;
-  background: none;
-  cursor: pointer;
-  font-family: inherit;
-  text-align: left;
-  padding: 2px 0;
-}
 
-.todo__box {
-  width: 18px;
-  height: 18px;
-  border-radius: 6px;
-  border: 2px solid #D4D4DD;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  transition: all 0.15s;
-}
 
-.todo__item[data-done="true"] .todo__box {
-  background: var(--pp);
-  border-color: var(--pp);
-}
 
-.todo__text { font-size: 13px; font-weight: 600; color: var(--ink-2); }
-.todo__item[data-done="true"] .todo__text { text-decoration: line-through; color: var(--mut); }
 
-.todo__add {
-  margin-top: 11px;
-  align-self: flex-start;
-  border: none;
-  background: var(--pp-50);
-  color: var(--pp);
-  border-radius: 9px;
-  padding: 7px 12px;
-  font-family: inherit;
-  font-size: 12px;
-  font-weight: 700;
-  cursor: pointer;
-}
 
 /* Todo row wrapper — holds the item button + action buttons */
-.todo__item-row {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
 
-.todo__item-row .todo__item {
-  flex: 1;
-}
 
-.todo__del-btn,
-.todo__edit-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: none;
-  border: none;
-  padding: 4px;
-  border-radius: 6px;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.12s;
-  flex-shrink: 0;
-}
 
-.todo__item-row:hover .todo__del-btn,
-.todo__item-row:hover .todo__edit-btn,
-.todo__item--edit .todo__del-btn {
-  opacity: 1;
-}
 
-.todo__del-btn:hover { background: rgba(239, 68, 68, 0.08); }
-.todo__edit-btn:hover { background: var(--pp-50); }
 
 /* Todo — inline edit row */
-.todo__item--edit {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 0;
-}
 
-.todo__input {
-  flex: 1;
-  border: none;
-  border-bottom: 2px solid var(--pp);
-  background: transparent;
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--ink-2);
-  outline: none;
-  padding: 2px 0;
-}
 
 /* ─── Scenes ─── */
 .scenes { display: flex; gap: 9px; }
@@ -1788,13 +1462,6 @@ body,
 
   /* Hub home padding */
   /* Ask Goose CTA: reduce padding */
-  .askgoose {
-    padding: 11px 16px;
-  }
-  .askgoose__mic {
-    width: 38px; height: 38px; border-radius: 11px;
-  }
-  .askgoose__say { font-size: 14px; }
 
   /* Home grid: already single-col at <=1080px; ensure gap is tight */
   /* Section labels */
@@ -1820,7 +1487,6 @@ body,
   .dtile__temp { font-size: 26px; margin: 4px 0; }
 
   /* Room pills: smaller */
-  .rpill { padding: 6px 12px; font-size: 12px; }
 
   /* Weather widget: compress */
   .wx { padding: 12px; gap: 8px; }
@@ -1832,8 +1498,6 @@ body,
   .hclock--big .hclock__ampm { font-size: 15px; }
 
   /* Sticky note */
-  .sticky { min-height: 100px; padding: 12px; }
-  .sticky__body { font-size: 13px; }
 
   /* Panels */
   .gpanel { padding: 12px; }
@@ -1850,8 +1514,6 @@ body,
   .ext2__head { padding: 6px 4px; }
 
   /* Category dock pills */
-  .cdock__pill { padding: 8px 10px; }
-  .cdock__icon { width: 28px; height: 28px; }
 
   /* Privacy hero */
   .privacy-hero { padding: 14px; }
@@ -1888,9 +1550,6 @@ body,
 @media (max-height: 500px) {
 
   /* Home: ultra-compact */
-  .askgoose { padding: 9px 14px; }
-  .askgoose__mic { width: 32px; height: 32px; }
-  .askgoose__say { font-size: 13px; }
 
   /* Collapse aside on 480px height: not enough room */
   /* Tiles: keep 2 col */

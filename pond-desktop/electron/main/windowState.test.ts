@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { parseBounds, isOnSomeDisplay, usableBounds, stateFilePath } from "./windowState";
+import {
+  parseBounds,
+  isOnSomeDisplay,
+  usableBounds,
+  stateFilePath,
+} from "./windowState";
 
 const LAPTOP = { x: 0, y: 0, width: 1512, height: 982 };
 /** A second display to the right — the kind that gets unplugged. */
@@ -35,38 +40,56 @@ describe("parseBounds", () => {
 
 describe("isOnSomeDisplay", () => {
   it("accepts a window fully on a display", () => {
-    expect(isOnSomeDisplay({ x: 100, y: 100, width: 800, height: 600 }, [LAPTOP])).toBe(true);
+    expect(
+      isOnSomeDisplay({ x: 100, y: 100, width: 800, height: 600 }, [LAPTOP]),
+    ).toBe(true);
   });
 
   // Overlap, not containment: a window hanging off an edge is a position the
   // user chose and can still drag back.
   it("accepts a window hanging off an edge", () => {
-    expect(isOnSomeDisplay({ x: -200, y: 50, width: 800, height: 600 }, [LAPTOP])).toBe(true);
-    expect(isOnSomeDisplay({ x: 1400, y: 900, width: 800, height: 600 }, [LAPTOP])).toBe(true);
+    expect(
+      isOnSomeDisplay({ x: -200, y: 50, width: 800, height: 600 }, [LAPTOP]),
+    ).toBe(true);
+    expect(
+      isOnSomeDisplay({ x: 1400, y: 900, width: 800, height: 600 }, [LAPTOP]),
+    ).toBe(true);
   });
 
   it("accepts a window on a second display while it is attached", () => {
     expect(
-      isOnSomeDisplay({ x: 2000, y: 300, width: 800, height: 600 }, [LAPTOP, EXTERNAL]),
+      isOnSomeDisplay({ x: 2000, y: 300, width: 800, height: 600 }, [
+        LAPTOP,
+        EXTERNAL,
+      ]),
     ).toBe(true);
   });
 
   // The failure this whole module exists for.
   it("rejects a window on a display that has been unplugged", () => {
-    expect(isOnSomeDisplay({ x: 2000, y: 300, width: 800, height: 600 }, [LAPTOP])).toBe(false);
+    expect(
+      isOnSomeDisplay({ x: 2000, y: 300, width: 800, height: 600 }, [LAPTOP]),
+    ).toBe(false);
   });
 
   it("rejects a window that touches nothing at all", () => {
     expect(
-      isOnSomeDisplay({ x: 9000, y: 9000, width: 800, height: 600 }, [LAPTOP, EXTERNAL]),
+      isOnSomeDisplay({ x: 9000, y: 9000, width: 800, height: 600 }, [
+        LAPTOP,
+        EXTERNAL,
+      ]),
     ).toBe(false);
-    expect(isOnSomeDisplay({ x: 0, y: 0, width: 800, height: 600 }, [])).toBe(false);
+    expect(isOnSomeDisplay({ x: 0, y: 0, width: 800, height: 600 }, [])).toBe(
+      false,
+    );
   });
 
   // Abutting is not overlapping: a window exactly beside a display has no
   // pixel on it.
   it("rejects a window that only abuts a display", () => {
-    expect(isOnSomeDisplay({ x: 1512, y: 0, width: 800, height: 600 }, [LAPTOP])).toBe(false);
+    expect(
+      isOnSomeDisplay({ x: 1512, y: 0, width: 800, height: 600 }, [LAPTOP]),
+    ).toBe(false);
   });
 });
 
@@ -94,6 +117,8 @@ describe("usableBounds", () => {
 
 describe("stateFilePath", () => {
   it("sits in the app's own data directory", () => {
-    expect(stateFilePath("/tmp/userData")).toBe("/tmp/userData/window-state.json");
+    expect(stateFilePath("/tmp/userData")).toBe(
+      "/tmp/userData/window-state.json",
+    );
   });
 });

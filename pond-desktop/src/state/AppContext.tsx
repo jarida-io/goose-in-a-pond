@@ -58,7 +58,12 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
           error?: string;
         };
         const status = data.status;
-        if (status !== "completed" && status !== "failed" && status !== "running") return;
+        if (
+          status !== "completed" &&
+          status !== "failed" &&
+          status !== "running"
+        )
+          return;
         const toast: ScheduleToast = {
           id: data.id || data.schedule_id || String(Date.now()),
           schedule_id: data.schedule_id || data.id || "",
@@ -79,7 +84,8 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
           result: toast.result ?? null,
           error: toast.error ?? null,
           startedAt: new Date().toISOString(),
-          finishedAt: toast.status !== "running" ? new Date().toISOString() : null,
+          finishedAt:
+            toast.status !== "running" ? new Date().toISOString() : null,
           durationMs: null,
           read: false,
           excerpt: (toast.result ?? toast.error ?? "").slice(0, 80),
@@ -95,7 +101,8 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
     };
 
     // Fetch existing schedule run history on connect
-    api.getAllRecentRuns(5)
+    api
+      .getAllRecentRuns(5)
       .then((runs) => {
         const notifications: ScheduleRunNotification[] = runs.map((r) => ({
           id: r.id,
@@ -113,7 +120,9 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
         }));
         dispatch({ type: "SET_SCHEDULE_RUNS", payload: notifications });
       })
-      .catch(() => { /* schedule runs fetch failed — non-fatal */ });
+      .catch(() => {
+        /* schedule runs fetch failed — non-fatal */
+      });
 
     return () => {
       es.close();
@@ -137,13 +146,19 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
   // listener above is: a turn started in Chat is still arriving while you are
   // looking at Devices, and its `done` frame still has to reach the reducer.
   // `dispatch` from `useReducer` is stable, hence its absence below.
-  useEffect(() => setChatRunBridge({
-    sessionToken:   state.sessionToken,
-    serverOnline:   state.serverOnline,
-    onSessionId:    (id)   => dispatch({ type: "SET_SESSION_ID", payload: id }),
-    onResponseMeta: (meta) => dispatch({ type: "SET_LAST_RESPONSE_META", payload: meta }),
-    onContextCard:  (card) => dispatch({ type: "PUSH_CONTEXT_CARD", payload: card }),
-  }), [state.sessionToken, state.serverOnline]);
+  useEffect(
+    () =>
+      setChatRunBridge({
+        sessionToken: state.sessionToken,
+        serverOnline: state.serverOnline,
+        onSessionId: (id) => dispatch({ type: "SET_SESSION_ID", payload: id }),
+        onResponseMeta: (meta) =>
+          dispatch({ type: "SET_LAST_RESPONSE_META", payload: meta }),
+        onContextCard: (card) =>
+          dispatch({ type: "PUSH_CONTEXT_CARD", payload: card }),
+      }),
+    [state.sessionToken, state.serverOnline],
+  );
 
   // A turn started before this window existed.
   //
@@ -161,7 +176,6 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
     });
   }, [state.serverOnline]);
 
-
   useEffect(() => {
     const unlisten: Array<() => void> = [];
 
@@ -171,7 +185,8 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
       // all sections can load. Auth token not needed (loopback bypass).
       dispatch({ type: "SERVER_ONLINE" });
       // Still check onboarding status so the wizard shows for new setups.
-      api.getOnboardingStatus()
+      api
+        .getOnboardingStatus()
         .then((status) => {
           if (!status.onboarded) {
             dispatch({ type: "SET_NEEDS_ONBOARDING", payload: true });
@@ -210,7 +225,8 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
       dispatch({ type: "SERVER_ONLINE" });
       // connect() reuses a persisted token / refresh across restarts and only
       // falls back to a fresh pairing-code pair when neither is usable.
-      api.connect()
+      api
+        .connect()
         .then(async (token) => {
           if (token) {
             dispatch({ type: "SET_SESSION_TOKEN", payload: token });
@@ -228,16 +244,28 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
         .catch((err) => console.warn("Connect failed (non-fatal):", err));
     };
 
+    // The sidecar bound a port we did not assume. Redirect the client before
+    // anything else reacts: every request builder reads the base at call time,
+    // so this fixes in-flight and future requests alike without a reload.
+    unlisten.push(
+      listen("server-url", (url) => {
+        api.setBase(url);
+        dispatch({ type: "SET_SERVER_URL", payload: url });
+      }),
+    );
+
     // Server online/offline status — reactive path.
-    unlisten.push(listen("server-status", (online) => {
-      if (online) {
-        handleServerOnline();
-      } else {
-        // Server went offline — reset so a subsequent online event retriggers.
-        onlineHandled = false;
-        dispatch({ type: "SERVER_OFFLINE" });
-      }
-    }));
+    unlisten.push(
+      listen("server-status", (online) => {
+        if (online) {
+          handleServerOnline();
+        } else {
+          // Server went offline — reset so a subsequent online event retriggers.
+          onlineHandled = false;
+          dispatch({ type: "SERVER_OFFLINE" });
+        }
+      }),
+    );
 
     // Active probe path. Tauri events are NOT buffered: if the Rust side
     // emits `server-status: true` before our `listen()` registration above
@@ -265,16 +293,22 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
         await new Promise((r) => setTimeout(r, 250));
       }
     })();
-    unlisten.push(() => { probeCancelled = true; });
+    unlisten.push(() => {
+      probeCancelled = true;
+    });
 
-    unlisten.push(listen("server-starting", () => {
-      dispatch({ type: "SERVER_STARTING" });
-    }));
+    unlisten.push(
+      listen("server-starting", () => {
+        dispatch({ type: "SERVER_STARTING" });
+      }),
+    );
 
     // Global voice activation hotkey
-    unlisten.push(listen("desktop-summon", () => {
-      dispatch({ type: "VOICE_ACTIVATE" });
-    }));
+    unlisten.push(
+      listen("desktop-summon", () => {
+        dispatch({ type: "VOICE_ACTIVATE" });
+      }),
+    );
 
     // Recording lifecycle — voice state is now managed explicitly by
     // VoiceMode so calibration recordings don't corrupt it.
@@ -282,13 +316,17 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
     // recording-aborted: VoiceMode handles state transition itself
 
     // macOS menu bar — View menu items
-    unlisten.push(listen("canvas-toggle", () => {
-      dispatch({ type: "SET_SECTION", payload: "canvas" });
-    }));
+    unlisten.push(
+      listen("canvas-toggle", () => {
+        dispatch({ type: "SET_SECTION", payload: "canvas" });
+      }),
+    );
 
-    unlisten.push(listen("switch-to-voice", () => {
-      dispatch({ type: "SET_MODE", payload: "voice" });
-    }));
+    unlisten.push(
+      listen("switch-to-voice", () => {
+        dispatch({ type: "SET_MODE", payload: "voice" });
+      }),
+    );
 
     return () => {
       unlisten.forEach((u) => u());
@@ -297,9 +335,7 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
 
   return (
     <StateCtx.Provider value={state}>
-      <DispatchCtx.Provider value={dispatch}>
-        {children}
-      </DispatchCtx.Provider>
+      <DispatchCtx.Provider value={dispatch}>{children}</DispatchCtx.Provider>
     </StateCtx.Provider>
   );
 }
@@ -315,12 +351,14 @@ function inferRecipe(name: string): string | null {
 
 export function useAppState(): AppState {
   const ctx = useContext(StateCtx);
-  if (!ctx) throw new Error("useAppState must be used within AppContextProvider");
+  if (!ctx)
+    throw new Error("useAppState must be used within AppContextProvider");
   return ctx;
 }
 
 export function useAppDispatch(): React.Dispatch<AppAction> {
   const ctx = useContext(DispatchCtx);
-  if (!ctx) throw new Error("useAppDispatch must be used within AppContextProvider");
+  if (!ctx)
+    throw new Error("useAppDispatch must be used within AppContextProvider");
   return ctx;
 }

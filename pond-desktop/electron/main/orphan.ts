@@ -1,15 +1,20 @@
-// Reaping a voice child that outlived the shell.
+// Reaping a child process that outlived the shell.
 //
 // Killing the app hard -- Force Quit, an OOM kill, a main-process crash --
-// leaves `pond-server chat` running and holding the microphone. Nothing else
-// cleans that up: spawned children are not killed when their parent dies on
-// POSIX, and this particular child cannot notice on its own, because in the
-// shipped voice configuration it never reads stdin and so never sees the
-// closed pipe.
+// leaves the shell's children running. Nothing else cleans that up: spawned
+// children are not killed when their parent dies on POSIX.
+//
+// Both children need this, for different reasons. The voice child, `pond-server
+// chat`, holds the microphone and cannot notice on its own, because in the
+// shipped voice configuration it never reads stdin and so never sees the closed
+// pipe. The sidecar, `pond-server serve`, holds port 4000 -- and because the
+// shell adopts any healthy server it finds there, an orphan is not merely
+// leaked but INHERITED, silently, by every subsequent launch until something
+// kills it.
 //
 // So we write the child's pid to a well-known per-user file at spawn, and on
 // the next launch reap it -- but only after confirming the pid is alive AND
-// still a `pond-server chat` process, so a reused pid is never killed.
+// still the kind of process we think it is, so a reused pid is never killed.
 //
 // This is a workaround for roughly twenty missing lines in the child (a
 // stdin-EOF watcher racing its run loop). Once that exists, kill the shell
@@ -51,6 +56,42 @@ export function cmdlineIsVoiceChild(cmdline: string): boolean {
 }
 
 /**
+ * Does this command line identify our pond-server sidecar?
+ *
+ * The mirror image of cmdlineIsVoiceChild, and for the same reason: the voice
+ * child is also a `pond-server`, so matching the binary alone would have each
+ * reaper killing the other's process. Keyed on the subcommand and never on
+ * --port, so a sidecar that fell back past 4000 is still recognised as ours.
+ */
+export function cmdlineIsServerChild(cmdline: string): boolean {
+  return (
+    cmdline.includes("pond-server") &&
+    cmdline.split(/\s+/).some((tok) => tok === "serve")
+  );
+}
+
+/** One kind of child the shell spawns, and how to recognise it. */
+export interface ChildKind {
+  /** Filename token, so the two pidfiles cannot collide. */
+  readonly slug: string;
+  /** How this child is named in log lines. */
+  readonly label: string;
+  readonly matches: (cmdline: string) => boolean;
+}
+
+export const VOICE_CHILD: ChildKind = {
+  slug: "voice-child",
+  label: "voice child",
+  matches: cmdlineIsVoiceChild,
+};
+
+export const SERVER_CHILD: ChildKind = {
+  slug: "server",
+  label: "pond-server sidecar",
+  matches: cmdlineIsServerChild,
+};
+
+/**
  * A stable per-user token, used only to keep pidfiles from colliding between
  * accounts on a shared host. The temp dir is already user-private on most
  * platforms; this makes the isolation explicit.
@@ -63,9 +104,9 @@ function perUserToken(): string {
   return "default";
 }
 
-/** Path to the voice-child pidfile, scoped per user under the OS temp dir. */
-export function pidfilePath(): string {
-  return join(tmpdir(), `giap-voice-child-${perUserToken()}.pid`);
+/** Path to a child's pidfile, scoped per user under the OS temp dir. */
+export function pidfilePath(kind: ChildKind): string {
+  return join(tmpdir(), `giap-${kind.slug}-${perUserToken()}.pid`);
 }
 
 /**
@@ -90,8 +131,8 @@ export function readPidfile(contents: string | null): number | null {
 /**
  * Classify a pid:
  *
- *   * `true`  -- alive, and its command line is a `pond-server chat`. Ours,
- *     safe to kill.
+ *   * `true`  -- alive, and its command line matches this kind. Ours, safe to
+ *     kill.
  *   * `false` -- confirmed gone, or alive but unrelated (a reused pid). Never
  *     kill; the pidfile record is stale.
  *   * `null`  -- INDETERMINATE. We could not tell, so the caller must not
@@ -103,7 +144,11 @@ export function readPidfile(contents: string | null): number | null {
  * died long ago. The Rust ran `ps` unconditionally, including on a memory-
  * pressured board where spawning it is exactly what fails.
  */
-export function pidIsVoiceChild(pid: number, deps: OrphanDeps): boolean | null {
+export function pidIsChildOfKind(
+  pid: number,
+  kind: ChildKind,
+  deps: OrphanDeps,
+): boolean | null {
   if (pid <= 0) return false;
 
   let alive: boolean;
@@ -117,20 +162,26 @@ export function pidIsVoiceChild(pid: number, deps: OrphanDeps): boolean | null {
   const cmdline = deps.commandLine(pid);
   if (cmdline === null) return null;
   const trimmed = cmdline.trim();
-  return trimmed !== "" && cmdlineIsVoiceChild(trimmed);
+  return trimmed !== "" && kind.matches(trimmed);
 }
 
 /**
- * Read the pidfile and, if it names a live voice child, kill it and clear the
- * file.
+ * Read the pidfile and, if it names a live child of this kind, kill it and
+ * clear the file.
  */
-export function reapPidfileOrphan(deps: OrphanDeps, path = pidfilePath()): void {
+export function reapPidfileOrphan(
+  kind: ChildKind,
+  deps: OrphanDeps,
+  path = pidfilePath(kind),
+): void {
   const pid = readPidfile(deps.readFile(path));
   if (pid === null) return;
 
-  switch (pidIsVoiceChild(pid, deps)) {
+  switch (pidIsChildOfKind(pid, kind, deps)) {
     case true:
-      deps.warn(`reaping orphaned voice child pid ${pid} from a previous run`);
+      deps.warn(
+        `reaping orphaned ${kind.label} pid ${pid} from a previous run`,
+      );
       deps.kill(pid);
       deps.removeFile(path);
       return;
@@ -143,7 +194,7 @@ export function reapPidfileOrphan(deps: OrphanDeps, path = pidfilePath()): void 
       // be holding the mic, and this is the only record of it. Keeping it lets
       // a later launch retry rather than orphaning the child permanently.
       deps.warn(
-        `could not determine the status of voice pidfile pid ${pid}; keeping the pidfile so a later launch can retry recovery`,
+        `could not determine the status of ${kind.label} pidfile pid ${pid}; keeping the pidfile so a later launch can retry recovery`,
       );
   }
 }
@@ -203,7 +254,11 @@ export const realOrphanDeps: OrphanDeps = {
  * Record the live child's pid. Best effort: a failure only means orphan
  * recovery is unavailable, not that the session is broken.
  */
-export function writePidfile(pid: number, path = pidfilePath()): void {
+export function writePidfile(
+  kind: ChildKind,
+  pid: number,
+  path = pidfilePath(kind),
+): void {
   try {
     writeFileSync(path, String(pid), "utf8");
   } catch {
@@ -212,7 +267,7 @@ export function writePidfile(pid: number, path = pidfilePath()): void {
 }
 
 /** Clear the pid record. Idempotent. */
-export function removePidfile(path = pidfilePath()): void {
+export function removePidfile(kind: ChildKind, path = pidfilePath(kind)): void {
   try {
     rmSync(path, { force: true });
   } catch {

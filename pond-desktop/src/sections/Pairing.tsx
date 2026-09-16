@@ -39,7 +39,18 @@ export function Pairing() {
             ),
       ]);
       if (!pc.code) throw new Error("Server returned no pairing code");
-      const pairUrl = `pond://pair?host=${sysInfo.hostname}.local&port=${sysInfo.port}&code=${pc.code}`;
+      // Both addresses, because neither works everywhere. The mDNS name
+      // survives a DHCP lease change and is what an iPhone resolves happily;
+      // Android's resolver does no mDNS at all, so `<host>.local` fails there
+      // and the phone needs the raw address. The client tries the name first
+      // and falls back.
+      const params = new URLSearchParams({
+        host: `${sysInfo.hostname}.local`,
+        port: String(sysInfo.port),
+        code: pc.code,
+      });
+      if (sysInfo.lan_address) params.set("ip", sysInfo.lan_address);
+      const pairUrl = `pond://pair?${params.toString()}`;
       setInfo({ code: pc.code, expiresAt: pc.expires_at ?? "", pairUrl });
     } catch (e) {
       setError(String(e));

@@ -12,7 +12,7 @@
  */
 import * as readline from "readline";
 import { describeError, log } from "./log.js";
-import { SpotifyProvider } from "./providers/spotify.js";
+import { isShortRelease, SpotifyProvider } from "./providers/spotify.js";
 import type { TimeRange } from "./providers/types.js";
 
 const provider = new SpotifyProvider();
@@ -26,10 +26,11 @@ const TOOLS = [
     // cost 895 for three. An enum is also a stronger steer than prose asking
     // the model not to pick a sibling.
     // The enums carry their own semantics; repeating them here cost ~90 tokens
-    // to say everything twice. What stays is the one thing no parameter can
-    // express: the result may not be what was asked for.
+    // to say everything twice. What stays is what no parameter can express:
+    // that playback continues past the song it was asked for, and that the
+    // result may not be what was asked for.
     description:
-      "Play music on Spotify. Search picks the closest match, which is not always what was asked for — tell the user the track name and artist FROM THE RESULT, never the name they asked for.",
+      "Play music on Spotify. Music keeps playing afterwards: a song starts inside its album so the album follows on, and a single is topped up with more by the same artist — do not tell the user playback will stop after the song, and do not queue extra songs yourself to keep it going. Search picks the closest match, which is not always what was asked for — tell the user the track name and artist FROM THE RESULT, never the name they asked for.",
     inputSchema: {
       type: "object",
       properties: {
@@ -162,8 +163,35 @@ async function handlePlay(args: Record<string, unknown>): Promise<string> {
 
   // Direct URI play
   if (uri) {
-    const result = await provider.play(uri);
-    return result;
+    // A bare track URI carries no album, so resolve it first — otherwise this
+    // path keeps the old "plays once, then silence" behaviour that the search
+    // path no longer has. Any failure falls back to playing the URI as given:
+    // a lookup is a nicety, playing the music is not.
+    if (uri.startsWith("spotify:track:")) {
+      try {
+        const track = await provider.getTrack(uri);
+        if (track) {
+          const result = await provider.play(track);
+          if (isShortRelease(track)) {
+            try {
+              await provider.queueFollowUps(track);
+            } catch (err) {
+              log.warn("follow_up_failed", "could not queue follow-ups", {
+                seed: track.uri,
+                error: describeError(err),
+              });
+            }
+          }
+          return result;
+        }
+      } catch (err) {
+        log.warn("track_lookup_failed", "playing the URI without its album context", {
+          uri,
+          error: describeError(err),
+        });
+      }
+    }
+    return await provider.play(uri);
   }
 
   // Playlist: match one of the user's own by name and play it. provider.play
@@ -209,13 +237,48 @@ async function handlePlay(args: Record<string, unknown>): Promise<string> {
     }
 
     const top = tracks[0];
-    await provider.play(top.uri);
+    // The whole TrackInfo, not `top.uri`: it carries the album, and a track
+    // played inside its album keeps going when it ends. A bare URI goes out as
+    // a one-element `uris` list, which is what used to leave Spotify silent.
+    await provider.play(top);
+
+    // A single defeats the album context -- track 1 of 1 runs out just as
+    // fast. Top it up with more of the same artist.
+    //
+    // Never at the cost of the play itself: the song has already started by
+    // this point, and a rate limit, a device going away, or an artist with
+    // nothing else in the catalogue must not turn a working request into an
+    // error. Logged and dropped.
+    let toppedUp: { queued: number; source: "artist" | "listener" } | null = null;
+    if (isShortRelease(top)) {
+      try {
+        toppedUp = await provider.queueFollowUps(top);
+      } catch (err) {
+        log.warn("follow_up_failed", "could not queue follow-ups", {
+          seed: top.uri,
+          error: describeError(err),
+        });
+      }
+    }
 
     const others = tracks.slice(1, 4);
     // Say "track" outright. When the user asked for a playlist and this branch
     // ran anyway, a bare "Now playing: X" was reported back as "I started your
     // playlist"; naming what actually started makes the mismatch visible.
     let text = `Now playing track: ${top.name} by ${top.artist} (${top.album})`;
+    // Say what will follow, so the model does not have to guess and cannot
+    // claim the queue was cleared. Named precisely: the fallback queues the
+    // listener's own favourites, not this artist, and saying otherwise would
+    // be a lie about what is in the queue.
+    if (toppedUp && toppedUp.queued > 0) {
+      text +=
+        toppedUp.source === "artist"
+          ? `\nThen ${toppedUp.queued} more by ${top.artist}.`
+          : `\nThen ${toppedUp.queued} more from your top tracks.`;
+    } else if (!isShortRelease(top) && top.album_uri) {
+      // Only claim the album follows when a context was actually sent.
+      text += `\nThe rest of the album follows.`;
+    }
     if (others.length > 0) {
       text +=
         "\n\nOther matches:\n" +

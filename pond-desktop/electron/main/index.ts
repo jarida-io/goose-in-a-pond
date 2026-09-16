@@ -13,14 +13,22 @@
 
 import { app, BrowserWindow } from "electron";
 import { join, resolve } from "node:path";
+import { readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { registerAppScheme, serveRendererFrom } from "./protocol";
 import { createMainWindow, distRoot } from "./window";
-import { ServerProcess, recoveryBackoffSeconds, resolveServerBinary } from "./serverProcess";
+import {
+  ServerProcess,
+  recoveryBackoffSeconds,
+  resolveServerBinary,
+} from "./serverProcess";
 import { VoiceChildProcess } from "./voice/VoiceChildProcess";
 import { registerIpc } from "./ipc";
 import { installMenu, setAboutPanel } from "./menu";
 import { createTray, setTrayStatus, destroyTray } from "./tray";
 import { registerHotkeys, unregisterHotkeys } from "./hotkeys";
+import { createHealthLoop, createTeardown } from "./lifecycle";
+import { resolveDataDir, readRuntimePort, RUNTIME_PORT_FILE } from "./dataDir";
 import type { ShellEvent, ShellEvents } from "../../src/shell/contract";
 
 const log = {
@@ -43,6 +51,31 @@ function emit<E extends ShellEvent>(name: E, payload?: ShellEvents[E]): void {
   win.webContents.send(`giap:${name}`, payload);
 }
 
+/**
+ * The port pond-server says it bound, and when it said so.
+ *
+ * Deliberately computed from the server's own data directory rather than
+ * Electron's userData path, which points somewhere else entirely on Linux.
+ */
+function readPortFile(): { port: number; mtimeMs: number } | null {
+  const file = join(
+    resolveDataDir({
+      env: process.env,
+      home: homedir(),
+      platform: process.platform,
+    }),
+    RUNTIME_PORT_FILE,
+  );
+  try {
+    const port = readRuntimePort(readFileSync(file, "utf8"));
+    if (port === null) return null;
+    return { port, mtimeMs: statSync(file).mtimeMs };
+  } catch {
+    // Not written yet, or unreadable. The caller keeps its assumed port.
+    return null;
+  }
+}
+
 const server = new ServerProcess({
   lookup: {
     isPackaged: app.isPackaged,
@@ -50,6 +83,8 @@ const server = new ServerProcess({
     repoRoot,
     platform: process.platform,
   },
+  readPortFile,
+  onUrlChanged: (url) => emit("server-url", url),
   log,
 });
 
@@ -82,45 +117,28 @@ function showWindow(): void {
   win.focus();
 }
 
-/**
- * Watch the server, and try to bring it back when it goes away.
- *
- * Backs off exponentially so a server that cannot start is not hammered, and
- * reports every transition to the renderer and the tray -- when the window is
- * hidden the tooltip is the only place this state is visible.
- */
-function startHealthLoop(): void {
-  let failures = 0;
-  let online: boolean | null = null;
+const healthLoop = createHealthLoop({
+  healthCheck: () => server.healthCheck(),
+  ensureRunning: () => server.ensureRunning(),
+  onStatus: (healthy) => {
+    emit("server-status", healthy);
+    setTrayStatus(healthy);
+  },
+  onStarting: () => emit("server-starting"),
+  backoffSeconds: recoveryBackoffSeconds,
+  log,
+});
 
-  const tick = async () => {
-    const healthy = await server.healthCheck();
-    if (healthy !== online) {
-      online = healthy;
-      emit("server-status", healthy);
-      setTrayStatus(healthy);
-    }
-
-    if (healthy) {
-      failures = 0;
-      setTimeout(() => void tick(), 10_000);
-      return;
-    }
-
-    failures += 1;
-    const wait = recoveryBackoffSeconds(failures);
-    log.warn(`pond-server is unreachable (attempt ${failures}); retrying in ${wait}s`);
-    emit("server-starting");
-    try {
-      await server.ensureRunning();
-    } catch (e) {
-      log.warn(`recovery failed: ${(e as Error).message}`);
-    }
-    setTimeout(() => void tick(), wait * 1_000);
-  };
-
-  setTimeout(() => void tick(), 10_000);
-}
+const teardown = createTeardown({
+  stopHealthLoop: () => healthLoop.stop(),
+  killVoice: () => voice.killNow(),
+  shutdownServer: () => server.shutdown(),
+  releaseUi: () => {
+    unregisterHotkeys();
+    destroyTray();
+  },
+  log,
+});
 
 // Must happen before the app is ready.
 registerAppScheme();
@@ -161,7 +179,12 @@ if (!app.requestSingleInstanceLock()) {
     createTray({
       emit,
       showWindow,
-      iconPath: join(app.getAppPath(), "electron", "assets", "trayTemplate.png"),
+      iconPath: join(
+        app.getAppPath(),
+        "electron",
+        "assets",
+        "trayTemplate.png",
+      ),
     });
 
     registerHotkeys({ emit, focusWindow: showWindow, log: log.info });
@@ -173,7 +196,7 @@ if (!app.requestSingleInstanceLock()) {
       .then((url) => log.info(`pond-server ready at ${url}`))
       .catch((e: Error) => log.warn(`pond-server did not start: ${e.message}`));
 
-    startHealthLoop();
+    healthLoop.start();
   });
 
   app.on("activate", () => {
@@ -187,15 +210,32 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on("before-quit", () => {
     quitting = true;
-    // Order matters: release the microphone and speaker before taking the
-    // server down.
-    voice.killNow();
-    server.shutdown();
-    unregisterHotkeys();
-    destroyTray();
+    teardown.releaseChildren();
+    teardown.releaseUi();
+  });
+
+  // The RunEvent::Exit analogue the Tauri port dropped. `app.exit()` and a
+  // quit that skips before-quit both land here, and without it those paths
+  // left a sidecar running.
+  app.on("will-quit", () => {
+    quitting = true;
+    teardown.releaseChildren();
   });
 
   // Last resort. `kill()` is a synchronous syscall, so it is legal here, and
   // this is the path that runs when an uncaught exception takes the app down.
-  process.on("exit", () => voice.killNow());
+  // UI teardown is deliberately NOT here: the Electron calls it makes are not
+  // safe this late, and throwing here would mask the kills that matter.
+  process.on("exit", () => teardown.releaseChildren());
+
+  // Ctrl-C on a dev run is the commonest way to orphan a sidecar, because it
+  // reaches neither before-quit nor will-quit. `app.exit` rather than
+  // `app.quit`, which a window handler can block and leave the process hung.
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.once(signal, () => {
+      log.warn(`received ${signal}; releasing child processes`);
+      teardown.releaseChildren();
+      app.exit(0);
+    });
+  }
 }

@@ -111,8 +111,8 @@
  * the reach regions really did overlap. 36px visual + 12px row-gap puts the
  * pitch at 48px, clear of the 44px reach.
  *
- * Only wrapping containers need this. `.chat2__chips` and `.todo__item-row`
- * are `nowrap`, so their pills have no vertical neighbour and no constraint. */
+ * Only wrapping containers need this. `.chat2__chips` is `nowrap`, so its
+ * pills have no vertical neighbour and no constraint. */
 .act-filter-row {
   row-gap: var(--space-3);
 }
@@ -204,8 +204,6 @@ label:has(> .native-checkbox) {
  *    todo, a refresh on the log feed — and blowing them up would give a
  *    destructive action more visual weight than the thing it acts on. They
  *    keep their size and take reach. */
-.todo__del-btn,
-.todo__edit-btn,
 .act-refresh-btn,
 .nfeed__mark-all,
 .setup-footer__link,
@@ -216,8 +214,6 @@ label:has(> .native-checkbox) {
   position: relative;
 }
 
-.todo__del-btn::after,
-.todo__edit-btn::after,
 .act-refresh-btn::after,
 .nfeed__mark-all::after,
 .setup-footer__link::after,
@@ -233,17 +229,6 @@ label:has(> .native-checkbox) {
   transform: translateY(-50%);
   height: var(--tap-min);
 }
-
-/* The icon buttons on a todo row sit side by side, so their reach regions meet
- * edge to edge. A real gap keeps that boundary away from where a finger lands.
- * (`.todo__item-row` is the actual container — an earlier guess at
- * `.todo__actions` matched nothing, which is the quiet way a rule like this
- * fails.) */
-.todo__item-row { gap: var(--space-2); }
-
-/* 2. Rows that are themselves the target. A todo row is a control, not a
- *    label, so it grows rather than reaching. */
-.todo__item { min-height: var(--tap-min); }
 
 /* 3. Text fields and selects. No density argument applies — a 38px field next
  *    to a 44px button just looks unfinished — so these take the floor
@@ -262,19 +247,11 @@ label:has(> .native-checkbox) {
 
 /* ── Third pass: the hub components the classic Dashboard already borrows ──
  *
- * The classic Dashboard renders hub components directly (`home2__`, `dtile`,
- * `rpill`, `np__`) — the blend that already exists between the two views. So
- * these rules land on both surfaces at once, which is the point: the merge is
- * a shared layer, not a copy of one design into the other.
+ * The classic Dashboard renders hub components directly (`dtile`, `np__`) —
+ * the blend that already exists between the two views. So these rules land on
+ * both surfaces at once, which is the point: the merge is a shared layer, not
+ * a copy of one design into the other.
  */
-
-/* Primary card actions. "Add to my list" and "Create sticky" are the whole
- * purpose of the card they sit in, so they take the floor visually rather
- * than hiding behind a reach. */
-.todo__add,
-.sticky__cta {
-  min-height: var(--tap-min);
-}
 
 /* Media transport. People tap these repeatedly and often without looking, so
  * they get real size, not just reach. */
@@ -282,16 +259,12 @@ label:has(> .native-checkbox) {
 .np__ctrls { gap: var(--space-2); }
 
 /* Icon buttons and the room selector: compact by design, reached to 44. */
-.home2__iconbtn,
 .dtile__dots,
-.rpill,
 .np__ctrls button {
   position: relative;
 }
 
-.home2__iconbtn::after,
 .dtile__dots::after,
-.rpill::after,
 .np__ctrls button::after {
   content: "";
   position: absolute;

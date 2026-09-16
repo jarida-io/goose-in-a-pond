@@ -21,4 +21,26 @@ ignore = [
     # Not linked into pond-server (`cargo tree -p pond-server -i rsa --edges normal` is empty);
     # GIAP crypto is HMAC-SHA256 and sha256 hashes. Remove when rsa ships a fixed version.
     "RUSTSEC-2023-0071",
+
+    # hickory-proto 0.25.2: NSEC3 closest-encloser proof enters an unbounded
+    # loop on cross-zone responses (RUSTSEC-2026-0118 — NO fixed release
+    # exists), and O(n^2) name compression during message encoding
+    # (RUSTSEC-2026-0119 — needs >=0.26.1).
+    #
+    # BLOCKED UPSTREAM: reaches us only as
+    #   hickory-proto <- hickory-resolver 0.25 <- libp2p-dns <- libp2p 0.56
+    #   <- pond-adapters-mesh-libp2p <- pond-server
+    # and libp2p 0.56 pins hickory-resolver 0.25, so 0.26.1 needs a libp2p
+    # bump, not a lockfile change.
+    #
+    # NOT IN THE DEFAULT BINARY: libp2p is behind the optional `mesh` feature.
+    # `cargo tree -p pond-server -i hickory-proto --edges normal` reports the
+    # package is not in the graph at all; it appears only with
+    # `--features mesh`. Even then it is DNS resolution for dialling mesh
+    # peers, gated again at runtime by `settings.mesh_enabled`, and GIAP does
+    # not perform DNSSEC validation — the NSEC3 path 0118 needs.
+    #
+    # Re-evaluate when libp2p ships a release on hickory 0.26.
+    "RUSTSEC-2026-0118",
+    "RUSTSEC-2026-0119",
 ]

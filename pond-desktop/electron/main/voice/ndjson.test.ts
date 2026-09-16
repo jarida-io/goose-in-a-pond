@@ -109,7 +109,9 @@ describe("classifyLine: the NDJSON to shell-event mapping", () => {
 
   it("defaults a missing or non-numeric rms to zero", () => {
     expect(event('{"event":"audio_level"}').payload).toEqual({ rms: 0 });
-    expect(event('{"event":"audio_level","rms":"loud"}').payload).toEqual({ rms: 0 });
+    expect(event('{"event":"audio_level","rms":"loud"}').payload).toEqual({
+      rms: 0,
+    });
   });
 });
 
@@ -134,7 +136,10 @@ describe("classifyLine: exit lines", () => {
   // possible and must pass through rather than being coerced.
   it("passes an unrecognised reason through unchanged", () => {
     const r = classifyLine('{"event":"exit","reason":"something_new"}');
-    expect(r).toEqual({ ok: true, value: { kind: "exit", reason: "something_new" } });
+    expect(r).toEqual({
+      ok: true,
+      value: { kind: "exit", reason: "something_new" },
+    });
   });
 });
 
@@ -145,7 +150,9 @@ describe("classifyLine: bad input is an error, never a throw", () => {
   });
 
   it("rejects a non-JSON line", () => {
-    expect(failure("this is a banner line, not JSON")).toMatch(/not valid JSON/);
+    expect(failure("this is a banner line, not JSON")).toMatch(
+      /not valid JSON/,
+    );
   });
 
   it("rejects JSON with no event field", () => {
@@ -162,7 +169,9 @@ describe("classifyLine: bad input is an error, never a throw", () => {
   });
 
   it("names an unknown event kind so the log says which", () => {
-    expect(failure('{"event":"telemetry"}')).toMatch(/unknown event kind `telemetry`/);
+    expect(failure('{"event":"telemetry"}')).toMatch(
+      /unknown event kind `telemetry`/,
+    );
   });
 });
 

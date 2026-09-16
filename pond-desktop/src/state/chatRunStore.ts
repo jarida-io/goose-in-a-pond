@@ -27,7 +27,10 @@
 import { useSyncExternalStore } from "react";
 import { api } from "../api/PondApiClient";
 import { nextCardId } from "./reducer";
-import type { ContextCard as ContextCardType, LastResponseMeta } from "./reducer";
+import type {
+  ContextCard as ContextCardType,
+  LastResponseMeta,
+} from "./reducer";
 import { filterThinking } from "../lib/thinkFilter";
 import { applySubagentProgress } from "../components/SubagentTree";
 import type { SubagentRun } from "../components/SubagentTree";
@@ -87,13 +90,13 @@ export interface Message {
 function friendlyToolStatus(rawName: string): string {
   const bare = rawName.includes("__") ? rawName.split("__").pop()! : rawName;
   const map: Record<string, string> = {
-    get_current_weather:      "Checking the weather…",
-    list_registered_devices:  "Looking up your devices…",
-    recall_memories:          "Recalling what I know…",
-    save_memory:              "Saving that for later…",
-    list_schedules:           "Looking up your schedules…",
-    get_user_profile:         "Looking up your profile…",
-    list_skills:              "Checking my skills…",
+    get_current_weather: "Checking the weather…",
+    list_registered_devices: "Looking up your devices…",
+    recall_memories: "Recalling what I know…",
+    save_memory: "Saving that for later…",
+    list_schedules: "Looking up your schedules…",
+    get_user_profile: "Looking up your profile…",
+    list_skills: "Checking my skills…",
   };
   if (map[bare]) return map[bare];
   return `Working on: ${bare.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}…`;
@@ -111,7 +114,9 @@ function sessionMessagesToMessages(raw: SessionMessage[]): Message[] {
       const hasToolCalls = (m.tool_calls?.length ?? 0) > 0;
       if (!hasContent && hasToolCalls) continue;
       const historyToolNames = hasToolCalls
-        ? m.tool_calls!.map((tc) => (tc.name.includes("__") ? tc.name.split("__").pop()! : tc.name))
+        ? m.tool_calls!.map((tc) =>
+            tc.name.includes("__") ? tc.name.split("__").pop()! : tc.name,
+          )
         : undefined;
       // PAI-5 P6. The panel below already renders `thinkingBlocks` and is
       // already gated on `!streaming`, which is exactly right for replayed
@@ -136,7 +141,13 @@ function sessionMessagesToMessages(raw: SessionMessage[]): Message[] {
         liked: m.liked ?? null,
       });
     } else {
-      out.push({ id: ++_msgId, role: "user", text: m.content, images, backendId: m.id });
+      out.push({
+        id: ++_msgId,
+        role: "user",
+        text: m.content,
+        images,
+        backendId: m.id,
+      });
     }
   }
   return out;
@@ -350,7 +361,8 @@ export function setChatRunBridge(bridge: ChatRunBridge): () => void {
 function revokeOwnedPreviews(surviving: readonly Message[]): void {
   if (state.ownedPreviews.size === 0) return;
   const stillShown = new Set<string>();
-  for (const m of surviving) for (const url of m.images ?? []) stillShown.add(url);
+  for (const m of surviving)
+    for (const url of m.images ?? []) stillShown.add(url);
   for (const url of [...state.ownedPreviews]) {
     if (stillShown.has(url)) continue;
     state.ownedPreviews.delete(url);
@@ -420,7 +432,10 @@ interface TurnCtx {
   agentMsgId: number;
 }
 
-async function consume(stream: AsyncGenerator<unknown>, ctx: TurnCtx): Promise<void> {
+async function consume(
+  stream: AsyncGenerator<unknown>,
+  ctx: TurnCtx,
+): Promise<void> {
   for await (const event of stream) {
     if (ctx.stale()) return;
     const ev = event as ChatEvent;
@@ -458,7 +473,10 @@ async function consume(stream: AsyncGenerator<unknown>, ctx: TurnCtx): Promise<v
       // bubble rather than stitching a partial answer together and presenting
       // it as whole -- and reload the session, which is authoritative for
       // everything that actually committed.
-      console.warn("Chat run lost frames; reloading the conversation:", ev.type);
+      console.warn(
+        "Chat run lost frames; reloading the conversation:",
+        ev.type,
+      );
       const sessionId = state.sessionId;
       if (sessionId) void openSession(sessionId);
       return;
@@ -479,9 +497,15 @@ async function consume(stream: AsyncGenerator<unknown>, ctx: TurnCtx): Promise<v
           // these as two separate frames and deliberately keeps streaming past an
           // error, so the honest rendering is two messages, not one string.
           if (last.error) {
-            return [...prev, { id: ++_msgId, role: "agent", text: visible, streaming: true }];
+            return [
+              ...prev,
+              { id: ++_msgId, role: "agent", text: visible, streaming: true },
+            ];
           }
-          return [...prev.slice(0, -1), { ...last, text: last.text + visible, status: undefined }];
+          return [
+            ...prev.slice(0, -1),
+            { ...last, text: last.text + visible, status: undefined },
+          ];
         });
       }
     } else if (ev.type === "thinking" && ev.content) {
@@ -515,22 +539,32 @@ async function consume(stream: AsyncGenerator<unknown>, ctx: TurnCtx): Promise<v
       mutate((prev) => {
         const last = prev[prev.length - 1];
         if (!last || last.role !== "agent" || !last.cards) return prev;
-        const cardData   = ev.ui?.data ?? { result: ev.content };
+        const cardData = ev.ui?.data ?? { result: ev.content };
         const renderHint = ev.ui?.card_type;
-        const evId   = ev.id as string;
+        const evId = ev.id as string;
         const evTool = ev.tool as string | undefined;
         const newCards = last.cards.map((c) =>
           (c.callId && c.callId === evId) || (evTool && c.tool === evTool)
             ? { ...c, data: cardData, ...(renderHint ? { renderHint } : {}) }
             : c,
         );
-        return [...prev.slice(0, -1), { ...last, cards: newCards, status: undefined }];
+        return [
+          ...prev.slice(0, -1),
+          { ...last, cards: newCards, status: undefined },
+        ];
       });
     } else if (ev.type === "review_status" && ev.content) {
       patchLastAgent((last) => ({ ...last, status: ev.content }));
-    } else if ((ev.type === "review_revision" || ev.type === "tool_revision") && ev.content) {
+    } else if (
+      (ev.type === "review_revision" || ev.type === "tool_revision") &&
+      ev.content
+    ) {
       state.inThinkBlock = false;
-      patchLastAgent((last) => ({ ...last, text: ev.content!, status: undefined }));
+      patchLastAgent((last) => ({
+        ...last,
+        text: ev.content!,
+        status: undefined,
+      }));
     } else if (ev.type === "error" || ev.error) {
       const errMsg = ev.error ?? "Unknown error from agent";
       patchLastAgent((last) => ({
@@ -545,7 +579,9 @@ async function consume(stream: AsyncGenerator<unknown>, ctx: TurnCtx): Promise<v
       patchLastAgent((last) => ({
         ...last,
         ...(ev.model_role ? { modelRole: ev.model_role } : {}),
-        ...(ev.usage && ev.usage.completion_tokens > 0 ? { tokenUsage: ev.usage } : {}),
+        ...(ev.usage && ev.usage.completion_tokens > 0
+          ? { tokenUsage: ev.usage }
+          : {}),
       }));
       if (ev.model_name && ev.model_role) {
         state.bridge?.onResponseMeta({
@@ -567,13 +603,25 @@ async function consume(stream: AsyncGenerator<unknown>, ctx: TurnCtx): Promise<v
           const recent = await api.getSessionMessages(doneSessionId, 10);
           if (ctx.stale()) return;
           const nonTool = recent.filter((m) => m.role !== "tool");
-          const lastUser  = [...nonTool].reverse().find((m) => m.role === "user");
-          const lastAgent = [...nonTool].reverse().find((m) => m.role === "assistant");
-          mutate((prev) => prev.map((m) => {
-            if (m.id === forAgent && lastAgent) return { ...m, backendId: lastAgent.id, liked: lastAgent.liked ?? null };
-            if (m.id === forUser && lastUser) return { ...m, backendId: lastUser.id };
-            return m;
-          }));
+          const lastUser = [...nonTool]
+            .reverse()
+            .find((m) => m.role === "user");
+          const lastAgent = [...nonTool]
+            .reverse()
+            .find((m) => m.role === "assistant");
+          mutate((prev) =>
+            prev.map((m) => {
+              if (m.id === forAgent && lastAgent)
+                return {
+                  ...m,
+                  backendId: lastAgent.id,
+                  liked: lastAgent.liked ?? null,
+                };
+              if (m.id === forUser && lastUser)
+                return { ...m, backendId: lastUser.id };
+              return m;
+            }),
+          );
         } catch {
           // Non-fatal: the turn already rendered; only the action icons
           // stay disabled until the next successful history load.
@@ -584,29 +632,46 @@ async function consume(stream: AsyncGenerator<unknown>, ctx: TurnCtx): Promise<v
       // replaces `messages` with another conversation's history, and the
       // stats must never land on one of those messages.
       const stats = ev as unknown as TurnStats;
-      mutate((prev) => prev.map((m) => (m.id === ctx.agentMsgId ? { ...m, turnStats: stats } : m)));
+      mutate((prev) =>
+        prev.map((m) =>
+          m.id === ctx.agentMsgId ? { ...m, turnStats: stats } : m,
+        ),
+      );
     } else if (ev.type === "turn_limit_reached") {
       // The agent ran out of turns rather than finishing. Mark the message
       // (by id, same reasoning as turn_stats) so it offers a Continue action
       // instead of leaving the backend's "would you like me to continue?"
       // as a question nothing can answer.
       const limit = ev.max_turns ?? 0;
-      mutate((prev) => prev.map((m) => (m.id === ctx.agentMsgId ? { ...m, turnLimit: limit } : m)));
+      mutate((prev) =>
+        prev.map((m) =>
+          m.id === ctx.agentMsgId ? { ...m, turnLimit: limit } : m,
+        ),
+      );
     } else if (ev.type === "subagent_progress") {
       // PAI-6 P6. Attach by id — same reasoning as turn_stats — and fold
       // through the one shared reducer, so this surface and the hub cannot
       // disagree about what a frame means.
-      mutate((prev) => prev.map((m) =>
-        m.id === ctx.agentMsgId
-          ? { ...m, delegations: applySubagentProgress(m.delegations ?? [], ev) }
-          : m,
-      ));
+      mutate((prev) =>
+        prev.map((m) =>
+          m.id === ctx.agentMsgId
+            ? {
+                ...m,
+                delegations: applySubagentProgress(m.delegations ?? [], ev),
+              }
+            : m,
+        ),
+      );
     } else if (ev.type === "context_warning") {
       // PAI-4 P7b. The window is filling. Attach by id — same reasoning as
       // turn_stats and turn_limit_reached — so the note lands on this turn
       // and not on whatever message a mid-stream session switch left last.
       const cw = ev as unknown as ContextWarning;
-      mutate((prev) => prev.map((m) => (m.id === ctx.agentMsgId ? { ...m, contextWarning: cw } : m)));
+      mutate((prev) =>
+        prev.map((m) =>
+          m.id === ctx.agentMsgId ? { ...m, contextWarning: cw } : m,
+        ),
+      );
     }
   }
 }
@@ -637,11 +702,20 @@ async function runTurn(turn: SendTurn): Promise<void> {
     text,
     images: turn.previewUrls?.length ? turn.previewUrls : undefined,
   };
-  const agentMsg: Message = { id: ++_msgId, role: "agent", text: "", streaming: true };
+  const agentMsg: Message = {
+    id: ++_msgId,
+    role: "agent",
+    text: "",
+    streaming: true,
+  };
   state.messages = [...state.messages, userMsg, agentMsg];
   commit();
 
-  const ctx: TurnCtx = { stale, userMsgId: userMsg.id, agentMsgId: agentMsg.id };
+  const ctx: TurnCtx = {
+    stale,
+    userMsgId: userMsg.id,
+    agentMsgId: agentMsg.id,
+  };
 
   try {
     const token = state.bridge?.sessionToken ?? null;
@@ -772,7 +846,11 @@ export async function resumeActiveRun(): Promise<boolean> {
   // still opens, because the person was just in it and `hasLiveThread` has
   // already sent the surface to the thread on the strength of that pointer.
   // Landing them in an empty one would be worse than the wall they were spared.
-  if (!active || active.run_id !== pointer.runId || active.epoch !== pointer.epoch) {
+  if (
+    !active ||
+    active.run_id !== pointer.runId ||
+    active.epoch !== pointer.epoch
+  ) {
     forgetRun();
     await openSession(pointer.sessionId);
     state.completedTurns += 1;
@@ -805,7 +883,12 @@ export async function resumeActiveRun(): Promise<boolean> {
 
   // A bubble for the answer in progress. The user's half is already on screen
   // from the history load above, so only the agent's is added here.
-  const agentMsg: Message = { id: ++_msgId, role: "agent", text: "", streaming: true };
+  const agentMsg: Message = {
+    id: ++_msgId,
+    role: "agent",
+    text: "",
+    streaming: true,
+  };
   const lastUser = [...state.messages].reverse().find((m) => m.role === "user");
   state.messages = [...state.messages, agentMsg];
   commit();
@@ -823,7 +906,12 @@ export async function resumeActiveRun(): Promise<boolean> {
     // frames before that are already on screen from a previous window, and
     // replaying them would write the answer out twice.
     await consume(
-      api.reattachRun(pointer.runId, pointer.lastSeq, pointer.epoch, token ?? undefined),
+      api.reattachRun(
+        pointer.runId,
+        pointer.lastSeq,
+        pointer.epoch,
+        token ?? undefined,
+      ),
       ctx,
     );
   } catch (e) {
@@ -990,8 +1078,13 @@ export function truncateFrom(localMessageId: number): void {
 }
 
 /** Targeted write for optimistic UI a surface owns — today the like/dislike flip. */
-export function patchMessage(localMessageId: number, patch: Partial<Message>): void {
-  mutate((prev) => prev.map((m) => (m.id === localMessageId ? { ...m, ...patch } : m)));
+export function patchMessage(
+  localMessageId: number,
+  patch: Partial<Message>,
+): void {
+  mutate((prev) =>
+    prev.map((m) => (m.id === localMessageId ? { ...m, ...patch } : m)),
+  );
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

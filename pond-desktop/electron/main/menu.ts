@@ -31,12 +31,15 @@ export function setAboutPanel(): void {
     applicationName: "Goose In A Pond",
     applicationVersion: app.getVersion(),
     copyright: "Copyright (c) 2026 Jarida Open Source Community\nApache-2.0",
-    credits: "Privacy-first, fully local AI smart home assistant.\nAll inference, voice and memory run on your own hardware.",
+    credits:
+      "Privacy-first, fully local AI smart home assistant.\nAll inference, voice and memory run on your own hardware.",
     iconPath: join(app.getAppPath(), "electron", "assets", "about.png"),
   });
 }
 
-export function buildMenuTemplate(t: MenuTargets): MenuItemConstructorOptions[] {
+export function buildMenuTemplate(
+  t: MenuTargets,
+): MenuItemConstructorOptions[] {
   const isMac = process.platform === "darwin";
 
   const appMenu: MenuItemConstructorOptions[] = isMac

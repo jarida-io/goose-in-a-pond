@@ -32,8 +32,7 @@ export type LineClass =
  * caller logs `error` and reads the next line.
  */
 export type Classified =
-  | { ok: true; value: LineClass }
-  | { ok: false; error: string };
+  { ok: true; value: LineClass } | { ok: false; error: string };
 
 /**
  * How many trailing stderr lines to keep for a startup failure's `detail`.
@@ -118,7 +117,10 @@ export function classifyLine(line: string): Classified {
     case "token":
       return ev("voice-token", { content: str(obj, "content") });
     case "tool_call":
-      return ev("voice-tool-call", { tool: str(obj, "tool"), id: str(obj, "id") });
+      return ev("voice-tool-call", {
+        tool: str(obj, "tool"),
+        id: str(obj, "id"),
+      });
     case "tool_result":
       return ev("voice-tool-result", {
         tool: str(obj, "tool"),
@@ -133,7 +135,9 @@ export function classifyLine(line: string): Classified {
     // exclusively to the voice-* family that useVoiceSession owns.
     case "audio_level": {
       const rms = obj["rms"];
-      return ev("voice-audio-level", { rms: typeof rms === "number" ? rms : 0 });
+      return ev("voice-audio-level", {
+        rms: typeof rms === "number" ? rms : 0,
+      });
     }
     case "exit": {
       const reason = obj["reason"];

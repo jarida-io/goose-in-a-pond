@@ -159,6 +159,22 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
   await page.route("**/api/v1/models/memory-status", (route) =>
     route.fulfill({ json: { total_mb: 8192, available_for_llm_mb: 4096, loaded_model: null } }),
   );
+  // Prefix warm-up. Unmocked, this is the one request that still reached a real
+  // server during e2e — `ERR_CONNECTION_REFUSED` on 127.0.0.1:4000/api/v1/warmup
+  // — which failed the console-error assertion in hub-visual-verify. Mirrors
+  // `WarmupStatus::default()`: skipped, never run.
+  await page.route("**/api/v1/warmup", (route) =>
+    route.fulfill({
+      json: {
+        state: "skipped",
+        reason: "not yet run",
+        model: "",
+        started_unix_ms: 0,
+        finished_unix_ms: null,
+        elapsed_ms: 0,
+      },
+    }),
+  );
   await page.route("**/api/v1/models/download/progress", (route) =>
     route.fulfill({ json: { downloads: [] } }),
   );
@@ -474,7 +490,10 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
   // Extensions secrets endpoint
   await page.route("**/api/v1/extensions/*/secrets", (route) => {
     if (route.request().method() === "POST") {
-      return route.fulfill({ status: 204, body: "" });
+      // Matches the documented contract: the route reports whether the running
+      // extension picked the new credentials up. A 204 here would exercise the
+      // undefined-body path rather than the one users hit.
+      return route.fulfill({ json: { stored: 1, restarted: false, restart_error: null } });
     }
     return route.fulfill({ json: { requirements: [], fulfilled: {} } });
   });

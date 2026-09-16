@@ -1,5 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { type AppState, reducer, buildInitialState, type TranscriptMessage, type ContextCard } from "./reducer";
+import {
+  type AppState,
+  reducer,
+  buildInitialState,
+  type TranscriptMessage,
+  type ContextCard,
+} from "./reducer";
+import { isDesktopShell } from "../shell";
+
+vi.mock("../shell", () => ({ isDesktopShell: vi.fn(() => false) }));
 
 // ── Mock localStorage (pure function tests must not touch real storage) ───────
 
@@ -7,9 +16,15 @@ const storageMock = (() => {
   let store: Record<string, string> = {};
   return {
     getItem: vi.fn((k: string) => store[k] ?? null),
-    setItem: vi.fn((k: string, v: string) => { store[k] = v; }),
-    removeItem: vi.fn((k: string) => { delete store[k]; }),
-    clear: () => { store = {}; },
+    setItem: vi.fn((k: string, v: string) => {
+      store[k] = v;
+    }),
+    removeItem: vi.fn((k: string) => {
+      delete store[k];
+    }),
+    clear: () => {
+      store = {};
+    },
   };
 })();
 
@@ -44,7 +59,13 @@ function msg(overrides?: Partial<TranscriptMessage>): TranscriptMessage {
 }
 
 function card(overrides?: Partial<ContextCard>): ContextCard {
-  return { id: 1, tool: "giap__weather", data: {}, timestamp_ms: 0, ...overrides };
+  return {
+    id: 1,
+    tool: "giap__weather",
+    data: {},
+    timestamp_ms: 0,
+    ...overrides,
+  };
 }
 
 beforeEach(() => storageMock.clear());
@@ -61,7 +82,10 @@ describe("reducer — mode & section", () => {
   it("SET_SECTION updates section and persists to localStorage", () => {
     const next = reducer(BASE, { type: "SET_SECTION", payload: "settings" });
     expect(next.section).toBe("settings");
-    expect(storageMock.setItem).toHaveBeenCalledWith("giap-section", "settings");
+    expect(storageMock.setItem).toHaveBeenCalledWith(
+      "giap-section",
+      "settings",
+    );
   });
 });
 
@@ -105,17 +129,29 @@ describe("reducer — server status", () => {
   });
 
   it("SET_SERVER_URL updates URL and persists to localStorage", () => {
-    const next = reducer(BASE, { type: "SET_SERVER_URL", payload: "http://192.168.1.10:4000" });
+    const next = reducer(BASE, {
+      type: "SET_SERVER_URL",
+      payload: "http://192.168.1.10:4000",
+    });
     expect(next.serverUrl).toBe("http://192.168.1.10:4000");
-    expect(storageMock.setItem).toHaveBeenCalledWith("giap-server-url", "http://192.168.1.10:4000");
+    expect(storageMock.setItem).toHaveBeenCalledWith(
+      "giap-server-url",
+      "http://192.168.1.10:4000",
+    );
   });
 });
 
 describe("reducer — session token", () => {
   it("SET_SESSION_TOKEN stores a token in localStorage", () => {
-    const next = reducer(BASE, { type: "SET_SESSION_TOKEN", payload: "tok123" });
+    const next = reducer(BASE, {
+      type: "SET_SESSION_TOKEN",
+      payload: "tok123",
+    });
     expect(next.sessionToken).toBe("tok123");
-    expect(storageMock.setItem).toHaveBeenCalledWith("giap-session-token", "tok123");
+    expect(storageMock.setItem).toHaveBeenCalledWith(
+      "giap-session-token",
+      "tok123",
+    );
   });
 
   it("SET_SESSION_TOKEN with null removes token from localStorage", () => {
@@ -181,7 +217,10 @@ describe("reducer — voice state", () => {
   });
 
   it("SET_VOICE_ERROR sets voiceError", () => {
-    const next = reducer(BASE, { type: "SET_VOICE_ERROR", payload: "mic unavailable" });
+    const next = reducer(BASE, {
+      type: "SET_VOICE_ERROR",
+      payload: "mic unavailable",
+    });
     expect(next.voiceError).toBe("mic unavailable");
   });
 });
@@ -197,14 +236,20 @@ describe("reducer — transcript", () => {
     // Build state with 50 messages
     let s = BASE;
     for (let i = 0; i < 50; i++) {
-      s = reducer(s, { type: "APPEND_TRANSCRIPT", payload: msg({ id: i, text: `m${i}` }) });
+      s = reducer(s, {
+        type: "APPEND_TRANSCRIPT",
+        payload: msg({ id: i, text: `m${i}` }),
+      });
     }
     expect(s.transcript).toHaveLength(50);
 
     // Adding one more should trim the oldest
-    const next = reducer(s, { type: "APPEND_TRANSCRIPT", payload: msg({ id: 99, text: "new" }) });
+    const next = reducer(s, {
+      type: "APPEND_TRANSCRIPT",
+      payload: msg({ id: 99, text: "new" }),
+    });
     expect(next.transcript).toHaveLength(50);
-    expect(next.transcript[0].text).toBe("m1");    // m0 was trimmed
+    expect(next.transcript[0].text).toBe("m1"); // m0 was trimmed
     expect(next.transcript[49].text).toBe("new");
   });
 
@@ -213,18 +258,27 @@ describe("reducer — transcript", () => {
       ...BASE,
       transcript: [msg({ role: "agent", text: "Hello" })],
     };
-    const next = reducer(s, { type: "APPEND_AGENT_TOKEN", payload: { token: " world", done: false } });
+    const next = reducer(s, {
+      type: "APPEND_AGENT_TOKEN",
+      payload: { token: " world", done: false },
+    });
     expect(next.transcript[0].text).toBe("Hello world");
   });
 
   it("APPEND_AGENT_TOKEN is a no-op when transcript is empty", () => {
-    const next = reducer(BASE, { type: "APPEND_AGENT_TOKEN", payload: { token: "x", done: false } });
+    const next = reducer(BASE, {
+      type: "APPEND_AGENT_TOKEN",
+      payload: { token: "x", done: false },
+    });
     expect(next.transcript).toHaveLength(0);
   });
 
   it("APPEND_AGENT_TOKEN is a no-op when last message is not from agent", () => {
     const s = { ...BASE, transcript: [msg({ role: "user" })] };
-    const next = reducer(s, { type: "APPEND_AGENT_TOKEN", payload: { token: "x", done: false } });
+    const next = reducer(s, {
+      type: "APPEND_AGENT_TOKEN",
+      payload: { token: "x", done: false },
+    });
     expect(next.transcript[0].text).toBe("hello");
   });
 
@@ -255,7 +309,10 @@ describe("reducer — context cards", () => {
       type: "UPDATE_CONTEXT_CARD",
       payload: { callId: "call-1", data: { result: "22C" } },
     });
-    expect(next.contextCards[0].data).toMatchObject({ id: "call-1", result: "22C" });
+    expect(next.contextCards[0].data).toMatchObject({
+      id: "call-1",
+      result: "22C",
+    });
     // c2 is unchanged
     expect(next.contextCards[1].data).toEqual({ id: "call-2" });
   });
@@ -275,7 +332,11 @@ describe("reducer — context cards", () => {
     const s = { ...BASE, contextCards: [c] };
     const next = reducer(s, {
       type: "UPDATE_CONTEXT_CARD",
-      payload: { callId: "orphan", tool: "giap__news", data: { result: "headline" } },
+      payload: {
+        callId: "orphan",
+        tool: "giap__news",
+        data: { result: "headline" },
+      },
     });
     // The orphan result surfaces as its own card rather than being dropped.
     expect(next.contextCards).toHaveLength(2);
@@ -309,5 +370,23 @@ describe("reducer — immutability", () => {
     // @ts-expect-error — testing unknown action
     const next = reducer(BASE, { type: "UNKNOWN_ACTION" });
     expect(next).toBe(BASE);
+  });
+});
+
+// The shell knows which port its own sidecar bound; a persisted URL is at best
+// stale. This matters for the upgrade path: anyone who hit the double-spawn bug
+// has http://127.0.0.1:4001 saved here, and honouring it would keep the fixed
+// build pointed at a port nothing is listening on.
+describe("buildInitialState server URL precedence", () => {
+  it("prefers the shell's injected URL over a stored one in the desktop app", () => {
+    vi.mocked(isDesktopShell).mockReturnValue(true);
+    storageMock.setItem("giap-server-url", "http://127.0.0.1:4001");
+    expect(buildInitialState().serverUrl).not.toBe("http://127.0.0.1:4001");
+  });
+
+  it("still honours a stored URL in a plain browser, where a user typed it", () => {
+    vi.mocked(isDesktopShell).mockReturnValue(false);
+    storageMock.setItem("giap-server-url", "http://192.168.1.10:4000");
+    expect(buildInitialState().serverUrl).toBe("http://192.168.1.10:4000");
   });
 });

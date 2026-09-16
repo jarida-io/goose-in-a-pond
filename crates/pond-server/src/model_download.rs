@@ -1318,7 +1318,7 @@ mod kokoro_engine_tests {
 
 // ── MTP drafter ───────────────────────────────────────────────────────────────
 
-pub use pond_core::models::domain::drafter::{drafter_for, DrafterSpec};
+pub use pond_core::models::domain::drafter::drafter_for;
 
 /// Is this file a drafter this engine can actually load?
 ///

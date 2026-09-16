@@ -35,9 +35,15 @@ export const APP_ORIGIN = `${APP_SCHEME}://${APP_HOST}`;
  * normalisation often enough to be worth refusing explicitly rather than
  * trusting the URL parser.
  */
-export function resolveAppPath(distRoot: string, pathname: string): string | null {
+export function resolveAppPath(
+  distRoot: string,
+  pathname: string,
+): string | null {
   const root = resolve(distRoot);
-  const rel = pathname === "/" || pathname === "" ? "index.html" : decodeURIComponent(pathname);
+  const rel =
+    pathname === "/" || pathname === ""
+      ? "index.html"
+      : decodeURIComponent(pathname);
   const target = resolve(join(root, rel));
   if (target !== root && !target.startsWith(root + sep)) return null;
   return target;

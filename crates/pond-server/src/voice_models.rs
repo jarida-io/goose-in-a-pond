@@ -70,6 +70,12 @@ pub struct PiperVoice {
 
 impl PiperVoice {
     /// True when both halves are present on disk.
+    ///
+    /// Test-only: nothing in the running server asks this, because every caller
+    /// already holds the resolved paths. Gated rather than deleted because the
+    /// resolution tests assert through it, and rather than left ungated because
+    /// a production build should not carry a method production never calls.
+    #[cfg(test)]
     pub fn is_installed(&self) -> bool {
         self.onnx.exists() && self.config.exists()
     }
@@ -89,6 +95,7 @@ impl VoiceModels {
     /// catalog names are `en-lessac-medium`, so every install fell through to
     /// text-only output. The question is not what the setting is spelled like,
     /// it is whether a voice actually resolved.
+    #[cfg(test)]
     pub fn tts_is_piper(&self) -> bool {
         self.piper.is_some()
     }
