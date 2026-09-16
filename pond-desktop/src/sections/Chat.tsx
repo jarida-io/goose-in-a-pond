@@ -32,18 +32,16 @@ import { ContextPressureNote } from "../components/ContextPressureNote";
 import { SubagentTree } from "../components/SubagentTree";
 import { prepareImage, validateAttachmentSet } from "../lib/imageAttach";
 import type { PreparedImage } from "../lib/imageAttach";
+import { useSuggestedPrompts } from "../hooks/useSuggestedPrompts";
 
-const CHIPS = [
-  "What can you help me with?",
-  "Check the weather",
-  "Set a schedule",
-  "Show my devices",
-  "Manage my models",
-];
 
 export function Chat() {
   const state    = useAppState();
   const dispatch = useAppDispatch();
+
+  // The starting quips, from the suggestion engine rather than a fixed list.
+  // See `useSuggestedPrompts`.
+  const chips = useSuggestedPrompts(state.sessionId);
 
   // The transcript, the turn in flight and the queue behind it belong to the
   // store, not to this component: pressing anything in the sidebar unmounts
@@ -1137,7 +1135,7 @@ export function Chat() {
       {/* Quips, below the composer — a starting point, not a header. */}
       {!loadingSession && messages.length === 0 && (
         <div className="chat2__chips" role="group" aria-label="Suggestions">
-          {CHIPS.map((c, i) => (
+          {chips.map((c, i) => (
             <button
               key={c}
               className="ch-chip"

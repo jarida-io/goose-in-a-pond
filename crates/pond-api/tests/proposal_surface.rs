@@ -415,12 +415,57 @@ async fn a_guest_receives_nothing_and_is_told_why() {
     );
 }
 
-/// Invariant 4's other half, and the deliberate cliff. `Household` is the
-/// broadcast, so it cannot hold a proposal, even on a one-member pond where an
-/// unidentified session resolves to it. On a default install nothing binds a
-/// session to a member yet, so this surface answers 403 until something does.
+/// Invariant 4's other half, rewritten around TWO members rather than deleted.
+///
+/// This test used to assert that an unidentified session on a ONE-member pond
+/// was refused, on the argument that `Household` is the broadcast. That
+/// argument is still exactly right where it bites -- with two or more members,
+/// answering would mean picking one by row order, which is the fallback PAI-1
+/// P3 refused -- and it is wrong on a household of one, where the candidate set
+/// has a single element and choosing from it is not a choice. `proposal_caller`
+/// now falls through to `sole_member` there; the sibling test below pins that.
+///
+/// Rewritten and not deleted for the reason `881da889` gives about the same
+/// change on `context_source_owner`: "what it was really pinning is still
+/// true".
 #[tokio::test]
-async fn an_unidentified_session_on_a_one_member_pond_is_still_refused() {
+async fn an_unidentified_session_on_a_multi_member_pond_is_still_refused() {
+    let h = make_app().await;
+    let liz = member(&h, "Liz").await;
+    let _jerry = member(&h, "Jerry").await;
+    save_proposal(&h, "p-liz-1", &liz, Duration::hours(2)).await;
+
+    let session = unidentified_session(&h, "s-anon").await;
+    let (status, body) = get_json(&h.app, &format!("/api/v1/proposals?session_id={session}")).await;
+
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "with two members, answering would address Liz's proposal to whoever is holding \
+         the screen. Body: {body}"
+    );
+
+    // The vacuity control: the very same proposal IS visible to the very same
+    // pond once the session names its member. Without this, a route that
+    // answered 403 to everything would pass.
+    let bound = session_of(&h, "s-liz", &liz).await;
+    let (status, body) = get_json(&h.app, &format!("/api/v1/proposals?session_id={bound}")).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(ids(&body), vec!["p-liz-1".to_string()], "body: {body}");
+}
+
+/// A household of one has exactly one possible answer, so stop asking.
+///
+/// The measured consequence of the old behaviour: on a pond with
+/// `proactive_review_enabled` switched on, `drafts where origin='proactive'`
+/// was 0 and the Home column had never rendered a row -- because the surface
+/// that would have shown them answered 403 to the only caller there was.
+///
+/// Note the scope this asserts on is `Owner`, not `Household`: the fallthrough
+/// RESOLVES the member rather than widening the audience, so nothing downstream
+/// ever sees a broadcast and invariant 4 is untouched.
+#[tokio::test]
+async fn an_unidentified_session_on_a_one_member_pond_gets_that_members_proposals() {
     let h = make_app().await;
     let liz = member(&h, "Liz").await;
     save_proposal(&h, "p-liz-1", &liz, Duration::hours(2)).await;
@@ -430,24 +475,15 @@ async fn an_unidentified_session_on_a_one_member_pond_is_still_refused() {
 
     assert_eq!(
         status,
-        StatusCode::FORBIDDEN,
-        "a Household scope IS the broadcast, and invariant 4 forbids one. Body: {body}"
+        StatusCode::OK,
+        "a one-member pond has nobody else the proposal could belong to. Body: {body}"
     );
-    assert!(
-        body["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("whole household"),
-        "the refusal must name the broadcast it refused; body: {body}"
-    );
-
-    // The vacuity control for both refusals above: the very same proposal IS
-    // visible to the very same pond once the session names its member. Without
-    // this, a route that answered 403 to everything would pass them both.
-    let bound = session_of(&h, "s-liz", &liz).await;
-    let (status, body) = get_json(&h.app, &format!("/api/v1/proposals?session_id={bound}")).await;
-    assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(ids(&body), vec!["p-liz-1".to_string()], "body: {body}");
+    assert_eq!(
+        body["profile_id"].as_str(),
+        Some(liz.as_str()),
+        "the response must name the member it resolved, not the household; body: {body}"
+    );
 }
 
 #[tokio::test]

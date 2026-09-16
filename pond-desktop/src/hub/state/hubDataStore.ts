@@ -583,7 +583,6 @@ async function load() {
       weatherStatus: weatherStatusFor(weatherAnswered, wOK),
       devicesAreReal: true,
       nowPlaying: nowPlayingFromApi(npOK),
-      gooseSuggestions: EMPTY_HOME.gooseSuggestions,
     };
     state.routines = routinesFromRecipes(rcOK);
     state.loaded = true;

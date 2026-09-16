@@ -47,6 +47,7 @@ use pond_core::user_data::ports::scheduler::{CreateScheduleRequest, UpdateSchedu
 use pond_core::user_data::ports::session_storage::SessionStorageError;
 use pond_core::user_data::services::identity_resolution;
 use pond_core::user_data::services::onboarding::OnboardingService;
+use pond_core::user_data::services::suggestion::GroupsKnown;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::convert::Infallible;
@@ -395,6 +396,11 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // costs nothing to keep. `live-test.sh` asserts it from outside.
         .route("/reminders", get(list_reminders))
         .route("/reminders/{id}/dismiss", post(dismiss_reminder))
+        // ── Suggestions ──────────────────────────────────────────────────────
+        // Deliberately beside `/reminders` and not beside `/proposals`: both of
+        // these are ungated reads that a pond with nobody identified still has
+        // to answer. See `list_suggestions` for the whole argument.
+        .route("/suggestions", get(list_suggestions))
         // ── Memory Consolidation ─────────────────────────────────────────────
         .route("/memory/consolidate", post(start_consolidation))
         .route("/memory/consolidate/stop", post(stop_consolidation))
@@ -13301,6 +13307,322 @@ async fn delete_memory(
 /// The reminder store, built from the pool `AppState` already holds -- same
 /// story as [`proposal_repo`], and the same one-line swap when it moves onto
 /// `AppState` proper.
+// ── Suggestions: what the household might want to ask ────────────────────────
+//
+// `GET /api/v1/suggestions`. The other half of Home's left column, and the half
+// that works on a pond's first evening.
+//
+// # Why this is not `/proposals`
+//
+// A proposal is a staged action addressed to one member, so `ProposalAudience`
+// makes "the household" and "a guest" unrepresentable rather than merely
+// refused. That is right for something that will act on somebody's behalf, and
+// it is why that route answers 403 wherever nobody has been identified. A
+// suggestion performs nothing until it is tapped, and **the tap is the
+// consent**, so there is no audience to name and nothing to approve.
+//
+// # No member gate, deliberately -- the same call `/reminders` made
+//
+// `list_reminders` records the reasoning in full and it applies here more
+// strongly, because this is the surface that has to be non-empty before
+// anybody has identified themselves to anything.
+//
+// # This route must not write, and that is a real hazard rather than a style note
+//
+// It does NOT call `resolve_turn_scope`. That function is not a pure read: its
+// `DeviceRung::Member` arm calls `set_session_identity_if_stronger`, and
+// `IdentificationSource::PairedDevice` outranks `Face`. A Dashboard polling
+// this route through `resolve_turn_scope` would overwrite a face match with a
+// device claim on every tick. Scope is resolved here from the same three
+// inputs through `identity_resolution::resolve` directly, and nothing is
+// written back.
+
+/// How many memories are counted before the number stops being interesting.
+///
+/// A ceiling rather than a `COUNT(*)`, because `MemoryRepository` has no
+/// windowed count and adding one for a headline number is more port surface
+/// than the sentence is worth. Note what is NOT used: `count_for_profile` has
+/// no lifecycle predicate, so it counts archived and superseded rows the read
+/// path would never return -- a number strictly larger than anything an answer
+/// could draw on.
+const SUGGESTION_MEMORY_CEILING: usize = 500;
+
+/// How far back "this week" reaches for the inbox suggestor.
+///
+/// Seven days rather than "today" because a mail sync runs on a thirty-minute
+/// timer and may not have run yet today; a today-count would read zero on a
+/// pond with a full inbox and the card would be silent for the wrong reason.
+const SUGGESTION_MAIL_WINDOW_DAYS: i64 = 7;
+
+/// What the caller may be shown, resolved without writing anything.
+///
+/// `Guest` maps to `Shared` and everything else to `Personal`. The reason it is
+/// not "`Owner` is personal, the rest is shared" is in `Audience`'s own docs:
+/// `identity_resolution::resolve` returns `Guest` only when the household has
+/// more than one member, so `Household` is reachable only on a pond of at most
+/// one -- where `Household` IS that member. Gating on `Owner` would make the
+/// personal half unreachable on every desktop pond that has not paired an
+/// attributed device, which is most of them, and is the same call commit
+/// `881da889` made for connecting a context source.
+async fn suggestion_audience(
+    state: &Arc<AppState>,
+    principal: Option<&pond_core::security::ports::policy::Principal>,
+    session_id: Option<&str>,
+) -> pond_core::user_data::services::suggestion::Audience {
+    use pond_core::user_data::domain::profile::ProfileScope;
+    use pond_core::user_data::domain::session::SessionIdentity;
+    use pond_core::user_data::services::identity_resolution;
+    use pond_core::user_data::services::suggestion::Audience;
+
+    // A failed read counts as "more than one member", which resolves to Guest
+    // and shows less. Every unknown here narrows.
+    let members = match state.profile_repo.list().await {
+        Ok(p) => p.len(),
+        Err(e) => {
+            tracing::debug!(error = %e, "suggestions: could not count members; showing the shared tier");
+            2
+        }
+    };
+
+    // The device rung, built exactly as `resolve_turn_scope` builds it and then
+    // NOT written back -- the whole difference between the two functions.
+    //
+    // Routed through `ProvenDevice::rung` rather than a local
+    // `.ok().flatten()`, which behaves identically and is not the same thing:
+    // `device_rung_wiring.rs` walks every production site filling this rung and
+    // fails any that does not hand over a bare `DeviceRung::profile_id()`,
+    // because `.or(..)` and `.unwrap_or(..)` look like the same line in a diff
+    // and mean the strongest rung answers `Some` when the pond knows nothing.
+    // `IdentificationSource::PairedDevice` outranks every proof the pond can
+    // make, so a default here would outrank all of them. The guard caught this
+    // function on its first run, which is what the guard is for.
+    let device = principal
+        .map(ProvenDevice::from_principal)
+        .unwrap_or_else(ProvenDevice::none);
+    let device_rung = match device.id() {
+        None => DeviceRung::NoDevice,
+        Some(device_id) => device.rung(device_attribution(state).device_profile(device_id).await),
+    };
+
+    // The session rung. Absent when the caller has no session, which is the
+    // normal state of a cold Dashboard and is not an error here.
+    let session_identity = match session_id {
+        Some(sid) => state
+            .session_storage
+            .get_session_identity(sid)
+            .await
+            .unwrap_or_else(|_| SessionIdentity::unknown()),
+        None => SessionIdentity::unknown(),
+    };
+
+    let resolved = identity_resolution::resolve(&identity_resolution::ResolutionInputs {
+        paired_device_profile: device_rung.profile_id(),
+        session: &session_identity,
+        household_has_multiple_members: members > 1,
+    });
+
+    match resolved.scope {
+        ProfileScope::Guest => Audience::Shared,
+        _ => Audience::Personal,
+    }
+}
+
+/// What is known about the tool groups this pond has.
+///
+/// `enabled` AND `status == "connected"`, so a registered extension that failed
+/// to start does not put a card on screen whose prompt the model cannot serve.
+///
+/// But an EMPTY answer is `Unknown`, not "none" -- see [`GroupsKnown`]. The
+/// manager answers from a live agent session, so a pond whose model provider is
+/// not up yet reports nothing at all rather than failing, and treating that as
+/// "no extensions exist" silences the whole column exactly when it is most
+/// wanted. Observed live on a scratch pond: two devices registered, weather on,
+/// and both suggestors refused with "is not installed" because the log said
+/// `LLM: llamafile skipped (provider = )`.
+async fn suggestion_groups(state: &Arc<AppState>) -> GroupsKnown {
+    let Some(manager) = state.extension_manager.as_ref() else {
+        return GroupsKnown::Unknown;
+    };
+    match manager.list_extensions().await {
+        Ok(list) => GroupsKnown::from_report(Some(
+            list.into_iter()
+                .filter(|e| e.enabled && e.status == "connected")
+                .map(|e| e.name)
+                .collect(),
+        )),
+        Err(e) => {
+            tracing::debug!(error = %e, "suggestions: could not list extensions; not treating that as absence");
+            GroupsKnown::Unknown
+        }
+    }
+}
+
+/// Unpaused schedules due before `until`, and the soonest one's own label.
+async fn suggestion_schedules_before(
+    state: &Arc<AppState>,
+    now: chrono::DateTime<chrono::Utc>,
+    until: chrono::DateTime<chrono::Utc>,
+) -> (usize, Option<String>) {
+    let Some(scheduler) = state.scheduler.as_ref() else {
+        return (0, None);
+    };
+    // A generous limit: `list_upcoming` is ordered, and the count is over a
+    // window far narrower than the fetch, so the cap cannot truncate the answer
+    // unless a household has more than fifty routines due before midnight.
+    let Ok(all) = scheduler.list_upcoming(50).await else {
+        return (0, None);
+    };
+    let mut due: Vec<_> = all
+        .into_iter()
+        .filter(|s| !s.paused)
+        .filter_map(|s| s.next_run.map(|at| (at, s.label)))
+        .filter(|(at, _)| *at >= now && *at < until)
+        .collect();
+    due.sort_by_key(|(at, _)| *at);
+    let label = due.first().map(|(_, label)| label.clone());
+    (due.len(), label)
+}
+
+#[derive(serde::Deserialize)]
+struct ListSuggestionsQuery {
+    /// Optional, unlike every proposal route. A cold Dashboard has no session
+    /// -- `state.sessionId` starts null and is never persisted -- and requiring
+    /// one would blank the column on exactly the launch it exists to fill.
+    session_id: Option<String>,
+}
+
+/// `GET /api/v1/suggestions` -- what this household might want to ask.
+async fn list_suggestions(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    Query(query): Query<ListSuggestionsQuery>,
+) -> impl axum::response::IntoResponse {
+    use pond_core::context::domain::SourceKind;
+    use pond_core::context::ports::ContextRepository;
+    use pond_core::user_data::domain::memory::MemorySegment;
+    use pond_core::user_data::domain::profile::ProfileScope;
+    use pond_core::user_data::services::{location, suggestion};
+
+    let principal_ref = principal.as_ref().map(|axum::Extension(p)| p);
+    let audience = suggestion_audience(&state, principal_ref, query.session_id.as_deref()).await;
+
+    let settings = state.settings_repo.get().await.unwrap_or_default();
+    let place = location::resolve(&settings);
+    let now = chrono::Utc::now();
+    let (day_start, day_end) = place.day_bounds(now);
+    let week_start = now - chrono::Duration::days(SUGGESTION_MAIL_WINDOW_DAYS);
+
+    // The scope every repository is read at. `Shared` reads as `Guest`, whose
+    // SQL predicate is `AND 1 = 0` -- so the read fails closed even if a
+    // suggestor forgets to check its own audience. Belt and braces, on purpose:
+    // the engine's check is what produces the honest silence message, and this
+    // is what makes a missing check harmless rather than a disclosure.
+    let read_scope = match audience {
+        suggestion::Audience::Personal => ProfileScope::Household,
+        suggestion::Audience::Shared => ProfileScope::Guest,
+    };
+
+    let repo = context_repo(&state);
+    // One read of the source list, used for both context suggestors.
+    // A `Vec`, not a set: `SourceKind` is not `Ord` and there are eight of them,
+    // so a linear scan of at most eight is cheaper than the trait bound is worth.
+    let connected: Vec<SourceKind> = match repo.list_sources(&read_scope).await {
+        Ok(sources) => sources
+            .iter()
+            .filter(|s| s.status() == pond_core::context::domain::SourceStatus::Connected)
+            .map(|s| s.kind())
+            .collect(),
+        Err(e) => {
+            tracing::debug!(error = %e, "suggestions: could not list context sources");
+            Vec::new()
+        }
+    };
+
+    // `None` and `Some(0)` are different answers and the engine phrases them
+    // differently: no account connected, versus a connected account with an
+    // empty day. Collapsing them would lose the one sentence that tells a
+    // household their calendar is working and simply has nothing on it.
+    let calendar_events_today = if connected.iter().any(|k| *k == SourceKind::Calendar) {
+        repo.count_in_window(&read_scope, SourceKind::Calendar, day_start, day_end)
+            .await
+            .ok()
+            .map(|n| n as usize)
+    } else {
+        None
+    };
+    let mail_items_this_week = if connected.iter().any(|k| *k == SourceKind::Mail) {
+        repo.count_in_window(&read_scope, SourceKind::Mail, week_start, now)
+            .await
+            .ok()
+            .map(|n| n as usize)
+    } else {
+        None
+    };
+
+    let active_memories = state
+        .memory_repo
+        .search_recent(&read_scope, SUGGESTION_MEMORY_CEILING)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let routine_memories = state
+        .memory_repo
+        .search_by_segment(
+            MemorySegment::Routine,
+            &read_scope,
+            SUGGESTION_MEMORY_CEILING,
+        )
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    let devices_registered = state
+        .device_registry
+        .list_devices()
+        .await
+        .map(|d| d.len())
+        .unwrap_or(0);
+
+    let (schedules_before_midnight, next_schedule_label) =
+        suggestion_schedules_before(&state, now, day_end).await;
+
+    let snapshot = suggestion::SuggestionSnapshot {
+        audience,
+        groups: suggestion_groups(&state).await,
+        muted: settings.suggestions_muted.iter().cloned().collect(),
+        calendar_events_today,
+        mail_items_this_week,
+        schedules_before_midnight,
+        next_schedule_label,
+        active_memories,
+        routine_memories,
+        devices_registered,
+        weather_ready: settings.weather_enabled && place.weather_target().is_some(),
+        place: place.is_named().then(|| place.name.clone()),
+    };
+
+    let set = suggestion::suggest(&snapshot);
+    Json(json!({
+        "suggestions": set.offered,
+        // Every suggestor that ran, and why each silent one was silent. Without
+        // this, a quiet house and a broken engine are the same empty array --
+        // which is the state the proposal column has been in since it shipped,
+        // and the reason nobody noticed.
+        "considered": set.considered,
+        "audience": set_audience_label(audience),
+    }))
+    .into_response()
+}
+
+/// The audience as a word, for a client that wants to explain itself.
+fn set_audience_label(a: pond_core::user_data::services::suggestion::Audience) -> &'static str {
+    use pond_core::user_data::services::suggestion::Audience;
+    match a {
+        Audience::Personal => "personal",
+        Audience::Shared => "shared",
+    }
+}
+
 fn reminder_repo(state: &Arc<AppState>) -> pond_infra::sqlite_reminder::SqliteReminderRepository {
     pond_infra::sqlite_reminder::SqliteReminderRepository::new(state.db.system.clone())
 }
@@ -15738,21 +16060,64 @@ async fn delete_user_biometrics(
 /// on "not one member": `Guest` generates and receives nothing, and `Household`
 /// is not a weaker address than `Owner` — it *is* the broadcast.
 ///
-/// **The consequence is a real cliff and I am taking it deliberately.** A
-/// session that nobody has identified resolves to `Household` on a one-member
-/// pond, so on a default install today this answers 403 and the surface is
-/// unusable until the speaker is resolved to a member — by
-/// `PUT /sessions/{id}/user`, by a face match, or (since PAI-1 P9's identity
-/// half) by the request arriving on a device paired with a member-bound code.
-/// The third of those needs no session binding at all: `resolve_turn_scope`
-/// resolves it per request, from the token. That is narrower than
-/// [`is_draft_decision_permitted`](pond_core::security::ports::policy::is_draft_decision_permitted),
-/// which lets `Household` decide any draft on the argument that a one-member
-/// pond has nobody to protect from. The difference is that a draft can be
-/// unowned and a proposal never is: to LIST one I would have to pick a member,
-/// and picking is the fallback PAI-1 P3 refused. Rather than let the read refuse
-/// while the write permits — you could then dispose of what you cannot see — both
-/// go through this one door.
+/// **The cliff this used to describe is gone, and the paragraph that argued for
+/// it is kept below because the argument was half right.**
+///
+/// It said: a draft can be unowned and a proposal never is, so "to LIST one I
+/// would have to pick a member, and picking is the fallback PAI-1 P3 refused."
+/// That holds for a household of two or more, where picking would address
+/// somebody's suggestion by row order. It does not hold for a household of
+/// **one**, where there is no picking to do -- the set of candidates has one
+/// element and choosing from it is not a choice. So `Household` now falls
+/// through to [`member_attribution::sole_member`], and two or more members
+/// still refuse, which is exactly where the original reasoning survives.
+///
+/// This is the same call `881da889` made for connecting a context source, in
+/// the same file, four hundred lines below -- `context_source_owner` has the
+/// identical shape. Its commit message is the argument: connecting a calendar
+/// "required first starting a conversation AND being on an attributed device,
+/// to establish something a one-member pond has exactly one possible answer
+/// to." Reading a proposal required the same thing, for the same non-reason,
+/// and the consequence was measurable: `select count(*) from drafts where
+/// origin='proactive'` is 0 on a pond that has had `proactive_review_enabled`
+/// switched on, because the column that would have shown them answered 403.
+///
+/// The write path was already there. `is_draft_decision_permitted` admits
+/// `Household` for an owned draft under the comment "Single-member pond: there
+/// is no other member to protect from", pinned by
+/// `household_decides_anything_because_a_household_pond_has_one_member`. So
+/// until now the READ refused what the WRITE permitted -- the exact inversion
+/// this function's last sentence says it exists to prevent.
+///
+/// **`session_id` stays required.** Making it optional is a separate and
+/// riskier change: `is_draft_decision_permitted`'s first rung refuses a blank
+/// actor session outright, so an optional session would 403 every decide after
+/// letting the list through. A cold Dashboard reaches this surface once it has
+/// a session, and `GET /api/v1/suggestions` -- which needs none -- is what
+/// fills the column before then.
+/// The one 403 both refusal paths in [`proposal_caller`] return.
+///
+/// A free function so the two arms cannot drift into saying different things
+/// about the same refusal -- which is how a caller ends up debugging two
+/// distinct-looking errors that mean one thing.
+fn proposal_caller_refusal(session_id: &str, reason: &str) -> (StatusCode, Json<Value>) {
+    tracing::info!(
+        target: "giap::trace",
+        kind = "proposal_caller_unaddressable",
+        session_id,
+        reason,
+        "a proposal route refused a caller that is not one household member"
+    );
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "error": reason,
+            "hint": "proposals are addressed to one household member; bind this \
+                     session to a member before reading or deciding one",
+        })),
+    )
+}
+
 async fn proposal_caller(
     state: &Arc<AppState>,
     session_id: &str,
@@ -15761,6 +16126,37 @@ async fn proposal_caller(
     let scope = resolve_turn_scope(state, session_id, device).await;
     match ProposalAudience::from_scope(&scope) {
         Ok(audience) => Ok((scope, audience)),
+        // `Household` only, and only when the household really is one person.
+        // `Guest` is NOT admitted here and must not be: `identity_resolution`
+        // answers `Guest` exactly when the pond has more than one member, so a
+        // guest fallthrough would be the row-order pick PAI-1 P3 refused.
+        Err(_) if matches!(scope, ProfileScope::Household) => {
+            let members: Vec<String> = state
+                .profile_repo
+                .list()
+                .await
+                .map(|profiles| profiles.into_iter().map(|p| p.id).collect())
+                .unwrap_or_default();
+            match pond_core::user_data::services::member_attribution::sole_member(&members) {
+                Some(only) => match ProposalAudience::for_member(&only) {
+                    Ok(audience) => {
+                        tracing::debug!(
+                            target: "giap::trace",
+                            kind = "proposal_caller_sole_member",
+                            session_id,
+                            "nobody identified this caller and this household has one member, \
+                             so the proposal is theirs"
+                        );
+                        Ok((ProfileScope::Owner(only.clone()), audience))
+                    }
+                    Err(e) => Err(proposal_caller_refusal(session_id, &e.to_string())),
+                },
+                None => Err(proposal_caller_refusal(
+                    session_id,
+                    "this pond has more than one member and nobody said who is asking",
+                )),
+            }
+        }
         Err(e) => {
             tracing::info!(
                 target: "giap::trace",

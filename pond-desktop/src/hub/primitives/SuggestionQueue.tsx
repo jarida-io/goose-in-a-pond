@@ -11,11 +11,16 @@
 // Two things the design asked for are deliberately not built, because the pond
 // cannot back them:
 //
-//   * A per-suggestion verb ("Turn them off", "Close it"). The only action
-//     field on the wire is `proposed_action`, a TaskKind tagged union typed as
-//     `string` — never bind it, it renders [object Object]. A button labelled
-//     with a verb it cannot perform is exactly what DESIGN.md section 3
-//     forbids, so both buttons are generic: Approve, and Not now.
+//   * A per-suggestion verb ("Turn them off", "Close it"). There is no verb on
+//     the wire at all: `go`/`doing`/`done` exist only in the design's mock
+//     array, and `ProposalPayload` carries `{trigger, proposed_action,
+//     confidence}` — adding one is a schema change, not a prompt change. The
+//     nearest field, `proposed_action`, is a TaskKind tagged union; it is now
+//     TYPED as one (it used to be declared `string`, so this comment was the
+//     only thing stopping anyone binding it and shipping [object Object]).
+//     Even typed, a button labelled with a verb the pond cannot perform is what
+//     DESIGN.md section 3 forbids, so both buttons stay generic: Approve, and
+//     Not now.
 //
 //   * The doing/done toast pair ("Turning off the patio lights" then "Patio
 //     lights off"). Approving moves the row to `approved` and executes
@@ -25,11 +30,38 @@
 //     was answered, not because anything changed in the house.
 //
 // Backed by GET /api/v1/proposals and POST /api/v1/proposals/:id/decide.
+//
+// ── The other half: suggestions ─────────────────────────────────────────────
+//
+// When nothing is waiting on you, the column offers things you might want to
+// ASK instead, from GET /api/v1/suggestions. The two are different in kind and
+// the screen says so:
+//
+//   a proposal   is addressed to you, expires, and wants an answer  -> Approve
+//   a suggestion is addressed to nobody, keeps, and is an offer     -> Ask
+//
+// Proposals win the column whenever there are any, because only they are
+// waiting on somebody. Suggestions fill the quiet, which until now was a single
+// sentence about the weather.
+//
+// "Ask" rather than "Approve" is the point. `decide_proposal` returns
+// `"executed": false` and there is no consumer of an approved proposal anywhere
+// in the tree, so Approve records an answer and changes nothing. Asking is a
+// verb the pond demonstrably performs: the prompt goes to chat through the same
+// path the composer uses, and the household watches it answer. That is the
+// difference between a button that does what it says and the one DESIGN.md
+// section 3 forbids.
+//
+// The suggestion fetch deliberately does NOT wait for a session. `sessionId` is
+// null on a cold launch and never persisted, so requiring one would blank the
+// column on exactly the launch this fills. Tapping a suggestion mints the
+// session that the proposals half has never had -- so the offer lane bootstraps
+// the asking lane.
 // ────────────────────────────────────────────────────────────
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api/PondApiClient";
-import type { Proposal, ProposalDecision } from "../../api/types";
+import type { Proposal, ProposalDecision, Suggestion } from "../../api/types";
 import { HubIco } from "./HubIco";
 import { HP_PATHS } from "./icons";
 import "./suggestion-queue.css";
@@ -37,8 +69,16 @@ import "./suggestion-queue.css";
 export interface SuggestionQueueProps {
   /** Who is asking. Null before a chat session exists, and the column shows its quiet state. */
   sessionId: string | null;
-  /** One short sentence about this house, shown when nothing is waiting. Already one sentence, <= 72 chars. */
+  /** One short sentence about this house, shown when nothing is waiting and nothing is on offer. Already one sentence, <= 72 chars. */
   quietLine: string;
+  /**
+   * Put a question to the pond.
+   *
+   * The caller sends the prompt and goes to chat. Optional: a surface that has
+   * nowhere to send it passes nothing and the suggestions half stays folded,
+   * rather than drawing a button that would do nothing when tapped.
+   */
+  onAsk?: (prompt: string) => void;
 }
 
 /** One notch per wheel gesture: below this a trackpad flings through the queue. */
@@ -55,8 +95,9 @@ function timeOf(iso: string): string | null {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-export function SuggestionQueue({ sessionId, quietLine }: SuggestionQueueProps): React.ReactElement {
+export function SuggestionQueue({ sessionId, quietLine, onAsk }: SuggestionQueueProps): React.ReactElement {
   const [proposals, setProposals] = useState<Proposal[]>([]);
+  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   // The cursor names a suggestion, not a slot. A stored index silently changes
   // meaning the moment anything above it leaves the queue -- answering a row
   // from the panel would slide a different suggestion into the open card under
@@ -94,6 +135,34 @@ export function SuggestionQueue({ sessionId, quietLine }: SuggestionQueueProps):
         if (cancelled) return;
         setProposals([]);
         setActiveId(null);
+      }
+    }
+
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
+  // Suggestions, on their own effect and their own terms. Note the dependency
+  // is still `sessionId` -- not because the fetch needs one, but because
+  // acquiring one sharpens the audience from shared to personal and the column
+  // should pick that up. The request itself is made with or without it.
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load(): Promise<void> {
+      try {
+        const list = await api.listSuggestions(sessionId);
+        if (cancelled) return;
+        setSuggestions(list.suggestions ?? []);
+      } catch {
+        // Same reasoning as the proposals load: a column whose whole job is
+        // quiet does not get a banner. The server-side `considered` list is
+        // where a silent engine explains itself; this is the client, and it has
+        // nothing useful to say that the quiet line does not already say.
+        if (cancelled) return;
+        setSuggestions([]);
       }
     }
 
@@ -199,6 +268,10 @@ export function SuggestionQueue({ sessionId, quietLine }: SuggestionQueueProps):
     [proposals, activeIndex, sessionId, showToast],
   );
 
+  // Offered only when the caller can actually send one. A surface with no
+  // `onAsk` would otherwise draw buttons that do nothing -- the exact thing the
+  // verb refusal at the top of this file is about.
+  const askable = onAsk ? suggestions : [];
   const rest = proposals.filter((_, i) => i !== activeIndex);
   const more = rest.length;
   const peek = rest.slice(0, 2);
@@ -208,12 +281,33 @@ export function SuggestionQueue({ sessionId, quietLine }: SuggestionQueueProps):
       {proposals.length > 0 && <p className="sq__eyebrow">Goose asks · scroll for the next</p>}
 
       {activeProposal === null ? (
-        // Nothing waiting is the good outcome, so it reads as reassurance
-        // rather than an empty inbox. The caller supplies a line about THIS
-        // house; a generic one would be wallpaper on a glanced-at screen.
-        <p className="sq__quiet" aria-live="polite">
-          {quietLine}
-        </p>
+        askable.length > 0 ? (
+          // Nothing is waiting on anybody, so the column offers instead of
+          // reporting. Each row is a question the pond can currently answer,
+          // with the fact that produced it underneath.
+          <div className="sq__offers">
+            <p className="sq__eyebrow">You could ask</p>
+            {askable.map((s) => (
+              <button
+                key={s.id}
+                type="button"
+                className="sq__offer"
+                onClick={() => onAsk?.(s.prompt)}
+              >
+                <span className="sq__offer-prompt">{s.prompt}</span>
+                <span className="sq__offer-why">{s.because}</span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          // Nothing waiting AND nothing to offer is the good outcome, so it
+          // reads as reassurance rather than an empty inbox. The caller supplies
+          // a line about THIS house; a generic one would be wallpaper on a
+          // glanced-at screen.
+          <p className="sq__quiet" aria-live="polite">
+            {quietLine}
+          </p>
+        )
       ) : (
         <>
           <h2 className="sq__summary">{activeProposal.summary}</h2>

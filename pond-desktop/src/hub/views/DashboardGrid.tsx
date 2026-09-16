@@ -75,9 +75,17 @@ export interface DashboardGridProps {
   onTalk: () => void;
   /** The chat session the suggestions belong to. Null before one is opened. */
   sessionId: string | null;
+  /**
+   * Put a question to the pond and go where the answer appears.
+   *
+   * Optional, and the column folds its offers away without it rather than
+   * drawing buttons that would do nothing. Both Home surfaces supply it; a
+   * future embedder that cannot reach chat simply does not.
+   */
+  onAsk?: (prompt: string) => void;
 }
 
-export function DashboardGrid({ onNavigate, onTalk, sessionId }: DashboardGridProps): ReactElement {
+export function DashboardGrid({ onNavigate, onTalk, sessionId, onAsk }: DashboardGridProps): ReactElement {
   const home = useHomeData();
   const now = useNow();
   const layout = useDashboardLayout();
@@ -192,7 +200,7 @@ export function DashboardGrid({ onNavigate, onTalk, sessionId }: DashboardGridPr
       />
 
       <div className="dash__body">
-        <SuggestionQueue sessionId={sessionId} quietLine={quietLine} />
+        <SuggestionQueue sessionId={sessionId} quietLine={quietLine} onAsk={onAsk} />
         <div className="dash__track">
           <WidgetTrack pages={pages} page={page} onPageChange={setRequestedPage} />
         </div>

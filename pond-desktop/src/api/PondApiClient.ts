@@ -49,6 +49,7 @@ import {
   type SessionMessageToolCall,
   type ProposalDecision,
   type ProposalList,
+  type SuggestionList,
   type SessionSummary,
   type MusicControlAction,
   type NowPlayingApiResponse,
@@ -1345,6 +1346,19 @@ export class PondApiClient {
     return this.get<ProposalList>(
       `/api/v1/proposals?session_id=${encodeURIComponent(sessionId)}`,
     );
+  }
+
+  /**
+   * What the household might want to ask.
+   *
+   * `sessionId` is OPTIONAL, unlike every proposal call, and that is the point:
+   * `state.sessionId` is null on a cold launch and never persisted, so a Home
+   * screen that waited for one would show nothing on exactly the launch this
+   * fills. Passing one when it exists only sharpens the audience.
+   */
+  listSuggestions(sessionId?: string | null): Promise<SuggestionList> {
+    const q = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
+    return this.get<SuggestionList>(`/api/v1/suggestions${q}`);
   }
 
   decideProposal(

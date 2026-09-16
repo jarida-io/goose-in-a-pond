@@ -368,6 +368,19 @@ pub struct Settings {
     #[serde(default)]
     pub voice_wake_word_transcriptions: Vec<String>,
 
+    /// Suggestion kinds the household never wants offered on Home.
+    ///
+    /// Holds [`suggestion`](crate::user_data::services::suggestion) suggestor
+    /// ids. Per KIND and not per instance, deliberately: a suggestion is
+    /// derived on every read and carries no durable id, so an instance-level
+    /// dismissal would be a key that never matched again -- the same shape as
+    /// the memory-edge table, which has a writer and no reachable reader.
+    /// "Never suggest the weather" is also what a household actually means.
+    ///
+    /// Empty is the shipped state: nothing is muted until somebody mutes it.
+    #[serde(default)]
+    pub suggestions_muted: Vec<String>,
+
     /// Selected TTS voice.
     ///
     /// Kokoro voice id (`af_heart`, `bm_george`, …) since the engine swap; a
@@ -1350,6 +1363,7 @@ impl Default for Settings {
             voice_kws_post_trigger_silence_ms: Self::default_kws_post_trigger_silence_ms(),
             voice_kws_cooldown_ms: Self::default_kws_cooldown_ms(),
             voice_wake_word_transcriptions: Vec::new(),
+            suggestions_muted: Vec::new(),
             voice_tts_voice: Self::default_tts_voice(),
             voice_tts_speed: Self::default_tts_speed(),
             voice_tts_quality: Self::default_tts_quality(),
@@ -2830,6 +2844,14 @@ mod tests {
         // Everything else is surfaced in the desktop UI (Settings tabs / hub
         // views / onboarding) and mirrored in the TS Settings type.
         const UI_WIRED: &[&str] = &[
+            // The suggestion engine's per-kind mute. UI_WIRED rather than
+            // HEADLESS_BY_DESIGN because a control that writes it really
+            // exists and a household can operate it -- but note WHERE it is:
+            // "Don't suggest this" on the Home suggestion card, not a row in
+            // Settings.tsx. This list asserts that a control exists, which is
+            // true; it does not assert which screen holds it. The TS mirror is
+            // in `pond-desktop/src/api/types.ts` like every other entry here.
+            "suggestions_muted",
             // Private mesh (#132 Milestone 2): the Mesh section's toggle
             // (Mesh.tsx) starts/stops the real libp2p MeshTransport. Requires
             // a `pond-server` build with the `mesh` feature — flipping it on

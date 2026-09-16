@@ -558,6 +558,15 @@ mod tests {
         async fn save_item(&self, _item: &ContextItem) -> anyhow::Result<()> {
             Ok(())
         }
+        async fn count_in_window(
+            &self,
+            _scope: &ProfileScope,
+            _kind: SourceKind,
+            _from: chrono::DateTime<chrono::Utc>,
+            _to: chrono::DateTime<chrono::Utc>,
+        ) -> anyhow::Result<u64> {
+            Ok(0)
+        }
         async fn recent_items(
             &self,
             scope: &ProfileScope,

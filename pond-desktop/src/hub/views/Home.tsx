@@ -17,6 +17,7 @@
 import { useAppState, useAppDispatch } from "../../state/AppContext";
 import type { GuiSection } from "../../desktopState";
 import { DashboardGrid } from "./DashboardGrid";
+import { sendTurn } from "../../state/chatRunStore";
 
 interface HomeViewProps {
   /**
@@ -45,6 +46,13 @@ export function HomeView({ go }: HomeViewProps) {
         go ? go(section) : dispatch({ type: "SET_SECTION", payload: section })
       }
       onTalk={() => dispatch({ type: "SET_MODE", payload: "voice" })}
+      // Same two steps as the classic surface, routed the hub's way. See
+      // `sections/Dashboard.tsx` for why the send comes first.
+      onAsk={(prompt) => {
+        sendTurn({ text: prompt });
+        if (go) go("chat");
+        else dispatch({ type: "SET_SECTION", payload: "chat" });
+      }}
     />
   );
 }

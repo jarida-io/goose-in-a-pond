@@ -401,3 +401,67 @@
     animation-duration: 0.01ms;
   }
 }
+
+/* ── offers: the column when nothing is waiting on anybody ──
+   A different shape from a proposal card on purpose. A proposal is one loud
+   question with two buttons under it; an offer is a row you tap. Same column,
+   same 34ch measure, no accent fill -- the accent is spent on the thing that
+   is actually asking, and when nothing is asking it is not spent at all.
+   DESIGN.md: "Spend the offset about twice per screen, and mean it both
+   times." An offer means it once, on press. */
+
+.sq__offers {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sq__offer {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  width: 100%;
+  min-height: 44px;
+  padding: 11px 13px;
+  box-sizing: border-box;
+  /* Chrome, not content: a hairline, per "the edge marks content, never
+     chrome". These are a way in, not the thing the screen is for. */
+  border: 1px solid var(--grey-200, var(--color-border));
+  border-radius: 10px;
+  background: transparent;
+  /* The global button rule centres everything; an offer reads as prose. */
+  justify-content: flex-start;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--dur-fast, 120ms) var(--ink-ease, ease);
+}
+
+.sq__offer:hover {
+  border-color: var(--color-text);
+}
+
+/* Press is physical: the row takes the offset it lacks at rest, so it lands
+   in the space its own shadow would have occupied. */
+.sq__offer:active {
+  box-shadow: 0 0 0 var(--color-text);
+  transform: translate(1px, 1px);
+}
+
+.sq__offer:focus-visible {
+  outline: 2px solid var(--pp);
+  outline-offset: 2px;
+}
+
+.sq__offer-prompt {
+  font: 600 15px/1.3 Quicksand, sans-serif;
+  color: var(--color-text);
+  max-width: 34ch;
+}
+
+.sq__offer-why {
+  font-size: 12.5px;
+  line-height: 1.35;
+  color: var(--color-text-secondary);
+  max-width: 34ch;
+}

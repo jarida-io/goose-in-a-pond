@@ -119,6 +119,10 @@ impl SettingsRepository for SqliteSettingsRepository {
             serde_json::to_string(&settings.voice_wake_word_transcriptions)
                 .unwrap_or_else(|_| "[]".to_string())
         );
+        upsert!(
+            "suggestions_muted",
+            serde_json::to_string(&settings.suggestions_muted).unwrap_or_else(|_| "[]".to_string())
+        );
         upsert!("voice_tts_voice", &settings.voice_tts_voice);
         upsert!("voice_tts_speed", settings.voice_tts_speed.to_string());
         upsert!("voice_tts_quality", &settings.voice_tts_quality);
@@ -784,6 +788,11 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
         "voice_wake_word_transcriptions" => {
             if let Ok(v) = serde_json::from_str::<Vec<String>>(value) {
                 s.voice_wake_word_transcriptions = v;
+            }
+        }
+        "suggestions_muted" => {
+            if let Ok(v) = serde_json::from_str::<Vec<String>>(value) {
+                s.suggestions_muted = v;
             }
         }
         "voice_tts_voice" => s.voice_tts_voice = value.to_string(),

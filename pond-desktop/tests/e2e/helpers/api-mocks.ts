@@ -268,6 +268,48 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     route.fulfill({ json: [] }),
   );
 
+  // Home's left column, both halves. Neither was mocked before, so every E2E
+  // run exercised the column's ERROR path and called it the quiet state -- the
+  // two are pixel-identical by design, which is exactly why the gap survived.
+  //
+  // Proposals: empty, which is the honest default. The reviewer has never
+  // yielded one on real hardware, so a fixture with rows in it would assert a
+  // state no pond has reached.
+  await page.route("**/api/v1/proposals*", (route) =>
+    route.fulfill({ json: { profile_id: "p-jerry", proposals: [] } }),
+  );
+
+  // Suggestions: two real ones, so the offers half is actually rendered rather
+  // than skipped past. Both are shapes the engine really emits, with a measured
+  // number in each reason -- a fixture whose `because` was a template would let
+  // a regression that dropped the number through.
+  await page.route("**/api/v1/suggestions*", (route) =>
+    route.fulfill({
+      json: {
+        suggestions: [
+          {
+            id: "memory_recall",
+            prompt: "What do you remember about me?",
+            because: "12 things remembered the pond can still reach.",
+            answered_by: "giap-memory",
+          },
+          {
+            id: "devices_online",
+            prompt: "Which of my devices are online?",
+            because: "3 devices registered here.",
+            answered_by: "giap-device",
+          },
+        ],
+        considered: [
+          { id: "calendar_today", silent_because: "no calendar account is connected" },
+          { id: "memory_recall", silent_because: null },
+          { id: "devices_online", silent_because: null },
+        ],
+        audience: "personal",
+      },
+    }),
+  );
+
   // Skills
   await page.route("**/api/v1/skills", (route) =>
     route.fulfill({ json: [] }),

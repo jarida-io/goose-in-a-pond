@@ -329,7 +329,6 @@ describe("what the screen will not claim", () => {
       hum: 0, wind: 0, sunrise: "", sunset: "", forecast: [],
     },
     rooms: [], devices: [], cameras: [], categories: [], scenes: [],
-    gooseSuggestions: [],
     weatherEnabled: false,
     devicesAreReal: true,
   };

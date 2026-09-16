@@ -128,7 +128,6 @@ export interface HomeData {
   categories: CategoryData[];
   scenes: SceneData[];
   nowPlaying: NowPlayingData;
-  gooseSuggestions: string[];
   /**
    * The pond answered with a location and weather turned on. False also covers
    * "has not answered yet", which is why nothing keyed on it may render a
@@ -188,8 +187,17 @@ const SILENT_PLAYER: NowPlayingData = {
  * repeating them. One consumer forgot, which is the whole reason this exists:
  * an empty fixture is the only one that cannot be mistaken for a house.
  *
- * `user` and `gooseSuggestions` survive because neither claims anything about
- * this home — a name to greet and four things you could say out loud.
+ * `user` survives because it claims nothing about this home — it is a name to
+ * greet.
+ *
+ * `gooseSuggestions` used to survive beside it on the same argument, and it is
+ * gone: four hardcoded "Goose, ..." strings with ZERO readers anywhere in the
+ * app. It read exactly like the field a suggestion engine should populate, and
+ * populating it would have rendered nowhere. The real thing is
+ * `GET /api/v1/suggestions`, which derives its offers from what this pond can
+ * actually do. One of the four was not even honest: "is the front door locked?"
+ * implies a lock the pond can read, and device state is the one thing the
+ * registry does not know.
  */
 export const EMPTY_HOME: HomeData = {
   user: "Jerry",
@@ -203,12 +211,6 @@ export const EMPTY_HOME: HomeData = {
   weatherEnabled: false,
   weatherStatus: "unknown",
   devicesAreReal: false,
-  gooseSuggestions: [
-    "Goose, what can you do?",
-    "Goose, is the front door locked?",
-    "Goose, make a new sticky note",
-    "Goose, what is the weather today?",
-  ],
 };
 
 export const HOME: HomeData = {
@@ -282,10 +284,4 @@ export const HOME: HomeData = {
   weatherEnabled: false,
   weatherStatus: "unknown",
   devicesAreReal: false,
-  gooseSuggestions: [
-    "Goose, set the house to Movie Time",
-    "Goose, is the front door locked?",
-    "Goose, make a new sticky note",
-    "Goose, lower the bedroom to 67°",
-  ],
 };

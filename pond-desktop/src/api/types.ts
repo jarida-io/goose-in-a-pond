@@ -83,6 +83,15 @@ export interface Settings {
   // Voice pipeline
   voice_wake_word?: string;
   voice_wake_word_transcriptions?: string[];
+  /**
+   * Suggestion kinds this household never wants offered on Home.
+   *
+   * Holds suggestor ids (`"weather_today"`, `"memory_recall"`, ...). Per kind
+   * and not per instance: a suggestion is derived on every read and has no
+   * durable id, so an instance-level dismissal would be a key that never
+   * matched again.
+   */
+  suggestions_muted?: string[];
   voice_recording_duration_secs?: number;
   voice_whisper_url?: string;
   active_whisper_model?: string;
@@ -1424,11 +1433,26 @@ export interface Proposal {
   profile_id: string | null;
   created_at: string;
   expires_at: string;
-  proposed_action: string;
+  /**
+   * A TAGGED UNION, not a string. `TaskKind` is
+   * `#[serde(tag = "type", rename_all = "snake_case")]`, so the server sends
+   * `{"type":"agent_prompt","prompt":"..."}`.
+   *
+   * This was typed `string` until now, which is why `SuggestionQueue`'s header
+   * warns "never bind it, it renders [object Object]" -- the type could not
+   * stop anyone, so a comment had to. Typed properly, binding the wrong half is
+   * a compile error instead of a rendering bug.
+   */
+  proposed_action:
+    | { type: "agent_prompt"; prompt: string }
+    | { type: "webhook"; url: string }
+    | { type: "sensor_trigger"; device_id: string; signal: string };
   trigger: {
     kind: string;
-    source_id: string;
-    signal: string;
+    /** Nullable on the wire: `Option<String>` in the domain. */
+    source_id: string | null;
+    /** Nullable on the wire: `Option<String>` in the domain. */
+    signal: string | null;
     observed_at: string;
   };
 }
@@ -1436,6 +1460,37 @@ export interface Proposal {
 export interface ProposalList {
   profile_id: string | null;
   proposals: Proposal[];
+}
+
+/**
+ * One thing the household might want to ask, from `GET /api/v1/suggestions`.
+ *
+ * Mirrors `pond_core::user_data::services::suggestion::Suggestion`. Note there
+ * is no expiry and no `profile_id`: a suggestion is an offer addressed to
+ * nobody, and the tap is the consent -- which is why its route needs neither a
+ * session nor a resolved member, and why it answers where `/proposals` 403s.
+ */
+export interface Suggestion {
+  /** Stable per KIND, so muting one mutes the same one tomorrow. */
+  id: string;
+  /** The sentence shown AND the prompt sent. One string, deliberately. */
+  prompt: string;
+  /** The measured fact behind it. Never blank. */
+  because: string;
+  /** The tool group that can answer `prompt`. */
+  answered_by: string;
+}
+
+/** Why one suggestor produced nothing, so quiet can be told from broken. */
+export interface SuggestionConsidered {
+  id: string;
+  silent_because: string | null;
+}
+
+export interface SuggestionList {
+  suggestions: Suggestion[];
+  considered: SuggestionConsidered[];
+  audience: "personal" | "shared";
 }
 
 /** Approve or reject. The server accepts no third value. */
