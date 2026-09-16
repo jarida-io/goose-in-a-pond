@@ -37,12 +37,22 @@ test("Hub visual screenshot", async ({ page }) => {
   await page.keyboard.press("Escape");
 
   // Check AskGoose bar present
-  const hasAskGoose = await page.locator(".askgoose").isVisible();
-  console.log(`AskGoose bar visible: ${hasAskGoose}`);
+  // The AskGoose bar is gone -- deleted in dbdf02a1, "delete the components the
+  // Home redesign left behind". Its job is now two round controls at the foot
+  // of the screen: `.dash__voice` starts a voice turn, and the left column
+  // offers questions you can tap. This assertion was left behind when the rest
+  // of this file was migrated to the drawer, so it has been failing on a
+  // selector that no longer exists in `src/` at all.
+  const hasVoiceButton = await page.locator(".dash__voice").isVisible();
+  console.log(`Talk-to-Goose button visible: ${hasVoiceButton}`);
 
-  // Check room pills
+  // Room pills went the same way as the AskGoose bar, in the same commit
+  // (dbdf02a1). Home is three arrangeable cards and an asking column now; there
+  // is no room filter on it, so there is nothing here to assert. Reported for
+  // the log rather than deleted outright, because a reader comparing this file
+  // against an old screenshot should be told where they went.
   const hasPills = await page.locator(".rpills").isVisible();
-  console.log(`Room pills visible: ${hasPills}`);
+  console.log(`Room pills visible: ${hasPills} (expected false -- removed in dbdf02a1)`);
 
   // Home's device tiles are HomeControlsCard's now; DeviceTile (.dtile) still
   // ships, in the Devices section and in chat's ResultCard, but not here.
@@ -75,12 +85,19 @@ test("Hub visual screenshot", async ({ page }) => {
     console.log(`  [${i}] tag=${tag} aria-label="${label}"`);
   }
 
-  // A11y: AskGoose element
-  const askGooseBar = page.locator(".askgoose");
-  const askGooseTag = await askGooseBar.evaluate((el) => el.tagName.toLowerCase());
-  const askGooseBtn = page.locator(".askgoose button, .askgoose__bar");
-  const askBtnCount = await askGooseBtn.count();
-  console.log(`\nAskGoose outer tag: ${askGooseTag}, inner buttons: ${askBtnCount}`);
+  // A11y: the asking column. It carries either the proposal that is waiting or
+  // the questions the pond can currently answer, and on a pond with neither it
+  // carries one sentence. All three states are legitimate, so this reports
+  // rather than asserts -- what it pins is that the column EXISTS.
+  const offers = page.locator(".sq__offer");
+  const offerCount = await offers.count();
+  const quiet = await page.locator(".sq__quiet").count();
+  console.log(`\nAsking column -- offers: ${offerCount}, quiet line: ${quiet > 0}`);
+  for (let i = 0; i < Math.min(offerCount, 3); i++) {
+    const prompt = await offers.nth(i).locator(".sq__offer-prompt").textContent();
+    const why = await offers.nth(i).locator(".sq__offer-why").textContent();
+    console.log(`  offer[${i}] "${prompt}" -- ${why}`);
+  }
 
   // A11y: the track's page dots. Every one names the page it goes to and the
   // number of pages there are, because "dot 2" tells nobody anything.
@@ -97,8 +114,17 @@ test("Hub visual screenshot", async ({ page }) => {
   // up to 2px of border on each side depending on box-sizing.
   expect(drawerWidth).toBeGreaterThanOrEqual(344);
   expect(drawerWidth).toBeLessThanOrEqual(348);
-  expect(hasAskGoose).toBe(true);
-  expect(hasPills).toBe(true);
+  expect(hasVoiceButton).toBe(true);
+  // Every offer is tappable at the hub's 44px floor, and carries the fact that
+  // produced it -- an offer with no reason is the template the engine exists
+  // not to be.
+  for (let i = 0; i < offerCount; i++) {
+    const box = await offers.nth(i).boundingBox();
+    expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+    const why = (await offers.nth(i).locator(".sq__offer-why").textContent()) ?? "";
+    expect(why.trim().length).toBeGreaterThan(0);
+  }
+  expect(hasPills, "room pills were deleted in dbdf02a1; this must stay false").toBe(false);
   expect(tileCount).toBeGreaterThan(0);
 });
 
@@ -214,13 +240,13 @@ test("Old shell sections still work (no hub regression)", async ({ page }) => {
   console.log(`Hub shell visible after clicking Settings: ${hubAfterSettings} (expected: false)`);
   expect(hubAfterSettings).toBe(false);
 
-  // Preview button should be present in Settings
-  const previewBtn = page.getByRole("button", { name: /preview goose hub redesign/i });
-  await expect(previewBtn).toBeVisible();
-  console.log("Preview button visible in Settings: true");
-
-  // Clicking Preview should transition to Hub
-  await previewBtn.click();
-  await page.waitForSelector(".ghub", { timeout: 8000 });
-  console.log("Hub renders after clicking Preview: true");
+  // There is no "Preview Goose Hub redesign" button to click. This half of the
+  // test outlived the control it named: the entry point survives only in
+  // comments, and `hub-smoke.spec.ts` says so at the top of its own file. Every
+  // hub test enters through `giap-force-hub` instead, which is what the
+  // reducer's opt-in exists for.
+  //
+  // What this test is REALLY about -- that the classic shell does not
+  // accidentally render the hub -- is asserted twice above and is untouched by
+  // the missing button.
 });
