@@ -152,10 +152,38 @@ struct FragmentRow {
     corrects: Option<String>,
 }
 
+/// Read a stored timestamp, in either shape this table has ever held.
+///
+/// The writer at `add` formats `%Y-%m-%d %H:%M:%S`, and for a long time that
+/// was the only format this parsed — with `Utc::now()` as the fallback. That
+/// fallback is a LIE with a specific shape: a row whose timestamp cannot be
+/// read comes back created this instant, so the oldest note in the store
+/// reports as the newest. It sorts to the front of `search_recent`, it beats
+/// every real memory on recency, and nothing anywhere says it happened.
+///
+/// It went unnoticed because nothing showed a memory's date to anybody. The
+/// composed-suggestion tier does — "saved 3 days ago" under the question — and
+/// the first end-to-end run against a real model printed "saved today" for
+/// seven notes that were between two and forty-five days old.
+///
+/// RFC3339 is accepted because rows written by anything other than `add` carry
+/// it: `datetime('now')` column defaults, hand-seeded fixtures, and any future
+/// writer that reaches for the obvious format. The fallback stays — a read path
+/// that returned `Result` would push the decision to callers who have no better
+/// answer — but it is no longer silent.
 fn parse_dt(s: &str) -> chrono::DateTime<Utc> {
-    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
-        .map(|ndt| ndt.and_utc())
-        .unwrap_or_else(|_| Utc::now())
+    if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+        return ndt.and_utc();
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return dt.with_timezone(&Utc);
+    }
+    tracing::debug!(
+        timestamp = s,
+        "unreadable memory timestamp — reporting it as now, which makes an old \
+         note look new"
+    );
+    Utc::now()
 }
 
 fn parse_segment(s: &str) -> Option<MemorySegment> {

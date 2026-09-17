@@ -878,6 +878,15 @@ pub struct Settings {
     /// turn and stored as categorised memories (segment, importance, decay).
     #[serde(default = "Settings::default_memory_extraction_enabled")]
     pub memory_extraction_enabled: bool,
+    /// Compose questions out of the household's own memories, on the lane.
+    ///
+    /// Separate from `memory_extraction_enabled` because they are different
+    /// bargains: extraction decides what the pond REMEMBERS, and this decides
+    /// what it OFFERS. A household that wants to be remembered and not
+    /// suggested to is a coherent position, and folding the two would make
+    /// turning off the offers also stop the remembering.
+    #[serde(default = "Settings::default_suggestion_generation_enabled")]
+    pub suggestion_generation_enabled: bool,
 
     /// When true, a background task periodically prunes/archives decayed memories.
     #[serde(default = "Settings::default_memory_cleanup_enabled")]
@@ -1427,6 +1436,7 @@ impl Default for Settings {
             agent_memory_limit: Self::default_agent_memory_limit(),
             tool_output_compaction: Self::default_tool_output_compaction(),
             memory_extraction_enabled: true,
+            suggestion_generation_enabled: Self::default_suggestion_generation_enabled(),
             memory_cleanup_enabled: true,
             memory_consolidation_enabled: Self::default_memory_consolidation_enabled(),
             session_titling_enabled: Self::default_session_titling_enabled(),
@@ -1833,6 +1843,15 @@ impl Settings {
         0.15
     }
     fn default_tool_output_compaction() -> bool {
+        true
+    }
+    /// On by default.
+    ///
+    /// The template tier answers whether or not this runs, so the cost of it
+    /// being on is one model call per idle period and the cost of it being off
+    /// is a household reading the same three questions forever — which is the
+    /// complaint this whole surface was built from.
+    fn default_suggestion_generation_enabled() -> bool {
         true
     }
     fn default_memory_extraction_enabled() -> bool {
@@ -2906,6 +2925,7 @@ mod tests {
             "memory_extraction_enabled",
             "memory_extraction_interval_secs",
             "memory_extraction_max_facts",
+            "suggestion_generation_enabled",
             "memory_graph_enabled",
             "memory_prune_threshold",
             "mic_enabled",

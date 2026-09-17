@@ -146,6 +146,21 @@ pub struct AppState {
     /// pass skips the quiet period it would otherwise wait for. `None` when there is no sweep to
     /// wake (no embedder, or a CLI process); the route still clears, so the next process refills.
     pub index_reindex: Option<Arc<tokio::sync::Notify>>,
+    /// Seeing the inference lane, and asking one of its jobs to run now.
+    ///
+    /// `None` in a process that has no lane — the CLI paths, and every
+    /// integration test that builds an `AppState` by hand. The routes answer
+    /// with "there is no lane here" rather than an empty list, because a
+    /// household looking at six jobs all reading "never run" deserves to know
+    /// whether that is the lane's answer or the absence of one.
+    pub lane: Option<Arc<dyn pond_core::user_data::ports::lane_control::LaneControl>>,
+    /// The suggestions the pond composed out of the household'''s own memories.
+    ///
+    /// Not an `Option`: unlike the lane, this is a table, and every process
+    /// that has a database has one. A `None` here would make "no composed
+    /// suggestions" and "this build cannot compose" the same empty list.
+    pub suggestion_queue:
+        Arc<dyn pond_core::user_data::ports::suggestion_queue::SuggestionQueueRepository>,
     /// Pull every connected account now instead of waiting for the timer. The half-hourly sweep
     /// suits a calendar that changes weekly, not somebody who has just entered a password and
     /// wants to know whether it worked. `None` where nothing can sync (no secret store, or a CLI

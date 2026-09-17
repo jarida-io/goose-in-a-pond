@@ -56,6 +56,9 @@ async fn make_harness() -> Harness {
 
     let state = Arc::new(AppState {
         warmup: Default::default(),
+        suggestion_queue: std::sync::Arc::new(
+            pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
+        ),
         db,
         onboarding_repo: Arc::new(SqlxOnboardingRepository::new(pool.clone())),
         handshake: Arc::new(mock_hs),
@@ -87,6 +90,7 @@ async fn make_harness() -> Harness {
         embedding_provider: None,
         vector_index: None,
         index_reindex: None,
+        lane: None,
         account_sync: None,
         // The real store, so the aggregate SQL and the TEXT range comparison
         // are what the assertions actually exercise.

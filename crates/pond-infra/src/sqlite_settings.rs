@@ -331,6 +331,14 @@ impl SettingsRepository for SqliteSettingsRepository {
             }
         );
         upsert!(
+            "suggestion_generation_enabled",
+            if settings.suggestion_generation_enabled {
+                "true"
+            } else {
+                "false"
+            }
+        );
+        upsert!(
             "memory_cleanup_enabled",
             if settings.memory_cleanup_enabled {
                 "true"
@@ -1005,6 +1013,7 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
         "network_mode" => s.network_mode = value.to_string(),
         // Memory lifecycle
         "memory_extraction_enabled" => s.memory_extraction_enabled = value == "true",
+        "suggestion_generation_enabled" => s.suggestion_generation_enabled = value == "true",
         "memory_cleanup_enabled" => s.memory_cleanup_enabled = value == "true",
         "memory_consolidation_enabled" => s.memory_consolidation_enabled = value == "true",
         "session_titling_enabled" => s.session_titling_enabled = value == "true",

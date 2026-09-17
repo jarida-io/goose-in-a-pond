@@ -120,6 +120,9 @@ async fn make_app(wire_index: bool, wire_embedder: bool) -> Harness {
 
     let state = Arc::new(AppState {
         warmup: Default::default(),
+        suggestion_queue: std::sync::Arc::new(
+            pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
+        ),
         db: Arc::new(db),
         onboarding_repo: Arc::new(CompletedOnboarding),
         handshake: Arc::new(hs),
@@ -147,6 +150,7 @@ async fn make_app(wire_index: bool, wire_embedder: bool) -> Harness {
         // `if let Some(provider)`. Wiring it whenever the index is present would
         // make this harness claim a refill on a pond where nothing can refill.
         index_reindex: (wire_index && wire_embedder).then(|| reindex.clone()),
+        lane: None,
         account_sync: None,
         sensor_storage: Arc::new(MockSensorStorage::new()),
         camera_storage: Arc::new(MockCameraStorage::new()),

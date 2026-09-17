@@ -327,6 +327,157 @@ impl ConversationExtractor for LlmConversationExtractor {
     }
 }
 
+/// The same text with one level of quote-escaping removed, when it has any.
+///
+/// MEASURED, on gemma-4-E2B against a real eight-message conversation. The
+/// model produced a COMPLETE, correct answer — ten good notes and two reminders,
+/// properly nested, properly closed, inside a ```json fence — and wrote every
+/// quote as `\"`:
+///
+/// ```text
+/// {\"memories\": [{\"note\": \"Jerry drinks coffee only before noon.\", ...
+/// ```
+///
+/// A backslash outside a string is not valid JSON, so every candidate above
+/// failed and the window came back `parse_failures=1` with nothing written. Ten
+/// notes the model got right were discarded over the escaping of a quote.
+///
+/// This is a model writing what it thinks a JSON string literal looks like —
+/// the same confusion that puts a ```json fence around it — and on the model
+/// this pond ships it is not rare.
+///
+/// `None` when there is nothing escaped, so the caller does not parse the same
+/// bytes twice. Tried only AFTER every unmodified candidate has failed: a reply
+/// that legitimately contains `\"` inside a note parses as itself, and
+/// unescaping it first would break that note in half.
+fn unescaped(slice: &str) -> Option<String> {
+    slice.contains("\\\"").then(|| slice.replace("\\\"", "\""))
+}
+
+/// Recover the complete items from a reply the model ran out of room to finish.
+///
+/// MEASURED, on gemma-4-E2B against a real eight-message conversation. The
+/// reply opened a ```json fence, wrote two entirely good notes, and stopped
+/// mid-word inside the third:
+///
+/// ```text
+/// {"memories":[
+///   {"note":"... reachable before the 7:15 school run every morning.","kind":"context"},
+///   {"note":"Jerry prefer
+/// ```
+///
+/// Every candidate above needs VALID JSON, and a truncated reply closes
+/// nothing — so `rfind('}')` lands on the end of the last complete item and the
+/// slice is missing its `]` and its outer `}`. The whole window was discarded
+/// as `parse_failures=1`, and two notes the model got right went with it. On a
+/// pond whose model is small enough to truncate at all, that is most windows.
+///
+/// So: scan the items array, keep every object whose braces balance, discard
+/// the partial one at the end. Nothing else is repaired — this does not close
+/// quotes, guess at a missing field, or complete a word.
+///
+/// # It only fires on a reply that is actually truncated
+///
+/// One rule does that work: a bare array is only read when it OPENS the reply.
+/// Otherwise this reaches into `{"facts":[...]}`, the old prompt's shape, and
+/// hands its contents back as `memories` — which moves the watermark past every
+/// window in the store, once, and never comes back.
+///
+/// # Why this returns `Ok` rather than `Unparseable`
+///
+/// It advances the cursor past a window whose tail was never mined, and that is
+/// the deliberate trade. The alternative is re-reading the same window on every
+/// pass, truncating at the same place (these calls run at temperature 0) and
+/// writing nothing, forever. Keeping what the model finished and moving on is
+/// progress; looping on it is not. An item that survives salvage still faces
+/// every gate below — a partial object missing `note` is dropped there, not
+/// admitted here.
+fn salvage_truncated(cleaned: &str) -> Option<serde_json::Value> {
+    // Find the items array: the new schema's `"memories": [`, or a bare `[`
+    // when the model answered in the old prompt's shape.
+    //
+    // The bare case requires the array to OPEN the reply, exactly as the
+    // `bracket` candidate above does. Without that restriction this reaches
+    // inside `{"facts":[...]}` -- a well-formed answer to a schema nobody asked
+    // for -- pulls out its array and returns it as `memories`. That is the
+    // failure `an_object_with_neither_key_is_a_parse_failure` exists for, and
+    // it is the worst one available here: it moves the watermark past every
+    // window in the store, once, and never comes back.
+    let start = match cleaned.find("\"memories\"") {
+        Some(key) => cleaned[key..].find('[').map(|offset| key + offset + 1)?,
+        None => {
+            let open = cleaned.find('[')?;
+            let brace_first = cleaned.find('{').is_some_and(|b| b < open);
+            if brace_first {
+                return None;
+            }
+            open + 1
+        }
+    };
+
+    let bytes = cleaned.as_bytes();
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    let mut depth = 0usize;
+    let mut item_start = None;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (i, &b) in bytes.iter().enumerate().skip(start) {
+        // Braces inside a string are not structure. A note containing "{" is
+        // unusual and a note containing an apostrophe-escaped quote is not, so
+        // the string state has to be tracked properly rather than counted.
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' => {
+                if depth == 0 {
+                    item_start = Some(i);
+                }
+                depth += 1;
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    if let Some(from) = item_start.take() {
+                        if let Ok(value) =
+                            serde_json::from_str::<serde_json::Value>(&cleaned[from..=i])
+                        {
+                            items.push(value);
+                        }
+                    }
+                }
+            }
+            // The array closed. Stop scanning — but KEEP what was collected.
+            //
+            // This was a `return None` for one commit, on the theory that a
+            // closed array means "not truncated" and salvaging it could
+            // launder a wrong answer into a right one. Mutation testing
+            // disproved the second half: flipping it back changed no test,
+            // because the laundering case (`{"facts":[...]}`) is already
+            // refused by the bare-array rule above, which requires the array to
+            // OPEN the reply. What the refusal did cost is real — a reply whose
+            // items are fine and whose tail is malformed (a trailing comma
+            // after a closed array is the common one) would have gone back as
+            // unparseable with perfectly good notes inside it.
+            b']' if depth == 0 => break,
+            _ => {}
+        }
+    }
+
+    // One complete item is worth keeping; none means there was nothing to
+    // salvage and the reply really is unparseable.
+    (!items.is_empty()).then(|| serde_json::json!({ "memories": items }))
+}
+
 /// Whether a parsed value is an answer to the question that was asked.
 ///
 /// An array is the old schema's memories list and is lifted into the new shape.
@@ -346,7 +497,10 @@ fn usable_shape(value: serde_json::Value) -> Option<serde_json::Value> {
 /// Three shapes are accepted, in this order: the object as written, the object
 /// recovered from between the first `{` and the last `}` (a model that added a
 /// preamble), and a bare `[...]` read as the `memories` array (a model that
-/// answered the shape of the old prompt). Anything else is
+/// answered the shape of the old prompt), each of those again with one level of
+/// quote-escaping removed (see `unescaped`), and finally the complete items of
+/// a reply the model ran out of room to finish (see `salvage_truncated`, which
+/// is tried LAST because it repairs by discarding). Anything else is
 /// [`ExtractionError::Unparseable`] -- NOT an empty result, which in a batch
 /// design would advance a cursor past a window nobody read.
 pub fn parse_window_response(
@@ -389,11 +543,33 @@ pub fn parse_window_response(
         _ => None,
     };
 
-    let value = [Some(cleaned.as_str()), brace, bracket]
+    let slices = [Some(cleaned.as_str()), brace, bracket];
+
+    // Every candidate as written, first. Nothing below may run while a slice
+    // still parses on its own terms.
+    let value = slices
         .into_iter()
         .flatten()
         .filter_map(|slice| serde_json::from_str::<serde_json::Value>(slice).ok())
         .find_map(usable_shape)
+        // Then the same candidates with one level of quote-escaping removed —
+        // a complete, correct answer whose every quote is `\"`. See
+        // `unescaped`. After the plain pass, because a note that really does
+        // contain an escaped quote parses as itself and must not be unescaped.
+        .or_else(|| {
+            slices
+                .into_iter()
+                .flatten()
+                .filter_map(unescaped)
+                .filter_map(|slice| serde_json::from_str::<serde_json::Value>(&slice).ok())
+                .find_map(usable_shape)
+        })
+        // LAST, and only after every valid-JSON reading has failed. The salvage
+        // repairs truncation by DISCARDING a trailing item, which on a
+        // well-formed reply would throw away a memory the model finished. Both
+        // forms, because a reply can be over-escaped AND truncated.
+        .or_else(|| salvage_truncated(cleaned.as_str()))
+        .or_else(|| unescaped(cleaned.as_str()).and_then(|u| salvage_truncated(&u)))
         .ok_or_else(unparseable)?;
 
     let mut extraction = WindowExtraction::default();
@@ -512,6 +688,152 @@ mod tests {
     /// The window and the known-memories block both grow with the
     /// conversation; this is the one component that is authored, so it is the
     /// one whose size can be asserted rather than hoped for.
+    /// The reply a real gemma-4-E2B gave on this pond, and what it used to cost.
+    ///
+    /// A complete, correct answer — ten notes and two reminders, properly
+    /// nested and closed, inside a ```json fence — with every quote written as
+    /// `\"`. A backslash outside a string is not valid JSON, so every candidate
+    /// failed and the window came back `parse_failures=1` with nothing written.
+    #[test]
+    fn a_reply_whose_every_quote_is_escaped_still_yields_its_notes() {
+        let over_escaped = concat!(
+            "```json\n{\n  \\\"memories\\\": [\n",
+            "    {\n      \\\"note\\\": \\\"Jerry drinks coffee only before noon.\\\",\n",
+            "      \\\"kind\\\": \\\"preference\\\"\n    },\n",
+            "    {\n      \\\"note\\\": \\\"Brother Manu lives in Kisumu and visits at Christmas.\\\",\n",
+            "      \\\"kind\\\": \\\"relationship\\\"\n    }\n  ]\n}\n```"
+        );
+        // It really is invalid JSON as written -- the control for everything
+        // below, and the reason the pond lost ten notes.
+        assert!(
+            serde_json::from_str::<serde_json::Value>(over_escaped).is_err(),
+            "the fixture must be the malformed thing the model actually sent"
+        );
+
+        let out = parse_window_response(over_escaped, 5, false)
+            .expect("a correct answer must not be lost to the escaping of a quote");
+        assert_eq!(out.memories.len(), 2);
+        assert!(out.memories[0].note.contains("coffee only before noon"));
+        assert!(out.memories[1].note.contains("Kisumu"));
+    }
+
+    /// The unescape runs only after every unmodified candidate has failed, so a
+    /// note that legitimately contains an escaped quote parses as itself. Run
+    /// the other way round, this fixture's note would be broken in half.
+    #[test]
+    fn a_note_containing_a_real_quotation_is_not_unescaped() {
+        let raw = r#"{"memories":[{"note":"Jerry says \"no confirmations\" when asked twice.","kind":"preference"}]}"#;
+        let out = parse_window_response(raw, 5, false).expect("valid JSON");
+        assert_eq!(out.memories.len(), 1);
+        assert!(
+            out.memories[0].note.contains("\"no confirmations\""),
+            "the quotation survives: {:?}",
+            out.memories[0].note
+        );
+    }
+
+    /// The reply a real gemma-4-E2B gave, verbatim, and what it used to cost.
+    ///
+    /// An eight-message conversation, temperature 0. The model opened a ```json
+    /// fence, wrote two entirely good notes and stopped mid-word inside the
+    /// third. Every candidate above needs valid JSON, so the window came back
+    /// `parse_failures=1`, nothing was written, and the cursor did not advance
+    /// — meaning the next pass would read the same window, truncate at the same
+    /// place, and write nothing again.
+    #[test]
+    fn a_reply_the_model_ran_out_of_room_to_finish_keeps_what_it_finished() {
+        let truncated = "```json\n{\n  \"memories\": [\n    {\n      \"note\": \"Jerry moves the espresso machine to the window shelf so it is reachable before the 7:15 school run every morning.\",\n      \"kind\": \"context\"\n    },\n    {\n      \"note\": \"Jerry buys beans from Kahawa on Ngong Road, a kilo at a time.\",\n      \"kind\": \"context\"\n    },\n    {\n      \"note\": \"Jerry prefer";
+
+        let out = parse_window_response(truncated, 5, false)
+            .expect("two finished notes are worth more than nothing");
+        assert_eq!(
+            out.memories.len(),
+            2,
+            "both complete items, and not the partial one"
+        );
+        assert!(out.memories[0].note.contains("espresso machine"));
+        assert!(out.memories[1].note.contains("Kahawa"));
+        assert!(
+            !out.memories
+                .iter()
+                .any(|m| m.note.starts_with("Jerry prefer")),
+            "the half-written item is discarded, never completed or guessed at"
+        );
+    }
+
+    /// The two ways salvage could launder a wrong answer into a right one, both
+    /// refused. This is the regression guard for
+    /// `an_object_with_neither_key_is_a_parse_failure`, which this salvage
+    /// broke the first time it was written.
+    #[test]
+    fn salvage_refuses_anything_that_is_not_actually_truncated() {
+        // A CLOSED array is not truncated; whatever is wrong with it cannot be
+        // fixed by discarding a trailing item.
+        assert!(
+            parse_window_response(
+                r#"{"facts":[{"content":"Jerry prefers short answers.","segment":"preference"}]}"#,
+                3,
+                false
+            )
+            .is_err(),
+            "the old prompt's shape must not be read as the new one"
+        );
+
+        // And the same wrong schema, truncated, is still not this schema.
+        assert!(
+            parse_window_response(
+                r#"{"facts":[{"content":"Jerry prefers short answers.","segment":"preference"},{"content":"Jerry buys"#,
+                3,
+                false
+            )
+            .is_err(),
+            "a bare array is only salvaged when it OPENS the reply"
+        );
+    }
+
+    /// The recall the closed-array refusal would have cost. A trailing comma
+    /// after a closed array is the commonest malformed tail these models write,
+    /// and the notes inside it are perfectly good.
+    #[test]
+    fn a_closed_array_with_a_malformed_tail_still_yields_its_notes() {
+        let raw = "{\"memories\":[{\"note\":\"Jerry buys beans from Kahawa on Ngong Road.\",\"kind\":\"context\"}],}";
+        let out = parse_window_response(raw, 5, false).expect("the notes inside are fine");
+        assert_eq!(out.memories.len(), 1);
+        assert!(out.memories[0].note.contains("Kahawa"));
+    }
+
+    /// The salvage is tried LAST and must never touch a reply that parses. It
+    /// repairs by DISCARDING, so on a well-formed reply it would throw away the
+    /// final memory the model actually finished.
+    #[test]
+    fn a_reply_that_parses_never_reaches_the_salvage() {
+        let whole = r#"{"memories":[{"note":"one thing worth keeping about them","kind":"context"},{"note":"a second thing worth keeping too","kind":"context"}]}"#;
+        let out = parse_window_response(whole, 5, false).expect("valid JSON");
+        assert_eq!(
+            out.memories.len(),
+            2,
+            "the last item survives a clean parse"
+        );
+    }
+
+    /// Salvage must not turn genuine rubbish into a false success. A cursor
+    /// advanced past a window nobody read is the failure `Unparseable` exists
+    /// for, and this is the path that could quietly reintroduce it.
+    #[test]
+    fn rubbish_is_still_unparseable_after_the_salvage() {
+        for raw in [
+            "I'm sorry, I can't help with that.",
+            "```json\n{\n  \"memories\": [\n    {\n      \"no",
+            "{\"memories\": [",
+            "",
+        ] {
+            assert!(
+                parse_window_response(raw, 5, false).is_err(),
+                "should stay unparseable: {raw:?}"
+            );
+        }
+    }
+
     #[test]
     fn the_prompt_fits_its_stated_ceiling() {
         let prompt = rendered();

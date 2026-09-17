@@ -1,0 +1,54 @@
+-- When each inference-lane job last took the slot.
+--
+-- ── What this replaces ───────────────────────────────────────────────────────
+--
+-- A `HashMap<LaneJob, Instant>` living in the lane runner, which is to say: a
+-- clock that is erased by every restart. On a desktop pond that is several
+-- times a day, and the consequence is not "the lane forgets a little".
+--
+-- `select_next` treats `since_last_run: None` as `Duration::MAX` -- the most
+-- starved a job can be -- and `should_run` skips the interval-floor check
+-- entirely when it is `None`, because a job that has never run cannot be too
+-- soon. Both are correct readings of "never ran". They are the wrong reading of
+-- "ran four minutes ago, in the process before this one".
+--
+-- So after every restart all seven jobs are simultaneously floor-exempt and
+-- maximally starved. They are held back only by the activity gate, and the
+-- moment somebody says anything to the pond that gate opens and the whole set
+-- becomes eligible at once, ordered by declaration rather than by need. A job
+-- with a 24-hour floor can run twice in ten minutes across a restart and
+-- nothing in the lane can tell.
+--
+-- ── Why a table and not a settings key ───────────────────────────────────────
+--
+-- Seven rows that are written by a background loop and read once at boot. The
+-- settings table is a flat key-value store whose every field needs both an
+-- `upsert!` and an `apply_key` arm, and whose contents are a household's
+-- configuration -- things somebody chose. Nobody chose these. They are a log.
+--
+-- ── `job` is the wire name, and unknown ones are ignored on read ─────────────
+--
+-- The primary key is `LaneJob::as_str()`, the same spelling the API route and
+-- the desktop panel use. A release that removes a job leaves its row behind
+-- rather than requiring a migration to chase it, and the loader skips any name
+-- `LaneJob::from_wire` does not recognise. The alternative -- failing the load
+-- on an unknown row -- would turn a deleted job into a pond that will not
+-- start.
+--
+-- ── Against a database that already has rows ─────────────────────────────────
+--
+-- Empty. There is no backfill and there cannot be one: no pond has ever
+-- recorded when a lane job ran, so every existing pond starts with seven
+-- genuine "never"s, which is what it already had at every boot. The difference
+-- begins at the first run after upgrading, and the first restart after that is
+-- the first time a pond has ever remembered.
+
+CREATE TABLE IF NOT EXISTS lane_job_runs (
+    -- `LaneJob::as_str()`. Not a foreign key to anything; the set of jobs is a
+    -- compile-time enum, not data.
+    job          TEXT PRIMARY KEY,
+    -- RFC3339, UTC. Written at the moment the slot is released -- which is the
+    -- moment the run ended, whatever the outcome, matching what the in-memory
+    -- clock has always recorded.
+    last_run_at  TEXT NOT NULL
+);

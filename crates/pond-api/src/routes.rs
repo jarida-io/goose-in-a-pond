@@ -386,6 +386,12 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/memories", get(list_memories).post(save_memory))
         // Before the `{id}` route, or axum matches "extraction-status" as an id.
         .route("/memories/extraction-status", get(extraction_status))
+        // The background jobs that spend inference: what each is waiting for,
+        // and a way to stop waiting. See `ports::lane_control` for why both
+        // halves are needed.
+        .route("/suggestions/{id}/taken", post(suggestion_taken))
+        .route("/lane", get(lane_status))
+        .route("/lane/jobs/{job}/run", post(run_lane_job))
         .route("/memories/{id}", delete(delete_memory).put(update_memory))
         // ── Reminders ─────────────────────────────────────────────────────────
         //
@@ -3715,13 +3721,12 @@ async fn compact_session(
     ))
 }
 
-/// POST /api/v1/sessions/retitle — rename conversations now, without waiting
-/// for an idle window.
+/// POST /api/v1/sessions/retitle — ask the titling job to run its next pass now.
 ///
 /// The attended counterpart to the background pass in `pond-server`. It skips
 /// the *scheduling* gate only: you asked for it, so the pond does not argue
-/// about whether now is a good moment, and it does not abandon the run when you
-/// keep typing. Every per-conversation rule still applies —
+/// about whether now is a good moment. Every per-conversation rule still
+/// applies, because the same job does the work —
 ///
 /// - a name somebody typed is never overwritten,
 /// - a conversation too short to describe is left to the six-word fallback,
@@ -3731,99 +3736,66 @@ async fn compact_session(
 /// Deliberately independent of `session_titling_enabled`. That setting governs
 /// whether the pond does this *unattended*; pressing a button is not that, and
 /// a control that silently does nothing because of a switch somewhere else is
-/// the worse surprise.
+/// the worse surprise. The lane applies the waiver to the asking job's own gate
+/// for exactly this reason.
+///
+/// # This route used to do the work itself, and that was the wrong shape
+///
+/// It ran up to twenty model calls sequentially inside the request handler,
+/// taking no lane slot — so it could decode beside whichever background job was
+/// already holding the machine, which is the single thing the lane exists to
+/// prevent. This port's own docs named it as the precedent not to follow.
+///
+/// It also could not finish. The desktop client's default timeout is 30 s
+/// (`PondApiClient.request`), and on the Orin at roughly 16 tok/s twenty titles
+/// is minutes of decode — so the button reliably returned a timeout error while
+/// the work carried on invisibly behind it. Answering "the pass is starting" in
+/// milliseconds is not a smaller promise than that one; it is the first honest
+/// one this button has made.
+///
+/// What is lost is the "renamed 7 of 12" summary, which could only ever be
+/// produced by blocking. The Automations panel shows the job running, and the
+/// conversation list shows the names.
 async fn retitle_sessions(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    use pond_core::shared::domain::session_activity::SessionOrigin;
-    use pond_core::shared::services::session_title::{
-        RetitleOutcome, SessionTitleService, SkipReason,
-    };
+    use pond_core::user_data::ports::lane_control::WakeOutcome;
+    use pond_core::user_data::services::inference_lane::LaneJob;
 
-    // A manual pass is bounded too. On a small board every rename is a model
-    // call, and a request that walks 400 conversations is a request that times
-    // out. `capped` tells the caller another press will pick up where this one
-    // stopped.
-    const MANUAL_MAX_RENAMES: usize = 20;
-
-    let Some(provider) = state.llm_provider.read().await.clone() else {
+    // Checked here rather than left to the job, because the job's own answer to
+    // "no model configured" is to skip the tick silently — correct for a
+    // background loop and useless to somebody who just pressed a button.
+    if state.llm_provider.read().await.is_none() {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "No language model is configured" })),
         ));
-    };
-
-    let sessions = state.session_storage.list_sessions().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": format!("list sessions: {e}") })),
-        )
-    })?;
-
-    let service = SessionTitleService::new(provider, state.session_storage.clone());
-    // Never cancelled: this run was asked for, so activity must not cut it short.
-    let cancel = tokio_util::sync::CancellationToken::new();
-
-    let mut renamed: Vec<Value> = Vec::new();
-    let mut considered = 0usize;
-    let mut unusable = 0usize;
-    let mut failed = 0usize;
-    let (mut user_named, mut still_current, mut too_short, mut unknown) = (0, 0, 0, 0);
-    let mut capped = false;
-
-    for session in sessions {
-        // The pond's own background conversations are not things anybody
-        // browses, so naming them spends a model call on a row nobody reads.
-        if !SessionOrigin::of(&session.id).is_human() {
-            continue;
-        }
-        if renamed.len() >= MANUAL_MAX_RENAMES {
-            capped = true;
-            break;
-        }
-        considered += 1;
-
-        match service.retitle(&session.id, &cancel).await {
-            Ok(RetitleOutcome::Retitled { title, .. }) => {
-                tracing::info!(
-                    target: "giap::trace",
-                    kind = "session_retitled",
-                    trigger = "manual",
-                    session_id = %session.id,
-                    title = %title,
-                );
-                renamed.push(json!({ "session_id": session.id, "title": title }));
-            }
-            Ok(RetitleOutcome::Skipped(reason)) => match reason {
-                SkipReason::UserNamed => user_named += 1,
-                SkipReason::StillCurrent => still_current += 1,
-                SkipReason::TooShort => too_short += 1,
-                SkipReason::UnknownProvenance => unknown += 1,
-            },
-            Ok(RetitleOutcome::Unusable) => unusable += 1,
-            // One bad conversation must not sink the whole pass.
-            Ok(RetitleOutcome::Cancelled) => {}
-            Err(e) => {
-                tracing::debug!("manual re-title of {} failed: {e}", session.id);
-                failed += 1;
-            }
-        }
     }
 
-    Ok(Json(json!({
-        "renamed": renamed,
-        "renamed_count": renamed.len(),
-        "considered": considered,
-        "capped": capped,
-        "unusable": unusable,
-        "failed": failed,
-        "skipped": {
-            "user_named": user_named,
-            "still_current": still_current,
-            "too_short": too_short,
-            "unknown_provenance": unknown,
-        },
-    })))
+    let Some(lane) = state.lane.as_ref() else {
+        return Ok(Json(json!({
+            "started": false,
+            "reason": "this process has no inference lane",
+        })));
+    };
+
+    match lane.wake(LaneJob::Titling).await {
+        WakeOutcome::Woken => {
+            tracing::info!(
+                target: "giap::trace",
+                kind = "session_retitle_pass_asked",
+                trigger = "manual",
+            );
+            Ok(Json(json!({ "started": true })))
+        }
+        // Not an error: a pond whose titling loop never spawned genuinely has
+        // nothing to wake, and that is a fact about this pond rather than a
+        // fault in the request.
+        WakeOutcome::NotPresent => Ok(Json(json!({
+            "started": false,
+            "reason": "the titling job has no loop in this process",
+        }))),
+    }
 }
 
 /// POST /api/v1/sessions/{session_id}/retitle — rename this one conversation.
@@ -13271,6 +13243,140 @@ async fn extraction_status(
     }))
 }
 
+// ── The inference lane ───────────────────────────────────────────────────────
+//
+// One slot, six background jobs, and until now no way to see which one had it
+// or to ask for a different one. `ports::lane_control` carries the reasoning.
+//
+// Both routes answer with a `lane` key that is `false` when this process has no
+// lane at all, rather than with an empty job list. A household reading six rows
+// of "never" is owed the difference between "the lane says never" and "there is
+// no lane here to ask".
+
+/// `GET /api/v1/lane` — what every background job is doing and waiting for.
+///
+/// The numbers are as fresh as the last tick that produced them, which is up to
+/// that job's own poll old — fifteen minutes for the index sweep. That is
+/// reported per job as `observed_secs_ago` rather than smoothed over, because a
+/// reading presented as live when it is a quarter of an hour stale is how this
+/// surface would come to mislead exactly the person debugging with it.
+async fn lane_status(State(state): State<Arc<AppState>>) -> impl axum::response::IntoResponse {
+    let Some(lane) = state.lane.as_ref() else {
+        return Json(json!({ "lane": false, "jobs": [] }));
+    };
+    let snapshot = lane.snapshot().await;
+
+    let jobs: Vec<Value> = snapshot
+        .jobs
+        .iter()
+        .map(|j| {
+            json!({
+                "job": j.job.as_str(),
+                "title": j.job.title(),
+                "present": j.present,
+                "registered": j.registered,
+                "enabled": j.enabled,
+                "since_last_run_secs": j.since_last_run_secs,
+                "interval_floor_secs": j.interval_floor_secs,
+                "idle_threshold_secs": j.idle_threshold_secs,
+                // `null` when it would run right now. A reason and "no reason"
+                // are different answers and the caller is owed the true one.
+                "blocked_by": j.blocked_by.map(|r| r.as_str()),
+                "would_run_next": snapshot.would_run == Some(j.job),
+                // The HISTORY beside the instant. `blocked_by` cannot tell a
+                // job that is eligible and losing from one that is switched
+                // off; these can.
+                "granted": j.history.granted,
+                "nudged": j.history.nudged,
+                "slot_busy": j.history.slot_busy,
+                "refused_disabled": j.history.refused[0],
+                "refused_no_activity": j.history.refused[1],
+                "refused_still_active": j.history.refused[2],
+                "refused_interval_floor": j.history.refused[3],
+                "lost_to_total": j.history.lost_to_total,
+                "lost_to_most": j.history.lost_to_most.map(|(job, n)| json!({
+                    "job": job.as_str(),
+                    "times": n,
+                })),
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "lane": true,
+        "jobs": jobs,
+        "would_run": snapshot.would_run.map(|j| j.as_str()),
+        "idle_reason": snapshot.idle_reason.map(|r| r.as_str()),
+        "idle_for_secs": snapshot.idle_for_secs,
+        "saw_activity_since_start": snapshot.saw_activity_since_start,
+        "slot_busy": snapshot.slot_busy,
+        // What the watcher draws. `slot_busy` could always say something was
+        // running; these say what, and for how long.
+        "running": snapshot.running.map(|j| j.as_str()),
+        "running_title": snapshot.running.map(|j| j.title()),
+        "running_for_secs": snapshot.running_for_secs,
+    }))
+}
+
+/// `POST /api/v1/lane/jobs/{job}/run` — ask one job to take its next tick now.
+///
+/// Wakes; does not run. The work happens in the job's own loop, under the same
+/// single slot every scheduled pass takes, so pressing this during another
+/// job's run queues behind it rather than decoding beside it.
+///
+/// It deliberately does NOT call `note_user_activity`. Every other route that
+/// starts work on the user's behalf does, and here it would be precisely
+/// backwards: the activity clock is what the idle gate measures, so recording
+/// the press as activity would reset the quiet period the woken job is about to
+/// skip — and push every OTHER job's next turn fifteen minutes further out. The
+/// person pressing the button is the reason to run, not a reason to wait.
+async fn run_lane_job(
+    State(state): State<Arc<AppState>>,
+    Path(job): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use pond_core::user_data::ports::lane_control::WakeOutcome;
+    use pond_core::user_data::services::inference_lane::LaneJob;
+
+    // An unknown name is a 404, never a cheerful OK. A typo that answered
+    // "asked" would be a button that reports success and does nothing, which is
+    // the failure mode this whole surface was built to end.
+    let Some(job) = LaneJob::from_wire(&job) else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": "no such background job",
+                "known": LaneJob::ALL.iter().map(|j| j.as_str()).collect::<Vec<_>>(),
+            })),
+        ));
+    };
+
+    let Some(lane) = state.lane.as_ref() else {
+        return Ok(Json(json!({
+            "lane": false,
+            "job": job.as_str(),
+            "woken": false,
+            "reason": "this process has no inference lane",
+        })));
+    };
+
+    match lane.wake(job).await {
+        WakeOutcome::Woken => Ok(Json(json!({
+            "lane": true,
+            "job": job.as_str(),
+            "woken": true,
+        }))),
+        // Not an error: a pond with no embedder genuinely has no extraction
+        // loop, and that is a fact about this pond rather than a fault in the
+        // request. The caller renders it as "nothing here to run".
+        WakeOutcome::NotPresent => Ok(Json(json!({
+            "lane": true,
+            "job": job.as_str(),
+            "woken": false,
+            "reason": "this job has no loop in this process",
+        }))),
+    }
+}
+
 async fn delete_memory(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -13602,8 +13708,69 @@ async fn list_suggestions(
     };
 
     let set = suggestion::suggest(&snapshot);
+
+    // COMPOSED FIRST, TEMPLATES TO FILL.
+    //
+    // The two tiers answer the same question and only one of them is about this
+    // household. `suggestion.rs` picks among seven fixed strings and attaches a
+    // measured count -- correct, free, and identical on every pond that has
+    // mail, memories and devices, which is what a household calls a
+    // placeholder. A composed one is a question written from one of their own
+    // notes.
+    //
+    // So composed rows take the slots and the template tier fills whatever is
+    // left. It is NOT removed: it is what answers on a pond with no model, on
+    // one whose queue has drained, and on the first evening of every install.
+    //
+    // Scope, not audience, does the gating here. `read_scope` is `Guest` for a
+    // shared audience, and the adapter's own predicate then returns nothing --
+    // so a note belonging to a member cannot reach a shared screen even if this
+    // function forgot to check, which is the same belt-and-braces the context
+    // reads above use.
+    let composed = state
+        .suggestion_queue
+        .offerable(&read_scope, suggestion::MAX_SUGGESTIONS)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::debug!(error = %e, "suggestions: could not read the composed queue");
+            Vec::new()
+        });
+
+    let mut offered: Vec<Value> = composed
+        .iter()
+        .map(|c| {
+            json!({
+                // The queue row's id, so tapping it can settle the row. A
+                // composed suggestion is a thing that exists, unlike a template
+                // one, which is recomputed on every read.
+                "id": c.id,
+                "prompt": c.prompt,
+                "because": c.reason,
+                "answered_by": "giap-memory",
+                // What lets the client tell them apart -- and it has to, because
+                // only one of the two is worth telling the pond about when it
+                // is tapped.
+                "composed": true,
+            })
+        })
+        .collect();
+
+    for s in set
+        .offered
+        .iter()
+        .take(suggestion::MAX_SUGGESTIONS.saturating_sub(offered.len()))
+    {
+        offered.push(json!({
+            "id": s.id,
+            "prompt": s.prompt,
+            "because": s.because,
+            "answered_by": s.answered_by,
+            "composed": false,
+        }));
+    }
+
     Json(json!({
-        "suggestions": set.offered,
+        "suggestions": offered,
         // Every suggestor that ran, and why each silent one was silent. Without
         // this, a quiet house and a broken engine are the same empty array --
         // which is the state the proposal column has been in since it shipped,
@@ -13612,6 +13779,38 @@ async fn list_suggestions(
         "audience": set_audience_label(audience),
     }))
     .into_response()
+}
+
+/// `POST /api/v1/suggestions/{id}/taken` — the household tapped a composed one.
+///
+/// Only composed suggestions have an id that means anything: a template one is
+/// recomputed on every read, so there is no row to settle and the client does
+/// not call this for them.
+///
+/// **Without this the queue never drains**, and a household would read the same
+/// three composed questions forever — which is the complaint the whole surface
+/// was built from, reproduced one tier up.
+///
+/// `false` for "no queued suggestion by that id" is a real answer and a 200,
+/// not a 404: a double tap on a touch panel is a household being quick, and the
+/// second tap must not look like a failure to them.
+async fn suggestion_taken(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl axum::response::IntoResponse {
+    use pond_core::user_data::ports::suggestion_queue::Settled;
+
+    match state.suggestion_queue.settle(&id, Settled::Taken).await {
+        Ok(settled) => Json(json!({ "id": id, "settled": settled })).into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not settle a suggestion");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "could not record that"})),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// The audience as a word, for a client that wants to explain itself.

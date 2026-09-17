@@ -16,3 +16,4 @@ pub mod proactive_review;
 pub mod redacting_memory_repository;
 pub mod reminder_proposal;
 pub mod suggestion;
+pub mod suggestion_generation;
