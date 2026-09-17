@@ -310,6 +310,40 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     }),
   );
 
+  // The inference lane. Mocked for the same reason `now-playing` is: the
+  // Settings screen reads it on mount, and an unmocked route leaves the
+  // browser to reach 127.0.0.1:4000 -- a live pond-server on a developer's
+  // machine, nothing at all in CI -- and the failure lands on whichever
+  // unrelated test happens to assert a clean console.
+  //
+  // The fixture is the shape a REAL pond answers with, not a tidy one: two
+  // jobs with no loop in this process (no embedder), one that has never run,
+  // and one blocked on quiet. A fixture where all six were present and happy
+  // would let a regression that drops the `present` distinction through.
+  await page.route("**/api/v1/lane", (route) =>
+    route.fulfill({
+      json: {
+        lane: true,
+        slot_busy: false,
+        idle_for_secs: 240,
+        saw_activity_since_start: true,
+        would_run: "titling",
+        idle_reason: null,
+        jobs: [
+          { job: "consolidation", title: "Tidy the memory store", present: true, registered: true, enabled: true, since_last_run_secs: 3600, interval_floor_secs: 86400, idle_threshold_secs: 900, blocked_by: "interval_floor", would_run_next: false },
+          { job: "titling", title: "Name conversations", present: true, registered: true, enabled: true, since_last_run_secs: 300, interval_floor_secs: 300, idle_threshold_secs: 900, blocked_by: null, would_run_next: true },
+          { job: "proactive_review", title: "Look for something to suggest", present: true, registered: false, enabled: false, since_last_run_secs: null, interval_floor_secs: 0, idle_threshold_secs: 0, blocked_by: null, would_run_next: false },
+          { job: "summary_refresh", title: "Refresh conversation summaries", present: true, registered: true, enabled: true, since_last_run_secs: 120, interval_floor_secs: 30, idle_threshold_secs: 120, blocked_by: "still_active", would_run_next: false },
+          { job: "index_maintenance", title: "Maintain the search index", present: false, registered: false, enabled: false, since_last_run_secs: null, interval_floor_secs: 0, idle_threshold_secs: 0, blocked_by: null, would_run_next: false },
+          { job: "memory_extraction", title: "Read conversations for memories", present: true, registered: true, enabled: true, since_last_run_secs: null, interval_floor_secs: 60, idle_threshold_secs: 900, blocked_by: "still_active", would_run_next: false },
+        ],
+      },
+    }),
+  );
+  await page.route("**/api/v1/lane/jobs/*/run", (route) =>
+    route.fulfill({ json: { lane: true, job: "titling", woken: true } }),
+  );
+
   // Skills
   await page.route("**/api/v1/skills", (route) =>
     route.fulfill({ json: [] }),

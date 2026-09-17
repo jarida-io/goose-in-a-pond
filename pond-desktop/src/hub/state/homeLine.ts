@@ -147,9 +147,19 @@ export function homeLine({ user, devices, weather, now }: HomeLineInput): string
  * provider could not be reached — the slice it is handed is ZEROES, not a
  * reading. Printing it gave ", 0° out.", a temperature nobody measured. The
  * hour is the one thing still true in that state, so the hour is what it says.
+ *
+ * The guard keys on `cond` ALONE, and that is the fix rather than the typo it
+ * looks like. It used to be `!cond && !icon`, so a provider that answered with
+ * an icon and no condition word — which Open-Meteo's mapping can do — passed a
+ * guard about whether there is a reading and then fell into a sentence that
+ * interpolates `cond` and `temp`. The output was ", 0° out." with a leading
+ * comma. Nothing caught it because this line was drawn in secondary grey at the
+ * bottom of an empty column; it is the head of the screen now, at 26px, so it
+ * is the first thing a household reads. Every branch below interpolates `cond`,
+ * and none of them interpolates `icon`, so `cond` is the only honest test.
  */
 function skyLine(weather: WeatherData, hour: number, user: string): string {
-  if (!weather.cond && !weather.icon) return hourLine(hour, user);
+  if (!weather.cond) return hourLine(hour, user);
   const cond = (weather.cond || "").toLowerCase();
   const wet = /rain|drizzle|shower|storm/.test(cond);
   const clear = /clear|sun/.test(cond);

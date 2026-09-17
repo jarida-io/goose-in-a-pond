@@ -173,6 +173,7 @@ test.describe("Classic sections UI — 800×480", () => {
     await page.goto("/");
     await page.waitForSelector(".app-shell", { timeout: 8000 });
     await checkNoHorizOverflow(page);
+    await checkHomeControlsAreOnScreen(page);
     await page.screenshot({ path: "kiosk-screenshots/sections-dashboard-800x480.png" });
   });
 
@@ -182,6 +183,41 @@ test.describe("Classic sections UI — 800×480", () => {
     await checkDrawerFits(page);
   });
 });
+
+/**
+ * Home's own controls are inside the panel, not below it.
+ *
+ * VERTICAL, where everything else in this file measures horizontally, and it is
+ * here because the screen it guards is the one that had the defect: `.dash`
+ * carried a `min-height: 520px` under a 60px shell bar, so on the 800x480 panel
+ * its bottom edge -- which the floating dock was positioned against -- sat at
+ * 580. Measured at the time: the mic at top=500 bottom=564 in a 480px viewport,
+ * and the page dots at 524. The panel could not reach either.
+ *
+ * No existing check could have caught it. Horizontal overflow was clean, the
+ * touch targets were the right size, the drawer fitted, and a full-page
+ * screenshot renders an overflowing box in full -- so the kiosk screenshots
+ * this file writes showed a mic that no thumb could touch.
+ */
+async function checkHomeControlsAreOnScreen(page: Page): Promise<void> {
+  const box = await page.evaluate(() => {
+    const dash = document.querySelector(".dash");
+    const mic = document.querySelector(".dash__voice");
+    const chat = document.querySelector(".dash__chat");
+    if (!dash || !mic || !chat) return null;
+    return {
+      dash: dash.getBoundingClientRect().bottom,
+      mic: mic.getBoundingClientRect().bottom,
+      chat: chat.getBoundingClientRect().bottom,
+      vh: window.innerHeight,
+    };
+  });
+  expect(box, "Home and both of its controls should be in the DOM").not.toBeNull();
+  const b = box as NonNullable<typeof box>;
+  expect(b.dash, "Home itself fits the panel").toBeLessThanOrEqual(b.vh);
+  expect(b.mic, "Talk to Goose is reachable").toBeLessThanOrEqual(b.vh);
+  expect(b.chat, "Type to Goose is reachable").toBeLessThanOrEqual(b.vh);
+}
 
 // ── Hub UI — 1024×600 ────────────────────────────────────────────────────────
 
@@ -201,6 +237,7 @@ test.describe("Hub UI — 1024×600", () => {
     await page.waitForSelector(".ghub", { timeout: 10_000 });
     await checkNoHorizOverflow(page);
     await checkNoPersistentNav(page, ".ghub__main");
+    await checkHomeControlsAreOnScreen(page);
     await page.screenshot({ path: "kiosk-screenshots/hub-home-1024x600.png" });
   });
 });
@@ -222,6 +259,7 @@ test.describe("Hub UI — 800×480", () => {
     await page.goto("/");
     await page.waitForSelector(".ghub", { timeout: 10_000 });
     await checkNoHorizOverflow(page);
+    await checkHomeControlsAreOnScreen(page);
     await page.screenshot({ path: "kiosk-screenshots/hub-home-800x480.png" });
   });
 });

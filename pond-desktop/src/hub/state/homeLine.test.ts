@@ -223,6 +223,28 @@ describe("a pond with no weather in it", () => {
     expect(noWeatherLine(at(3))).toBe("The house is quiet, Jerry.");
   });
 
+  /**
+   * The case the old guard let through.
+   *
+   * It read `!cond && !icon`, so a provider that answered with an icon and no
+   * condition word satisfied it and fell into a branch that interpolates `cond`
+   * and `temp` — producing ", 0° out.", a leading comma and a reading nobody
+   * took. This is the vacuity control for the guard above it: with the guard
+   * keyed on `cond` alone, both tests pass; with it keyed on `icon` alone, THIS
+   * one fails and the one above still passes.
+   */
+  it("says nothing about a sky that sent an icon and no words", () => {
+    const iconOnly: WeatherData = { ...nothing, icon: "partly-cloudy-day" };
+    for (const now of [at(3), at(9), at(14), at(21)]) {
+      const line = homeLine({ user: "Jerry", devices: [], weather: iconOnly, now });
+      expect(line).not.toContain("°");
+      expect(line.startsWith(",")).toBe(false);
+    }
+    expect(homeLine({ user: "Jerry", devices: [], weather: iconOnly, now: at(21) })).toBe(
+      "Good evening, Jerry.",
+    );
+  });
+
   /** Devices that reported nothing land here too, not on a sentence about them. */
   it("holds for a house whose devices all stayed silent", () => {
     const d = [dev({ id: "Front Door", kind: "lock" }), dev({ id: "Lamp", kind: "light" })];

@@ -169,6 +169,8 @@ export interface Settings {
 
   // Memory lifecycle
   memory_extraction_enabled?: boolean;
+  /** Turn what the pond remembers into questions on Home. */
+  suggestion_generation_enabled?: boolean;
   memory_cleanup_enabled?: boolean;
   memory_consolidation_enabled?: boolean;
   /** Let the pond rename conversations while idle. Never touches a name you typed. */
@@ -368,26 +370,15 @@ export interface RetitleOneResult {
   reason?: string;
 }
 
-/** What one manual re-titling pass did. */
+/** What asking for a re-titling pass answered. */
 export interface RetitleResult {
-  renamed: { session_id: string; title: string }[];
-  renamed_count: number;
-  /** Conversations the pass looked at, excluding the pond's own background ones. */
-  considered: number;
-  /** True when the pass hit its own bound — pressing again picks up from there. */
-  capped: boolean;
-  /** The model answered with something unusable; the old name was kept. */
-  unusable: number;
-  failed: number;
-  skipped: {
-    /** Named by hand. Never overwritten. */
-    user_named: number;
-    /** Already has a model-written name that still fits. */
-    still_current: number;
-    too_short: number;
-    /** Predates the provenance column and is not the six-word fallback. */
-    unknown_provenance: number;
-  };
+  /** True when the titling job was asked to run its next pass now. */
+  started: boolean;
+  /**
+   * Why not, when it is false. A pond whose titling loop never spawned has
+   * nothing to wake, which is a fact about the pond rather than a failure.
+   */
+  reason?: string;
 }
 
 export interface ConsolidationEvent {
@@ -537,6 +528,90 @@ export type MemorySegment =
 /// has read nothing", and the two must not render the same: a pond whose
 /// embedder never loaded looks identical, from the outside, to one with nothing
 /// left to extract, and the difference is months of history.
+/**
+ * One background job that spends inference, as the lane currently sees it.
+ *
+ * Wire shape of `GET /api/v1/lane`. Three of these fields answer questions that
+ * used to have no answer anywhere: `present` (is there a loop for this in the
+ * running process at all), `blocked_by` (what it is waiting for), and
+ * `would_run_next` (whose turn it actually is). Before them, a job that was
+ * eligible and losing the tie-break looked exactly like one that was switched
+ * off, from every surface the household has.
+ */
+export interface LaneJobStatus {
+  /** Stable wire name, and the path segment `runLaneJob` takes. */
+  job: string;
+  /** What to call it on screen. */
+  title: string;
+  /** A loop for this job exists in this process. False is a real answer. */
+  present: boolean;
+  /** It has asked the lane for the slot at least once since this pond started. */
+  registered: boolean;
+  enabled: boolean;
+  /** Seconds since it last ran in this process; null means never. */
+  since_last_run_secs: number | null;
+  interval_floor_secs: number;
+  idle_threshold_secs: number;
+  /** Why it would not run right now, or null if it would. */
+  blocked_by: string | null;
+  /**
+   * Counters since the pond started.
+   *
+   * `blocked_by` is an instant; these are the history, and the difference is
+   * the point. A job that is eligible and losing the tie-break has
+   * `blocked_by: null` — identical to one that is about to run — and only
+   * `lost_to_total` tells them apart.
+   */
+  granted?: number;
+  /** Times the lane rang this job's bell because it should have been running. */
+  nudged?: number;
+  slot_busy?: number;
+  refused_disabled?: number;
+  refused_no_activity?: number;
+  refused_still_active?: number;
+  refused_interval_floor?: number;
+  lost_to_total?: number;
+  lost_to_most?: { job: string; times: number } | null;
+  /** It is the one that would take the slot on the next tick. */
+  would_run_next: boolean;
+}
+
+export interface LaneStatus {
+  /**
+   * False when this process has no lane at all -- the CLI paths. Distinct from
+   * an empty job list, because six rows of "never" from a lane and six rows
+   * from nothing are different facts.
+   */
+  lane: boolean;
+  jobs: LaneJobStatus[];
+  would_run?: string | null;
+  idle_reason?: string | null;
+  idle_for_secs?: number;
+  saw_activity_since_start?: boolean;
+  slot_busy?: boolean;
+  /**
+   * The job holding the inference slot right now, and for how long.
+   *
+   * `slot_busy` could always say something was running; these say WHAT. That is
+   * the difference between "the pond is busy" and "the memory engine is reading
+   * your conversations", which is what somebody wondering why it is slow
+   * actually needs.
+   */
+  running?: string | null;
+  running_title?: string | null;
+  running_for_secs?: number | null;
+}
+
+/** What asking for a job to run now did. */
+export interface LaneRunResult {
+  lane: boolean;
+  job: string;
+  /** The job's loop was asked to take its next tick at once. */
+  woken: boolean;
+  /** Why not, when not. */
+  reason?: string;
+}
+
 export interface ExtractionStatus {
   sessions_total: number;
   sessions_pending: number;
@@ -1479,6 +1554,17 @@ export interface Suggestion {
   because: string;
   /** The tool group that can answer `prompt`. */
   answered_by: string;
+
+  /**
+   * True when the pond composed this question from one of your own memories,
+   * false when it came from the template tier.
+   *
+   * The client has to be able to tell them apart for one reason: only a
+   * composed suggestion is a ROW, so only a composed one can be settled when it
+   * is tapped. A template suggestion is recomputed on every read and has
+   * nothing to settle.
+   */
+  composed: boolean;
 }
 
 /** Why one suggestor produced nothing, so quiet can be told from broken. */

@@ -51,9 +51,12 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-  /* The 88px is the floating dock's lane. The dock is drawn over this column,
-     so the last widget has to end above it rather than under it. */
-  padding: 0 20px 88px;
+  /* No dock lane. The dock used to float over this column, so the last widget
+     had to end 88px above the bottom of the track or the mic sat on top of it
+     -- and on a 480px panel that is a fifth of the height this column has. The
+     dock moved to the asking column beside it, which had the room to spare, and
+     the 88px came back to the widgets. 20px is the page's own foot. */
+  padding: 0 20px 20px;
   scrollbar-width: none;
 }
 

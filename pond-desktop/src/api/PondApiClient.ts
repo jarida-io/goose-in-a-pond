@@ -11,6 +11,8 @@ import {
   type CompactionReport,
   type ContextIndexHealth,
   type ContextIndexRebuild,
+  type LaneRunResult,
+  type LaneStatus,
   type AccountSyncSummary,
   type ContextItem,
   type ContextSource,
@@ -845,6 +847,39 @@ export class PondApiClient {
     return this.post<ContextIndexRebuild>("/api/v1/context/index/rebuild", {});
   }
 
+  /**
+   * Record that a composed suggestion was tapped.
+   *
+   * Only composed ones: a template suggestion is recomputed on every read and
+   * has no row to settle. Without this the queue never drains and a household
+   * reads the same composed questions forever, which is the complaint the whole
+   * surface was built from, one tier up.
+   */
+  markSuggestionTaken(id: string): Promise<{ id: string; settled: boolean }> {
+    return this.post(`/api/v1/suggestions/${encodeURIComponent(id)}/taken`, {});
+  }
+
+  // ── The inference lane ────────────────────────────────────
+
+  /** What every background job is doing and waiting for. */
+  laneStatus(): Promise<LaneStatus> {
+    return this.get<LaneStatus>("/api/v1/lane");
+  }
+
+  /**
+   * Ask one background job to take its next tick now.
+   *
+   * Wakes rather than runs: the work happens in the job's own loop under the
+   * same single slot every scheduled pass takes, so this returns as soon as the
+   * doorbell has been rung. What happened is read back from `laneStatus`.
+   */
+  runLaneJob(job: string): Promise<LaneRunResult> {
+    return this.post<LaneRunResult>(
+      `/api/v1/lane/jobs/${encodeURIComponent(job)}/run`,
+      {},
+    );
+  }
+
   // ── Time and place ────────────────────────────────────────
 
   /** Every IANA zone with today's offset. Public: the wizard needs it. */
@@ -958,11 +993,14 @@ export class PondApiClient {
   // ── Conversation titles ───────────────────────────────────
 
   /**
-   * Rename conversations now rather than waiting for the pond to be idle.
+   * Ask the pond to rename conversations now rather than waiting for it to be
+   * idle.
    *
-   * Runs to completion before it answers — one model call per conversation
-   * renamed — so callers should expect this to be slow on a small board and
-   * show it. Names typed by hand are never touched.
+   * Answers as soon as the titling job has been asked, not when it has
+   * finished. It used to do the work inline — one model call per conversation,
+   * up to twenty — which on a small board took minutes and so reliably tripped
+   * the 30 s default timeout below while the work carried on invisibly. Names
+   * typed by hand are never touched.
    */
   retitleSessions(): Promise<RetitleResult> {
     return this.post("/api/v1/sessions/retitle", {});

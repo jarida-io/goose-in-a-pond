@@ -4,7 +4,7 @@
    stylesheet, and the pages and dots belong to widget-track.css.
 
    Sizes this has to hold, from DESIGN.md §4:
-     800x480   the small panel
+     800x480   the small panel — 344px of column, ~456px of track
      1024x600  the shelf panel — 396px of column, ~628px of track
      desktop   the classic surface — the same pages, two columns wide
 
@@ -23,16 +23,42 @@
 
 /*
   `.dash` sizes itself rather than growing inside somebody else's scroller.
-  The dock is absolutely positioned against it, the track's pages scroll
-  inside it, and both of those need a box with a known bottom edge.
+  The dock is absolutely positioned against it, the track's pages scroll inside
+  it, and both of those need a box with a known bottom edge.
+
+  It had a `min-height: 520px`, and that was the reason the 800x480 panel could
+  not reach its own microphone. The shell bar above Home is 60px, so 60 + 520
+  put this box's bottom edge at 580 on a 480px screen -- and the dock, which is
+  positioned against that bottom edge, sat 20px below the fold along with the
+  page dots. Measured, not inferred: `.dash__dock` came back top=500 bottom=564
+  in a 480px viewport. The panel's two primary controls were unreachable.
+
+  There is no minimum. The panel is as tall as the panel is, and everything in
+  here has to fit that rather than assert it.
+
+  ONE SOURCE for the asking column's width. `.sq` sizes itself from it and the
+  dock, which floats over that column, takes the same number. They were two
+  literals and the dock is not in the column's flow, so nothing would have
+  caught them drifting apart.
+
+  344 rather than 396 on the small panel: at 800 wide, 396 is half the screen
+  for one column of prose and leaves the track 404px, which is where the device
+  card was being clipped.
 */
 .dash {
+  --sq-col: 396px;
+
   position: relative;
   height: 100%;
-  min-height: 520px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+@media (max-width: 52.5rem) {
+  .dash {
+    --sq-col: 344px;
+  }
 }
 
 /*
@@ -57,9 +83,9 @@
   flex: 1;
   min-height: 0;
   display: flex;
-  /* No bottom padding. The queue centres itself in this box and the track's
-     pages carry their own 88px lane for the dock; a rule here would be this
-     file reaching into another component's column to fix it. */
+  /* No bottom padding. The dock's clearance is paid by the column it now
+     floats over, in `.sq`'s own bottom padding; a rule here would be this file
+     reaching into another component's column to fix it. */
   padding-bottom: 0;
 }
 
@@ -72,27 +98,63 @@
   padding: 16px 0 8px;
 }
 
-/* ── The dock ─────────────────────────────────────────────────
-   Floats over both columns, and only the two buttons take pointer events —
-   the bar itself is a layout device, not a surface.
-   ──────────────────────────────────────────────────────────── */
+/* ── The asking column and its dock ───────────────────────── */
 
+/*
+  The asking side: the column, then the dock, then whatever height is left.
+
+  `.sq` takes its own content height rather than the column's, so the mic sits
+  directly under the last question at every screen size instead of against the
+  bottom edge of the screen. On a 900px desktop window that edge was 500px below
+  the thing the buttons belong to.
+
+  The spacer is the third child and it is what absorbs the rest. Without it the
+  two would stretch and the gap would reopen inside the column.
+*/
+.dash__aside {
+  flex: 0 0 var(--sq-col);
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.dash__aside::after {
+  content: "";
+  flex: 1;
+  min-height: 0;
+}
+
+/*
+  IN FLOW, under the asking column.
+
+  It was `position: absolute` against `.dash`, and that is what put it off the
+  bottom of the 800x480 panel: `.dash` carried a 520px minimum under a 60px
+  shell bar, so its bottom edge -- the edge this was pinned to -- was at 580 on
+  a 480px screen. Measured before the change: top=500, bottom=564, in a 480px
+  viewport. The panel's two primary controls were unreachable, and no test could
+  have caught it because a screenshot of an overflowing box still renders them.
+
+  In flow that failure is not expressible. It also stops the mic covering the
+  widget track mid-scroll, which is what the track's 88px bottom lane was for --
+  a fifth of the height that column has on the small panel, now returned to the
+  widgets.
+
+  22px of side padding matches the column's own, so the mic's left edge lines up
+  with the offers above it.
+*/
 .dash__dock {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 16px;
-  z-index: 2;
+  flex: none;
+  box-sizing: border-box;
+  padding: 4px 22px 16px;
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 14px;
-  pointer-events: none;
 }
 
 .dash__voice,
 .dash__chat {
-  pointer-events: auto;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -116,16 +178,23 @@
   transform: translate(4px, 4px);
 }
 
+/*
+  A hairline, not a second offset.
+
+  DESIGN.md section 3 spends the offset about twice per screen. Home now spends
+  it on the lead offer and on the mic; this button was the third, and three
+  levels of the same treatment is how a signal stops being one. What it loses in
+  shadow it keeps in size and in the 44px floor -- it is still the second way
+  into the same conversation, drawn beside the first.
+*/
 .dash__chat {
   width: 56px;
   height: 56px;
   background: var(--color-surface);
-  box-shadow: 4px 4px 0 var(--pp);
 }
 
 .dash__chat:active {
-  box-shadow: 0 0 0 var(--pp);
-  transform: translate(4px, 4px);
+  transform: translate(1px, 1px);
 }
 
 .dash__voice:focus-visible,

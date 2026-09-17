@@ -30,6 +30,7 @@ export type SettingsRowId =
   | "memory"
   | "extensions"
   | "logs"
+  | "background"
   | "privacy"
   | "rooms"
   | "cameras"
@@ -38,7 +39,12 @@ export type SettingsRowId =
   | "account";
 
 // ─── SettingsGroup ─────────────────────────────────────────────
-export type SettingsGroupName = "Assistant & AI" | "System" | "Home" | "General";
+export type SettingsGroupName =
+  | "Assistant & AI"
+  | "Automations"
+  | "System"
+  | "Home"
+  | "General";
 
 export type SettingsRow = {
   id: SettingsRowId;
@@ -108,6 +114,27 @@ export const SETTINGS: SettingsGroup[] = [
         label: "Memory",
         sub: "What Goose remembers about you",
         value: "5 notes",
+      },
+    ],
+  },
+  {
+    // Its own group rather than a row under System, because what it holds is
+    // not a system fact -- it is the work the pond does on its own, which is
+    // the same thing "Automations" means on the classic surface. The two
+    // taxonomies are separate structures and always have been; this is the one
+    // heading it is worth spending to make them agree on.
+    group: "Automations",
+    rows: [
+      {
+        id: "background",
+        // Three arrows around a circle: work that goes round on its own.
+        iconPath:
+          "M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6",
+        color: "#4338CA",
+        bg: "#E0E7FF",
+        label: "Background jobs",
+        sub: "What the pond does while nobody is talking to it",
+        value: "",
       },
     ],
   },

@@ -79,10 +79,14 @@
 
 /* `min-width: 0` so the ellipsis can actually engage -- a flex item's
    automatic minimum size otherwise refuses to shrink below its text. */
+/* Quicksand, not the mono face. DESIGN.md section 2 gives mono to numbers,
+   timestamps, file paths and measurements; this is a sentence of instruction.
+   The clock and the temperature on this same strip keep it, because they are
+   the data it is for. */
 .hbar__caption {
   margin: 0;
   min-width: 0;
-  font: 500 12px/1 var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
+  font: 500 13px/1 var(--font-body, Quicksand, sans-serif);
   color: var(--color-text-secondary);
   white-space: nowrap;
   overflow: hidden;

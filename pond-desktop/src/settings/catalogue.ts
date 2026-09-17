@@ -341,6 +341,7 @@ export const CATALOGUE: CatalogueCategory[] = [
           { key: "memory_extraction_enabled", label: "Learn from conversations", description: "Read your conversations back in quiet moments and remember what lasts. Nothing is remembered while you are talking, so this takes a while to show up \u2014 and a long history takes a few nights.", control: { kind: "toggle" }, consumer: "live" },
           { key: "memory_extraction_max_facts", label: "Most things kept at once", description: "How many things it may remember from one stretch of conversation. Fewer is better: a store full of near-misses crowds out what matters.", control: { kind: "number", min: 0, max: 50 }, consumer: "live", validate: all(integer, range(0, 50)) },
           { key: "memory_extraction_interval_secs", label: "Wait between readings", description: "The shortest gap between two readings. It only ever makes them rarer.", control: { kind: "number", min: 0, unit: "seconds" }, consumer: "live", validate: all(integer, atLeast(0, "seconds")) },
+          { key: "suggestion_generation_enabled", label: "Suggest things to ask", description: "Turn what it remembers about you into questions on the Home screen. Off, Home still suggests \u2014 but only the same general questions every day.", control: { kind: "toggle" }, consumer: "live" },
         ],
       },
       {
@@ -509,9 +510,9 @@ export const CATALOGUE: CatalogueCategory[] = [
   },
   {
     id: "automation",
-    name: "Automation & Proactivity",
+    name: "Automations",
     tier: "Household",
-    blurb: "What runs on its own, and whether the assistant may speak before you do.",
+    blurb: "What runs on its own, what it is doing right now, and whether the assistant may speak before you do.",
     groups: [
       {
         name: "Schedules",

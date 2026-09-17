@@ -36,9 +36,28 @@
 
 /* Wrapping the children keeps the toolbar out of the card's own flex context.
    The height resolves once the track hands the frame a definite row height,
-   which is what lets a card fill its cell rather than sit at the top of it. */
+   which is what lets a card fill its cell rather than sit at the top of it.
+
+   AND THE CARD FILLS THE BODY. `height: 100%` sized this wrapper and stopped
+   there: the widget inside stayed at its own content height, so a frame at size
+   m reserved 196px for a weather card 137px tall and left a 59px hole under it
+   that read as a gap in the layout rather than as anything. Home's whole
+   right-hand column was doing this -- it is most of the empty space the screen
+   opened on. A flex column with the child at `flex: 1` hands the reserved
+   height to the thing that was supposed to occupy it.
+
+   `min-height: 0` on the child because a flex item's automatic minimum is its
+   content, which would let a card with a long list push the frame past the size
+   the household chose for it. */
 .wframe__body {
   height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.wframe__body > * {
+  flex: 1;
+  min-height: 0;
 }
 
 /* What data-size buys, measured on the BODY rather than on the frame.

@@ -2,6 +2,19 @@
 // SuggestionQueue — the left column of Home, and the only thing on the screen
 // that asks rather than reports.
 //
+// THE HEAD. One sentence about this house, above everything, in the display
+// italic DESIGN.md section 2 calls "the single most recognisable thing about
+// our typography". It was previously drawn only when the column had nothing
+// else to say, so the screen lost its own voice the moment the pond had
+// something to offer -- and Home, the front door, was the one surface in the
+// product carrying none of the product's typography.
+//
+// ONE THING IS LOUD. Whatever the column is carrying, exactly one item wears
+// the 2px ink edge and the hard offset: the open proposal, or the lead offer.
+// Everything under it is a hairline row. DESIGN.md section 3 budgets the offset
+// at about twice per screen and Home spends it here and on the mic; four
+// equally-weighted cards would have spent it four times and meant it none.
+//
 // One suggestion is open at a time. The rest are a two-line peek and a count,
 // because a household glancing at a panel needs to know something is waiting,
 // not be handed a queue to work through. The wheel moves the cursor through
@@ -69,8 +82,18 @@ import "./suggestion-queue.css";
 export interface SuggestionQueueProps {
   /** Who is asking. Null before a chat session exists, and the column shows its quiet state. */
   sessionId: string | null;
-  /** One short sentence about this house, shown when nothing is waiting and nothing is on offer. Already one sentence, <= 72 chars. */
-  quietLine: string;
+  /**
+   * One short sentence about this house, and the column's head.
+   *
+   * It used to be `quietLine` and appeared only when there was nothing waiting
+   * AND nothing on offer -- so the moment the suggestion engine started
+   * answering, the screen lost the only sentence on it that was about this
+   * household, and Home had no voice at all. It is now the head, drawn above
+   * whatever the column is carrying, because it is true in every state.
+   *
+   * Already one sentence, <= 72 chars.
+   */
+  houseLine: string;
   /**
    * Put a question to the pond.
    *
@@ -95,7 +118,67 @@ function timeOf(iso: string): string | null {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-export function SuggestionQueue({ sessionId, quietLine, onAsk }: SuggestionQueueProps): React.ReactElement {
+/**
+ * How many offers stand as quiet rows under the one that carries the edge.
+ *
+ * Measured, not chosen. The dock sits under this column in flow, so every row
+ * pushes it down, and the screen's own bottom edge is the budget:
+ *
+ *   1024x600   head + lead + 2 rows + the count   dock ends at 536 of 600
+ *   800x480    head + lead + 0 rows + the count   dock ends at 423 of 480
+ *   800x480    head + lead + 2 rows + the count   dock ends at 480 of 480, and
+ *                                                 the offers run to 467 --
+ *                                                 through the dock they sit on
+ *
+ * So the small panel takes none: one question, which is what DESIGN.md section
+ * 4 asks of the hub anyway -- "one decision per screen". The server caps a set
+ * at four, so either way an offer can go unshown, and that is why the remainder
+ * is drawn as a count rather than dropped in silence.
+ */
+const OFFER_ROWS_TALL = 2;
+const OFFER_ROWS_SHORT = 0;
+
+/**
+ * The height below which the column shows one row instead of two.
+ *
+ * HEIGHT, deliberately, where the widget track beside it keys off its own width
+ * with a container query. That rule exists because the two Home surfaces give
+ * the track containers 64px apart at the same viewport width, so a viewport
+ * query sizes one of them wrong. Vertically they differ by nothing worth a
+ * step, and the cost of being one step out is one row shown or not shown rather
+ * than a clipped card. 560 sits between the two panels: 600 keeps both rows,
+ * 480 takes one.
+ */
+const SHORT_PANEL = "(max-height: 560px)";
+
+/**
+ * True on a panel too short for the second row.
+ *
+ * Subscribed rather than read once: the hub panel never resizes, but the same
+ * column renders on the desktop surface inside a window somebody can drag. A
+ * value read at mount would leave a resized window one row wrong until the next
+ * navigation. Guarded for the environments -- jsdom among them -- that do not
+ * carry a real `matchMedia`, the same guard WidgetTrack uses for its
+ * reduced-motion query. jsdom without it reports a tall panel, which is the
+ * safe default: the component's own tests assert what the column offers, and a
+ * short-panel default would have them asserting the truncated set.
+ */
+function useShortPanel(): boolean {
+  const [short, setShort] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const mq = window.matchMedia(SHORT_PANEL);
+    setShort(mq.matches);
+    const onChange = (e: MediaQueryListEvent): void => setShort(e.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+
+  return short;
+}
+
+export function SuggestionQueue({ sessionId, houseLine, onAsk }: SuggestionQueueProps): React.ReactElement {
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   // The cursor names a suggestion, not a slot. A stored index silently changes
@@ -107,6 +190,32 @@ export function SuggestionQueue({ sessionId, quietLine, onAsk }: SuggestionQueue
   const [listOpen, setListOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const shortPanel = useShortPanel();
+
+  /**
+   * Tap an offer: send it, and tell the pond it was taken.
+   *
+   * The ORDER is deliberate. `onAsk` goes first and is never awaited, because
+   * it is what the household is waiting for -- the turn is already in flight by
+   * the time the transcript mounts. Settling is bookkeeping and rides behind
+   * it; if it fails, the household still got their answer and the worst case is
+   * the same question being offered again tomorrow.
+   *
+   * Only a composed suggestion is settled. A template one is recomputed on
+   * every read and its `id` is a suggestor name, not a row -- posting it would
+   * be asking the pond to settle something that does not exist.
+   */
+  const take = useCallback(
+    async (offer: Suggestion) => {
+      onAsk?.(offer.prompt);
+      if (!offer.composed) return;
+      // Dropped rather than surfaced. The household has left this screen by
+      // now, and a toast about bookkeeping would land on a conversation.
+      await api.markSuggestionTaken(offer.id).catch(() => {});
+    },
+    [onAsk],
+  );
 
   const lastWheel = useRef(0);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -276,9 +385,23 @@ export function SuggestionQueue({ sessionId, quietLine, onAsk }: SuggestionQueue
   const more = rest.length;
   const peek = rest.slice(0, 2);
 
+  // One offer carries the ink edge and the rest are hairline rows, which is the
+  // shape the proposals half of this file already has -- one open, the others a
+  // peek. Four equally-weighted cards was the other option and it is the one
+  // DESIGN.md section 3 rules out: spend the offset about twice per screen and
+  // mean it both times. Home spends it here and on the mic.
+  const lead = askable[0];
+  const rows = askable.slice(1, 1 + (shortPanel ? OFFER_ROWS_SHORT : OFFER_ROWS_TALL));
+  const unshown = Math.max(0, askable.length - 1 - rows.length);
+
   return (
     <div className="sq" data-hook="suggestion-queue" onWheel={onWheel}>
-      {proposals.length > 0 && <p className="sq__eyebrow">Goose asks · scroll for the next</p>}
+      {/* The head. Above everything the column can be carrying, and drawn in
+          every state except an open proposal -- a proposal is addressed to
+          somebody and is allowed to take the column over. */}
+      {activeProposal === null && <p className="sq__head">{houseLine}</p>}
+
+      {proposals.length > 0 && <p className="sq__eyebrow">Goose asks. Scroll for the next.</p>}
 
       {activeProposal === null ? (
         askable.length > 0 ? (
@@ -287,25 +410,59 @@ export function SuggestionQueue({ sessionId, quietLine, onAsk }: SuggestionQueue
           // with the fact that produced it underneath.
           <div className="sq__offers">
             <p className="sq__eyebrow">You could ask</p>
-            {askable.map((s) => (
+
+            <button
+              type="button"
+              className="sq__offer sq__offer--lead"
+              onClick={() => void take(lead)}
+            >
+              <span className="sq__offer-prompt">{lead.prompt}</span>
+              <span className="sq__offer-why">{lead.because}</span>
+            </button>
+
+            {rows.map((s) => (
               <button
                 key={s.id}
                 type="button"
                 className="sq__offer"
-                onClick={() => onAsk?.(s.prompt)}
+                onClick={() => void take(s)}
               >
                 <span className="sq__offer-prompt">{s.prompt}</span>
                 <span className="sq__offer-why">{s.because}</span>
               </button>
             ))}
+
+            {/* Said rather than dropped. A column that quietly showed three of
+                four would look like the engine found three.
+
+                It used to read "N more waiting in chat", and that was a promise
+                the interface does not keep. Measured: tapping an offer sends the
+                turn and lands you in chat with a message already in it, and the
+                classic composer only draws its chips while the transcript is
+                empty (`sections/Chat.tsx`, `messages.length === 0`) -- so the
+                count said four were there and chat showed zero. The hub composer
+                draws them unconditionally, which made it true on one surface and
+                false on the other, which is worse than either.
+
+                So it names no destination. What it claims is only what `offered`
+                already means: the engine believes the pond can answer these. */}
+            {unshown > 0 && (
+              <p className="sq__unshown">
+                {unshown === 1
+                  ? "1 more the pond can answer"
+                  : `${unshown} more the pond can answer`}
+              </p>
+            )}
           </div>
         ) : (
-          // Nothing waiting AND nothing to offer is the good outcome, so it
-          // reads as reassurance rather than an empty inbox. The caller supplies
-          // a line about THIS house; a generic one would be wallpaper on a
-          // glanced-at screen.
+          // Nothing to offer. Note this is ALSO what a failed fetch looks like
+          // -- both loads swallow their error into an empty list on purpose --
+          // so this line must not claim the pond looked and found nothing. It
+          // claims nothing at all: it is an invitation, which is what DESIGN.md
+          // section 7 asks an empty screen to be. The sentence about this house
+          // is already above it, and is true either way.
           <p className="sq__quiet" aria-live="polite">
-            {quietLine}
+            Ask about the house, or just talk.
           </p>
         )
       ) : (

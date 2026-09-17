@@ -9,21 +9,74 @@
 
 /* ── the column ── */
 
+/*
+  TOP-ALIGNED, not centred. `justify-content: center` put this column's ~200px
+  of content in the middle of a 496px box, so Home opened on 250px of nothing in
+  the corner a reader starts from, and the head below would have opened on it
+  too. The column is short; it sits under the status bar and stops.
+
+  `padding-bottom` is the dock's lane. The dock floats over this column now
+  rather than over the track, so the clearance is paid here -- 64px of button,
+  16px below it, 16px above.
+*/
+/*
+  Its own content's height, not the column's. `.dash__aside` is what holds the
+  width, and the dock sits under this in flow -- so a column that stretched to
+  the bottom of the screen would push the mic down with it.
+*/
 .sq {
-  flex: 0 0 396px;
+  flex: 0 1 auto;
+  width: 100%;
   box-sizing: border-box;
-  padding: 24px 22px;
+  padding: 20px 22px 4px;
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  gap: 16px;
+  justify-content: flex-start;
+  gap: 14px;
   position: relative;
   min-height: 0;
 }
 
+/* ── the head ──
+   One sentence about this house, in the bold italic at -0.02em that DESIGN.md
+   section 2 names as the signature of this product's typography -- and which
+   appeared nowhere on Home until now.
+
+   26px, not the 30px the proposal summary uses: a proposal is a question
+   somebody has to answer and the head is the screen introducing itself, so the
+   head must not be the loudest thing on a screen that has one waiting.
+
+   Charcoal, never purple. Purple measures 4.42:1 on Jarida White, which clears
+   what a boundary needs and misses what a sentence needs (section 2). */
+.sq__head {
+  margin: 0;
+  font-family: Quicksand, Comfortaa, sans-serif;
+  font-weight: 700;
+  font-style: italic;
+  font-size: 23px;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  color: var(--color-text);
+  text-wrap: balance;
+}
+
+/* The short panel. 480px of screen minus 60 of shell bar and 44 of status strip
+   leaves this column 376px, and it has to fit a head, an offer and the dock. 19
+   takes a line off the longest sentence homeLine can write. */
+@media (max-height: 560px) {
+  .sq__head {
+    font-size: 19px;
+  }
+}
+
+/* Quicksand, not JetBrains Mono. "You could ask" is prose; DESIGN.md section 2
+   reserves the mono face for numbers, timestamps, file paths and measurements,
+   and a label set in it reads as data the household cannot act on. Sentence
+   case for the same reason it is not tracked-out capitals: this line turns the
+   head's statement into a question, and it does that by being quiet. */
 .sq__eyebrow {
   margin: 0;
-  font: 500 12px/1 "JetBrains Mono", ui-monospace, monospace;
+  font: 600 13px/1.2 Quicksand, Comfortaa, sans-serif;
   color: var(--color-text-secondary);
 }
 
@@ -32,7 +85,7 @@
   font-size: 15px;
   line-height: 1.45;
   color: var(--color-text-secondary);
-  max-width: 34ch;
+  max-width: 30ch;
 }
 
 .sq__summary {
@@ -216,7 +269,9 @@
   bottom: 14px;
   left: 14px;
   z-index: 4;
-  width: 396px;
+  /* The column's width, from `.dash`. A literal 396 here was a second copy of
+     it, and the small panel now uses 344. */
+  width: var(--sq-col, 396px);
   background: var(--color-surface);
   border: 2px solid var(--color-text);
   border-radius: 20px;
@@ -413,20 +468,29 @@
 .sq__offers {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
+/* The rows. A hairline, no offset: these are a way in, not the thing the
+   screen is for.
+
+   This used to be every offer, on the reading that an offer is chrome. It is
+   half right -- a row is -- but it left Home with nothing at all wearing the
+   ink edge, and the only two hard offsets on the screen belonging to the mic
+   and the chat button. DESIGN.md section 3 is the other way round: "the edge
+   marks content, never chrome... if the chrome starts shouting, nothing on the
+   page is loud any more." A question the pond composed from this household's
+   own memories and devices is the content. So one of them takes the edge, and
+   these stay exactly as they were. */
 .sq__offer {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 3px;
+  gap: 2px;
   width: 100%;
   min-height: 44px;
-  padding: 11px 13px;
+  padding: 9px 12px;
   box-sizing: border-box;
-  /* Chrome, not content: a hairline, per "the edge marks content, never
-     chrome". These are a way in, not the thing the screen is for. */
   border: 1px solid var(--grey-200, var(--color-border));
   border-radius: 10px;
   background: transparent;
@@ -439,6 +503,66 @@
 
 .sq__offer:hover {
   border-color: var(--color-text);
+}
+
+/* ── the one that is loud ──
+   The ink card, taken verbatim from `styles/context.css` .ctx__card -- same
+   custom property, same 4px, same 7px on hover, same compensating translate so
+   the card's top-left corner stays put while the shadow grows underneath it.
+   Copied rather than reinterpreted: a second dialect of the house's one
+   gesture is worse than a duplicated rule.
+
+   Exactly one offer gets this. DESIGN.md section 3 budgets the offset at about
+   twice per screen; Home spends it here and on the mic, and the chat button
+   gives its own up to pay for it. */
+.sq__offer--lead {
+  --ink-lift: 4px;
+
+  gap: 5px;
+  padding: 15px 16px;
+  border: 2px solid var(--color-text);
+  border-radius: 12px;
+  background: var(--color-surface);
+  box-shadow: var(--ink-lift) var(--ink-lift) 0 var(--border-ink);
+  transform: translate(calc(4px - var(--ink-lift)), calc(4px - var(--ink-lift)));
+  transition:
+    box-shadow var(--dur-fast, 120ms) var(--ink-ease, ease),
+    transform var(--dur-fast, 120ms) var(--ink-ease, ease),
+    border-color var(--dur-fast, 120ms) var(--ink-ease, ease);
+}
+
+.sq__offer--lead:hover {
+  --ink-lift: 7px;
+  border-color: var(--color-accent);
+}
+
+/* Press is physical (section 3): the shadow collapses to nothing and the card
+   travels into the space the shadow was occupying, so it reads as a key being
+   struck. */
+.sq__offer--lead:active {
+  --ink-lift: 0px;
+  border-color: var(--color-text);
+}
+
+.sq__offer--lead .sq__offer-prompt {
+  font-size: 19px;
+  line-height: 1.26;
+  letter-spacing: -0.01em;
+}
+
+.sq__offer--lead .sq__offer-why {
+  font-size: 13.5px;
+}
+
+/* Said, not dropped. The 1024x600 panel fits two rows under the lead and the
+   800x480 one fits none, while the server can send four -- so a column is
+   routinely showing fewer than it was given, and it says so rather than letting
+   the household believe the pond found that many. It names no destination --
+   see the component for the measurement that took "in chat" out of it. */
+.sq__unshown {
+  margin: 2px 0 0;
+  font: 500 13px/1.3 Quicksand, Comfortaa, sans-serif;
+  color: var(--color-text-secondary);
 }
 
 /* Press is physical: the row takes the offset it lacks at rest, so it lands

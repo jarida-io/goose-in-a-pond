@@ -346,6 +346,11 @@
   background: linear-gradient(150deg, #60A5FA 0%, #3B82F6 55%, #818CF8 100%);
   display: flex;
   flex-direction: column;
+  /* The reading and the forecast take the top and the bottom of whatever
+     height the card is given, rather than stacking at the top and leaving a
+     band of flat sky under them. No effect where the card is only as tall as
+     its own content, which is every use outside a stretched widget frame. */
+  justify-content: space-between;
   gap: 12px;
   box-shadow: 0 6px 18px rgba(59, 130, 246, 0.25);
 }

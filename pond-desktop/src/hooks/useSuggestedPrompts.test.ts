@@ -16,7 +16,7 @@ function answers(prompts: string[]) {
       id: `s${i}`,
       prompt: p,
       because: "a measured fact.",
-      answered_by: "giap-memory",
+      answered_by: "giap-memory", composed: false,
     })),
     considered: [],
     audience: "personal",

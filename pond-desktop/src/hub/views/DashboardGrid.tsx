@@ -8,10 +8,13 @@
 // extra room on the desktop widens the widgets rather than adding any, which
 // is WidgetTrack's single container query and not a breakpoint here.
 //
-// THE SHAPE. A fixed 396px column that asks, and a paged track that reports.
-// The asking column never pages and never scrolls: one suggestion is open, the
-// rest are a peek and a count. The track is the household's own arrangement,
-// held in `state/dashboardLayout.ts` — which page, which order, which size.
+// THE SHAPE. A column that asks, and a paged track that reports. The column is
+// 396px on the shelf panel and 344 on the small one, and it holds three things
+// in one block: a sentence about this house, the questions the pond can answer,
+// and the mic and keyboard that are the two ways to ask. The column never pages
+// and never scrolls: one suggestion is open, the rest are a peek and a count.
+// The track is the household's own arrangement, held in
+// `state/dashboardLayout.ts` — which page, which order, which size.
 //
 // GONE, and both deliberately:
 //
@@ -200,29 +203,40 @@ export function DashboardGrid({ onNavigate, onTalk, sessionId, onAsk }: Dashboar
       />
 
       <div className="dash__body">
-        <SuggestionQueue sessionId={sessionId} quietLine={quietLine} onAsk={onAsk} />
+        {/* The asking side: what the house said, what you could ask it, and the
+            two ways to ask. One block, in flow.
+
+            The dock used to float over the whole screen, positioned against the
+            bottom edge of `.dash`. That is what put it 20px BELOW the fold on
+            the 800x480 panel, where `.dash` carried a 520px minimum against a
+            420px box -- the panel could not reach its own microphone. It also
+            landed it on top of the widget track mid-scroll, and, on a 900px
+            desktop window, 500px below the questions it belongs to.
+
+            In flow under the column it is none of those things, at any height,
+            and the failure mode it had is not expressible any more. */}
+        <div className="dash__aside">
+          <SuggestionQueue sessionId={sessionId} houseLine={quietLine} onAsk={onAsk} />
+          <div className="dash__dock">
+            <button type="button" className="dash__voice" aria-label="Talk to Goose" onClick={onTalk}>
+              {/* micEl, not HP_PATHS.mic: that entry is a compound sentinel
+                  string and renders nothing at all as a path. */}
+              <HubIco d={micEl} size={26} color="#fff" sw={2} />
+            </button>
+            <button
+              type="button"
+              className="dash__chat"
+              aria-label="Type to Goose"
+              onClick={() => onNavigate("chat")}
+            >
+              <HubIco d={HP_PATHS.railChat} size={22} color="var(--color-text)" sw={2} />
+            </button>
+          </div>
+        </div>
+
         <div className="dash__track">
           <WidgetTrack pages={pages} page={page} onPageChange={setRequestedPage} />
         </div>
-      </div>
-
-      {/* Floats over both columns. The track's pages carry 88px of bottom
-          padding for exactly this, and the left column clears it by being
-          vertically centred in a taller box than its own content. */}
-      <div className="dash__dock">
-        <button type="button" className="dash__voice" aria-label="Talk to Goose" onClick={onTalk}>
-          {/* micEl, not HP_PATHS.mic: that entry is a compound sentinel string
-              and renders nothing at all as a path. */}
-          <HubIco d={micEl} size={26} color="#fff" sw={2} />
-        </button>
-        <button
-          type="button"
-          className="dash__chat"
-          aria-label="Type to Goose"
-          onClick={() => onNavigate("chat")}
-        >
-          <HubIco d={HP_PATHS.railChat} size={22} color="var(--color-text)" sw={2} />
-        </button>
       </div>
 
       <ArrangeSheet
