@@ -1,0 +1,165 @@
+/* ────────────────────────────────────────────────────────────
+   Background jobs — one row per job, a sentence about what it is waiting for,
+   and the control that stops the waiting.
+
+   Chrome, not content: a hairline and no offset (DESIGN.md §3). This is a
+   maintenance list a household visits when something seems stuck, not the
+   thing a screen is for. Nothing here carries the ink edge.
+
+   Colour: none. Six rows differing by hue would assert a structure the data
+   does not have — "never invent meaning the data lacks". A job that cannot run
+   here is marked by its control being unavailable and by its own sentence
+   saying so, which are both readable on a dim panel and to a screen reader.
+   ──────────────────────────────────────────────────────────── */
+
+.bgjobs__card {
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 16px;
+  background: var(--color-surface);
+}
+
+.bgjobs__heading {
+  margin: 0 0 4px;
+  font: 700 16px var(--font-body, Quicksand, sans-serif);
+  color: var(--color-text);
+}
+
+.bgjobs__sub,
+.bgjobs__note {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--color-text-secondary);
+  max-width: 60ch;
+}
+
+.bgjobs__error {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--color-text);
+  max-width: 60ch;
+}
+
+.bgjobs__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.bgjobs__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--grey-200);
+}
+
+.bgjobs__row:last-child {
+  border-bottom: 0;
+}
+
+/* A job with no loop in this process reads quieter, but never disappears and
+   never drops below the contrast floor -- the whole reason to show it is that
+   somebody is looking for why it is not running. */
+.bgjobs__row:not([data-present]) .bgjobs__title {
+  color: var(--color-text-secondary);
+}
+
+.bgjobs__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 18rem;
+}
+
+.bgjobs__title {
+  font: 600 14px var(--font-body, Quicksand, sans-serif);
+  color: var(--color-text);
+}
+
+.bgjobs__wait {
+  font-size: 12.5px;
+  line-height: 1.35;
+  color: var(--color-text-secondary);
+}
+
+.bgjobs__act {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+
+/* The full 44px touch floor, because this list renders on the panel as well as
+   the desktop (DESIGN.md §6). */
+.bgjobs__run {
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid var(--color-border-strong, var(--color-text));
+  border-radius: 10px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: 600 14px var(--font-body, Quicksand, sans-serif);
+  cursor: pointer;
+}
+
+.bgjobs__run:hover:not(:disabled) {
+  background: var(--color-hover);
+}
+
+.bgjobs__run:active:not(:disabled) {
+  background: var(--color-pressed);
+}
+
+.bgjobs__run:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.bgjobs__run:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.bgjobs__said {
+  font-size: 12.5px;
+  line-height: 1.35;
+  color: var(--color-text-secondary);
+  max-width: 22ch;
+}
+
+/* ── The watcher ──────────────────────────────────────────────
+   One line, reprinted every five seconds. It is chrome that reports, not a
+   control, so it stays on the hairline discipline the rest of this panel
+   keeps — no edge, no offset, no colour (DESIGN.md §3).
+
+   What DOES change when a job is running is the weight and a left rule, which
+   both read at a glance on a dim panel and neither of which asserts a meaning
+   the data lacks: the rule is there when something holds the slot and gone
+   when nothing does.
+   ──────────────────────────────────────────────────────────── */
+
+.bgjobs__now {
+  margin: 0 0 12px;
+  padding: 8px 0 8px 12px;
+  border-left: 2px solid transparent;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--color-text-secondary);
+  max-width: 60ch;
+  transition: border-color var(--dur-fast, 120ms) var(--ink-ease, ease);
+}
+
+.bgjobs__now[data-running] {
+  border-left-color: var(--color-accent);
+  color: var(--color-text);
+  font-weight: 600;
+}

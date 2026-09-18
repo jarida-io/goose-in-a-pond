@@ -33,11 +33,32 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     route.fulfill({ json: { token: "e2e-test-token", session_id: "e2e-session" } }),
   );
 
-  // Direct tool invoke (Hub device control bypasses the LLM)
+  // Direct tool invoke (Hub device control bypasses the LLM).
+  //
+  // The device-control tools answer for real, because the card under test reads
+  // rather than assumes: it writes with `set_device_state` and then ASKS with
+  // `get_device_state`, and displays the answer. A mock that returned a bare
+  // "ok" to the read would put every tile in its "Not reporting" branch, which
+  // is correct behaviour against a backend that says nothing and no test of a
+  // toggle at all. The switch position is held here so the re-read reflects the
+  // write, the same way a real device would.
+  const power = new Map<string, boolean>();
   await page.route("**/api/v1/tools/invoke", (route) => {
-    const body = route.request().postDataJSON() as { server?: string; tool?: string };
+    const body = route.request().postDataJSON() as {
+      server?: string;
+      tool?: string;
+      args?: { device_id?: string; power?: boolean };
+    };
+    const id = body.args?.device_id ?? "";
+    if (body.tool === "set_device_state" && typeof body.args?.power === "boolean") {
+      power.set(id, body.args.power);
+    }
+    const content =
+      body.tool === "get_device_state" || body.tool === "set_device_state"
+        ? `device: ${id}\npower: ${power.get(id) ? "on" : "off"}`
+        : "ok";
     return route.fulfill({
-      json: { tool: `${body.server ?? ""}__${body.tool ?? ""}`, success: true, content: "ok" },
+      json: { tool: `${body.server ?? ""}__${body.tool ?? ""}`, success: true, content },
     });
   });
 
@@ -167,9 +188,28 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     route.fulfill({ json: { status: "ok" } }),
   );
 
-  // Devices
+  // Devices.
+  //
+  // One real device, not an empty list. Home no longer substitutes a demo house
+  // when the pond has none, so an empty answer here means every device test
+  // asserts against an empty state and none of them can exercise a control.
+  // `capabilities` is load-bearing: Home offers a switch only to a device that
+  // says it has one.
   await page.route("**/api/v1/devices", (route) =>
-    route.fulfill({ json: { devices: [] } }),
+    route.fulfill({
+      json: {
+        devices: [
+          {
+            id: "driveway",
+            name: "Driveway Light",
+            device_type: "light",
+            is_online: true,
+            room: "Outdoor",
+            capabilities: ["power"],
+          },
+        ],
+      },
+    }),
   );
   // The Devices tab reads this on mount for its Matter section. Off is the
   // default a fresh Pond is in.
@@ -228,6 +268,82 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     route.fulfill({ json: [] }),
   );
 
+  // Home's left column, both halves. Neither was mocked before, so every E2E
+  // run exercised the column's ERROR path and called it the quiet state -- the
+  // two are pixel-identical by design, which is exactly why the gap survived.
+  //
+  // Proposals: empty, which is the honest default. The reviewer has never
+  // yielded one on real hardware, so a fixture with rows in it would assert a
+  // state no pond has reached.
+  await page.route("**/api/v1/proposals*", (route) =>
+    route.fulfill({ json: { profile_id: "p-jerry", proposals: [] } }),
+  );
+
+  // Suggestions: two real ones, so the offers half is actually rendered rather
+  // than skipped past. Both are shapes the engine really emits, with a measured
+  // number in each reason -- a fixture whose `because` was a template would let
+  // a regression that dropped the number through.
+  await page.route("**/api/v1/suggestions*", (route) =>
+    route.fulfill({
+      json: {
+        suggestions: [
+          {
+            id: "memory_recall",
+            prompt: "What do you remember about me?",
+            because: "12 things remembered the pond can still reach.",
+            answered_by: "giap-memory",
+          },
+          {
+            id: "devices_online",
+            prompt: "Which of my devices are online?",
+            because: "3 devices registered here.",
+            answered_by: "giap-device",
+          },
+        ],
+        considered: [
+          { id: "calendar_today", silent_because: "no calendar account is connected" },
+          { id: "memory_recall", silent_because: null },
+          { id: "devices_online", silent_because: null },
+        ],
+        audience: "personal",
+      },
+    }),
+  );
+
+  // The inference lane. Mocked for the same reason `now-playing` is: the
+  // Settings screen reads it on mount, and an unmocked route leaves the
+  // browser to reach 127.0.0.1:4000 -- a live pond-server on a developer's
+  // machine, nothing at all in CI -- and the failure lands on whichever
+  // unrelated test happens to assert a clean console.
+  //
+  // The fixture is the shape a REAL pond answers with, not a tidy one: two
+  // jobs with no loop in this process (no embedder), one that has never run,
+  // and one blocked on quiet. A fixture where all six were present and happy
+  // would let a regression that drops the `present` distinction through.
+  await page.route("**/api/v1/lane", (route) =>
+    route.fulfill({
+      json: {
+        lane: true,
+        slot_busy: false,
+        idle_for_secs: 240,
+        saw_activity_since_start: true,
+        would_run: "titling",
+        idle_reason: null,
+        jobs: [
+          { job: "consolidation", title: "Tidy the memory store", present: true, registered: true, enabled: true, since_last_run_secs: 3600, interval_floor_secs: 86400, idle_threshold_secs: 900, blocked_by: "interval_floor", would_run_next: false },
+          { job: "titling", title: "Name conversations", present: true, registered: true, enabled: true, since_last_run_secs: 300, interval_floor_secs: 300, idle_threshold_secs: 900, blocked_by: null, would_run_next: true },
+          { job: "proactive_review", title: "Look for something to suggest", present: true, registered: false, enabled: false, since_last_run_secs: null, interval_floor_secs: 0, idle_threshold_secs: 0, blocked_by: null, would_run_next: false },
+          { job: "summary_refresh", title: "Refresh conversation summaries", present: true, registered: true, enabled: true, since_last_run_secs: 120, interval_floor_secs: 30, idle_threshold_secs: 120, blocked_by: "still_active", would_run_next: false },
+          { job: "index_maintenance", title: "Maintain the search index", present: false, registered: false, enabled: false, since_last_run_secs: null, interval_floor_secs: 0, idle_threshold_secs: 0, blocked_by: null, would_run_next: false },
+          { job: "memory_extraction", title: "Read conversations for memories", present: true, registered: true, enabled: true, since_last_run_secs: null, interval_floor_secs: 60, idle_threshold_secs: 900, blocked_by: "still_active", would_run_next: false },
+        ],
+      },
+    }),
+  );
+  await page.route("**/api/v1/lane/jobs/*/run", (route) =>
+    route.fulfill({ json: { lane: true, job: "titling", woken: true } }),
+  );
+
   // Skills
   await page.route("**/api/v1/skills", (route) =>
     route.fulfill({ json: [] }),
@@ -249,9 +365,40 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     route.fulfill({ json: [] }),
   );
 
-  // Recipes
+  // Recipes.
+  //
+  // One real recipe, not an empty list. This used to answer [] and the Routines
+  // screen still showed five routines, because hubDataStore substituted a
+  // fixture whenever the list came back empty -- so every routine assertion in
+  // this suite was passing against invented data. That substitution is gone,
+  // which is correct, and it left those tests with nothing to click. A mocked
+  // backend that answers with a recipe is a mock; a product that invents one
+  // when the backend says "none" was the bug.
   await page.route("**/api/v1/recipes", (route) =>
-    route.fulfill({ json: [] }),
+    route.fulfill({
+      json: [
+        {
+          id: "recipe-morning",
+          name: "Morning Check",
+          description: "Read the briefing, report the weather",
+          yaml: "title: Morning Check\ninstructions: read the briefing\n",
+          title: "Morning Check",
+          active: true,
+        },
+      ],
+    }),
+  );
+
+  // Warmup.
+  //
+  // Opening Chat asks the pond to precompile the prompt prefix. It was the only
+  // endpoint the shell reaches that this file did not answer, so the request
+  // went to the real 127.0.0.1:4000 and was refused -- two console errors that
+  // tripped the strict console gate in hub-visual-verify and looked, for a
+  // while, like a Vite HMR port conflict. It is neither: it is a route that was
+  // added to the client and never to the mock.
+  await page.route("**/api/v1/warmup", (route) =>
+    route.fulfill({ json: { warmed: false, reason: "no model in the test environment" } }),
   );
 
   // Transcribe (for voice pipeline)

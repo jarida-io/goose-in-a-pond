@@ -78,6 +78,7 @@ use crate::user_data::domain::session::Session;
 use crate::user_data::services::consolidation_schedule::{
     saw_activity_since_start, should_run, GateDecision, GateInputs, SkipReason,
 };
+use crate::user_data::services::member_attribution;
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -313,16 +314,44 @@ pub fn should_review(inputs: &ReviewInputs) -> ReviewDecision {
     if let GateDecision::Skip(reason) = should_run(inputs.schedule) {
         return ReviewDecision::Skip(ReviewSkip::Schedule(reason));
     }
-    if inputs.run_in_flight {
-        return ReviewDecision::Skip(ReviewSkip::RunInFlight);
+    match reviewer_refusal(inputs.run_in_flight, inputs.proposals_today) {
+        Some(skip) => ReviewDecision::Skip(skip),
+        None => ReviewDecision::Run,
     }
-    if inputs.proposals_today >= MAX_PROPOSALS_PER_DAY {
-        return ReviewDecision::Skip(ReviewSkip::DailyCapReached {
-            made: inputs.proposals_today,
+}
+
+/// The refusals that are about whether a review is WORTH running, with no
+/// timing in them at all.
+///
+/// Split out because the reviewer runs on the shared inference lane, and the
+/// lane owns the timing half: `InferenceLane::acquire` applies the enable
+/// toggle, the never-at-startup guard, the quiet threshold and the interval
+/// floor, for this job and six others, and decides which of them gets the one
+/// slot. What it cannot know is that this particular job has nothing worth
+/// doing — and a job must not take the only inference slot in order to discover
+/// that.
+///
+/// Neither refusal here is waivable, and that is the point of their being
+/// separate from the timing ones. A person pressing "Run now" is asking the
+/// pond to skip its politeness, not to interrupt a household past the one limit
+/// it has on being interrupted — `MAX_PROPOSALS_PER_DAY` is that limit, and a
+/// button that could be pressed past it would turn a cap into a suggestion.
+///
+/// `orchestrator_enabled` is deliberately NOT here: it is the pond's own enable
+/// toggle for this job, so it belongs in the `enabled` argument the lane
+/// already takes, where it is counted and reported as `disabled` like every
+/// other job's switch.
+pub fn reviewer_refusal(run_in_flight: bool, proposals_today: usize) -> Option<ReviewSkip> {
+    if run_in_flight {
+        return Some(ReviewSkip::RunInFlight);
+    }
+    if proposals_today >= MAX_PROPOSALS_PER_DAY {
+        return Some(ReviewSkip::DailyCapReached {
+            made: proposals_today,
             cap: MAX_PROPOSALS_PER_DAY,
         });
     }
-    ReviewDecision::Run
+    None
 }
 
 /// Invariant 3's second half: must a review already in flight be cancelled?
@@ -524,16 +553,64 @@ pub fn reviewable(event: &BusEvent) -> Option<BusEventRef> {
 /// exists to avoid. [`ProposalAudience`] cannot express one, so a caller that
 /// ignored this would have nothing to pass.
 ///
+/// # The sole-member fallthrough, and why it is not a hole in invariant 4
+///
+/// `members` is the household roster, and when it holds exactly one person an
+/// unattributed conversation is addressed to them. Nothing is broadcast: the
+/// fallthrough RESOLVES a member and returns an `Owner` audience, so no
+/// downstream caller ever sees "the household". With two members it answers
+/// `None` exactly as before, because picking one would be attribution by row
+/// order, which is evidence of nothing — the rule PAI-1 P3 refused.
+///
+/// This is the same call `881da889` made for `context_source_owner` and the one
+/// `proposal_caller` now makes on the read side: a one-member pond has exactly
+/// one possible answer to "whose is this?", and requiring proof of it means
+/// requiring a paired, attributed device that most desktop ponds do not have.
+///
+/// It was measured, not assumed. On a real pond: 961 sessions, **0** carrying a
+/// `profile_id`, because `resolve_turn_scope` only writes one on the
+/// `DeviceRung::Member` arm and the desktop's own device row is never
+/// attributed. So this function returned `None` on every tick of every process
+/// the reviewer has ever run — which made PAI-7's entire model-backed producer
+/// unreachable, and left the Home column showing only the template-tier
+/// suggestions, which is what a household actually notices.
+///
 /// [`SessionOrigin::is_human`]: crate::shared::domain::session_activity::SessionOrigin::is_human
-pub fn audience_for_review(sessions: &[Session], now: DateTime<Utc>) -> Option<ProposalAudience> {
+pub fn audience_for_review(
+    sessions: &[Session],
+    now: DateTime<Utc>,
+    members: &[String],
+) -> Option<ProposalAudience> {
     let cutoff = now - AUDIENCE_WINDOW;
-    sessions
+    let attributed = sessions
         .iter()
         .filter(|s| SessionOrigin::of(&s.id).is_human())
         .filter(|s| s.updated_at > cutoff)
         .filter_map(|s| s.profile_id.as_deref().map(|p| (s.updated_at, p)))
         .max_by_key(|(at, _)| *at)
-        .and_then(|(_, profile_id)| ProposalAudience::for_member(profile_id).ok())
+        .map(|(_, profile_id)| profile_id.to_string());
+
+    // An attribution the pond actually made always wins. The roster is only
+    // consulted when there is none, so this can never override a face match or
+    // a paired device with a guess.
+    let profile_id = match attributed {
+        Some(id) => id,
+        None => {
+            // Still requires SOMEBODY to have been here inside the window. A
+            // pond nobody has talked to in six hours has nothing to review, and
+            // the roster does not change that.
+            let anyone_here = sessions
+                .iter()
+                .filter(|s| SessionOrigin::of(&s.id).is_human())
+                .any(|s| s.updated_at > cutoff);
+            if !anyone_here {
+                return None;
+            }
+            member_attribution::sole_member(members)?
+        }
+    };
+
+    ProposalAudience::for_member(&profile_id).ok()
 }
 
 /// The events a review addressed to `audience` may actually be shown.
@@ -1200,6 +1277,65 @@ mod tests {
     #[test]
     fn an_idle_pond_after_real_activity_may_review() {
         assert_eq!(should_review(&inputs()), ReviewDecision::Run);
+    }
+
+    /// The reviewer runs on the lane now, and calls this half directly.
+    ///
+    /// The lane owns the timing -- enable toggle, never-at-startup, quiet
+    /// threshold, interval floor -- for this job and six others, because it is
+    /// what decides which of them gets the one slot. What is left here is the
+    /// question the lane cannot answer: is a review worth running at all?
+    #[test]
+    fn the_reviewers_own_refusals_are_the_cap_and_a_run_in_flight() {
+        assert_eq!(reviewer_refusal(false, 0), None);
+        assert_eq!(reviewer_refusal(true, 0), Some(ReviewSkip::RunInFlight));
+        assert_eq!(
+            reviewer_refusal(false, MAX_PROPOSALS_PER_DAY),
+            Some(ReviewSkip::DailyCapReached {
+                made: MAX_PROPOSALS_PER_DAY,
+                cap: MAX_PROPOSALS_PER_DAY,
+            })
+        );
+        assert_eq!(
+            reviewer_refusal(false, MAX_PROPOSALS_PER_DAY - 1),
+            None,
+            "the cap is a ceiling, not a fence one short of it"
+        );
+    }
+
+    /// Splitting the gate must not have made a second copy of the timing rules.
+    ///
+    /// The whole reason `should_run` is shared is that a second copy is what
+    /// reintroduces the failure it was written to fix -- a background loop
+    /// firing fifteen minutes after every boot on a machine nobody has touched.
+    /// This half takes no clock, no duration and no activity reading, and its
+    /// signature is what enforces that: there is nothing here to get wrong.
+    #[test]
+    fn the_reviewers_own_half_of_the_gate_has_no_timing_in_it() {
+        // Two calls that differ in nothing but the caller's imagination about
+        // when they happened. A timing rule hiding in here would have to read
+        // something, and there is nothing to read.
+        assert_eq!(reviewer_refusal(false, 3), reviewer_refusal(false, 3));
+        assert_eq!(
+            should_review(&ReviewInputs::for_tick(
+                GateInputs {
+                    enabled: true,
+                    saw_activity_since_start: true,
+                    idle_for: std::time::Duration::from_secs(9_999),
+                    idle_threshold: std::time::Duration::ZERO,
+                    since_last_run: None,
+                    interval_floor: std::time::Duration::ZERO,
+                },
+                true,
+                MAX_PROPOSALS_PER_DAY,
+                false,
+            )),
+            ReviewDecision::Skip(ReviewSkip::DailyCapReached {
+                made: MAX_PROPOSALS_PER_DAY,
+                cap: MAX_PROPOSALS_PER_DAY,
+            }),
+            "a perfect schedule does not buy a way past the cap"
+        );
     }
 
     /// The reviewer is off on a stock install, and that is structural rather
@@ -2183,11 +2319,92 @@ mod tests {
             ),
             session("chat-anon", None, now - Duration::minutes(1)),
         ];
-        let audience = audience_for_review(&sessions, now).expect("somebody was here");
+        let audience = audience_for_review(&sessions, now, &[]).expect("somebody was here");
         assert_eq!(
             audience.profile_id(),
             EXEMPLAR_OWNER_ID,
             "an unattributed conversation is newer, but it names nobody to address"
+        );
+    }
+
+    /// The measured blocker, and the fallthrough that clears it.
+    ///
+    /// On a real pond: 961 sessions, zero carrying a `profile_id`, because the
+    /// only writer is `resolve_turn_scope`'s `DeviceRung::Member` arm and the
+    /// desktop's own device row is never attributed. So this returned `None` on
+    /// every tick the reviewer has ever run, and PAI-7's model-backed producer
+    /// was unreachable — which is why Home only ever showed the template-tier
+    /// suggestions.
+    #[test]
+    fn a_one_member_pond_is_addressed_even_when_nothing_is_attributed() {
+        let now = Utc::now();
+        let roster = vec![EXEMPLAR_OWNER_ID.to_string()];
+        let unattributed = session("chat-1", None, now - Duration::minutes(2));
+
+        // The control first: the same pond with no roster still answers None,
+        // so what follows is the fallthrough and not some other admission.
+        assert!(
+            audience_for_review(&[unattributed.clone()], now, &[]).is_none(),
+            "with no roster there is nobody to fall through to"
+        );
+
+        assert_eq!(
+            audience_for_review(&[unattributed], now, &roster)
+                .expect("a one-member pond has exactly one possible answer")
+                .profile_id(),
+            EXEMPLAR_OWNER_ID,
+        );
+    }
+
+    /// Invariant 4, held. Two members and no attribution is the case where
+    /// picking would be attribution by row order — the rule PAI-1 P3 refused —
+    /// so the answer stays "no review".
+    #[test]
+    fn two_members_and_no_attribution_is_still_nobody() {
+        let now = Utc::now();
+        let roster = vec![EXEMPLAR_OWNER_ID.to_string(), "liz".to_string()];
+        let unattributed = session("chat-1", None, now - Duration::minutes(2));
+
+        assert!(
+            audience_for_review(&[unattributed], now, &roster).is_none(),
+            "with two members, choosing one would be attribution by row order"
+        );
+    }
+
+    /// The roster never overrides an attribution the pond actually made. A face
+    /// match or a paired device outranks a guess, even a guess with only one
+    /// candidate.
+    #[test]
+    fn an_attribution_the_pond_made_outranks_the_roster() {
+        let now = Utc::now();
+        let roster = vec!["liz".to_string()];
+        let theirs = session(
+            "chat-1",
+            Some(EXEMPLAR_OWNER_ID),
+            now - Duration::minutes(1),
+        );
+
+        assert_eq!(
+            audience_for_review(&[theirs], now, &roster)
+                .expect("an attributed conversation names its member")
+                .profile_id(),
+            EXEMPLAR_OWNER_ID,
+            "the roster must not rename somebody the pond identified",
+        );
+    }
+
+    /// The fallthrough does not wake a pond nobody has touched. `AUDIENCE_WINDOW`
+    /// still has to hold, or a one-member pond would be proposed to forever on
+    /// the strength of a conversation from last March.
+    #[test]
+    fn a_silent_pond_is_not_addressed_just_because_it_has_one_member() {
+        let now = Utc::now();
+        let roster = vec![EXEMPLAR_OWNER_ID.to_string()];
+        let stale = session("chat-1", None, now - AUDIENCE_WINDOW - Duration::minutes(1));
+
+        assert!(
+            audience_for_review(&[stale], now, &roster).is_none(),
+            "nobody has been here inside the window, so there is nothing to review",
         );
     }
 
@@ -2204,7 +2421,7 @@ mod tests {
         );
         assert!(!SessionOrigin::of(&mine.id).is_human());
         assert!(
-            audience_for_review(&[mine], now).is_none(),
+            audience_for_review(&[mine], now, &[]).is_none(),
             "a review addressed to the member its own previous run was scoped to is the pond \
              talking to itself"
         );
@@ -2217,7 +2434,7 @@ mod tests {
             now - Duration::minutes(1),
         );
         assert_eq!(
-            audience_for_review(&[theirs], now)
+            audience_for_review(&[theirs], now, &[])
                 .expect("a human conversation names its member")
                 .profile_id(),
             EXEMPLAR_OWNER_ID
@@ -2232,8 +2449,8 @@ mod tests {
             Some(EXEMPLAR_OWNER_ID),
             now - AUDIENCE_WINDOW - Duration::seconds(1),
         );
-        assert!(audience_for_review(&[stale], now).is_none());
-        assert!(audience_for_review(&[], now).is_none());
+        assert!(audience_for_review(&[stale], now, &[]).is_none());
+        assert!(audience_for_review(&[], now, &[]).is_none());
     }
 
     /// The brief goes around the scope, not through it: it is prose handed to

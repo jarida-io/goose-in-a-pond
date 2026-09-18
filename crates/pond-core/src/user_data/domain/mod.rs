@@ -9,6 +9,7 @@ pub mod prompt_template;
 pub mod proposal;
 pub mod push_token;
 pub mod recipe;
+pub mod reminder;
 pub mod schedule;
 pub mod sensor;
 pub mod session;

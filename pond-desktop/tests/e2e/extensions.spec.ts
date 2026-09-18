@@ -1,14 +1,12 @@
 import { test, expect } from "@playwright/test";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
+import { navigateTo } from "./helpers/nav";
 
 // ── Helper ────────────────────────────────────────────────────
 
+// Extensions lives behind the drawer's "Manage" group now; navigateTo expands it.
 async function goToExtensions(page: import("@playwright/test").Page) {
-  await page
-    .getByRole("button")
-    .filter({ hasText: /extensions/i })
-    .first()
-    .click();
+  await navigateTo(page, "Extensions");
 }
 
 // ── Tests ─────────────────────────────────────────────────────

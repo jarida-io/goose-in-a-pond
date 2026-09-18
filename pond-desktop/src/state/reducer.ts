@@ -125,8 +125,12 @@ export function nextCardId(): number {
 export function buildInitialState(): AppState {
   const storedMode = normalizeDesktopMode(localStorage.getItem("giap-mode"));
   // The classic (sections) UI is the default landing surface. The Goose Hub is
-  // still a preview (reachable via Settings > "Preview Goose Hub"), so never
-  // *start* in it even if it was the last-viewed section — a persisted "hub" is
+  // still a preview, so never *start* in it even if it was the last-viewed
+  // section. This used to say the preview was "reachable via Settings >
+  // Preview Goose Hub"; that control is gone and the sentence outlived it by
+  // long enough to send an E2E test looking for a button nobody had built in
+  // months. The only way in now is the `giap-force-hub` opt-in below — a
+  // persisted "hub" is
   // coerced back to the classic UI on launch/reload so the preview is not
   // sticky. An explicit opt-in (`giap-force-hub`, used by hub E2E tests and
   // available for dev) bypasses the coercion.

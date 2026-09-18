@@ -2,7 +2,7 @@
 
 use crate::models::ports::embedding::EmbeddingProvider;
 use crate::user_data::domain::memory::{
-    cosine_similarity, MemoryEventKind, MemoryFragment, MemoryLifecycle, MemorySegment,
+    cosine_similarity, MemoryEvent, MemoryEventKind, MemoryFragment, MemoryLifecycle, MemorySegment,
 };
 use crate::user_data::domain::profile::ProfileScope;
 use crate::user_data::ports::memory_repository::MemoryRepository;
@@ -70,7 +70,12 @@ pub struct MockMemoryRepository {
     lifecycle_updates: Arc<RwLock<Vec<(String, MemoryLifecycle)>>>,
     superseded: Arc<RwLock<Vec<(String, String)>>>,
     segment_updates: Arc<RwLock<Vec<(String, MemorySegment, f32)>>>,
-    events: Arc<RwLock<Vec<(MemoryEventKind, String, Option<String>)>>>,
+    /// Recorded in full rather than as a projection, because the batch
+    /// extraction engine READS its own audit rows back: the window key it logs
+    /// on a finished window is what stops a re-walk paying for stretches it has
+    /// already mined. A mock whose `get_events` returned nothing would make that
+    /// guard untestable and, worse, make it look tested.
+    events: Arc<RwLock<Vec<MemoryEvent>>>,
     consolidation_runs: Arc<RwLock<Vec<RecordedConsolidationRun>>>,
 }
 
@@ -102,8 +107,16 @@ impl MockMemoryRepository {
     }
 
     /// Audit events recorded, in order: (kind, memory id, data).
+    ///
+    /// The projection the existing assertions are written against; the rows
+    /// themselves come back through [`MemoryRepository::get_events`].
     pub async fn events(&self) -> Vec<(MemoryEventKind, String, Option<String>)> {
-        self.events.read().await.clone()
+        self.events
+            .read()
+            .await
+            .iter()
+            .map(|e| (e.event_kind.clone(), e.memory_id.clone(), e.data.clone()))
+            .collect()
     }
 
     /// Consolidation audit rows recorded, in order.
@@ -246,14 +259,33 @@ impl MemoryRepository for MockMemoryRepository {
         &self,
         kind: MemoryEventKind,
         memory_id: &str,
-        _session_id: Option<&str>,
+        session_id: Option<&str>,
         data: Option<&str>,
     ) -> Result<()> {
-        self.events
-            .write()
-            .await
-            .push((kind, memory_id.to_string(), data.map(str::to_string)));
+        let mut events = self.events.write().await;
+        let id = events.len() as i64 + 1;
+        events.push(MemoryEvent {
+            id,
+            event_kind: kind,
+            memory_id: memory_id.to_string(),
+            session_id: session_id.map(str::to_string),
+            data: data.map(str::to_string),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        });
         Ok(())
+    }
+
+    /// Newest first, like the SQLite adapter, so a caller that takes the first
+    /// match takes the most recent one in both.
+    async fn get_events(&self, memory_id: Option<&str>, limit: usize) -> Result<Vec<MemoryEvent>> {
+        let events = self.events.read().await;
+        Ok(events
+            .iter()
+            .rev()
+            .filter(|e| memory_id.is_none_or(|id| e.memory_id == id))
+            .take(limit)
+            .cloned()
+            .collect())
     }
 
     async fn log_consolidation_run(

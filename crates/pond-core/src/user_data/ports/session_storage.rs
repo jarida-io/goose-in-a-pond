@@ -1,6 +1,6 @@
 use crate::models::domain::message::ImageAttachment;
 use crate::user_data::domain::session::{
-    MessageAttachment, Session, SessionIdentity, SessionMessage,
+    ExtractionCursor, MessageAttachment, Session, SessionIdentity, SessionMessage,
 };
 use thiserror::Error;
 
@@ -518,6 +518,65 @@ pub trait SessionStorage: Send + Sync {
         Err(SessionStorageError::General(
             "message feedback is not supported by this SessionStorage adapter".to_string(),
         ))
+    }
+
+    // ── Batch memory extraction cursor (migration 0056) ─────────────────────
+    //
+    // Three defaulted methods, for the same reason as every other default in
+    // this trait: four non-SQLite implementors exist and none of them has a
+    // conversation worth mining. The cost of a default is that deleting the
+    // real override leaves the tree green, so the SQLite adapter carries its
+    // own behavioural tests rather than a grep.
+    //
+    // The defaults are the narrowing direction. An adapter that does not
+    // override reads as "never examined" and silently discards every write, so
+    // the batch engine re-walks the same window forever rather than advancing
+    // past conversations it never read. Wasteful, never wrong.
+
+    /// How far batch memory extraction has read into this conversation.
+    async fn extraction_cursor(
+        &self,
+        _session_id: &str,
+    ) -> Result<ExtractionCursor, SessionStorageError> {
+        Ok(ExtractionCursor::unstarted())
+    }
+
+    /// Move the watermark, or clear it.
+    ///
+    /// `Some(id)` records that the walk has covered everything up to and
+    /// including that message, stamps the time, and resets the attempt count --
+    /// a watermark that moved is a watermark nothing has failed against yet.
+    ///
+    /// `None` clears the cursor back to unstarted, which is what a walk does
+    /// when its anchor has been deleted (see
+    /// [`messages_after`](Self::messages_after) returning `None`). The stamp is
+    /// cleared with it, deliberately: a conversation that must be re-walked
+    /// from message one has not been examined, and leaving the stamp would sort
+    /// it to the back of a backlog it has not started.
+    ///
+    /// **Implementations must not touch `sessions.updated_at`.** That column is
+    /// one of the two activity sources the idle gate reads
+    /// (`consolidation_schedule::saw_activity_since_start`), so a background
+    /// writer stamping it looks exactly like a person coming back: the pass's
+    /// own watcher would cancel it mid-run, and every pass would shove the idle
+    /// clock forward. Both existing title writers already avoid this for the
+    /// same reason, and a source-grep test pins it.
+    async fn set_extraction_cursor(
+        &self,
+        _session_id: &str,
+        _through_message_id: Option<&str>,
+    ) -> Result<(), SessionStorageError> {
+        Ok(())
+    }
+
+    /// Record that a window was read and came back unparseable, returning the
+    /// new consecutive-attempt count.
+    ///
+    /// Separate from [`set_extraction_cursor`](Self::set_extraction_cursor)
+    /// because the watermark must NOT move: the window has not been examined,
+    /// only attempted. Same `updated_at` rule applies.
+    async fn note_extraction_attempt(&self, _session_id: &str) -> Result<u32, SessionStorageError> {
+        Ok(0)
     }
 
     /// Delete `message_id` and every later message in the same session (by

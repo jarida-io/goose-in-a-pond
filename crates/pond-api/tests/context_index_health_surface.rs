@@ -120,6 +120,9 @@ async fn make_app(wire_index: bool, wire_embedder: bool) -> Harness {
 
     let state = Arc::new(AppState {
         warmup: Default::default(),
+        suggestion_queue: std::sync::Arc::new(
+            pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
+        ),
         db: Arc::new(db),
         onboarding_repo: Arc::new(CompletedOnboarding),
         handshake: Arc::new(hs),
@@ -147,6 +150,7 @@ async fn make_app(wire_index: bool, wire_embedder: bool) -> Harness {
         // `if let Some(provider)`. Wiring it whenever the index is present would
         // make this harness claim a refill on a pond where nothing can refill.
         index_reindex: (wire_index && wire_embedder).then(|| reindex.clone()),
+        lane: None,
         account_sync: None,
         sensor_storage: Arc::new(MockSensorStorage::new()),
         camera_storage: Arc::new(MockCameraStorage::new()),
@@ -177,8 +181,7 @@ async fn make_app(wire_index: bool, wire_embedder: bool) -> Harness {
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         notification_sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         answer_reviewer: None,
-        memory_extractor: None,
-        memory_extraction_service: None,
+        extraction_status: None,
         last_user_activity: Arc::new(tokio::sync::RwLock::new(std::time::Instant::now())),
         consolidation_cancel: Arc::new(tokio::sync::RwLock::new(None)),
         consolidation_event_tx: tokio::sync::broadcast::channel(16).0,

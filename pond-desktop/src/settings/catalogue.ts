@@ -338,9 +338,10 @@ export const CATALOGUE: CatalogueCategory[] = [
         entries: [
           { key: "agent_memory_inject", label: "Use memories in replies", description: "Let it recall what it knows about you when answering.", control: { kind: "toggle" }, consumer: "live" },
           { key: "agent_memory_limit", label: "Memories per reply", description: "How many remembered things it may bring to a single answer.", control: { kind: "number", min: 0, max: 100 }, consumer: "live", validate: all(integer, range(0, 100)) },
-          { key: "memory_extraction_enabled", label: "Learn from conversations", description: "Remember lasting facts from your conversations.", control: { kind: "toggle" }, consumer: "live" },
-          { key: "memory_extraction_max_facts", label: "Facts kept per conversation", description: "How many things it may remember from one exchange.", control: { kind: "number", min: 0, max: 50 }, consumer: "live", validate: all(integer, range(0, 50)) },
-          { key: "memory_extraction_interval_secs", label: "Wait between learning", description: "How long to wait between remembering, so it does not do it constantly.", control: { kind: "number", min: 0, unit: "seconds" }, consumer: "live", validate: all(integer, atLeast(0, "seconds")) },
+          { key: "memory_extraction_enabled", label: "Learn from conversations", description: "Read your conversations back in quiet moments and remember what lasts. Nothing is remembered while you are talking, so this takes a while to show up \u2014 and a long history takes a few nights.", control: { kind: "toggle" }, consumer: "live" },
+          { key: "memory_extraction_max_facts", label: "Most things kept at once", description: "How many things it may remember from one stretch of conversation. Fewer is better: a store full of near-misses crowds out what matters.", control: { kind: "number", min: 0, max: 50 }, consumer: "live", validate: all(integer, range(0, 50)) },
+          { key: "memory_extraction_interval_secs", label: "Wait between readings", description: "The shortest gap between two readings. It only ever makes them rarer.", control: { kind: "number", min: 0, unit: "seconds" }, consumer: "live", validate: all(integer, atLeast(0, "seconds")) },
+          { key: "suggestion_generation_enabled", label: "Suggest things to ask", description: "Turn what it remembers about you into questions on the Home screen. Off, Home still suggests \u2014 but only the same general questions every day.", control: { kind: "toggle" }, consumer: "live" },
         ],
       },
       {
@@ -509,9 +510,9 @@ export const CATALOGUE: CatalogueCategory[] = [
   },
   {
     id: "automation",
-    name: "Automation & Proactivity",
+    name: "Automations",
     tier: "Household",
-    blurb: "What runs on its own, and whether the assistant may speak before you do.",
+    blurb: "What runs on its own, what it is doing right now, and whether the assistant may speak before you do.",
     groups: [
       {
         name: "Schedules",
@@ -544,6 +545,12 @@ export const CATALOGUE: CatalogueCategory[] = [
         name: "Thinking unprompted",
         entries: [
           { key: "proactive_review_enabled", label: "Review the day on its own", description: "Let it think over the day without being asked.", control: { kind: "toggle" }, consumer: "live" },
+          // Written from the Home card ("Don't suggest this"), and undoable
+          // here -- a mute with no way back is worse than no mute. The control
+          // is text because the value is a list of suggestor ids; the card is
+          // the place you actually use it, and this is the place you take it
+          // back.
+          { key: "suggestions_muted", label: "Suggestions you have hidden", description: "Kinds of suggestion Home will not offer. Clear this to see them again.", control: { kind: "text", placeholder: "Nothing hidden" }, consumer: "live" },
           // Only ever touches names the pond wrote itself. A title typed by
           // hand is left alone whatever this is set to, so the control does not
           // need to warn about losing one.

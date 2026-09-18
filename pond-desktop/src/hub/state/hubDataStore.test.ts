@@ -14,8 +14,8 @@ vi.mock("../../api/PondApiClient", () => ({
 import { api } from "../../api/PondApiClient";
 import { getHomeData, refreshHomeData, refreshWeather, refreshNowPlaying,
          resumeNowPlayingPolling,
-         __resetHubDataForTests, __tickNowPlayingPollForTests } from "./hubDataStore";
-import { ROUTINES as MOCK_ROUTINES } from "../data/routines";
+         __resetHubDataForTests, __tickNowPlayingPollForTests,
+         __getRoutinesForTests } from "./hubDataStore";
 
 const apiMock = api as unknown as {
   getSettings: ReturnType<typeof vi.fn>;
@@ -40,16 +40,135 @@ describe("hubDataStore", () => {
     apiMock.getNowPlaying.mockResolvedValue({ connected: false });
   });
 
-  it("falls back to mock data when API returns empty devices", async () => {
+  /**
+   * The demo house is gone, and this is the test that used to require it.
+   *
+   * A pond with nothing paired was handed ten invented devices, three cameras
+   * and six rooms — which made the screen a new household meets the one screen
+   * guaranteed to be false. Zero devices is a state, and every surface that
+   * shows them has an empty state for it.
+   */
+  it("reports an empty house as empty rather than borrowing a demo one", async () => {
     apiMock.getSettings.mockResolvedValue({ user_name: "", assistant_name: "Goose", prompt_style: "balanced" });
     apiMock.listDevices.mockResolvedValue([]);
     apiMock.listSchedules.mockResolvedValue([]);
 
     await refreshHomeData();
     const home = getHomeData();
-    expect(home.devices.length).toBeGreaterThan(0);
-    expect(home.cameras.length).toBeGreaterThan(0);
+    expect(home.devices).toEqual([]);
+    expect(home.cameras).toEqual([]);
+    // The flag says the emptiness was answered for, not merely not-yet-loaded.
+    expect(home.devicesAreReal).toBe(true);
     expect(home.user).toBe("Jerry");
+  });
+
+  /**
+   * And nothing is on the screen before the first answer lands, either.
+   *
+   * The seed used to be the demo house, which every consumer then had to
+   * remember to suppress by checking `devicesAreReal`. The drawer did not, so
+   * it listed Living Room, Kitchen, Bedroom, Office and Outdoor to households
+   * that owned none of them, for however long the six requests took — 30s per
+   * abort, 190s if a re-pair runs, and for the whole session if `load()` threw.
+   * An empty seed cannot be mistaken for a house by anybody, guard or no guard.
+   */
+  it("seeds nothing at all before the first load", () => {
+    const home = getHomeData();
+    expect(home.devices).toEqual([]);
+    expect(home.rooms).toEqual([]);
+    expect(home.cameras).toEqual([]);
+    expect(home.categories).toEqual([]);
+    expect(home.scenes).toEqual([]);
+    expect(home.devicesAreReal).toBe(false);
+    expect(home.nowPlaying.track).toBe("");
+    expect(home.weather.cond).toBe("");
+  });
+
+  /**
+   * The device list carries identity and capabilities and no state whatsoever
+   * (`routes.rs` list_devices), so these four fields have nothing behind them.
+   * They used to default — and `locked: true` in particular made "All locked"
+   * unfalsifiable: no real-world door could change what the panel said.
+   */
+  it("invents no on, locked or setpoint for a device that reported none", async () => {
+    apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
+    apiMock.listDevices.mockResolvedValue([
+      { id: "lr1", name: "Lamp", device_type: "light",      is_online: true, room: "Living Room" },
+      { id: "fd",  name: "Door", device_type: "lock",       is_online: true, room: "Outdoor" },
+      { id: "th",  name: "Nest", device_type: "thermostat", is_online: true, room: "Living Room" },
+    ]);
+    apiMock.listSchedules.mockResolvedValue([]);
+
+    await refreshHomeData();
+    const byId = Object.fromEntries(getHomeData().devices.map((d) => [d.id, d]));
+    expect(byId.lr1.on).toBeUndefined();
+    expect(byId.fd.locked).toBeUndefined();
+    expect(byId.th.target).toBeUndefined();
+    expect(byId.th.value).toBeUndefined();
+  });
+
+  /** The chips read off those same fields, so they say so rather than guess. */
+  it("does not let a category chip claim a state nothing reported", async () => {
+    apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
+    apiMock.listDevices.mockResolvedValue([
+      { id: "fd",  name: "Door", device_type: "lock",       is_online: true, room: "Outdoor" },
+      { id: "lr1", name: "Lamp", device_type: "light",      is_online: true, room: "Living Room" },
+      { id: "th",  name: "Nest", device_type: "thermostat", is_online: true, room: "Living Room" },
+    ]);
+    apiMock.listSchedules.mockResolvedValue([]);
+
+    await refreshHomeData();
+    const byId = Object.fromEntries(getHomeData().categories.map((c) => [c.id, c]));
+    expect(byId.locks.status).toBe("Not reported");
+    expect(byId.lights.status).toBe("Not reported");
+    expect(byId.climate.status).toBe("Not reported");
+    // The Security chip is gone with it: it was pinned first and hardcoded to
+    // "Disarmed", which is an alarm state read off a placeholder.
+    expect(byId.security).toBeUndefined();
+  });
+
+  /** One silent lock is enough to stop the chip saying "All". */
+  it("will not say all locked when one lock stayed silent", async () => {
+    apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
+    apiMock.listDevices.mockResolvedValue([
+      { id: "fd", name: "Front", device_type: "lock", is_online: true, room: "Outdoor", metadata: { locked: true } },
+      { id: "bd", name: "Back",  device_type: "lock", is_online: true, room: "Outdoor" },
+    ]);
+    apiMock.listSchedules.mockResolvedValue([]);
+
+    await refreshHomeData();
+    const locks = getHomeData().categories.find((c) => c.id === "locks");
+    expect(locks?.status).toBe("1/1 locked");
+  });
+
+  /**
+   * Scenes are the household's schedules. An empty schedule list used to return
+   * the demo file's five, so a pond that had never been given one showed five
+   * tappable scenes.
+   */
+  it("shows no scenes when the pond has no schedules", async () => {
+    apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
+    apiMock.listDevices.mockResolvedValue([]);
+    apiMock.listSchedules.mockResolvedValue([]);
+
+    await refreshHomeData();
+    expect(getHomeData().scenes).toEqual([]);
+  });
+
+  /** Home gates a device's power control on this, so a sensor is never offered one. */
+  it("carries a device's capabilities through untouched", async () => {
+    apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
+    apiMock.listDevices.mockResolvedValue([
+      { id: "lr1", name: "Lamp", device_type: "light", is_online: true, room: "Living Room",
+        capabilities: ["power", "brightness"] },
+      { id: "cs1", name: "Contact", device_type: "sensor", is_online: true, room: "Hall", capabilities: [] },
+    ]);
+    apiMock.listSchedules.mockResolvedValue([]);
+
+    await refreshHomeData();
+    const home = getHomeData();
+    expect(home.devices.find((d) => d.id === "lr1")?.capabilities).toEqual(["power", "brightness"]);
+    expect(home.devices.find((d) => d.id === "cs1")?.capabilities).toEqual([]);
   });
 
   it("uses settings.user_name when present", async () => {
@@ -107,7 +226,13 @@ describe("hubDataStore", () => {
     expect(home.weather.forecast).toEqual([{ d: "Wed", i: "rain", t: 55 }]);
   });
 
-  it("falls back to mock weather when the API reports disabled", async () => {
+  /**
+   * Weather off used to render a mock 64° / Partly cloudy / H68 L54 and a
+   * Tue-Wed-Thu strip, which is a forecast for a place the pond does not know.
+   * Now the slice is zeroed and `weatherEnabled` is false, and Home draws a
+   * "set your location" panel where the card would be.
+   */
+  it("reports no weather at all when the API says it is disabled", async () => {
     apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
     apiMock.listDevices.mockResolvedValue([]);
     apiMock.listSchedules.mockResolvedValue([]);
@@ -115,8 +240,29 @@ describe("hubDataStore", () => {
 
     await refreshHomeData();
     const home = getHomeData();
-    expect(home.weather.temp).toBe(64);
-    expect(home.weather.cond).toBe("Partly cloudy");
+    expect(home.weatherEnabled).toBe(false);
+    expect(home.weather.cond).toBe("");
+    expect(home.weather.forecast).toEqual([]);
+  });
+
+  /**
+   * The per-field fallbacks were the same fabrication at smaller scale: a real
+   * answer missing a high and low reported the demo numbers beside a real
+   * temperature, which is harder to spot and no more true.
+   */
+  it("does not fill a real answer's gaps from the mock record", async () => {
+    apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
+    apiMock.listDevices.mockResolvedValue([]);
+    apiMock.listSchedules.mockResolvedValue([]);
+    apiMock.getWeather.mockResolvedValue({ enabled: true, temp: 12, cond: "Overcast", icon: "cloud" });
+
+    await refreshHomeData();
+    const home = getHomeData();
+    expect(home.weatherEnabled).toBe(true);
+    expect(home.weather.temp).toBe(12);
+    expect(home.weather.hi).toBe(0);
+    expect(home.weather.lo).toBe(0);
+    expect(home.weather.forecast).toEqual([]);
   });
 
   it("refreshWeather updates the weather slice without a full reload", async () => {
@@ -139,6 +285,64 @@ describe("hubDataStore", () => {
     expect(apiMock.listDevices).not.toHaveBeenCalled();
   });
 
+  /**
+   * A 502 is not a household decision.
+   *
+   * `GET /api/v1/weather` answers 200 `{enabled:false}` only when the pond has
+   * no provider configured at all; once a location is set, an upstream failure
+   * or a PAI-2 egress refusal is a 502 with a message saying which. The client
+   * throws on that, `Promise.allSettled` flattened it to null, and null became
+   * `weatherEnabled: false` — so the card told a household whose location was
+   * already set to go and set their location, and tapping through to Settings
+   * and saving fixed nothing, because nothing was unset.
+   */
+  it("does not report a failed weather fetch as weather being off", async () => {
+    apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
+    apiMock.listDevices.mockResolvedValue([]);
+    apiMock.listSchedules.mockResolvedValue([]);
+    apiMock.getWeather.mockRejectedValue(new Error("502 Failed to fetch weather"));
+
+    await refreshHomeData();
+    expect(getHomeData().weatherStatus).toBe("unreachable");
+  });
+
+  /** The household's own "off" still reads as off, and is still distinguishable. */
+  it("reports weather being switched off as off", async () => {
+    apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
+    apiMock.listDevices.mockResolvedValue([]);
+    apiMock.listSchedules.mockResolvedValue([]);
+    apiMock.getWeather.mockResolvedValue({ enabled: false });
+
+    await refreshHomeData();
+    expect(getHomeData().weatherStatus).toBe("off");
+  });
+
+  /**
+   * And a failed reload does not wipe a reading that was right all day. `load()`
+   * rebuilds every field, so one 502 during a reconnect used to replace a live
+   * 71 degrees with the "set your location" panel — which the ten-minute poll
+   * cannot undo, because it only ever keeps the last slice.
+   */
+  it("keeps the last good reading when a full reload cannot reach weather", async () => {
+    apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
+    apiMock.listDevices.mockResolvedValue([]);
+    apiMock.listSchedules.mockResolvedValue([]);
+    apiMock.getWeather.mockResolvedValue({ enabled: true, temp: 71, cond: "Clear sky", icon: "sun" });
+
+    await refreshHomeData();
+    expect(getHomeData().weatherStatus).toBe("on");
+
+    // The server restarts mid-session and AppContext re-runs the whole load.
+    apiMock.getWeather.mockRejectedValue(new Error("502 Failed to fetch weather"));
+    await refreshHomeData();
+
+    const home = getHomeData();
+    expect(home.weather.temp).toBe(71);
+    expect(home.weather.cond).toBe("Clear sky");
+    expect(home.weatherEnabled).toBe(true);
+    expect(home.weatherStatus).toBe("unreachable");
+  });
+
   it("refreshWeather keeps the last reading when the fetch fails", async () => {
     apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
     apiMock.listDevices.mockResolvedValue([]);
@@ -150,29 +354,47 @@ describe("hubDataStore", () => {
 
     await refreshWeather();
     expect(getHomeData().weather.temp).toBe(16);
+    // Kept, and said to be kept: a card may go on showing the last reading, but
+    // nothing may present it as current.
+    expect(getHomeData().weatherStatus).toBe("unreachable");
   });
 
-  it("falls back to mock routines when no recipes returned", async () => {
+  /**
+   * A pond with no recipes has no routines.
+   *
+   * It used to have five — Good Morning, Good Night, Movie Time, Away, Focus —
+   * on every fresh install and every unreachable server, listed in the drawer
+   * and on Routines with a control that ran them. Tapping one wrote the fixture
+   * into the household's real `agent_recipes` and sent its prompt to the agent,
+   * in a house that may have had nothing paired.
+   */
+  it("shows no routines when the pond has no recipes", async () => {
     apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
     apiMock.listDevices.mockResolvedValue([]);
     apiMock.listSchedules.mockResolvedValue([]);
     apiMock.listRecipes.mockResolvedValue([]);
 
     await refreshHomeData();
-    const { useRoutines: _u, getHomeData: _g } = await import("./hubDataStore");
-    // Sample directly via the module instance
-    const { __resetHubDataForTests: _r } = await import("./hubDataStore");
-    void _u; void _g; void _r;
-    // Read routines through the singleton snapshot
-    const mod = await import("./hubDataStore");
-    // routines aren't on HomeData — read via the snapshot used by useRoutines
-    const snapshot = (mod as unknown as { __getRoutinesForTests?: () => unknown[] }).__getRoutinesForTests?.()
-      ?? MOCK_ROUTINES;
-    expect(Array.isArray(snapshot)).toBe(true);
-    expect((snapshot as { name: string }[]).map((r) => r.name)).toContain("Good Morning");
+    expect(__getRoutinesForTests()).toEqual([]);
   });
 
-  it("maps recipes to routines (known names reuse mock visual templates)", async () => {
+  /** Offline is the same answer: no recipes came back, so there are no routines. */
+  it("shows no routines when the recipe call fails", async () => {
+    apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
+    apiMock.listDevices.mockResolvedValue([]);
+    apiMock.listSchedules.mockResolvedValue([]);
+    apiMock.listRecipes.mockRejectedValue(new Error("server offline"));
+
+    await refreshHomeData();
+    expect(__getRoutinesForTests()).toEqual([]);
+  });
+
+  /** And nothing is seeded before the first load, either. */
+  it("starts with no routines at all", () => {
+    expect(__getRoutinesForTests()).toEqual([]);
+  });
+
+  it("maps recipes to routines from the recipe itself", async () => {
     apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
     apiMock.listDevices.mockResolvedValue([]);
     apiMock.listSchedules.mockResolvedValue([]);
@@ -182,15 +404,18 @@ describe("hubDataStore", () => {
     ]);
 
     await refreshHomeData();
-    const mod = await import("./hubDataStore");
-    const snapshot = (mod as unknown as { __getRoutinesForTests?: () => unknown[] }).__getRoutinesForTests?.() ?? [];
+    const snapshot = __getRoutinesForTests();
     expect(snapshot.length).toBe(2);
-    // Known name should get the mock "Good Morning" template (with rich does list)
-    const morning = (snapshot as { name: string; does: string[] }[]).find((r) => r.name === "Good Morning");
-    expect(morning?.does.length).toBeGreaterThan(1);
-    // Unknown name should derive does from description
-    const sunset = (snapshot as { name: string; does: string[] }[]).find((r) => r.name === "Sunset Bath");
+    // A recipe whose name happens to match a fixture keeps its OWN description
+    // and gets no schedule. It used to be relabelled "7:00 AM · weekdays" and
+    // given four actions off a file, with "wake up macro" thrown away.
+    const morning = snapshot.find((r) => r.name === "Good Morning");
+    expect(morning?.does).toEqual(["wake up macro"]);
+    expect(morning?.time).toBe("On demand");
+    // Every other recipe derives its chips from its description, as before.
+    const sunset = snapshot.find((r) => r.name === "Sunset Bath");
     expect(sunset?.does).toEqual(["Run tub", "dim lights", "play jazz"]);
+    expect(sunset?.time).toBe("On demand");
   });
 
   // ── Now Playing ──────────────────────────────────────────────
@@ -257,6 +482,25 @@ describe("hubDataStore", () => {
     expect(np.artist).toBe("The Weeknd");
     expect(np.playing).toBe(true);
     expect(np.elapsed).toBeCloseTo(0.3);
+    // The raw milliseconds too: the fraction cannot be turned back into mm:ss,
+    // so a card that wants to say 1:00 of 3:20 needs both of these.
+    expect(np.progressMs).toBe(60_000);
+    expect(np.durationMs).toBe(200_000);
+  });
+
+  /** Null, never 0 — a zero here would be read as the start of a track. */
+  it("leaves the milliseconds null when Spotify did not send them", async () => {
+    const idle = await loadWithNowPlaying({ connected: true, playing: false });
+    expect(idle.progressMs).toBeNull();
+    expect(idle.durationMs).toBeNull();
+
+    const off = await loadWithNowPlaying({ connected: false });
+    expect(off.progressMs).toBeNull();
+    expect(off.durationMs).toBeNull();
+    // And no borrowed track. A fresh install showed "Weightless / Marconi
+    // Union" here, which is exactly the state most likely to be mistaken for
+    // working playback.
+    expect(off.track).toBe("");
   });
 
   it("derives scenes from schedules", async () => {

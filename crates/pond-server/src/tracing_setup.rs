@@ -342,6 +342,14 @@ mod tests {
             // Per-turn context-trim decision. Worth promoting alongside the
             // next piece of compaction work rather than on its own.
             "history_trim_skipped",
+            // Fires on every proposals poll on a one-member pond, because that
+            // is exactly the shape that reaches the fallthrough: an
+            // unidentified session resolves to `Household`, and `sole_member`
+            // then names the only person there. At INFO it would be one line
+            // per poll for the whole life of the process, which is how a log
+            // stops being readable. Its value is in a debug session, where
+            // `RUST_LOG` is raised anyway.
+            "proposal_caller_sole_member",
         ];
 
         let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

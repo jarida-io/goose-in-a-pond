@@ -217,6 +217,24 @@ kill -9 "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null
 # Drop the old server's port file, or resolve_server returns instantly with a
 # stale port and the restart is verified against whatever now holds it.
 rm -f "$DATA_DIR/.runtime_api_port"
+# Stamp a lane run while nothing is holding the database, so the restart has a
+# fact to remember. The lane's clock is durable as of 0059, and the only thing
+# that can prove that wiring -- load at boot, into the runner, out through the
+# route -- is a second process reading what a first one left behind. Writing it
+# here rather than waiting for a real background pass is what makes the check
+# deterministic: whether any job wins the slot during a live test depends on a
+# model this pond does not have.
+python3 - "$DATA_DIR" <<'LANESTAMP'
+import sqlite3, sys, datetime
+con = sqlite3.connect(sys.argv[1] + "/pond_system.db")
+at = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=600)
+con.execute(
+    "INSERT INTO lane_job_runs (job, last_run_at) VALUES (?, ?) "
+    "ON CONFLICT(job) DO UPDATE SET last_run_at = excluded.last_run_at",
+    ("titling", at.replace(microsecond=0).isoformat().replace("+00:00", "Z")),
+)
+con.commit()
+LANESTAMP
 POND_DATA_DIR="$DATA_DIR" POND_DEV_ALLOW_LOOPBACK=1 RUST_LOG=info \
   "$BIN" serve --port "$PORT" --static-dir pond-desktop/dist \
   > "$DATA_DIR/server2.out" 2>&1 < /dev/zero &

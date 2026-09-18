@@ -1,6 +1,16 @@
-// ─── Notification center — type defs + mock data ─────────────────────────────
-// Backend-backed categories (schedule debrief) are fetched live in Notifications.tsx.
-// All other categories use mock data from this file until the EventLog port (Q2-32) lands.
+// ─── Notification center — type defs + grouping ──────────────────────────────
+//
+// Schedule and routine runs are the only notifications this build can raise,
+// and `Notifications.tsx` builds them from `state.scheduleRuns`. The other four
+// categories wait on the EventLog port (Q2-32).
+//
+// There is deliberately NO fixture here any more. Seven of them used to be
+// concatenated into the live feed unconditionally — no environment gate, no
+// offline branch — so every install presented a front door unlocked remotely,
+// a driveway camera and a garage door left open as its own history, and the
+// "Nothing here yet" empty state was unreachable for every user in every
+// configuration. If this file ever needs sample data again, it belongs behind
+// an import.meta.env.DEV gate and nowhere near the feed a household reads.
 
 import type { ScheduleRunNotification } from "../../api/types";
 
@@ -42,83 +52,6 @@ export const CATEGORY_COLOR: Record<NotificationCategory, { fg: string; bg: stri
   routine:  { fg: "#0D9488", bg: "#CCFBF1" },
   battery:  { fg: "#D97706", bg: "#FEF3C7" },
 };
-
-// ─── Mock notifications (non-schedule categories) ─────────────────────────────
-// Timestamps are relative; the view groups them into Today / Yesterday / Earlier.
-// "Today" = 2026-06-04, "Yesterday" = 2026-06-03.
-
-export const MOCK_NOTIFICATIONS: Notification[] = [
-  // Today — security
-  {
-    id: "sec-001",
-    category: "security",
-    title: "Front door unlocked",
-    body: "Unlocked remotely at 8:14 AM — confirm it was you",
-    timestamp: "2026-06-04T08:14:00Z",
-    read: false,
-    action: { label: "Open device", route: "canvas" },
-  },
-  // Today — camera
-  {
-    id: "cam-001",
-    category: "camera",
-    title: "Driveway — motion detected",
-    body: "A person was detected at the driveway camera",
-    timestamp: "2026-06-04T07:42:00Z",
-    read: false,
-    action: { label: "View on Canvas", route: "canvas" },
-  },
-  // Today — routine
-  {
-    id: "rt-001",
-    category: "routine",
-    title: "Movie Time finished",
-    body: "Dimmed lights, closed blinds, set TV to HDMI 1",
-    timestamp: "2026-06-04T06:58:00Z",
-    read: true,
-    action: { label: "View on Canvas", route: "canvas" },
-  },
-  // Yesterday — battery
-  {
-    id: "bat-001",
-    category: "battery",
-    title: "Bedroom sensor — 12%",
-    body: "Battery critical. Replace soon to avoid sensor dropout",
-    timestamp: "2026-06-03T20:05:00Z",
-    read: false,
-    action: { label: "Open device", route: "canvas" },
-  },
-  // Yesterday — camera
-  {
-    id: "cam-002",
-    category: "camera",
-    title: "Back yard — motion detected",
-    body: "Motion detected at 9:30 PM — no person identified",
-    timestamp: "2026-06-03T21:30:00Z",
-    read: true,
-    action: { label: "View on Canvas", route: "canvas" },
-  },
-  // Earlier — routine
-  {
-    id: "rt-002",
-    category: "routine",
-    title: "Away Mode activated",
-    body: "All lights off, thermostat to eco, doors locked",
-    timestamp: "2026-06-02T09:15:00Z",
-    read: true,
-    action: { label: "View on Canvas", route: "canvas" },
-  },
-  // Earlier — security
-  {
-    id: "sec-002",
-    category: "security",
-    title: "Garage door left open",
-    body: "Garage door has been open for more than 30 minutes",
-    timestamp: "2026-06-02T15:47:00Z",
-    read: true,
-    action: { label: "Open device", route: "canvas" },
-  },
-];
 
 // ─── Grouping helper ──────────────────────────────────────────────────────────
 export function groupNotifications(

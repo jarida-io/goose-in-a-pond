@@ -7,7 +7,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use crate::context::domain::{ContextItem, ContextSource};
+use crate::context::domain::{ContextItem, ContextSource, SourceKind};
 use crate::context::retention::ContextRetention;
 use crate::user_data::domain::profile::ProfileScope;
 
@@ -66,6 +66,32 @@ pub trait ContextRepository: Send + Sync {
 
     /// How many items a member owns. Used to say what deleting them removes.
     async fn count_for_profile(&self, profile_id: &str) -> Result<u64>;
+
+    /// How many items of one source kind fall inside a time window.
+    ///
+    /// A COUNT, deliberately, not a `LIMIT`-bounded fetch. The suggestion
+    /// engine quotes this number to the household ("three events between now
+    /// and midnight"), and a count derived from a capped read would be wrong in
+    /// exactly the case that matters -- a busy day -- while looking right on a
+    /// quiet one.
+    ///
+    /// `recent_items` cannot stand in for it either: it is `ORDER BY
+    /// occurred_at DESC`, and the CalDAV adapter stores DTSTART in
+    /// `occurred_at` over a window reaching ninety days forward, so the
+    /// furthest-future event sorts first and today's is unreachable behind any
+    /// limit.
+    ///
+    /// No default body, per this module's header: a defaulted read answers
+    /// `Ok(0)` through any decorator that forgets it, and a zero here is
+    /// indistinguishable from an empty day -- the engine would go quiet and
+    /// nothing would say why.
+    async fn count_in_window(
+        &self,
+        scope: &ProfileScope,
+        kind: SourceKind,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<u64>;
 
     /// What each source has contributed, and how much of it is searchable.
     ///

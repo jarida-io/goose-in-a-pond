@@ -87,13 +87,22 @@ def call(method, path, body=None, token=None):
 
 
 def expect(label, code, want, body, *predicates):
-    """Status first, then body predicates. Returns True only if all held."""
+    """Status first, then body predicates. Returns True only if all held.
+
+    A predicate is CALLED with the body. It used to be passed straight to
+    `check`, and every caller passes a lambda -- `bool(<function>)` is True, so
+    every body assertion in this file reported PASS without ever running. The
+    route-ordering check that says `extraction-status` is "not a memory row" was
+    one of them: it would have passed against a memory. Callables are called; a
+    plain value is still read as the boolean it is.
+    """
     if code != want:
         check(label, False, "HTTP %s (wanted %s): %s" % (code, want, body))
         return False
     ok = True
     for sublabel, predicate in predicates:
-        ok &= check(label + " / " + sublabel, predicate, str(body))
+        verdict = predicate(body) if callable(predicate) else predicate
+        ok &= check(label + " / " + sublabel, verdict, str(body))
     if not predicates:
         check(label, True)
     return ok
@@ -573,6 +582,67 @@ def section_network_mode():
     )
 
 
+def section_lane_clock_after_restart():
+    """Does the lane still know when a job ran, in a process that did not run it?
+
+    Nothing in a unit test can answer this. The runner's clock is seeded from
+    `lane_job_runs` during wiring in `main.rs`, and every integration test in
+    the tree builds an `AppState` with `lane: None` -- so the load, the seed and
+    the route that reports it only ever meet in a real second process.
+
+    The defect it exists for: until 0059 the clock was a `HashMap<LaneJob,
+    Instant>` and a restart erased it. `select_next` reads `since_last_run:
+    None` as `Duration::MAX` -- the most starved a job can be -- and
+    `should_run` skips the interval floor entirely on `None`, because a job that
+    has never run cannot be too soon. Both are the right reading of "never" and
+    the wrong reading of "ran ten minutes ago, in the process before this one".
+    So every restart handed all seven jobs a free pass through their own floors
+    at once, and a daily job could run twice in ten minutes with nothing able to
+    say so.
+
+    `live-test.sh` writes titling's stamp into the database while the first
+    server is down. This pass is the second server.
+    """
+    print("\n=== the lane clock survived the restart ===")
+
+    code, body = call("GET", "/api/v1/lane")
+    jobs = body.get("jobs", []) if isinstance(body, dict) else []
+    titling = next((j for j in jobs if j.get("job") == "titling"), None)
+
+    check(
+        "the lane answers after a restart",
+        code == 200 and titling is not None,
+        f"HTTP {code}, {len(jobs)} jobs",
+    )
+    if titling is None:
+        return
+
+    age = titling.get("since_last_run_secs")
+    check(
+        "a run from the previous process is still dated",
+        age is not None,
+        f"since_last_run_secs={age!r} -- None means the clock was erased",
+    )
+    # The age has to be the STAMP's, not this process's. A wiring that loaded
+    # the row and then stamped `now` would also report "not None" while telling
+    # the scheduler the job had just run -- which is the opposite error and
+    # blocks the job for a full interval instead of releasing it.
+    check(
+        "and dated from when it ran, not from this boot",
+        isinstance(age, int) and 570 <= age <= 900,
+        f"expected about 600s, got {age!r}",
+    )
+    # The control. Every other job's clock is genuinely empty on this pond, so
+    # if the check above were passing because the route reports an age for
+    # everything, this fails.
+    others = [j for j in jobs if j.get("job") != "titling"]
+    check(
+        "a job that never ran still says so",
+        all(j.get("since_last_run_secs") is None for j in others),
+        f"{[(j.get('job'), j.get('since_last_run_secs')) for j in others]}",
+    )
+
+
 def section_network_mode_after_restart():
     """PAI-2 P5, restart pass -- does `offline` actually refuse, and say so?
 
@@ -812,6 +882,426 @@ def section_policy_telemetry():
     )
 
 
+# ── The batch memory-extraction engine ───────────────────────────────────────
+
+
+def section_memory_extraction():
+    """Phase 2: nothing else extracts memories now, so the engine has to answer.
+
+    Three things this can see and no unit test can. The route is registered --
+    it sits before `/memories/{id}` in the router and axum would otherwise match
+    `extraction-status` as an id. The cursor columns migration 0056 added are on
+    a real database file with rows already in it. And the engine reports its own
+    absence honestly: this pond has no embedding model, so it must say so rather
+    than look identical to a pond with nothing left to read.
+    """
+    print("\n=== memory extraction: the engine answers for itself ===")
+
+    code, body = call("GET", "/api/v1/memories/extraction-status")
+    expect(
+        "the extraction status route is registered",
+        code,
+        200,
+        body,
+        ("answers with an object", lambda b: isinstance(b, dict)),
+        # The ordering trap: `/memories/{id}` would match "extraction-status" as
+        # an id and return a memory, or a 404, rather than this.
+        ("is not a memory row", lambda b: "sessions_total" in b),
+        ("says whether the engine is running here", lambda b: "running" in b),
+        ("says why it is not, when it is not", lambda b: "blocked_on" in b),
+        # The loss that is invisible from every other angle: a pond with more
+        # than one member never mines a conversation nobody has identified, and
+        # the voice child cannot be identified at all -- it is a separate
+        # process with no request, so none of the three things that bind a
+        # session to a member can reach it. The count has to be on the wire or
+        # the household has no way to see it.
+        (
+            "says how many conversations nobody can name",
+            lambda b: "unattributed_sessions" in b,
+        ),
+    )
+
+    if not isinstance(body, dict):
+        return
+
+    # A pond with no embedder must SAY it is not extracting. The failure this
+    # guards is the quiet one: reading nothing looks exactly like having nothing
+    # left to read, and the difference is a household's whole history.
+    if not body.get("running"):
+        check(
+            "a pond with no engine says so rather than reporting a zeroed pass",
+            body.get("blocked_on") is not None or body.get("last_pass_at") is None,
+            "running=%s blocked_on=%r" % (body.get("running"), body.get("blocked_on")),
+        )
+
+    # The cursor is a real column on a real row, not a default a mock returned.
+    seed_session("sess-extraction-cursor")
+    con = db()
+    cols = {r[1] for r in con.execute("PRAGMA table_info(sessions)")}
+    con.close()
+    for col in ("extracted_through_id", "extracted_at", "extraction_attempts"):
+        check(
+            "migration 0056 put %s on the sessions table" % col,
+            col in cols,
+            "columns: %s" % sorted(cols),
+        )
+
+    code, body = call("GET", "/api/v1/memories/extraction-status")
+    check(
+        "a newly seeded conversation is counted as still to read",
+        code == 200 and body.get("sessions_pending", 0) >= 1,
+        "HTTP %s: %s" % (code, body),
+    )
+
+    # Where a refused date goes. The gate refuses any memory carrying a one-off
+    # calendar date on the understanding that the date is kept as a reminder
+    # instead, and for one release nothing was: the candidate was counted and
+    # dropped. A unit test builds this table by applying every migration to an
+    # empty file; this asks the real database file, after a restart, whether the
+    # table and its dedup guard are actually there.
+    con = db()
+    tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    check(
+        "migration 0057 created the reminders table",
+        "reminders" in tables,
+        "tables: %s" % sorted(tables),
+    )
+    if "reminders" in tables:
+        cols = {r[1] for r in con.execute("PRAGMA table_info(reminders)")}
+        for col in ("about", "when_said", "session_id", "window_id", "disposition"):
+            check(
+                "the reminders table carries %s" % col,
+                col in cols,
+                "columns: %s" % sorted(cols),
+            )
+        # The re-walk guard. Without it the engine files the same reminder again
+        # every time a cleared cursor sends it back over a window it has read.
+        uniques = [
+            r[1]
+            for r in con.execute("PRAGMA index_list(reminders)")
+            if r[2] == 1
+        ]
+        unique_cols = set()
+        for name in uniques:
+            unique_cols.update(r[2] for r in con.execute("PRAGMA index_info(%s)" % name))
+        check(
+            "the reminders table refuses the same window's reminder twice",
+            {"window_id", "about_key"} <= unique_cols,
+            "unique indexes over: %s" % sorted(unique_cols),
+        )
+    con.close()
+
+    # The two numbers that say whether the date rule is costing anything. The
+    # panel used to imply that dates_lost = 0 meant the date had been moved,
+    # while nothing moved it -- so the counters have to be on the wire before
+    # anything can claim that again.
+    check(
+        "the status route says what the last pass kept and what it lost",
+        "last_pass_reminders_written" in body and "last_pass_reminders_lost" in body,
+        str(body),
+    )
+
+
+# ── The reminders surface ────────────────────────────────────────────────────
+
+
+def section_inference_lane():
+    """The six background jobs answer for themselves, and can be run by hand.
+
+    Nothing below is visible to a unit test. The two routes have to be
+    REGISTERED, and `/lane/jobs/{job}/run` sits one path segment away from the
+    same trap `extraction-status` fell into. The lane has to be WIRED into
+    `AppState` -- every integration test in the tree builds one with `lane:
+    None`, so the only place `Some` is ever exercised is a real server. And the
+    job list has to come back with all six whether or not their loops spawned on
+    this pond, which is a fact about `claim` being called at spawn time.
+
+    The defect this surface exists for: on a real pond the memory engine had
+    never completed a pass -- 958 conversations, zero cursors -- and no surface
+    anywhere could say whether it was switched off, waiting, or losing a
+    tie-break it would never win.
+    """
+    print("\n=== the inference lane: the jobs answer, and can be asked to run ===")
+
+    code, body = call("GET", "/api/v1/lane")
+    expect(
+        "the lane status route is registered",
+        code,
+        200,
+        body,
+        ("answers with an object", lambda b: isinstance(b, dict)),
+        # `lane: false` is a legitimate answer (a process with no lane), so the
+        # key has to be there either way; its absence means a different route
+        # answered.
+        ("says whether this process has a lane at all", lambda b: "lane" in b),
+        ("carries a job list", lambda b: isinstance(b.get("jobs"), list)),
+    )
+
+    jobs = body.get("jobs", []) if isinstance(body, dict) else []
+    # The history beside the instant. `blocked_by` cannot distinguish a job that
+    # is eligible and losing every tie-break from one about to run; these can,
+    # and their absence is what made that question take a log-file dig.
+    check(
+        "every job carries its counters, not just its current state",
+        all(
+            "granted" in j and "lost_to_total" in j and "nudged" in j
+            for j in jobs
+        ),
+        f"{len(jobs)} jobs",
+    )
+    names = [j.get("job") for j in jobs]
+    known = [
+        "consolidation",
+        "titling",
+        "proactive_review",
+        "summary_refresh",
+        "index_maintenance",
+        "memory_extraction",
+    ]
+    check(
+        "every background job is listed, present on this pond or not",
+        all(n in names for n in known),
+        f"got {names}",
+    )
+    # A job missing its explanation is the state this whole surface replaces.
+    check(
+        "every job says what it is waiting for and when it last ran",
+        all(
+            "blocked_by" in j and "since_last_run_secs" in j and "present" in j
+            for j in jobs
+        ),
+        f"{len(jobs)} jobs",
+    )
+
+    # An unknown job must be refused rather than answered cheerfully. A typo
+    # that returned 200 would be a button reporting success and doing nothing,
+    # which is the exact failure this surface was built to end.
+    code, body = call("POST", "/api/v1/lane/jobs/not-a-real-job/run")
+    expect(
+        "an unknown job is refused",
+        code,
+        404,
+        body,
+        ("says which jobs exist", lambda b: isinstance(b.get("known"), list)),
+    )
+
+    # And a real one is accepted. `woken` may be either value on this pond --
+    # there is no embedding model here, so the extraction loop never spawned --
+    # but the route must answer 200 with a verdict rather than 404 or 500.
+    code, body = call("POST", "/api/v1/lane/jobs/titling/run")
+    expect(
+        "a known job can be asked to run now",
+        code,
+        200,
+        body,
+        ("names the job it acted on", lambda b: b.get("job") == "titling"),
+        ("says whether anything was woken", lambda b: isinstance(b.get("woken"), bool)),
+    )
+
+    # `POST /sessions/retitle` used to run up to twenty model calls inside the
+    # request handler, holding no lane slot -- so it could decode beside
+    # whichever background job already had the machine, and on the Orin it
+    # overran the desktop's 30 s client timeout while doing it. It now asks the
+    # titling job for its next pass, which is a thing that can be answered in
+    # milliseconds.
+    #
+    # Only a live server can show this: every route test builds an `AppState`
+    # with a stub lane, so the real `wake` reaching a real loop is exercised
+    # nowhere else.
+    import time as _time
+
+    started = _time.monotonic()
+    code, body = call("POST", "/api/v1/sessions/retitle")
+    elapsed = _time.monotonic() - started
+    check(
+        "the retitle button answers without decoding anything",
+        code in (200, 503) and elapsed < 5.0,
+        f"HTTP {code} in {elapsed:.2f}s",
+    )
+    # The shape, either way. A reply still carrying a count would let the
+    # desktop keep reading a number the request can no longer have measured.
+    stale = [
+        k
+        for k in ("renamed", "renamed_count", "considered", "capped", "skipped")
+        if isinstance(body, dict) and k in body
+    ]
+    check(
+        "and carries no count it could not have measured",
+        not stale,
+        f"stale keys: {stale}" if stale else f"{body}",
+    )
+
+
+def section_composed_suggestions():
+    """The composed tier: a queue, a settle route, and templates behind it.
+
+    What no unit test can see. The MIGRATION has to have run against a real file
+    (0058), the route has to be REGISTERED beside `/suggestions`, and the merge
+    has to actually fall back -- this pond has no memories and no model, so every
+    suggestion it returns must be a template one, with `composed` present and
+    false rather than absent.
+
+    `composed` being on the wire at all is the load-bearing part: it is what the
+    client uses to decide whether a tap is worth telling the pond about, and a
+    missing field reads as falsy, which silently turns settling off.
+    """
+    print("\n=== composed suggestions: the queue, and the tier behind it ===")
+
+    code, body = call("GET", "/api/v1/suggestions")
+    expect(
+        "the suggestions route answers",
+        code,
+        200,
+        body,
+        ("carries a list", lambda b: isinstance(b.get("suggestions"), list)),
+        # Every suggestion says which tier it came from, template ones included.
+        (
+            "every suggestion says whether the pond composed it",
+            lambda b: all("composed" in s for s in b.get("suggestions", [])),
+        ),
+        # This pond has no memories and no model, so nothing can have been
+        # composed -- and that is the fallback working, not a failure.
+        (
+            "a pond with nothing to compose from still gets the template tier",
+            lambda b: all(s.get("composed") is False for s in b.get("suggestions", [])),
+        ),
+    )
+
+    con = db()
+    tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    check(
+        "migration 0058 created the suggestion queue",
+        "suggestion_queue" in tables,
+        "tables: %s" % sorted(t for t in tables if "sugg" in t),
+    )
+    # The partial unique index IS the deduplication -- without it a pass that
+    # runs every idle period queues a hundred variations of one note.
+    indexes = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    check(
+        "one live suggestion per memory is enforced by the database",
+        "suggestion_queue_one_live_per_memory" in indexes,
+        "indexes: %s" % sorted(i for i in indexes if "sugg" in i),
+    )
+
+    # Settling an id that was never queued is a 200 saying it changed nothing,
+    # not a 404: a double tap on a touch panel is a household being quick.
+    code, body = call("POST", "/api/v1/suggestions/never-queued/taken")
+    expect(
+        "settling an unknown suggestion answers rather than failing",
+        code,
+        200,
+        body,
+        ("says it changed nothing", lambda b: b.get("settled") is False),
+    )
+
+
+def section_reminders_surface():
+    """A stored reminder can be read and dismissed over real HTTP.
+
+    The table landing was only half of keeping the date. A row nothing can reach
+    is a quieter way of losing it than not writing it, and the route that
+    reaches it is registered in `routes.rs` beside `/memories/{id}` -- the exact
+    neighbourhood where `extraction-status` was once matched as an id. Route
+    registration is the thing no unit test sees: every Rust test builds the
+    router by hand or not at all.
+
+    The row is seeded through SQL rather than by running an extraction pass,
+    because this pond has no embedding model and the engine is therefore not
+    running here at all. What is under test is the surface, not the producer.
+    """
+    print("\n=== reminders: the date can be seen and disposed of ===")
+
+    con = db()
+    tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "reminders" not in tables:
+        check("the reminders surface has a table to read", False, "no reminders table")
+        con.close()
+        return
+    con.execute(
+        "INSERT OR REPLACE INTO reminders "
+        "(id, about, when_said, about_key, session_id, window_id, subject, "
+        " profile_id, said_at, captured_at, disposition) "
+        "VALUES ('live-r1', 'the dentist', 'next Tuesday', 'the dentist', "
+        "        'sess-live-reminder', 'win-live-1', 'LiveTest', NULL, "
+        "        strftime('%Y-%m-%dT%H:%M:%SZ','now'), "
+        "        strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'pending')"
+    )
+    con.commit()
+    con.close()
+
+    code, body = call("GET", "/api/v1/reminders")
+    ok = expect(
+        "the reminders route is registered",
+        code,
+        200,
+        body,
+        ("answers with an object", lambda b: isinstance(b, dict)),
+        (
+            "returns the pending reminder",
+            lambda b: isinstance(b, dict)
+            and any(r.get("id") == "live-r1" for r in b.get("reminders", [])),
+        ),
+    )
+    if ok:
+        row = next(r for r in body["reminders"] if r["id"] == "live-r1")
+        check(
+            "the timing is the words that were said, not a date",
+            row.get("when_said") == "next Tuesday" and "due_at" not in row,
+            str(row),
+        )
+        check(
+            "a reminder nobody owns is still readable",
+            row.get("profile_id") is None,
+            "profile_id=%r -- this is the state of every row on a live pond" % row.get("profile_id"),
+        )
+        check(
+            "it says which conversation it came from",
+            row.get("session_id") == "sess-live-reminder",
+            str(row),
+        )
+
+    # The ordering trap, from the other side. `/reminders` must reach its own
+    # handler, and a literal segment under `/memories/` must not be read as an
+    # id. The second is already asserted in the extraction section; this is the
+    # one route added since, in the same neighbourhood.
+    code, body = call("GET", "/api/v1/memories/extraction-status")
+    check(
+        "a literal path segment is still not matched as an id",
+        code == 200 and isinstance(body, dict) and "sessions_total" in body,
+        "HTTP %s: %s" % (code, body),
+    )
+
+    code, body = call("POST", "/api/v1/reminders/live-r1/dismiss")
+    check(
+        "a reminder can be dismissed",
+        code == 200 and isinstance(body, dict) and body.get("disposition") == "dismissed",
+        "HTTP %s: %s" % (code, body),
+    )
+
+    code, body = call("GET", "/api/v1/reminders")
+    check(
+        "a dismissed reminder is not offered again",
+        code == 200
+        and isinstance(body, dict)
+        and not any(r.get("id") == "live-r1" for r in body.get("reminders", [])),
+        "HTTP %s: %s" % (code, body),
+    )
+
+    # The pond must not say it dismissed something it did not. Both of these are
+    # the same answer on purpose: an id that never existed and one already
+    # decided are both "there is nothing waiting under that id".
+    for label, rid in (
+        ("one already dismissed", "live-r1"),
+        ("one that never existed", "live-r-nobody"),
+    ):
+        code, body = call("POST", "/api/v1/reminders/%s/dismiss" % rid)
+        check(
+            "dismissing %s is a 404, not a second success" % label,
+            code == 404,
+            "HTTP %s: %s" % (code, body),
+        )
+
+
 def main():
     """Auth is NOT checked here.
 
@@ -829,6 +1319,7 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "restart":
         section_secret_store_after_restart()
         section_network_mode_after_restart()
+        section_lane_clock_after_restart()
     else:
         section_schema()
         jerry, liz = section_identity()
@@ -842,6 +1333,10 @@ def main():
         # zero on a fresh process by design -- so on the restart pass it would
         # assert nothing the first pass has not already asserted better.
         section_policy_telemetry()
+        section_memory_extraction()
+        section_inference_lane()
+        section_composed_suggestions()
+        section_reminders_surface()
 
     failed = [label for label, ok, _ in results if not ok]
     print("\n%d checks run, %d failed" % (len(results), len(failed)))

@@ -42,15 +42,46 @@ impl GooseProviderAdapter {
     }
 
     /// Convert a Goose Message back into a pond ChatMessage.
+    ///
+    /// # Why the thinking fallback is here
+    ///
+    /// `as_concat_text` filters the message's content blocks to `as_text()`,
+    /// which drops `Thinking` blocks entirely. A reasoning-capable local model
+    /// that puts its whole answer in the reasoning channel and leaves the text
+    /// channel empty therefore hands its caller an EMPTY STRING, with
+    /// `finish_reason` "stop" and nothing to say what went wrong.
+    ///
+    /// Measured, not hypothetical: 19 of 72 replies from Nemotron3-Nano-4B came
+    /// through this function as empty strings during the extraction probe, and
+    /// all 19 parsed perfectly from the reasoning field. The window was marked
+    /// `Unparseable`, the cursor did not advance, and the correct answer was
+    /// discarded 26% of the time.
+    ///
+    /// A FALLBACK and never a concatenation: when the model wrote text, that is
+    /// the reply, and a model's private reasoning is not something to paste
+    /// into a household's chat.
     fn from_goose_message(msg: &GooseMessage) -> ChatMessage {
         let role = match msg.role {
             rmcp::model::Role::User => Role::User,
             rmcp::model::Role::Assistant => Role::Assistant,
         };
 
+        let text = msg.as_concat_text();
+        let content = if text.trim().is_empty() {
+            msg.content
+                .iter()
+                .filter_map(|c| c.as_thinking())
+                .map(|t| t.thinking.trim())
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            text
+        };
+
         ChatMessage {
             role,
-            content: msg.as_concat_text(),
+            content,
             images: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: None,

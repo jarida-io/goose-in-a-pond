@@ -75,9 +75,8 @@ All tokens are CSS custom properties on `:root`. HeroUI's stylesheet is imported
 
 | Token | Value |
 |---|---|
-| `--sidebar-width` | 232px |
-| `--sidebar-width-collapsed` | 56px |
 | `--toolbar-height` | 48px |
+| drawer width | 344px (a literal, not a token — one component owns it) |
 | `--row-height-sm/md/lg` | 36px / 44px / 52px |
 
 ### Shadows
@@ -234,8 +233,8 @@ Each section gets its own block prefix matching the section name:
 State modifiers use `is-*` on the element itself:
 
 ```css
-.sidebar__item.is-active { ... }
 .chat-dock.is-collapsed { ... }
+.wave.is-playing { ... }
 ```
 
 Structural modifiers use `--modifier` suffix:

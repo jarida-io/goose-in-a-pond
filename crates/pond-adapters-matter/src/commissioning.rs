@@ -63,7 +63,14 @@ impl MatterCommissioner {
         // to mDNS. Refusing on a zero there would make the one transport that can pair a new
         // device report "No device found in pairing mode". Skipping only costs the discovery wait.
         if self.client.has_ble() {
-            tracing::debug!(
+            // INFO, not debug. `giap::trace` is carved to INFO in the
+            // production filter, so at debug this line could never appear in a
+            // log — and a skipped probe is precisely what somebody reading a
+            // captured log needs to see when pairing failed, because without it
+            // the skip is indistinguishable from a probe that ran and found
+            // nothing. It fires once per pairing attempt, which is rare and
+            // always user-initiated, so it costs a log nothing.
+            tracing::info!(
                 target: "giap::trace",
                 kind = "matter_pairing_probe_skipped",
                 reason = "ble_active",

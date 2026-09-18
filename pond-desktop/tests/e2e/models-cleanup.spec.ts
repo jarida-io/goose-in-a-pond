@@ -7,16 +7,15 @@
  */
 import { test, expect } from "@playwright/test";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
+import { navigateTo } from "./helpers/nav";
 
 async function goToModels(page: import("@playwright/test").Page) {
   await page.goto("/");
-  const modelsBtn = page
-    .getByRole("button", { name: /models/i })
-    .or(page.locator('[title="Models"]'))
-    .first();
-  await modelsBtn.click({ timeout: 10_000 });
-  // No tab hop any more — the "Manage" tab was removed with the Models
-  // redesign; the cleanup controls sit on the section itself.
+  // Models sits behind the drawer's "Manage" group; navigateTo expands it.
+  await navigateTo(page, "Models");
+  // No in-page view switch any more. The Set up / Manage toggle this helper
+  // used to click was removed when the page was rebuilt (d516c82d); Models is
+  // now a single scroll, so arriving at the section IS arriving at the content.
 }
 
 test.describe("Models cleanup", () => {

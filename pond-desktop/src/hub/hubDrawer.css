@@ -1,0 +1,311 @@
+/* ────────────────────────────────────────────────────────────
+   Drawer navigation.
+
+   Numbers are the design's, not rounded: 344px wide, inset 14px, a 2px ink
+   border with a 4px hard accent shadow. The hard shadow is the ink edge --
+   it is offset, not blurred, and DESIGN.md treats a soft shadow here as a
+   different design rather than a near miss.
+   ──────────────────────────────────────────────────────────── */
+
+.hdrawer__scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(23, 22, 22, 0.42);
+  cursor: pointer;
+}
+
+.hdrawer {
+  position: fixed;
+  top: 14px;
+  bottom: 14px;
+  left: 14px;
+  z-index: 61;
+  width: 344px;
+  max-width: calc(100vw - 28px);
+  background: var(--color-surface);
+  border: 2px solid var(--color-text);
+  border-radius: 20px;
+  box-shadow: 4px 4px 0 var(--pp);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-family: var(--font-body), "Quicksand", sans-serif;
+  color: var(--color-text);
+}
+
+.hdrawer * { box-sizing: border-box; }
+
+/* ── Head ── */
+
+.hdrawer__head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 18px;
+}
+
+.hdrawer__brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.hdrawer__brand-name {
+  font-family: "Comfortaa", var(--font-body), "Quicksand", sans-serif;
+  font-weight: 700;
+  font-size: 24px;
+}
+
+.hdrawer__close {
+  width: 36px;
+  height: 36px;
+  flex: none;
+  border: 0;
+  border-radius: 999px;
+  background: var(--color-hover);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.hdrawer__close:hover { background: var(--color-pressed); }
+
+/* ── Body ── */
+
+.hdrawer__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px 18px 18px;
+  scrollbar-width: none;
+}
+
+.hdrawer__body::-webkit-scrollbar { width: 0; height: 0; }
+
+.hdrawer__label {
+  margin: 0 0 8px;
+  font: 500 12px/1 "JetBrains Mono", ui-monospace, monospace;
+  color: var(--color-text-secondary);
+}
+
+.hdrawer__label--spaced { margin: 18px 0 8px; }
+
+.hdrawer__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* ── Rows ── */
+
+.hdrawer__item {
+  min-height: 44px;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  /* A global button rule centres flex children; these rows are left-aligned. */
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font: 600 15px var(--font-body), "Quicksand", sans-serif;
+  text-align: left;
+  cursor: pointer;
+}
+
+.hdrawer__item:hover { background: var(--color-hover); }
+.hdrawer__item[data-active="true"] { background: var(--color-accent-soft); }
+
+.hdrawer__group-label { flex: 1; }
+
+.hdrawer__caret {
+  transform: rotate(-90deg);
+  transition: transform var(--dur-fast) var(--ink-ease);
+}
+
+.hdrawer__caret.is-open { transform: rotate(0deg); }
+
+.hdrawer__sub {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 0 4px 30px;
+}
+
+.hdrawer__subitem {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font: 500 14px var(--font-body), "Quicksand", sans-serif;
+  text-align: left;
+  cursor: pointer;
+}
+
+.hdrawer__subitem:hover { background: var(--color-hover); }
+
+/* ── Chips: Manage, and the rooms ── */
+
+.hdrawer__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.hdrawer__chips--indent { padding: 2px 0 6px 30px; }
+
+.hdrawer__chip {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--color-hover);
+  color: inherit;
+  font: 500 13px var(--font-body), "Quicksand", sans-serif;
+  cursor: pointer;
+}
+
+.hdrawer__chip:hover { background: var(--color-pressed); }
+
+.hdrawer__chip[data-active="true"] {
+  background: var(--color-accent-soft);
+  color: var(--pp);
+}
+
+.hdrawer__room {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--color-hover);
+  color: inherit;
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.hdrawer__room:hover { background: var(--color-pressed); }
+
+/* ── Quick routines ── */
+
+.hdrawer__routines {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hdrawer__routine {
+  min-height: 44px;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--color-hover);
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.hdrawer__routine:hover { background: var(--color-pressed); }
+
+.hdrawer__routine-name {
+  flex: 1;
+  min-width: 0;
+  font: 600 15px var(--font-body), "Quicksand", sans-serif;
+}
+
+.hdrawer__routine-run {
+  font: 600 12px "JetBrains Mono", ui-monospace, monospace;
+  color: var(--color-text-secondary);
+}
+
+/* ── Shell bar: the two controls that open the drawer and the bell ── */
+
+.shellbar {
+  flex: none;
+  height: 60px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 20px;
+  background: transparent;
+}
+
+.shellbar__btn {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  border: 0;
+  border-radius: 999px;
+  background: var(--color-surface);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.shellbar__btn:hover { background: var(--color-hover); }
+
+.shellbar__bar {
+  display: block;
+  width: 16px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--color-text);
+}
+
+.shellbar__count {
+  position: absolute;
+  top: 6px;
+  right: 5px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--pp);
+  color: #fff;
+  font: 700 10px/16px "JetBrains Mono", ui-monospace, monospace;
+  text-align: center;
+}
+
+/* ── Quality floor ── */
+
+.hdrawer__item:focus-visible,
+.hdrawer__subitem:focus-visible,
+.hdrawer__chip:focus-visible,
+.hdrawer__room:focus-visible,
+.hdrawer__routine:focus-visible,
+.hdrawer__close:focus-visible,
+.shellbar__btn:focus-visible {
+  outline: 2px solid var(--pp);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hdrawer__caret { transition: none; }
+}

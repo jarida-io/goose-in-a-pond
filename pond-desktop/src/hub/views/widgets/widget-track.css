@@ -1,0 +1,134 @@
+/* ────────────────────────────────────────────────────────────
+   WidgetTrack — the pages, the page columns, and the dots.
+
+   Everything here is layout. Nothing in this file knows what a widget is, and
+   nothing in it paints a value. The cursor varies with state and lives inline
+   in WidgetTrack.tsx; a class swap for "is a drag in progress" would be a
+   second answer to a question the component already has.
+
+   `scroll-snap-type` is the resting value, and it is here rather than inline so
+   that the drag can switch it by hand — it writes "none" onto the element at
+   the instant it takes capture and clears it again on release, because that
+   property has to change in step with the gesture and not one render later.
+   See the header of WidgetTrack.tsx.
+
+   Sizes this has to hold, from DESIGN.md §4:
+     1024x600  the shelf panel — one widget per page-width column
+     desktop   the classic surface — the same pages, two columns wide
+   ──────────────────────────────────────────────────────────── */
+
+.wtrack {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-snap-type: x mandatory;
+  /* Left as pan-x pan-y rather than none. This ships on a finger-driven panel,
+     and if the pointer path ever bails — capture lost, a child swallowing the
+     event — the native pan is the thing that still works. Locking it down
+     would trade a rare stutter for a dead screen. */
+  touch-action: pan-x pan-y;
+  /* The widening rule below asks about the width of THIS element, not the
+     window. Home is rendered by two surfaces whose container differs by 64px at
+     the same viewport width, so a media query sizes one of them wrong. */
+  container-type: inline-size;
+  container-name: wtrack;
+  scrollbar-width: none;
+}
+
+.wtrack::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.wtrack__page {
+  box-sizing: border-box;
+  flex: none;
+  width: 100%;
+  scroll-snap-align: start;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  /* No dock lane. The dock used to float over this column, so the last widget
+     had to end 88px above the bottom of the track or the mic sat on top of it
+     -- and on a 480px panel that is a fifth of the height this column has. The
+     dock moved to the asking column beside it, which had the room to spare, and
+     the 88px came back to the widgets. 20px is the page's own foot. */
+  padding: 0 20px 20px;
+  scrollbar-width: none;
+}
+
+.wtrack__page::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* Wider track, same pages, same order — more room per widget, not different
+   widgets. A household that arranged three cards onto page one still finds
+   three cards on page one on the desktop. */
+@container wtrack (min-width: 760px) {
+  .wtrack__page {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-content: start;
+  }
+
+  /* A widget sized large keeps the full width it was given; the two-column
+     rule is extra room, not a re-negotiation of what fits. */
+  .wtrack__page > [data-size="l"] {
+    grid-column: 1 / -1;
+  }
+}
+
+/* ── Dots ─────────────────────────────────────────────────────
+   Right-aligned, under the track. They report which page is showing and can
+   also move to one, which is why they are buttons and not a decoration.
+   ──────────────────────────────────────────────────────────── */
+
+.wtrack__dots {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 24px 4px;
+}
+
+/* The mark is 6px tall and a 6px target is not one a thumb can hit. The button
+   is the full 44px touch floor, transparent, and the mark is a child of it —
+   so what you aim at and what you see are allowed to be different sizes. */
+.wtrack__dot {
+  width: 44px;
+  height: 44px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.wtrack__dot-bar {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--color-border-strong);
+  transition: width var(--dur-lift) var(--ink-ease);
+}
+
+/* The current page's mark grows into a bar rather than changing shade alone:
+   the length reads at arm's length on the panel, where a colour swap on 6px
+   does not. */
+.wtrack__dot[aria-current="true"] .wtrack__dot-bar {
+  width: 22px;
+  background: var(--pp);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wtrack__dot-bar {
+    transition-duration: 0.01ms;
+  }
+}

@@ -368,6 +368,19 @@ pub struct Settings {
     #[serde(default)]
     pub voice_wake_word_transcriptions: Vec<String>,
 
+    /// Suggestion kinds the household never wants offered on Home.
+    ///
+    /// Holds [`suggestion`](crate::user_data::services::suggestion) suggestor
+    /// ids. Per KIND and not per instance, deliberately: a suggestion is
+    /// derived on every read and carries no durable id, so an instance-level
+    /// dismissal would be a key that never matched again -- the same shape as
+    /// the memory-edge table, which has a writer and no reachable reader.
+    /// "Never suggest the weather" is also what a household actually means.
+    ///
+    /// Empty is the shipped state: nothing is muted until somebody mutes it.
+    #[serde(default)]
+    pub suggestions_muted: Vec<String>,
+
     /// Selected TTS voice.
     ///
     /// Kokoro voice id (`af_heart`, `bm_george`, …) since the engine swap; a
@@ -865,6 +878,15 @@ pub struct Settings {
     /// turn and stored as categorised memories (segment, importance, decay).
     #[serde(default = "Settings::default_memory_extraction_enabled")]
     pub memory_extraction_enabled: bool,
+    /// Compose questions out of the household's own memories, on the lane.
+    ///
+    /// Separate from `memory_extraction_enabled` because they are different
+    /// bargains: extraction decides what the pond REMEMBERS, and this decides
+    /// what it OFFERS. A household that wants to be remembered and not
+    /// suggested to is a coherent position, and folding the two would make
+    /// turning off the offers also stop the remembering.
+    #[serde(default = "Settings::default_suggestion_generation_enabled")]
+    pub suggestion_generation_enabled: bool,
 
     /// When true, a background task periodically prunes/archives decayed memories.
     #[serde(default = "Settings::default_memory_cleanup_enabled")]
@@ -944,13 +966,108 @@ pub struct Settings {
     #[serde(default = "Settings::default_memory_consolidation_batch_size")]
     pub memory_consolidation_batch_size: u32,
 
-    /// Max facts to extract per conversation turn. Default 3.
+    /// Most memories one WINDOW may produce. Default 3.
+    ///
+    /// Per window, not per turn: the unit changed when extraction did. Three
+    /// out of twenty messages is deliberately tight -- the prompt says "fewer
+    /// is better" -- because a window that yields three memories every time is
+    /// a model padding, and padding is what fills a store with rows nobody
+    /// wants recalled.
     #[serde(default = "Settings::default_memory_extraction_max_facts")]
     pub memory_extraction_max_facts: u32,
 
-    /// Minimum seconds between extraction runs (rate limit). Default 10.
+    /// Floor under the gap between batch extraction passes. Default 60.
     #[serde(default = "Settings::default_memory_extraction_interval_secs")]
     pub memory_extraction_interval_secs: u32,
+
+    // ── Batch memory extraction ──────────────────────────────────────────────
+    //
+    // The batch engine reads one WINDOW of one conversation per lane slot,
+    // in the pond's idle time, instead of one turn after every turn. These
+    // are its dials. All of them are headless: they tune how often the pond
+    // reads its own history and how close two notes have to be before one
+    // counts as a restatement of the other, and neither is a question a
+    // household can answer from a slider.
+    /// Conversations examined per pass. Default 3.
+    ///
+    /// One window each, so this is also windows per pass. Three at roughly
+    /// 10-15 s of inference apiece is ~30-45 s, which is about as long as a
+    /// background job should hold the single inference slot before the next
+    /// tick reconsiders.
+    #[serde(default = "Settings::default_memory_extraction_sessions_per_pass")]
+    pub memory_extraction_sessions_per_pass: u32,
+
+    /// Messages in one extraction window. Default 20.
+    ///
+    /// Bounded by three things at once and the smallest wins: this count, a
+    /// character budget, and never splitting a user-assistant pair. A whole
+    /// session does not fit the prompt-side clamp, and a turn is the unit this
+    /// engine exists to stop using.
+    #[serde(default = "Settings::default_memory_extraction_window_messages")]
+    pub memory_extraction_window_messages: u32,
+
+    /// How quiet the household must be before a pass may start, in seconds.
+    /// Default 900.
+    ///
+    /// Its own value rather than the shared chore threshold because this job is
+    /// the most expensive in the lane and the least urgent: a conversation from
+    /// last March does not get staler while the pond waits.
+    #[serde(default = "Settings::default_memory_extraction_idle_secs")]
+    pub memory_extraction_idle_secs: u32,
+
+    /// Cosine at or above which a candidate is the SAME memory as one already
+    /// stored. Default 0.94.
+    ///
+    /// **This number is a proposal, not a measurement.** It is what the shadow
+    /// pass exists to replace: the engine bands every candidate it sees and
+    /// logs the histogram without writing anything, so the threshold can be
+    /// picked off a real distribution of real wordings from the device's own
+    /// model rather than off an intuition.
+    #[serde(default = "Settings::default_memory_reinforce_threshold")]
+    pub memory_reinforce_threshold: f32,
+
+    /// Cosine at or above which a candidate is ABOUT the same thing as one
+    /// already stored, without being the same note. Default 0.78.
+    ///
+    /// Same caveat as the reinforce threshold above, and more sharply: 0.78 is
+    /// the number the whole shadow phase was designed to buy evidence for.
+    #[serde(default = "Settings::default_memory_relate_threshold")]
+    pub memory_relate_threshold: f32,
+
+    /// Whether a dated utterance becomes a proposal in the suggestion queue.
+    /// Default true.
+    ///
+    /// Dates never become memories — a memory is read six months later with no
+    /// conversation around it, and "next Tuesday" is then a lie. The
+    /// destination is the proposal queue, which is a thing that exists; it is
+    /// not a calendar write and not a sticky note, neither of which does.
+    #[serde(default = "Settings::default_memory_date_proposals_enabled")]
+    pub memory_date_proposals_enabled: bool,
+
+    /// What the batch engine is allowed to do: `shadow`, `write`, or
+    /// `reinforce`. Default `write`.
+    ///
+    /// Internal state, written by the engine and by whoever is rolling it out —
+    /// not a user-facing control. An unrecognised value reads as `shadow`,
+    /// which is the narrowing direction: an unreadable mode must not be able to
+    /// start writing to the household's memory store.
+    ///
+    /// `shadow` is what an operator selects to re-measure the two thresholds
+    /// against a real history without touching the store. It is no longer the
+    /// default: with the per-turn path gone, a pond left in `shadow` reads its
+    /// own conversations and remembers nothing.
+    #[serde(default = "Settings::default_memory_extraction_mode")]
+    pub memory_extraction_mode: String,
+
+    /// When the batch engine first completed a pass, RFC3339; empty until it
+    /// has. Internal state, written once by the engine.
+    ///
+    /// It is the epoch the first-sighting rule is measured against: a memory
+    /// the per-turn path wrote before this moment must not be able to reinforce
+    /// itself into looking like a habit the first time the backlog re-reads the
+    /// conversation it came from.
+    #[serde(default = "Settings::default_memory_extraction_first_pass_at")]
+    pub memory_extraction_first_pass_at: String,
 
     // ── Scheduling tuning ────────────────────────────────────────────────────
     /// Max concurrent scheduled task executions. Default 2.
@@ -1255,6 +1372,7 @@ impl Default for Settings {
             voice_kws_post_trigger_silence_ms: Self::default_kws_post_trigger_silence_ms(),
             voice_kws_cooldown_ms: Self::default_kws_cooldown_ms(),
             voice_wake_word_transcriptions: Vec::new(),
+            suggestions_muted: Vec::new(),
             voice_tts_voice: Self::default_tts_voice(),
             voice_tts_speed: Self::default_tts_speed(),
             voice_tts_quality: Self::default_tts_quality(),
@@ -1318,6 +1436,7 @@ impl Default for Settings {
             agent_memory_limit: Self::default_agent_memory_limit(),
             tool_output_compaction: Self::default_tool_output_compaction(),
             memory_extraction_enabled: true,
+            suggestion_generation_enabled: Self::default_suggestion_generation_enabled(),
             memory_cleanup_enabled: true,
             memory_consolidation_enabled: Self::default_memory_consolidation_enabled(),
             session_titling_enabled: Self::default_session_titling_enabled(),
@@ -1334,6 +1453,15 @@ impl Default for Settings {
             memory_consolidation_batch_size: Self::default_memory_consolidation_batch_size(),
             memory_extraction_max_facts: Self::default_memory_extraction_max_facts(),
             memory_extraction_interval_secs: Self::default_memory_extraction_interval_secs(),
+            memory_extraction_sessions_per_pass: Self::default_memory_extraction_sessions_per_pass(
+            ),
+            memory_extraction_window_messages: Self::default_memory_extraction_window_messages(),
+            memory_extraction_idle_secs: Self::default_memory_extraction_idle_secs(),
+            memory_reinforce_threshold: Self::default_memory_reinforce_threshold(),
+            memory_relate_threshold: Self::default_memory_relate_threshold(),
+            memory_date_proposals_enabled: Self::default_memory_date_proposals_enabled(),
+            memory_extraction_mode: Self::default_memory_extraction_mode(),
+            memory_extraction_first_pass_at: Self::default_memory_extraction_first_pass_at(),
             schedule_max_concurrent: Self::default_schedule_max_concurrent(),
             schedule_max_runs_per_task: Self::default_schedule_max_runs_per_task(),
             context_monitor_enabled: Self::default_context_monitor_enabled(),
@@ -1717,6 +1845,15 @@ impl Settings {
     fn default_tool_output_compaction() -> bool {
         true
     }
+    /// On by default.
+    ///
+    /// The template tier answers whether or not this runs, so the cost of it
+    /// being on is one model call per idle period and the cost of it being off
+    /// is a household reading the same three questions forever — which is the
+    /// complaint this whole surface was built from.
+    fn default_suggestion_generation_enabled() -> bool {
+        true
+    }
     fn default_memory_extraction_enabled() -> bool {
         true
     }
@@ -1744,8 +1881,57 @@ impl Settings {
     fn default_memory_extraction_max_facts() -> u32 {
         3
     }
+    /// Sixty, matching the lane's own tick.
+    ///
+    /// This was ten: the rate limit on a per-turn extractor that ran after
+    /// every exchange and needed stopping from spending inference twice in a
+    /// chatty minute. That reader is gone, and the key now means the one thing
+    /// left for it to mean -- the floor under how often a batch pass may take
+    /// the inference slot. Ten would let a pass start on every tick; sixty is
+    /// the tick, so the floor and the poll agree by default and the key only
+    /// ever makes passes RARER.
     fn default_memory_extraction_interval_secs() -> u32 {
-        10
+        60
+    }
+    fn default_memory_extraction_sessions_per_pass() -> u32 {
+        3
+    }
+    fn default_memory_extraction_window_messages() -> u32 {
+        20
+    }
+    fn default_memory_extraction_idle_secs() -> u32 {
+        900
+    }
+    fn default_memory_reinforce_threshold() -> f32 {
+        0.94
+    }
+    fn default_memory_relate_threshold() -> f32 {
+        0.78
+    }
+    fn default_memory_date_proposals_enabled() -> bool {
+        true
+    }
+    /// `write`, because the per-turn extraction path is gone.
+    ///
+    /// This was `shadow` while both paths were live: a pond upgrading into the
+    /// release that first contained the engine must not start writing to the
+    /// household's memory store because a new background job appeared, and the
+    /// per-turn path was still there doing the writing.
+    ///
+    /// That argument inverts at the cutover. With nothing else extracting,
+    /// `shadow` would mean a pond that reads its own conversations, bands every
+    /// candidate, and remembers nothing at all -- forever, silently, with a
+    /// memory section that never grows. `shadow` remains a mode an operator can
+    /// select to re-measure a threshold; it is no longer a safe default,
+    /// because the thing it was safe relative to no longer exists.
+    ///
+    /// An unrecognised value still reads as `shadow`. That has not changed and
+    /// must not: a typo in a settings row may cost a pass, never a write.
+    fn default_memory_extraction_mode() -> String {
+        "write".to_string()
+    }
+    fn default_memory_extraction_first_pass_at() -> String {
+        String::new()
     }
     fn default_schedule_max_concurrent() -> u32 {
         2
@@ -2642,10 +2828,49 @@ mod tests {
             // Private mesh lend-side throttle: what number is reasonable is
             // an open product decision, same as the rate above. No UI yet.
             "mesh_lend_token_ceiling",
+            // The batch memory-extraction engine's dials. Headless as a group,
+            // for two different reasons.
+            //
+            // The three cadence knobs tune how much of the single inference
+            // slot the pond spends reading its own history. A control for them
+            // would be a slider whose effect a household cannot observe, which
+            // invites tuning by superstition -- the same argument that keeps
+            // `compaction_verbatim_days` headless.
+            //
+            // The two thresholds are worse than unobservable: they are
+            // UNMEASURED. 0.94 and 0.78 are proposals the shadow pass exists to
+            // replace with numbers off a real histogram. Shipping a control for
+            // a number nobody has measured would invite a household to tune a
+            // dial whose units do not mean anything yet.
+            "memory_extraction_sessions_per_pass",
+            "memory_extraction_window_messages",
+            "memory_extraction_idle_secs",
+            "memory_reinforce_threshold",
+            "memory_relate_threshold",
+            // The date destination. It gets a UI in the same change that gives
+            // the proposal queue an executor -- until approving a proposal
+            // actually does something, a switch labelled "turn reminders on"
+            // would promise more than the code delivers.
+            "memory_date_proposals_enabled",
+            // Engine state rather than settings: `mode` is the rollout lever
+            // (shadow -> write -> reinforce) and `first_pass_at` is an epoch
+            // the engine stamps itself. Neither is a preference, and giving a
+            // household a control that flips an engine straight from reading to
+            // writing its memory store is the opposite of a rollout.
+            "memory_extraction_mode",
+            "memory_extraction_first_pass_at",
         ];
         // Everything else is surfaced in the desktop UI (Settings tabs / hub
         // views / onboarding) and mirrored in the TS Settings type.
         const UI_WIRED: &[&str] = &[
+            // The suggestion engine's per-kind mute. UI_WIRED rather than
+            // HEADLESS_BY_DESIGN because a control that writes it really
+            // exists and a household can operate it -- but note WHERE it is:
+            // "Don't suggest this" on the Home suggestion card, not a row in
+            // Settings.tsx. This list asserts that a control exists, which is
+            // true; it does not assert which screen holds it. The TS mirror is
+            // in `pond-desktop/src/api/types.ts` like every other entry here.
+            "suggestions_muted",
             // Private mesh (#132 Milestone 2): the Mesh section's toggle
             // (Mesh.tsx) starts/stops the real libp2p MeshTransport. Requires
             // a `pond-server` build with the `mesh` feature — flipping it on
@@ -2700,6 +2925,7 @@ mod tests {
             "memory_extraction_enabled",
             "memory_extraction_interval_secs",
             "memory_extraction_max_facts",
+            "suggestion_generation_enabled",
             "memory_graph_enabled",
             "memory_prune_threshold",
             "mic_enabled",

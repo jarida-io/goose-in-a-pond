@@ -27,6 +27,31 @@ PRUNE: empty content, general knowledge (weather, Wikipedia facts), info already
 Only keep memories personally relevant to the user that would be lost if forgotten.
 Output ONLY the JSON array.";
 
+/// Parse a stored segment label written by a model.
+///
+/// Both consolidators name a segment in their output, so both have to read one
+/// back. It lived in the per-turn extractor until that module was deleted with
+/// the per-turn path; it is here rather than beside the batch extractor's own
+/// parser because the two answer different questions. The batch catalogue is
+/// CLOSED -- five values, and an unknown label is refused, because defaulting
+/// is measurably how five third-party biography facts reached the live store.
+/// Consolidation reads the seven segments the store already holds, including
+/// the three the extractor may no longer choose, and an unknown label there
+/// simply leaves the row's segment alone.
+pub fn parse_segment_str(s: &str) -> Option<MemorySegment> {
+    match s.to_lowercase().as_str() {
+        "identity" => Some(MemorySegment::Identity),
+        "preference" => Some(MemorySegment::Preference),
+        "correction" => Some(MemorySegment::Correction),
+        "relationship" => Some(MemorySegment::Relationship),
+        "routine" => Some(MemorySegment::Routine),
+        "project" => Some(MemorySegment::Project),
+        "knowledge" => Some(MemorySegment::Knowledge),
+        "context" => Some(MemorySegment::Context),
+        _ => None,
+    }
+}
+
 pub struct LlmMemoryConsolidator {
     live_provider: Arc<RwLock<Option<Arc<dyn LlmProvider>>>>,
 }
@@ -182,7 +207,7 @@ fn parse_consolidation_response(raw: &str) -> Result<Vec<ConsolidationAction>> {
     let text = raw.trim();
 
     // Strip thinking tokens
-    let cleaned = crate::llm_memory_extractor::strip_thinking(text);
+    let cleaned = crate::conversation_extractor::strip_thinking(text);
 
     // Try to find JSON array
     let json_str = if cleaned.starts_with('[') {
@@ -221,7 +246,7 @@ fn parse_consolidation_response(raw: &str) -> Result<Vec<ConsolidationAction>> {
                 let segment = v
                     .get("segment")
                     .and_then(|s| s.as_str())
-                    .and_then(|s| crate::llm_memory_extractor::parse_segment_str(s))
+                    .and_then(|s| parse_segment_str(s))
                     .unwrap_or(MemorySegment::Knowledge);
                 let importance = v
                     .get("importance")

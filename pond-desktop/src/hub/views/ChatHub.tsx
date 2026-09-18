@@ -20,6 +20,7 @@ import type { SubagentRun } from "../../components/SubagentTree";
 import { AttachmentTray } from "../../components/AttachmentTray";
 import { prepareImage, validateAttachmentSet } from "../../lib/imageAttach";
 import type { PreparedImage } from "../../lib/imageAttach";
+import { useSuggestedPrompts } from "../../hooks/useSuggestedPrompts";
 import "./chat.css";
 
 // ── Types ─────────────────────────────────────────────────────
@@ -77,13 +78,6 @@ function makeSeed(userName: string): Row[] {
   ];
 }
 
-const CHIPS = [
-  "Set Movie Time",
-  "Lock everything",
-  "Bedroom to 67°",
-  "Show the driveway",
-  "New sticky note",
-];
 
 /** Project a stored message into what this surface renders. */
 function toRow(m: Message): Row {
@@ -126,6 +120,10 @@ export function ChatHubView() {
   // and the Chat section shows the same conversation rather than a second one.
   const run = useChatRun();
   const { messages, busy } = run;
+
+  // The composer's chips, grounded. See `useSuggestedPrompts` for why the five
+  // hardcoded ones went: three of them named hardware a pond may not own.
+  const chips = useSuggestedPrompts(state.sessionId);
 
   // Presentation, not conversation: an empty pond opens on something to read
   // rather than a blank pane. The seed is replaced by the first real message
@@ -374,7 +372,7 @@ export function ChatHubView() {
         role="group"
         aria-label="Quick suggestions"
       >
-        {CHIPS.map((c) => (
+        {chips.map((c) => (
           <button
             key={c}
             className="ch-chip"

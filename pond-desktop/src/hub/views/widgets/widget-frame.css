@@ -1,0 +1,170 @@
+/* ────────────────────────────────────────────────────────────
+   WidgetFrame — arrange-mode chrome, and the add affordance beside it.
+
+   Sized for the 1024×600 panel the household touches. The design draws these
+   controls at 26px on their short axis; DESIGN.md's touch floor is 44px, so
+   every control here is 44px and the toolbar lane is 48px rather than the
+   design's 30px. The shapes — pills, a clipped segmented control, a circle —
+   and the token colours are the design's, unchanged.
+
+   Nothing here animates, so there is no reduced-motion guard to write.
+   ──────────────────────────────────────────────────────────── */
+
+/* The idle border is dashed transparent rather than absent, so entering
+   arrange mode adds the toolbar lane and one pixel of side padding — not a
+   whole border's worth of reflow underneath the card. */
+.wframe {
+  position: relative;
+  flex: none;
+  box-sizing: border-box;
+  border: 2px dashed transparent;
+  border-radius: 16px;
+  padding: 5px;
+}
+
+.wframe[data-arranging] {
+  border-color: var(--color-border-strong);
+  padding: 48px 6px 6px;
+}
+
+/* The design paints one widget's border in the accent — the one under the
+   household's attention. There is no selection model in this build, so
+   focus-within is the only honest source for "this one". */
+.wframe[data-arranging]:focus-within {
+  border-color: var(--pp);
+}
+
+/* Wrapping the children keeps the toolbar out of the card's own flex context.
+   The height resolves once the track hands the frame a definite row height,
+   which is what lets a card fill its cell rather than sit at the top of it.
+
+   AND THE CARD FILLS THE BODY. `height: 100%` sized this wrapper and stopped
+   there: the widget inside stayed at its own content height, so a frame at size
+   m reserved 196px for a weather card 137px tall and left a 59px hole under it
+   that read as a gap in the layout rather than as anything. Home's whole
+   right-hand column was doing this -- it is most of the empty space the screen
+   opened on. A flex column with the child at `flex: 1` hands the reserved
+   height to the thing that was supposed to occupy it.
+
+   `min-height: 0` on the child because a flex item's automatic minimum is its
+   content, which would let a card with a long list push the frame past the size
+   the household chose for it. */
+.wframe__body {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.wframe__body > * {
+  flex: 1;
+  min-height: 0;
+}
+
+/* What data-size buys, measured on the BODY rather than on the frame.
+
+   The frame is border-box, so a min-height there is a height the 44px toolbar
+   lane spends: entering arrange mode took 44px straight out of the card of
+   every widget shorter than its own size — size l fell 266px → 222px, size m
+   182px → 138px — so the S/M/L control was previewing heights it was about to
+   change, and S and M sat 13px apart while arranging and 57px apart once Done
+   was pressed. Sized from the body out, the lane is additive and the card keeps
+   its size. That is what the design does: its frames carry the lane's padding
+   and no height constraint at all.
+
+   WidgetTrack owns the two-column rule and reads the same attribute, which is
+   why data-size stays on the frame. */
+.wframe[data-size="s"] .wframe__body { min-height: 132px; }
+.wframe[data-size="m"] .wframe__body { min-height: 196px; }
+.wframe[data-size="l"] .wframe__body { min-height: 280px; }
+
+/* ── Toolbar ──────────────────────────────────────────────── */
+
+.wframe__bar {
+  position: absolute;
+  top: 2px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.wframe__btn {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 2px solid var(--color-text);
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.wframe__btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* One chevron turned over rather than a second path to keep in step with it. */
+.wframe__up {
+  transform: rotate(180deg);
+}
+
+.wframe__seg {
+  display: flex;
+  height: 44px;
+  border: 2px solid var(--color-text);
+  border-radius: 999px;
+  background: var(--color-surface);
+  overflow: hidden;
+  font: 700 11px var(--font-mono), "JetBrains Mono", ui-monospace, monospace;
+}
+
+/* border-radius: 0 is load-bearing. base.css rounds every button, and a
+   rounded segment leaves daylight between the active fill and the pill that
+   `overflow: hidden` above is clipping it into. No dividers, no gaps. */
+.wframe__seg-btn {
+  width: 44px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+/* #fff, not a token: the one literal the design itself uses, and only on an
+   accent fill where the token ramp has no equivalent. */
+.wframe__seg-btn[aria-pressed="true"] {
+  background: var(--pp);
+  color: #fff;
+}
+
+/* ── Add affordance ───────────────────────────────────────── */
+
+/* Centred, so base.css's global justify-content is what this one wants —
+   unlike every left-aligned flex button in this build, which has to say
+   flex-start out loud. */
+.wframe-add {
+  flex: none;
+  min-height: 52px;
+  box-sizing: border-box;
+  border: 2px dashed var(--pp);
+  border-radius: 16px;
+  background: transparent;
+  color: var(--color-text);
+  font: 600 14px var(--font-body), "Quicksand", sans-serif;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  cursor: pointer;
+}

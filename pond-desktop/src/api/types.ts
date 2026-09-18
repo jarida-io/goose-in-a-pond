@@ -83,6 +83,15 @@ export interface Settings {
   // Voice pipeline
   voice_wake_word?: string;
   voice_wake_word_transcriptions?: string[];
+  /**
+   * Suggestion kinds this household never wants offered on Home.
+   *
+   * Holds suggestor ids (`"weather_today"`, `"memory_recall"`, ...). Per kind
+   * and not per instance: a suggestion is derived on every read and has no
+   * durable id, so an instance-level dismissal would be a key that never
+   * matched again.
+   */
+  suggestions_muted?: string[];
   voice_recording_duration_secs?: number;
   voice_whisper_url?: string;
   active_whisper_model?: string;
@@ -160,6 +169,8 @@ export interface Settings {
 
   // Memory lifecycle
   memory_extraction_enabled?: boolean;
+  /** Turn what the pond remembers into questions on Home. */
+  suggestion_generation_enabled?: boolean;
   memory_cleanup_enabled?: boolean;
   memory_consolidation_enabled?: boolean;
   /** Let the pond rename conversations while idle. Never touches a name you typed. */
@@ -359,26 +370,15 @@ export interface RetitleOneResult {
   reason?: string;
 }
 
-/** What one manual re-titling pass did. */
+/** What asking for a re-titling pass answered. */
 export interface RetitleResult {
-  renamed: { session_id: string; title: string }[];
-  renamed_count: number;
-  /** Conversations the pass looked at, excluding the pond's own background ones. */
-  considered: number;
-  /** True when the pass hit its own bound — pressing again picks up from there. */
-  capped: boolean;
-  /** The model answered with something unusable; the old name was kept. */
-  unusable: number;
-  failed: number;
-  skipped: {
-    /** Named by hand. Never overwritten. */
-    user_named: number;
-    /** Already has a model-written name that still fits. */
-    still_current: number;
-    too_short: number;
-    /** Predates the provenance column and is not the six-word fallback. */
-    unknown_provenance: number;
-  };
+  /** True when the titling job was asked to run its next pass now. */
+  started: boolean;
+  /**
+   * Why not, when it is false. A pond whose titling loop never spawned has
+   * nothing to wake, which is a fact about the pond rather than a failure.
+   */
+  reason?: string;
 }
 
 export interface ConsolidationEvent {
@@ -515,8 +515,151 @@ export type MemorySegment =
   | "correction"
   | "relationship"
   | "project"
+  // Something the household does again and again. Written only by batch
+  // extraction, which is the one path that sees more than a single turn.
+  | "routine"
   | "knowledge"
   | "context";
+
+/// What the batch memory-extraction engine is doing, and why it is not.
+///
+/// `running` is false when the engine is not wired into this process at all --
+/// a CLI path, or a pond with no embedder. That is a different answer from "it
+/// has read nothing", and the two must not render the same: a pond whose
+/// embedder never loaded looks identical, from the outside, to one with nothing
+/// left to extract, and the difference is months of history.
+/**
+ * One background job that spends inference, as the lane currently sees it.
+ *
+ * Wire shape of `GET /api/v1/lane`. Three of these fields answer questions that
+ * used to have no answer anywhere: `present` (is there a loop for this in the
+ * running process at all), `blocked_by` (what it is waiting for), and
+ * `would_run_next` (whose turn it actually is). Before them, a job that was
+ * eligible and losing the tie-break looked exactly like one that was switched
+ * off, from every surface the household has.
+ */
+export interface LaneJobStatus {
+  /** Stable wire name, and the path segment `runLaneJob` takes. */
+  job: string;
+  /** What to call it on screen. */
+  title: string;
+  /** A loop for this job exists in this process. False is a real answer. */
+  present: boolean;
+  /** It has asked the lane for the slot at least once since this pond started. */
+  registered: boolean;
+  enabled: boolean;
+  /** Seconds since it last ran in this process; null means never. */
+  since_last_run_secs: number | null;
+  interval_floor_secs: number;
+  idle_threshold_secs: number;
+  /** Why it would not run right now, or null if it would. */
+  blocked_by: string | null;
+  /**
+   * Counters since the pond started.
+   *
+   * `blocked_by` is an instant; these are the history, and the difference is
+   * the point. A job that is eligible and losing the tie-break has
+   * `blocked_by: null` — identical to one that is about to run — and only
+   * `lost_to_total` tells them apart.
+   */
+  granted?: number;
+  /** Times the lane rang this job's bell because it should have been running. */
+  nudged?: number;
+  slot_busy?: number;
+  refused_disabled?: number;
+  refused_no_activity?: number;
+  refused_still_active?: number;
+  refused_interval_floor?: number;
+  lost_to_total?: number;
+  lost_to_most?: { job: string; times: number } | null;
+  /** It is the one that would take the slot on the next tick. */
+  would_run_next: boolean;
+}
+
+export interface LaneStatus {
+  /**
+   * False when this process has no lane at all -- the CLI paths. Distinct from
+   * an empty job list, because six rows of "never" from a lane and six rows
+   * from nothing are different facts.
+   */
+  lane: boolean;
+  jobs: LaneJobStatus[];
+  would_run?: string | null;
+  idle_reason?: string | null;
+  idle_for_secs?: number;
+  saw_activity_since_start?: boolean;
+  slot_busy?: boolean;
+  /**
+   * The job holding the inference slot right now, and for how long.
+   *
+   * `slot_busy` could always say something was running; these say WHAT. That is
+   * the difference between "the pond is busy" and "the memory engine is reading
+   * your conversations", which is what somebody wondering why it is slow
+   * actually needs.
+   */
+  running?: string | null;
+  running_title?: string | null;
+  running_for_secs?: number | null;
+}
+
+/** What asking for a job to run now did. */
+export interface LaneRunResult {
+  lane: boolean;
+  job: string;
+  /** The job's loop was asked to take its next tick at once. */
+  woken: boolean;
+  /** Why not, when not. */
+  reason?: string;
+}
+
+export interface ExtractionStatus {
+  sessions_total: number;
+  sessions_pending: number;
+  mode: string | null;
+  last_pass_at: string | null;
+  last_pass_windows: number | null;
+  last_pass_written: number | null;
+  /// Memories the last pass refused for carrying a date, and how many of those
+  /// left no reminder behind. Nothing edits a note on its way to the store, so
+  /// a dated note is refused whole -- affordable exactly as long as the date is
+  /// kept somewhere else, which is a row in the `reminders` table, readable at
+  /// `GET /api/v1/reminders`.
+  ///
+  /// `last_pass_dates_lost` counts refused NOTES that no stored reminder could
+  /// be matched to -- one per note, not one per window. Those dates are gone
+  /// from the pond entirely.
+  ///
+  /// The match is a coarse shared-content-word test on the engine side, and it
+  /// answers "not covered" wherever it cannot tell. So this number over-reports
+  /// loss rather than under-reporting it: a note whose reminder was filed in
+  /// quite different words can be counted here. It is the direction chosen on
+  /// purpose, because an over-count is a banner somebody can check and an
+  /// under-count is a date discarded in silence.
+  ///
+  /// Two different things cause a loss, told apart by
+  /// `last_pass_reminders_lost` below: above zero it is the POND, a store that
+  /// would not take the write; at zero it is the MODEL, which answered half the
+  /// schema and filed no reminder to write.
+  last_pass_dated: number | null;
+  last_pass_dates_lost: number | null;
+  /// Reminder rows the last pass wrote, and candidates that reached no store at
+  /// all. The first is the only positive evidence on this object that a refused
+  /// date was kept; the second is a pass losing every date it refuses, which
+  /// nothing else here shows.
+  ///
+  /// A re-walk that recognised its own earlier row counts in neither: nothing
+  /// was written and nothing was lost.
+  last_pass_reminders_written: number | null;
+  last_pass_reminders_lost: number | null;
+  /// Conversations in the store that nobody can say whose they are, and which
+  /// are therefore never remembered. A total over the store, not a count of
+  /// what one pass looked at: most of them come from the voice surface, which
+  /// runs as its own process with no request and so cannot be told who is
+  /// speaking at all.
+  unattributed_sessions: number | null;
+  blocked_on: string | null;
+  running: boolean;
+}
 
 export type MemoryTier = "short" | "long" | "permanent";
 export type MemoryLifecycle = "active" | "archived" | "merged";
@@ -1365,11 +1508,26 @@ export interface Proposal {
   profile_id: string | null;
   created_at: string;
   expires_at: string;
-  proposed_action: string;
+  /**
+   * A TAGGED UNION, not a string. `TaskKind` is
+   * `#[serde(tag = "type", rename_all = "snake_case")]`, so the server sends
+   * `{"type":"agent_prompt","prompt":"..."}`.
+   *
+   * This was typed `string` until now, which is why `SuggestionQueue`'s header
+   * warns "never bind it, it renders [object Object]" -- the type could not
+   * stop anyone, so a comment had to. Typed properly, binding the wrong half is
+   * a compile error instead of a rendering bug.
+   */
+  proposed_action:
+    | { type: "agent_prompt"; prompt: string }
+    | { type: "webhook"; url: string }
+    | { type: "sensor_trigger"; device_id: string; signal: string };
   trigger: {
     kind: string;
-    source_id: string;
-    signal: string;
+    /** Nullable on the wire: `Option<String>` in the domain. */
+    source_id: string | null;
+    /** Nullable on the wire: `Option<String>` in the domain. */
+    signal: string | null;
     observed_at: string;
   };
 }
@@ -1377,6 +1535,48 @@ export interface Proposal {
 export interface ProposalList {
   profile_id: string | null;
   proposals: Proposal[];
+}
+
+/**
+ * One thing the household might want to ask, from `GET /api/v1/suggestions`.
+ *
+ * Mirrors `pond_core::user_data::services::suggestion::Suggestion`. Note there
+ * is no expiry and no `profile_id`: a suggestion is an offer addressed to
+ * nobody, and the tap is the consent -- which is why its route needs neither a
+ * session nor a resolved member, and why it answers where `/proposals` 403s.
+ */
+export interface Suggestion {
+  /** Stable per KIND, so muting one mutes the same one tomorrow. */
+  id: string;
+  /** The sentence shown AND the prompt sent. One string, deliberately. */
+  prompt: string;
+  /** The measured fact behind it. Never blank. */
+  because: string;
+  /** The tool group that can answer `prompt`. */
+  answered_by: string;
+
+  /**
+   * True when the pond composed this question from one of your own memories,
+   * false when it came from the template tier.
+   *
+   * The client has to be able to tell them apart for one reason: only a
+   * composed suggestion is a ROW, so only a composed one can be settled when it
+   * is tapped. A template suggestion is recomputed on every read and has
+   * nothing to settle.
+   */
+  composed: boolean;
+}
+
+/** Why one suggestor produced nothing, so quiet can be told from broken. */
+export interface SuggestionConsidered {
+  id: string;
+  silent_because: string | null;
+}
+
+export interface SuggestionList {
+  suggestions: Suggestion[];
+  considered: SuggestionConsidered[];
+  audience: "personal" | "shared";
 }
 
 /** Approve or reject. The server accepts no third value. */

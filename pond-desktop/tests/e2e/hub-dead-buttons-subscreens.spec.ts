@@ -1,5 +1,6 @@
 import { test } from "@playwright/test";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
+import { navigateTo } from "./helpers/nav";
 
 const SUBSCREENS: Array<{ row: RegExp; label: string }> = [
   { row: /^Models$/,            label: "Models" },
@@ -26,7 +27,9 @@ test("Settings sub-screen dead-button audit", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
   await page.waitForSelector(".ghub", { timeout: 10_000 });
-  await page.getByRole("button", { name: "Settings", exact: true }).first().click();
+  // Settings is a drawer row now, not a rail icon. The sub-rows themselves are
+  // still on the settings screen, so only the way in changes.
+  await navigateTo(page, "Settings");
   await page.waitForSelector(".set", { timeout: 5_000 });
 
   const inventory: Array<{ view: string; text: string; hasOnClick: boolean; cls: string }> = [];
@@ -51,8 +54,8 @@ test("Settings sub-screen dead-button audit", async ({ page }) => {
 
     for (const b of buttons) inventory.push({ view: `Settings/${label}`, ...b });
 
-    // Back to Settings root
-    await page.getByRole("button", { name: "Settings", exact: true }).first().click();
+    // Back to Settings root, through the drawer for the same reason.
+    await navigateTo(page, "Settings");
     await page.waitForSelector(".set", { timeout: 4_000 });
   }
 

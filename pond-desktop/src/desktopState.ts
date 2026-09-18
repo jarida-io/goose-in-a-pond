@@ -64,7 +64,11 @@ export const DESKTOP_SECTIONS: Array<{ section: GuiSection; label: string }> =
   SIDEBAR_GROUPS.flatMap((g) => g.sections.map(({ section, label }) => ({ section, label })));
 
 // Include all valid sections — some are routable but not in the sidebar
-// "hub" is hidden from the classic sidebar; entry is via Settings > "Preview Goose Hub"
+// "hub" is routable but has NO entry point in the UI. The Settings button this
+// comment used to name does not exist anywhere in src/ -- the only way in is
+// `giap-force-hub` in localStorage (see the reducer), which is what the hub's
+// own e2e specs set. Recorded rather than fixed: giving it an entry is a
+// product decision, not a rename.
 const HIDDEN_SECTIONS: GuiSection[] = ["faces", "canvas", "hub"];
 const SECTION_SET = new Set<GuiSection>([
   ...DESKTOP_SECTIONS.map((s) => s.section),
