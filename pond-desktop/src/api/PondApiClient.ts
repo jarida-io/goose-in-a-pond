@@ -515,6 +515,24 @@ export class PondApiClient {
     return this.post(`/api/v1/devices/${encodeURIComponent(id)}/heartbeat`, {});
   }
 
+  /**
+   * Refresh this client's own row in the device registry.
+   *
+   * The desktop registers itself as an ordinary device when it pairs, and the
+   * registry derives `is_online` from `last_seen` against a five-minute
+   * threshold rather than storing it. Pairing was the only thing that ever
+   * wrote the row, so it aged out minutes into a session and the app reported
+   * the machine rendering the Devices list as unreachable.
+   *
+   * The id has to be the one pairing registered -- the server keys the row on
+   * the `client_id` sent at handshake -- so this goes through `clientId()`
+   * rather than taking an argument. A beat against any other id would succeed
+   * and refresh nothing.
+   */
+  heartbeatSelf(): Promise<void> {
+    return this.markDeviceOnline(this.clientId());
+  }
+
   /** Mark a device offline ("Turn off" in the Devices UI). */
   markDeviceOffline(id: string): Promise<void> {
     return this.post(`/api/v1/devices/${encodeURIComponent(id)}/offline`, {});
