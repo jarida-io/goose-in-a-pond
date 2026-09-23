@@ -78,6 +78,7 @@ All errors return JSON:
 | GET | /profiles/{id} | Protected | Get a profile |
 | DELETE | /profiles/{id} | Protected | Delete a profile |
 | GET | /devices | Protected | List registered devices |
+| GET | /devices/self | Protected | The calling device, and the household member it belongs to |
 | POST | /devices | Protected | Register a device |
 | DELETE | /devices/{id} | Protected | Unregister a device |
 | POST | /devices/{id}/heartbeat | Protected | Update device last-seen |
@@ -1041,6 +1042,31 @@ Devices are GOTG mobile clients, IoT sensors, cameras, or other Pond instances.
 `is_online` is computed live from `last_seen > now − 5min`, not stored.
 
 ---
+
+### GET /devices/self
+
+The calling device, and the household member it is attributed to, if anyone. **For display only:** a greeting, the name on a profile screen. It proves nothing and grants nothing. `Principal::profile_id` is not populated from it, and it never feeds `ProfileScope`.
+
+The device comes from `proven_device()`, the token this Pond issued at pairing, never from anything the client sends about itself. The attribution comes from the pairing code (migration 0043). The route is scoped to the caller on purpose. Adding `profile_id` to every row of `GET /devices` would hand every paired client the whole device-to-member map.
+
+**Response 200**, attributed:
+```json
+{ "device_id": "liz-phone", "profile": { "id": "p-1", "display_name": "Liz" } }
+```
+
+**Response 200**, unattributed. Nobody has claimed this device, which is the normal case, because pairing happens before anyone says who they are:
+```json
+{ "device_id": "kitchen-tablet", "profile": null }
+```
+
+| Status | Meaning |
+|---|---|
+| 200 | `profile` is the member, or `null`. Only `id` and `display_name` are returned, not preferences and not the avatar. |
+| 401 | No token. The route is not on `PUBLIC_ROUTES`. |
+| 404 | The request did not come from a paired device, for example a loopback bypass. |
+| 503 | The attribution read failed. It is logged, and it is deliberately **not** reported as `profile: null`, which would look exactly like an unclaimed device. |
+
+A Pond from before this route answers a GET here with **405**, because the request falls through to `/devices/{id}`, which only accepts DELETE and PUT. Clients should treat 404 and 405 as "this Pond cannot say".
 
 ### POST /devices
 
