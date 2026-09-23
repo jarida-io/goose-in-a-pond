@@ -6,3 +6,5 @@ pub mod policy;
 pub mod redactor;
 pub mod secret;
 pub mod telemetry;
+
+pub mod remote_access;

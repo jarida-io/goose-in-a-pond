@@ -10,8 +10,11 @@
 //! what port was actually used so dependent services can connect to the right
 //! address.
 
-/// GIAP REST API + web dashboard (all interfaces, 0.0.0.0).
+/// Local REST API and dashboard (loopback only).
 pub const API_SERVER: u16 = 4000;
+
+/// Pinned HTTPS companion API on LAN and tailnet.
+pub const HTTPS_SERVER: u16 = 4443;
 
 /// llamafile LLM subprocess (loopback only).
 pub const LLAMAFILE: u16 = 8080;

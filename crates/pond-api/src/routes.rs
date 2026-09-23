@@ -120,28 +120,25 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // see PUBLIC_ROUTES for what each of the two exposes.
         .route("/time/zones", get(list_time_zones))
         .route("/location/detect", post(detect_location))
-        // TTS synthesis is public so the onboarding voice-preview can play a
-        // sample before onboarding completes. Text→audio via local Piper is not
-        // privileged and leaks no user data.
+        // Local voice preview can synthesize before pairing. The allowlist
+        // grants this compatibility exemption only to actual loopback peers.
         .route("/tts", post(tts_synthesise))
-        // Transcription proxy (public — local test tool)
-        .route("/transcribe", post(transcribe))
         // Wake-word phrase calibration (public — used during onboarding WakeWord step)
         .route("/voice/tts/apply", post(apply_tts_settings))
         .route("/voice/calibrate", post(calibrate_wake_word))
         .route("/voice/calibrate", delete(reset_wake_word_calibration))
         .route("/system/info", get(system_info))
-        // Service connectivity test (public — diagnostic tool)
+        // Local diagnostics; network peers must authenticate.
         .route("/test", get(test_services))
         .route("/test/speak", post(test_speak))
-        // Goose agent status (public — dev diagnostic)
-        .route("/dev/goose", get(goose_status))
         // Profile create/patch are public so onboarding steps can write before completion
         .route("/profiles", post(create_profile))
         .route("/profiles/{id}", patch(update_profile_prefs));
 
     // ───────────── Protected routes (require onboarding) ─────────────
     let protected_routes = Router::new()
+        .route("/transcribe", post(transcribe))
+        .route("/dev/goose", get(goose_status))
         .route("/chat", post(chat))
         // Phase F1: raise the body ceiling for the ONE route that carries image
         // attachments. Axum's 2 MiB default is smaller than a legal attachment
@@ -525,8 +522,13 @@ async fn health() -> Json<Value> {
 /// 3. Return connection details (hostname, port, capabilities)
 async fn handshake_handler(
     State(state): State<Arc<AppState>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
     body: Result<Json<HandshakeRequest>, JsonRejection>,
 ) -> Result<Json<HandshakeResponse>, (axum::http::StatusCode, Json<Value>)> {
+    crate::network::require_lan(peer.ok())?;
     let Json(request) = body.map_err(|e| {
         (
             axum::http::StatusCode::BAD_REQUEST,
@@ -571,8 +573,13 @@ fn bad_body() -> (StatusCode, Json<Value>) {
 /// Phase 1 of pairing: client requests a challenge (public).
 async fn handshake_init(
     State(state): State<Arc<AppState>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
     body: Result<Json<InitRequest>, JsonRejection>,
 ) -> Result<Json<ChallengeResponse>, (StatusCode, Json<Value>)> {
+    crate::network::require_lan(peer.ok())?;
     let Json(request) = body.map_err(|_| bad_body())?;
     let resp = state
         .handshake
@@ -706,9 +713,15 @@ async fn emit_pairing_outcome(
 /// Phase 2 of pairing: client proves the pairing code via MAC (public).
 async fn handshake_verify(
     State(state): State<Arc<AppState>>,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
     body: Result<Json<VerifyRequest>, JsonRejection>,
 ) -> Result<Json<HandshakeResponse>, (StatusCode, Json<Value>)> {
+    let peer = peer.ok();
+    crate::network::require_lan(peer)?;
+    let peer = peer.expect("LAN guard requires a connection address").0;
     // Rate-limit verify attempts per source IP (applies to loopback too — this
     // endpoint is security-sensitive regardless of origin).
     if let Err(remaining) = verify_limiter()
@@ -764,22 +777,88 @@ async fn handshake_refresh(
     Ok(Json(resp))
 }
 
-#[derive(Deserialize)]
-struct RevokeRequest {
-    token: String,
-}
-
-/// Revoke a session token — i.e. log the device out (public).
+/// Revoke only the authenticated session and its associated refresh credential.
+/// Legacy clients may still send a JSON token field; it never selects the target.
+/// Kept outside the onboarding guard so a paired client can always log out.
 async fn handshake_revoke(
     State(state): State<Arc<AppState>>,
-    body: Result<Json<RevokeRequest>, JsonRejection>,
+    headers: axum::http::HeaderMap,
+    remote: Option<
+        axum::Extension<Arc<dyn pond_core::security::ports::remote_access::RemoteRevocation>>,
+    >,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let Json(request) = body.map_err(|_| bad_body())?;
+    let token = crate::middleware::extract_bearer_token(&headers).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "authentication_required"})),
+        )
+    })?;
+    // Explicit validation also covers the opt-in development loopback bypass.
+    if !state
+        .handshake
+        .validate_token(&token)
+        .await
+        .map_err(|e| handshake_error("revoke", e))?
+    {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "invalid_token"})),
+        ));
+    }
+    // Named once, and used for both the network revocation and the registry
+    // removal below.
+    let caller = state
+        .handshake
+        .caller_for_token(&token)
+        .await
+        .map_err(|e| handshake_error("revoke", e))?
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error":"invalid_token"})),
+        ))?;
+    if let Some(axum::Extension(remote)) = remote {
+        remote.queue(&caller.device_id).await.map_err(|_| {
+            tracing::error!("could not persist remote device revocation");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"revocation_unavailable"})),
+            )
+        })?;
+    }
     state
         .handshake
-        .revoke_token(&request.token)
+        .revoke_token(&token)
         .await
         .map_err(|e| handshake_error("revoke", e))?;
+
+    // A device that signed out has left the household, so it leaves the
+    // registry with its credentials. It used to keep its tile on the devices
+    // screen -- offline, last seen minutes ago -- which reads as a device that
+    // is merely away rather than one that is gone, and leaves the operator
+    // removing by hand something that already removed itself.
+    //
+    // After the credentials, deliberately. If this fails the device has still
+    // lost its access and the row can be deleted by hand, which is the
+    // recoverable order; the reverse would leave a device listed as gone while
+    // its token still worked.
+    match state.device_registry.unregister(&caller.device_id).await {
+        Ok(()) => tracing::info!(
+            target: "giap::trace",
+            kind = "device_signed_out",
+            device = %caller.device_id,
+            "devices: a device signed out and was removed from the registry"
+        ),
+        Err(error) => tracing::warn!(
+            error = %error,
+            device = %caller.device_id,
+            "devices: a device signed out but its registry row could not be removed; its access is revoked"
+        ),
+    }
+
+    tracing::info!(
+        operation = "session_revoke",
+        "session and refresh credential revoked"
+    );
     Ok(Json(json!({"revoked": true})))
 }
 
@@ -4096,7 +4175,12 @@ fn tailnet_address() -> Option<String> {
     is_tailnet_v4(v4).then(|| v4.to_string())
 }
 
-async fn system_info(State(state): State<Arc<AppState>>) -> Json<Value> {
+async fn system_info(
+    State(state): State<Arc<AppState>>,
+    transport: Option<axum::Extension<crate::network::CompanionTransport>>,
+    embedded: Option<axum::Extension<crate::network::EmbeddedAddress>>,
+) -> Json<Value> {
+    let (https_port, tls_spki_sha256) = crate::network::transport_fields(transport);
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
@@ -4113,7 +4197,9 @@ async fn system_info(State(state): State<Arc<AppState>>) -> Json<Value> {
         // Null unless this Pond is on a tailnet. Reachable from outside the
         // house, so it is what a paired phone falls back to when the LAN
         // address does not answer.
-        "tailnet_address": tailnet_address(),
+        "tailnet_address": match embedded { Some(e) => e.0.0.read().ok().and_then(|v| v.clone()), None => tailnet_address() },
+        "https_port": https_port,
+        "tls_spki_sha256": tls_spki_sha256,
         "port": state.api_port,
         "version": env!("CARGO_PKG_VERSION"),
         "platform": std::env::consts::OS,
@@ -4470,6 +4556,35 @@ async fn unregister_device(
             children = children.len(),
             "devices: removed a hub and the devices behind it"
         );
+    }
+
+    // Take the device's access with it. `session_tokens` carries no foreign key
+    // onto `devices` and nothing cascades, so without this the row vanishes from
+    // the list while every token it was issued keeps validating -- an operator
+    // removing a lost phone would be told it was gone while it carried on
+    // working. Revoked BEFORE the row is dropped: if this fails, the device is
+    // still listed and still deletable, which is the recoverable order.
+    match state.handshake.revoke_device(&id).await {
+        Ok(revoked) => {
+            if revoked > 0 {
+                tracing::info!(
+                    target: "giap::trace",
+                    kind = "device_sessions_revoked",
+                    device = %id,
+                    sessions = revoked,
+                    "devices: revoked the sessions of a device being removed"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::error!(device = %id, error = %e, "devices: could not revoke sessions; refusing to remove the device while its access would survive");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "could not revoke this device's access, so it has not been removed"
+                })),
+            ));
+        }
     }
 
     state.device_registry.unregister(&id).await.map_err(|e| {
@@ -4910,9 +5025,11 @@ const MAX_PUSH_TOKEN_LEN: usize = 4096;
 /// known; replaces any prior token for that device.
 async fn register_push_token(
     State(state): State<Arc<AppState>>,
+    axum::Extension(principal): axum::Extension<pond_core::security::ports::policy::Principal>,
     Path(id): Path<String>,
     Json(req): Json<RegisterPushTokenRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_own_device(&principal, &id, "register_push_token")?;
     let Some(repo) = state.push_token_repo.as_ref() else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -4983,8 +5100,10 @@ async fn register_push_token(
 /// (logout / unpair). Idempotent.
 async fn delete_push_token(
     State(state): State<Arc<AppState>>,
+    axum::Extension(principal): axum::Extension<pond_core::security::ports::policy::Principal>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_own_device(&principal, &id, "delete_push_token")?;
     let Some(repo) = state.push_token_repo.as_ref() else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -10405,6 +10524,29 @@ async fn resume_rule(
     }
 }
 
+/// Check device-scoped delivery against the identity resolved from the session.
+/// This is bearer authorization, not device-key proof of possession. Neither
+/// network addresses nor arbitrary smart-home device targets establish ownership.
+fn require_own_device(
+    principal: &pond_core::security::ports::policy::Principal,
+    claimed: &str,
+    operation: &'static str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if principal.device_id.as_deref() != Some(claimed) {
+        tracing::warn!(
+            operation,
+            reason = "device_mismatch",
+            "device authorization refused"
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "device_mismatch"})),
+        ));
+    }
+    tracing::debug!(operation, "device authorization accepted");
+    Ok(())
+}
+
 #[derive(serde::Deserialize)]
 struct NotificationStreamParams {
     device_id: Option<String>,
@@ -10418,6 +10560,7 @@ struct NotificationStreamParams {
 /// dedupe by it. Bounded by `notification_sse_semaphore`.
 async fn notifications_stream(
     State(state): State<Arc<AppState>>,
+    axum::Extension(principal): axum::Extension<pond_core::security::ports::policy::Principal>,
     axum::extract::Query(params): axum::extract::Query<NotificationStreamParams>,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)>
 {
@@ -10425,6 +10568,8 @@ async fn notifications_stream(
         StatusCode::BAD_REQUEST,
         Json(json!({ "error": "`device_id` query param required" })),
     ))?;
+
+    require_own_device(&principal, &device_id, "notifications_stream")?;
 
     let Some(queue) = state.notification_queue.clone() else {
         return Err((

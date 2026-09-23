@@ -51,7 +51,7 @@ async fn make_app() -> Harness {
         // The real adapter: the whole point is that the route reaches
         // `issue_pairing_code_for`, and a mock would answer whatever it was
         // told to.
-        handshake: Arc::new(SqliteHandshakeAdapter::new(pool.clone())),
+        handshake: Arc::new(SqliteHandshakeAdapter::new(pool.clone(), None)),
         whisper_url: "http://127.0.0.1:9000".into(),
         transcribe_audio: None,
         session_storage: Arc::new(SqliteSessionStorage::new(pool.clone())),

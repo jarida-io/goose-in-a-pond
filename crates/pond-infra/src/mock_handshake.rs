@@ -72,12 +72,21 @@ impl Handshake for MockHandshake {
                 "settings".to_string(),
             ],
             rejection_reason: None,
+            // The mock has no TLS identity and accepts no binding, so it has
+            // nothing to prove.
+            server_proof: None,
         })
     }
 
     async fn validate_token(&self, token: &str) -> Result<bool> {
         let tokens = self.valid_tokens.read().await;
         Ok(tokens.get(token).copied().unwrap_or(false))
+    }
+
+    async fn revoke_device(&self, _device_id: &str) -> Result<u64> {
+        // The mock issues tokens without recording a device, so it has none to
+        // revoke and says so rather than reporting a number it cannot back up.
+        Ok(0)
     }
 
     async fn revoke_token(&self, token: &str) -> Result<()> {

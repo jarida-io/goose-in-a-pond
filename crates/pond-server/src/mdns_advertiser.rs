@@ -38,8 +38,13 @@ use mdns_sd::{IfKind, ServiceDaemon, ServiceInfo};
 /// `veth*`, `docker*` and `virbr*`.
 const TUNNEL_PREFIXES: &[&str] = &[
     // macOS / BSD
-    "utun", "ipsec", "ppp", // Linux: OpenVPN and IPIP, WireGuard, bridged tap
-    "tun", "wg", "tap",
+    "utun",
+    "ipsec",
+    "ppp", // Linux: OpenVPN and IPIP, WireGuard, bridged tap
+    "tun",
+    "wg",
+    "tap",
+    "tailscale",
 ];
 
 /// How many indices of each prefix to exclude, e.g. `utun0` through `utun15`.
@@ -90,7 +95,7 @@ impl Drop for MdnsHandle {
 ///
 /// Returns [`None`] (with a warning log) rather than propagating the error, so
 /// a missing mDNS stack never prevents the server from starting.
-pub fn advertise(hostname: &str, port: u16, version: &str) -> Result<MdnsHandle> {
+pub fn advertise(hostname: &str, port: u16, version: &str, pin: &str) -> Result<MdnsHandle> {
     let daemon = ServiceDaemon::new()?;
 
     let tunnels = tunnel_interface_names();
@@ -112,6 +117,14 @@ pub fn advertise(hostname: &str, port: u16, version: &str) -> Result<MdnsHandle>
 
     let mut properties = std::collections::HashMap::new();
     properties.insert("v".to_string(), version.to_string());
+    properties.insert("scheme".to_string(), "https".to_string());
+    // The public-key pin, so a phone on this LAN can offer it rather than asking
+    // someone to copy fifty-one characters of base64 off a screen. This is a
+    // convenience, not an authentication: mDNS is unauthenticated and anything on
+    // the network can claim it, so a client must still confirm the value against
+    // the Pond before trusting it. It is public information either way, published
+    // in the pairing QR and recoverable from any TLS handshake with this Pond.
+    properties.insert("pin".to_string(), pin.to_string());
 
     let service = ServiceInfo::new(
         service_type,

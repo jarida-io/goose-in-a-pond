@@ -150,7 +150,7 @@ if [ "$DO_BUILD" -eq 1 ]; then
   fi
 fi
 
-BIN="target/debug/pond-server"
+BIN="${CARGO_TARGET_DIR:-target}/debug/pond-server"
 [ -x "$BIN" ] || { echo "no binary at $BIN (drop --no-build?)" >&2; exit 1; }
 
 if [ "$DO_UI" -eq 1 ]; then
@@ -316,6 +316,10 @@ if [ "$AUTH_OK" -eq 1 ]; then
            RC=1 ;;
     esac
   done
+
+  if ! POND_DATA_DIR="$AUTH_DIR" python3 scripts/remote_auth_checks.py; then
+    RC=1
+  fi
 
   # ── PAI-2 P7: the onboarding holes close, and a reset reopens them ─────────
   #

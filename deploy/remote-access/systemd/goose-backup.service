@@ -1,0 +1,13 @@
+# Reference unit. Both paths below assume the package is deployed at
+# /opt/goose-remote-access; change them to match the actual deployment path.
+[Unit]
+Description=Coordinated encrypted backup of the Goose remote-access control plane
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/goose-remote-access/deploy/remote-access
+ExecStart=/opt/goose-remote-access/deploy/remote-access/backup.sh
+# The stack is briefly stopped; do not let a hung run hold it down.
+TimeoutStartSec=600

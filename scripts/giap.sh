@@ -819,13 +819,17 @@ action_build_server() {
   fi
   local cb; cb="$(cargo_bin)"
   if [ -n "$feats" ]; then
-    run_sh "PATH=\$HOME/.cargo/bin:/usr/local/cuda/bin:\$PATH SQLX_OFFLINE=true CMAKE_CUDA_ARCHITECTURES=87 \
+    run_sh "PATH=\$HOME/.cargo/bin:/usr/local/cuda/bin:\$PATH SQLX_OFFLINE=true CMAKE_CUDA_ARCHITECTURES=87 CUDA_COMPUTE_CAP=87 \
       $cb build -p pond-server --features $feats --release"
   else
     run_sh "SQLX_OFFLINE=true $cb build -p pond-server --release"
   fi
   local rc=$?
-  if [ $rc -eq 0 ]; then write_build_stamp; ok "server built"; else bad "build failed (exit $rc)"; fi
+  if [ $rc -eq 0 ]; then
+    run bash "$REPO_ROOT/scripts/build-network-helper.sh" "$REPO_ROOT/target/release"
+    rc=$?
+  fi
+  if [ $rc -eq 0 ]; then write_build_stamp; ok "server and network helper built"; else bad "build failed (exit $rc)"; fi
   if [ "${RESTART_SVC_AFTER:-false}" = true ]; then
     run systemctl --user start "$SERVICE_NAME"; RESTART_SVC_AFTER=false
   fi

@@ -1,0 +1,59 @@
+name: goose-remote-access
+services:
+  headscale:
+    image: ghcr.io/juanfont/headscale:0.29.3@sha256:0e7f1c6e4ce6c2a2a001103ecd3fa645a045adf30ac8a5234fe037b43000cd72
+    command: serve
+    tmpfs: [/var/run/headscale]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ./runtime/headscale.yaml:/etc/headscale/config.yaml:ro
+      - ./runtime/headscale:/var/lib/headscale
+    ports:
+      - '${STUN_BIND:-127.0.0.1}:3478:3478/udp'
+    networks: [control]
+    logging: {driver: json-file, options: {max-size: 10m, max-file: '3'}}
+  enrollment:
+    build:
+      context: ../..
+      dockerfile: deploy/remote-access/Dockerfile
+    command: ['--state', '/state', '--listen', '0.0.0.0:8081', '--headscale', 'http://headscale:8080', '--credential-file', '/run/secrets/headscale_admin']
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ./runtime/enrollment:/state
+    secrets: [headscale_admin]
+    networks: [control]
+    logging: {driver: json-file, options: {max-size: 10m, max-file: '3'}}
+    healthcheck:
+      test: [CMD, /pond-enrollment, --health-check]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+  gateway:
+    depends_on:
+      enrollment:
+        condition: service_healthy
+    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    restart: unless-stopped
+    environment:
+      HEADSCALE_HOST: '${HEADSCALE_HOST:?Set the Headscale domain}'
+      ENROLLMENT_HOST: '${ENROLLMENT_HOST:?Set the enrollment domain}'
+    ports:
+      - '${HTTPS_BIND:-127.0.0.1}:443:443'
+      - '${HTTPS_BIND:-127.0.0.1}:80:80'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./runtime/caddy-data:/data
+      - ./runtime/caddy-config:/config
+    networks: [control]
+    logging: {driver: json-file, options: {max-size: 10m, max-file: '3'}}
+networks:
+  control: {}
+secrets:
+  headscale_admin:
+    file: ./runtime/secrets/headscale_admin

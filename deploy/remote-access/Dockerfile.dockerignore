@@ -1,0 +1,6 @@
+**
+!native/
+!native/pondnet/
+!native/pondnet/**
+native/pondnet/**/testdata/
+native/pondnet/**/*.test

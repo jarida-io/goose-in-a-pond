@@ -57,7 +57,7 @@ echo "==> [3/4] Release build on the Jetson (CUDA sm_87) — this is the slow st
 # ~1-2.6s instead of a multi-second all-6-core CPU burst).
 ssh "$HOST" "cd ~/${REMOTE_REPO} \
   && PATH=\$HOME/.cargo/bin:/usr/local/cuda/bin:\$PATH SQLX_OFFLINE=true \
-     CMAKE_CUDA_ARCHITECTURES=87 \
+     CMAKE_CUDA_ARCHITECTURES=87 CUDA_COMPUTE_CAP=87 \
      cargo build -p pond-server \
        --features pond-adapters-local-inference/cuda,pond-adapters-whisper/cuda \
        --release"

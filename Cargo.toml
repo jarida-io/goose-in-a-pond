@@ -265,6 +265,8 @@ strip = false
 # measured 2.8x decode win needs the latter. This is 0.1.156 with the OAI surface from
 # 0.1.146 re-applied. See docs/developer/jetson-mtp-in-process-scope.md.
 [patch.crates-io]
+# Isolate Whisper's private GGML symbols from llama.cpp on Linux.
+whisper-rs-sys = { path = "vendor/whisper-rs-sys" }
 # A git rev, not a path: the Jetson has no sibling checkout, so the workspace-relative
 # path this used made the fork unbuildable anywhere but my Mac. Pinned by full SHA so a
 # device build and a laptop build are the same code -- move the rev deliberately, never

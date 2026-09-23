@@ -456,3 +456,21 @@ level they were written at — that is why it logs NDJSON rather than prose.
 - Adding a sensor type without dispositioning it fails
   `cargo test -p pond-core --test context_producer_tracks_the_sensor_vocabulary`,
   deliberately. See [the protocol doc](matter-protocol.md#adding-to-the-protocol).
+
+## Clean installation compatibility (2026-09-20)
+
+The controller installer runs `npm ci --omit=dev` on the Pond. Its lockfile must
+also pass npm 10, shipped with the supported Node 20 runtime. npm 11 accepted a
+lockfile that omitted the nested esbuild 0.28.2 dependency and platform packages;
+npm 10.8.2 refused it before starting the controller, even with development
+dependencies omitted. The repaired lockfile adds the 27 missing entries without
+changing existing package versions or removing platform metadata.
+
+Verification: clean installs under npm 10.8.2 and npm 11, TypeScript checking, and
+241 controller tests pass. On Jetson Node 20.20.2/npm 10.8.2, the production-only
+install passes. After a backup of `matter-server/storage-js` and restart, the
+Pond-managed controller binds loopback port 5580, reports ready with BLE enabled,
+and reconnects to the Pond. The phone's Matter-unreachable warning clears after
+refresh. No fabric or companion pairing was reset. A connected controller does
+not establish successful accessory commissioning; that requires a real device
+with an open commissioning window and appropriate network credentials.

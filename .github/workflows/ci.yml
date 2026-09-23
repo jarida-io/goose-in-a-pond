@@ -38,6 +38,35 @@ env:
   RUSTFLAGS: ""
 
 jobs:
+  embedded-network:
+    name: Embedded Go — race / vet / ARM64 build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: native/pondnet
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: native/pondnet/go.mod
+          cache-dependency-path: native/pondnet/go.sum
+      - name: Formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Race tests
+        run: go test -mod=readonly -race ./...
+      - name: Vet
+        run: go vet -mod=readonly ./...
+      - name: Vulnerability reachability
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+      - name: Production commands
+        run: go build -mod=readonly ./cmd/...
+      - name: Jetson helper cross-compilation
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: arm64
+        run: go build -mod=readonly -trimpath -o "$RUNNER_TEMP/pondnet-linux-arm64" ./cmd/pondnet
+
   # 1: Rust ─────────────────────────────────────────────────────────────
   # Formatting, lints and the fast test suite. Excludes crates that pull the Goose submodule or
   # native system libs (pond-adapters-goose, pond-adapters-local-inference,

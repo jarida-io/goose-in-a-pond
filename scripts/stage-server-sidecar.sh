@@ -77,6 +77,8 @@ echo "==> [2/3] Building pond-server (release, RUSTFLAGS emptied, mesh feature o
   || fail "cargo build of pond-server failed."
 [ -f "${RELEASE_BIN}" ] || fail "cargo reported success but ${RELEASE_BIN} is missing."
 
+bash "${SCRIPT_DIR}/build-network-helper.sh" "${RESOURCES_DIR}" || fail "network helper build failed."
+
 # --- 3. Stage the sidecar, and stamp the dist it carries ----------------------
 echo "==> [3/3] Staging sidecar -> ${SIDECAR_PATH}"
 mkdir -p "${RESOURCES_DIR}"

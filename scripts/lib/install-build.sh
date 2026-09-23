@@ -55,7 +55,7 @@ build_server() {
   # Determine cargo features
   local features=""
   if [ "$MODE" = "jetson" ] && [ "$HAS_CUDA" = true ]; then
-    features="--features pond-adapters-local-inference/cuda"
+    features="--features pond-adapters-local-inference/cuda,pond-adapters-whisper/cuda"
     log "CUDA detected -- enabling GPU acceleration"
   fi
 
@@ -63,6 +63,10 @@ build_server() {
   local env_prefix=""
   if [ "$MODE" = "jetson" ]; then
     env_prefix="SQLX_OFFLINE=true"
+    if [ "$HAS_CUDA" = true ]; then
+      # Jetson does not provide nvidia-smi for Candle capability detection.
+      env_prefix="$env_prefix CMAKE_CUDA_ARCHITECTURES=87 CUDA_COMPUTE_CAP=87"
+    fi
   fi
 
   # Full workspace or server-only
@@ -87,4 +91,11 @@ build_server() {
       S_BUILD="failed"
     fi
   fi
+  if [ "$S_BUILD" = "ok" ]; then
+    if ! bash "$REPO_DIR/scripts/build-network-helper.sh" "$REPO_DIR/target/$BUILD_PROFILE"; then
+      error "Bundled networking helper build failed"
+      S_BUILD="failed"
+    fi
+  fi
+
 }

@@ -27,6 +27,7 @@ mod llamafile_process;
 mod llm_memory_consolidator;
 mod llm_memory_extractor;
 mod mdns_advertiser;
+use pond_server::tls_identity;
 mod model_download;
 mod node_path;
 mod ports;
@@ -134,6 +135,10 @@ enum Commands {
         /// Port to listen on (defaults to 4000)
         #[arg(long)]
         port: Option<u16>,
+
+        /// HTTPS companion port (defaults to 4443, with sequential fallback).
+        #[arg(long)]
+        https_port: Option<u16>,
 
         /// Also launch the native desktop app after the server starts.
         /// macOS only. Looks for an installed app in /Applications, then a
@@ -540,10 +545,14 @@ async fn async_main() -> Result<()> {
             debug,
             agent,
             port,
+            https_port,
             native,
         }) => {
             let drain = tracing_setup::init_tracing(debug, &data_dir);
-            run_server(static_dir, open, debug, &agent, port, native, drain).await
+            run_server(
+                static_dir, open, debug, &agent, port, https_port, native, drain,
+            )
+            .await
         }
         Some(Commands::Chat {
             provider,
@@ -1113,6 +1122,7 @@ async fn run_server(
     debug: bool,
     agent_backend: &str,
     port: Option<u16>,
+    https_port: Option<u16>,
     native: bool,
     drain_handle: tracing_setup::LogDrainHandle,
 ) -> Result<()> {
@@ -3634,7 +3644,28 @@ async fn run_server(
     // dynamic OAuth redirect URIs).  The actual `axum::serve()` call that
     // consumes the listener happens further below.
     let (listener, api_port) =
-        ports::bind_with_fallback("0.0.0.0", port.unwrap_or(ports::API_SERVER)).await?;
+        ports::bind_with_fallback("127.0.0.1", port.unwrap_or(ports::API_SERVER)).await?;
+    let (https_listener, https_port) =
+        ports::bind_with_fallback("0.0.0.0", https_port.unwrap_or(ports::HTTPS_SERVER)).await?;
+    let tls_hostname = hostname::get()?
+        .to_string_lossy()
+        .trim_end_matches(".local")
+        .to_string();
+    let mut tls_identity = tls_identity::TlsIdentity::load(
+        &data_dir,
+        &tls_identity::certificate_names(&tls_hostname)?,
+    )?;
+    let pairing_pin = tls_identity.pin()?;
+    let transport = pond_api::network::CompanionTransport {
+        https_port,
+        tls_spki_sha256: pairing_pin.clone(),
+    };
+    let (cert, key) = tls_identity.pem();
+    let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem(cert, key).await?;
+    #[cfg(unix)]
+    let (embedded, embedded_listener) =
+        pond_server::embedded_network::Runtime::new(&data_dir, https_port)?;
+    std::fs::write(data_dir.join(".runtime_https_port"), https_port.to_string())?;
 
     // Persist the ACTUAL bound port so the standalone `pond pairing` CLI can
     // build a pairing URL with the real port (bind_with_fallback may have picked
@@ -4204,8 +4235,9 @@ async fn run_server(
     // DB-backed handshake/pairing (#93). Construct before `db` is moved into
     // AppState, then issue a fresh pairing code the operator reads off the CLI
     // to pair a GOTG device.
-    let handshake: Arc<dyn pond_core::security::ports::handshake::Handshake> =
-        Arc::new(SqliteHandshakeAdapter::new(db.system.clone()));
+    let handshake: Arc<dyn pond_core::security::ports::handshake::Handshake> = Arc::new(
+        SqliteHandshakeAdapter::new(db.system.clone(), Some(pairing_pin.clone())),
+    );
     let pairing_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "pond".to_string());
@@ -4215,17 +4247,25 @@ async fn run_server(
         .to_string();
     match handshake.issue_pairing_code().await {
         Ok(pc) => {
-            let pair_url = format!(
-                "pond://pair?host={}.local&port={}&code={}",
-                pairing_hostname, api_port, pc.code
+            let addresses = pond_api::network::interfaces()?;
+            let lan = addresses
+                .iter()
+                .find(|i| i.ip().is_ipv4() && pond_api::network::is_lan_interface(i))
+                .map(|i| i.ip().to_string());
+            let tailnet = addresses
+                .iter()
+                .find(|i| i.ip().is_ipv4() && pond_api::network::is_tailnet(i.ip()))
+                .map(|i| i.ip().to_string());
+            let pair_url = tls_identity::pairing_url(
+                &pairing_hostname,
+                https_port,
+                &pc.code,
+                &transport.tls_spki_sha256,
+                lan.as_deref(),
+                tailnet.as_deref(),
             );
-            println!("\n  ┌────────────────────────────────────────────────────┐");
-            println!(
-                "  │  Pairing code:  {}   (valid 10 min)           │",
-                pc.code
-            );
-            println!("  │  Scan with Goose On The Go or enter the code.     │");
-            println!("  └────────────────────────────────────────────────────┘");
+            println!("\nPairing code: {} (valid 10 min)", pc.code);
+            println!("Public-key fingerprint: {}", transport.tls_spki_sha256);
             print_pairing_qr(&pair_url);
             println!();
         }
@@ -4448,17 +4488,21 @@ async fn run_server(
     // Advertise _pond._tcp.local. so phones on the LAN can discover this hub.
     // The handle is kept alive for the duration of the server; dropping it
     // deregisters the service gracefully.
-    let _mdns_handle =
-        match mdns_advertiser::advertise(&pairing_hostname, api_port, env!("CARGO_PKG_VERSION")) {
-            Ok(h) => {
-                println!("  📡 mDNS: advertising _pond._tcp.local. on port {api_port}");
-                Some(h)
-            }
-            Err(e) => {
-                tracing::warn!("mDNS advertisement failed (LAN discovery disabled): {e:#}");
-                None
-            }
-        };
+    let _mdns_handle = match mdns_advertiser::advertise(
+        &pairing_hostname,
+        https_port,
+        env!("CARGO_PKG_VERSION"),
+        &pairing_pin,
+    ) {
+        Ok(h) => {
+            println!("  mDNS: advertising _pond._tcp.local. over HTTPS on port {https_port}");
+            Some(h)
+        }
+        Err(e) => {
+            tracing::warn!("mDNS advertisement failed (LAN discovery disabled): {e:#}");
+            None
+        }
+    };
 
     // The web UI is normally embedded into this binary (single executable). We
     // only fall back to `static_dir` when the binary was built without the UI,
@@ -4480,7 +4524,45 @@ async fn run_server(
     // banner); the settings handler re-runs this on a provider/model change.
     pond_api::spawn_prefix_prewarm(state.clone(), false);
 
-    let app = pond_api::build_router(state, static_dir);
+    let companion =
+        pond_api::build_companion_router(state.clone()).layer(axum::Extension(transport.clone()));
+    let app =
+        pond_api::build_router(state.clone(), static_dir).layer(axum::Extension(transport.clone()));
+    #[cfg(unix)]
+    let companion = companion
+        .layer(axum::Extension(embedded.clone()
+            as Arc<
+                dyn pond_core::security::ports::remote_access::RemoteRevocation,
+            >))
+        .layer(axum::Extension(embedded.address.clone()))
+        .merge(pond_server::embedded_network::companion_management(
+            embedded.clone(),
+            state.clone(),
+        ));
+    #[cfg(unix)]
+    let app = app
+        .layer(axum::Extension(embedded.clone()
+            as Arc<
+                dyn pond_core::security::ports::remote_access::DevicePresence,
+            >))
+        .layer(axum::Extension(embedded.clone()
+            as Arc<
+                dyn pond_core::security::ports::remote_access::RemoteRevocation,
+            >))
+        .layer(axum::Extension(embedded.address.clone()))
+        .merge(pond_server::embedded_network::management(embedded.clone()));
+    #[cfg(unix)]
+    let embedded_router = pond_server::embedded_network::private_companion(companion.clone());
+    #[cfg(unix)]
+    match embedded.config() {
+        Ok(config) if config.enabled => {
+            if let Err(error) = embedded.start(config).await {
+                tracing::error!(%error, "embedded remote access did not start; local HTTPS remains available");
+            }
+        }
+        Ok(_) => (),
+        Err(error) => tracing::error!(%error, "embedded remote access configuration is invalid"),
+    }
 
     // Resolve hostname — strip trailing ".local" if the OS already appended it
     let hostname = hostname::get()
@@ -4491,16 +4573,14 @@ async fn run_server(
         .unwrap_or(&hostname)
         .to_string();
 
-    let display_url = if api_port == 80 {
-        format!("http://pond.{}.local", hostname)
-    } else {
-        format!("http://pond.{}.local:{}", hostname, api_port)
-    };
-
-    println!("  🌐 Listening on 0.0.0.0:{}", api_port);
-    println!("  📡 Dashboard: {}", display_url);
-    println!("  📡 API:       {}/api/v1/health", display_url);
-    println!();
+    tracing::info!(
+        http_port = api_port,
+        https_port,
+        "local dashboard and HTTPS companion listeners ready"
+    );
+    println!("Local dashboard: http://127.0.0.1:{api_port}");
+    println!("Companion API: https://{hostname}.local:{https_port}/api/v1/health");
+    println!("Pond public-key fingerprint: {}", transport.tls_spki_sha256);
 
     // Open the browser when:
     //   - `--open` is explicitly passed, OR
@@ -4522,16 +4602,83 @@ async fn run_server(
     // Serve until a shutdown signal. We race the server against the signal
     // rather than using graceful shutdown so long-lived SSE streams (chat,
     // notifications) can't hold shutdown open indefinitely.
-    tokio::select! {
-        result = axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        ) => {
-            result?;
+    let tls_handle = axum_server::Handle::new();
+    let https_server =
+        axum_server::from_tcp_rustls(https_listener.into_std()?, tls_config.clone())?
+            .handle(tls_handle.clone())
+            .serve(companion.into_make_service_with_connect_info::<std::net::SocketAddr>());
+    let renewal = async {
+        let mut ticks = tokio::time::interval(std::time::Duration::from_secs(30));
+        ticks.tick().await;
+        loop {
+            #[cfg(unix)]
+            tokio::select! { _ = ticks.tick() => (), _ = embedded.changed.notified() => () }
+            #[cfg(not(unix))]
+            ticks.tick().await;
+            let names = tls_identity::certificate_names(&tls_hostname).map(|names| {
+                #[cfg(unix)]
+                {
+                    let mut names = names;
+                    names.extend(embedded.addresses());
+                    names.sort();
+                    names.dedup();
+                    names
+                }
+                #[cfg(not(unix))]
+                {
+                    names
+                }
+            });
+            let names = names?;
+            match tls_identity.renew_if_needed(&names) {
+                Ok(true) => {
+                    let (cert, key) = tls_identity.pem();
+                    tls_config.reload_from_pem(cert, key).await?;
+                }
+                Ok(false) => {}
+                Err(error) => return Err::<(), anyhow::Error>(error),
+            }
+            #[cfg(unix)]
+            embedded.publish_ready(&names);
         }
+    };
+    let embedded_server = async {
+        #[cfg(unix)]
+        {
+            axum::serve(embedded_listener, embedded_router.into_make_service())
+                .await
+                .map_err(anyhow::Error::from)
+        }
+        #[cfg(not(unix))]
+        {
+            std::future::pending::<Result<()>>().await
+        }
+    };
+    let revocations = async {
+        #[cfg(unix)]
+        {
+            embedded.reconcile_revocations().await
+        }
+        #[cfg(not(unix))]
+        {
+            std::future::pending::<Result<()>>().await
+        }
+    };
+    let serve_result = tokio::select! {
+        result = revocations => result,
+        result = embedded_server => result,
+        result = axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()) => result.map_err(anyhow::Error::from),
+        result = https_server => result.map_err(anyhow::Error::from),
+        result = renewal => result,
         _ = shutdown_signal() => {
-            tracing::info!("shutdown signal received — stopping");
+            tracing::info!("shutdown signal received -- stopping both listeners");
+            Ok(())
         }
+    };
+    tls_handle.shutdown();
+    #[cfg(unix)]
+    if let Err(error) = embedded.shutdown().await {
+        tracing::warn!(%error, "embedded networking shutdown failed");
     }
 
     // Stop the matter-server GIAP started, if any. kill_on_drop does not fire on
@@ -4542,7 +4689,7 @@ async fn run_server(
         matter.shutdown().await;
     }
 
-    Ok(())
+    serve_result
 }
 
 /// Resolves when the process is asked to stop: Ctrl-C on any platform, plus
@@ -7650,6 +7797,7 @@ async fn run_main_menu() -> Result<()> {
                     false,
                     "goose",
                     None,
+                    None,
                     false,
                     drain,
                 )
@@ -9801,25 +9949,32 @@ async fn run_pairing(refresh: bool) -> Result<()> {
         }
     };
 
-    // Derive the hostname the same way run_server does.
-    let hostname = hostname::get()
-        .map(|h| h.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "pond".to_string());
-    let hostname = hostname
-        .strip_suffix(".local")
-        .unwrap_or(&hostname)
-        .to_string();
-
-    let pair_url = format!("pond://pair?host={hostname}.local&port={port}&code={code}");
-
-    println!("\n  ┌────────────────────────────────────────────────────┐");
-    println!(
-        "  │  Pairing code:  {}   (expires: {})  │",
-        code,
-        &expires_at[..16.min(expires_at.len())]
+    let info: serde_json::Value = client
+        .get(format!("http://127.0.0.1:{port}/api/v1/system/info"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let host = info["hostname"]
+        .as_str()
+        .context("server omitted hostname")?;
+    let https_port = info["https_port"]
+        .as_u64()
+        .context("server does not support pinned HTTPS")? as u16;
+    let pin = info["tls_spki_sha256"]
+        .as_str()
+        .context("server omitted TLS pin")?;
+    let pair_url = tls_identity::pairing_url(
+        host,
+        https_port,
+        &code,
+        pin,
+        info["lan_address"].as_str(),
+        info["tailnet_address"].as_str(),
     );
-    println!("  │  Scan with Goose On The Go or enter the code.     │");
-    println!("  └────────────────────────────────────────────────────┘");
+    println!("Pairing code: {code} (expires: {expires_at})");
+    println!("Pond public-key fingerprint: {pin}");
     print_pairing_qr(&pair_url);
     println!("\n  URL: {pair_url}\n");
     Ok(())

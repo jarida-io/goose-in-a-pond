@@ -34,6 +34,8 @@ extraResources:
   # which is where the main process looks via process.resourcesPath.
   - from: "resources/pond-server"
     to: "pond-server"
+  - from: "resources/pondnet"
+    to: "pondnet"
   # The Matter controller's sources. pond-server copies these to a writable
   # directory and runs `npm ci` there on first use; it finds them by walking up
   # from its own path, and Contents/Resources/matter-server is the first
@@ -80,6 +82,7 @@ mac:
   # signed too, once signing is on.
   binaries:
     - "Contents/Resources/pond-server"
+    - "Contents/Resources/pondnet"
 
   extendInfo:
     NSMicrophoneUsageDescription: >-

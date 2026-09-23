@@ -9,3 +9,7 @@ pub mod llm_memory_consolidator;
 pub mod llm_memory_extractor;
 pub mod schedule_executors;
 pub mod startup;
+
+#[cfg(unix)]
+pub mod embedded_network;
+pub mod tls_identity;

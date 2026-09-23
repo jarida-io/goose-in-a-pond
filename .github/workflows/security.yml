@@ -26,6 +26,18 @@ permissions:
   contents: read
 
 jobs:
+  embedded-go-audit:
+    name: Embedded Go — OSV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # This new module has its own blocking gate. Existing Rust advisory
+      # deferrals must not suppress findings in shipped networking dependencies.
+      - name: Embedded networking dependencies
+        uses: google/osv-scanner-action/osv-scanner-action@v2.5.1
+        with:
+          scan-args: --lockfile=native/pondnet/go.mod
+
   rust-audit:
     name: Rust — cargo audit (RustSec)
     runs-on: ubuntu-latest

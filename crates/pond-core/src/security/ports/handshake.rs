@@ -13,9 +13,40 @@
 //!    The server mints a random 32-byte challenge bound to `client_id`,
 //!    persists it with a short TTL, and returns it (base64) to the client.
 //! 2. `verify_handshake(VerifyRequest)`
-//!    The client computes `mac = HMAC-SHA256(pairing_code, challenge || client_id)`
+//!    The client computes a MAC over the challenge, keyed by the pairing code,
 //!    and submits it. On success the server consumes the challenge + pairing
 //!    code, registers the device, and mints a session+refresh token pair.
+//!
+//! # Channel binding
+//!
+//! A client that reached this server over pinned TLS names the key it pinned to
+//! in [`VerifyRequest::channel_binding`] and folds it into the MAC. The server
+//! recomputes with **its own** key, so the two agree only when the client is
+//! talking to this server directly:
+//!
+//! ```text
+//! bound   mac = HMAC(code, "goose-pair-client-v1\0" || challenge || \0 || client_id || \0 || spki)
+//! unbound mac = HMAC(code, challenge || client_id)
+//! ```
+//!
+//! and the server answers with [`HandshakeResponse::server_proof`] over the same
+//! transcript under `goose-pair-server-v1`, which only something holding the
+//! pairing code can produce.
+//!
+//! What this buys: the pin no longer has to be carried to the phone by a
+//! trustworthy route. Somebody who intercepts the connection and presents their
+//! own certificate -- by answering an mDNS query, say -- gets a client that
+//! MACs over *their* key. Relaying that to this server fails the recomputation;
+//! stripping the binding and relaying leaves a MAC over a transcript this
+//! server no longer computes; and answering the client themselves fails the
+//! server proof. A wrong pin therefore ends pairing in a visible failure
+//! instead of a successful pair with the wrong pond.
+//!
+//! The binding is optional because one real caller has no channel to bind: the
+//! desktop dashboard pairs over loopback HTTP, where there is no certificate
+//! and no interceptor. Optional does not mean downgradable -- a client that
+//! binds always binds, and nobody in the middle can compute the unbound MAC
+//! either, because both forms need the pairing code.
 //!
 //! `refresh` rotates an expiring session token; `revoke_token` disconnects a
 //! client. Pairing codes are issued by the server via `issue_pairing_code`
@@ -63,6 +94,15 @@ pub struct HandshakeResponse {
     pub capabilities: Vec<String>,
     /// Reason if rejected.
     pub rejection_reason: Option<String>,
+    /// Hex `HMAC-SHA256` proving this server holds the pairing code and serves
+    /// the certificate the client pinned. See the channel-binding note above.
+    ///
+    /// Present exactly when the accepted request carried a
+    /// [`VerifyRequest::channel_binding`]. A client that sent one and did not
+    /// get one back is not talking to the pond it thinks it is, and must treat
+    /// the pair as failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_proof: Option<String>,
 }
 
 /// Phase 1 request: the client asks for a challenge.
@@ -87,11 +127,19 @@ pub struct ChallengeResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifyRequest {
     pub challenge_id: String,
-    /// Hex-encoded `HMAC-SHA256(pairing_code, challenge || client_id)`.
+    /// Hex-encoded MAC over the transcript named by `channel_binding`.
     pub mac: String,
     /// Optional friendly device name to record in the devices table.
     #[serde(default)]
     pub device_name: Option<String>,
+    /// The server public-key pin this client pinned its connection to, in
+    /// `sha256/<base64>` form, when it reached the server over pinned TLS.
+    ///
+    /// `None` means there was no channel to bind -- the loopback dashboard --
+    /// and selects the unbound MAC. Anything else must equal this server's own
+    /// pin, or the request is rejected: see the channel-binding note above.
+    #[serde(default)]
+    pub channel_binding: Option<String>,
 }
 
 /// Exchange a refresh token for a fresh session+refresh pair.
@@ -227,6 +275,24 @@ pub trait Handshake: Send + Sync {
             .await?
             .map(|caller| caller.client_id))
     }
+
+    /// Revoke every session a device holds, and report how many were live.
+    ///
+    /// Removing a device from the household registry has to take its access
+    /// with it. `session_tokens.device_id` carries no foreign key, and nothing
+    /// cascades onto that table, so deleting the `devices` row on its own left
+    /// the tokens valid -- an operator who removed a lost phone from the device
+    /// list would have been told it was gone while it carried on working.
+    ///
+    /// # Why this has no default
+    ///
+    /// Every other new method on this trait is defaulted, and each of those
+    /// defaults **narrows**: a forgotten override loses a capability. A default
+    /// here would do the opposite. `Ok(0)` would mean "revoked nothing", the
+    /// caller would delete the device row anyway, and the omission would widen
+    /// access while reading like success. So it is required, and an adapter
+    /// that cannot revoke has to say so out loud.
+    async fn revoke_device(&self, device_id: &str) -> Result<u64>;
 
     /// Revoke a session token (disconnect a client).
     async fn revoke_token(&self, token: &str) -> Result<()>;

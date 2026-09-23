@@ -40,6 +40,9 @@ fail() {
 [ -f "${SIDECAR}" ] || fail "no staged sidecar at ${SIDECAR}."
 [ -x "${SIDECAR}" ] || fail "${SIDECAR} is not executable."
 
+[ -x "${DESKTOP_DIR}/resources/pondnet" ] || fail "bundled networking helper is missing."
+"${DESKTOP_DIR}/resources/pondnet" --help >/dev/null 2>&1 || fail "networking helper does not run."
+
 # 2. A real binary. This is the check that would have caught the old stub: a
 #    shell script starts with '#!' and passes every other test here.
 if [ "$(uname -s)" = "Darwin" ]; then

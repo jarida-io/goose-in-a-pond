@@ -1,0 +1,16 @@
+{$HEADSCALE_HOST} {
+  # Administrative API is reachable only on the private container network.
+  @administration path /api/* /metrics /debug/* /swagger* /web*
+  respond @administration 404
+  reverse_proxy headscale:8080
+}
+{$ENROLLMENT_HOST} {
+  request_body {
+    max_size 8KB
+  }
+  @public path /v1/household /v1/approval /health
+  handle @public {
+    reverse_proxy enrollment:8081
+  }
+  respond 404
+}

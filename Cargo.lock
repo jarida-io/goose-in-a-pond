@@ -11428,8 +11428,11 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "futures",
+ "hmac 0.12.1",
  "hostname",
+ "if-addrs 0.13.4",
  "include_dir",
+ "libc",
  "mime_guess",
  "pond-adapters-caldav",
  "pond-adapters-llamafile",
@@ -11633,6 +11636,8 @@ dependencies = [
  "assert_cmd",
  "async-trait",
  "axum 0.8.9",
+ "axum-server",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "cpal",
@@ -11676,6 +11681,7 @@ dependencies = [
  "pond-voice",
  "predicates",
  "qrcode",
+ "rcgen 0.14.9",
  "reqwest 0.13.3",
  "rustls",
  "serde",
@@ -11684,8 +11690,10 @@ dependencies = [
  "sqlx",
  "tar",
  "tempfile",
+ "time",
  "tokio",
  "tokio-util",
+ "tower 0.5.3",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -11693,6 +11701,7 @@ dependencies = [
  "uuid",
  "webbrowser",
  "wiremock",
+ "x509-parser 0.18.1",
  "zip 8.6.0",
 ]
 
@@ -17193,8 +17202,6 @@ dependencies = [
 [[package]]
 name = "whisper-rs-sys"
 version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6986c0fe081241d391f09b9a071fbcbb59720c3563628c3c829057cf69f2a56f"
 dependencies = [
  "bindgen 0.72.1",
  "cfg-if 1.0.4",
