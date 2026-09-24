@@ -1359,6 +1359,8 @@ criterion. It has not been taken. That makes two measurement-pending P5s on the 
 PAI-3's, which is worth saying out loud rather than quietly accruing: a green unit suite proves the
 rule fires where it was told to, not that firing there was cheap.
 
+**Mac half taken 2026-09-24 (release binary, isolated pond; `docs/developer/realtime-inference-audit-2026-09-24.md`): warm-cache turns DID show new re-prefills, and the cause was neither compaction nor the lane.** Goose's `<turn-context>` block was prepended to a user message the engine had already cached, so every provider call re-decoded from that message's first byte: 471 tokens on the completeness-check inference, 589 on the next turn's first inference, and the entire conversation (10-21K tokens per turn) on a thinking-only session whose user messages goose had merged -- the shape the household pond logged all day. Fork patch `36413f065` appends the block instead; re-measured: 97 and 147 tokens, completeness-check TTFT 1.05 s -> 0.3 s (E2B) and 2.0 s -> 0.75 s (E4B). The summary-refresh lane job ran as `SacrificialContext` and evicted nothing. Still open on this axis: goose's completeness-check and tool-pair machinery rewrites history mid-turn (prompt 2,934 -> 2,618 with reuse falling to 1,340 on E4B), and the Orin half of the measurement is still owed. P5 stays MEASUREMENT PENDING on the device; on the Mac the re-prefills were real, attributed, and removed at their source.
+
 **The design reads as two rules and only one of them was new.** 3.3 says recompact when cold,
 prefer byte-identical edits when warm. The warm half landed on 2026-08-06 as P3, whose age rung
 fires only when the conversation is over budget and cites invariant 4 for it — P3 simply could not
