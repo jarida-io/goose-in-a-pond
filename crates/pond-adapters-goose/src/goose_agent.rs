@@ -263,7 +263,7 @@ This usually clears if you reword the question — or start a new chat if it kee
 /// The goose env knobs GIAP sets. `hybrid_compaction` used to be a parameter;
 /// since C1/C2 it governs none of them, so taking it would be a lie the
 /// signature tells.
-fn goose_env_knobs(provider: &str, effective_ctx: usize) -> [(&'static str, Option<String>); 5] {
+fn goose_env_knobs(provider: &str, effective_ctx: usize) -> [(&'static str, Option<String>); 6] {
     let local = matches!(provider, "local" | "gguf");
     [
         // Without this Goose's ModelConfig defaults context_limit to 128K and
@@ -314,6 +314,18 @@ fn goose_env_knobs(provider: &str, effective_ctx: usize) -> [(&'static str, Opti
             "GOOSE_MAX_TOOL_RESPONSE_SIZE",
             local.then(|| ((effective_ctx / 4) * 4).to_string()),
         ),
+        // Goose's `<turn-context>` is duplicate information on this host: the
+        // envelope already carries the time, the turn budget and the memories,
+        // the working directory means nothing to a household assistant, and no
+        // extension contributes to the block. It is also injected on a clone
+        // the engine never sees stored, so a prefix cache re-prefilled it plus
+        // whatever followed it on every provider call. Measured 2026-09-24 on
+        // the Mac (E2B, release): the completeness-check inference redid 471
+        // tokens with the block prepended, 130-161 appended, 58 with it off;
+        // a no-tool turn prefilled a quarter fewer tokens. Local providers
+        // only, where every token is prefilled on the pond's own GPU; an HTTP
+        // provider keeps goose's default. Fork `d4157795d` reads this.
+        ("GOOSE_DISABLE_MOIM", local.then(|| "1".to_string())),
     ]
 }
 
@@ -3750,13 +3762,8 @@ impl GooseAdapter {
             }
         }
 
-        self.shim_controls
-            .session(&goose_sid)
-            .set_turn_appendix(if shim_appendix.is_empty() {
-                None
-            } else {
-                Some(shim_appendix.join("\n\n"))
-            });
+        // The appendix is published further down, once the dormant tool-groups
+        // note exists to ride it.
 
         // ── Token-budgeted memory injection ──────────────────────────────
         // Memories go into <system-context> in the user message (not the system
@@ -4114,6 +4121,25 @@ impl GooseAdapter {
         // withheld groups out of the dormant-groups note". It did the opposite:
         // the note was built from `registered_extensions()`, so every withheld
         // group appeared on it. `permitted_groups` is what makes the claim true.
+        // D2, moved off the per-turn envelope on 2026-09-24. What the model
+        // could load but cannot see rides the system appendix now. It is
+        // session-scoped and changes only when a group is enabled -- the moment
+        // the tools block changes anyway -- so it never moves the prefix on its
+        // own, and in "minimal" mode every session starts with the same dormant
+        // set, so the boot-time warm-up covers it for all of them. In the
+        // envelope it was ~150 tokens re-prefilled on every turn; here it is
+        // prefilled once per session.
+        if !dormant_groups_note.is_empty() {
+            shim_appendix.push(dormant_groups_note.clone());
+        }
+        self.shim_controls
+            .session(&goose_sid)
+            .set_turn_appendix(if shim_appendix.is_empty() {
+                None
+            } else {
+                Some(shim_appendix.join("\n\n"))
+            });
+
         let allowed_tools = if turn_scope.excludes_everything() {
             let before = allowed_tools.len();
             let kept: HashSet<String> =
@@ -4249,15 +4275,9 @@ impl GooseAdapter {
                 msg.push_str(&memory_block_for_user_msg);
                 msg.push_str("\n</memories>\n");
             }
-            // D2: what the model could load but currently cannot see. Rides the
-            // user message, never the system prompt — it is session-specific and
-            // the prefix must stay byte-identical across sessions for KV reuse.
-            // Empty (zero tokens) whenever nothing is dormant, so the default
-            // "all" mode is unaffected.
-            if !dormant_groups_note.is_empty() {
-                msg.push_str(&dormant_groups_note);
-                msg.push('\n');
-            }
+            // The dormant tool-groups note used to ride here; it is in the
+            // system appendix now (see where `set_turn_appendix` is called),
+            // so it is prefilled once per session instead of once per turn.
             msg.push_str(&turn_budget_block);
             msg.push('\n');
             // Last inside the envelope, and the envelope now trails the user's
@@ -8665,6 +8685,18 @@ mod tests {
             assert!(
                 knob(&knobs, "GOOSE_TOOL_PAIR_SUMMARIZATION").is_none(),
                 "unset, so goose's background tool-pair summaries run (ctx {ctx})"
+            );
+            assert_eq!(
+                knob(&knobs, "GOOSE_DISABLE_MOIM").as_deref(),
+                Some("1"),
+                "a local pond prefills every token itself; goose's turn-context is duplicate \
+                 information there and cost ~100 re-prefilled tokens per inference (ctx {ctx})"
+            );
+        }
+        for provider in ["ollama", "llamafile"] {
+            assert!(
+                knob(&goose_env_knobs(provider, 8192), "GOOSE_DISABLE_MOIM").is_none(),
+                "{provider}: an HTTP provider keeps goose's default turn-context"
             );
         }
     }

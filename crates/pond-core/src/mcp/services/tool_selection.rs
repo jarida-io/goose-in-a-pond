@@ -285,7 +285,7 @@ pub fn permitted_groups(
         .collect()
 }
 
-/// The `<tool-groups>` block for the user message's `<system-context>`, listing the groups
+/// The `<tool-groups>` block for the session's system appendix, listing the groups
 /// that are NOT loaded so the model can call `enable_tool_group` without a round trip on
 /// `list_tool_groups`. It rides the user message because the system prefix must stay
 /// byte-identical across sessions for KV reuse. Empty string when nothing is dormant.

@@ -142,8 +142,23 @@ load average of 8 to 17 from another session's dev server, so read the token col
 | system prefix | 1,210 tok | 1,210 tok | 1,133 tok |
 
 `ReusePrefix(2602) cached_tokens=2602`: with the knob, the check inference resumes exactly at
-the end of the cache. GIAP should set the variable in `goose_env_knobs` for local providers; that
-file was held by another session when this was written, so it is a recommendation here.
+the end of the cache. **Set** for local providers in `goose_env_knobs` (6 knobs now), with the
+test asserting it is on for `local`/`gguf` and off for HTTP providers.
+
+### 4.4 The dormant tool-groups list leaves the envelope
+
+`dormant_groups_note` (the `<tool-groups>` block: "these groups exist but are not loaded, call
+`enable_tool_group`") is session-scoped and changes only when a group is enabled, which is the
+moment the tools block changes anyway. Riding the per-turn envelope it was ~150 tokens prefilled
+on every turn; it now rides the session's system appendix (`set_turn_appendix`, beside the
+skills list), prefilled once per session. In "minimal" mode every session starts with the same
+dormant set, so the boot-time warm-up covers it for all of them; in "relevant" mode the appendix
+differs per session, but so did the tools block that follows it, so cross-session reuse loses
+nothing it had. The envelope keeps the turn budget and the answer contract, whose placement is
+deliberate (recency) and pinned by a test. The measurement of this change (run R15, three E2B
+turns by token count) was queued behind another session's concurrent builds when this was
+committed and had not run; the expected effect is arithmetic on measured parts -- about 150
+fewer tokens prefilled on every turn after the first, on top of the ~100 the knob removes.
 
 ### 4.2 GIAP's own per-turn churn
 
@@ -159,7 +174,10 @@ file was held by another session when this was written, so it is a recommendatio
   first turns across the release runs; R4 hit it on every turn and three of its four turns still
   ended with no answer after 5 inferences and 14 to 35 s of prefill each.
 - **`<system-context>`** is now stable in history (C1 stopped stripping it), so it costs
-  context (about 350 tokens per turn kept forever) but no longer costs re-prefill.
+  context (about 350 tokens per turn kept forever) but no longer costs re-prefill. Its parts
+  today: date and time, retrieved memories, the dormant `<tool-groups>` list (~150 tokens, the
+  same bytes every turn until a group is enabled), the turn budget (~85) and the answer contract
+  (~60). Only the first two vary per turn.
 
 ### 4.3 The lane did not evict the cache
 
@@ -233,7 +251,8 @@ columns derived from `prefill_ms` were not.
 | 1 | binary | run the daily server from `target/release` | 1.5 to 2x on decode and prefill (section 2) | recommendation; `npm run dev:server` and the `--native` launch both build debug |
 | 2 | engine | speculative decoding removed from the llama.cpp backend | 0.64 to 0.94x on Metal (section 3); Jerry's call | **done**, fork `743649d98`; GIAP-side switch, UI, provisioning and memory charge are the follow-up |
 | 3 | prompt bytes | `<turn-context>` appended, not prepended | section 4.1 | **done**, fork `36413f065`, verified in section 6 |
-| 3b | prompt bytes | `GOOSE_DISABLE_MOIM=1` for local providers | check inference 390 to 177 ms, per-turn prefill −25% (section 4.1) | fork knob `d4157795d` done; set it in `goose_env_knobs` (file held by another session) |
+| 3b | prompt bytes | `GOOSE_DISABLE_MOIM=1` for local providers | check inference 390 to 177 ms, per-turn prefill −25% (section 4.1) | **done**: fork knob `d4157795d`, set in `goose_env_knobs` |
+| 3c | prompt bytes | dormant `<tool-groups>` list moved from the per-turn envelope to the per-session appendix | ~150 tokens per turn (section 4.4) | **done**; measurement queued behind another session's builds at commit time |
 | 4 | prompt bytes | keep history append-only: no rewrite of a stored message by steer or nudge; `<turn-context>` disabled for local providers if the residual still costs | section 4.1, 4.2 | proposal |
 | 5 | agent loop | completeness check only after a turn that used tools, or off | 2 inferences per no-tool turn (4.2) | proposal, Jerry's call: it was measured worth its cost on 2026-08-12 for a seven-tool turn |
 | 6 | agent loop | thinking off or bounded for short answers; re-engagement cap | section 5, 4.2 | proposal |
