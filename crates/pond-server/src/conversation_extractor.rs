@@ -393,28 +393,70 @@ fn unescaped(slice: &str) -> Option<String> {
 /// every gate below — a partial object missing `note` is dropped there, not
 /// admitted here.
 fn salvage_truncated(cleaned: &str) -> Option<serde_json::Value> {
-    // Find the items array: the new schema's `"memories": [`, or a bare `[`
-    // when the model answered in the old prompt's shape.
-    //
-    // The bare case requires the array to OPEN the reply, exactly as the
-    // `bracket` candidate above does. Without that restriction this reaches
-    // inside `{"facts":[...]}` -- a well-formed answer to a schema nobody asked
-    // for -- pulls out its array and returns it as `memories`. That is the
-    // failure `an_object_with_neither_key_is_a_parse_failure` exists for, and
-    // it is the worst one available here: it moves the watermark past every
-    // window in the store, once, and never comes back.
-    let start = match cleaned.find("\"memories\"") {
-        Some(key) => cleaned[key..].find('[').map(|offset| key + offset + 1)?,
-        None => {
-            let open = cleaned.find('[')?;
-            let brace_first = cleaned.find('{').is_some_and(|b| b < open);
-            if brace_first {
-                return None;
+    // Both arrays, not just the first. This used to rescue `memories` alone and
+    // stop at its closing `]` -- and the schema puts `reminders` AFTER it, so a
+    // reply truncated near its end, the likeliest place, lost exactly the
+    // reminders. The result was still `Ok`, the window counted as examined, and
+    // the cursor moved past it: a complete "next Tuesday" gone, with
+    // `reminders_lost` and `dates_lost` both reading zero.
+    let memories = match array_after_key(cleaned, "memories") {
+        Some(start) => complete_items(cleaned, start),
+        // No `"memories"` key at all. A bare `[` counts only when the array
+        // OPENS the reply, exactly as the `bracket` candidate above requires.
+        // Without that restriction this reaches inside `{"facts":[...]}` -- a
+        // well-formed answer to a schema nobody asked for -- pulls out its
+        // array and returns it as `memories`. That is the failure
+        // `an_object_with_neither_key_is_a_parse_failure` exists for, and the
+        // worst one available here: it moves the watermark past every window
+        // in the store, once, and never comes back.
+        None if !cleaned.contains("\"memories\"") => match cleaned.find('[') {
+            Some(open) if !cleaned.find('{').is_some_and(|b| b < open) => {
+                complete_items(cleaned, open + 1)
             }
-            open + 1
-        }
+            _ => Vec::new(),
+        },
+        // The key is there but its value is not an array (`null`, say). Its
+        // items are none -- and the next `[` in the reply belongs to some
+        // OTHER key. Reading it here is how a reminders array used to be
+        // misread as memories, fail the note gate one by one, and vanish.
+        None => Vec::new(),
     };
+    let reminders = array_after_key(cleaned, "reminders")
+        .map(|start| complete_items(cleaned, start))
+        .unwrap_or_default();
 
+    // One complete item of either kind is worth keeping; none means there was
+    // nothing to salvage and the reply really is unparseable.
+    if memories.is_empty() && reminders.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({ "memories": memories, "reminders": reminders }))
+}
+
+/// Where the array that is `key`'s VALUE begins, just past its `[`.
+///
+/// Only whitespace and the `:` may stand between the key and the bracket. A
+/// looser "first `[` after the key" is what let a key with a `null` value lend
+/// the next key's array to the wrong reader.
+fn array_after_key(cleaned: &str, key: &str) -> Option<usize> {
+    let quoted = format!("\"{key}\"");
+    let at = cleaned.find(&quoted)? + quoted.len();
+    let rest = &cleaned[at..];
+    let after_colon = rest.trim_start().strip_prefix(':')?;
+    let value = after_colon.trim_start();
+    if !value.starts_with('[') {
+        return None;
+    }
+    // Byte offset of the bracket in `cleaned`, plus one to step inside it.
+    Some(cleaned.len() - value.len() + 1)
+}
+
+/// Every complete, balanced object in an array, scanning from just inside its
+/// opening bracket until the array closes or the text runs out.
+///
+/// An item that survives this still faces every gate below -- a partial object
+/// missing `note` is dropped there, not admitted here.
+fn complete_items(cleaned: &str, start: usize) -> Vec<serde_json::Value> {
     let bytes = cleaned.as_bytes();
     let mut items: Vec<serde_json::Value> = Vec::new();
     let mut depth = 0usize;
@@ -456,26 +498,15 @@ fn salvage_truncated(cleaned: &str) -> Option<serde_json::Value> {
                     }
                 }
             }
-            // The array closed. Stop scanning — but KEEP what was collected.
-            //
-            // This was a `return None` for one commit, on the theory that a
-            // closed array means "not truncated" and salvaging it could
-            // launder a wrong answer into a right one. Mutation testing
-            // disproved the second half: flipping it back changed no test,
-            // because the laundering case (`{"facts":[...]}`) is already
-            // refused by the bare-array rule above, which requires the array to
-            // OPEN the reply. What the refusal did cost is real — a reply whose
-            // items are fine and whose tail is malformed (a trailing comma
-            // after a closed array is the common one) would have gone back as
-            // unparseable with perfectly good notes inside it.
+            // The array closed. Stop scanning -- but KEEP what was collected.
+            // A closed array with a malformed tail (a trailing comma is the
+            // common one) holds perfectly good items, and refusing it was
+            // measured to cost exactly those.
             b']' if depth == 0 => break,
             _ => {}
         }
     }
-
-    // One complete item is worth keeping; none means there was nothing to
-    // salvage and the reply really is unparseable.
-    (!items.is_empty()).then(|| serde_json::json!({ "memories": items }))
+    items
 }
 
 /// Whether a parsed value is an answer to the question that was asked.
@@ -648,28 +679,52 @@ pub fn parse_window_response(
 /// definition now: both consolidators call this, where they used to call a
 /// copy.
 pub fn strip_thinking(text: &str) -> String {
-    let mut result = text.to_string();
+    let result = strip_blocks(text, "<think>", "</think>");
+    strip_blocks(&result, "<|channel>", "<channel|>")
+        .trim()
+        .to_string()
+}
 
-    while let Some(start) = result.find("<think>") {
-        if let Some(end) = result.find("</think>") {
-            result = format!("{}{}", &result[..start], &result[end + 8..]);
-        } else {
-            // Unclosed think block — strip from <think> to end.
-            result = result[..start].to_string();
+/// Remove every `open .. close` block, and any reasoning that has lost its
+/// opening tag.
+///
+/// Always terminates, and that is the point of it being written this way. The
+/// previous loop searched for the close tag from the START of the string rather
+/// than after the open tag it had just found, so a close that came first --
+/// `r1</think><think>r2</think>{..}`, the shape a chat template that inserts the
+/// opening tag itself produces -- rebuilt a string still holding the same open
+/// tag, byte-identical or longer, forever. That was a synchronous spin inside
+/// an async fn, called from the extraction pass and both consolidators while
+/// they held the lane's only inference slot: one reply of that shape would have
+/// starved every other background job for the life of the process.
+///
+/// Here every iteration removes at least the tag it found, so the string
+/// strictly shrinks.
+fn strip_blocks(text: &str, open: &str, close: &str) -> String {
+    let mut s = text.to_string();
+
+    // A close with no open before it ends a reasoning block whose opening tag
+    // the template emitted on the model's behalf: everything up to and
+    // including it is reasoning.
+    while let Some(c) = s.find(close) {
+        if s.find(open).is_some_and(|o| o < c) {
             break;
         }
+        s.replace_range(..c + close.len(), "");
     }
 
-    while let Some(start) = result.find("<|channel>") {
-        if let Some(end) = result.find("<channel|>") {
-            result = format!("{}{}", &result[..start], &result[end + 10..]);
-        } else {
-            result = result[..start].to_string();
-            break;
+    while let Some(start) = s.find(open) {
+        let body = start + open.len();
+        match s[body..].find(close) {
+            Some(rel) => s.replace_range(start..body + rel + close.len(), ""),
+            None => {
+                // Unclosed -- a reply cut off mid-thought. Strip to the end.
+                s.truncate(start);
+                break;
+            }
         }
     }
-
-    result.trim().to_string()
+    s
 }
 
 #[cfg(test)]
@@ -681,6 +736,53 @@ mod tests {
 
     fn rendered() -> String {
         render_extraction_prompt("Jerry", "Goose", 3, true)
+    }
+
+    // ── strip_thinking ───────────────────────────────────────────────────
+
+    /// THE DEFECT: a close tag before an open one used to spin forever,
+    /// holding the lane slot. This test would hang, not fail, on the old loop
+    /// -- which is exactly how the defect presents on a pond.
+    #[test]
+    fn a_close_before_an_open_terminates_and_keeps_the_answer() {
+        assert_eq!(
+            strip_thinking(r#"r1</think><think>r2</think>{"memories":[]}"#),
+            r#"{"memories":[]}"#
+        );
+        assert_eq!(
+            strip_thinking(r#"a<channel|><|channel>b<channel|>{"x":1}"#),
+            r#"{"x":1}"#
+        );
+    }
+
+    /// The template-inserted opening tag: reasoning, then a bare close.
+    #[test]
+    fn reasoning_that_lost_its_opening_tag_is_still_stripped() {
+        assert_eq!(
+            strip_thinking(r#"let me think</think>{"a":1}"#),
+            r#"{"a":1}"#
+        );
+    }
+
+    /// The ordinary shapes are unchanged -- the fix must not cost the case
+    /// every model produces.
+    #[test]
+    fn well_formed_and_unclosed_blocks_strip_as_they_always_did() {
+        assert_eq!(strip_thinking(r#"<think>hmm</think>{"a":1}"#), r#"{"a":1}"#);
+        assert_eq!(
+            strip_thinking(r#"{"a":1}<think>cut off mid-"#),
+            r#"{"a":1}"#
+        );
+        assert_eq!(
+            strip_thinking("<think>x</think>A<think>y</think>B"),
+            "AB",
+            "every block goes, not just the first"
+        );
+        assert_eq!(
+            strip_thinking(r#"  {"a":1}  "#),
+            r#"{"a":1}"#,
+            "no tags: trimmed only"
+        );
     }
 
     /// The prompt fits the budget it claims.
@@ -800,6 +902,64 @@ mod tests {
         let out = parse_window_response(raw, 5, false).expect("the notes inside are fine");
         assert_eq!(out.memories.len(), 1);
         assert!(out.memories[0].note.contains("Kahawa"));
+    }
+
+    /// A reply truncated inside `reminders` keeps the reminder the model
+    /// finished, not just the memories before it.
+    ///
+    /// THE DEFECT: salvage rescued `memories` and stopped at its closing `]`,
+    /// and the schema puts `reminders` after it. So the tail of the reply --
+    /// the likeliest place for a cut -- held exactly what was thrown away, the
+    /// window was still counted as examined, and the date was gone with every
+    /// counter reading zero.
+    #[test]
+    fn a_reply_cut_off_inside_its_reminders_keeps_the_finished_one() {
+        let raw = r#"{"memories":[{"note":"Jerry sees a dentist in Kisumu.","kind":"context"}],"reminders":[{"about":"the dentist","when":"next Tuesday"},{"about":"collect the tract"#;
+        let out = parse_window_response(raw, 5, true).expect("finished items are worth keeping");
+        assert_eq!(
+            out.memories.len(),
+            1,
+            "the memory before it survives, as it always did"
+        );
+        assert_eq!(out.reminders.len(), 1, "the finished reminder survives too");
+        assert_eq!(out.reminders[0].when_said, "next Tuesday");
+    }
+
+    /// A key whose value is not an array lends nobody its neighbour's.
+    ///
+    /// "First `[` after the key" read a `null` memories value's NEXT array --
+    /// the reminders -- as memories. None has a `note`, so every one failed
+    /// the gate and vanished: the same loss, by a different road.
+    #[test]
+    fn a_null_memories_value_does_not_read_the_reminders_as_memories() {
+        let raw = r#"{"memories":null,"reminders":[{"about":"the clinic","when":"on the 14th"},{"about":"the bi"#;
+        let out =
+            parse_window_response(raw, 5, true).expect("the finished reminder is worth keeping");
+        assert!(
+            out.memories.is_empty(),
+            "no reminder was misread as a memory"
+        );
+        assert_eq!(out.reminders.len(), 1);
+        assert_eq!(out.reminders[0].when_said, "on the 14th");
+    }
+
+    /// The key anchor, on the case where it is load-bearing: another key's
+    /// array whose items DO carry a `note`.
+    ///
+    /// With a looser "first `[` after the key", a `null` memories value lends
+    /// the next array to the memories reader -- and where that array's items
+    /// have notes (an echoed example, an invented field), they pass the gate
+    /// and are admitted as things the household said. The same laundering
+    /// `an_object_with_neither_key_is_a_parse_failure` guards, reached through
+    /// the salvage. Here nothing was asked for and nothing is kept: the reply
+    /// is unparseable, which is the honest answer.
+    #[test]
+    fn a_null_memories_value_lends_no_other_array_to_the_memories_reader() {
+        let raw = r#"{"memories":null,"example":[{"note":"Jerry likes his tea strong.","kind":"preference"},{"note":"Jerry wal"#;
+        assert!(
+            parse_window_response(raw, 5, true).is_err(),
+            "an array that is not the memories value was admitted as memories"
+        );
     }
 
     /// The salvage is tried LAST and must never touch a reply that parses. It

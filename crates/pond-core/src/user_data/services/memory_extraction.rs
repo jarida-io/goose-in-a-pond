@@ -324,36 +324,68 @@ pub enum WindowCarve<'a> {
 /// give-up path -- or fails outright. Skipping that exchange and saying so is a
 /// loss the household can see; sending it was a loss dressed as a cost.
 pub fn carve_window(messages: &[WindowMessage], max_chars: usize) -> WindowCarve<'_> {
-    // Trim to the character budget first, from the OLDEST end, so a long window
-    // keeps its most recent exchange rather than its oldest.
+    // Take the OLDEST prefix that fits, never the newest suffix.
+    //
+    // The cursor only ever walks forward: it advances to the carved window's
+    // last message and the next pass reads from there. So whatever a carve
+    // leaves AFTER the window's end is simply read on the next pass -- and
+    // whatever it leaves BEFORE the window's start is never read at all. This
+    // used to keep the newest suffix, which did the second: the oldest
+    // messages of every long page sat behind the new watermark, unread and
+    // uncounted. With the default twenty messages and six thousand characters
+    // that was the normal case for any conversation with long replies, not an
+    // edge -- the opening of a conversation, silently never remembered.
+    //
+    // The first message is always taken, even alone over budget, so an
+    // oversized opening exchange is found and named below rather than
+    // stalling the walk.
     let mut used = 0usize;
-    let mut start = messages.len();
-    for (i, m) in messages.iter().enumerate().rev() {
+    let mut end = 0usize;
+    for (i, m) in messages.iter().enumerate() {
         let cost = m.content.chars().count();
-        if used + cost > max_chars && start < messages.len() {
+        if used + cost > max_chars && end > 0 {
             break;
         }
         used += cost;
-        start = i;
+        end = i + 1;
     }
 
-    if let Some(carved) = last_complete_pair(&messages[start..]) {
+    if let Some(carved) = last_complete_pair(&messages[..end]) {
         return WindowCarve::Ready(carved);
     }
 
-    // Nothing fit. Which of the two failures it is decides what the caller does,
-    // so it is answered here rather than guessed there: if the page HAS a
-    // complete exchange and it simply does not fit, that is an oversize.
-    match last_complete_pair(messages) {
-        Some(whole) => WindowCarve::Oversized {
-            chars: whole.iter().map(|m| m.content.chars().count()).sum(),
-            through: whole
+    // Nothing fit. Which of the two failures it is decides what the caller
+    // does, so it is answered here rather than guessed there. If the page HAS a
+    // complete exchange, its FIRST one is the oversize: the budgeted prefix is
+    // the longest prefix that fits, so if the first exchange fitted it would
+    // have been carved above. Only that one exchange is skipped -- the ones
+    // after it are left for the next pass. This used to name the LAST complete
+    // exchange on the page, which advanced the cursor past every short exchange
+    // alongside the one that was genuinely too long.
+    match first_complete_pair(messages) {
+        Some(first) => WindowCarve::Oversized {
+            chars: first.iter().map(|m| m.content.chars().count()).sum(),
+            through: first
                 .last()
                 .map(|m| m.id.as_str())
-                .expect("last_complete_pair never returns an empty slice"),
+                .expect("first_complete_pair never returns an empty slice"),
         },
         None => WindowCarve::NoExchange,
     }
+}
+
+/// The prefix ending at the FIRST assistant reply that has a user message ahead
+/// of it, or `None` when there is no such point. The unit an oversize skips.
+fn first_complete_pair(slice: &[WindowMessage]) -> Option<&[WindowMessage]> {
+    let mut seen_user = false;
+    for (i, m) in slice.iter().enumerate() {
+        if m.is_user() {
+            seen_user = true;
+        } else if seen_user {
+            return Some(&slice[..i + 1]);
+        }
+    }
+    None
 }
 
 /// The prefix ending at the last assistant reply that has a user message ahead
@@ -2713,22 +2745,75 @@ mod batch_tests {
         assert_eq!(carve_window(&messages, 6_000), WindowCarve::NoExchange);
     }
 
-    /// The character budget trims the OLDEST end.
+    /// The character budget keeps the OLDEST end, and leaves the rest for the
+    /// next pass.
     ///
-    /// Trimming the newest end would mean a long window is read for what was
-    /// said furthest in the past, which is the opposite of what a window is
-    /// chosen for.
+    /// This replaces `the_character_budget_drops_the_oldest_messages_first`,
+    /// which pinned the opposite on the reasoning that a window should be read
+    /// for its most recent content. That reasoning holds for a window that is
+    /// read once and never revisited -- and this one is revisited: the cursor
+    /// advances to the window's end, so what a carve leaves AFTER the window is
+    /// the next pass's, and what it leaves BEFORE is nobody's. Keeping the
+    /// newest suffix bought freshness with permanent loss.
     #[test]
-    fn the_character_budget_drops_the_oldest_messages_first() {
+    fn the_character_budget_keeps_the_oldest_end_and_leaves_the_rest() {
         let messages = vec![
-            msg("m1", "user", &"a".repeat(500)),
-            msg("m2", "assistant", &"b".repeat(500)),
-            msg("m3", "user", &"c".repeat(100)),
-            msg("m4", "assistant", &"d".repeat(100)),
+            msg("m1", "user", &"a".repeat(100)),
+            msg("m2", "assistant", &"b".repeat(100)),
+            msg("m3", "user", &"c".repeat(500)),
+            msg("m4", "assistant", &"d".repeat(500)),
         ];
         let carved = ready(carve_window(&messages, 400));
         let ids: Vec<&str> = carved.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, vec!["m3", "m4"]);
+        assert_eq!(
+            ids,
+            vec!["m1", "m2"],
+            "the oldest exchange that fits is read first"
+        );
+    }
+
+    /// Walked pass by pass exactly as the cursor walks, every message is either
+    /// read or named as an oversize. None is left behind the watermark unread.
+    ///
+    /// The property the old carve broke, stated directly rather than through
+    /// one example: it is what makes "the whole history is read" true.
+    #[test]
+    fn walking_a_page_leaves_no_message_behind_the_cursor_unread() {
+        let messages = vec![
+            msg("u1", "user", &"a".repeat(100)),
+            msg("a1", "assistant", &"b".repeat(100)),
+            msg("u2", "user", &"c".repeat(100)),
+            msg("a2", "assistant", &"d".repeat(100)),
+            msg("u3", "user", &"e".repeat(3_000)),
+            msg("a3", "assistant", &"f".repeat(3_000)),
+            msg("u4", "user", &"g".repeat(100)),
+            msg("a4", "assistant", &"h".repeat(100)),
+        ];
+        let (mut read, mut skipped) = (Vec::new(), Vec::new());
+        let mut from = 0usize;
+        while from < messages.len() {
+            let page = &messages[from..];
+            let through = match carve_window(page, 450) {
+                WindowCarve::Ready(carved) => {
+                    read.extend(carved.iter().map(|m| m.id.clone()));
+                    carved.last().unwrap().id.clone()
+                }
+                WindowCarve::Oversized { through, .. } => {
+                    let upto = page.iter().position(|m| m.id == through).unwrap() + 1;
+                    skipped.extend(page[..upto].iter().map(|m| m.id.clone()));
+                    through.to_string()
+                }
+                WindowCarve::NoExchange => break,
+            };
+            from += page.iter().position(|m| m.id == through).unwrap() + 1;
+        }
+        assert_eq!(read, vec!["u1", "a1", "u2", "a2", "u4", "a4"]);
+        assert_eq!(
+            skipped,
+            vec!["u3", "a3"],
+            "only the exchange that is genuinely too long is skipped -- not the short ones \
+             around it"
+        );
     }
 
     /// One oversized exchange is REFUSED, where it used to be sent whole.
