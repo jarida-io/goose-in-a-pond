@@ -13503,9 +13503,6 @@ async fn delete_memory(
 // only SQL could reach. It sits behind the same auth as `/memories`, which is
 // the panel this belongs beside.
 
-/// The reminder store, built from the pool `AppState` already holds -- same
-/// story as [`proposal_repo`], and the same one-line swap when it moves onto
-/// `AppState` proper.
 // ── Suggestions: what the household might want to ask ────────────────────────
 //
 // `GET /api/v1/suggestions`. The other half of Home's left column, and the half
@@ -13741,7 +13738,7 @@ async fn list_suggestions(
     // differently: no account connected, versus a connected account with an
     // empty day. Collapsing them would lose the one sentence that tells a
     // household their calendar is working and simply has nothing on it.
-    let calendar_events_today = if connected.iter().any(|k| *k == SourceKind::Calendar) {
+    let calendar_events_today = if connected.contains(&SourceKind::Calendar) {
         repo.count_in_window(&read_scope, SourceKind::Calendar, day_start, day_end)
             .await
             .ok()
@@ -13749,7 +13746,7 @@ async fn list_suggestions(
     } else {
         None
     };
-    let mail_items_this_week = if connected.iter().any(|k| *k == SourceKind::Mail) {
+    let mail_items_this_week = if connected.contains(&SourceKind::Mail) {
         repo.count_in_window(&read_scope, SourceKind::Mail, week_start, now)
             .await
             .ok()
@@ -13915,6 +13912,9 @@ fn set_audience_label(a: pond_core::user_data::services::suggestion::Audience) -
     }
 }
 
+/// The reminder store, built from the pool `AppState` already holds -- same
+/// story as [`proposal_repo`], and the same one-line swap when it moves onto
+/// `AppState` proper.
 fn reminder_repo(state: &Arc<AppState>) -> pond_infra::sqlite_reminder::SqliteReminderRepository {
     pond_infra::sqlite_reminder::SqliteReminderRepository::new(state.db.system.clone())
 }

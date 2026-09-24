@@ -177,11 +177,15 @@ pub struct SuggestionSet {
 /// the model answers with "I can't do that"; the cost of being wrong in the
 /// strict direction is a feature that never appears at all, which this codebase
 /// has shipped several times.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum GroupsKnown {
     /// The manager answered with a real list. A group not in it is absent.
     These(BTreeSet<String>),
     /// Nobody could say. Offer everything and let the model speak for itself.
+    ///
+    /// The default, and deliberately: absence of evidence is permissive. See
+    /// this type's docs for which direction of being wrong is cheaper.
+    #[default]
     Unknown,
 }
 
@@ -201,12 +205,6 @@ impl GroupsKnown {
             Self::These(set) => set.contains(group),
             Self::Unknown => true,
         }
-    }
-}
-
-impl Default for GroupsKnown {
-    fn default() -> Self {
-        Self::Unknown
     }
 }
 
