@@ -28,10 +28,13 @@
 //! the quiet period, exactly as the Reindex button already does for index
 //! maintenance. It does NOT do the work in the caller's task, and it does not
 //! bypass the slot. That is deliberate and it is the whole point of the lane:
-//! one job at a time. The precedent for the other choice is in the tree and it
-//! is the wrong one -- `POST /sessions/retitle` runs its model calls inline in
-//! the request handler, taking no slot, so it can decode beside whichever
-//! background job is already holding the machine.
+//! one job at a time. The other choice was in the tree until this port landed,
+//! and it was the wrong one: `POST /sessions/retitle` ran up to twenty renames
+//! inline in the request handler, taking no slot, free to decode beside
+//! whichever background job already held the machine. It calls `wake` for the
+//! titling job now. `POST /sessions/{id}/retitle` still makes its single call
+//! inline -- user-initiated and bounded to one, so it is left as the one
+//! exception rather than turned into a queue.
 //!
 //! So `wake` returns promptly and reports only whether there was a loop to
 //! wake. What happened is read back from `snapshot`.
