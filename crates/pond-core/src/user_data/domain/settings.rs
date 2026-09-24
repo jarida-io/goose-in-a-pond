@@ -2863,13 +2863,13 @@ mod tests {
         // Everything else is surfaced in the desktop UI (Settings tabs / hub
         // views / onboarding) and mirrored in the TS Settings type.
         const UI_WIRED: &[&str] = &[
-            // The suggestion engine's per-kind mute. UI_WIRED rather than
-            // HEADLESS_BY_DESIGN because a control that writes it really
-            // exists and a household can operate it -- but note WHERE it is:
-            // "Don't suggest this" on the Home suggestion card, not a row in
-            // Settings.tsx. This list asserts that a control exists, which is
-            // true; it does not assert which screen holds it. The TS mirror is
-            // in `pond-desktop/src/api/types.ts` like every other entry here.
+            // The suggestion engine's per-kind mute. UI_WIRED because a control
+            // that writes it exists: the "Suggestions you have hidden" text row
+            // in the classic Settings catalogue (catalogue.ts), which parses it
+            // as a list. This comment used to name a "Don't suggest this"
+            // action on the Home card as the writer; no such action exists, and
+            // this list passed on that claim. The TS mirror is in
+            // `pond-desktop/src/api/types.ts` like every other entry here.
             "suggestions_muted",
             // Private mesh (#132 Milestone 2): the Mesh section's toggle
             // (Mesh.tsx) starts/stops the real libp2p MeshTransport. Requires

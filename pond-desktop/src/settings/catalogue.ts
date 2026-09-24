@@ -545,11 +545,11 @@ export const CATALOGUE: CatalogueCategory[] = [
         name: "Thinking unprompted",
         entries: [
           { key: "proactive_review_enabled", label: "Review the day on its own", description: "Let it think over the day without being asked.", control: { kind: "toggle" }, consumer: "live" },
-          // Written from the Home card ("Don't suggest this"), and undoable
-          // here -- a mute with no way back is worse than no mute. The control
-          // is text because the value is a list of suggestor ids; the card is
-          // the place you actually use it, and this is the place you take it
-          // back.
+          // The only writer of this list today. A per-kind "Don't suggest
+          // this" on the Home card is the intended way in, and it is NOT built
+          // -- this comment used to say it was. The control is text because the
+          // value is a list of suggestor ids, parsed as a list (see LIST_TEXT in
+          // SettingsCatalogue); clearing it unmutes everything.
           { key: "suggestions_muted", label: "Suggestions you have hidden", description: "Kinds of suggestion Home will not offer. Clear this to see them again.", control: { kind: "text", placeholder: "Nothing hidden" }, consumer: "live" },
           // Only ever touches names the pond wrote itself. A title typed by
           // hand is left alone whatever this is set to, so the control does not

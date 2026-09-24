@@ -170,8 +170,18 @@ const NULLABLE_TEXT = new Set([
 ]);
 
 /** Inverse of `textValue`. Returns the shape the server expects for this key. */
-function parseText(key: string, raw: string): unknown {
-  if (key === "voice_wake_word_transcriptions") {
+/**
+ * Text boxes whose server value is a LIST: typed comma-separated, sent as an
+ * array. Named once, because a list field missing from here is sent as the raw
+ * string -- `suggestions_muted` was, and the server's `Vec<String>` refused it
+ * with a 422 that took every other edit in the same Save down with it. Merely
+ * typing a character and deleting it marked the page dirty (`""` is not `[]`)
+ * with a change it could never save.
+ */
+const LIST_TEXT = new Set(["voice_wake_word_transcriptions", "suggestions_muted"]);
+
+export function parseText(key: string, raw: string): unknown {
+  if (LIST_TEXT.has(key)) {
     return raw
       .split(",")
       .map((s) => s.trim())

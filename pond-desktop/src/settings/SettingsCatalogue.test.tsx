@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup, within } from "@testing-library/react";
-import { SettingsCatalogueView, summariseRetitle } from "./SettingsCatalogue";
+import { SettingsCatalogueView, summariseRetitle, parseText } from "./SettingsCatalogue";
 import { api } from "../api/PondApiClient";
 
 // ── Mocks ─────────────────────────────────────────────────────
@@ -585,5 +585,30 @@ describe("the rename-now button", () => {
 
     const button = screen.getByRole("button", { name: /Rename now/ }) as HTMLButtonElement;
     expect(button.disabled).toBe(false);
+  });
+});
+
+// The server's `suggestions_muted` is a `Vec<String>`. Sent as the raw string it
+// was refused with a 422, and that refusal took every other edit in the same
+// Save with it -- so touching this one box made Settings unsavable.
+describe("parseText: list-valued text boxes", () => {
+  it("sends the hidden-suggestions box as a list, not the string it was typed as", () => {
+    expect(parseText("suggestions_muted", "weather_today, devices_online")).toEqual([
+      "weather_today",
+      "devices_online",
+    ]);
+  });
+
+  it("reads an emptied box as the empty list, which is what 'clear to unmute' means", () => {
+    // `""` against a baseline of `[]` is what made the page dirty with a change
+    // it could never save.
+    expect(parseText("suggestions_muted", "")).toEqual([]);
+    expect(parseText("suggestions_muted", " , ")).toEqual([]);
+  });
+
+  it("leaves an ordinary text field a string -- the control for the two above", () => {
+    // Without this, a parseText that split EVERY field would pass both tests
+    // and send the assistant's name as an array.
+    expect(parseText("assistant_name", "Goose, the pond")).toBe("Goose, the pond");
   });
 });
