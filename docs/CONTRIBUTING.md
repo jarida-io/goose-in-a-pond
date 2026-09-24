@@ -64,6 +64,23 @@ cargo build --workspace
 
 ---
 
+### npm lockfiles: check them with the npm CI uses
+
+CI installs with `npm ci`, which refuses a lockfile that disagrees with `package.json` or leaves a peer dependency unsatisfied. **npm 10 and npm 11 do not agree on what counts.** The Matter controller's lock installed under npm 11 and failed CI under npm 10, and its job pins Node 20.19, which ships npm 10. So a lock that works on your machine proves little. Check it with CI's npm:
+
+```bash
+npx npm@10 ci --ignore-scripts --no-audit --no-fund
+```
+
+When `npm ci` reports `ERESOLVE` over a peer range that a newer version of a *transitive* dependency would satisfy, `npm update` and a plain relock often cannot fix it. npm keeps a locked transitive version for as long as it still fits its own range, and then hits the same conflict. Remove only the offending entries from `package-lock.json` and let npm re-resolve them within their existing ranges:
+
+```bash
+node -e 'const f="package-lock.json",l=require("./"+f);for(const k of Object.keys(l.packages))if(/node_modules\/(react-aria|@adobe\/react-spectrum)$/.test(k))delete l.packages[k];require("fs").writeFileSync(f,JSON.stringify(l,null,2)+"\n")'
+npx npm@10 install --package-lock-only --ignore-scripts
+```
+
+(That example fixed the `@heroui/react` / `react-aria` conflict in #391.) Then compare the lock before and after, and expect only the family you removed to move. Do not reach for `--legacy-peer-deps` or `--force`: both hide the conflict rather than resolve it.
+
 ## Development Workflow
 
 ```bash

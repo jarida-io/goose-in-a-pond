@@ -248,6 +248,14 @@ codegen-units = 1
 strip = true
 panic = "abort"
 
+# Build scripts and proc macros are built for the host and then dlopen'd by
+# rustc, so they must not be stripped: on macOS, stripping a proc-macro dylib
+# leaves it with a "mis-aligned LINKEDIT string pool" that rustc cannot load,
+# and the failure surfaces as `can't find crate for sqlx` in every crate that
+# depends on it. Nothing here ships, so there is no size to reclaim anyway.
+[profile.release.build-override]
+strip = false
+
 # NOTE: goose's own [patch.crates-io] (vendored v8, cudaforge) is ignored when building from this
 # root; replicate entries here if its build graph ever needs them.
 

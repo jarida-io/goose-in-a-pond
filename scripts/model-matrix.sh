@@ -169,6 +169,38 @@ run_model() {
     || cp "$src" "$data_dir/models/gguf/$entry" \
     || { echo "  SKIP $model — could not stage"; rm -rf "$data_dir"; return; }
 
+  # Optional pre-seeding of Kokoro and any MTP drafter, for the reason
+  # espeak-ng-data and ORT_DYLIB_PATH are pre-seeded above: a scratch pond
+  # otherwise fetches ~155 MB of Kokoro and a 57 MB drafter per model per run,
+  # and on a slow link that exhausts the 360 s health window before the model is
+  # ever loaded. OFF by default until it is understood -- staging Kokoro made
+  # startup go silent after the ONNX download and never become healthy, for both
+  # models, where the same run without it worked. Set MATRIX_PRESEED=1 to try it.
+  #
+  # Hard links where the filesystem allows, and realpath FIRST: entries under
+  # models/gguf are often symlinks into hf_cache, and the startup migration
+  # MOVES what it finds in models/gguf -- the same trap the staging above avoids.
+  if [ "${MATRIX_PRESEED:-0}" = "1" ]; then
+    if [ -d "$REAL_MODELS/kokoro" ]; then
+      cp -al "$REAL_MODELS/kokoro" "$data_dir/models/" 2>/dev/null \
+        || cp -R "$REAL_MODELS/kokoro" "$data_dir/models/" 2>/dev/null || true
+    fi
+    for drafter in "$REAL_MODELS/gguf"/mtp-*.gguf; do
+      [ -e "$drafter" ] || continue
+      local dreal; dreal="$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$drafter")"
+      [ -f "$dreal" ] || continue
+      ln "$dreal" "$data_dir/models/gguf/$(basename "$drafter")" 2>/dev/null \
+        || cp "$dreal" "$data_dir/models/gguf/$(basename "$drafter")" 2>/dev/null || true
+    done
+  fi
+
+  # Refuse to start on an occupied port. Paired with the ownership check below:
+  # this catches the leak before it can be measured, that one catches ours dying.
+  if curl -sf -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/api/v1/health"; then
+    echo "  FAIL $model — port $PORT is already serving; a leaked pond-server would be measured instead"
+    rm -rf "$data_dir"; return
+  fi
+
   # ORT_DYLIB_PATH is exported at the top when a runtime was found on this
   # machine, and inherited from here. Without it every model re-downloads ~30 MB
   # into its own scratch dir, because the dir is wiped between models -- minutes
@@ -182,9 +214,19 @@ run_model() {
     "$BIN" serve --port "$PORT" > "$log" 2>&1 &
   local pid=$!
 
+  # The health check below trusts whatever answers on $PORT. A pond-server
+  # leaked by an earlier run answers it, reports itself onboarded, accepts the
+  # activate -- and then fails every turn with "Model not downloaded", because
+  # its own scratch data dir was removed when that run ended. Two full matrix
+  # runs were recorded as data before that was spotted. So: our process, or
+  # nothing.
   local ready=0
   for _ in $(seq 1 180); do
-    curl -sf -o /dev/null "http://127.0.0.1:$PORT/api/v1/health" && { ready=1; break; }
+    if curl -sf -o /dev/null "http://127.0.0.1:$PORT/api/v1/health"; then
+      if kill -0 "$pid" 2>/dev/null; then ready=1; break; fi
+      echo "  FAIL $model — something else is serving port $PORT; our server is gone"
+      rm -rf "$data_dir"; return
+    fi
     kill -0 "$pid" 2>/dev/null || break
     sleep 2
   done
@@ -193,13 +235,49 @@ run_model() {
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rm -rf "$data_dir"; return
   fi
 
-  sqlite3 "$data_dir/pond_system.db" \
-    "INSERT INTO onboarding_state (id, current_step) VALUES (1, 'Completed');" 2>/dev/null
-
+  # Settings BEFORE onboarding: `POST /onboard/complete` refuses while any
+  # required field is unset, and `chat_model` is one of them.
   curl -s -X PUT "http://127.0.0.1:$PORT/api/v1/settings" \
     -H 'Content-Type: application/json' \
     -d "{\"chat_provider\":\"local\",\"chat_model\":\"$model\",\"thinking_mode\":\"$THINKING\",\"tool_selection_mode\":\"$TOOLS\",\"show_turn_stats\":true}" \
     > /dev/null
+
+  # Finish onboarding through the product's own public endpoint rather than by
+  # writing `onboarding_state` directly. The direct INSERT this replaces could
+  # never succeed: `id` is `INTEGER PRIMARY KEY CHECK (id = 1)` and the server
+  # seeds row 1 during startup, so an INSERT run after the health check always
+  # hit the constraint -- and `2>/dev/null` made the failure look like success.
+  # Every turn then returned `onboarding_required` and the parser, which counts
+  # only `data:` lines, recorded nulls. A whole matrix of empty rows.
+  curl -s -X POST "http://127.0.0.1:$PORT/api/v1/onboard/complete" \
+    -H 'Content-Type: application/json' -d '{}' > /dev/null
+
+  # Assert it took. A model that cannot be driven must not be reported as a
+  # model that said nothing.
+  if ! curl -s "http://127.0.0.1:$PORT/api/v1/onboard/status" | grep -q '"onboarded":true'; then
+    echo "  FAIL $model — onboarding did not complete; turns would all 403 (see $log)"
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rm -rf "$data_dir"; return
+  fi
+
+  # Register the staged GGUF, then assign it the chat role. The file being on
+  # disk is not enough: the engine resolves a model through its CATALOGUE row,
+  # and a scratch pond starts with an empty `models` table holding only the
+  # seeded ASR and TTS entries. A model the catalogue does not already know --
+  # which is the entire point of this script -- otherwise answers every turn
+  # with "Model not downloaded: <name>" about a file that is right there, and
+  # the parser records that sentence as the reply. Measured: 203 reply chars
+  # per turn, no stats, and a `done` line.
+  #
+  # `activate` and not `scan` alone: `ModelRouter` is built at startup, and
+  # activate is the call that rebuilds it for LLM roles.
+  curl -s -X POST "http://127.0.0.1:$PORT/api/v1/models/scan" > /dev/null
+  curl -s -X POST "http://127.0.0.1:$PORT/api/v1/models/gguf/$model/activate" \
+    -H 'Content-Type: application/json' -d '{"role":"chat"}' > /dev/null
+
+  if ! curl -s "http://127.0.0.1:$PORT/api/v1/models/active-roles" | grep -q "gguf/$model"; then
+    echo "  FAIL $model — not assigned to the chat role after scan+activate (see $log)"
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rm -rf "$data_dir"; return
+  fi
 
   local sid="matrix-$$"
   local i=0
