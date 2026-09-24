@@ -74,9 +74,19 @@ so the daily server was decoding with MTP at draft depth 4. Same turns, release 
 
 0.64x to 0.94x. Metal's mat-vec path repeats a per-position kernel at or below 8 positions
 (`project_mtp_batch_cost_curve`), so verifying drafts costs about what decoding them costs, and
-depth 8 does not recover it here either. On the Orin the same code measured 1.8x over eight
-real turns. The switch should be off on macOS and on for CUDA; until the default is
-platform-aware, turning it off in Settings is a free 10 to 30% on every Mac answer.
+depth 8 does not recover it here either. On the Orin the same code had measured 1.8x over eight
+real turns.
+
+**Removed from the engine the same evening at Jerry's request** (fork commit `743649d98`): the
+`mtp.rs` module, the `SessionCtx::Mtp` variant, the drafter load and the speculate branch of the
+decode loop are gone; the registry fields `draft_model`, `draft_n_max` and `draft_p_min` are still
+accepted and now ignored by this backend. Verified on the rebuilt binary with
+`speculative_decoding_enabled = true` and the E2B drafter present: zero `MTP drafter loaded` lines,
+decode 46 to 49 tok/s. What the removal leaves for the GIAP side (files held by another session on
+2026-09-24): the `speculative_decoding_enabled`, `mtp_draft_max` and `mtp_draft_p_min` settings and
+their UI, `mtp_drafter.rs` and `apply_speculation_switch` (which evicts the model on every flip),
+`drafter.rs`, the drafter download in `model_download.rs` / `main.rs`, the drafter memory charge in
+`device_budget.rs` and `apply_jetson_settings`. Until they go, the switch is a no-op.
 
 ## 4. Where the re-prefill comes from: prompt bytes that move
 
@@ -117,6 +127,24 @@ Landed in the fork as commit `36413f065` on `feat/llama-cpp-2-0.1.156-oai-fork` 
 the block and only the block and what follows it re-prefills. The companion timing patch is
 `afe7adc69`. Verification runs are in section 6.
 
+Then the block itself: for GIAP it is duplicate information (the envelope already carries the
+time and the budget; the working directory means nothing to a household assistant; no extension
+contributes to it), and even appended it costs about a hundred tokens per inference. Fork commit
+`d4157795d` adds `GOOSE_DISABLE_MOIM=1`, which removes the block and the system-prompt paragraph
+that announces it. Measured with the knob set (E2B, same three turns; the machine was under a
+load average of 8 to 17 from another session's dev server, so read the token columns, not the ms):
+
+| inference | prepended (R1) | appended (R11) | disabled (R12) |
+|---|---:|---:|---:|
+| completeness check: tokens redone | 471 | 130 to 161 | **58 (the nudge only)** |
+| completeness check: prefill incl. sync | 1,011 to 1,103 ms | 289 to 390 ms | **159 to 177 ms** |
+| no-tool turn: tokens prefilled | 1,133 to 1,683 | 674 | **481 to 523** |
+| system prefix | 1,210 tok | 1,210 tok | 1,133 tok |
+
+`ReusePrefix(2602) cached_tokens=2602`: with the knob, the check inference resumes exactly at
+the end of the cache. GIAP should set the variable in `goose_env_knobs` for local providers; that
+file was held by another session when this was written, so it is a recommendation here.
+
 ### 4.2 GIAP's own per-turn churn
 
 - **The completeness check** (`goal_check_enabled`, default on) appends a synthetic user
@@ -154,6 +182,12 @@ answered the same first turn in 48 completion tokens against 746 with thinking o
 unchanged at about 1 s because TTFT is prefill-bound. This is the agent layer and it is the
 largest single wall-clock term for E4B users; it is reported here, not changed.
 
+Measured on E4B with `thinking_mode = "off"` (R13, same three turns, under the same heavy load so
+only the token columns are comparable): `reasoning_tokens` 0 on every inference, `completion_tokens`
+22 / 41 / 164 against 214 / 601 / 495 with thinking on, and the visible answer begins at the
+engine's first token instead of after the reasoning block. For a household asking the time, that
+is the difference between about two seconds and about fifteen on this model.
+
 ## 6. Verification of the MOIM placement patch
 
 Same script, same release build with only the fork patch applied. "Check" is the
@@ -179,6 +213,13 @@ shrank mid-turn (2,934 to 2,618 tokens with reuse falling to 1,340; 4,428 to 4,3
 the plan below. The hatch itself still costs one full re-prefill per session the first time a
 group is enabled, because the tools block sits before the conversation (item 8).
 
+The engine's fixed per-inference costs, measured with the `prefill breakdown` debug line the same
+commit series added: memory estimate 0 ms, template render 5 to 25 ms, request-log write 0,
+tokenize 1 to 4 ms, validate 0, streaming-parser init 0. Everything else in `prefill_ms` is GPU
+prefill, and on a quiet machine that prefill runs at the standalone rate (llama-bench pp128 at
+depth 2048: 568 tok/s; GIAP warm inferences: 480 to 680 tok/s). There is nothing left to take out
+of the engine's own path; TTFT is now the count of new tokens divided by the hardware rate.
+
 A second engine patch landed alongside: `prefill_ms` now waits for the GPU before it is
 stamped. Metal returns from `decode` once the graph is submitted, so a 160-token warm prefill
 read 13 to 33 ms and 250 to 360 ms of its work surfaced as a gap between "prefill end" and the
@@ -190,8 +231,9 @@ columns derived from `prefill_ms` were not.
 | # | layer | lever | evidence | status |
 |---|---|---|---|---|
 | 1 | binary | run the daily server from `target/release` | 1.5 to 2x on decode and prefill (section 2) | recommendation; `npm run dev:server` and the `--native` launch both build debug |
-| 2 | engine config | speculative decoding off on Metal, on for CUDA | 0.64 to 0.94x with it on (section 3) | setting today; platform-aware default proposed |
-| 3 | prompt bytes | `<turn-context>` appended, not prepended | section 4.1 | fork patch landed, verification pending in section 6 |
+| 2 | engine | speculative decoding removed from the llama.cpp backend | 0.64 to 0.94x on Metal (section 3); Jerry's call | **done**, fork `743649d98`; GIAP-side switch, UI, provisioning and memory charge are the follow-up |
+| 3 | prompt bytes | `<turn-context>` appended, not prepended | section 4.1 | **done**, fork `36413f065`, verified in section 6 |
+| 3b | prompt bytes | `GOOSE_DISABLE_MOIM=1` for local providers | check inference 390 to 177 ms, per-turn prefill −25% (section 4.1) | fork knob `d4157795d` done; set it in `goose_env_knobs` (file held by another session) |
 | 4 | prompt bytes | keep history append-only: no rewrite of a stored message by steer or nudge; `<turn-context>` disabled for local providers if the residual still costs | section 4.1, 4.2 | proposal |
 | 5 | agent loop | completeness check only after a turn that used tools, or off | 2 inferences per no-tool turn (4.2) | proposal, Jerry's call: it was measured worth its cost on 2026-08-12 for a seven-tool turn |
 | 6 | agent loop | thinking off or bounded for short answers; re-engagement cap | section 5, 4.2 | proposal |
