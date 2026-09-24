@@ -3542,8 +3542,8 @@ async fn get_session_messages(
             }
             // Phase F2: attachments are referenced, never inlined. Base64 in a
             // history read would turn a routine page load into megabytes; the
-            // client fetches each image once from the URL below and the browser
-            // caches it.
+            // client fetches each image once from the URL below, WITH its bearer
+            // token -- the route is protected, so a bare `<img src>` gets a 401.
             if let Some(atts) = attachments_by_message.get(&m.id) {
                 obj["images"] = json!(atts
                     .iter()
@@ -3945,10 +3945,15 @@ fn urlencoding_lite(s: &str) -> String {
 
 /// Serve one persisted image attachment's raw bytes (phase F2).
 ///
-/// Bytes, not base64: the client uses this straight as an `<img src>`, and
-/// re-encoding only to have the browser decode again is pure waste. The
-/// `session_id` path segment is checked against the stored row so an attachment
-/// id from one conversation cannot be read through another's URL.
+/// Bytes, not base64: the client displays them as they come, and re-encoding
+/// only to have it decode again is pure waste. This sits on the PROTECTED
+/// router and the middleware reads only an `Authorization: Bearer` header, so
+/// the URL is not usable as a bare `<img src>`: an image element cannot send
+/// that header, and every such load is a 401 unless `POND_DEV_ALLOW_LOOPBACK`
+/// is set. The desktop fetches the bytes with its token and shows them through
+/// an object URL (`PondApiClient.getSessionAttachment`). The `session_id` path
+/// segment is checked against the stored row so an attachment id from one
+/// conversation cannot be read through another's URL.
 async fn get_session_attachment(
     State(state): State<Arc<AppState>>,
     Path((session_id, attachment_id)): Path<(String, String)>,

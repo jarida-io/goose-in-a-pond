@@ -28,7 +28,7 @@ vi.mock("../api/PondApiClient", () => ({
       structured_output: false,
       tool_calling: true,
     }),
-    sessionAttachmentUrl: vi.fn((sessionId: string, attachmentId: string) => `/api/v1/sessions/${sessionId}/attachments/${attachmentId}`),
+    getSessionAttachment: vi.fn(),
     compactSession: vi.fn(),
     retitleSession: vi.fn(),
     renameSession: vi.fn(),
@@ -382,9 +382,14 @@ describe("Chat — context pressure note (PAI-4 P7b)", () => {
 // The thinking panel and its live accumulator both already existed; what did
 // not was the refill from history, so every reloaded conversation showed its
 // answers with the reasoning behind them silently gone. This drives the real
-// component against a real `getSessionMessages` payload rather than asserting
-// that `sessionMessagesToMessages` mentions `thinking` — a grep would have
-// passed against the version that dropped the field on the floor.
+// component and the real store rather than asserting that
+// `sessionMessagesToMessages` mentions `thinking` — a grep would have passed
+// against the version that dropped the field on the floor.
+//
+// What it does NOT drive is the client: `getSessionMessages` is mocked here,
+// so the mapping from the wire never runs, and that mapping is where the field
+// was actually being dropped in production while these tests passed.
+// `PondApiClient.test.ts` covers it from a raw fetch body.
 //
 // `vi.resetModules()` + dynamic import because the module-level AppContext mock
 // pins `sessionId: null`. And the session id is flipped AFTER mount rather than
@@ -420,7 +425,7 @@ describe("Chat history — persisted reasoning (PAI-5 P6)", () => {
           structured_output: false,
           tool_calling: true,
         }),
-        sessionAttachmentUrl: vi.fn(() => "/api/v1/sessions/s/attachments/a"),
+        getSessionAttachment: vi.fn(),
       },
     }));
     vi.doMock("../state/AppContext", () => ({
@@ -510,6 +515,48 @@ describe("Chat history — persisted reasoning (PAI-5 P6)", () => {
 
     await waitFor(() => expect(screen.getByText("The porch light is on.")).toBeTruthy());
     expect(document.querySelector(".think")).toBeNull();
+  });
+});
+
+// ── History images ────────────────────────────────────────────────────────────
+//
+// Opened from the wall, the way a person does. The bubble must show an object
+// URL made from bytes the client fetched with its token: the bare attachment
+// URL it used to show sits on the protected router, and an `<img src>` cannot
+// send the bearer header, so on a real pond every one of them was a 401.
+describe("Chat history — images", () => {
+  it("shows a replayed image through an object URL, not the attachment URL", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([
+      { id: "sess-img", title: "a picture", created_at: "", updated_at: "" },
+    ] as never);
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      {
+        id: "m1",
+        session_id: "sess-img",
+        role: "user",
+        content: "what is in this picture?",
+        created_at: "",
+        images: [
+          {
+            id: "att-1",
+            mime_type: "image/png",
+            byte_size: 3,
+            url: "/api/v1/sessions/sess-img/attachments/att-1",
+          },
+        ],
+      },
+    ] as never);
+    vi.mocked(api.getSessionAttachment).mockResolvedValue(
+      new Blob(["png"], { type: "image/png" }),
+    );
+
+    render(<Chat />);
+    fireEvent.click(await screen.findByRole("button", { name: /Open conversation/ }));
+
+    const img = await screen.findByAltText("Attached image 1");
+    expect(img.getAttribute("src")).toMatch(/^blob:/);
+    expect(vi.mocked(api.getSessionAttachment)).toHaveBeenCalledWith("sess-img", "att-1");
+    expect(document.querySelector('img[src*="/attachments/"]')).toBeNull();
   });
 });
 

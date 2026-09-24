@@ -14,7 +14,7 @@
  * written to the database, and was invisible to the person who asked for it.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook } from "@testing-library/react";
 import { api } from "../api/PondApiClient";
 import {
@@ -29,6 +29,7 @@ import {
   acknowledgeCompletion,
   resetConversation,
   openSession,
+  followExternalSession,
   truncateFrom,
   patchMessage,
 } from "./chatRunStore";
@@ -43,10 +44,7 @@ vi.mock("../api/PondApiClient", () => ({
     getActiveRun: vi.fn(),
     reattachRun: vi.fn(),
     cancelRun: vi.fn(),
-    sessionAttachmentUrl: vi.fn(
-      (sessionId: string, id: string) =>
-        `/api/v1/sessions/${sessionId}/attachments/${id}`,
-    ),
+    getSessionAttachment: vi.fn(),
   },
 }));
 
@@ -371,10 +369,11 @@ describe("image previews", () => {
       images: [{ data: "AAA", mime_type: "image/png" }],
       previewUrls: ["blob:pond/one"],
     });
-    // A history image on the same transcript: an ordinary http URL that this
-    // store did not make and must not claim to free.
+    // A URL on the same transcript that this store did not make, and so must
+    // not claim to free. (History images used to be the example here; they are
+    // object URLs the store owns now -- see "history images" below.)
     patchMessage(getChatRun().messages[1].id, {
-      images: ["/api/v1/sessions/s/attachments/a1"],
+      images: ["https://example.com/not-ours.png"],
     });
 
     resetConversation();
@@ -382,6 +381,189 @@ describe("image previews", () => {
     expect(revoke).toHaveBeenCalledTimes(1);
     expect(revoke).toHaveBeenCalledWith("blob:pond/one");
     revoke.mockRestore();
+  });
+});
+
+/**
+ * Images on a replayed conversation.
+ *
+ * The attachment route is protected and accepts only a bearer header, which an
+ * `<img src>` cannot send, so the bare URL this store used to hand both chat
+ * surfaces answered 401 on every pond without the loopback dev bypass -- seen
+ * against a live server started without it, 2026-09-24. The bytes now come
+ * through the client and are shown through object URLs this store owns.
+ */
+describe("history images", () => {
+  /** A user row carrying `ids` as attachments, shaped as the history read sends it. */
+  function rowWithImages(sessionId: string, ...ids: string[]) {
+    return {
+      id: `m-${sessionId}`,
+      session_id: sessionId,
+      role: "user",
+      content: "what is this",
+      created_at: "",
+      images: ids.map((id) => ({
+        id,
+        mime_type: "image/png",
+        byte_size: 3,
+        url: `/api/v1/sessions/${sessionId}/attachments/${id}`,
+      })),
+    };
+  }
+
+  // Every blob is named for the attachment it holds, and every object URL for
+  // the blob it was made from, so an assertion reads as which image went where.
+  const named = new Map<Blob, string>();
+  const blobFor = (id: string) => {
+    const b = new Blob([id], { type: "image/png" });
+    named.set(b, id);
+    return b;
+  };
+  let create: ReturnType<typeof vi.spyOn>;
+  let revoke: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    named.clear();
+    create = vi
+      .spyOn(URL, "createObjectURL")
+      .mockImplementation(
+        (b) => `blob:pond/${named.get(b as Blob) ?? "unknown"}`,
+      );
+    revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    vi.mocked(api.getSessionAttachment).mockImplementation(async (_s, id) =>
+      blobFor(id),
+    );
+  });
+
+  afterEach(() => {
+    create.mockRestore();
+    revoke.mockRestore();
+  });
+
+  it("fetches through the client and shows an object URL, never the attachment URL", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      rowWithImages("s-img", "a1"),
+    ] as never);
+
+    await openSession("s-img");
+    await flush();
+
+    // Through the client, which is what carries the bearer token...
+    expect(api.getSessionAttachment).toHaveBeenCalledWith("s-img", "a1");
+    // ...and on screen as the URL made from its bytes. The attachment URL is
+    // what used to be here.
+    expect(getChatRun().messages[0].images).toEqual(["blob:pond/a1"]);
+  });
+
+  it("owns them: leaving the conversation revokes them", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      rowWithImages("s-img", "a1"),
+    ] as never);
+    await openSession("s-img");
+    await flush();
+
+    resetConversation();
+
+    expect(revoke).toHaveBeenCalledWith("blob:pond/a1");
+  });
+
+  it("shows the text without waiting for the images", async () => {
+    let land!: () => void;
+    const held = new Promise<void>((r) => {
+      land = r;
+    });
+    vi.mocked(api.getSessionAttachment).mockImplementation(async (_s, id) => {
+      await held;
+      return blobFor(id);
+    });
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      rowWithImages("s-img", "a1"),
+    ] as never);
+
+    await openSession("s-img");
+
+    expect(getChatRun().loadingSession).toBe(false);
+    expect(getChatRun().messages[0].text).toBe("what is this");
+    expect(getChatRun().messages[0].images).toBeUndefined();
+
+    land();
+    await flush();
+    expect(getChatRun().messages[0].images).toEqual(["blob:pond/a1"]);
+  });
+
+  it("makes no URL for bytes that land after the conversation moved on", async () => {
+    let land!: () => void;
+    const held = new Promise<void>((r) => {
+      land = r;
+    });
+    vi.mocked(api.getSessionAttachment).mockImplementation(async (_s, id) => {
+      await held;
+      return blobFor(id);
+    });
+    vi.mocked(api.getSessionMessages).mockResolvedValueOnce([
+      rowWithImages("s-img", "a1"),
+    ] as never);
+    await openSession("s-img");
+
+    // Somewhere else before the image arrived.
+    vi.mocked(api.getSessionMessages).mockResolvedValueOnce([
+      {
+        id: "m-other",
+        session_id: "s-other",
+        role: "user",
+        content: "something else",
+        created_at: "",
+      },
+    ] as never);
+    await openSession("s-other");
+    land();
+    await flush();
+
+    // Made now, a URL would be shown by nothing and so revoked by nothing...
+    expect(create).not.toHaveBeenCalled();
+    // ...and it must not turn up on the conversation that replaced its own.
+    expect(getChatRun().messages[0].text).toBe("something else");
+    expect(getChatRun().messages[0].images).toBeUndefined();
+  });
+
+  it("leaves out an image it cannot fetch and keeps the rest in order", async () => {
+    let releaseFirst!: () => void;
+    const firstHeld = new Promise<void>((r) => {
+      releaseFirst = r;
+    });
+    vi.mocked(api.getSessionAttachment).mockImplementation(async (_s, id) => {
+      if (id === "gone") throw new Error("404 Attachment bytes are no longer available");
+      // The first image lands last, so order cannot come from arrival.
+      if (id === "a1") await firstHeld;
+      return blobFor(id);
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      rowWithImages("s-img", "a1", "gone", "a3"),
+    ] as never);
+
+    await openSession("s-img");
+    await flush();
+    releaseFirst();
+    await flush();
+
+    expect(getChatRun().messages[0].images).toEqual([
+      "blob:pond/a1",
+      "blob:pond/a3",
+    ]);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("loads them for a session followed from outside, too", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      rowWithImages("s-deep", "a1"),
+    ] as never);
+
+    await followExternalSession("s-deep");
+    await flush();
+
+    expect(getChatRun().messages[0].images).toEqual(["blob:pond/a1"]);
   });
 });
 

@@ -199,6 +199,134 @@ describe("deleteSession()", () => {
   });
 });
 
+// PAI-5 P6. What a live pond-server returned for one turn recorded with
+// `persist_thinking` on -- captured over real HTTP on 2026-09-24, ids shortened.
+// It goes through the REAL mapping from a raw fetch body. The replay tests in
+// `Chat.test.tsx` mock `getSessionMessages` itself, which skips the one piece
+// of code that dropped `thinking`; that is how every reloaded conversation lost
+// its reasoning while those tests stayed green.
+describe("getSessionMessages()", () => {
+  const userRow = {
+    id: "m-user",
+    session_id: "sess-1",
+    role: "user",
+    content: "what is in this picture?",
+    created_at: "2026-09-24T07:14:51+00:00",
+    liked: null,
+    images: [
+      {
+        id: "att-1",
+        mime_type: "image/png",
+        byte_size: 70,
+        url: "/api/v1/sessions/sess-1/attachments/att-1",
+      },
+    ],
+  };
+  const replyRow = {
+    id: "m-reply",
+    session_id: "sess-1",
+    role: "assistant",
+    content: "A single white pixel.",
+    created_at: "2026-09-24T07:15:42+00:00",
+    liked: null,
+    thinking: ["It is a 1x1 PNG.", "So: one pixel, white."],
+  };
+
+  it("keeps the persisted reasoning on the assistant row", async () => {
+    fetchMock.mockResolvedValueOnce(okJson({ messages: [userRow, replyRow] }));
+    const msgs = await client().getSessionMessages("sess-1");
+    // Both passages, in order: a mapping that kept only the first would pass
+    // a check on presence.
+    expect(msgs[1].thinking).toEqual([
+      "It is a 1x1 PNG.",
+      "So: one pixel, white.",
+    ]);
+  });
+
+  it("drops nothing else the server sent", async () => {
+    fetchMock.mockResolvedValueOnce(okJson({ messages: [userRow, replyRow] }));
+    const msgs = await client().getSessionMessages("sess-1");
+    // Against the wire rows themselves, so any field the mapping forgets
+    // fails here rather than in some screen that quietly shows less.
+    expect(msgs).toEqual([userRow, replyRow]);
+  });
+
+  it("keeps 'nothing was recorded' apart from 'recorded, and empty'", async () => {
+    const unrecorded = { ...replyRow, id: "m-unrecorded", thinking: undefined };
+    const empty = { ...replyRow, id: "m-empty", thinking: [] };
+    fetchMock.mockResolvedValueOnce(okJson({ messages: [unrecorded, empty] }));
+    const msgs = await client().getSessionMessages("sess-1");
+    expect(msgs[0].thinking).toBeUndefined();
+    expect(msgs[1].thinking).toEqual([]);
+  });
+});
+
+describe("getSessionAttachment()", () => {
+  const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+  const png = () =>
+    new Response(PNG, {
+      status: 200,
+      headers: { "Content-Type": "image/png" },
+    });
+
+  afterEach(() => localStorage.clear());
+
+  it("GETs the bytes with the bearer token an <img src> cannot send", async () => {
+    fetchMock.mockResolvedValueOnce(png());
+    const blob = await new PondApiClient(
+      "http://localhost:4000",
+      "tok",
+    ).getSessionAttachment("sess 1", "att/1");
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(
+      "http://localhost:4000/api/v1/sessions/sess%201/attachments/att%2F1",
+    );
+    expect(init.method).toBe("GET");
+    expect((init.headers as Record<string, string>)["Authorization"]).toBe(
+      "Bearer tok",
+    );
+    expect(new Uint8Array(await blob.arrayBuffer())).toEqual(PNG);
+  });
+
+  it("re-pairs once on a 401 and retries, like every other call", async () => {
+    const future = new Date(Date.now() + 3_600_000).toISOString();
+    localStorage.setItem("giap-session-token", "stale");
+    localStorage.setItem("giap-refresh-token", "r1");
+    localStorage.setItem("giap-token-expires-at", future);
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.includes("/handshake/refresh")) {
+        return okJson({
+          accepted: true,
+          session_token: "fresh",
+          refresh_token: "r2",
+          expires_at: future,
+        });
+      }
+      const auth = (init?.headers as Record<string, string> | undefined)?.[
+        "Authorization"
+      ];
+      return auth === "Bearer fresh"
+        ? png()
+        : errJson(401, "Invalid or expired token");
+    });
+
+    const blob = await client().getSessionAttachment("s", "a");
+    expect(new Uint8Array(await blob.arrayBuffer())).toEqual(PNG);
+  });
+
+  it("throws ApiError when the bytes are gone", async () => {
+    fetchMock.mockResolvedValueOnce(
+      errJson(404, "Attachment bytes are no longer available"),
+    );
+    const err = await client()
+      .getSessionAttachment("s", "a")
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(404);
+  });
+});
+
 describe("compactSession()", () => {
   it("POSTs /sessions/:id/compact", async () => {
     fetchMock.mockResolvedValueOnce(

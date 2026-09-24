@@ -73,8 +73,11 @@ export interface Message {
    *  frames. Rendered WHILE streaming, unlike every other note here: a tree
    *  nobody sees until the turn ends is the spinner it replaces. */
   delegations?: SubagentRun[];
-  /** Image preview URLs — either a live send's local previewUrl, or a
-   *  built `${apiBase}${url}` for images replayed from session history. */
+  /** Object URLs for the bubble's images, every one of them this store's to
+   *  revoke: a live send's composer previews, or the ones `loadHistoryImages`
+   *  makes from attachment bytes when history is replayed. Never the
+   *  attachment URL itself — that route needs the bearer token, and an
+   *  `<img src>` cannot send it. */
   images?: string[];
   /** The persisted session_messages.id this bubble corresponds to. Absent
    *  for a just-sent live turn until the "done" event backfills it (see
@@ -102,13 +105,28 @@ function friendlyToolStatus(rawName: string): string {
   return `Working on: ${bare.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}…`;
 }
 
-function sessionMessagesToMessages(raw: SessionMessage[]): Message[] {
+/**
+ * A replayed bubble's images, still on the server.
+ *
+ * Kept beside the transcript rather than on the bubble: until the bytes arrive
+ * there is nothing a surface can render, and a bubble carrying the attachment
+ * URL instead is exactly what both surfaces used to put in `<img src>`.
+ */
+interface HistoryImages {
+  /** The bubble, by local id. One that is gone when the bytes land gets none. */
+  messageId: number;
+  sessionId: string;
+  attachmentIds: string[];
+}
+
+function sessionMessagesToMessages(raw: readonly SessionMessage[]): {
+  messages: Message[];
+  images: HistoryImages[];
+} {
   const out: Message[] = [];
+  const pending: HistoryImages[] = [];
   for (const m of raw) {
     if (m.role === "tool") continue;
-    const images = m.images?.length
-      ? m.images.map((img) => api.sessionAttachmentUrl(m.session_id, img.id))
-      : undefined;
     if (m.role === "assistant") {
       const hasContent = m.content.trim().length > 0;
       const hasToolCalls = (m.tool_calls?.length ?? 0) > 0;
@@ -130,7 +148,6 @@ function sessionMessagesToMessages(raw: SessionMessage[]): Message[] {
         role: "agent",
         text: m.content,
         historyToolNames,
-        images,
         thinkingBlocks,
         // The persisted id and the vote ride the SAME row as the reasoning.
         // Pushing them as a second entry renders every assistant turn twice on
@@ -145,12 +162,62 @@ function sessionMessagesToMessages(raw: SessionMessage[]): Message[] {
         id: ++_msgId,
         role: "user",
         text: m.content,
-        images,
         backendId: m.id,
       });
     }
+    // Against the bubble just pushed, so the bytes can find it by id.
+    if (m.images?.length)
+      pending.push({
+        messageId: out[out.length - 1].id,
+        sessionId: m.session_id,
+        attachmentIds: m.images.map((img) => img.id),
+      });
   }
-  return out;
+  return { messages: out, images: pending };
+}
+
+/**
+ * Fetch the images a replayed transcript refers to, and give each bubble
+ * object URLs it can display.
+ *
+ * Not the attachment URL itself: that route is protected, `<img src>` cannot
+ * send the bearer token, and so every history image was a 401 on any pond
+ * without the loopback dev bypass. The bytes come through `PondApiClient`,
+ * which carries the token, and the URLs join `ownedPreviews`, under the same
+ * rule as a live send's composer previews.
+ *
+ * An image that cannot be fetched is left out and said so on the console; the
+ * rest of its bubble still loads.
+ */
+async function loadHistoryImages(
+  pending: readonly HistoryImages[],
+): Promise<void> {
+  await Promise.all(
+    pending.map(async ({ messageId, sessionId, attachmentIds }) => {
+      const settled = await Promise.allSettled(
+        // `async`, so a synchronous throw is settled like any other failure.
+        attachmentIds.map(async (id) =>
+          api.getSessionAttachment(sessionId, id),
+        ),
+      );
+      const blobs: Blob[] = [];
+      for (const r of settled) {
+        if (r.status === "fulfilled") blobs.push(r.value);
+        else console.warn("Could not load a history image (non-fatal):", r.reason);
+      }
+      if (blobs.length === 0) return;
+      // Made HERE, after the wait, and only for a bubble still on screen. A URL
+      // made earlier would strand whenever the conversation is left while its
+      // bytes are in flight: no surviving message would show it, so
+      // `revokeOwnedPreviews` would never be asked about it.
+      if (!state.messages.some((m) => m.id === messageId)) return;
+      const urls = blobs.map((b) => URL.createObjectURL(b));
+      for (const url of urls) state.ownedPreviews.add(url);
+      mutate((prev) =>
+        prev.map((m) => (m.id === messageId ? { ...m, images: urls } : m)),
+      );
+    }),
+  );
 }
 
 // ── What a subscriber sees ────────────────────────────────────────────────────
@@ -352,11 +419,14 @@ export function setChatRunBridge(bridge: ChatRunBridge): () => void {
 // ── Object URLs ───────────────────────────────────────────────────────────────
 
 /**
- * Revoke previews this store created that no surviving message still shows.
+ * Revoke object URLs this store created that no surviving message still shows.
  *
- * Never touches a URL from `api.sessionAttachmentUrl`: history images are
- * ordinary http URLs, and revoking one is a no-op that would still be a lie
- * about who owns what.
+ * Two kinds, one rule: the composer previews a live send hands over, and the
+ * URLs `loadHistoryImages` makes from attachment bytes on a replay. History
+ * images used to be bare attachment URLs that this store did not make and so
+ * never revoked; they are object URLs now because the bare URL cannot carry
+ * the bearer token. Anything in `images` that is not in `ownedPreviews` was
+ * put there by someone else, and is still not this store's to free.
  */
 function revokeOwnedPreviews(surviving: readonly Message[]): void {
   if (state.ownedPreviews.size === 0) return;
@@ -998,6 +1068,16 @@ function replaceMessages(next: Message[]): void {
   commit();
 }
 
+/** Lay down a persisted transcript, then fetch the images it refers to. */
+function replayHistory(raw: readonly SessionMessage[]): void {
+  const { messages, images } = sessionMessagesToMessages(raw);
+  replaceMessages(messages);
+  // Not awaited: the text shows now, and a slow image must not hold it back.
+  void loadHistoryImages(images).catch((e) =>
+    console.warn("Could not show history images (non-fatal):", e),
+  );
+}
+
 /**
  * Open one conversation, replaying its persisted history.
  *
@@ -1024,7 +1104,7 @@ export async function openSession(
   try {
     const msgs = await api.getSessionMessages(sessionId);
     if (state.sessionId !== sessionId) return;
-    replaceMessages(sessionMessagesToMessages(msgs ?? []));
+    replayHistory(msgs ?? []);
   } catch (err) {
     console.warn("Could not open conversation (non-fatal):", err);
   } finally {
@@ -1049,7 +1129,7 @@ export async function followExternalSession(sessionId: string): Promise<void> {
   try {
     const msgs = await api.getSessionMessages(sessionId);
     if (state.sessionId !== sessionId) return;
-    replaceMessages(sessionMessagesToMessages(msgs ?? []));
+    replayHistory(msgs ?? []);
   } catch (err) {
     console.warn("Could not load session history (non-fatal):", err);
   }

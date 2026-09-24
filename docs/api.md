@@ -56,6 +56,7 @@ All errors return JSON:
 | GET | /sessions | Protected | List conversation sessions |
 | PATCH | /sessions/{id} | Protected | Rename session |
 | GET | /sessions/{id}/messages | Protected | Get session messages |
+| GET | /sessions/{id}/attachments/{attachment_id} | Protected | Raw bytes of one chat-image attachment |
 | GET | /models | Protected | List model catalog |
 | GET | /models/capabilities | Protected | Active model's runtime capabilities |
 | GET | /models/active-roles | Protected | Current role assignments |
@@ -557,7 +558,30 @@ Returns all messages in a session, oldest first.
 }
 ```
 
-`role` values: `"user"` | `"assistant"` | `"system"`
+`role` values: `"user"` | `"assistant"` | `"system"` | `"tool"`
+
+Two optional fields, each ABSENT rather than empty when it does not apply:
+
+- `images` — on a message that had images attached:
+  `[{ "id": "...", "mime_type": "image/png", "byte_size": 70, "url": "/api/v1/sessions/<sid>/attachments/<aid>" }]`.
+  `url` is relative to the API base and is protected; see the next route before using it.
+- `thinking` — on an assistant message recorded while `persist_thinking` was on: the reasoning
+  passages that produced it, in order, as `string[]`. Absent means nothing was kept; `[]` means it
+  was kept and there was none.
+
+---
+
+### GET /sessions/{session_id}/attachments/{attachment_id}
+
+The raw bytes of one persisted chat image, with its `Content-Type` and
+`Cache-Control: private, max-age=31536000, immutable`. 404 when the attachment does not belong to
+that session, or its bytes are gone.
+
+**Send the bearer token.** This is on the protected router and the middleware reads only
+`Authorization: Bearer`, so a loader that cannot set a header — a bare `<img src>` — gets a 401 on
+every pond not started with `POND_DEV_ALLOW_LOOPBACK`. The desktop fetches the bytes with its token
+and shows them through an object URL (`PondApiClient.getSessionAttachment`); React Native's
+`Image` takes `source={{ uri, headers: { Authorization: "Bearer <token>" } }}`.
 
 ---
 

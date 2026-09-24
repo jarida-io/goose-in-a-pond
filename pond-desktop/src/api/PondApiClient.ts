@@ -263,13 +263,21 @@ export class PondApiClient {
     return h;
   }
 
-  private async request<T>(
+  /**
+   * Send one authenticated request and hand back the response unread.
+   *
+   * The half every JSON call and every bytes call share: the proactive token
+   * refresh, the timeout, one coalesced re-pair on a 401, and a non-2xx mapped
+   * to `ApiError`. Split out of `request()` so a caller that wants bytes
+   * rather than JSON inherits all four instead of copying three of them.
+   */
+  private async send(
     method: string,
     path: string,
     body?: unknown,
     timeout?: number,
     _retry = false,
-  ): Promise<T> {
+  ): Promise<Response> {
     await this.ensureTokenFresh();
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout ?? 30_000);
@@ -285,7 +293,7 @@ export class PondApiClient {
         // The stored token was rejected (e.g. the server rotated it). Re-pair
         // once, coalesced, then retry — see reauthenticate().
         await this.reauthenticate();
-        return this.request<T>(method, path, body, timeout, true);
+        return this.send(method, path, body, timeout, true);
       }
       if (!res.ok) {
         let msg = res.statusText;
@@ -296,11 +304,7 @@ export class PondApiClient {
         }
         throw new ApiError(res.status, msg);
       }
-      // 204 No Content and any other empty body — return undefined cast to T
-      const ct = res.headers.get("content-type") ?? "";
-      if (res.status === 204 || !ct.includes("json"))
-        return undefined as unknown as T;
-      return res.json() as Promise<T>;
+      return res;
     } catch (e) {
       clearTimeout(timeoutId);
       if (e instanceof DOMException && e.name === "AbortError") {
@@ -308,6 +312,20 @@ export class PondApiClient {
       }
       throw e;
     }
+  }
+
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    timeout?: number,
+  ): Promise<T> {
+    const res = await this.send(method, path, body, timeout);
+    // 204 No Content and any other empty body — return undefined cast to T
+    const ct = res.headers.get("content-type") ?? "";
+    if (res.status === 204 || !ct.includes("json"))
+      return undefined as unknown as T;
+    return res.json() as Promise<T>;
   }
 
   private get<T>(path: string): Promise<T> {
@@ -1425,7 +1443,13 @@ export class PondApiClient {
   }
 
   /** `limit` with no `offset`: server returns the N most recent messages
-   *  (newest-aware), not an old-first page — see get_session_messages. */
+   *  (newest-aware), not an old-first page — see get_session_messages.
+   *
+   *  The mapping copies fields one at a time, and a field it does not name is
+   *  dropped without a sound: `thinking` was, for every reloaded conversation,
+   *  while the replay tests stayed green because they mocked this method and
+   *  so never ran it. The `satisfies` below makes a key of `SessionMessage`
+   *  that this literal leaves out a type error rather than a lost field. */
   getSessionMessages(
     sessionId: string,
     limit?: number,
@@ -1441,17 +1465,23 @@ export class PondApiClient {
           ? r
           : ((r as { messages: Array<Record<string, unknown>> }).messages ??
             []);
-        return raw.map((m): SessionMessage => ({
-          id: m.id as string,
-          session_id: m.session_id as string,
-          role: m.role as SessionMessage["role"],
-          content: (m.content as string) ?? "",
-          created_at: m.created_at as string,
-          tool_calls: m.tool_calls as SessionMessageToolCall[] | undefined,
-          tool_call_id: m.tool_call_id as string | undefined,
-          images: m.images as SessionMessage["images"],
-          liked: m.liked as boolean | null | undefined,
-        }));
+        return raw.map(
+          (m): SessionMessage =>
+            ({
+              id: m.id as string,
+              session_id: m.session_id as string,
+              role: m.role as SessionMessage["role"],
+              content: (m.content as string) ?? "",
+              created_at: m.created_at as string,
+              tool_calls: m.tool_calls as SessionMessageToolCall[] | undefined,
+              tool_call_id: m.tool_call_id as string | undefined,
+              images: m.images as SessionMessage["images"],
+              // Passed through as sent: absent stays absent and `[]` stays
+              // `[]`, the distinction the type documents.
+              thinking: m.thinking as SessionMessage["thinking"],
+              liked: m.liked as boolean | null | undefined,
+            }) satisfies Record<keyof SessionMessage, unknown>,
+        );
       },
     );
   }
@@ -1658,9 +1688,24 @@ export class PondApiClient {
     );
   }
 
-  /** Absolute URL for a persisted chat-image attachment (see SessionMessageImage.url). */
-  sessionAttachmentUrl(sessionId: string, attachmentId: string): string {
-    return `${this.base}/api/v1/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(attachmentId)}`;
+  /**
+   * The bytes of one persisted chat-image attachment (see SessionMessageImage).
+   *
+   * Fetched, never handed to `<img src>`. The route sits on the protected
+   * router and the server accepts only an `Authorization: Bearer` header, which
+   * an image element cannot send, so a bare URL answers 401 on every pond
+   * started without the loopback dev bypass. Callers show the result through
+   * an object URL they own and revoke.
+   */
+  async getSessionAttachment(
+    sessionId: string,
+    attachmentId: string,
+  ): Promise<Blob> {
+    const res = await this.send(
+      "GET",
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(attachmentId)}`,
+    );
+    return res.blob();
   }
 
   /**

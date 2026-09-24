@@ -785,7 +785,8 @@ is — its rationale at `goose_agent.rs:1000-1011` is a measured result, not a p
   | The gate — `persist_thinking`, default `false` | `settings.rs:459` + `:915`, `sqlite_settings.rs:253` (upsert) and `:799` (`apply_key`) |
   | The write — accumulate and hand to `ChatService` | `routes.rs:1346` (`chat_stream`) and `:8253` (`agent_chat_stream`), both via `record_thinking` |
   | The read — rehydrate on session load | `get_thinking_for_session` on `SessionStorage`, folded into the history read |
-  | The render — refill `thinkingBlocks` | `sections/Chat.tsx:96` on load, `:423` while streaming, `:659` in the panel |
+  | The client — map `thinking` off the wire | `PondApiClient.getSessionMessages` — **missing until 2026-09-24**, see below |
+  | The render — refill `thinkingBlocks` | `sessionMessagesToMessages` in `state/chatRunStore.ts` on load (it moved out of `sections/Chat.tsx` with the turn store); the panel is `hub/views/chat/ThinkingDisclosure.tsx`, rendered by `sections/Chat.tsx` |
 
   **Migration `0040_session_thinking.sql`** took the number this note reserved. It is a side table,
   not a column on `session_messages`, and that is the load-bearing decision: everything that builds
@@ -824,6 +825,21 @@ is — its rationale at `goose_agent.rs:1000-1011` is a measured result, not a p
   argument fails the default-off test; deleting the SQLite override fails the round-trip and the
   scoping test (`thinking_blocks_round_trip_keyed_to_their_message`); dropping the field from the
   frontend object literal fails the render test.
+
+  **2026-09-24 — the rehydrate half never reached the screen.** The table above had four seams and
+  the feature has five. Between the history read and the refill sits
+  `PondApiClient.getSessionMessages`, which copies fields one at a time and never named `thinking`,
+  so the refill read `undefined` on every pond, for every reloaded conversation, from `bc3aa9df`
+  on. "Dropping the field from the frontend object literal fails the render test" was true of the
+  literal it meant, the store's; the client's literal had no test, and the render tests mock
+  `getSessionMessages` itself, so it never ran under them. Seen with the real client against a
+  live scratch server: both passages on the wire, none after the mapping. Fixed, with the value
+  passed through as sent so absent and `[]` stay distinct. Guards: `PondApiClient.test.ts` drives
+  the mapping from a raw body captured over real HTTP and asserts the mapped rows equal the wire
+  rows; and the literal `satisfies Record<keyof SessionMessage, unknown>`, so a field added to the
+  type and left out of the mapping is a `tsc` error. Both mutation-tested. Verified on the Mac in a
+  browser, bypass off: the reloaded reply shows "Thought for a moment" and expands to both
+  passages. Not run on the Orin.
 
   **Not done, and worth knowing:** these rows have no retention policy of their own. They ride the
   `CASCADE` off `session_messages` and the session, so a future pruner that bypasses the foreign key

@@ -1256,7 +1256,9 @@ export interface SessionMessageToolCall {
 }
 
 /** Attachment metadata for a persisted image on a session message. `url` is
- *  relative to the API base, e.g. `/api/v1/sessions/<sid>/attachments/<aid>`. */
+ *  relative to the API base, e.g. `/api/v1/sessions/<sid>/attachments/<aid>`.
+ *  That route requires the bearer token like any protected one, so it is not
+ *  an `<img src>`: fetch the bytes with `PondApiClient.getSessionAttachment`. */
 export interface SessionMessageImage {
   id: string;
   mime_type: string;
