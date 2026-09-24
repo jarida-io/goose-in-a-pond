@@ -216,7 +216,16 @@ pub async fn promote_pending_reminders(
     limit: usize,
     now: DateTime<Utc>,
 ) -> Result<PromotionReport> {
-    let pending = reminders.list_pending(limit).await?;
+    // `Household`, deliberately and alone among callers: this pass routes each
+    // reminder to its OWN member's proposal queue, which requires reading every
+    // member's. Nothing it reads leaves this function except as a proposal
+    // addressed to the reminder's owner.
+    let pending = reminders
+        .list_pending(
+            &crate::user_data::domain::profile::ProfileScope::Household,
+            limit,
+        )
+        .await?;
     let mut report = PromotionReport {
         considered: pending.len(),
         ..Default::default()
@@ -288,7 +297,12 @@ pub async fn promote_pending_reminders(
         // way, and a reminder still pending beside it is one the next run will
         // propose again.
         match reminders
-            .set_disposition(&reminder.id, ReminderDisposition::Proposed, now)
+            .set_disposition(
+                &reminder.id,
+                &crate::user_data::domain::profile::ProfileScope::Household,
+                ReminderDisposition::Proposed,
+                now,
+            )
             .await
         {
             Ok(true) => report.proposed += 1,

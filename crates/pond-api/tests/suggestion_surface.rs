@@ -26,7 +26,6 @@ use pond_core::user_data::domain::onboarding::OnboardingStep;
 use pond_core::user_data::domain::profile::CreateProfileRequest;
 use pond_core::user_data::mocks::mock_memory::MockMemoryRepository;
 use pond_core::user_data::mocks::mock_sensor::{MockCameraStorage, MockSensorStorage};
-use pond_core::user_data::mocks::mock_settings::MockSettingsRepository;
 use pond_core::user_data::ports::device_registry::{Device, DeviceRegistry, RegisterDeviceRequest};
 use pond_core::user_data::ports::onboarding::OnboardingRepository;
 use pond_core::user_data::ports::profile::ProfileRepository;
@@ -96,6 +95,9 @@ impl DeviceRegistry for SomeDevices {
 struct Harness {
     app: axum::Router,
     profiles: Arc<SqliteProfileRepository>,
+    pool: sqlx::Pool<sqlx::Sqlite>,
+    storage: Arc<SqliteSessionStorage>,
+    settings: Arc<pond_infra::sqlite_settings::SqliteSettingsRepository>,
     _tmp: tempfile::TempDir,
 }
 
@@ -105,7 +107,12 @@ async fn make_app(device_count: usize) -> Harness {
     let pool = db.system.clone();
     let storage = Arc::new(SqliteSessionStorage::new(pool.clone()));
     let profiles = Arc::new(SqliteProfileRepository::new(pool.clone()));
-    let settings = Arc::new(MockSettingsRepository::new());
+    // The real store, not `MockSettingsRepository`: the mock persists 23 of
+    // the 138 fields and silently drops the rest, so a test that flips
+    // `suggestion_generation_enabled` would read the default straight back.
+    let settings = Arc::new(pond_infra::sqlite_settings::SqliteSettingsRepository::new(
+        pool.clone(),
+    ));
     let devices: Arc<dyn DeviceRegistry + Send + Sync> = Arc::new(SomeDevices(device_count));
     let hs = MockHandshake::new();
     hs.add_valid_token("test-token".to_string()).await;
@@ -206,6 +213,9 @@ async fn make_app(device_count: usize) -> Harness {
     Harness {
         app: build_router(state, std::path::PathBuf::from("pond-desktop/dist")),
         profiles,
+        pool,
+        storage,
+        settings,
         _tmp: tmp,
     }
 }
@@ -239,6 +249,66 @@ async fn get_json(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
         .unwrap();
     let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, body)
+}
+
+/// A session bound to a member at `Explicit` strength -- what
+/// `PUT /sessions/{id}/user` writes, and the plainest way to be identified.
+async fn session_of(h: &Harness, id: &str, profile_id: &str) -> String {
+    use pond_core::user_data::domain::session::{IdentificationSource, SessionIdentity};
+    use pond_core::user_data::ports::session_storage::SessionStorage;
+    h.storage.create_session(id.to_string()).await.unwrap();
+    h.storage
+        .set_session_identity(
+            id,
+            &SessionIdentity {
+                profile_id: Some(profile_id.to_string()),
+                source: IdentificationSource::Explicit,
+                confidence: None,
+            },
+        )
+        .await
+        .unwrap();
+    id.to_string()
+}
+
+/// A question composed from one member's own note, queued as the lane would.
+///
+/// The note goes into the real `memory_fragments` table, not the mock memory
+/// repository, because `offerable` joins it to decide the offer is still live
+/// -- a queued question whose note has gone is never shown.
+async fn compose_for(h: &Harness, member: &str, memory_id: &str, prompt: &str) {
+    use pond_core::user_data::ports::suggestion_queue::SuggestionQueueRepository;
+    use pond_core::user_data::services::suggestion_generation::GeneratedSuggestion;
+    sqlx::query(
+        "INSERT INTO memory_fragments (id, profile_id, content, source, created_at, lifecycle) \
+         VALUES (?, ?, 'a private note', 'extraction', datetime('now'), 'active')",
+    )
+    .bind(memory_id)
+    .bind(member)
+    .execute(&h.pool)
+    .await
+    .unwrap();
+    let queued = pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(h.pool.clone())
+        .queue(&[GeneratedSuggestion {
+            source_memory_id: memory_id.to_string(),
+            profile_id: Some(member.to_string()),
+            prompt: prompt.to_string(),
+            reason: "From something you told me, saved 3 days ago.".to_string(),
+        }])
+        .await
+        .unwrap();
+    assert_eq!(queued, 1, "the fixture must actually queue the question");
+}
+
+fn prompts(body: &Value) -> Vec<String> {
+    body["suggestions"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s["prompt"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn offered(body: &Value) -> Vec<String> {
@@ -374,4 +444,140 @@ async fn the_route_never_refuses_whoever_is_asking() {
             "refused a caller on a pond with {members} members; body: {body}"
         );
     }
+}
+
+/// One member must never be offered a question composed from another's note.
+///
+/// THE DEFECT: the route mapped every non-Guest caller to `Household`, whose
+/// read predicate is empty. `Household` is only ever RESOLVED on a pond of one,
+/// where it is that member -- but an identified member on a pond of two
+/// resolves to `Owner(them)`, which was widened to `Household` and read every
+/// member's rows. Liz's question, derived from Liz's private note, reached
+/// Jerry's screen with its "saved 3 days ago" reason attached.
+#[tokio::test]
+async fn an_identified_member_is_never_offered_another_members_composed_question() {
+    let h = make_app(19).await;
+    let jerry = member(&h, "Jerry").await;
+    let liz = member(&h, "Liz").await;
+    let lizs_question = "When is my appointment at the clinic?";
+    compose_for(&h, &liz, "m-liz-clinic", lizs_question).await;
+
+    let session = session_of(&h, "s-jerry", &jerry).await;
+    let (status, body) =
+        get_json(&h.app, &format!("/api/v1/suggestions?session_id={session}")).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        body["audience"].as_str(),
+        Some("personal"),
+        "Jerry is identified, so this is his personal tier; body: {body}"
+    );
+    assert!(
+        !prompts(&body).iter().any(|p| p == lizs_question),
+        "Liz's composed question reached Jerry; body: {body}"
+    );
+}
+
+/// The control: the member the note belongs to IS offered it.
+///
+/// Without this the test above would pass for the wrong reason -- a queue this
+/// harness cannot read, an `offerable` join that finds no live note, a route
+/// that never serves the composed tier at all.
+#[tokio::test]
+async fn the_member_a_note_belongs_to_is_offered_the_question_composed_from_it() {
+    let h = make_app(19).await;
+    let _jerry = member(&h, "Jerry").await;
+    let liz = member(&h, "Liz").await;
+    let lizs_question = "When is my appointment at the clinic?";
+    compose_for(&h, &liz, "m-liz-clinic", lizs_question).await;
+
+    let session = session_of(&h, "s-liz", &liz).await;
+    let (status, body) =
+        get_json(&h.app, &format!("/api/v1/suggestions?session_id={session}")).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(
+        prompts(&body).iter().any(|p| p == lizs_question),
+        "Liz was not offered the question composed from her own note; body: {body}"
+    );
+}
+
+/// Nobody identified on a pond of two sees no composed question at all.
+///
+/// The existing multi-member test checks only the template tier's personal
+/// suggestors, every one of which is silent on this harness for its own reason
+/// (no calendar, no mail, a mock memory store) -- so it could not have caught
+/// a composed question leaking to the guest tier.
+#[tokio::test]
+async fn nobody_identified_on_a_pond_of_two_is_offered_no_composed_question() {
+    let h = make_app(19).await;
+    let _jerry = member(&h, "Jerry").await;
+    let liz = member(&h, "Liz").await;
+    compose_for(
+        &h,
+        &liz,
+        "m-liz-clinic",
+        "When is my appointment at the clinic?",
+    )
+    .await;
+
+    let (status, body) = get_json(&h.app, "/api/v1/suggestions").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["audience"].as_str(), Some("shared"), "body: {body}");
+    let composed: Vec<&Value> = body["suggestions"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|s| s["composed"] == Value::Bool(true))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        composed.is_empty(),
+        "a composed question reached the guest tier; body: {body}"
+    );
+}
+
+/// Switching "Suggest things to ask" off takes composed questions off Home at
+/// once, and switching it back on returns the same ones.
+///
+/// The toggle's own description promises "Off, Home still suggests -- but only
+/// the same general questions every day". It used to stop only NEW
+/// composition, so every question already queued stayed on screen -- the one
+/// thing a household turns it off to prevent.
+#[tokio::test]
+async fn turning_composed_suggestions_off_takes_the_queued_ones_off_home() {
+    use pond_core::user_data::ports::settings::SettingsRepository;
+
+    let h = make_app(19).await;
+    let jerry = member(&h, "Jerry").await;
+    let question = "What did I decide about the garden fence?";
+    compose_for(&h, &jerry, "m-jerry-fence", question).await;
+
+    // On: the question is there. This is the control -- without it, "off shows
+    // nothing" would pass on a harness that never serves the composed tier.
+    let (_, body) = get_json(&h.app, "/api/v1/suggestions").await;
+    assert!(
+        prompts(&body).iter().any(|p| p == question),
+        "on: body: {body}"
+    );
+
+    let mut off = h.settings.get().await.unwrap();
+    off.suggestion_generation_enabled = false;
+    h.settings.update(&off).await.unwrap();
+    let (status, body) = get_json(&h.app, "/api/v1/suggestions").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(
+        !prompts(&body).iter().any(|p| p == question),
+        "off: a queued composed question is still on Home; body: {body}"
+    );
+
+    // On again: the same question, not one rebuilt by a later pass -- the row
+    // was kept, which is what makes the switch reversible without a night.
+    let mut on = h.settings.get().await.unwrap();
+    on.suggestion_generation_enabled = true;
+    h.settings.update(&on).await.unwrap();
+    let (_, body) = get_json(&h.app, "/api/v1/suggestions").await;
+    assert!(
+        prompts(&body).iter().any(|p| p == question),
+        "back on: body: {body}"
+    );
 }

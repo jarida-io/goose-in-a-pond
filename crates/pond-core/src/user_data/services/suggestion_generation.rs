@@ -238,6 +238,34 @@ pub fn order_candidates(memories: &mut [MemoryFragment]) {
     memories.sort_by_key(worth_asking_about);
 }
 
+/// The notes for ONE composing call: those belonging to the owner of the most
+/// worth-asking note, in order, up to [`MEMORIES_PER_PASS`]. Unattributed notes
+/// are an owner of their own.
+///
+/// A prompt never holds two members' notes, and that is a privacy rule rather
+/// than a tidiness one. [`parse_response`] attributes a question to the owner
+/// of the note the MODEL says it used -- and nothing can check that a question
+/// is really about that note rather than a blend of two, or that the number is
+/// not simply wrong. With twelve notes from anyone in one prompt, a question
+/// built from Liz's medical appointment, numbered as an unattributed grocery
+/// note, was queued with no owner and offered to every member. With one owner
+/// per prompt, every number the model could write names the same owner, so
+/// the attribution is right whatever the model does.
+///
+/// It costs nothing in inference: still one call per pass. The other owners'
+/// notes get their turn on later passes, because the queue subtracts notes
+/// that already carry a live question before ordering.
+pub fn one_owners_candidates(ordered: Vec<MemoryFragment>) -> Vec<MemoryFragment> {
+    let Some(owner) = ordered.first().map(|m| m.profile_id.clone()) else {
+        return Vec::new();
+    };
+    ordered
+        .into_iter()
+        .filter(|m| m.profile_id == owner)
+        .take(MEMORIES_PER_PASS)
+        .collect()
+}
+
 /// Number the memories for the model.
 ///
 /// The index is 1-based and positional: it means "the nth line of this prompt",
@@ -592,6 +620,107 @@ mod tests {
             superseded_by: None,
             corrects: None,
         }
+    }
+
+    fn owned(id: &str, content: &str, owner: Option<&str>) -> MemoryFragment {
+        let mut m = memory(id, content);
+        m.profile_id = owner.map(str::to_string);
+        m
+    }
+
+    /// A composing prompt holds one owner's notes, never a mix.
+    #[test]
+    fn one_composing_call_holds_one_owners_notes() {
+        let ordered = vec![
+            owned(
+                "m1",
+                "Liz sees Dr. Otieno at Aga Khan on Friday.",
+                Some("liz"),
+            ),
+            owned(
+                "m2",
+                "The household does the grocery run at Carrefour.",
+                None,
+            ),
+            owned(
+                "m3",
+                "Jerry waters the greenhouse before work.",
+                Some("jerry"),
+            ),
+            owned(
+                "m4",
+                "Liz takes her tea without sugar these days.",
+                Some("liz"),
+            ),
+        ];
+        let ids: Vec<String> = one_owners_candidates(ordered)
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(ids, vec!["m1", "m4"], "only the top note's owner, in order");
+    }
+
+    #[test]
+    fn unattributed_notes_are_an_owner_of_their_own() {
+        let ordered = vec![
+            owned(
+                "m2",
+                "The household does the grocery run at Carrefour.",
+                None,
+            ),
+            owned(
+                "m1",
+                "Liz sees Dr. Otieno at Aga Khan on Friday.",
+                Some("liz"),
+            ),
+            owned("m5", "The bins go out on Thursday night.", None),
+        ];
+        let ids: Vec<String> = one_owners_candidates(ordered)
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(ids, vec!["m2", "m5"]);
+        assert!(one_owners_candidates(Vec::new()).is_empty());
+    }
+
+    /// THE PROPERTY: whatever number the model writes, the question is
+    /// attributed to the one owner whose notes were in the prompt.
+    ///
+    /// Asked the dangerous way on purpose -- a question plainly about the
+    /// first note, reported as belonging to the other. Over a mixed prompt
+    /// that misnumbering moved Liz's appointment into an unattributed row;
+    /// over one owner's notes there is no other owner for it to move to.
+    #[test]
+    fn a_misnumbered_question_cannot_leave_its_owner() {
+        let candidates = one_owners_candidates(vec![
+            owned(
+                "m1",
+                "Liz sees Dr. Otieno at Aga Khan on Friday about her blood pressure.",
+                Some("liz"),
+            ),
+            owned(
+                "m2",
+                "The household does the grocery run at Carrefour.",
+                None,
+            ),
+            owned(
+                "m4",
+                "Liz takes her tea without sugar these days.",
+                Some("liz"),
+            ),
+        ]);
+        let reply = r#"[{"memory":2,"question":"Should I move the grocery run around the Aga Khan visit?"}]"#;
+        let out = parse_response(reply, &candidates, &[], now());
+        assert_eq!(
+            out.accepted.len(),
+            1,
+            "the control: the question was accepted at all"
+        );
+        assert_eq!(
+            out.accepted[0].profile_id.as_deref(),
+            Some("liz"),
+            "a question built from Liz's note was attributed to somebody else"
+        );
     }
 
     fn segmented(id: &str, content: &str, segment: MemorySegment) -> MemoryFragment {

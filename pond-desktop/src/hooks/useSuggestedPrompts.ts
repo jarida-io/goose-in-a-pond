@@ -45,6 +45,15 @@ export function useSuggestedPrompts(sessionId?: string | null): string[] {
   useEffect(() => {
     let cancelled = false;
 
+    // The audience just changed, so whatever is on screen belongs to the last
+    // one. Back to the neutral fallback NOW, not when the fetch lands: the
+    // chips can be personal -- composed from one member's own notes -- and a
+    // "New conversation" on a shared panel is exactly when the next person
+    // walks up. This used to keep the previous prompts until something
+    // replaced them, and an empty or failed fetch never did, so one member's
+    // dentist question sat on an empty chat for a guest to read.
+    setPrompts(ABOUT_THE_ASSISTANT);
+
     async function load(): Promise<void> {
       try {
         const list = await api.listSuggestions(sessionId ?? null);
@@ -55,7 +64,7 @@ export function useSuggestedPrompts(sessionId?: string | null): string[] {
         // loading state that never finishes.
         if (offered.length > 0) setPrompts(offered);
       } catch {
-        // Keep the fallback. These chips are a convenience, and a convenience
+        // The fallback stays. These chips are a convenience, and a convenience
         // that renders an error is worse than one that renders something true.
       }
     }

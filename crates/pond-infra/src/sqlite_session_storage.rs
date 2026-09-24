@@ -629,6 +629,57 @@ impl SessionStorage for SqliteSessionStorage {
         Ok(false)
     }
 
+    async fn claim_session_identity(
+        &self,
+        session_id: &str,
+        identity: &SessionIdentity,
+    ) -> Result<bool, SessionStorageError> {
+        let cases: String = IdentificationSource::ALL_RANKED
+            .iter()
+            .map(|(name, rank)| format!("WHEN '{name}' THEN {rank}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let unattributed = IdentificationSource::ALL_RANKED.len();
+
+        // The strength write's statement, plus the one clause that makes it a
+        // claim: the session is unattributed, or already this member's. Inside
+        // the UPDATE, not read first, for the reason the trait gives -- a
+        // read-then-write lets a second device slip in between.
+        let sql = format!(
+            "UPDATE sessions SET \
+               profile_id                = ?, \
+               identification_source     = ?, \
+               identification_confidence = ? \
+             WHERE id = ? \
+               AND (profile_id IS NULL OR profile_id = ?) \
+               AND ? <= (CASE COALESCE(identification_source, '') {cases} ELSE {unattributed} END)"
+        );
+
+        let result = sqlx::query(&sql)
+            .bind(identity.profile_id.as_deref())
+            .bind(identity.source.as_str())
+            .bind(identity.confidence.map(|c| c as f64))
+            .bind(session_id)
+            .bind(identity.profile_id.as_deref())
+            .bind(identity.source.rank() as i64)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| SessionStorageError::StorageError(e.to_string()))?;
+
+        if result.rows_affected() > 0 {
+            return Ok(true);
+        }
+        let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE id = ?")
+            .bind(session_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| SessionStorageError::StorageError(e.to_string()))?;
+        if exists == 0 {
+            return Err(SessionStorageError::SessionNotFound(session_id.to_string()));
+        }
+        Ok(false)
+    }
+
     async fn get_session_tool_groups(
         &self,
         session_id: &str,
@@ -3026,6 +3077,104 @@ mod tests {
                 source
             );
         }
+    }
+
+    fn who(profile: &str, source: IdentificationSource) -> SessionIdentity {
+        SessionIdentity {
+            profile_id: Some(profile.into()),
+            source,
+            confidence: None,
+        }
+    }
+
+    /// An implicit device claim never moves a session to a different member.
+    ///
+    /// THE DEFECT: `resolve_turn_scope` persisted the paired-device rung with
+    /// the strength-only write, and resolves scope for read routes too. So
+    /// Liz's phone opening the proposals for Jerry's session -- bound to him
+    /// by face, or by his own "this is Jerry" -- took it, because
+    /// `PairedDevice` outranks both. This is the one write that must not.
+    #[tokio::test]
+    async fn a_device_claim_never_takes_a_session_bound_to_another_member() {
+        for held in [IdentificationSource::Face, IdentificationSource::Explicit] {
+            let (s, _tmp) = make_storage().await;
+            s.create_session("sess-1".to_string()).await.unwrap();
+            insert_profile(&s, "jerry").await;
+            insert_profile(&s, "liz").await;
+            assert!(s
+                .set_session_identity_if_stronger("sess-1", &who("jerry", held))
+                .await
+                .unwrap());
+
+            assert!(
+                !s.claim_session_identity(
+                    "sess-1",
+                    &who("liz", IdentificationSource::PairedDevice)
+                )
+                .await
+                .unwrap(),
+                "Liz's device took a session bound to Jerry by {held:?}"
+            );
+            let kept = s.get_session_identity("sess-1").await.unwrap();
+            assert_eq!(kept.profile_id.as_deref(), Some("jerry"));
+            assert_eq!(kept.source, held);
+        }
+    }
+
+    /// The control: a device claim binds a session nobody holds. Without this,
+    /// a claim that refused everything would pass the test above -- and would
+    /// quietly stop the batch extractor attributing any paired-device chat.
+    #[tokio::test]
+    async fn a_device_claim_binds_an_unattributed_session() {
+        let (s, _tmp) = make_storage().await;
+        s.create_session("sess-1".to_string()).await.unwrap();
+        insert_profile(&s, "liz").await;
+        assert!(s
+            .claim_session_identity("sess-1", &who("liz", IdentificationSource::PairedDevice))
+            .await
+            .unwrap());
+        assert_eq!(
+            s.get_session_identity("sess-1")
+                .await
+                .unwrap()
+                .profile_id
+                .as_deref(),
+            Some("liz")
+        );
+    }
+
+    /// And it still strengthens the SAME member's binding: a face match
+    /// upgraded to the device proof, which is the case the claim exists for.
+    #[tokio::test]
+    async fn a_device_claim_strengthens_the_same_members_binding() {
+        let (s, _tmp) = make_storage().await;
+        s.create_session("sess-1".to_string()).await.unwrap();
+        insert_profile(&s, "jerry").await;
+        assert!(s
+            .set_session_identity_if_stronger("sess-1", &who("jerry", IdentificationSource::Face))
+            .await
+            .unwrap());
+        assert!(s
+            .claim_session_identity("sess-1", &who("jerry", IdentificationSource::PairedDevice))
+            .await
+            .unwrap());
+        assert_eq!(
+            s.get_session_identity("sess-1").await.unwrap().source,
+            IdentificationSource::PairedDevice
+        );
+    }
+
+    #[tokio::test]
+    async fn a_claim_on_a_missing_session_is_still_not_found() {
+        let (s, _tmp) = make_storage().await;
+        let err = s
+            .claim_session_identity(
+                "no-such-session",
+                &who("liz", IdentificationSource::PairedDevice),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SessionStorageError::SessionNotFound(id) if id == "no-such-session"));
     }
 
     /// A legacy row has a NULL source and is unattributed, so anything binds it.

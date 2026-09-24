@@ -377,6 +377,41 @@ pub trait SessionStorage: Send + Sync {
         Ok(true)
     }
 
+    /// Bind an unattributed session to `identity`, or strengthen a binding that
+    /// is already to the SAME member. Never moves a session to a different one.
+    ///
+    /// For implicit claims -- an inference about who is making THIS request --
+    /// as opposed to [`set_session_identity_if_stronger`], which is for
+    /// deliberate ones. The difference is exactly the case that method is
+    /// designed to allow: "this is Liz", typed at the pond, must be able to
+    /// correct a face match that bound the session to Jerry, so strength alone
+    /// decides there. A paired phone that merely OPENS a conversation is not a
+    /// statement about whose conversation it is. `PairedDevice` is the
+    /// strongest source there is, so under strength alone Liz's phone reading
+    /// the proposals for Jerry's session would take it -- and after that
+    /// Jerry's next turn at the kiosk is answered with Liz's context, and the
+    /// batch extractor files what Jerry said as Liz's memories.
+    ///
+    /// Returns `true` when the write happened, `false` when the session is
+    /// bound to somebody else or a stronger source already holds it.
+    ///
+    /// Like the method above, the default is **not** race-free; real adapters
+    /// do the comparison inside the write.
+    async fn claim_session_identity(
+        &self,
+        session_id: &str,
+        identity: &SessionIdentity,
+    ) -> Result<bool, SessionStorageError> {
+        let existing = self.get_session_identity(session_id).await?;
+        let someone_else =
+            existing.profile_id.is_some() && existing.profile_id != identity.profile_id;
+        if someone_else || !identity.supersedes(&existing) {
+            return Ok(false);
+        }
+        self.set_session_identity(session_id, identity).await?;
+        Ok(true)
+    }
+
     /// The tool GROUPS (MCP extension names) selected for this session, if any.
     ///
     /// Phase D2 chooses a session's tool surface once, from its opening message,

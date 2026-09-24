@@ -3843,7 +3843,13 @@ mod batch_tests {
         assert_eq!(report.reminders_written, 1);
         assert_eq!(report.reminders_lost, 0);
 
-        let rows = reminders.list_pending(10).await.unwrap();
+        let rows = reminders
+            .list_pending(
+                &crate::user_data::domain::profile::ProfileScope::Household,
+                10,
+            )
+            .await
+            .unwrap();
         assert_eq!(
             rows.len(),
             1,

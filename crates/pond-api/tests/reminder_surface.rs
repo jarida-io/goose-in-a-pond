@@ -79,6 +79,8 @@ impl DeviceRegistry for NoDevices {
 struct Harness {
     app: axum::Router,
     reminders: SqliteReminderRepository,
+    profiles: Arc<SqliteProfileRepository>,
+    storage: Arc<SqliteSessionStorage>,
     _tmp: tempfile::TempDir,
 }
 
@@ -187,6 +189,8 @@ async fn make_app() -> Harness {
     Harness {
         app: build_router(state, std::path::PathBuf::from("pond-desktop/dist")),
         reminders: SqliteReminderRepository::new(pool),
+        profiles,
+        storage,
         _tmp: tmp,
     }
 }
@@ -388,4 +392,82 @@ async fn the_page_is_bounded_and_says_what_it_was_asked_for() {
 
     let (_, body) = get_json(&h.app, "/api/v1/reminders?limit=99999").await;
     assert_eq!(body["limit"], 500, "clamped, not honoured");
+}
+
+async fn a_member(h: &Harness, name: &str) -> String {
+    use pond_core::user_data::domain::profile::CreateProfileRequest;
+    use pond_core::user_data::ports::profile::ProfileRepository;
+    h.profiles
+        .create(CreateProfileRequest {
+            display_name: name.to_string(),
+            avatar_emoji: "\u{1F986}".to_string(),
+        })
+        .await
+        .unwrap()
+        .id
+}
+
+async fn a_session_of(h: &Harness, id: &str, profile_id: &str) -> String {
+    use pond_core::user_data::domain::session::{IdentificationSource, SessionIdentity};
+    use pond_core::user_data::ports::session_storage::SessionStorage;
+    h.storage.create_session(id.to_string()).await.unwrap();
+    h.storage
+        .set_session_identity(
+            id,
+            &SessionIdentity {
+                profile_id: Some(profile_id.to_string()),
+                source: IdentificationSource::Explicit,
+                confidence: None,
+            },
+        )
+        .await
+        .unwrap();
+    id.to_string()
+}
+
+/// A member's reminder reaches that member, and nobody else -- over HTTP.
+///
+/// The adapter's own tests prove the SQL; this proves the ROUTE passes the
+/// caller's scope rather than one that reads everybody's. A route that handed
+/// the repository `Household` would pass every adapter test and still read
+/// Liz's clinic date out to a guest's phone.
+#[tokio::test]
+async fn a_members_reminder_reaches_that_member_and_nobody_else() {
+    let h = make_app().await;
+    let jerry = a_member(&h, "Jerry").await;
+    let liz = a_member(&h, "Liz").await;
+    let mut lizs = reminder("r-liz", "the clinic", Duration::hours(1));
+    lizs.profile_id = Some(liz.clone());
+    assert!(h.reminders.capture(&lizs).await.unwrap());
+
+    let (status, body) = get_json(&h.app, "/api/v1/reminders").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(
+        !ids(&body).contains(&"r-liz".to_string()),
+        "a guest read Liz's reminder: {body}"
+    );
+
+    let s_jerry = a_session_of(&h, "s-jerry", &jerry).await;
+    let (_, body) = get_json(&h.app, &format!("/api/v1/reminders?session_id={s_jerry}")).await;
+    assert!(
+        !ids(&body).contains(&"r-liz".to_string()),
+        "Jerry read Liz's reminder: {body}"
+    );
+
+    // A guest cannot dismiss it either, and is told the same 404 as for an id
+    // that does not exist -- so the refusal discloses nothing.
+    let (status, _) = post_json(&h.app, "/api/v1/reminders/r-liz/dismiss").await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a guest dismissed Liz's reminder"
+    );
+
+    // The control: Liz sees it, still pending after the refused dismiss.
+    let s_liz = a_session_of(&h, "s-liz", &liz).await;
+    let (_, body) = get_json(&h.app, &format!("/api/v1/reminders?session_id={s_liz}")).await;
+    assert!(
+        ids(&body).contains(&"r-liz".to_string()),
+        "Liz could not read her own reminder: {body}"
+    );
 }

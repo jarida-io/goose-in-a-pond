@@ -10,6 +10,7 @@
 //! fail cannot show that a failure is counted, and "the date is lost" is the one
 //! outcome here that has to be visible rather than merely handled.
 
+use crate::user_data::domain::profile::ProfileScope;
 use crate::user_data::domain::reminder::{CapturedReminder, ReminderDisposition};
 use crate::user_data::ports::reminder_repository::ReminderRepository;
 use anyhow::Result;
@@ -33,6 +34,17 @@ impl MockReminderRepository {
     }
 }
 
+/// The SQL adapter's scope predicate, restated for the in-memory rows. It has
+/// to match, or a mock-backed test would pass on a read the real store refuses
+/// -- or, worse, the other way round.
+fn in_scope(scope: &ProfileScope, row_owner: Option<&str>) -> bool {
+    match scope {
+        ProfileScope::Owner(id) => row_owner.is_none() || row_owner == Some(id.as_str()),
+        ProfileScope::Household => true,
+        ProfileScope::Guest => false,
+    }
+}
+
 #[async_trait]
 impl ReminderRepository for MockReminderRepository {
     async fn capture(&self, reminder: &CapturedReminder) -> Result<bool> {
@@ -47,11 +59,16 @@ impl ReminderRepository for MockReminderRepository {
         Ok(true)
     }
 
-    async fn list_pending(&self, limit: usize) -> Result<Vec<CapturedReminder>> {
+    async fn list_pending(
+        &self,
+        scope: &ProfileScope,
+        limit: usize,
+    ) -> Result<Vec<CapturedReminder>> {
         let rows = self.rows.lock().unwrap();
         let mut pending: Vec<CapturedReminder> = rows
             .iter()
             .filter(|row| row.disposition == ReminderDisposition::Pending)
+            .filter(|row| in_scope(scope, row.profile_id.as_deref()))
             .cloned()
             .collect();
         pending.sort_by(|a, b| b.said_at.cmp(&a.said_at));
@@ -65,14 +82,16 @@ impl ReminderRepository for MockReminderRepository {
     async fn set_disposition(
         &self,
         id: &str,
+        scope: &ProfileScope,
         disposition: ReminderDisposition,
         _at: DateTime<Utc>,
     ) -> Result<bool> {
         let mut rows = self.rows.lock().unwrap();
-        match rows
-            .iter_mut()
-            .find(|row| row.id == id && row.disposition == ReminderDisposition::Pending)
-        {
+        match rows.iter_mut().find(|row| {
+            row.id == id
+                && row.disposition == ReminderDisposition::Pending
+                && in_scope(scope, row.profile_id.as_deref())
+        }) {
             Some(row) => {
                 row.disposition = disposition;
                 Ok(true)

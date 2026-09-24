@@ -71,4 +71,40 @@ describe("useSuggestedPrompts", () => {
       expect(vi.mocked(api.listSuggestions)).toHaveBeenCalledWith(null),
     );
   });
+
+  /// The chips can be personal. When the audience changes -- a "New
+  /// conversation" on a shared panel -- the last person's must not survive a
+  /// fetch for the next one that finds nothing, or fails.
+  it("drops the last audience's prompts when the next fetch comes back empty", async () => {
+    answers(["When is my appointment at the clinic?"]);
+    const { result, rerender } = renderHook(({ sid }) => useSuggestedPrompts(sid), {
+      initialProps: { sid: "s-liz" as string | null },
+    });
+    // The control: the personal prompt really was on screen first. Without
+    // this the assertion below passes on the initial fallback, before the
+    // fetch it is about has ever settled.
+    await waitFor(() => expect(result.current).toEqual(["When is my appointment at the clinic?"]));
+
+    answers([]);
+    rerender({ sid: null });
+    await waitFor(() => expect(vi.mocked(api.listSuggestions)).toHaveBeenLastCalledWith(null));
+    await waitFor(() =>
+      expect(result.current).not.toContain("When is my appointment at the clinic?"),
+    );
+    expect(result.current.length).toBeGreaterThan(0);
+  });
+
+  it("drops the last audience's prompts when the next fetch fails", async () => {
+    answers(["When is my appointment at the clinic?"]);
+    const { result, rerender } = renderHook(({ sid }) => useSuggestedPrompts(sid), {
+      initialProps: { sid: "s-liz" as string | null },
+    });
+    await waitFor(() => expect(result.current).toEqual(["When is my appointment at the clinic?"]));
+
+    vi.mocked(api.listSuggestions).mockRejectedValue(new Error("offline"));
+    rerender({ sid: null });
+    await waitFor(() =>
+      expect(result.current).not.toContain("When is my appointment at the clinic?"),
+    );
+  });
 });

@@ -30,8 +30,28 @@
 //! only needs to be a write target (a test double, a future peer that forwards
 //! rather than stores) compiles without asserting it can answer questions it
 //! cannot, in the same spirit as the defaults that let the extraction cursor be
-//! added to `SessionStorage` without touching every implementation.
+//! added to `SessionStorage` without touching every implementation. Both
+//! defaults fail closed -- an empty list, and "nothing moved" -- which is what
+//! keeps a write-only double from ever answering as though it could see.
+//!
+//! # Reads and moves are scoped, and the scope is the caller's
+//!
+//! A reminder carries the `profile_id` of the member whose conversation said
+//! it. [`list_pending`](ReminderRepository::list_pending) and
+//! [`set_disposition`](ReminderRepository::set_disposition) take the scope the
+//! caller resolved to, with the meaning every other personal read has: `Owner`
+//! sees their own and the unattributed, `Household` sees everything (only ever
+//! resolved on a pond of one, where it IS that member), and `Guest` sees
+//! nothing. A move is scoped as well as a read, because dismissing somebody
+//! else's reminder deletes their date as surely as reading it discloses it.
+//!
+//! They used to take no scope, on a premise that was true when written --
+//! every row a live pond held was unattributed -- and stopped being true the
+//! moment the batch engine began stamping the member a conversation belonged
+//! to. The engine's own promotion pass passes `Household` explicitly, because
+//! routing each reminder to its owner requires reading every owner's.
 
+use crate::user_data::domain::profile::ProfileScope;
 use crate::user_data::domain::reminder::{CapturedReminder, ReminderDisposition};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -52,7 +72,11 @@ pub trait ReminderRepository: Send + Sync {
     /// read it, because a backlog walk reads a year of history in one night and
     /// capture order says nothing about which reminder is still worth asking
     /// about.
-    async fn list_pending(&self, _limit: usize) -> Result<Vec<CapturedReminder>> {
+    async fn list_pending(
+        &self,
+        _scope: &ProfileScope,
+        _limit: usize,
+    ) -> Result<Vec<CapturedReminder>> {
         Ok(vec![])
     }
 
@@ -69,9 +93,14 @@ pub trait ReminderRepository: Send + Sync {
     /// distinction is not bookkeeping: a route that cannot tell them apart
     /// answers "dismissed" for an id that does not exist, which is the pond
     /// asserting something it does not know.
+    ///
+    /// Scoped like the read: a reminder outside `scope` answers `Ok(false)`,
+    /// the same as one that does not exist, so a caller cannot tell a reminder
+    /// it may not touch from one that is not there.
     async fn set_disposition(
         &self,
         _id: &str,
+        _scope: &ProfileScope,
         _disposition: ReminderDisposition,
         _at: DateTime<Utc>,
     ) -> Result<bool> {

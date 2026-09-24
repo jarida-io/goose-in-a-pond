@@ -6985,7 +6985,11 @@ async fn compose_suggestions(
     // pond itself said in a conversation, and keeps recency inside each rank.
     // See `order_candidates`.
     gen::order_candidates(&mut pool);
-    let candidates: Vec<_> = pool.into_iter().take(gen::MEMORIES_PER_PASS).collect();
+    // One owner's notes per call, never a mix -- see `one_owners_candidates`.
+    // The model names the note a question came from, and that number is the
+    // only attribution there is; over a mixed prompt a misnumbered question
+    // leaves the member it is about.
+    let candidates = gen::one_owners_candidates(pool);
 
     if candidates.is_empty() {
         return Ok(empty);
@@ -10719,6 +10723,32 @@ async fn run_pairing(refresh: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// The composing pass hands the model one owner's notes, never a mix.
+    ///
+    /// `one_owners_candidates` is proven in the generator's own tests; this
+    /// proves it is what the pass calls. A revert to "take the top twelve from
+    /// anyone" passes every one of those tests and reopens the leak they close:
+    /// the model names the note a question came from, that number is the only
+    /// attribution there is, and over a mixed prompt a misnumbered question
+    /// about one member is queued under another -- or under nobody, and offered
+    /// to everyone.
+    #[test]
+    fn the_composing_pass_gives_the_model_one_owners_notes() {
+        let src = include_str!("main.rs");
+        let start = src
+            .find("async fn compose_suggestions(")
+            .expect("vacuity: compose_suggestions was not found, so this read nothing");
+        let body = &src[start..start + src[start..].find("\n}\n").unwrap()];
+        assert!(
+            body.contains("search_recent"),
+            "vacuity: this is not the composing pass's body"
+        );
+        assert!(
+            body.contains("gen::one_owners_candidates("),
+            "the composing pass no longer restricts a call to one owner's notes"
+        );
+    }
+
     use super::*;
 
     // ── category_to_provider ──────────────────────────────────────────────────

@@ -13560,15 +13560,13 @@ const SUGGESTION_MAIL_WINDOW_DAYS: i64 = 7;
 /// personal half unreachable on every desktop pond that has not paired an
 /// attributed device, which is most of them, and is the same call commit
 /// `881da889` made for connecting a context source.
-async fn suggestion_audience(
+async fn read_only_caller_scope(
     state: &Arc<AppState>,
     principal: Option<&pond_core::security::ports::policy::Principal>,
     session_id: Option<&str>,
-) -> pond_core::user_data::services::suggestion::Audience {
-    use pond_core::user_data::domain::profile::ProfileScope;
+) -> pond_core::user_data::domain::profile::ProfileScope {
     use pond_core::user_data::domain::session::SessionIdentity;
     use pond_core::user_data::services::identity_resolution;
-    use pond_core::user_data::services::suggestion::Audience;
 
     // A failed read counts as "more than one member", which resolves to Guest
     // and shows less. Every unknown here narrows.
@@ -13617,10 +13615,11 @@ async fn suggestion_audience(
         household_has_multiple_members: members > 1,
     });
 
-    match resolved.scope {
-        ProfileScope::Guest => Audience::Shared,
-        _ => Audience::Personal,
-    }
+    // The scope itself, not a two-valued audience. An audience says how to
+    // PHRASE a suggestion; the scope says whose rows may be READ, and
+    // collapsing the second into the first is how `Owner(them)` became
+    // `Household`.
+    resolved.scope
 }
 
 /// What is known about the tool groups this pond has.
@@ -13700,7 +13699,12 @@ async fn list_suggestions(
     use pond_core::user_data::services::{location, suggestion};
 
     let principal_ref = principal.as_ref().map(|axum::Extension(p)| p);
-    let audience = suggestion_audience(&state, principal_ref, query.session_id.as_deref()).await;
+    let read_scope =
+        read_only_caller_scope(&state, principal_ref, query.session_id.as_deref()).await;
+    let audience = match read_scope {
+        ProfileScope::Guest => suggestion::Audience::Shared,
+        _ => suggestion::Audience::Personal,
+    };
 
     let settings = state.settings_repo.get().await.unwrap_or_default();
     let place = location::resolve(&settings);
@@ -13708,15 +13712,21 @@ async fn list_suggestions(
     let (day_start, day_end) = place.day_bounds(now);
     let week_start = now - chrono::Duration::days(SUGGESTION_MAIL_WINDOW_DAYS);
 
-    // The scope every repository is read at. `Shared` reads as `Guest`, whose
-    // SQL predicate is `AND 1 = 0` -- so the read fails closed even if a
-    // suggestor forgets to check its own audience. Belt and braces, on purpose:
-    // the engine's check is what produces the honest silence message, and this
-    // is what makes a missing check harmless rather than a disclosure.
-    let read_scope = match audience {
-        suggestion::Audience::Personal => ProfileScope::Household,
-        suggestion::Audience::Shared => ProfileScope::Guest,
-    };
+    // Every repository below is read at `read_scope` -- the scope identity
+    // resolution produced, NOT a widening of it. `Guest` has the SQL predicate
+    // `AND 1 = 0`, so the read fails closed even if a suggestor forgets to
+    // check its own audience: the engine's check is what produces the honest
+    // silence message, and this is what makes a missing check harmless rather
+    // than a disclosure.
+    //
+    // This used to map every non-Guest caller to `Household`, whose predicate
+    // is empty. That is safe for exactly the case it was written for --
+    // `Household` is only ever resolved on a pond of one, where it IS that
+    // member -- and a disclosure for the case it was not: an identified member
+    // on a pond of two resolves to `Owner(them)`, was widened to `Household`,
+    // and was shown the other member's composed questions, memories, and
+    // calendar and mail counts. `Owner` reads their own rows and the
+    // unattributed ones, which is the whole point of having resolved them.
 
     let repo = context_repo(&state);
     // One read of the source list, used for both context suggestors.
@@ -13817,14 +13827,27 @@ async fn list_suggestions(
     // so a note belonging to a member cannot reach a shared screen even if this
     // function forgot to check, which is the same belt-and-braces the context
     // reads above use.
-    let composed = state
-        .suggestion_queue
-        .offerable(&read_scope, suggestion::MAX_SUGGESTIONS)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::debug!(error = %e, "suggestions: could not read the composed queue");
-            Vec::new()
-        });
+    //
+    // And only while the household wants composed questions at all. The toggle
+    // tells them "Off, Home still suggests -- but only the same general
+    // questions every day", and switching it off has to mean that at once. It
+    // used to stop only NEW composition: every question already queued -- each
+    // built from somebody's own note -- stayed on Home until tapped, which is
+    // precisely the screen a household turns this off to keep their notes off.
+    // The rows are left in the queue rather than discarded, so switching back
+    // on restores them instead of waiting a night for a pass to rebuild them.
+    let composed = if settings.suggestion_generation_enabled {
+        state
+            .suggestion_queue
+            .offerable(&read_scope, suggestion::MAX_SUGGESTIONS)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::debug!(error = %e, "suggestions: could not read the composed queue");
+                Vec::new()
+            })
+    } else {
+        Vec::new()
+    };
 
     let mut offered: Vec<Value> = composed
         .iter()
@@ -13953,6 +13976,18 @@ fn reminder_json(r: &pond_core::user_data::domain::reminder::CapturedReminder) -
 struct ListRemindersQuery {
     #[serde(default)]
     limit: Option<usize>,
+    /// Optional, for the same reason as on `/suggestions`: a cold client has
+    /// no session. Absent means the caller is resolved from their device alone
+    /// -- which on a pond of two, with no device, is `Guest`, and reads nothing.
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+/// The session a dismiss is made from, so the move is scoped to the caller.
+#[derive(serde::Deserialize, Default)]
+struct DismissReminderQuery {
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 /// The largest page this route will answer with, and what it answers without a
@@ -13969,16 +14004,24 @@ const REMINDERS_PAGE_DEFAULT: usize = 100;
 /// be asking again.
 async fn list_reminders(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Query(query): Query<ListRemindersQuery>,
 ) -> impl axum::response::IntoResponse {
     use pond_core::user_data::ports::reminder_repository::ReminderRepository;
+
+    // Read at the caller's own scope, resolved without writing anything back.
+    // A reminder carries its member's `profile_id` -- the batch engine stamps
+    // it -- so an unscoped read handed one member's dated reminders ("the
+    // clinic on the 14th") to anybody who asked, a guest's phone included.
+    let principal_ref = principal.as_ref().map(|axum::Extension(p)| p);
+    let scope = read_only_caller_scope(&state, principal_ref, query.session_id.as_deref()).await;
 
     let limit = query
         .limit
         .unwrap_or(REMINDERS_PAGE_DEFAULT)
         .clamp(1, REMINDERS_PAGE_MAX);
 
-    match reminder_repo(&state).list_pending(limit).await {
+    match reminder_repo(&state).list_pending(&scope, limit).await {
         Ok(reminders) => Json(json!({
             "reminders": reminders.iter().map(reminder_json).collect::<Vec<_>>(),
             // What was asked for, so a client that got exactly `limit` rows
@@ -14015,13 +14058,26 @@ async fn list_reminders(
 /// write would let two callers disagree about which decision stuck.
 async fn dismiss_reminder(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
+    Query(query): Query<DismissReminderQuery>,
 ) -> impl axum::response::IntoResponse {
     use pond_core::user_data::domain::reminder::ReminderDisposition;
     use pond_core::user_data::ports::reminder_repository::ReminderRepository;
 
+    // Scoped like the read. A reminder outside the caller's scope answers 404,
+    // exactly as one that does not exist, so a caller learns nothing about a
+    // reminder it may not touch -- and cannot delete somebody else's date.
+    let principal_ref = principal.as_ref().map(|axum::Extension(p)| p);
+    let scope = read_only_caller_scope(&state, principal_ref, query.session_id.as_deref()).await;
+
     match reminder_repo(&state)
-        .set_disposition(&id, ReminderDisposition::Dismissed, chrono::Utc::now())
+        .set_disposition(
+            &id,
+            &scope,
+            ReminderDisposition::Dismissed,
+            chrono::Utc::now(),
+        )
         .await
     {
         Ok(true) => Json(json!({"id": id, "disposition": "dismissed"})).into_response(),
@@ -16727,9 +16783,17 @@ async fn resolve_turn_scope(
             // line an identified member's chats would be the ones the pond
             // refuses to remember.
             //
-            // `_if_stronger` rather than a plain write: the comparison happens
-            // inside the write, so a face match landing a millisecond later
-            // cannot downgrade a cryptographic binding to a probabilistic one.
+            // A CLAIM, not `_if_stronger`: it binds an unattributed session or
+            // strengthens this member's own binding, and never moves a session
+            // to a different member. This function also resolves scope for
+            // read routes -- GET /proposals, the context routes -- that take a
+            // session id straight from the query string, so under strength
+            // alone (and `PairedDevice` is the strongest source there is) Liz's
+            // phone merely LOOKING at Jerry's conversation would have taken it.
+            // Jerry's next turn at the kiosk would then be answered with Liz's
+            // context, and the batch extractor would file his words as her
+            // memories. The comparison is inside the write, so a face match
+            // landing a millisecond later still cannot downgrade the binding.
             // A refusal is a normal outcome and is not logged as a failure.
             let proposed = SessionIdentity {
                 profile_id: Some(profile_id.clone()),
@@ -16738,7 +16802,7 @@ async fn resolve_turn_scope(
             };
             if let Err(e) = state
                 .session_storage
-                .set_session_identity_if_stronger(session_id, &proposed)
+                .claim_session_identity(session_id, &proposed)
                 .await
             {
                 tracing::warn!(

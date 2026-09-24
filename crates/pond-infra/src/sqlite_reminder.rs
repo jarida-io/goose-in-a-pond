@@ -18,6 +18,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
+use pond_core::user_data::domain::profile::ProfileScope;
 use pond_core::user_data::domain::reminder::{CapturedReminder, ReminderDisposition};
 use pond_core::user_data::ports::reminder_repository::ReminderRepository;
 use sqlx::{Pool, Sqlite};
@@ -105,6 +106,21 @@ fn row_to_reminder(row: ReminderRow) -> Result<CapturedReminder> {
     })
 }
 
+/// The scope predicate, in the same shape `sqlite_suggestion_queue` and
+/// `sqlite_memory` use: an `Owner` sees their own rows and the unattributed
+/// ones, a `Household` sees everything, a `Guest` sees nothing -- and says so
+/// in SQL, so a caller that forgot to check still fails closed.
+fn scope_sql(scope: &ProfileScope) -> (&'static str, Option<&str>) {
+    match scope {
+        ProfileScope::Owner(id) => (
+            "AND (profile_id = ? OR profile_id IS NULL)",
+            Some(id.as_str()),
+        ),
+        ProfileScope::Household => ("", None),
+        ProfileScope::Guest => ("AND 1 = 0", None),
+    }
+}
+
 #[async_trait]
 impl ReminderRepository for SqliteReminderRepository {
     async fn capture(&self, reminder: &CapturedReminder) -> Result<bool> {
@@ -133,15 +149,25 @@ impl ReminderRepository for SqliteReminderRepository {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn list_pending(&self, limit: usize) -> Result<Vec<CapturedReminder>> {
-        let rows: Vec<ReminderRow> = sqlx::query_as(&format!(
+    async fn list_pending(
+        &self,
+        scope: &ProfileScope,
+        limit: usize,
+    ) -> Result<Vec<CapturedReminder>> {
+        let (predicate, owner) = scope_sql(scope);
+        let sql = format!(
             "SELECT {REMINDER_COLUMNS} FROM reminders \
-             WHERE disposition = 'pending' ORDER BY said_at DESC LIMIT ?"
-        ))
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
-        .await
-        .context("listing pending reminders")?;
+             WHERE disposition = 'pending' {predicate} ORDER BY said_at DESC LIMIT ?"
+        );
+        let mut query = sqlx::query_as::<_, ReminderRow>(&sql);
+        if let Some(owner) = owner {
+            query = query.bind(owner);
+        }
+        let rows: Vec<ReminderRow> = query
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await
+            .context("listing pending reminders")?;
 
         // A row that cannot be rebuilt is dropped from the answer rather than
         // failing the whole read: one unreadable timestamp must not hide every
@@ -167,19 +193,26 @@ impl ReminderRepository for SqliteReminderRepository {
     async fn set_disposition(
         &self,
         id: &str,
+        scope: &ProfileScope,
         disposition: ReminderDisposition,
         at: DateTime<Utc>,
     ) -> Result<bool> {
-        let result = sqlx::query(
+        let (predicate, owner) = scope_sql(scope);
+        let sql = format!(
             "UPDATE reminders SET disposition = ?, decided_at = ? \
-             WHERE id = ? AND disposition = 'pending'",
-        )
-        .bind(disposition.as_str())
-        .bind(sql_ts(at))
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .with_context(|| format!("disposing of reminder {id}"))?;
+             WHERE id = ? AND disposition = 'pending' {predicate}"
+        );
+        let mut query = sqlx::query(&sql)
+            .bind(disposition.as_str())
+            .bind(sql_ts(at))
+            .bind(id);
+        if let Some(owner) = owner {
+            query = query.bind(owner);
+        }
+        let result = query
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("disposing of reminder {id}"))?;
         Ok(result.rows_affected() > 0)
     }
 }
@@ -210,6 +243,124 @@ mod tests {
         }
     }
 
+    /// A reminder said in one member's conversation. `profile_id` carries no
+    /// foreign key (see 0057), so no profile row is needed for the fixture.
+    fn reminder_of(id: &str, about: &str, owner: Option<&str>) -> CapturedReminder {
+        CapturedReminder {
+            profile_id: owner.map(str::to_string),
+            window_id: format!("w-{id}"),
+            ..reminder(id, "w", about)
+        }
+    }
+
+    async fn seeded() -> (tempfile::TempDir, SqliteReminderRepository) {
+        let (tmp, pool) = db().await;
+        let repo = SqliteReminderRepository::new(pool);
+        for r in [
+            reminder_of("r-liz", "the clinic", Some("liz")),
+            reminder_of("r-jerry", "the dentist", Some("jerry")),
+            reminder_of("r-anyone", "the bins", None),
+        ] {
+            assert!(repo.capture(&r).await.unwrap());
+        }
+        (tmp, repo)
+    }
+
+    fn ids(rows: &[CapturedReminder]) -> Vec<&str> {
+        let mut v: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// THE DEFECT: `list_pending` filtered only on disposition, and the batch
+    /// engine stamps each reminder with the member whose conversation said it
+    /// -- so any caller read every member's dated reminders.
+    #[tokio::test]
+    async fn an_owner_reads_their_own_and_the_unattributed_but_not_another_members() {
+        let (_tmp, repo) = seeded().await;
+        let jerry = repo
+            .list_pending(&ProfileScope::Owner("jerry".into()), 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            ids(&jerry),
+            vec!["r-anyone", "r-jerry"],
+            "Liz's clinic date reached Jerry"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_guest_reads_no_reminder_at_all() {
+        let (_tmp, repo) = seeded().await;
+        assert!(repo
+            .list_pending(&ProfileScope::Guest, 10)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    /// The control for the two above: `Household` -- the engine's own read,
+    /// which routes each reminder to its owner -- sees every row. Without it,
+    /// an adapter that returned nothing for everyone would pass both.
+    #[tokio::test]
+    async fn the_household_read_sees_every_members_reminder() {
+        let (_tmp, repo) = seeded().await;
+        let all = repo
+            .list_pending(&ProfileScope::Household, 10)
+            .await
+            .unwrap();
+        assert_eq!(ids(&all), vec!["r-anyone", "r-jerry", "r-liz"]);
+    }
+
+    /// A move is scoped as well as a read: dismissing somebody else's
+    /// reminder deletes their date as surely as reading it discloses it.
+    #[tokio::test]
+    async fn one_member_cannot_dismiss_another_members_reminder() {
+        let (_tmp, repo) = seeded().await;
+        let jerry = ProfileScope::Owner("jerry".into());
+
+        assert!(
+            !repo
+                .set_disposition("r-liz", &jerry, ReminderDisposition::Dismissed, Utc::now())
+                .await
+                .unwrap(),
+            "Jerry dismissed Liz's reminder"
+        );
+        assert!(
+            !repo
+                .set_disposition(
+                    "r-liz",
+                    &ProfileScope::Guest,
+                    ReminderDisposition::Dismissed,
+                    Utc::now()
+                )
+                .await
+                .unwrap(),
+            "a guest dismissed Liz's reminder"
+        );
+        // Still pending, for the person it belongs to.
+        let liz = repo
+            .list_pending(&ProfileScope::Owner("liz".into()), 10)
+            .await
+            .unwrap();
+        assert!(
+            ids(&liz).contains(&"r-liz"),
+            "the refused dismiss moved the row anyway"
+        );
+
+        // The control: the owner CAN dismiss their own. A move that refused
+        // everybody would pass everything above.
+        assert!(repo
+            .set_disposition(
+                "r-jerry",
+                &jerry,
+                ReminderDisposition::Dismissed,
+                Utc::now()
+            )
+            .await
+            .unwrap());
+    }
+
     #[tokio::test]
     async fn a_captured_reminder_round_trips() {
         let (_tmp, pool) = db().await;
@@ -220,7 +371,10 @@ mod tests {
             .await
             .unwrap());
 
-        let back = repo.list_pending(10).await.unwrap();
+        let back = repo
+            .list_pending(&ProfileScope::Household, 10)
+            .await
+            .unwrap();
         assert_eq!(back.len(), 1);
         assert_eq!(
             back[0],
@@ -254,7 +408,10 @@ mod tests {
             "a re-walk must be told the row was already there"
         );
 
-        let back = repo.list_pending(10).await.unwrap();
+        let back = repo
+            .list_pending(&ProfileScope::Household, 10)
+            .await
+            .unwrap();
         assert_eq!(back.len(), 1);
         assert_eq!(back[0].id, "r-1", "the first row is the one that is kept");
     }
@@ -273,7 +430,13 @@ mod tests {
             .capture(&reminder("r-2", "w-1", "the school run"))
             .await
             .unwrap());
-        assert_eq!(repo.list_pending(10).await.unwrap().len(), 2);
+        assert_eq!(
+            repo.list_pending(&ProfileScope::Household, 10)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     /// The same words out of a DIFFERENT window are a different reminder. A
@@ -291,7 +454,13 @@ mod tests {
             .capture(&reminder("r-2", "w-2", "the dentist"))
             .await
             .unwrap());
-        assert_eq!(repo.list_pending(10).await.unwrap().len(), 2);
+        assert_eq!(
+            repo.list_pending(&ProfileScope::Household, 10)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     /// A re-walk must not resurrect something somebody said no to.
@@ -303,16 +472,24 @@ mod tests {
         repo.capture(&reminder("r-1", "w-1", "the dentist"))
             .await
             .unwrap();
-        repo.set_disposition("r-1", ReminderDisposition::Dismissed, Utc::now())
-            .await
-            .unwrap();
+        repo.set_disposition(
+            "r-1",
+            &ProfileScope::Household,
+            ReminderDisposition::Dismissed,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
 
         assert!(!repo
             .capture(&reminder("r-2", "w-1", "the dentist"))
             .await
             .unwrap());
         assert!(
-            repo.list_pending(10).await.unwrap().is_empty(),
+            repo.list_pending(&ProfileScope::Household, 10)
+                .await
+                .unwrap()
+                .is_empty(),
             "DO NOTHING, not DO UPDATE -- an upsert would put a dismissed reminder back"
         );
 
@@ -344,7 +521,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(repo.list_pending(10).await.unwrap().is_empty());
+        assert!(repo
+            .list_pending(&ProfileScope::Household, 10)
+            .await
+            .unwrap()
+            .is_empty());
         let (disposition, profile_id, session_id): (String, Option<String>, String) =
             sqlx::query_as(
                 "SELECT disposition, profile_id, session_id FROM reminders WHERE id = 'r-1'",
@@ -387,7 +568,7 @@ mod tests {
                 .await
                 .unwrap();
             let moved = repo
-                .set_disposition(&id, disposition, Utc::now())
+                .set_disposition(&id, &ProfileScope::Household, disposition, Utc::now())
                 .await
                 .unwrap_or_else(|e| panic!("the table refused {}: {e}", disposition.as_str()));
             assert!(moved, "{} moved no row", disposition.as_str());
@@ -406,19 +587,34 @@ mod tests {
             .unwrap();
 
         assert!(repo
-            .set_disposition("r-1", ReminderDisposition::Dismissed, Utc::now())
+            .set_disposition(
+                "r-1",
+                &ProfileScope::Household,
+                ReminderDisposition::Dismissed,
+                Utc::now()
+            )
             .await
             .unwrap());
         assert!(
             !repo
-                .set_disposition("r-1", ReminderDisposition::Proposed, Utc::now())
+                .set_disposition(
+                    "r-1",
+                    &ProfileScope::Household,
+                    ReminderDisposition::Proposed,
+                    Utc::now()
+                )
                 .await
                 .unwrap(),
             "a decided reminder is not decided again"
         );
         assert!(
             !repo
-                .set_disposition("nobody", ReminderDisposition::Dismissed, Utc::now())
+                .set_disposition(
+                    "nobody",
+                    &ProfileScope::Household,
+                    ReminderDisposition::Dismissed,
+                    Utc::now()
+                )
                 .await
                 .unwrap(),
             "an unknown id moves nothing"
