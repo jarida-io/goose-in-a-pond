@@ -1,66 +1,36 @@
-//! The catalog of GIAP tool GROUPS — one entry per `giap-*` MCP extension, and the unit of
-//! tool-relevance selection (Phase D): 15 comparisons instead of 59, scored against one short
-//! natural-language description per group. Groups rather than tools because a tool schema is
-//! indivisible in the prompt and costs ~100 tokens re-prefilled per turn on an 8K-class budget.
+//! Catalog of GIAP tool groups, one per `giap-*` MCP extension: the unit of relevance selection.
+//! Groups, not tools: a schema is indivisible and costs ~100 tokens per turn on an 8K budget.
 
 /// A selectable group of tools, backed by exactly one `giap-*` MCP extension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolGroup {
-    /// The MCP extension name, e.g. `"giap-weather"`. Tool names are
-    /// `"<extension>__<tool>"`, which is how a tool is mapped back to a group.
+    /// MCP extension name (`"giap-weather"`); tool names are `"<extension>__<tool>"`.
     pub extension: &'static str,
-    /// Natural-language description of what the group is FOR, phrased the way a
-    /// user would ask for it. This string is what gets embedded and scored, so
-    /// it should read like example requests, not like an API summary.
+    /// What gets embedded and scored, so phrase it like user requests, not an API summary.
     pub description: &'static str,
     /// Always loaded, never scored, never removable. See [`CORE_RATIONALE`].
     pub core: bool,
 }
 
-/// Why each core group is core, kept next to the data so the decision is reviewable.
-/// `giap-memory` is cross-cutting and no opening message predicts it; `giap-system` holds
-/// `get_current_time`; `giap-toolkit` is the escape hatch that keeps narrowing reversible.
-///
-/// `giap-draft` was the fourth — the confirmation surface — until the 2026-09-10
-/// group deletions. Its staging tools went with `giap-news`, `giap-audit`,
-/// `giap-finance`, `giap-discovery` and `giap-vision`; the one rule it carried
-/// that nothing else asserted, the same-message go-ahead for a lock or an
-/// alarm, moved onto `set_device_state`'s own description.
+/// Why each core group is core: no opening message predicts a need for memory, `giap-system`
+/// holds `get_current_time`, and `giap-toolkit` keeps narrowing reversible.
 pub const CORE_RATIONALE: &str = "memory=cross-cutting, system=time, toolkit=escape";
 
 /// The extension providing the discovery / enable escape hatch.
 pub const TOOLKIT_EXTENSION: &str = "giap-toolkit";
 
-/// The extension carrying the `delegate` tool (PAI-6 P5). A const because three crates spell this
-/// name and a typo is silent: an extension matching no catalog entry is treated as a user-added
-/// MCP server, which selection never narrows. `tests/registration_matches_the_catalog.rs` resolves
-/// the known consts by name and fails on any argument it cannot resolve.
+/// Extension carrying `delegate`. A const because a typo is silent: an unknown extension is
+/// treated as a user-added MCP server, which selection never narrows.
 pub const ORCHESTRATOR_EXTENSION: &str = "giap-orchestrator";
 
-/// Separator between the extension name and the tool name in a prefixed tool
-/// name (`giap-weather__get_forecast`). Goose's own convention.
+/// Separator in a prefixed tool name (`giap-weather__get_forecast`); Goose's convention.
 pub const TOOL_NAME_SEPARATOR: &str = "__";
 
-/// Environment variable that offers the model no tools at all.
-///
-/// Here rather than in an adapter because THREE places honour it -- the goose
-/// provider shim, GIAP's builtin registration, and the mistral.rs backend --
-/// and the point of the switch is that it means one thing everywhere. All
-/// three carried their own copy of the parsing rule, one of them cached and
-/// two not, and a divergence would have been silent: a pond that registered no
-/// extensions but still offered tools, or the reverse.
+/// Env var that offers the model no tools; defined once so every reader parses it the same.
 pub const NO_TOOLS_ENV: &str = "GIAP_NO_TOOLS";
 
-/// Whether a value of [`NO_TOOLS_ENV`] means "no tools".
-///
-/// Takes the value rather than reading the environment so a test can exercise
-/// it: the environment is process-global and a test binary is threaded, so a
-/// test that set it would decide the answer for every other test in the
-/// process.
-///
-/// Anything present and not an explicit off-switch counts as on, because the
-/// failure that matters is a turn that quietly kept its tools after someone set
-/// the variable -- not one that lost them after `GIAP_NO_TOOLS=maybe`.
+/// Whether a value of [`NO_TOOLS_ENV`] means "no tools". Unrecognised values count as on:
+/// a turn that quietly kept its tools is the worse failure.
 pub fn no_tools_from(value: Option<&str>) -> bool {
     match value.map(str::trim) {
         None | Some("") | Some("0") | Some("false") | Some("no") => false,
@@ -68,14 +38,11 @@ pub fn no_tools_from(value: Option<&str>) -> bool {
     }
 }
 
-/// Read [`NO_TOOLS_ENV`] from the environment and apply [`no_tools_from`].
 pub fn no_tools_env_set() -> bool {
     no_tools_from(std::env::var(NO_TOOLS_ENV).ok().as_deref())
 }
 
-/// Every group GIAP knows about. Registration is still gated by the
-/// `ext_*_enabled` settings toggles — this catalog describes what COULD be
-/// registered, and selection always intersects it with what actually was.
+/// Every known group: what COULD be registered (`ext_*_enabled` gates that), not what was.
 pub const TOOL_GROUPS: &[ToolGroup] = &[
     ToolGroup {
         extension: "giap-memory",
@@ -98,10 +65,7 @@ pub const TOOL_GROUPS: &[ToolGroup] = &[
     },
     ToolGroup {
         extension: "giap-schedule",
-        // This sentence promised "timers" for months while a one-shot was not
-        // expressible: `SchedulerPort` was cron-only, and a 6-field cron has no
-        // year field, so "in ten minutes" became an annual alarm or nothing at
-        // all. `set_timer` is what makes the first clause true.
+        // The one-shot timer clause relies on `set_timer`; a 6-field cron cannot express it.
         description: "Reminders, alarms, timers, recurring routines and scheduled tasks: set a \
                       one-shot timer for a few minutes or hours from now, create a repeating \
                       schedule, list or inspect what is scheduled, change or pause or delete one, \
@@ -162,14 +126,9 @@ pub const TOOL_GROUPS: &[ToolGroup] = &[
     },
 ];
 
-/// Sort key putting the tools every turn carries before the ones it might not. Two turns share a
-/// prompt prefix only up to their first difference, and tool schemas are the bulk of it: on the
-/// Gemma template, chats differing in half their tools shared 70% of the preamble with those tools
-/// first and 85% with them last. Core groups sort first, then by name: order must be deterministic.
+/// Sort key putting core tools first, then by name, so turns share the longest prompt prefix.
 pub fn prefix_sort_key(tool_name: &str) -> (u8, &str) {
-    // Tool names are `<extension>__<tool>`; the extension is what maps to a
-    // group. An unknown prefix (a user-added MCP server) ranks with the
-    // non-core tools, which is right: nothing guarantees it is there next turn.
+    // A user-added server ranks non-core: nothing guarantees it is there next turn.
     let extension = tool_name.split("__").next().unwrap_or("");
     let tier = match find_group(extension) {
         Some(group) if group.core => 0,
@@ -178,60 +137,43 @@ pub fn prefix_sort_key(tool_name: &str) -> (u8, &str) {
     (tier, tool_name)
 }
 
-/// Look up a group by extension name.
 pub fn find_group(extension: &str) -> Option<&'static ToolGroup> {
     TOOL_GROUPS.iter().find(|g| g.extension == extension)
 }
 
-/// Extension names of the always-on core groups.
-/// Groups an unidentified speaker must never be given (PAI-1 P5): a guest can still ask for
-/// `recall_memories` or `forget_memory`, and neither tool knows about sessions. `select_groups`
-/// puts `core` groups back, so subtract this list AFTER selection; a denylist, so new groups pass.
+/// Groups an unidentified speaker must never be given. Subtract AFTER selection, since
+/// `select_groups` puts core groups back; a denylist, so new groups pass.
 pub fn groups_denied_to_guests() -> &'static [&'static str] {
     &[
         // Reads and deletes the household's long-term memory.
         "giap-memory",
         // Sensor history: when the house was empty, when somebody came home.
         "giap-sensors",
-        // PAI-8. A member's own connected sources. Invariant 2 is that a Guest sees no context
-        // items, and the tool layer enforces that by scope; this entry stops the tool being
-        // OFFERED, which on a small model saves a turn spent discovering the refusal.
+        // A member's connected sources. Scope refuses a guest anyway; not offering it saves a turn.
         "giap-context",
-        // PAI-6 P5, and the only entry here not about reading personal data. `delegate` starts an
-        // autonomous multi-turn agent under `GooseMode::Auto` on the household's own hardware,
-        // which on a Jetson is the single GPU the household's next turn needs. The child inherits
-        // the guest's scope, so what is withheld is the device, not the memory.
+        // Not about personal data: `delegate` runs an autonomous agent on the household's one GPU.
         ORCHESTRATOR_EXTENSION,
     ]
 }
 
-/// Groups a SUBAGENT must never be given, whatever role asked and however wide its parent was.
-/// PAI-6 P3: a subagent has no identity, so the draft gate answers `REASON_UNRESOLVED_ACTOR` and
-/// the default `PolicyMode::Audit` proceeds, and mandatory `GooseMode::Auto` has no approval path.
-/// The tool set is the only boundary, so subtract this from the DERIVED set or core groups return.
+/// Groups a subagent must never be given, however wide its parent. It has no identity or approval
+/// path, so the tool set is the only boundary; subtract from the DERIVED set or core groups return.
 pub fn groups_denied_to_subagents() -> &'static [&'static str] {
     &[
-        // `enable_tool_group` WIDENS an allow-set, and a child has nothing to widen: its whole
-        // grant is published up front by `narrow_child_groups` and bounded by the parent's
-        // entitlement. Offering a 2-4B model a tool whose every call is refused is not harmless.
+        // `enable_tool_group` widens; a child's grant is fixed up front by `narrow_child_groups`.
         TOOLKIT_EXTENSION,
-        // Actuates the house. There is no approval path for a subagent, and the
-        // one it would otherwise take -- staging a draft -- is denied above.
+        // Actuates the house, and a subagent has no approval path.
         "giap-device-control",
-        // `send_notification`, which reaches the member directly with no
-        // approval path. The file and shell tools this also covered were
-        // removed on 2026-09-10; the denial stands on the notifier alone.
+        // `send_notification` reaches the member directly with no approval path.
         "giap-system",
-        // Schedules future work that will run with the household's authority,
-        // long after the delegation that created it has ended.
+        // Schedules work that runs with household authority after the delegation ends.
         "giap-schedule",
-        // PAI-6 P5. Depth already refuses a subagent's `delegate` with `DepthExceeded`; this
-        // entry stops the tool being OFFERED, because a 2-4B model handed a tool whose every
-        // call is refused spends its turn budget discovering that.
+        // Depth already refuses it; not offering it saves a small model's turn budget.
         ORCHESTRATOR_EXTENSION,
     ]
 }
 
+/// Extension names of the always-on core groups.
 pub fn core_group_names() -> Vec<&'static str> {
     TOOL_GROUPS
         .iter()
@@ -240,17 +182,14 @@ pub fn core_group_names() -> Vec<&'static str> {
         .collect()
 }
 
-/// The group a prefixed tool name belongs to (`giap-weather__get_forecast` →
-/// `giap-weather`). `None` for an unprefixed name.
+/// The group of a prefixed tool name (`giap-weather__get_forecast` → `giap-weather`).
 pub fn group_of_tool(tool_name: &str) -> Option<&str> {
     tool_name
         .find(TOOL_NAME_SEPARATOR)
         .map(|sep| &tool_name[..sep])
 }
 
-/// Whether `extension` is a GIAP builtin the catalog knows about. Anything else
-/// (a user-added external MCP server) is never narrowed by selection: the user
-/// added it deliberately and GIAP has no description to score it against.
+/// Whether `extension` is a catalog builtin; anything else is user-added and never narrowed.
 pub fn is_catalog_extension(extension: &str) -> bool {
     find_group(extension).is_some()
 }
@@ -261,8 +200,6 @@ mod tests {
     fn the_no_tools_switch_reads_presence_not_truthiness() {
         assert!(no_tools_from(Some("1")));
         assert!(no_tools_from(Some("yes")));
-        // Anything unrecognised still disables: a turn that quietly KEPT its
-        // tools after someone set the variable is the worse failure.
         assert!(no_tools_from(Some("maybe")));
     }
 
@@ -288,8 +225,7 @@ mod tests {
         assert_eq!(names.len(), total, "duplicate extension in TOOL_GROUPS");
     }
 
-    /// The three core groups are load-bearing for safety, continuity, and the
-    /// escape hatch. A change here should be deliberate, so pin it.
+    /// Pinned so a change to the core set is deliberate.
     #[test]
     fn core_groups_are_exactly_the_documented_three() {
         let mut core = core_group_names();
@@ -333,9 +269,7 @@ mod prefix_order_tests {
         names
     }
 
-    /// The property the on-disk KV snapshot depends on: the tools every turn
-    /// carries come first, so they form a prefix two turns can share even when
-    /// the rest of their selection differs.
+    /// The on-disk KV snapshot depends on this shared prefix.
     #[test]
     fn core_tools_come_before_the_ones_a_turn_might_not_have() {
         let got = ordered(vec![
@@ -355,8 +289,6 @@ mod prefix_order_tests {
         );
     }
 
-    /// Two turns whose selections differ must still agree for the whole core
-    /// block. This is the measurement that motivated the change, as a property.
     #[test]
     fn two_different_selections_agree_for_their_whole_core_block() {
         let a = ordered(vec![
@@ -376,8 +308,6 @@ mod prefix_order_tests {
         );
     }
 
-    /// Deterministic within a tier. A set rendered in a different order on two
-    /// turns shares nothing, whatever the tiering does.
     #[test]
     fn the_order_is_stable_whatever_order_the_selection_arrives_in() {
         let forward = ordered(vec![
@@ -391,9 +321,6 @@ mod prefix_order_tests {
         assert_eq!(forward, backward);
     }
 
-    /// A user-added MCP server ranks with the removable tools. Nothing promises
-    /// it is there next turn, so leading with it would truncate the prefix for
-    /// every turn that lacks it.
     #[test]
     fn an_unknown_extension_does_not_lead() {
         let got = ordered(vec![
@@ -419,9 +346,6 @@ mod guest_denylist_tests {
         }
     }
 
-    /// The denylist is only useful because it removes groups `select_groups`
-    /// puts back. If none of them were core, the list would be doing nothing
-    /// the scorer was not already doing.
     #[test]
     fn the_denylist_covers_groups_that_are_otherwise_unremovable() {
         let core = core_group_names();
@@ -439,7 +363,6 @@ mod guest_denylist_tests {
         );
     }
 
-    /// A guest is meant to stay useful -- weather, time, knowledge, the lights.
     /// Denying everything would be a boundary nobody keeps switched on.
     #[test]
     fn a_guest_keeps_the_neutral_groups() {
@@ -458,8 +381,7 @@ mod guest_denylist_tests {
         }
     }
 
-    /// Same typo hazard as the guest list, and the same consequence: a name
-    /// that matches no group removes nothing.
+    /// A name that matches no group silently removes nothing.
     #[test]
     fn every_subagent_denied_group_actually_exists() {
         for name in groups_denied_to_subagents() {
@@ -471,11 +393,6 @@ mod guest_denylist_tests {
         }
     }
 
-    /// The two the list exists for, named individually so removing one fails a test rather than
-    /// passing quietly. `giap-toolkit` because `enable_tool_group` widens an allow-set;
-    /// `giap-device-control` because a subagent is forced to `GooseMode::Auto` with no approval.
-    /// `giap-draft` was the third until the group was deleted on 2026-09-10 — with no staging
-    /// tools there is nothing for an unresolvable actor to decide.
     #[test]
     fn the_subagent_denylist_covers_widening_and_actuating() {
         let denied = groups_denied_to_subagents();
@@ -488,10 +405,7 @@ mod guest_denylist_tests {
         }
     }
 
-    /// PAI-6 P5. The delegation surface is withheld from both a guest and a subagent for two
-    /// different mechanisms, and neither list backstops the other, so both are named here.
-    /// Removing either entry breaks no other test: depth already refuses a subagent's `delegate`,
-    /// and only the handler's own scope check refuses a guest's.
+    /// Neither list backstops the other, and removing either entry breaks no other test.
     #[test]
     fn neither_a_guest_nor_a_subagent_is_offered_the_delegation_tool() {
         assert!(
@@ -507,16 +421,10 @@ mod guest_denylist_tests {
         );
     }
 
-    /// Vacuity control. If the list grew to cover every group, a subagent would
-    /// be useless and the narrowing would be indistinguishable from "no
-    /// subagents". The research surface the workstream exists for must survive.
+    /// Vacuity control: a denylist covering everything would amount to "no subagents".
     #[test]
     fn a_subagent_keeps_the_read_only_research_groups() {
         let denied = groups_denied_to_subagents();
-        // Every name here must be a group that EXISTS, or the assertion holds
-        // for the wrong reason: `giap-news` and `giap-finance` sat in this list
-        // after their groups were deleted, and "not denied" was true because
-        // there was nothing to deny.
         for kept in [
             "giap-weather",
             "giap-knowledge",

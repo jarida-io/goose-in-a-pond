@@ -1,7 +1,6 @@
-//! Driven port: push events from GIAP to connected clients (GOTG mobile app, etc.).
+//! Driven port: push events from GIAP to connected clients (e.g. the GOTG mobile app).
 //!
-//! TODO: notification categories (alert, info, action_required), acknowledgement, history and
-//! persistence, and a WebSocket or SSE transport for real-time push.
+//! TODO: categories, acknowledgement, history and persistence, a WebSocket or SSE transport.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -28,6 +27,5 @@ pub trait NotificationSender: Send + Sync {
     /// Send a notification to a specific device or broadcast.
     async fn send(&self, notification: Notification) -> Result<()>;
 
-    /// Send a notification to all connected devices.
     async fn broadcast(&self, notification: Notification) -> Result<()>;
 }

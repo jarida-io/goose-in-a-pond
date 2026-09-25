@@ -1,6 +1,5 @@
-//! Driven port: durable queue for offline notification delivery (#99). A targeted notification is
-//! persisted here so a disconnected device receives it the next time it opens its notification
-//! stream. Delivered rows are stamped, not deleted, so they can be audited and retained.
+//! Durable queue so a disconnected device gets targeted notifications when it next opens its
+//! stream. Delivered rows are stamped, not deleted, so they can be audited.
 
 use anyhow::Result;
 use async_trait::async_trait;

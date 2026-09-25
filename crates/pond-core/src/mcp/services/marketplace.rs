@@ -6,19 +6,14 @@ use async_trait::async_trait;
 use crate::mcp::domain::marketplace::MarketplaceExtension;
 use crate::mcp::ports::extension_marketplace::ExtensionMarketplace;
 
-/// Top-level registry structure matching the JSON schema.
 #[derive(serde::Deserialize)]
 struct MarketplaceRegistry {
     extensions: Vec<MarketplaceExtension>,
 }
 
-/// Embedded JSON registry of curated MCP extensions.
 const REGISTRY_JSON: &str = include_str!("../../extensions/marketplace_registry.json");
 
-/// A marketplace backed by a bundled JSON registry compiled into the binary.
-///
-/// Zero external dependencies — the registry is parsed once at construction
-/// and served from memory. No network, no database.
+/// Marketplace backed by the bundled registry JSON, parsed once; no network, no database.
 pub struct BundledMarketplace {
     extensions: Vec<MarketplaceExtension>,
 }
@@ -32,10 +27,8 @@ impl BundledMarketplace {
         }
     }
 
-    /// Same as [`Self::new`], but rewrites repo-relative script arguments into absolute
-    /// paths anchored at `root`, the directory that *contains* `extensions/`. A relative
-    /// arg resolves against the MCP child's inherited cwd, so launching pond-server from
-    /// anywhere but the repo root kills the child with `ERR_MODULE_NOT_FOUND`.
+    /// Like [`Self::new`], but anchors `extensions/…` args at `root` (the dir *containing*
+    /// `extensions/`): relative args resolve against the child's cwd and fail outside the repo.
     pub fn with_asset_root(root: impl AsRef<Path>) -> Self {
         let root = root.as_ref();
         let mut this = Self::new();
@@ -46,10 +39,8 @@ impl BundledMarketplace {
     }
 }
 
-/// Rewrites every `extensions/…` arg in `args` to an absolute path under `root`.
-///
-/// Public because configs persisted by an earlier install carry the original relative
-/// args; startup auto-connect re-anchors them. Returns `true` if anything changed.
+/// Rewrites every `extensions/…` arg to an absolute path under `root`; `true` if any changed.
+/// Public so startup can re-anchor relative args persisted by an earlier install.
 pub fn anchor_asset_args(args: &mut [String], root: impl AsRef<Path>) -> bool {
     let root = root.as_ref();
     let mut changed = false;
@@ -62,10 +53,7 @@ pub fn anchor_asset_args(args: &mut [String], root: impl AsRef<Path>) -> bool {
     changed
 }
 
-/// Returns the absolute form of `arg` when it names a path under the bundled
-/// `extensions/` directory, or `None` when it should be passed through untouched.
-/// Deliberately narrow: flags, bare and scoped npm package names, and absolute paths
-/// are all left exactly as the registry wrote them.
+/// Absolute form of an `extensions/…` arg; flags, npm packages and absolute paths get `None`.
 fn anchor_asset_arg(arg: &str, root: &Path) -> Option<String> {
     if arg.starts_with('-') {
         return None;
@@ -246,8 +234,7 @@ mod tests {
             persisted,
             vec!["-y", "tsx", "/opt/giap/extensions/music/src/server.ts"]
         );
-        // Already anchored — a second pass is a no-op, so startup does not
-        // rewrite the persisted row on every restart.
+        // Idempotent, so startup does not rewrite the persisted row on every restart.
         assert!(!anchor_asset_args(&mut persisted, "/opt/giap"));
 
         let mut package_args = vec![

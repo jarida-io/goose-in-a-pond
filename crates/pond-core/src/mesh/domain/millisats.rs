@@ -1,7 +1,4 @@
-//! Money unit for the private mesh's metering/settlement path (#132).
-//!
-//! A newtype rather than a bare `u64` so an amount can't be confused with a token count
-//! at a call site. Arithmetic is checked — money math must never silently wrap.
+//! Money unit for mesh metering/settlement. Arithmetic is checked: money must never silently wrap.
 
 use serde::{Deserialize, Serialize};
 

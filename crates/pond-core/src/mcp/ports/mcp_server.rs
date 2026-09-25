@@ -29,8 +29,6 @@ pub struct McpServerConfig {
 }
 
 /// Persistent storage for configured external MCP server connections.
-///
-/// Implementations must be `Send + Sync` so they can live behind `Arc<dyn McpServerRepository>`.
 #[async_trait]
 pub trait McpServerRepository: Send + Sync {
     /// Return all saved MCP server configurations (enabled and disabled).
@@ -39,11 +37,9 @@ pub trait McpServerRepository: Send + Sync {
     /// Insert or replace a server configuration (upsert by `name`).
     async fn save(&self, config: &McpServerConfig) -> Result<()>;
 
-    /// Remove the server configuration with the given `name`.
-    /// Returns `Ok(())` even if no row matched.
+    /// Removes the config named `name`; `Ok(())` even if no row matched.
     async fn delete(&self, name: &str) -> Result<()>;
 
-    /// Update the `enabled` flag for the server with the given `name`.
-    /// Returns `Ok(())` even if no row matched.
+    /// Sets the `enabled` flag for `name`; `Ok(())` even if no row matched.
     async fn set_enabled(&self, name: &str, enabled: bool) -> Result<()>;
 }

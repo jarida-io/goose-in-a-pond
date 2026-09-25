@@ -8,10 +8,7 @@ use crate::mesh::domain::capabilities::PeerCapabilities;
 use crate::mesh::domain::peer_id::PeerId;
 use crate::mesh::ports::peer_capability_query::{PeerCapabilityQuery, PeerCapabilityQueryError};
 
-/// In-memory capability query for testing. Peers not explicitly given
-/// capabilities via `set` answer with `PeerCapabilities::default()` (both
-/// `false`) rather than an error — a real peer that's never announced
-/// anything is indistinguishable from one offering nothing.
+/// In-memory capability query; a peer never `set` answers the all-`false` default, not an error.
 pub struct MockPeerCapabilityQuery {
     capabilities: Arc<RwLock<HashMap<PeerId, PeerCapabilities>>>,
 }

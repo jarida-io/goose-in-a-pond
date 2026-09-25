@@ -1,7 +1,4 @@
-//! The mesh's trust dial (#132).
-//!
-//! v1 ships `SelfOwned` and `Circle` only; #132 defers the `OpenLane` (public,
-//! zero-trust) capability, so add that variant when the capability is built.
+//! The mesh's trust dial; add `OpenLane` (public, zero-trust) when that capability is built.
 
 use serde::{Deserialize, Serialize};
 

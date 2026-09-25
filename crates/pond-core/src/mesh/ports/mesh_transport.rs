@@ -15,10 +15,7 @@ pub enum MeshTransportError {
     Transport(String),
 }
 
-/// Driven Port: MeshTransport
-///
-/// Low-level connectivity to other Ponds. `address` stays an opaque, caller-supplied dial
-/// hint so no transport-specific type (e.g. libp2p's) leaks into the pure domain layer.
+/// Connectivity to other Ponds; `address` is an opaque dial hint so no libp2p type leaks in.
 #[async_trait]
 pub trait MeshTransport: Send + Sync {
     async fn connect(&self, peer: PeerId, address: String) -> Result<(), MeshTransportError>;
@@ -27,17 +24,12 @@ pub trait MeshTransport: Send + Sync {
 
     async fn connected_peers(&self) -> Result<Vec<PeerId>, MeshTransportError>;
 
-    /// Pull the next inbound frame from any connected peer, blocking until
-    /// one arrives. Pull-based so a mock can back it with a simple queue and
-    /// a real transport can back it with an mpsc fed by its event loop.
+    /// Next inbound frame from any connected peer; waits until one arrives.
     async fn recv(&self) -> Result<(PeerId, Vec<u8>), MeshTransportError>;
 
     /// This Pond's own identity. Pure lookup, no I/O — sync.
     fn local_peer_id(&self) -> PeerId;
 
-    /// Every address this node is confirmed listening on — opaque dial
-    /// hints in the same `String` shape `connect()` takes, so a caller (e.g.
-    /// an invite-generation route) can hand one back to another Pond without
-    /// pond-core ever knowing the transport-specific address type.
+    /// Addresses this node is confirmed listening on, as opaque dial hints `connect()` accepts.
     async fn listen_addresses(&self) -> Result<Vec<String>, MeshTransportError>;
 }

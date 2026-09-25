@@ -1,8 +1,3 @@
-//! Configurable mock implementation of `ModelStorage` for tests.
-//!
-//! Modes: `AlwaysPresent` skips every download, `NeverPresent` forces them all, and
-//! `FileSystemBacked` returns real paths inside a temp dir with `is_present` checking disk.
-
 use std::path::PathBuf;
 
 use crate::models::domain::model_record::{BinaryRecord, ModelCategory, ModelRecord};
@@ -135,7 +130,6 @@ mod tests {
         let record = gguf_record("llama3");
         assert!(!storage.is_present(&record), "file not yet created");
 
-        // Create the file
         let path = storage.path_for(&record).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"model").unwrap();

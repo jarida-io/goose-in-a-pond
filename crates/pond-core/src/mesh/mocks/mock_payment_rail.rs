@@ -11,8 +11,7 @@ use crate::mesh::domain::peer_id::PeerId;
 use crate::mesh::domain::settlement::SettlementRecord;
 use crate::mesh::ports::payment_rail::{PaymentRail, PaymentRailError};
 
-/// In-memory payment rail for testing. Invoices are opaque incrementing
-/// strings; any preimage of the form `"preimage-for-<invoice>"` verifies.
+/// In-memory payment rail; any preimage `"preimage-for-<invoice>"` verifies.
 pub struct MockPaymentRail {
     next_invoice: AtomicU64,
     issued: Arc<RwLock<HashMap<String, Millisats>>>,

@@ -1,24 +1,17 @@
-//! Whether this binary can use the accelerator the host actually has. Without CUDA a Jetson
-//! prefills at 26 tok/s against 696, and the five-link feature chain (local-inference/cuda down
-//! to llama-cpp-2/cuda) silently evaluates to "off" with no error in any log — as
-//! `scripts/jetson/build-docker.sh` does. Warn, never refuse: a CPU pond beats no pond.
+//! Whether this binary can use the host's accelerator; a CPU build silently prefills a Jetson at
+//! 26 tok/s instead of 696. Warn, never refuse: a CPU pond beats no pond.
 
 /// What this binary can do with this host's accelerator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Acceleration {
     /// Built with CUDA. Nothing to say.
     CudaBuild,
-    /// A host with an accelerator, and a binary that cannot reach it. The one
-    /// case worth shouting about.
+    /// An accelerated host and a binary that cannot reach it: the one case worth warning about.
     CpuOnAcceleratedHost,
     /// No accelerator expected here — a Mac, a laptop, a CI runner.
     CpuElsewhere,
 }
 
-/// Decide what this pair of facts means.
-///
-/// Both arrive as plain `bool` rather than being read here: the host probe lives in
-/// `pond-server` and the build flag in the adapter, so reading either would make this untestable.
 pub fn classify(host_is_accelerated: bool, cuda_build: bool) -> Acceleration {
     match (host_is_accelerated, cuda_build) {
         (_, true) => Acceleration::CudaBuild,
@@ -27,10 +20,7 @@ pub fn classify(host_is_accelerated: bool, cuda_build: bool) -> Acceleration {
     }
 }
 
-/// What to tell the operator, or `None` when there is nothing wrong.
-///
-/// Carries the rebuild command: the CUDA feature chain is five links long and is passed on
-/// one command line in one script, so nothing else would lead the reader to it.
+/// What to tell the operator, with the rebuild command: nothing else leads to the feature chain.
 pub fn warning(acceleration: Acceleration) -> Option<&'static str> {
     match acceleration {
         Acceleration::CudaBuild | Acceleration::CpuElsewhere => None,
@@ -47,10 +37,8 @@ pub fn warning(acceleration: Acceleration) -> Option<&'static str> {
     }
 }
 
-/// Whether a host looks like it has an NVIDIA accelerator GIAP should be using.
-/// Evidence is passed in, not read, so this is testable off-device: `model` is
-/// `/proc/device-tree/model`, the same file `scripts/giap.sh` reads; `has_tegra_release` is
-/// `/etc/nv_tegra_release`. Either signal alone is enough.
+/// Whether the host has an NVIDIA accelerator. `model` is `/proc/device-tree/model` and
+/// `has_tegra_release` is whether `/etc/nv_tegra_release` exists; either suffices.
 pub fn host_is_accelerated(model: Option<&str>, has_tegra_release: bool) -> bool {
     if has_tegra_release {
         return true;
@@ -58,8 +46,7 @@ pub fn host_is_accelerated(model: Option<&str>, has_tegra_release: bool) -> bool
     let Some(model) = model else {
         return false;
     };
-    // Case-insensitive because the string is vendor-supplied and has varied:
-    // "NVIDIA Jetson Orin Nano Developer Kit", "Jetson-AGX", "nvidia,p3768".
+    // Vendor-supplied and inconsistently cased ("Jetson-AGX", "nvidia,p3768").
     let model = model.to_ascii_lowercase();
     model.contains("jetson") || model.contains("tegra") || model.contains("nvidia")
 }
@@ -68,10 +55,7 @@ pub fn host_is_accelerated(model: Option<&str>, has_tegra_release: bool) -> bool
 mod tests {
     use super::*;
 
-    /// A CUDA build is fine wherever it runs, and a CPU build is fine anywhere
-    /// there is nothing to miss out on. Exactly one cell of this table is a
-    /// problem, and stating it as a table is the point: an `if !cuda { warn }`
-    /// would shout at every developer laptop and be muted within a week.
+    /// An `if !cuda { warn }` would shout at every laptop and be muted within a week.
     #[test]
     fn only_a_cpu_build_on_an_accelerated_host_is_a_problem() {
         assert_eq!(classify(true, true), Acceleration::CudaBuild);
@@ -91,10 +75,6 @@ mod tests {
         assert!(warning(Acceleration::CpuOnAcceleratedHost).is_some());
     }
 
-    /// The warning has to carry the fix. The five-link feature chain is not
-    /// something a reader can be expected to reconstruct from "CUDA is off", and
-    /// the script that gets it wrong is worth naming next to the one that gets
-    /// it right.
     #[test]
     fn the_warning_names_the_rebuild_and_the_script_that_omits_it() {
         let w = warning(Acceleration::CpuOnAcceleratedHost).expect("the problem case warns");
@@ -111,10 +91,7 @@ mod tests {
     #[test]
     fn a_jetson_is_recognised_however_its_device_tree_spells_it() {
         for model in [
-            // Read off the actual device on 2026-08-16. The invented strings
-            // below it are variants; THIS one is the deployment, and a matcher
-            // that only ever saw hand-written examples is a matcher nobody has
-            // checked against the hardware.
+            // Read off the deployed device; the strings below are invented variants.
             "NVIDIA Jetson Orin Nano Engineering Reference Developer Kit Super",
             "NVIDIA Jetson Orin Nano Developer Kit",
             "Jetson-AGX",
@@ -128,9 +105,7 @@ mod tests {
         }
     }
 
-    /// The release file alone is enough. In a container the device tree is
-    /// routinely absent, and that is precisely where a CPU-only image built by
-    /// `build-docker.sh` would otherwise pass unnoticed.
+    /// Containers routinely lack the device tree, and that is where a CPU-only image hides.
     #[test]
     fn a_container_without_a_device_tree_is_still_recognised_by_jetpack() {
         assert!(host_is_accelerated(None, true));

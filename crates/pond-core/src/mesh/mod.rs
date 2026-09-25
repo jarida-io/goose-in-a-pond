@@ -1,7 +1,5 @@
-//! Private Pond Compute — trust-scoped P2P inference mesh (#132).
-//!
-//! Domain types and port traits only. Real transport/payment/ledger
-//! implementations live in `pond-adapters-mesh-*` and `pond-infra`.
+//! Private Pond Compute: a trust-scoped P2P inference mesh. Real transport, payment and ledger
+//! adapters live in `pond-adapters-mesh-*` and `pond-infra`.
 
 pub mod domain;
 pub mod ports;

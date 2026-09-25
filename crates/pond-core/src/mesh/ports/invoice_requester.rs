@@ -16,10 +16,8 @@ pub enum InvoiceRequesterError {
     Timeout(PeerId),
 }
 
-/// Driven Port: InvoiceRequester — ask a trusted peer for the invoice that
-/// `PaymentRail::batch_settle` needs before it can pay. Implemented by
-/// `pond_adapters_mesh_inference::MeshInferenceService`, owner of the mesh transport's
-/// sole `recv()` consumer; a second consumer would compete with it.
+/// Asks a trusted peer for the invoice `PaymentRail::batch_settle` pays. Implemented by
+/// `MeshInferenceService`, the transport's sole `recv()` consumer; a second would compete.
 #[async_trait]
 pub trait InvoiceRequester: Send + Sync {
     async fn request_invoice(

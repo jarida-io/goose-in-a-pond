@@ -9,7 +9,6 @@ pub struct ExtensionInfo {
     pub kind: String, // "builtin" | "stdio" | "http"
     pub description: String,
     pub tools: Vec<String>,
-    /// Whether the extension is currently enabled.
     /// Disabled extensions are not loaded into Goose agent sessions.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
@@ -28,9 +27,7 @@ fn default_status() -> String {
     "connected".to_string()
 }
 
-/// A single MCP tool with its owning extension and description — unlike the
-/// bare names `list_tools()` returns, this is what backs the Extensions >
-/// Tools browser in the UI.
+/// An MCP tool with its owning extension and description, for the Extensions > Tools UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolInfo {
     pub extension: String,
@@ -60,10 +57,7 @@ pub trait ExtensionManagerPort: Send + Sync {
     async fn add_extension(&self, request: AddExtensionRequest) -> Result<ExtensionInfo>;
     async fn remove_extension(&self, name: &str) -> Result<()>;
     async fn list_tools(&self) -> Result<Vec<String>>;
-    /// Same tool set as `list_tools()`, enriched with the owning extension name
-    /// and description — used by the Extensions > Tools browser.
+    /// Same set as `list_tools()`, with each tool's extension and description.
     async fn list_tools_detailed(&self) -> Result<Vec<ToolInfo>>;
-    /// Enable or disable an extension by name.
-    /// Disabled extensions are excluded when loading tools for agent sessions.
     async fn set_enabled(&self, name: &str, enabled: bool) -> Result<()>;
 }

@@ -1,9 +1,6 @@
-//! What a mesh peer currently offers (#132 Milestone 5), queried live rather
-//! than persisted — see `ports::peer_capability_query` for why.
+//! What a mesh peer currently offers; queried live, not persisted.
 
-/// A snapshot, not a promise: a peer answering `inference_available: true`
-/// says its `MeshInferenceService` will *attempt* to serve a request right
-/// now, not that it has capacity or will still be true a second later.
+/// A snapshot, not a promise: `inference_available` means the peer will *attempt* to serve now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PeerCapabilities {
     pub inference_available: bool,

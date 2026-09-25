@@ -14,10 +14,7 @@ pub enum PaymentRailError {
     SettlementFailed(String),
 }
 
-/// Driven Port: PaymentRail
-///
-/// Lightning settlement, off the inference hot path by construction: only a background
-/// settlement job calls `batch_settle`, once per threshold or interval, never per token.
+/// Lightning settlement. Only a background job calls `batch_settle`, never per token.
 #[async_trait]
 pub trait PaymentRail: Send + Sync {
     async fn issue_invoice(&self, amount: Millisats) -> Result<String, PaymentRailError>;
@@ -28,10 +25,8 @@ pub trait PaymentRail: Send + Sync {
         preimage: &str,
     ) -> Result<bool, PaymentRailError>;
 
-    /// Pay `peer` against *their* `invoice`, obtained by the caller beforehand (e.g. via
-    /// `MeshInferenceService::request_invoice`) since this port has no transport of its
-    /// own. `amount` is passed separately from the amount encoded in the opaque,
-    /// BOLT11-shaped `invoice` so an adapter can cross-check the two before paying.
+    /// Pay `peer`'s own `invoice`, fetched by the caller (this port has no transport). `amount` is
+    /// separate so an adapter can cross-check it against the BOLT11 amount before paying.
     async fn batch_settle(
         &self,
         peer: PeerId,

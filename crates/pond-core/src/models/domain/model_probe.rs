@@ -1,18 +1,14 @@
-//! What a model can be asked to do, read from the model's own Jinja chat template rather than
-//! from a name table: DeepSeek-R1-Distill has no `tools` variable, so forcing native tool calling
-//! on it puts the declarations nowhere, and the MTP drafts carry no template at all — a third
-//! state, not an error. Only whole words inside `{% ... %}` count; emitted text is not evidence.
+//! What a model can be asked to do, read from its own Jinja chat template, not a name table.
+//! Only whole words inside `{% ... %}` count; emitted text is not evidence.
 
 use super::gguf::GgufInfo;
 
 /// Whether tool declarations can be rendered at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolSupport {
-    /// The template takes a `tools` variable and renders it. Declarations can
-    /// be passed natively.
+    /// The template renders a `tools` variable, so declarations can be passed natively.
     Native,
-    /// No `tools` variable. Tools must be described in prose in the system
-    /// prompt, or not offered.
+    /// No `tools` variable: describe tools in the system prompt, or offer none.
     Absent,
     /// No template to read. Says nothing either way.
     Unknown,
@@ -21,11 +17,9 @@ pub enum ToolSupport {
 /// Whether the model reasons before answering, and how that is controlled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Thinking {
-    /// The template exposes a flag (`enable_thinking`) and the caller decides.
-    /// Gemma 4, Nemotron, Nanbeige.
+    /// An `enable_thinking` flag lets the caller decide (Gemma 4, Nemotron, Nanbeige).
     Gated { marker: String },
-    /// The template always opens a reasoning block; there is no flag to clear.
-    /// DeepSeek-R1 distills.
+    /// Always opens a reasoning block, with no flag to clear it (DeepSeek-R1 distills).
     Always { marker: String },
     /// No reasoning markers.
     Absent,
@@ -38,24 +32,18 @@ pub enum Thinking {
 pub struct ModelProbe {
     pub tools: ToolSupport,
     pub thinking: Thinking,
-    /// `{arch}.context_length` — what the weights were trained for, which is
-    /// not the same as what this machine can afford.
+    /// `{arch}.context_length`: the trained window, not what this machine can afford.
     pub context_window_tokens: Option<u32>,
     /// `general.architecture`, for rules that legitimately need the family.
     pub architecture: Option<String>,
 }
 
-/// Reasoning markers, most specific first.
-///
-/// Gemma 4 emits `<|think|>`, NOT the `<|channel>thought` that
-/// `ModelCapabilities` documents -- read from the template on 2026-08-16.
+/// Reasoning markers, most specific first. Gemma 4's template emits `<|think|>`, not the
+/// `<|channel>thought` that `ModelCapabilities` documents.
 const THINKING_MARKERS: &[&str] = &["<|think|>", "<think>", "<|channel|>", "<reasoning>"];
 
 impl ModelProbe {
-    /// Read a probe from a parsed GGUF header.
-    ///
-    /// A header with no `chat_template` yields `Unknown`, not `Absent`: only "this model
-    /// cannot" justifies withholding tools.
+    /// No `chat_template` yields `Unknown`, not `Absent`: only "cannot" justifies withholding.
     pub fn from_gguf(info: &GgufInfo) -> Self {
         let Some(template) = info.chat_template.as_deref() else {
             return Self {
@@ -93,18 +81,11 @@ impl ModelProbe {
         }
     }
 
-    /// Can tool declarations be handed to this model natively?
-    ///
-    /// `Unknown` answers no: a file that would not say is not evidence it would have said yes,
-    /// and forcing native tools on a template with no `tools` variable is the failure here.
+    /// Can tools be passed natively? `Unknown` answers no: silence is not evidence of support.
     pub fn supports_native_tools(&self) -> bool {
         matches!(self.tools, ToolSupport::Native)
     }
 
-    /// Should reasoning be switched on for this model?
-    ///
-    /// Only where the template offers the flag. `Always` needs no help and
-    /// `Absent` has nothing to switch.
     pub fn thinking_is_selectable(&self) -> bool {
         matches!(self.thinking, Thinking::Gated { .. })
     }
@@ -118,17 +99,13 @@ impl ModelProbe {
     }
 }
 
-/// Read a probe from a GGUF on disk, remembering the answer. It is asked every turn from a
-/// synchronous block and feeds `PromptState`, so it must be cheap (~40 ms a parse) and identical
-/// on every turn: an answer that changes mid-session moves `prefix_hash` and costs a full
-/// re-prefill, 3.7 s on the Orin. Keyed on `(path, mtime, len)`; a `None` is cached too.
+/// Probe a GGUF on disk, cached on `(path, mtime, len)`, `None` included. Asked every turn, so
+/// it must be cheap and stable: a changed answer moves `prefix_hash`, forcing a full re-prefill.
 pub fn probe_cached(path: &std::path::Path) -> Option<ModelProbe> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
-    /// `(path, mtime-as-nanos, len)`. `mtime` is `None` when the filesystem
-    /// would not say, which simply makes the key coarser -- never wrong, since
-    /// `len` still moves when the file does.
+    /// `mtime` (nanos) is `None` when the filesystem won't say, which only makes the key coarser.
     type Key = (std::path::PathBuf, Option<u128>, u64);
 
     static CACHE: OnceLock<Mutex<HashMap<Key, Option<ModelProbe>>>> = OnceLock::new();
@@ -155,10 +132,7 @@ pub fn probe_cached(path: &std::path::Path) -> Option<ModelProbe> {
     probe
 }
 
-/// Does `ident` appear as a whole word inside a Jinja control block?
-///
-/// The scan covers `{% ... %}` only: an identifier in emitted text says nothing about what the
-/// template consumes, which is how DeepSeek-R1's one `tool_call` mention fools a substring test.
+/// Whether `ident` is a whole word inside a `{% ... %}` block; emitted text is not consumption.
 fn mentions_in_control_flow(template: &str, ident: &str) -> bool {
     let mut rest = template;
     while let Some(open) = rest.find("{%") {
@@ -174,8 +148,7 @@ fn mentions_in_control_flow(template: &str, ident: &str) -> bool {
     false
 }
 
-/// Whole-word match, so `tools` does not match `tool_calls` and `tool` does not
-/// match `tools`.
+/// Whole-word match: `tools` does not match `tool_calls`, nor `tool` match `tools`.
 fn contains_word(haystack: &str, word: &str) -> bool {
     let bytes = haystack.as_bytes();
     let mut from = 0;
@@ -203,8 +176,7 @@ fn is_ident_byte(b: u8) -> bool {
 mod tests {
     use super::*;
 
-    /// Excerpts taken verbatim from the real templates on 2026-08-16, so the
-    /// rules are tested against the strings they will actually meet.
+    /// Verbatim excerpts from the real templates.
     const GEMMA4: &str = r#"{{- bos_token -}}
         {%- if (enable_thinking is defined and enable_thinking) or tools or messages[0]['role'] in ['system'] -%}
         {{- '<|turn>system\n' -}}
@@ -241,8 +213,6 @@ mod tests {
         assert_eq!(p.context_window_tokens, Some(131072));
     }
 
-    /// The row this module exists for. DeepSeek reasons but cannot be handed
-    /// tools, and GIAP forces native tool calling on every model regardless.
     #[test]
     fn deepseek_reasons_but_is_not_a_tool_user() {
         let p = ModelProbe::from_gguf(&info(Some(DEEPSEEK_R1)));
@@ -281,8 +251,6 @@ mod tests {
         assert_eq!(p.thinking_marker(), None);
     }
 
-    /// No template is a third state. The MTP drafts on this machine carry
-    /// none, and "did not say" must not be read as "cannot".
     #[test]
     fn no_template_is_unknown_not_absent() {
         let p = ModelProbe::from_gguf(&info(None));
@@ -299,9 +267,7 @@ mod tests {
         );
     }
 
-    /// The probe against every real GGUF on the machine, not excerpts. Excerpt fixtures prove
-    /// the rules; only the files prove they survive 19 KB of real Jinja. Point
-    /// `GIAP_TEST_GGUF_DIR` at the gguf models directory and run with `--ignored`.
+    /// Only the real files prove the rules survive 19 KB of real Jinja.
     #[test]
     #[ignore = "needs real GGUF files; set GIAP_TEST_GGUF_DIR"]
     fn probes_every_model_on_disk() {
@@ -335,8 +301,6 @@ mod tests {
                 thinkers += 1;
             }
 
-            // Whatever a template says, an absent one must never read as
-            // permission to force native tools.
             if info.chat_template.is_none() {
                 assert!(
                     !p.supports_native_tools(),
@@ -365,7 +329,6 @@ mod tests {
         assert!(!contains_word("{{ mytools }}", "tools"));
     }
 
-    /// Only control blocks count; emitted text does not.
     #[test]
     fn emitted_text_is_not_control_flow() {
         assert!(!mentions_in_control_flow(

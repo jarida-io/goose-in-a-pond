@@ -6,15 +6,11 @@ pub enum Role {
     User,
     Assistant,
     System,
-    /// Tool response — result of a tool call, attributed to the tool system.
-    /// In OpenAI-compatible APIs this maps to `role: "tool"`.
+    /// A tool call's result; `role: "tool"` in OpenAI-compatible APIs.
     Tool,
 }
 
-/// An image attached to a chat message.
-///
-/// Used for multimodal input when the active model supports vision
-/// (e.g. Gemma 4, LLaVA). Models without vision silently ignore images.
+/// An image attached to a chat message; models without vision silently ignore it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageAttachment {
     /// Base64-encoded image data.
@@ -23,10 +19,7 @@ pub struct ImageAttachment {
     pub mime_type: String,
 }
 
-/// A record of a tool invocation embedded in an assistant message.
-///
-/// Round-tripped on later turns through the OpenAI-compatible `tool_calls` field so
-/// the model sees its own prior tool usage.
+/// A tool call in an assistant message, replayed via `tool_calls` so the model sees its history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCallRecord {
     pub id: String,
@@ -40,16 +33,12 @@ pub struct ToolCallRecord {
 pub struct ChatMessage {
     pub role: Role,
     pub content: String,
-    /// Optional image attachments for multimodal models.
-    /// Empty for text-only messages. Backwards-compatible via `serde(default)`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageAttachment>,
-    /// Tool calls invoked by an assistant message.
-    /// Empty for user/system/tool messages.
+    /// Set only on assistant messages.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallRecord>,
-    /// Identifier linking a tool-result message back to the originating
-    /// assistant `tool_calls[].id`. Set only on `Role::Tool` messages.
+    /// The originating `tool_calls[].id`; set only on `Role::Tool` messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
 }
@@ -85,10 +74,7 @@ impl ChatMessage {
         }
     }
 
-    /// Create a tool result message, rendered by the chat template as `role: "tool"`.
-    ///
-    /// `tool_call_id` must match the `id` of the originating `ToolCallRecord` on the
-    /// preceding assistant message.
+    /// A tool result; `tool_call_id` must match a `ToolCallRecord` id on the preceding message.
     pub fn tool_result(content: impl Into<String>, tool_call_id: impl Into<String>) -> Self {
         Self {
             role: Role::Tool,
@@ -99,8 +85,6 @@ impl ChatMessage {
         }
     }
 
-    /// Create an assistant message that includes tool-call metadata.
-    ///
     /// `content` may be empty when the model emitted only tool calls.
     pub fn assistant_with_tool_calls(
         content: impl Into<String>,
@@ -115,16 +99,12 @@ impl ChatMessage {
         }
     }
 
-    /// Attach an image to this message.
     pub fn with_image(mut self, data: String, mime_type: String) -> Self {
         self.images.push(ImageAttachment { data, mime_type });
         self
     }
 
-    /// Create a user message carrying image attachments (phase F1).
-    ///
-    /// Order is preserved: attachment ordinal 0 is the first image the user
-    /// picked, which is what "the first picture" refers to in a follow-up.
+    /// Order is preserved: "the first picture" in a follow-up means ordinal 0.
     pub fn user_with_images(content: impl Into<String>, images: Vec<ImageAttachment>) -> Self {
         Self {
             role: Role::User,

@@ -9,10 +9,8 @@ use crate::mesh::ports::mesh_transport::{MeshTransport, MeshTransportError};
 
 type SentFrame = (PeerId, Vec<u8>);
 
-/// In-memory mesh transport for testing. `connect` always succeeds unless the
-/// peer has been pre-marked unreachable via [`MockMeshTransport::mark_unreachable`].
-/// `recv()` is backed by a queue a test fills via [`MockMeshTransport::push_inbound`]
-/// — nothing generates inbound frames on its own.
+/// In-memory mesh transport. `connect` succeeds unless [`MockMeshTransport::mark_unreachable`];
+/// `recv()` only returns frames queued by [`MockMeshTransport::push_inbound`].
 pub struct MockMeshTransport {
     peer_id: PeerId,
     connected: Arc<RwLock<HashSet<PeerId>>>,
@@ -54,8 +52,7 @@ impl MockMeshTransport {
 
     /// Queue a frame for a future `recv()` to return.
     pub fn push_inbound(&self, peer: PeerId, frame: Vec<u8>) {
-        // An unbounded channel only fails to send if the receiver was
-        // dropped, which can't happen while `self` is still alive.
+        // Can't fail: the receiver lives as long as `self`.
         let _ = self.inbound_tx.send((peer, frame));
     }
 

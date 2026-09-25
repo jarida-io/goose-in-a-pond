@@ -13,10 +13,7 @@ pub enum PeerCapabilityQueryError {
     Timeout(PeerId),
 }
 
-/// Driven Port: PeerCapabilityQuery
-///
-/// A live, on-demand "what does this peer offer right now?". Kept out of the SQLite-backed
-/// `PeerDirectory`: capabilities flip between queries, so a cache would look authoritative.
+/// Live "what does this peer offer now?". Not in `PeerDirectory`: a cache would look authoritative.
 #[async_trait]
 pub trait PeerCapabilityQuery: Send + Sync {
     async fn capabilities_of(

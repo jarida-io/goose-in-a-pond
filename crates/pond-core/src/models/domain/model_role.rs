@@ -1,7 +1,5 @@
-//! Which job a model has been given: the single source for the seven role strings that five
-//! sites used to match on separately. [`ModelRole::settings_mirror`] is load-bearing, and an
-//! empty answer is a real answer; a Piper voice must never be mirrored, since `tts_piper/<name>`
-//! is an id no catalogue row has and every guard against the catalogue then stops matching.
+//! Which job a model has been given; the single source of the role strings. A Piper voice is
+//! never mirrored: `tts_piper/<name>` matches no catalogue row, breaking every catalogue guard.
 
 use crate::models::domain::model_record::ModelCategory;
 
@@ -12,8 +10,7 @@ const LLM_CATEGORIES: [ModelCategory; 3] = [
     ModelCategory::Ollama,
 ];
 const ASR_CATEGORIES: [ModelCategory; 1] = [ModelCategory::Whisper];
-/// Kokoro first: it is the only live engine, so a forgiving lookup that probes
-/// in this order finds what a household means before it finds a legacy row.
+/// Kokoro first: it is the only live engine, so an ordered lookup finds it before legacy rows.
 const TTS_CATEGORIES: [ModelCategory; 3] = [
     ModelCategory::TtsKokoro,
     ModelCategory::TtsHttp,
@@ -26,8 +23,7 @@ const EMBEDDING_CATEGORIES: [ModelCategory; 1] = [ModelCategory::Embedding];
 pub enum ModelRole {
     /// Fast conversational model for everyday queries.
     Chat,
-    /// Deeper reasoning model. Assignable and validated, but selects nothing
-    /// today — see the module note.
+    /// Deeper reasoning model; assignable and validated, but selects nothing yet.
     Think,
     /// Agentic tool-use model. Same standing as [`Self::Think`].
     Task,
@@ -65,8 +61,7 @@ impl ModelRole {
         }
     }
 
-    /// Parse a role name. `None` for anything else — roles arrive from the API
-    /// and the CLI as free text, and an unknown one is a refusal, not a panic.
+    /// Parse a role name; roles arrive as free text, so an unknown one is `None`, not a panic.
     pub fn from_str(s: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|r| r.as_str() == s)
     }
@@ -91,25 +86,19 @@ impl ModelRole {
         matches!(self, Self::Chat | Self::Think | Self::Task | Self::Tool)
     }
 
-    /// True only for the role whose model the live provider actually serves.
-    ///
-    /// Distinct from [`Self::is_llm`]: rebuilding the provider for `think` or `task` would
-    /// discard the KV prompt cache and force a full prefill for a setting nothing reads.
+    /// Only chat's model is served live; rebuilding for others would discard the KV prompt cache.
     pub fn rebuilds_llm_provider(&self) -> bool {
         matches!(self, Self::Chat)
     }
 
-    /// Every settings key this role owns. A patch touching one of these is a
-    /// patch that must re-sync this role's assignment.
+    /// Settings keys this role owns; a patch touching one must re-sync this role's assignment.
     pub fn settings_keys(&self) -> &'static [&'static str] {
         match self {
             Self::Chat => &["chat_provider", "chat_model"],
             Self::Think | Self::Task => &[],
             Self::Tool => &["tool_model"],
             Self::Asr => &["active_whisper_model"],
-            // `voice_tts_voice` belongs to this role too: the Voice screen
-            // writes it without touching the assignment, so a sweep that
-            // ignored it left the picker and the assignment disagreeing.
+            // The Voice screen writes `voice_tts_voice` without touching the assignment.
             Self::Tts => &["active_tts_model", "voice_tts_voice"],
             Self::Embedding => &["active_embedding_model"],
         }
@@ -123,10 +112,8 @@ impl ModelRole {
             .find(|r| r.settings_keys().contains(&key))
     }
 
-    /// The ONE role-to-settings mapping: which keys a writer upserts when `model_name` of
-    /// `category` takes this role. Empty is legitimate: `Think`/`Task` select no model, and a
-    /// legacy Piper voice is a filename, not a catalogue name. Kokoro writes both keys, or the
-    /// spoken voice lags the picker. `embedding_provider` is absent: writing it selects fastembed.
+    /// The ONE role-to-settings mapping; may be empty. Kokoro writes both keys, or the voice lags
+    /// the picker; `embedding_provider` is left out, as writing it selects fastembed.
     pub fn settings_mirror(
         &self,
         category: &ModelCategory,
@@ -166,9 +153,6 @@ mod tests {
         assert_eq!(ModelRole::from_str(""), None);
     }
 
-    /// The vocabulary this enum was widened to own. Five sites each held their
-    /// own subset; a role missing here is a role that becomes unassignable or
-    /// unreportable somewhere.
     #[test]
     fn the_role_vocabulary_is_the_seven_the_pond_runs_on() {
         let names: Vec<&str> = ModelRole::ALL.iter().map(|r| r.as_str()).collect();
@@ -191,9 +175,6 @@ mod tests {
         assert!(!ModelRole::Embedding.accepts(&ModelCategory::Gguf));
     }
 
-    /// The defect the mirror exists for: the reverse sweep hardcoded the TTS
-    /// category, so a Kokoro voice was written as `tts_piper/<name>` — an id
-    /// no catalogue row has, which silently unticked the live voice.
     #[test]
     fn a_kokoro_voice_writes_both_the_catalogue_row_and_the_engine_voice() {
         let mirror = ModelRole::Tts.settings_mirror(&ModelCategory::TtsKokoro, "af_heart");
@@ -239,8 +220,6 @@ mod tests {
         );
     }
 
-    /// Only chat's model is what the live provider serves — the others would
-    /// force a pointless unload/reload that discards the KV prompt cache.
     #[test]
     fn only_chat_rebuilds_the_provider_though_four_roles_are_llm() {
         let llm: Vec<&str> = ModelRole::ALL
@@ -257,8 +236,7 @@ mod tests {
         assert_eq!(rebuilds, ["chat"]);
     }
 
-    /// A settings key belongs to at most one role, or a reverse sweep would
-    /// have to guess which assignment a save meant.
+    /// A reverse sweep must never have to guess which assignment a save meant.
     #[test]
     fn no_settings_key_is_claimed_by_two_roles() {
         let mut seen: Vec<&str> = Vec::new();
@@ -272,8 +250,7 @@ mod tests {
         assert_eq!(ModelRole::for_settings_key("user_name"), None);
     }
 
-    /// Every key a role mirrors must be a key that role owns, or a save of it
-    /// would never re-sync the assignment that wrote it.
+    /// A mirrored key the role does not own would never re-sync its assignment.
     #[test]
     fn every_mirrored_key_is_owned_by_the_role_that_writes_it() {
         for role in ModelRole::ALL {

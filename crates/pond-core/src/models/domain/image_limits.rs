@@ -1,47 +1,29 @@
-//! Per-turn limits for image attachments (phase F1). An image turn bypasses the retained KV
-//! prompt-session cache so it pays a full prefill, and a 12 MP photo decodes to ~36 MB of RGB in
-//! the ~1 GB an 8 GB Orin has spare: unbounded is an OOM, not just slow. Clients downscale to
-//! 1024 px longest edge (`pond-desktop/src/lib/imageAttach.ts`); these caps are the backstop.
+//! Per-turn image attachment limits: a 12 MP photo decodes to ~36 MB of RGB in the ~1 GB an
+//! Orin has spare. Clients downscale to 1024 px longest edge; these caps are the backstop.
 
 use super::message::ImageAttachment;
 
-/// Maximum number of images accepted in a single chat turn.
-///
-/// Four keeps the vision encoder to a couple of seconds on the Orin and the added prompt tokens
-/// inside the pinned 4096-token context. The video sampler uses the same frame cap.
+/// Max images per turn, and the video frame cap: fits the Orin's time and 4096-token budgets.
 pub const MAX_IMAGES_PER_TURN: usize = 4;
 
-/// Maximum decoded (post-base64) size of a single image, in bytes.
-///
-/// 4 MiB of compressed JPEG/PNG is far more than a 1024 px-longest-edge image
-/// needs (typically 100-400 KiB) but leaves room for a lossless PNG screenshot.
+/// Max decoded size of one image; a 1024 px JPEG is ~100-400 KiB, but PNG screenshots need room.
 pub const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
 
-/// Maximum decoded size of ALL images in one turn, in bytes.
-///
-/// Bounds peak transient allocation per request, so `MAX_IMAGES_PER_TURN` images at
-/// `MAX_IMAGE_BYTES` each cannot combine into a 16 MiB spike.
+/// Max decoded size of ALL images in a turn, so four max-size images can't make a 16 MiB spike.
 pub const MAX_TOTAL_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 
-/// Request-body ceiling for the chat routes, in bytes. Axum's 2 MiB `DefaultBodyLimit` is below
-/// a legal attachment set (base64 inflates by 4/3), so this is sized to keep every rejection in
-/// [`validate_turn_images`] reachable, `TotalTooLarge` included; the ~22 MiB transient that
-/// costs is bounded by the SSE semaphore.
+/// Chat-route body ceiling, above every image limit after base64's 4/3 so each rejection in
+/// [`validate_turn_images`] is reachable; the ~22 MiB transient is bounded by the SSE semaphore.
 pub const MAX_CHAT_BODY_BYTES: usize =
     (MAX_IMAGES_PER_TURN * MAX_IMAGE_BYTES) * 4 / 3 + 1024 * 1024;
 
-// The backstop must sit above EVERY policy limit, or the policy never runs and the caller gets
-// Axum's "length limit exceeded" instead of an actionable message. Compile-time rather than a
-// test because it is a relationship between constants, so a violation should not build.
+// The body ceiling must exceed every policy limit, or Axum rejects before the policy runs.
 const _: () = assert!(MAX_CHAT_BODY_BYTES > MAX_TOTAL_IMAGE_BYTES * 4 / 3);
 const _: () = assert!(MAX_CHAT_BODY_BYTES > (MAX_IMAGES_PER_TURN * MAX_IMAGE_BYTES) * 4 / 3);
 // Axum's own default is 2 MiB, which is below a single legal image.
 const _: () = assert!(MAX_CHAT_BODY_BYTES > 2 * 1024 * 1024);
 
-/// MIME types the mtmd vision path can decode.
-///
-/// Kept explicit rather than accepting any `image/*`: an unsupported container
-/// fails deep inside the engine with a much worse error than a 415 here.
+/// MIME types mtmd can decode; explicit because others fail deep in the engine, not as a 415.
 pub const SUPPORTED_IMAGE_MIME_TYPES: &[&str] = &[
     "image/jpeg",
     "image/png",
@@ -50,10 +32,7 @@ pub const SUPPORTED_IMAGE_MIME_TYPES: &[&str] = &[
     "image/bmp",
 ];
 
-/// Why a turn's image attachments were rejected.
-///
-/// Deliberately carries the offending numbers so the HTTP layer can render an
-/// actionable message ("3.2 MB, limit is 4.0 MB") instead of "bad request".
+/// Why a turn's images were rejected, with the numbers for an actionable HTTP message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImageLimitError {
     TooManyImages {
@@ -115,8 +94,7 @@ impl std::fmt::Display for ImageLimitError {
 impl std::error::Error for ImageLimitError {}
 
 impl ImageLimitError {
-    /// `true` when the right HTTP status is 413 Payload Too Large rather than
-    /// 400/415. Lets the API layer pick a status without matching variants.
+    /// `true` when the right status is 413 Payload Too Large rather than 400/415.
     pub fn is_too_large(&self) -> bool {
         matches!(
             self,
@@ -125,10 +103,7 @@ impl ImageLimitError {
     }
 }
 
-/// Decoded byte length of a base64 payload, without decoding it.
-///
-/// Exact for well-formed base64 (3 bytes per 4 characters, each trailing `=` one byte less),
-/// and whitespace is ignored. Rejects an oversized payload before a decode buffer is allocated.
+/// Exact decoded length of well-formed base64 (whitespace ignored), without decoding it.
 #[must_use]
 pub fn decoded_len(base64: &str) -> usize {
     let mut chars = 0usize;
@@ -152,10 +127,7 @@ pub fn decoded_len(base64: &str) -> usize {
     ((chars / 4) * 3 + remainder).saturating_sub(padding.min(2))
 }
 
-/// Validate a turn's image attachments against the per-request limits.
-///
-/// Pure: no allocation beyond the error path, no decoding. Call this before the
-/// request reaches the agent so an oversized payload is a 4xx and not an OOM.
+/// Validate a turn's images before they reach the agent, so oversize is a 4xx, not an OOM.
 pub fn validate_turn_images(images: &[ImageAttachment]) -> Result<(), ImageLimitError> {
     if images.len() > MAX_IMAGES_PER_TURN {
         return Err(ImageLimitError::TooManyImages {
@@ -200,10 +172,7 @@ pub fn validate_turn_images(images: &[ImageAttachment]) -> Result<(), ImageLimit
     Ok(())
 }
 
-/// File extension for a supported image MIME type, without the dot.
-///
-/// Used when persisting an attachment to disk (phase F2) so the stored file is
-/// openable by a human debugging a session.
+/// File extension (no dot) for a supported image MIME type.
 #[must_use]
 pub fn extension_for_mime(mime_type: &str) -> &'static str {
     match mime_type
@@ -218,9 +187,7 @@ pub fn extension_for_mime(mime_type: &str) -> &'static str {
         "image/webp" => "webp",
         "image/gif" => "gif",
         "image/bmp" => "bmp",
-        // JPEG and anything that slipped past validation land here; a `.jpg`
-        // that is really something else is still readable by every viewer that
-        // sniffs magic bytes.
+        // Also catches anything that slipped past validation; viewers sniff magic bytes anyway.
         _ => "jpg",
     }
 }
@@ -301,8 +268,6 @@ mod tests {
 
     #[test]
     fn total_budget_rejects_several_individually_legal_images() {
-        // Three images just under the per-image cap pass individually but blow
-        // the aggregate budget.
         let each = MAX_IMAGE_BYTES - 1024;
         let images: Vec<_> = (0..3).map(|_| img(each, "image/jpeg")).collect();
         for one in &images {
