@@ -1,5 +1,12 @@
 # In-process MTP: scope
 
+> **2026-09-24 -- speculative decoding was taken out of the llama.cpp engine** (goose `743649d98`:
+> on Metal the drafter cost 6-36% of decode; on the Orin it had measured 1.8x over eight real turns,
+> at the price of a second context, the no-VMM CUDA pool, a drafter download and a model reload per
+> switch flip). GIAP's side of it -- the drafter provisioned at startup since `38b733c5`, and a
+> Settings > Models switch built the same day -- is commented out rather than deleted, so this
+> document is the record of how to bring it back, not a description of what runs.
+
 Measured on the Orin: upstream llama.cpp's MTP gives **47.7 tok/s against the vendored
 engine's 15.8** on `gemma-4-E4B-it-qat`, at 87 % draft acceptance, quality unchanged.
 See [`jetson-engine-bakeoff.md`](jetson-engine-bakeoff.md). This scopes bringing that

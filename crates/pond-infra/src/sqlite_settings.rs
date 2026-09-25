@@ -301,6 +301,16 @@ impl SettingsRepository for SqliteSettingsRepository {
                 "false"
             }
         );
+        // Speculation left the engine on 2026-09-24 (goose 743649d98); its switch is commented out,
+        // and restoring it means restoring this upsert and the apply_key arm together.
+        // upsert!(
+        //     "speculative_decoding_enabled",
+        //     if settings.speculative_decoding_enabled {
+        //         "true"
+        //     } else {
+        //         "false"
+        //     }
+        // );
         upsert!(
             "hybrid_compaction_enabled",
             if settings.hybrid_compaction_enabled {
@@ -973,6 +983,7 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
             }
         }
         "show_turn_stats" => s.show_turn_stats = value == "true",
+        // "speculative_decoding_enabled" => s.speculative_decoding_enabled = value == "true",
         "hybrid_compaction_enabled" => s.hybrid_compaction_enabled = value == "true",
         "summary_idle_secs" => {
             if let Ok(v) = value.parse() {

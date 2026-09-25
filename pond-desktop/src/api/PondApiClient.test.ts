@@ -11,8 +11,8 @@ function okJson(body: unknown, status = 200): Response {
   });
 }
 
-function errJson(status: number, message: string): Response {
-  return new Response(JSON.stringify({ error: message }), {
+function errJson(status: number, message: string, code?: string): Response {
+  return new Response(JSON.stringify({ error: message, ...(code ? { code } : {}) }), {
     status,
     headers: { "Content-Type": "application/json" },
   });
@@ -86,6 +86,68 @@ describe("updateSettings()", () => {
     expect(JSON.parse(init.body as string)).toMatchObject({
       assistant_name: "Puck",
     });
+  });
+});
+
+// ── models ────────────────────────────────────────────────────────────────────
+
+describe("listModels()", () => {
+  it("flattens the grouped reply, carrying reads_images and image_support_bytes through", async () => {
+    fetchMock.mockResolvedValueOnce(
+      okJson({
+        gguf: [
+          {
+            name: "gemma-4-E2B-it-Q4_K_M",
+            description: "Gemma 4 E2B",
+            active: true,
+            downloaded: true,
+            size_mb: 2600,
+            category: "llm",
+            reads_images: true,
+            image_support_bytes: 986_833_728,
+          },
+          {
+            name: "llama-3.2-3b",
+            description: "Llama 3.2 3B",
+            active: false,
+            downloaded: true,
+            size_mb: 1900,
+            category: "llm",
+          },
+        ],
+        llamafile: [],
+        whisper: [],
+        tts: [],
+        ollama: [],
+        embedding: [],
+      }),
+    );
+    const models = await client().listModels();
+    const vision = models.find((m) => m.name === "gemma-4-E2B-it-Q4_K_M");
+    expect(vision?.reads_images).toBe(true);
+    expect(vision?.image_support_bytes).toBe(986_833_728);
+    const textOnly = models.find((m) => m.name === "llama-3.2-3b");
+    expect(textOnly?.reads_images).toBeUndefined();
+    expect(textOnly?.image_support_bytes).toBeUndefined();
+  });
+});
+
+describe("getVisionStatus()", () => {
+  it("GETs /api/v1/models/vision-status", async () => {
+    fetchMock.mockResolvedValueOnce(
+      okJson({
+        model: "gemma-4-E2B-it-Q4_K_M",
+        state: { kind: "downloading", done: 412 * 1_048_576, total: 941 * 1_048_576 },
+        size_bytes: 986_833_728,
+        message: "Getting picture support ready: 412 MB of 941 MB. Text chat works meanwhile.",
+      }),
+    );
+    const status = await client().getVisionStatus();
+    expect(status.state.kind).toBe("downloading");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:4000/api/v1/models/vision-status",
+      expect.anything(),
+    );
   });
 });
 
@@ -440,6 +502,28 @@ describe("ApiError", () => {
     );
     await expect(client().health()).rejects.toMatchObject({ status: 502 });
   });
+
+  it("captures a structured {error, code} body's code, for a caller to branch on", async () => {
+    fetchMock.mockResolvedValueOnce(errJson(409, "Picture support is not ready yet.", "vision_not_ready"));
+    try {
+      await client().getPrompt("missing");
+      expect.fail("should have thrown");
+    } catch (e) {
+      expect(e).toBeInstanceOf(ApiError);
+      expect((e as ApiError).code).toBe("vision_not_ready");
+      expect((e as ApiError).body).toMatchObject({ code: "vision_not_ready" });
+    }
+  });
+
+  it("leaves code undefined for a plain {error} body", async () => {
+    fetchMock.mockResolvedValueOnce(errJson(500, "internal error"));
+    try {
+      await client().getPrompt("missing");
+      expect.fail("should have thrown");
+    } catch (e) {
+      expect((e as ApiError).code).toBeUndefined();
+    }
+  });
 });
 
 // ── chatStream ────────────────────────────────────────────────────────────────
@@ -482,6 +566,21 @@ describe("chatStream()", () => {
     fetchMock.mockResolvedValueOnce(errJson(500, "internal error"));
     const gen = client().chatStream("hi");
     await expect(gen.next()).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it("carries a refused turn's structured code — e.g. a 409 before any frame", async () => {
+    fetchMock.mockResolvedValueOnce(errJson(409, "Picture support is not ready yet.", "vision_not_ready"));
+    const gen = client().chatStream("look at this", undefined, undefined, undefined, [
+      { data: "AAA", mime_type: "image/png" },
+    ]);
+    try {
+      await gen.next();
+      expect.fail("should have thrown");
+    } catch (e) {
+      expect(e).toBeInstanceOf(ApiError);
+      expect((e as ApiError).status).toBe(409);
+      expect((e as ApiError).code).toBe("vision_not_ready");
+    }
   });
 
   /**

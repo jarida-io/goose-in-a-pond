@@ -4,6 +4,7 @@
 //! `<turn-context>` is stripped, tools outside the allow-set are vetoed; else pure pass-through.
 
 use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
@@ -41,7 +42,19 @@ pub struct SessionControls {
     /// static prefix, so the rebuild would silently replace its delegation envelope (turn budget,
     /// no-delegation rule, exact tool names) with the GLOBAL extension appendix and warn nothing.
     system_override: Mutex<Option<String>>,
+    /// Whether this session's model can look at a picture right now (its encoder is ready), for
+    /// tool-result images. Zero until a turn says, which promotes as before.
+    pictures_readable: AtomicU8,
+    /// How many image-bearing requests the engine refused for this session. The request that
+    /// failed is already in goose's session store with its image, and the history-image cap keeps
+    /// the newest one as pixels, so without this every later TEXT turn replays the picture and
+    /// fails the same way until the household starts a new conversation.
+    image_failures: AtomicU32,
 }
+
+// `pictures_readable` values. Zero, the default, is "no turn has said", which promotes.
+const PICTURES_READABLE: u8 = 1;
+const PICTURES_UNREADABLE: u8 = 2;
 
 impl SessionControls {
     pub fn set_turn_appendix(&self, appendix: Option<String>) {
@@ -93,6 +106,36 @@ impl SessionControls {
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .is_none_or(|set| set.contains(tool))
+    }
+
+    /// Publish whether this session's model can look at pictures this turn. Only the in-process
+    /// engine's tool-result promotion reads it.
+    pub fn set_pictures_readable(&self, readable: bool) {
+        self.pictures_readable.store(
+            if readable {
+                PICTURES_READABLE
+            } else {
+                PICTURES_UNREADABLE
+            },
+            Ordering::SeqCst,
+        );
+    }
+
+    /// `false` only when a turn said the model cannot look: unknown fails open to promotion,
+    /// the behaviour before this existed.
+    fn pictures_readable(&self) -> bool {
+        self.pictures_readable.load(Ordering::SeqCst) != PICTURES_UNREADABLE
+    }
+
+    /// Record that the engine refused an image-bearing request for this session.
+    pub fn note_image_failure(&self) {
+        self.image_failures.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// How many image-bearing requests the engine has refused for this session. The adapter
+    /// compares it across a turn to tell that THIS turn's picture failed.
+    pub fn image_failures(&self) -> u32 {
+        self.image_failures.load(Ordering::SeqCst)
     }
 }
 
@@ -325,7 +368,17 @@ fn provider_relocates_tool_images(provider_name: &str) -> bool {
 /// in the goose local-inference engine stop nested images reaching mtmd: `multimodal.rs` extracts
 /// only top-level `MessageContent::Image`, and `lib.rs` strips `image_url` parts with no vision
 /// guard. A no-op once the fork handles tool-result images; `None` means nothing to promote.
-fn promote_tool_result_images(messages: &[Message], max_images: usize) -> Option<Vec<Message>> {
+///
+/// `readable` is whether the model can look at a picture right now (its encoder is ready). When
+/// it cannot, the frames are NOT promoted: a promoted image on a model without a working encoder
+/// fails the whole tool loop mid-turn and poisons the conversation, and on a text-only model it
+/// becomes a "not supported" marker under a carrier that says "describe what you can see". The
+/// carrier then says what happened instead, so the model does not answer as if it had looked.
+fn promote_tool_result_images(
+    messages: &[Message],
+    max_images: usize,
+    readable: bool,
+) -> Option<Vec<Message>> {
     use goose::conversation::message::MessageContent;
     use rmcp::model::RawContent;
 
@@ -357,6 +410,14 @@ fn promote_tool_result_images(messages: &[Message], max_images: usize) -> Option
     promoted.reverse();
 
     let mut out = messages.to_vec();
+    if !readable {
+        out.push(Message::user().with_text(
+            "The tool call above returned a picture, but picture support is not ready on this \
+             device yet, so it is not shown here. Say that you cannot look at it yet; do not \
+             describe it.",
+        ));
+        return Some(out);
+    }
     // A dedicated trailing user message rather than editing an existing one:
     // rewriting a tool-response message would break the call/response pairing
     // every provider validates, and appending to the last user message would
@@ -370,6 +431,63 @@ fn promote_tool_result_images(messages: &[Message], max_images: usize) -> Option
     }
     out.push(carrier);
     Some(out)
+}
+
+/// Replace the images of every message except the current turn's with the history placeholder
+/// (phase F2's own wording), for a session whose engine already refused a picture. `None` when
+/// nothing changes.
+///
+/// The CURRENT turn is the last user message that is not tool bookkeeping: its picture, if any,
+/// is kept, so a household that retries once picture support works again is not silently sent
+/// a placeholder. Tool messages are never rewritten (the call/response pairing is validated by
+/// every provider), and the rewrite applies to this request only: goose's stored conversation
+/// is untouched, so it costs no `sessions.db` write, and a multimodal turn has already given up
+/// the KV prefix it would otherwise keep.
+fn scrub_history_images(messages: &[Message]) -> Option<Vec<Message>> {
+    use pond_core::models::services::context::image_history::history_image_placeholder;
+    let current = messages
+        .iter()
+        .rposition(|m| m.role == rmcp::model::Role::User && !crate::goose_agent::has_tool_parts(m));
+    let mut changed = false;
+    let out: Vec<Message> = messages
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            if Some(i) != current
+                && !crate::goose_agent::has_tool_parts(m)
+                && crate::goose_agent::image_part_count(m) > 0
+            {
+                changed = true;
+                crate::goose_agent::cap_message_images(m, 0, history_image_placeholder(0))
+            } else {
+                m.clone()
+            }
+        })
+        .collect();
+    changed.then_some(out)
+}
+
+/// Whether any message in this request carries a picture the engine has to encode.
+fn carries_image(messages: &[Message]) -> bool {
+    messages
+        .iter()
+        .any(|m| crate::goose_agent::image_part_count(m) > 0)
+}
+
+/// The engine's refusal of a request, as the shim can see it: typed, before goose turns it into
+/// "Ran into this error: ..." assistant prose.
+fn is_engine_refusal(err: &ProviderError) -> bool {
+    matches!(err, ProviderError::ExecutionError(_))
+}
+
+fn note_picture_refusal(session: &SessionControls, err: &ProviderError) {
+    session.note_image_failure();
+    tracing::warn!(
+        target: "giap::vision",
+        error = %err,
+        "the engine refused a request carrying a picture; this conversation's earlier pictures \
+         become placeholders so its later turns do not fail the same way"
+    );
 }
 
 use pond_core::mcp::domain::tool_group::{no_tools_env_set, NO_TOOLS_ENV};
@@ -600,17 +718,20 @@ impl Provider for GiapProviderShim {
                     .clone(),
             )
         };
-        let (turn_apx, allowed, owned_system) = match &session {
-            Some(s) => (
-                s.turn_appendix
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone(),
-                s.allowed_tools_snapshot(),
-                s.system_override_snapshot(),
-            ),
-            None => (None, None, None),
-        };
+        let (turn_apx, allowed, owned_system, pictures_readable, image_failed_before) =
+            match &session {
+                Some(s) => (
+                    s.turn_appendix
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone(),
+                    s.allowed_tools_snapshot(),
+                    s.system_override_snapshot(),
+                    s.pictures_readable(),
+                    s.image_failures() > 0,
+                ),
+                None => (None, None, None, true, false),
+            };
 
         // PAI-6 P3. A session that owns its whole system prompt (a subagent) skips the
         // prefix-plus-appendices rebuild: a child's prompt starts with the same GIAP prefix as
@@ -656,19 +777,31 @@ impl Provider for GiapProviderShim {
         // `strip_turn_context` is kept and still tested — it is the lever to
         // pull if the block turns out to cost more in KV churn than it returns.
         let stripped_messages: Option<Vec<Message>> = None;
+        // The poisoned-session backstop: once the engine has refused a picture for this session,
+        // the pictures already in its history become the history placeholder, so a later text
+        // turn is text-only instead of replaying the picture into the same failure.
+        let scrubbed_messages: Option<Vec<Message>> = if image_failed_before {
+            scrub_history_images(stripped_messages.as_deref().unwrap_or(messages))
+        } else {
+            None
+        };
+        let base_messages: &[Message] = scrubbed_messages
+            .as_deref()
+            .or(stripped_messages.as_deref())
+            .unwrap_or(messages);
         // Phase F3: built from the messages the provider will actually receive.
         let promoted_messages = if provider_relocates_tool_images(self.inner.get_name()) {
             None
         } else {
             promote_tool_result_images(
-                stripped_messages.as_deref().unwrap_or(messages),
+                base_messages,
                 pond_core::models::domain::image_limits::MAX_IMAGES_PER_TURN,
+                pictures_readable,
             )
         };
-        let final_messages: &[Message] = promoted_messages
-            .as_deref()
-            .or(stripped_messages.as_deref())
-            .unwrap_or(messages);
+        let final_messages: &[Message] = promoted_messages.as_deref().unwrap_or(base_messages);
+        // Decided on what the engine is actually handed, after both rewrites.
+        let picture_session = session.clone().filter(|_| carries_image(final_messages));
         let vetoed_tools = enforce_tools(tools, &allowed);
         // Minify AFTER the veto so we never pay for tools about to be dropped.
         let minified_tools = self.minify_tools_cached(vetoed_tools.as_deref().unwrap_or(tools));
@@ -698,12 +831,14 @@ impl Provider for GiapProviderShim {
 
         if enforced_system.is_some()
             || stripped_messages.is_some()
+            || scrubbed_messages.is_some()
             || vetoed_tools.is_some()
             || promoted_messages.is_some()
         {
             tracing::debug!(
                 system_rebuilt = enforced_system.is_some(),
                 turn_context_stripped = stripped_messages.is_some(),
+                history_images_scrubbed = scrubbed_messages.is_some(),
                 tools_vetoed = vetoed_tools.is_some(),
                 tool_images_promoted = promoted_messages.is_some(),
                 "GIAP provider shim enforced ownership"
@@ -804,7 +939,29 @@ impl Provider for GiapProviderShim {
             // ESTABLISHED — latency is time-to-stream, not time-to-last-token.
             call.finish(Some(if result.is_ok() { 200 } else { 500 }));
         }
-        result
+        // CR-2: the one place GIAP sees the engine's refusal of a picture as a TYPED error. The
+        // engine reports it either when the stream is set up or as a stream item (a failed load,
+        // encode, decode or multimodal tokenize), and goose turns both into assistant prose one
+        // layer up. Flag the session on either, so its later calls are scrubbed above.
+        match (result, picture_session) {
+            (Err(e), Some(s)) => {
+                if is_engine_refusal(&e) {
+                    note_picture_refusal(&s, &e);
+                }
+                Err(e)
+            }
+            (Ok(stream), Some(s)) => {
+                use futures::StreamExt;
+                Ok(Box::pin(stream.inspect(move |item| {
+                    if let Err(e) = item {
+                        if is_engine_refusal(e) {
+                            note_picture_refusal(&s, e);
+                        }
+                    }
+                })))
+            }
+            (result, None) => result,
+        }
     }
 
     async fn get_context_limit(&self, model_config: &ModelConfig) -> Result<usize, ProviderError> {
@@ -978,7 +1135,7 @@ mod tests {
             Message::user().with_text("hi"),
             tool_text_response("call-1", "the door is locked"),
         ];
-        assert!(promote_tool_result_images(&msgs, 4).is_none());
+        assert!(promote_tool_result_images(&msgs, 4, true).is_none());
     }
 
     fn tool_text_response(id: &str, body: &str) -> Message {
@@ -996,7 +1153,7 @@ mod tests {
             Message::user().with_text("what is at the door?"),
             image_tool_response("call-1", "front-door frame", &[("AAAA", "image/jpeg")]),
         ];
-        let out = promote_tool_result_images(&msgs, 4).expect("an image was returned");
+        let out = promote_tool_result_images(&msgs, 4, true).expect("an image was returned");
         assert_eq!(out.len(), 3, "the original messages are kept intact");
         // The tool response itself is untouched — rewriting it would break the
         // call/response pairing providers validate.
@@ -1014,7 +1171,7 @@ mod tests {
             image_tool_response("call-1", "older", &[("AAAA", "image/jpeg")]),
             image_tool_response("call-2", "newer", &[("BBBB", "image/jpeg")]),
         ];
-        let out = promote_tool_result_images(&msgs, 4).unwrap();
+        let out = promote_tool_result_images(&msgs, 4, true).unwrap();
         assert_eq!(
             top_level_images(out.last().unwrap())
                 .into_iter()
@@ -1040,7 +1197,7 @@ mod tests {
                 ("F6", "image/jpeg"),
             ],
         )];
-        let out = promote_tool_result_images(&msgs, 2).unwrap();
+        let out = promote_tool_result_images(&msgs, 2, true).unwrap();
         let kept: Vec<String> = top_level_images(out.last().unwrap())
             .into_iter()
             .map(|(d, _)| d)
@@ -1764,5 +1921,204 @@ mod tests {
             "the rebuild kept the envelope, so the override is not what preserves it"
         );
         assert!(system.contains("# MCP Extensions"));
+    }
+
+    // ── CR-2: a refused picture must not poison the conversation ─────────────
+
+    /// The in-process engine, as far as the shim can tell: it records what it was handed and
+    /// refuses in one of the two ways the real one does.
+    struct Engine {
+        name: &'static str,
+        refuse: Refusal,
+        seen: Arc<Mutex<Vec<Vec<Message>>>>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum Refusal {
+        None,
+        AtSetup,
+        AsAStreamItem,
+    }
+
+    #[async_trait]
+    impl Provider for Engine {
+        fn get_name(&self) -> &str {
+            self.name
+        }
+        async fn stream(
+            &self,
+            _: &ModelConfig,
+            _: &str,
+            messages: &[Message],
+            _: &[Tool],
+        ) -> Result<MessageStream, ProviderError> {
+            self.seen.lock().unwrap().push(messages.to_vec());
+            let refused =
+                || ProviderError::ExecutionError("Failed to init multimodal context".into());
+            match self.refuse {
+                Refusal::None => Ok(Box::pin(futures::stream::empty())),
+                Refusal::AtSetup => Err(refused()),
+                Refusal::AsAStreamItem => Ok(Box::pin(futures::stream::iter(vec![Err(refused())]))),
+            }
+        }
+    }
+
+    fn engine(
+        refuse: Refusal,
+    ) -> (
+        GiapProviderShim,
+        Arc<ShimControls>,
+        Arc<Mutex<Vec<Vec<Message>>>>,
+    ) {
+        let controls = Arc::new(ShimControls::default());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let shim = GiapProviderShim::new(
+            Arc::new(Engine {
+                name: "local",
+                refuse,
+                seen: seen.clone(),
+            }),
+            controls.clone(),
+            None,
+        );
+        (shim, controls, seen)
+    }
+
+    async fn call(shim: &GiapProviderShim, session: &str, messages: &[Message]) {
+        use futures::StreamExt;
+        goose::session_context::with_session_id(Some(session.to_string()), async {
+            if let Ok(mut stream) = shim
+                .stream(&ModelConfig::new("m"), "sys", messages, &[])
+                .await
+            {
+                while stream.next().await.is_some() {}
+            }
+        })
+        .await;
+    }
+
+    fn picture(text: &str) -> Message {
+        Message::user()
+            .with_text(text)
+            .with_image("AAAA", "image/png")
+    }
+
+    #[tokio::test]
+    async fn an_engine_refusal_of_a_picture_scrubs_the_sessions_later_calls() {
+        for refuse in [Refusal::AsAStreamItem, Refusal::AtSetup] {
+            let (shim, controls, seen) = engine(refuse);
+            let session = controls.session("s1");
+            let first = vec![picture("what is this?")];
+            call(&shim, "s1", &first).await;
+            assert_eq!(session.image_failures(), 1, "the refusal was not seen");
+
+            // The next turn: goose replays the failed picture from its own store, followed by its
+            // error prose, then the household's text question.
+            let second = vec![
+                picture("what is this?"),
+                Message::assistant().with_text("Ran into this error: Execution error"),
+                Message::user().with_text("never mind, what is the weather?"),
+            ];
+            call(&shim, "s1", &second).await;
+            let handed = seen.lock().unwrap().last().cloned().unwrap();
+            assert_eq!(handed.len(), 3);
+            assert_eq!(
+                crate::goose_agent::image_part_count(&handed[0]),
+                0,
+                "the failed picture reached the engine again, so this text turn fails the same way"
+            );
+            assert!(handed[0].as_concat_text().contains(
+                pond_core::models::services::context::image_history::HISTORY_IMAGE_PLACEHOLDER_MARKER
+            ));
+            assert_eq!(
+                handed[2].as_concat_text(),
+                "never mind, what is the weather?"
+            );
+        }
+    }
+
+    /// The current turn's own picture is kept, so a retry after picture support works again is
+    /// not silently answered from a placeholder.
+    #[tokio::test]
+    async fn the_current_turns_picture_survives_the_scrub() {
+        let (shim, controls, seen) = engine(Refusal::None);
+        controls.session("s1").note_image_failure();
+        let messages = vec![
+            picture("the old one"),
+            Message::assistant().with_text("ok"),
+            picture("and this one?"),
+        ];
+        call(&shim, "s1", &messages).await;
+        let handed = seen.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(crate::goose_agent::image_part_count(&handed[0]), 0);
+        assert_eq!(crate::goose_agent::image_part_count(&handed[2]), 1);
+    }
+
+    /// Vacuity controls: a failure with no picture in the request, a refused picture in ANOTHER
+    /// session, and a picture that went through all leave the session unflagged and its calls
+    /// untouched.
+    #[tokio::test]
+    async fn only_a_refused_picture_flags_only_its_own_session() {
+        let (shim, controls, _) = engine(Refusal::AsAStreamItem);
+        let s1 = controls.session("s1");
+        let s2 = controls.session("s2");
+        call(&shim, "s1", &[Message::user().with_text("hello")]).await;
+        assert_eq!(
+            s1.image_failures(),
+            0,
+            "a text-only failure is not a picture failure"
+        );
+        call(&shim, "s2", &[picture("look")]).await;
+        assert_eq!(s1.image_failures(), 0);
+        assert_eq!(s2.image_failures(), 1);
+
+        let (shim, controls, seen) = engine(Refusal::None);
+        let s3 = controls.session("s3");
+        let messages = vec![picture("look"), Message::user().with_text("and now?")];
+        call(&shim, "s3", &messages).await;
+        assert_eq!(s3.image_failures(), 0);
+        let handed = seen.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(
+            crate::goose_agent::image_part_count(&handed[0]),
+            1,
+            "an unflagged session's history is left exactly as goose sent it"
+        );
+    }
+
+    /// CR-9: a tool's picture on a model that cannot look yet becomes a note, never a promoted
+    /// image, and an unknown readiness promotes as before.
+    #[test]
+    fn a_tool_picture_the_model_cannot_look_at_becomes_a_note() {
+        let msgs = vec![
+            Message::user().with_text("show me the door"),
+            image_tool_response("t1", "one frame", &[("FRAME", "image/jpeg")]),
+        ];
+        let out = promote_tool_result_images(&msgs, 4, false).expect("the tool returned a picture");
+        let carrier = out.last().unwrap();
+        assert_eq!(crate::goose_agent::image_part_count(carrier), 0);
+        assert!(carrier.as_concat_text().contains("not ready"));
+
+        let s = SessionControls::default();
+        assert!(s.pictures_readable(), "unknown fails open to promotion");
+        s.set_pictures_readable(false);
+        assert!(!s.pictures_readable());
+        s.set_pictures_readable(true);
+        assert!(s.pictures_readable());
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_session_is_sent_the_note_by_the_local_engine_path() {
+        let (shim, controls, seen) = engine(Refusal::None);
+        controls.session("s1").set_pictures_readable(false);
+        let msgs = vec![
+            Message::user().with_text("show me the door"),
+            image_tool_response("t1", "one frame", &[("FRAME", "image/jpeg")]),
+        ];
+        call(&shim, "s1", &msgs).await;
+        let handed = seen.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(handed.len(), 3, "the note rides a trailing user message");
+        assert!(handed
+            .iter()
+            .all(|m| crate::goose_agent::image_part_count(m) == 0));
     }
 }

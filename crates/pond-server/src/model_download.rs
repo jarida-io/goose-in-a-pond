@@ -1316,118 +1316,121 @@ mod kokoro_engine_tests {
     }
 }
 
-// ── MTP drafter ───────────────────────────────────────────────────────────────
-
-pub use pond_core::models::domain::drafter::drafter_for;
-
-/// Is this file a drafter this engine can actually load?
-///
-/// A present-but-wrong drafter is worse than a missing one: it fails inside
-/// context creation on the first turn, where the error says "null reference"
-/// and points nowhere. Two files are easy to confuse here -- the ik_llama.cpp
-/// centroid drafters declare `gemma4_mtp` and upstream llama.cpp will not load
-/// them -- so check for the architecture upstream registers rather than
-/// trusting the filename.
-fn is_loadable_drafter(path: &std::path::Path) -> bool {
-    use std::io::Read;
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return false;
-    };
-    let mut head = vec![0u8; 16 * 1024];
-    let Ok(n) = f.read(&mut head) else {
-        return false;
-    };
-    head.truncate(n);
-    if !head.starts_with(b"GGUF") {
-        return false;
-    }
-    head.windows(16).any(|w| w == b"gemma4-assistant")
-}
-
-/// Make sure the drafter for `chat_model` is on disk, fetching it if it is not.
-///
-/// Returns the path when speculative decoding can be used. Every failure path
-/// returns `None` and leaves the pond decoding without speculation, because a
-/// missing drafter is a lost optimisation and not a broken assistant.
-///
-/// Self-correcting in the two ways that matter: a partial download never lands
-/// under the real name (it is written to `.part` and renamed only after it
-/// validates), and a file that is present but not loadable is deleted and
-/// re-fetched rather than being handed to the engine to fail on.
-pub async fn ensure_mtp_drafter(data_dir: &Path, chat_model: &str) -> Option<std::path::PathBuf> {
-    let spec = drafter_for(chat_model)?;
-    let dir = data_dir.join("models").join("gguf");
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!("could not create {}: {e}", dir.display());
-        return None;
-    }
-    let dest = dir.join(spec.filename);
-
-    if dest.exists() {
-        if is_loadable_drafter(&dest) {
-            return Some(dest);
-        }
-        tracing::warn!(
-            path = %dest.display(),
-            "drafter present but not loadable (truncated, or the ik_llama centroid format); re-fetching"
-        );
-        let _ = std::fs::remove_file(&dest);
-    }
-
-    let url = format!(
-        "https://huggingface.co/{}/resolve/main/{}",
-        spec.repo, spec.filename
-    );
-    let part = dest.with_extension("gguf.part");
-    let _ = std::fs::remove_file(&part);
-    eprintln!(
-        "  📥 speculative-decoding drafter ({} MB) — one time...",
-        spec.approx_mb
-    );
-    if let Err(e) = download_file(&url, &part, spec.approx_mb).await {
-        tracing::warn!("drafter download failed ({url}): {e}; continuing without speculation");
-        let _ = std::fs::remove_file(&part);
-        return None;
-    }
-    if !is_loadable_drafter(&part) {
-        tracing::warn!("downloaded drafter did not validate; continuing without speculation");
-        let _ = std::fs::remove_file(&part);
-        return None;
-    }
-    if let Err(e) = std::fs::rename(&part, &dest) {
-        tracing::warn!("could not install drafter: {e}");
-        let _ = std::fs::remove_file(&part);
-        return None;
-    }
-    tracing::info!(path = %dest.display(), "MTP drafter ready");
-    Some(dest)
-}
-
-#[cfg(test)]
-mod drafter_tests {
-    use super::*;
-
-    #[test]
-    fn a_file_that_is_not_a_drafter_is_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
-        let junk = tmp.path().join("x.gguf");
-        std::fs::write(&junk, b"not a gguf at all").unwrap();
-        assert!(!is_loadable_drafter(&junk));
-
-        // GGUF magic alone is not enough: the ik_llama centroid drafters are
-        // real GGUFs that upstream llama.cpp cannot load.
-        let wrong_arch = tmp.path().join("y.gguf");
-        let mut body = b"GGUF".to_vec();
-        body.extend_from_slice(&[0u8; 512]);
-        body.extend_from_slice(b"gemma4_mtp");
-        std::fs::write(&wrong_arch, &body).unwrap();
-        assert!(!is_loadable_drafter(&wrong_arch));
-
-        let right = tmp.path().join("z.gguf");
-        let mut body = b"GGUF".to_vec();
-        body.extend_from_slice(&[0u8; 512]);
-        body.extend_from_slice(b"gemma4-assistant");
-        std::fs::write(&right, &body).unwrap();
-        assert!(is_loadable_drafter(&right));
-    }
-}
+// Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98), so
+// the drafter's download, its validation and their tests are commented out rather than deleted;
+// restore them with the startup block in main.rs if it returns.
+// // ── MTP drafter ───────────────────────────────────────────────────────────────
+//
+// pub use pond_core::models::domain::drafter::drafter_for;
+//
+// /// Is this file a drafter this engine can actually load?
+// ///
+// /// A present-but-wrong drafter is worse than a missing one: it fails inside
+// /// context creation on the first turn, where the error says "null reference"
+// /// and points nowhere. Two files are easy to confuse here -- the ik_llama.cpp
+// /// centroid drafters declare `gemma4_mtp` and upstream llama.cpp will not load
+// /// them -- so check for the architecture upstream registers rather than
+// /// trusting the filename.
+// fn is_loadable_drafter(path: &std::path::Path) -> bool {
+//     use std::io::Read;
+//     let Ok(mut f) = std::fs::File::open(path) else {
+//         return false;
+//     };
+//     let mut head = vec![0u8; 16 * 1024];
+//     let Ok(n) = f.read(&mut head) else {
+//         return false;
+//     };
+//     head.truncate(n);
+//     if !head.starts_with(b"GGUF") {
+//         return false;
+//     }
+//     head.windows(16).any(|w| w == b"gemma4-assistant")
+// }
+//
+// /// Make sure the drafter for `chat_model` is on disk, fetching it if it is not.
+// ///
+// /// Returns the path when speculative decoding can be used. Every failure path
+// /// returns `None` and leaves the pond decoding without speculation, because a
+// /// missing drafter is a lost optimisation and not a broken assistant.
+// ///
+// /// Self-correcting in the two ways that matter: a partial download never lands
+// /// under the real name (it is written to `.part` and renamed only after it
+// /// validates), and a file that is present but not loadable is deleted and
+// /// re-fetched rather than being handed to the engine to fail on.
+// pub async fn ensure_mtp_drafter(data_dir: &Path, chat_model: &str) -> Option<std::path::PathBuf> {
+//     let spec = drafter_for(chat_model)?;
+//     let dir = data_dir.join("models").join("gguf");
+//     if let Err(e) = std::fs::create_dir_all(&dir) {
+//         tracing::warn!("could not create {}: {e}", dir.display());
+//         return None;
+//     }
+//     let dest = dir.join(spec.filename);
+//
+//     if dest.exists() {
+//         if is_loadable_drafter(&dest) {
+//             return Some(dest);
+//         }
+//         tracing::warn!(
+//             path = %dest.display(),
+//             "drafter present but not loadable (truncated, or the ik_llama centroid format); re-fetching"
+//         );
+//         let _ = std::fs::remove_file(&dest);
+//     }
+//
+//     let url = format!(
+//         "https://huggingface.co/{}/resolve/main/{}",
+//         spec.repo, spec.filename
+//     );
+//     let part = dest.with_extension("gguf.part");
+//     let _ = std::fs::remove_file(&part);
+//     eprintln!(
+//         "  📥 speculative-decoding drafter ({} MB) — one time...",
+//         spec.approx_mb
+//     );
+//     if let Err(e) = download_file(&url, &part, spec.approx_mb).await {
+//         tracing::warn!("drafter download failed ({url}): {e}; continuing without speculation");
+//         let _ = std::fs::remove_file(&part);
+//         return None;
+//     }
+//     if !is_loadable_drafter(&part) {
+//         tracing::warn!("downloaded drafter did not validate; continuing without speculation");
+//         let _ = std::fs::remove_file(&part);
+//         return None;
+//     }
+//     if let Err(e) = std::fs::rename(&part, &dest) {
+//         tracing::warn!("could not install drafter: {e}");
+//         let _ = std::fs::remove_file(&part);
+//         return None;
+//     }
+//     tracing::info!(path = %dest.display(), "MTP drafter ready");
+//     Some(dest)
+// }
+//
+// #[cfg(test)]
+// mod drafter_tests {
+//     use super::*;
+//
+//     #[test]
+//     fn a_file_that_is_not_a_drafter_is_rejected() {
+//         let tmp = tempfile::tempdir().unwrap();
+//         let junk = tmp.path().join("x.gguf");
+//         std::fs::write(&junk, b"not a gguf at all").unwrap();
+//         assert!(!is_loadable_drafter(&junk));
+//
+//         // GGUF magic alone is not enough: the ik_llama centroid drafters are
+//         // real GGUFs that upstream llama.cpp cannot load.
+//         let wrong_arch = tmp.path().join("y.gguf");
+//         let mut body = b"GGUF".to_vec();
+//         body.extend_from_slice(&[0u8; 512]);
+//         body.extend_from_slice(b"gemma4_mtp");
+//         std::fs::write(&wrong_arch, &body).unwrap();
+//         assert!(!is_loadable_drafter(&wrong_arch));
+//
+//         let right = tmp.path().join("z.gguf");
+//         let mut body = b"GGUF".to_vec();
+//         body.extend_from_slice(&[0u8; 512]);
+//         body.extend_from_slice(b"gemma4-assistant");
+//         std::fs::write(&right, &body).unwrap();
+//         assert!(is_loadable_drafter(&right));
+//     }
+// }

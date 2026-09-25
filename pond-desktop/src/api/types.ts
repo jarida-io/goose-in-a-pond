@@ -157,6 +157,11 @@ export interface Settings {
 
   // Agent behaviour
   agent_backend?: string;
+  // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98),
+  // so this setting is commented out rather than deleted; restore it with the catalogue entry.
+  // /** Guess ahead with a helper model (speculative decoding). Only Gemma 4 E2B
+  //  *  and E4B have one; defaults true. */
+  // speculative_decoding_enabled?: boolean;
   agent_goose_mode?: string;
   agent_max_turns?: number;
   agent_timeout_secs?: number;
@@ -876,6 +881,14 @@ export interface ModelEntry {
   asr_size?: string;
   tts_engine?: string;
   config_filename?: string;
+  /** GGUF rows only: whether this model can look at pictures on THIS device
+   *  (device-aware — e.g. a Jetson may decline a model the catalogue marks
+   *  vision-capable because the encoder would not fit). Absent for non-GGUF
+   *  rows and for a model the server has not classified yet. */
+  reads_images?: boolean;
+  /** The one-time picture-support download this model needs, in bytes —
+   *  present only when `reads_images` is true. */
+  image_support_bytes?: number;
 }
 
 /** GET /api/v1/warmup — the boot/model-change prefix warm-up (see Agent::prewarm). */
@@ -889,6 +902,30 @@ export interface WarmupStatus {
   started_unix_ms: number;
   finished_unix_ms: number | null;
   elapsed_ms: number;
+}
+
+/**
+ * A vision encoder's lifecycle for the active chat model — see
+ * `models/domain/vision_encoder.rs::EncoderState`. A closed, tagged union
+ * (`#[serde(tag = "kind", rename_all = "snake_case")]`) so a state this client
+ * does not know about fails a shape check rather than rendering wrong.
+ */
+export type EncoderState =
+  | { kind: "unknown" | "not_declared" | "not_on_this_device" | "absent" | "verifying" }
+  | { kind: "downloading"; done: number; total: number }
+  | { kind: "ready"; bytes: number | null }
+  | { kind: "failed"; reason: string; retry_at_unix_ms: number }
+  | { kind: "blocked"; mode: string; host: string };
+
+/** GET /api/v1/models/vision-status — picture support for the active chat model. */
+export interface VisionStatus {
+  model: string;
+  state: EncoderState;
+  size_bytes: number | null;
+  /** The household-copy sentence for this state, pre-formatted server-side
+   *  (sizes already in MB). Null for `ready` and `unknown`, and for
+   *  `not_declared`, which the client already knows how to say on its own. */
+  message: string | null;
 }
 
 export interface ModelMemoryStatus {
@@ -1489,6 +1526,11 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     message: string,
+    /** The server's machine-readable `code` field, e.g. "vision_not_ready" —
+     *  present on a structured `{error, code}` body, absent otherwise. */
+    public readonly code?: string,
+    /** The full parsed error body, for a caller that needs more than `code`. */
+    public readonly body?: unknown,
   ) {
     super(message);
     this.name = "ApiError";

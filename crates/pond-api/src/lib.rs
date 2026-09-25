@@ -4,6 +4,7 @@
 //! Clients are rate limited to 600 requests per 60 seconds; `routes.rs` holds the route list.
 
 pub mod cleanup;
+pub(crate) mod image_normalize;
 pub mod middleware;
 pub mod oauth_callback;
 pub mod routes;
@@ -540,6 +541,16 @@ pub struct ModelStatusEntry {
     /// Companion config filename (.onnx.json). TTS models only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config_filename: Option<String>,
+    /// Whether this model can look at pictures on THIS device, as the agent declares it (a Jetson
+    /// may decline a model whose encoder would cost it conversation room). GGUF rows only; a
+    /// static fact, never the live download state, which `GET /models/vision-status` carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reads_images: Option<bool>,
+    /// The picture-support download this model needs, in bytes: the encoder's pinned size.
+    /// Present only when `reads_images` is true, so the Models page can state the number before
+    /// the household spends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_support_bytes: Option<u64>,
 }
 
 /// Build the full API router.

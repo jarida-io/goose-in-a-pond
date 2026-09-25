@@ -100,6 +100,25 @@
   height: var(--tap-min);
 }
 
+/* The hub Toggle (46x27px) is a purpose-built pill, not a dense data
+ * control — it does NOT join the block above, whose `min-height` and
+ * `justify-content: center` would stretch it and re-centre its knob. It only
+ * needs the anchor for its own invisible reach, so `position: relative` is
+ * declared on its own. */
+.htoggle {
+  position: relative;
+}
+
+.htoggle::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  height: var(--tap-min);
+}
+
 /* ── Row pitch: the constraint a reach creates ────────────────────────────
  *
  * A 44px reach on a 36px pill overhangs its box by 4px above and below. Where

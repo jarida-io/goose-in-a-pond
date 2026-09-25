@@ -308,6 +308,9 @@ export const CATALOGUE: CatalogueCategory[] = [
             ] },
             validate: oneOf(["goose"]),
           },
+          // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98),
+          // so this switch is commented out rather than deleted; restore it with the setting.
+          // { key: "speculative_decoding_enabled", label: "Guess ahead with a helper model", description: "A small helper model guesses the next few words and the main model checks each one, so answers stay the same and only the speed changes (this is called speculative decoding). On a Jetson it measured faster; on a Mac it measured slower, so try it off if replies feel slow. Only Gemma 4 E2B and E4B have a helper; turning it on downloads it (57 MB) if it is not on this device. Changing it reloads the model, so the next reply waits for that.", control: { kind: "toggle" }, consumer: "live" },
         ],
       },
       {

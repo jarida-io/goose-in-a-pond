@@ -297,12 +297,17 @@ export class PondApiClient {
       }
       if (!res.ok) {
         let msg = res.statusText;
+        let code: string | undefined;
+        let body: unknown;
         try {
-          msg = (await res.json()).error ?? msg;
+          body = await res.json();
+          const b = body as { error?: string; code?: string };
+          msg = b.error ?? msg;
+          code = b.code;
         } catch {
           /* ignore */
         }
-        throw new ApiError(res.status, msg);
+        throw new ApiError(res.status, msg, code, body);
       }
       return res;
     } catch (e) {
@@ -1303,6 +1308,8 @@ export class PondApiClient {
             asr_size: item.asr_size as string | undefined,
             tts_engine: item.tts_engine as string | undefined,
             config_filename: item.config_filename as string | undefined,
+            reads_images: item.reads_images as boolean | undefined,
+            image_support_bytes: item.image_support_bytes as number | undefined,
           });
         }
       }
@@ -1350,6 +1357,11 @@ export class PondApiClient {
   /** Prefix warm-up status — is the pond ready for a first message yet. */
   getWarmupStatus(): Promise<import("./types").WarmupStatus> {
     return this.get("/api/v1/warmup");
+  }
+
+  /** Picture support for the active chat model — see `useVisionStatus`. */
+  getVisionStatus(): Promise<import("./types").VisionStatus> {
+    return this.get("/api/v1/models/vision-status");
   }
 
   getActiveRoles(): Promise<ModelActiveRoles> {
@@ -1804,12 +1816,17 @@ export class PondApiClient {
 
     if (!res.ok) {
       let msg = res.statusText;
+      let code: string | undefined;
+      let body: unknown;
       try {
-        msg = (await res.json()).error ?? msg;
+        body = await res.json();
+        const b = body as { error?: string; code?: string };
+        msg = b.error ?? msg;
+        code = b.code;
       } catch {
         /* ignore */
       }
-      throw new ApiError(res.status, msg);
+      throw new ApiError(res.status, msg, code, body);
     }
 
     const reader = res.body!.getReader();

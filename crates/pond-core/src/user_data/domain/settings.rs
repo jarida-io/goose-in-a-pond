@@ -712,6 +712,20 @@ pub struct Settings {
     #[serde(default)]
     pub context_window_override: u32,
 
+    // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98),
+    // so this is commented out rather than deleted; restore it if it returns.
+    // /// Speculative decoding: a small helper model (the MTP drafter) guesses the next few
+    // /// tokens and the chat model checks each one, so answers are unchanged and only the speed
+    // /// moves. Measured 1.8x on the Orin over real turns, and 0.87x (slower) on a Mac, which is
+    // /// why it is a switch.
+    // ///
+    // /// Default TRUE, which is what every install did before the switch existed. Off stops the
+    // /// drafter from being fetched, registered or attached; the change applies when the model
+    // /// next loads, which the server forces by evicting it. The drafter's memory is charged to
+    // /// the Orin's window either way, so turning it back on can never outgrow a window sized
+    // /// without it. Only Gemma 4 E2B and E4B have a drafter; for any other model it is inert.
+    // #[serde(default = "Settings::default_speculative_decoding_enabled")]
+    // pub speculative_decoding_enabled: bool,
     /// Show the per-turn inference stats footer (TTFT, tok/s, context) under
     /// assistant messages in the desktop/web chat UIs.
     #[serde(default)]
@@ -1419,6 +1433,7 @@ impl Default for Settings {
             review_max_rounds: Self::default_review_max_rounds(),
             review_pass_threshold: Self::default_review_pass_threshold(),
             context_window_override: 0,
+            // speculative_decoding_enabled: Self::default_speculative_decoding_enabled(),
             show_turn_stats: false,
             hybrid_compaction_enabled: Self::default_hybrid_compaction_enabled(),
             summary_idle_secs: Self::default_summary_idle_secs(),
@@ -1702,6 +1717,13 @@ impl Settings {
     fn default_hybrid_compaction_enabled() -> bool {
         true
     }
+
+    // /// True: speculative decoding was automatic before this switch existed, so an install that
+    // /// upgrades into it keeps what it had. Measured to help on the Orin (1.8x) and to hurt on a
+    // /// Mac (0.87x), so a Mac household may well turn it off, but that is their call to make.
+    // fn default_speculative_decoding_enabled() -> bool {
+    //     true
+    // }
 
     fn default_agent_backend() -> String {
         "goose".to_string()
@@ -2962,6 +2984,9 @@ mod tests {
             "reasoning_effort",
             "show_thinking",
             "show_turn_stats",
+            // Speculation left the engine on 2026-09-24; the switch is commented out (see the
+            // field).
+            // "speculative_decoding_enabled",
             "telemetry_enabled",
             "thinking_mode",
             "timezone",
@@ -3040,6 +3065,21 @@ mod tests {
             UI_WIRED.len() + HEADLESS_BY_DESIGN.len()
         );
     }
+
+    // /// The speculation switch keeps what every install had before it existed, along both
+    // /// routes a default reaches a pond by: a failed settings read (`unwrap_or_default()`) and a
+    // /// payload written before the field existed (serde). If either said false, every upgrading
+    // /// Orin would lose its 1.8x without anyone touching a switch.
+    // #[test]
+    // fn speculative_decoding_defaults_on_by_both_routes() {
+    //     assert!(Settings::default().speculative_decoding_enabled);
+    //     let from_nothing: Settings =
+    //         serde_json::from_str("{}").expect("every Settings field has a serde default");
+    //     assert!(from_nothing.speculative_decoding_enabled);
+    //     let off: Settings = serde_json::from_str(r#"{"speculative_decoding_enabled":false}"#)
+    //         .expect("the key deserialises");
+    //     assert!(!off.speculative_decoding_enabled);
+    // }
 
     /// PAI-6 P5. `ext_orchestrator_enabled` is the one extension toggle that
     /// defaults OFF, and there are three separate places it could silently

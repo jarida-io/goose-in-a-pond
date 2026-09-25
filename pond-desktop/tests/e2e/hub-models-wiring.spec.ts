@@ -229,4 +229,40 @@ test.describe("Hub — Models sub-screen wiring", () => {
     const useButtons = page.getByRole("button", { name: /use .+ as (speech-to-text|text-to-speech)/i });
     await expect(useButtons.first()).toBeVisible({ timeout: 3_000 });
   });
+
+  // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98),
+  // so the switch this test drove is commented out; restore it with the switch.
+  // test("the guess-ahead switch reads and writes speculative_decoding_enabled", async ({ page }) => {
+  //   await setupModelsRoutes(page);
+  //   // Overrides the fixed 8-key body setupModelsRoutes registers for
+  //   // /api/v1/settings -- registered AFTER it, so it wins (Playwright
+  //   // resolves the last-registered matching route first).
+  //   let putBody: unknown = null;
+  //   await page.route("**/api/v1/settings", async (r) => {
+  //     if (r.request().method() === "PUT") {
+  //       putBody = r.request().postDataJSON();
+  //       return r.fulfill({ json: putBody });
+  //     }
+  //     return r.fulfill({
+  //       json: {
+  //         assistant_name: "Pond", user_name: "Jerry", chat_provider: "llamafile", chat_model: "llama3.2",
+  //         agent_memory_inject: false, prompt_style: "balanced", llm_temperature: 0.7, llm_max_tokens: 1024,
+  //         speculative_decoding_enabled: false,
+  //       },
+  //     });
+  //   });
+  //
+  //   await goToModelsScreen(page);
+  //
+  //   const row = page.locator(".srow").filter({ hasText: "Guess ahead with a helper model" });
+  //   await expect(row).toBeVisible({ timeout: 5_000 });
+  //   const toggle = row.locator("button.htoggle");
+  //   // Drawn OFF from the mocked GET, guarding the remount-key regression: the
+  //   // hub Toggle seeds its own state once and never re-reads its prop.
+  //   await expect(toggle).toHaveAttribute("aria-pressed", "false");
+  //
+  //   await toggle.click();
+  //   await expect.poll(() => putBody).not.toBeNull();
+  //   expect(putBody).toEqual({ speculative_decoding_enabled: true });
+  // });
 });

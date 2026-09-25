@@ -407,6 +407,7 @@ fn scalar_width(kind: u32) -> Option<u64> {
 enum Value {
     U32(u32),
     U64(u64),
+    Bool(bool),
     Str(String),
     Other,
 }
@@ -420,6 +421,7 @@ fn read_value<S: GgufSource>(r: &mut Reader<S>, kind: u32, want_string: bool) ->
         }
         4 => Some(Value::U32(r.u32()?)),
         10 => Some(Value::U64(r.u64()?)),
+        7 => Some(Value::Bool(r.take(1)?[0] != 0)),
         9 => {
             // Array: element type, count, elements. Stepped over rather than
             // collected — nothing here needs one, and skipping keeps the walk
@@ -540,6 +542,199 @@ pub fn parse_gguf_file(path: &std::path::Path) -> Option<GgufInfo> {
     walk(FileSource::open(path)?)
 }
 
+// ── Encoder layout: the tensor table, and how long a complete file is ───────
+
+/// What an encoder GGUF (an `mmproj`, `general.architecture = "clip"`) says
+/// about its vision tower, and how many bytes a complete copy must have.
+///
+/// # Why the length has to come from the header
+///
+/// A file that stops early is still a valid-looking GGUF: the key/value
+/// header and the tensor table sit in the first ~85 KB and describe every
+/// tensor's offset and shape, so the head of a 64%-present encoder parses
+/// exactly like the head of a whole one. The Orin carried one for weeks. The
+/// only way to tell them apart without hashing a gigabyte is to add up what
+/// the table says is there and compare it with the file's length, which is
+/// what [`Self::data_end`] is for.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct GgufLayout {
+    /// `general.architecture`. `"clip"` for every mmproj llama.cpp writes.
+    pub architecture: Option<String>,
+    /// `clip.has_vision_encoder`. The Gemma 4 encoders carry an audio tower
+    /// as well, so this is a flag rather than implied by the architecture.
+    pub has_vision_encoder: Option<bool>,
+    /// `clip.vision.projector_type`, falling back to the older single-modality
+    /// `clip.projector_type`. `"gemma4v"` pairs with Gemma 4 E2B/E4B.
+    pub vision_projector_type: Option<String>,
+    /// `clip.vision.projection_dim`: the width the projector writes into, which
+    /// must equal the chat model's `embedding_length`.
+    pub vision_projection_dim: Option<u32>,
+    /// Tensors the header declares.
+    pub tensor_count: u64,
+    /// `general.alignment`, or the format's default of 32.
+    pub alignment: u64,
+    /// One past the last byte of tensor data the header describes: the length
+    /// a complete file must reach. `None` when the tensor table could not be
+    /// read in full (a cut-off header, a type this parser does not size, a
+    /// corrupt count), which a caller must treat as "cannot prove complete".
+    pub data_end: Option<u64>,
+}
+
+/// GGUF's default tensor-data alignment, used when `general.alignment` is absent.
+const DEFAULT_ALIGNMENT: u64 = 32;
+/// More tensors than any shipped model or encoder declares (Gemma 4 E4B's
+/// encoder has 1,411). A larger count is corruption, and walking it would
+/// spin.
+const MAX_TENSORS: u64 = 1 << 16;
+/// ggml's `GGML_MAX_DIMS`.
+const MAX_DIMS: u32 = 4;
+/// More key/value pairs than any real header carries; see [`walk`].
+const MAX_KVS: u64 = 4096;
+
+/// `(block size, bytes per block)` for a ggml tensor type, from
+/// `ggml/src/ggml.c`'s type traits in the vendored llama.cpp.
+///
+/// Only the types an encoder or a common quantisation can carry. An
+/// unlisted type returns `None`, which makes [`GgufLayout::data_end`] `None`:
+/// an extent this parser cannot compute must not be reported as a short one.
+fn ggml_type_size(kind: u32) -> Option<(u64, u64)> {
+    Some(match kind {
+        0 => (1, 4),      // F32
+        1 => (1, 2),      // F16
+        2 => (32, 18),    // Q4_0
+        3 => (32, 20),    // Q4_1
+        6 => (32, 22),    // Q5_0
+        7 => (32, 24),    // Q5_1
+        8 => (32, 34),    // Q8_0
+        10 => (256, 84),  // Q2_K
+        11 => (256, 110), // Q3_K
+        12 => (256, 144), // Q4_K
+        13 => (256, 176), // Q5_K
+        14 => (256, 210), // Q6_K
+        24 => (1, 1),     // I8
+        25 => (1, 2),     // I16
+        26 => (1, 4),     // I32
+        27 => (1, 8),     // I64
+        28 => (1, 8),     // F64
+        30 => (1, 2),     // BF16
+        _ => return None,
+    })
+}
+
+/// Walk the key/value header and then the tensor table, from any source.
+fn walk_layout<S: GgufSource>(src: S) -> Option<GgufLayout> {
+    let mut r = Reader { src, pos: 0 };
+    if r.take(4)? != b"GGUF" {
+        return None;
+    }
+    let version = r.u32()?;
+    let tensor_count = r.u64()?;
+    let kv_count = r.u64()?;
+
+    let mut out = GgufLayout {
+        tensor_count,
+        alignment: DEFAULT_ALIGNMENT,
+        ..Default::default()
+    };
+
+    // Version 1 used 32-bit counts and is not produced by anything current;
+    // its counts were just misread, so nothing past this point is trustworthy.
+    if version < 2 {
+        return Some(out);
+    }
+
+    let mut legacy_projector: Option<String> = None;
+    let mut kvs_complete = kv_count <= MAX_KVS;
+    for _ in 0..kv_count.min(MAX_KVS) {
+        let Some(key) = r.string() else {
+            kvs_complete = false;
+            break;
+        };
+        let Some(kind) = r.u32() else {
+            kvs_complete = false;
+            break;
+        };
+        let want_string = matches!(
+            key.as_str(),
+            "general.architecture" | "clip.vision.projector_type" | "clip.projector_type"
+        );
+        let Some(value) = read_value(&mut r, kind, want_string) else {
+            kvs_complete = false;
+            break;
+        };
+        match (key.as_str(), value) {
+            ("general.architecture", Value::Str(s)) => out.architecture = Some(s),
+            ("general.alignment", Value::U32(v)) => out.alignment = u64::from(v),
+            ("clip.has_vision_encoder", Value::Bool(b)) => out.has_vision_encoder = Some(b),
+            ("clip.vision.projector_type", Value::Str(s)) => out.vision_projector_type = Some(s),
+            ("clip.projector_type", Value::Str(s)) => legacy_projector = Some(s),
+            ("clip.vision.projection_dim", Value::U32(v)) => out.vision_projection_dim = Some(v),
+            _ => {}
+        }
+    }
+    if out.vision_projector_type.is_none() {
+        out.vision_projector_type = legacy_projector;
+    }
+
+    // The tensor table follows the last key directly, so an incomplete key
+    // walk leaves the cursor somewhere meaningless.
+    if kvs_complete && tensor_count <= MAX_TENSORS {
+        out.data_end = tensor_data_end(&mut r, tensor_count, out.alignment);
+    }
+    Some(out)
+}
+
+/// Read `count` tensor infos from the cursor and return where their data ends.
+///
+/// Each info is `name: string, n_dims: u32, dims: [u64; n_dims], type: u32,
+/// offset: u64`, the offset relative to the data section, which starts at the
+/// first `alignment` boundary after the table.
+fn tensor_data_end<S: GgufSource>(r: &mut Reader<S>, count: u64, alignment: u64) -> Option<u64> {
+    if alignment == 0 || !alignment.is_power_of_two() {
+        return None;
+    }
+    let mut end_rel: u64 = 0;
+    for _ in 0..count {
+        let name_len = r.u64()?;
+        if name_len > MAX_STRING_BYTES {
+            return None;
+        }
+        r.skip(name_len)?;
+        let n_dims = r.u32()?;
+        if n_dims == 0 || n_dims > MAX_DIMS {
+            return None;
+        }
+        let mut elements: u64 = 1;
+        for _ in 0..n_dims {
+            elements = elements.checked_mul(r.u64()?)?;
+        }
+        let (block, block_bytes) = ggml_type_size(r.u32()?)?;
+        let offset = r.u64()?;
+        if !elements.is_multiple_of(block) {
+            return None;
+        }
+        let bytes = (elements / block).checked_mul(block_bytes)?;
+        end_rel = end_rel.max(offset.checked_add(bytes)?);
+    }
+    let data_start = r.pos.checked_add(alignment - 1)? & !(alignment - 1);
+    data_start.checked_add(end_rel)
+}
+
+/// Read an encoder's layout from a slice.
+///
+/// Real encoders keep their whole table in the first ~85 KB, so a head read of
+/// a few hundred KB reaches [`GgufLayout::data_end`]; a slice that stops inside
+/// the table leaves it `None`. `None` overall means the bytes are not GGUF.
+pub fn parse_gguf_layout(head: &[u8]) -> Option<GgufLayout> {
+    walk_layout(head)
+}
+
+/// Read an encoder's layout from disk. Costs the header and the tensor table
+/// and nothing past them: about 85 KB for a Gemma 4 encoder, whatever its size.
+pub fn parse_gguf_layout_file(path: &std::path::Path) -> Option<GgufLayout> {
+    walk_layout(FileSource::open(path)?)
+}
+
 /// "4.3B", "270M" — parameter counts as they are spoken.
 fn format_params(n: u64) -> String {
     if n >= 1_000_000_000 {
@@ -577,6 +772,107 @@ fn title_case(s: &str) -> String {
     match c.next() {
         Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
         None => String::new(),
+    }
+}
+
+/// A GGUF writer for tests in this crate: key/values of the kinds the parsers
+/// read, and a tensor table, laid out the way llama.cpp's writer lays them out.
+/// Tests elsewhere in `models::domain` build headers with it so they exercise
+/// the format rather than a transcription of it.
+#[cfg(test)]
+pub(crate) mod test_gguf {
+    /// ggml type ids used by the tests.
+    pub(crate) const F32: u32 = 0;
+    pub(crate) const BF16: u32 = 30;
+
+    #[derive(Default)]
+    pub(crate) struct GgufWriter {
+        kvs: Vec<u8>,
+        kv_count: u64,
+        tensors: Vec<u8>,
+        tensor_count: u64,
+        /// Relative end of the tensor data so far, for [`Self::build_complete`].
+        data_end_rel: u64,
+        alignment: u64,
+    }
+
+    impl GgufWriter {
+        pub(crate) fn new() -> Self {
+            Self {
+                alignment: 32,
+                ..Default::default()
+            }
+        }
+        fn raw_string(out: &mut Vec<u8>, s: &str) {
+            out.extend_from_slice(&(s.len() as u64).to_le_bytes());
+            out.extend_from_slice(s.as_bytes());
+        }
+        fn key(&mut self, k: &str, kind: u32) {
+            Self::raw_string(&mut self.kvs, k);
+            self.kvs.extend_from_slice(&kind.to_le_bytes());
+            self.kv_count += 1;
+        }
+        pub(crate) fn str(mut self, k: &str, v: &str) -> Self {
+            self.key(k, 8);
+            Self::raw_string(&mut self.kvs, v);
+            self
+        }
+        pub(crate) fn u32(mut self, k: &str, v: u32) -> Self {
+            self.key(k, 4);
+            self.kvs.extend_from_slice(&v.to_le_bytes());
+            if k == "general.alignment" {
+                self.alignment = u64::from(v);
+            }
+            self
+        }
+        pub(crate) fn bool(mut self, k: &str, v: bool) -> Self {
+            self.key(k, 7);
+            self.kvs.push(u8::from(v));
+            self
+        }
+        /// A tensor of `dims` elements of ggml type `kind`, placed after the
+        /// previous one at the next alignment boundary, as the writer does.
+        pub(crate) fn tensor(mut self, name: &str, dims: &[u64], kind: u32) -> Self {
+            let per = match kind {
+                F32 => 4,
+                BF16 => 2,
+                other => panic!("test writer does not size ggml type {other}"),
+            };
+            let bytes: u64 = dims.iter().product::<u64>() * per;
+            let a = self.alignment;
+            let offset = self.data_end_rel.div_ceil(a) * a;
+            Self::raw_string(&mut self.tensors, name);
+            self.tensors
+                .extend_from_slice(&(dims.len() as u32).to_le_bytes());
+            for d in dims {
+                self.tensors.extend_from_slice(&d.to_le_bytes());
+            }
+            self.tensors.extend_from_slice(&kind.to_le_bytes());
+            self.tensors.extend_from_slice(&offset.to_le_bytes());
+            self.tensor_count += 1;
+            self.data_end_rel = offset + bytes;
+            self
+        }
+        /// The header and tensor table, with no tensor data.
+        pub(crate) fn build_header(&self) -> Vec<u8> {
+            let mut out = Vec::new();
+            out.extend_from_slice(b"GGUF");
+            out.extend_from_slice(&3u32.to_le_bytes());
+            out.extend_from_slice(&self.tensor_count.to_le_bytes());
+            out.extend_from_slice(&self.kv_count.to_le_bytes());
+            out.extend_from_slice(&self.kvs);
+            out.extend_from_slice(&self.tensors);
+            out
+        }
+        /// The whole file: header, padding to the data section, and exactly
+        /// the tensor bytes the table describes (zeroes).
+        pub(crate) fn build_complete(&self) -> Vec<u8> {
+            let mut out = self.build_header();
+            let a = self.alignment as usize;
+            let start = out.len().div_ceil(a) * a;
+            out.resize(start + self.data_end_rel as usize, 0);
+            out
+        }
     }
 }
 
@@ -997,5 +1293,139 @@ mod tests {
     fn a_header_with_nothing_useful_says_so() {
         let info = parse_gguf_header(&HeaderBuilder::new().build()).unwrap();
         assert!(info.summary().is_none());
+    }
+
+    // ── Encoder layout ──────────────────────────────────────────────────────
+
+    use super::test_gguf::{GgufWriter, BF16, F32};
+
+    /// A small encoder shaped like the real ones: the same keys, a vision and
+    /// an audio tensor, F32 and BF16 mixed.
+    fn encoder() -> GgufWriter {
+        GgufWriter::new()
+            .str("general.architecture", "clip")
+            .str("general.type", "mmproj")
+            .bool("clip.has_vision_encoder", true)
+            .bool("clip.has_audio_encoder", true)
+            .str("clip.vision.projector_type", "gemma4v")
+            .u32("clip.vision.projection_dim", 1536)
+            .str("clip.audio.projector_type", "gemma4a")
+            .tensor("v.patch_embd.weight", &[16, 16, 3, 7], BF16)
+            .tensor("a.conv1d.0.bias", &[33], F32)
+            .tensor("mm.input_projection.weight", &[8, 5], BF16)
+    }
+
+    #[test]
+    fn reads_what_an_encoder_says_about_its_vision_tower() {
+        let layout = parse_gguf_layout(&encoder().build_complete()).expect("is gguf");
+        assert_eq!(layout.architecture.as_deref(), Some("clip"));
+        assert_eq!(layout.has_vision_encoder, Some(true));
+        assert_eq!(
+            layout.vision_projector_type.as_deref(),
+            Some("gemma4v"),
+            "the audio projector type must not overwrite the vision one"
+        );
+        assert_eq!(layout.vision_projection_dim, Some(1536));
+        assert_eq!(layout.tensor_count, 3);
+        assert_eq!(layout.alignment, 32);
+    }
+
+    /// The whole point: the extent the table describes is the length of the
+    /// complete file, computed by a writer that knows nothing of the parser.
+    #[test]
+    fn the_tensor_table_gives_the_length_of_a_complete_file() {
+        let full = encoder().build_complete();
+        let layout = parse_gguf_layout(&full).unwrap();
+        assert_eq!(layout.data_end, Some(full.len() as u64));
+    }
+
+    /// A cut-off file parses its head exactly like a whole one, and still
+    /// reports the full extent, which is how a short file is recognised.
+    #[test]
+    fn a_short_file_still_reports_the_length_it_should_have() {
+        let full = encoder().build_complete();
+        let header_len = encoder().build_header().len();
+        let head = &full[..header_len + 10];
+        let layout = parse_gguf_layout(head).unwrap();
+        assert_eq!(layout.data_end, Some(full.len() as u64));
+    }
+
+    /// A table the bytes stop inside cannot be summed, and must say so
+    /// rather than report whatever it had added up.
+    #[test]
+    fn a_table_cut_off_mid_entry_has_no_extent() {
+        let header = encoder().build_header();
+        for cut in [header.len() - 1, header.len() - 9, header.len() - 30] {
+            let layout = parse_gguf_layout(&header[..cut]).expect("still gguf");
+            assert_eq!(layout.data_end, None, "cut at {cut}");
+        }
+        for cut in 0..header.len() {
+            let _ = parse_gguf_layout(&header[..cut]); // must not panic
+        }
+    }
+
+    #[test]
+    fn honours_a_declared_alignment() {
+        let w = GgufWriter::new()
+            .u32("general.alignment", 64)
+            .str("general.architecture", "clip")
+            .tensor("a", &[3], F32)
+            .tensor("b", &[5], F32);
+        let full = w.build_complete();
+        let layout = parse_gguf_layout(&full).unwrap();
+        assert_eq!(layout.alignment, 64);
+        assert_eq!(layout.data_end, Some(full.len() as u64));
+    }
+
+    /// The older single-modality key still names the projector.
+    #[test]
+    fn falls_back_to_the_legacy_projector_key() {
+        let bytes = GgufWriter::new()
+            .str("general.architecture", "clip")
+            .str("clip.projector_type", "mlp")
+            .build_complete();
+        assert_eq!(
+            parse_gguf_layout(&bytes)
+                .unwrap()
+                .vision_projector_type
+                .as_deref(),
+            Some("mlp")
+        );
+    }
+
+    /// A tensor type this parser cannot size makes the extent unknown, never
+    /// a smaller number that would read as a truncation.
+    #[test]
+    fn an_unsized_tensor_type_leaves_the_extent_unknown() {
+        let mut header = GgufWriter::new()
+            .str("general.architecture", "clip")
+            .tensor("t", &[4], F32)
+            .build_header();
+        // The type id sits 12 bytes from the end (type u32, offset u64).
+        let at = header.len() - 12;
+        header[at..at + 4].copy_from_slice(&999u32.to_le_bytes());
+        assert_eq!(parse_gguf_layout(&header).unwrap().data_end, None);
+    }
+
+    /// Adding the bool kind must not disturb the model-header walk, which
+    /// used to step over it as an opaque byte.
+    #[test]
+    fn a_bool_key_does_not_derail_the_model_header_walk() {
+        let bytes = GgufWriter::new()
+            .bool("general.some_flag", true)
+            .u32("gemma4.embedding_length", 2560)
+            .build_header();
+        assert_eq!(
+            parse_gguf_header(&bytes).unwrap().embedding_length,
+            Some(2560)
+        );
+    }
+
+    #[test]
+    fn a_model_is_not_mistaken_for_an_encoder() {
+        let layout = parse_gguf_layout(&gemma_header()).unwrap();
+        assert_eq!(layout.architecture.as_deref(), Some("gemma3"));
+        assert_eq!(layout.has_vision_encoder, None);
+        assert!(parse_gguf_layout(b"ONNX....").is_none());
     }
 }

@@ -34,6 +34,7 @@ import type {
 import { filterThinking } from "../lib/thinkFilter";
 import { applySubagentProgress } from "../components/SubagentTree";
 import type { SubagentRun } from "../components/SubagentTree";
+import { ApiError } from "../api/types";
 import type {
   ChatEvent,
   ContextWarning,
@@ -41,6 +42,7 @@ import type {
   SessionMessage,
   TurnStats,
 } from "../api/types";
+import type { PreparedImage } from "../lib/imageAttach";
 
 // ── The message model ─────────────────────────────────────────────────────────
 
@@ -234,6 +236,23 @@ export interface ChatRunSnapshot {
   readonly sessionId: string | undefined;
   /** Monotonic. Anything that must happen once per finished turn keys on it. */
   readonly completedTurns: number;
+  /** A turn the server refused before persisting anything (409/415/... --
+   *  any status but 408, which a network hiccup can also produce and which
+   *  therefore does NOT mean "nothing was saved"). A composer watches this to
+   *  put the draft back in the box; `takeRefusedDraft` is how it consumes it. */
+  readonly refusedDraft: RefusedDraft | null;
+}
+
+/** What a refused turn hands back to whichever composer sent it. */
+export interface RefusedDraft {
+  text: string;
+  attachments: PreparedImage[];
+  /** The server's `error` field -- the state sentence, e.g. "Picture support
+   *  is not ready yet." A composer appends its own client-side clause. */
+  message: string;
+  /** The server's `code`, e.g. "vision_not_ready" -- absent for a plain
+   *  ApiError that carried no structured body. */
+  code?: string;
 }
 
 /**
@@ -279,6 +298,10 @@ interface InternalState {
   /** How far this client has read. What a reattach resumes from. */
   lastSeq: number;
   bridge: ChatRunBridge | null;
+  /** See `RefusedDraft` -- set by `runTurn`'s catch, consumed and cleared by
+   *  `takeRefusedDraft`. Never both this and a bubble on screen for the same
+   *  turn: the refusal path removes the bubbles it just added. */
+  refusedDraft: RefusedDraft | null;
   snapshot: ChatRunSnapshot;
   subs: Set<Subscriber>;
 }
@@ -299,6 +322,7 @@ const state: InternalState = {
   epoch: null,
   lastSeq: 0,
   bridge: null,
+  refusedDraft: null,
   snapshot: {
     messages: [],
     busy: false,
@@ -307,6 +331,7 @@ const state: InternalState = {
     loadingSession: false,
     sessionId: undefined,
     completedTurns: 0,
+    refusedDraft: null,
   },
   subs: new Set(),
 };
@@ -327,6 +352,7 @@ function commit(): void {
     loadingSession: state.loadingSession,
     sessionId: state.sessionId,
     completedTurns: state.completedTurns,
+    refusedDraft: state.refusedDraft,
   };
   state.subs.forEach((f) => f());
 }
@@ -448,6 +474,26 @@ export interface SendTurn {
   /** Composer preview object URLs. The store takes ownership of revoking them:
    *  the bubble outlives the tray now, so the tray must not. */
   previewUrls?: string[];
+  /**
+   * The composer's own prepared images, kept verbatim. When present this is
+   * the source of truth -- `images` and `previewUrls` are DERIVED from it and
+   * any values passed alongside it are ignored -- because a refused turn has
+   * to hand the composer back something it can re-render as a tray again
+   * (width/height/byteSize), not just the wire pair and a bare preview URL.
+   */
+  attachments?: PreparedImage[];
+}
+
+/** Take the pending refused-turn draft, if any, and clear it. A composer
+ *  calls this from an effect on `run.refusedDraft` so StrictMode's double
+ *  effect (or two mounted composers) cannot both restore the same draft. */
+export function takeRefusedDraft(): RefusedDraft | null {
+  const draft = state.refusedDraft;
+  if (draft) {
+    state.refusedDraft = null;
+    commit();
+  }
+  return draft;
 }
 
 /**
@@ -748,7 +794,14 @@ async function consume(
 
 async function runTurn(turn: SendTurn): Promise<void> {
   const text = turn.text.trim();
-  const images = turn.images ?? [];
+  // `attachments`, when given, is the source of truth -- see SendTurn's doc.
+  const attachments = turn.attachments ?? [];
+  const images: ImageAttachment[] = turn.attachments
+    ? attachments.map((a) => ({ data: a.data, mime_type: a.mime_type }))
+    : (turn.images ?? []);
+  const previewUrls: string[] = turn.attachments
+    ? attachments.map((a) => a.previewUrl)
+    : (turn.previewUrls ?? []);
   if (!text && images.length === 0) return;
 
   // Claimed synchronously, before the first await, so two sends in one tick
@@ -764,13 +817,13 @@ async function runTurn(turn: SendTurn): Promise<void> {
   state.epoch = null;
   state.lastSeq = 0;
 
-  for (const url of turn.previewUrls ?? []) state.ownedPreviews.add(url);
+  for (const url of previewUrls) state.ownedPreviews.add(url);
 
   const userMsg: Message = {
     id: ++_msgId,
     role: "user",
     text,
-    images: turn.previewUrls?.length ? turn.previewUrls : undefined,
+    images: previewUrls.length ? previewUrls : undefined,
   };
   const agentMsg: Message = {
     id: ++_msgId,
@@ -786,6 +839,10 @@ async function runTurn(turn: SendTurn): Promise<void> {
     userMsgId: userMsg.id,
     agentMsgId: agentMsg.id,
   };
+
+  // Set only on a refusal (see below), so `finally` can skip the completed-
+  // turn bookkeeping for a turn that never actually ran.
+  let refused = false;
 
   try {
     const token = state.bridge?.sessionToken ?? null;
@@ -806,15 +863,34 @@ async function runTurn(turn: SendTurn): Promise<void> {
     );
   } catch (e) {
     if (stale()) return;
-    // Loud on the console as well as in the bubble: with no surface mounted the
-    // bubble is the only record, and it is not read until someone comes back.
-    console.warn("Chat turn failed:", e);
-    patchLastAgent((last) => ({
-      ...last,
-      text: `Error: ${String(e)}`,
-      streaming: false,
-      error: true,
-    }));
+    // A status the server actually returned before the first frame --
+    // 400/409/413/415/503 and the rest, but never 408, which a client-side
+    // timeout also produces and which therefore does NOT mean the server
+    // refused the turn (it may still be running it). Every real refusal
+    // happens before persist_user_message, so nothing was saved: the turn
+    // goes back to the composer as a draft rather than sitting on screen as
+    // an error bubble nobody can act on.
+    if (e instanceof ApiError && e.status !== 408) {
+      refused = true;
+      mutate((prev) =>
+        prev.filter((m) => m.id !== userMsg.id && m.id !== agentMsg.id),
+      );
+      // Handed back, not revoked -- the composer's tray needs these previews
+      // to render again.
+      for (const url of previewUrls) state.ownedPreviews.delete(url);
+      state.refusedDraft = { text, attachments, message: e.message, code: e.code };
+    } else {
+      // Loud on the console as well as in the bubble: with no surface
+      // mounted the bubble is the only record, and it is not read until
+      // someone comes back.
+      console.warn("Chat turn failed:", e);
+      patchLastAgent((last) => ({
+        ...last,
+        text: `Error: ${String(e)}`,
+        streaming: false,
+        error: true,
+      }));
+    }
   } finally {
     if (!stale()) {
       mutate((prev) => {
@@ -823,7 +899,7 @@ async function runTurn(turn: SendTurn): Promise<void> {
         return [...prev.slice(0, -1), { ...last, streaming: false }];
       });
       state.busy = false;
-      state.completedTurns += 1;
+      if (!refused) state.completedTurns += 1;
       commit();
       // A microtask, so a run that rejects before its first await cannot
       // recurse straight back into itself on this stack.
@@ -1191,6 +1267,7 @@ export function __resetChatRunForTests(): void {
   state.lastSeq = 0;
   forgetRun();
   state.bridge = null;
+  state.refusedDraft = null;
   state.subs.clear();
   commit();
 }

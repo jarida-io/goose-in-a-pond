@@ -139,6 +139,12 @@ resolve_server() {
 # a test binary and reads exactly like a miscompile. It is not one.
 export RUSTFLAGS=""
 
+# A scratch pond must not start the ~1 GB picture-support fetch the serve
+# process now begins at boot for a vision-capable chat model: the transfer
+# outlives the run, is killed with it, and leaves an .incomplete behind in a
+# directory that is about to be deleted. The same trap as ORT above.
+export POND_DISABLE_MODEL_PROVISIONING=1
+
 if [ "$DO_BUILD" -eq 1 ]; then
   say "building pond-server (RUSTFLAGS empty, per ci.yml)"
   if ! cargo build -p pond-server; then

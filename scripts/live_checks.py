@@ -1302,6 +1302,101 @@ def section_reminders_surface():
         )
 
 
+# A 1x1 red PNG. Decodable by anything; it never reaches an engine here, because every check
+# below expects the turn to be refused before anything is saved.
+_ONE_PIXEL_PNG = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="
+)
+_PICTURE_SESSION = "live-picture-refused"
+_VISION_KINDS = {
+    "unknown", "not_declared", "not_on_this_device", "absent", "verifying",
+    "downloading", "ready", "failed", "blocked",
+}
+
+
+def _picture_rows(sid):
+    con = db()
+    sessions = con.execute("SELECT COUNT(*) FROM sessions WHERE id = ?", (sid,)).fetchone()[0]
+    messages = con.execute(
+        "SELECT COUNT(*) FROM session_messages WHERE session_id = ?", (sid,)
+    ).fetchone()[0]
+    con.close()
+    return sessions, messages
+
+
+def section_picture_support():
+    """Picture support, over real HTTP: the readiness route, and a refused picture turn.
+
+    A picture sent to a model that cannot look at one is refused with a 409 BEFORE anything is
+    saved -- no session row, no message row -- because a refused turn that is persisted anyway
+    shows up in history as an unanswered photo and is replayed into the next turn. The route
+    tests build the router by hand; this is the first place the gate meets the real adapter and
+    the real database file, and the restart pass asks the same file again.
+    """
+    print("\n=== picture support ===")
+    code, body = call("GET", "/api/v1/models/vision-status")
+    expect(
+        "GET /models/vision-status answers",
+        code, 200, body,
+        ("has model, state, size_bytes, message",
+         lambda b: isinstance(b, dict) and {"model", "state", "size_bytes", "message"} <= set(b)),
+        ("state is a known kind",
+         lambda b: isinstance(b.get("state"), dict) and b["state"].get("kind") in _VISION_KINDS),
+    )
+
+    code, before = call("GET", "/api/v1/settings")
+    if not check("settings readable before the picture checks", code == 200, str(code)):
+        return
+    # A local provider with a text-only model. No model file is needed: the gate asks whether the
+    # model declares picture support, which is decided by name before any file is read.
+    code, body = call(
+        "PUT", "/api/v1/settings",
+        {"chat_provider": "local", "chat_model": "Llama-3.2-3B-Instruct-Q4_K_M"},
+    )
+    expect("switch to a text-only local model", code, 200, body)
+
+    code, body = call(
+        "POST", "/api/v1/chat/stream",
+        {
+            "session_id": _PICTURE_SESSION,
+            "message": "what is in this photo?",
+            "images": [{"data": _ONE_PIXEL_PNG, "mime_type": "image/png"}],
+        },
+    )
+    expect(
+        "a picture to a text-only local model is refused",
+        code, 409, body,
+        ("code is vision_unsupported", lambda b: isinstance(b, dict) and b.get("code") == "vision_unsupported"),
+        ("the refusal says what to do",
+         lambda b: isinstance(b, dict) and "Models page" in str(b.get("error", ""))),
+    )
+    sessions, messages = _picture_rows(_PICTURE_SESSION)
+    check("the refused picture turn saved no session", sessions == 0, "sessions=%d" % sessions)
+    check("the refused picture turn saved no message", messages == 0, "messages=%d" % messages)
+
+    # Put back what the rest of the suite runs on, so later sections see the pond they expect.
+    call(
+        "PUT", "/api/v1/settings",
+        {"chat_provider": before.get("chat_provider", ""), "chat_model": before.get("chat_model", "mock")},
+    )
+
+
+def section_picture_support_after_restart():
+    """The refused picture turn is still absent from the file a second server reads."""
+    print("\n=== picture support after a restart ===")
+    sessions, messages = _picture_rows(_PICTURE_SESSION)
+    check("after a restart, the refused picture turn has no session", sessions == 0, "sessions=%d" % sessions)
+    check("after a restart, the refused picture turn has no message", messages == 0, "messages=%d" % messages)
+    code, body = call("GET", "/api/v1/models/vision-status")
+    expect(
+        "after a restart, /models/vision-status answers",
+        code, 200, body,
+        ("state is a known kind",
+         lambda b: isinstance(b, dict) and isinstance(b.get("state"), dict)
+         and b["state"].get("kind") in _VISION_KINDS),
+    )
+
+
 def main():
     """Auth is NOT checked here.
 
@@ -1320,6 +1415,7 @@ def main():
         section_secret_store_after_restart()
         section_network_mode_after_restart()
         section_lane_clock_after_restart()
+        section_picture_support_after_restart()
     else:
         section_schema()
         jerry, liz = section_identity()
@@ -1337,6 +1433,8 @@ def main():
         section_inference_lane()
         section_composed_suggestions()
         section_reminders_surface()
+        # Last: it moves the chat model to a local one for a moment, and puts it back.
+        section_picture_support()
 
     failed = [label for label, ok, _ in results if not ok]
     print("\n%d checks run, %d failed" % (len(results), len(failed)))

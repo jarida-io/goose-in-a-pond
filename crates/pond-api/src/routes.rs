@@ -228,6 +228,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/weather", get(get_weather))
         .route("/models", get(list_models))
         .route("/models/capabilities", get(get_model_capabilities))
+        .route("/models/vision-status", get(get_vision_status))
         .route("/models/memory-status", get(get_memory_status))
         .route("/models/active-roles", get(get_active_roles))
         .route("/models/registry/refresh", post(refresh_model_registry))
@@ -1482,7 +1483,7 @@ async fn chat_stream(
                 Json(json!({"error": "Too many concurrent streams"})),
             )
         })?;
-    let Json(req) = body.map_err(|e| {
+    let Json(mut req) = body.map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": e.to_string()})),
@@ -1493,6 +1494,12 @@ async fn chat_stream(
     // the client gets a real HTTP status it can show rather than an SSE error
     // event mid-conversation. Nothing has been decoded at this point.
     image_limit_response(&req.images)?;
+
+    // Picture support, for the same reason and at the same point: before the run
+    // permit, the registry and `spawn_run`, because the user message is persisted
+    // inside the spawned turn and a refusal after that could only be an SSE frame
+    // over a question already saved with no answer under it.
+    req.images = prepare_turn_images(&state, std::mem::take(&mut req.images)).await?;
 
     if !req.resumable {
         // Today's contract, unchanged: the turn ends when the last reader does.
@@ -1582,6 +1589,295 @@ fn image_limit_response(
             Err((status, Json(json!({"error": e.to_string()}))))
         }
     }
+}
+
+// ── Picture support, before a turn is persisted ───────────────────────────────
+
+/// The two pre-stream picture checks both chat handlers run after `image_limit_response`,
+/// returning the attachments the engine should see.
+///
+/// First the model: an image turn the active model cannot take is refused with a 409 while
+/// nothing is saved, so the client can hand the draft back. It goes first because a picture the
+/// model will never see is not worth decoding. Then the bytes: a WebP is re-encoded, a picture
+/// that is no accepted container is a 415, and the result is checked against the limits again,
+/// since a re-encode can change the size. A text-only turn does neither and reads nothing.
+async fn prepare_turn_images(
+    state: &Arc<AppState>,
+    images: Vec<pond_core::models::domain::message::ImageAttachment>,
+) -> Result<Vec<pond_core::models::domain::message::ImageAttachment>, (StatusCode, Json<Value>)> {
+    if images.is_empty() {
+        return Ok(images);
+    }
+    // Unreadable settings fail OPEN, to the adapter's own backstop: refusing on no
+    // information would block every picture whenever the store hiccups.
+    if let Ok(settings) = state.settings_repo.get().await {
+        let reported =
+            read_vision_state(state, &settings.chat_provider, &settings.chat_model).await;
+        vision_refusal_response(
+            reported.as_ref(),
+            &settings.chat_provider,
+            &settings.chat_model,
+        )?;
+    }
+    let images = crate::image_normalize::normalize_images_for_engine(images)
+        .await
+        .map_err(image_unreadable_response)?;
+    image_limit_response(&images)?;
+    Ok(images)
+}
+
+/// The agent's picture-support state for `model` under `provider`, read on the blocking pool:
+/// the port promises a pure read, but it may open the encoder's header and sidecar, which on an
+/// SD card is not something to do on the executor. A join failure reads as unknown.
+async fn read_vision_state(
+    state: &Arc<AppState>,
+    provider: &str,
+    model: &str,
+) -> Option<pond_core::models::domain::vision_encoder::EncoderState> {
+    let agent = state.agent.clone();
+    let (provider, model) = (provider.to_string(), model.to_string());
+    tokio::task::spawn_blocking(move || agent.vision_state(&provider, &model))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Map pond-core's refusal verdict onto the wire: `None` (the agent does not report), unknown
+/// and ready pass; anything else is a 409 carrying the household copy, the code the client keys
+/// its restore clause on, and the state itself so the client need not ask again.
+fn vision_refusal_response(
+    reported: Option<&pond_core::models::domain::vision_encoder::EncoderState>,
+    provider: &str,
+    model: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    use pond_core::models::domain::vision_encoder::{encoder_for, refusal_for};
+
+    let spec = encoder_for(model);
+    let Some(refusal) = refusal_for(reported, spec.as_ref(), provider) else {
+        return Ok(());
+    };
+    tracing::info!(
+        target: "giap::vision",
+        provider,
+        model,
+        code = refusal.code.as_str(),
+        state = reported.map(|s| s.kind()).unwrap_or("unknown"),
+        "refused an image turn before anything was saved"
+    );
+    Err((
+        StatusCode::CONFLICT,
+        Json(json!({
+            "error": refusal.message,
+            "code": refusal.code.as_str(),
+            "state": reported,
+        })),
+    ))
+}
+
+/// A picture the server could not read: 415 with the household copy, counted from 1.
+fn image_unreadable_response(
+    unreadable: crate::image_normalize::Unreadable,
+) -> (StatusCode, Json<Value>) {
+    use pond_core::models::domain::vision_encoder::image_unreadable_message;
+    (
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        Json(json!({
+            "error": image_unreadable_message(unreadable.index + 1),
+            "code": "image_unreadable",
+        })),
+    )
+}
+
+/// The status-line sentence for the active model, or `None` where the desktop shows nothing of
+/// the server's (ready, unknown, and not_declared, which the client already knows how to say).
+///
+/// The mesh provider is the exception to the last rule: the adapter reports `not_declared` for
+/// it, but the reason is the wire, not the model, so the line is the mesh one the 409 would carry.
+fn vision_status_message(
+    provider: &str,
+    state: &pond_core::models::domain::vision_encoder::EncoderState,
+    spec: Option<&pond_core::models::domain::vision_encoder::EncoderSpec>,
+) -> Option<String> {
+    use pond_core::models::domain::vision_encoder::{status_message, EncoderState, MESH_MESSAGE};
+    if provider.eq_ignore_ascii_case("mesh")
+        && !matches!(state, EncoderState::Unknown | EncoderState::Ready { .. })
+    {
+        return Some(MESH_MESSAGE.to_string());
+    }
+    status_message(state, spec)
+}
+
+/// The bytes the status line may quote: the encoder's size where one is involved. `ready` says
+/// for itself (`None` there means no encoder is involved, as for an HTTP provider), and nothing
+/// is quoted for a model with no picture support or an agent that does not report.
+fn vision_status_size(
+    state: &pond_core::models::domain::vision_encoder::EncoderState,
+    spec: Option<&pond_core::models::domain::vision_encoder::EncoderSpec>,
+) -> Option<u64> {
+    use pond_core::models::domain::vision_encoder::EncoderState;
+    match state {
+        EncoderState::Ready { bytes } => *bytes,
+        EncoderState::Unknown | EncoderState::NotDeclared => None,
+        _ => spec.map(|s| s.size_bytes),
+    }
+}
+
+/// `GET /api/v1/models/vision-status` — picture support for the active chat model.
+///
+/// `{model, state, size_bytes, message}`: `state` is the `EncoderState` union, `message` the
+/// pond-core household copy. A pure read the desktop polls every 2 s while something moves, so
+/// it never starts a fetch or a hash; `prepare_model` is what does that.
+async fn get_vision_status(State(state): State<Arc<AppState>>) -> Json<Value> {
+    use pond_core::models::domain::vision_encoder::{encoder_for, EncoderState};
+
+    // Unreadable settings name no model, and asking the agent about "" would answer for a
+    // model nobody chose: unknown, which the desktop reads as "say nothing, block nothing".
+    let (provider, model, reported) = match state.settings_repo.get().await {
+        Ok(s) => {
+            let reported = read_vision_state(&state, &s.chat_provider, &s.chat_model)
+                .await
+                .unwrap_or(EncoderState::Unknown);
+            (s.chat_provider, s.chat_model, reported)
+        }
+        Err(_) => (String::new(), String::new(), EncoderState::Unknown),
+    };
+    let spec = encoder_for(&model);
+    Json(json!({
+        "size_bytes": vision_status_size(&reported, spec.as_ref()),
+        "message": vision_status_message(&provider, &reported, spec.as_ref()),
+        "state": reported,
+        "model": model,
+    }))
+}
+
+/// What a GGUF row says about pictures: `(reads_images, image_support_bytes)`.
+///
+/// The agent's device-aware verdict under the `local` provider (what activating the row would
+/// select), falling back to pond-core's pinned table when the agent does not report. A pure read:
+/// listing models must never prepare or fetch anything.
+fn gguf_vision_facts(
+    agent: &dyn pond_core::models::ports::agent::Agent,
+    model: &str,
+) -> (bool, Option<u64>) {
+    use pond_core::models::domain::vision_encoder::{encoder_for, EncoderState};
+    let spec = encoder_for(model);
+    let reads = match agent.vision_state("local", model) {
+        None | Some(EncoderState::Unknown) => spec.is_some(),
+        Some(state) => !state.is_unsupported(),
+    };
+    let bytes = if reads {
+        spec.map(|s| s.size_bytes)
+    } else {
+        None
+    };
+    (reads, bytes)
+}
+
+/// A GGUF that pairs WITH a chat model rather than being one: a vision encoder (`mmproj-*`) or
+/// a speculative drafter (`mtp-*`, and the older Gemma 4 `-assistant` drafters). Offered as a
+/// chat model, the encoder downloads into `models/gguf`, where every scan would take it for one.
+fn is_companion_gguf(file_name: &str) -> bool {
+    let base = file_name
+        .rsplit('/')
+        .next()
+        .unwrap_or(file_name)
+        .to_ascii_lowercase();
+    base.starts_with("mmproj")
+        || base.starts_with("mtp-")
+        || ((base.contains("gemma-4") || base.contains("gemma4")) && base.contains("-assistant"))
+}
+
+/// The header's own word for a companion: `clip` is an encoder, `*-assistant` a drafter.
+fn is_companion_architecture(architecture: Option<&str>) -> bool {
+    architecture.is_some_and(|a| a == "clip" || a.ends_with("-assistant"))
+}
+
+/// After a GGUF is deleted: if no other GGUF left on this pond uses its picture support, remove
+/// `models/mmproj/<dir>/` too, as the delete confirmation promised. Links go at once; a blob they
+/// pointed into is reclaimed by the next cleanup sweep, which no longer sees anything protect it.
+///
+/// "Uses" is checked two ways, because either alone misses a case: a catalogue row still marked
+/// downloaded, and a `.gguf` in `models/gguf` that no scan has registered yet. The directory is
+/// matched without regard to case, since the Mac's older encoder dirs are mixed-case.
+async fn remove_orphaned_encoder_dir(
+    data_dir: &std::path::Path,
+    deleted: &ModelRecord,
+    model_repo: &Arc<dyn pond_core::models::ports::model_repository::ModelRepository + Send + Sync>,
+) {
+    use pond_core::models::domain::vision_encoder::encoder_for;
+
+    let Some(spec) = encoder_for(&deleted.name) else {
+        return;
+    };
+    let same_dir = |name: &str| encoder_for(name).is_some_and(|s| s.dir == spec.dir);
+
+    let rows = model_repo.list_all().await.unwrap_or_default();
+    let in_catalogue = rows.iter().any(|m| {
+        m.category == ModelCategory::Gguf && m.downloaded && m.id != deleted.id && same_dir(&m.name)
+    });
+    if in_catalogue {
+        return;
+    }
+    let gguf_dir = data_dir.join("models").join("gguf");
+    let deleted_file = deleted.filename.as_deref();
+    if let Ok(mut entries) = tokio::fs::read_dir(&gguf_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if Some(name.as_str()) == deleted_file || is_companion_gguf(&name) {
+                continue;
+            }
+            if let Some(stem) = name.strip_suffix(".gguf") {
+                if same_dir(stem) {
+                    return;
+                }
+            }
+        }
+    }
+
+    let mmproj_root = data_dir.join("models").join("mmproj");
+    let Ok(mut entries) = tokio::fs::read_dir(&mmproj_root).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(spec.dir)
+        {
+            continue;
+        }
+        let path = entry.path();
+        // A link to a directory is removed as a link; its target is not this pond's to delete.
+        let removed = match tokio::fs::symlink_metadata(&path).await {
+            Ok(meta) if meta.is_dir() => tokio::fs::remove_dir_all(&path).await,
+            Ok(_) => tokio::fs::remove_file(&path).await,
+            Err(e) => Err(e),
+        };
+        match removed {
+            Ok(()) => tracing::info!(
+                target: "giap::vision",
+                model = %deleted.name,
+                encoder = spec.dir,
+                path = %path.display(),
+                "removed picture support no remaining model uses"
+            ),
+            Err(e) => tracing::warn!(
+                target: "giap::vision",
+                path = %path.display(),
+                error = %e,
+                "could not remove picture support after deleting its last model"
+            ),
+        }
+    }
+}
+
+/// Whether a settings save leaves the engine's warmed prefix stale, so exactly one warm-up
+/// should follow: a different provider or model. (The speculation switch was a third reason while
+/// the engine had speculative decoding; it is commented out with it.) A PUT that re-sends an
+/// unchanged value is no change, and must not put the Warming banner up.
+fn save_needs_prewarm(current: &Settings, merged: &Settings) -> bool {
+    current.chat_provider != merged.chat_provider || current.chat_model != merged.chat_model
+    // || current.speculative_decoding_enabled != merged.speculative_decoding_enabled
 }
 
 // ── One engine event, one SSE frame ───────────────────────────────────────────
@@ -5220,6 +5516,17 @@ async fn update_settings(
     // restart — a privacy control the user has to reboot to apply is not one.
     pond_core::models::domain::mic_gate::set_mic_enabled(merged.mic_enabled);
 
+    // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98),
+    // so this is commented out rather than deleted; restore it if it returns.
+    // // The speculation switch, and it must land HERE, before either
+    // // `rebuild_llm_provider` below: the rebuild constructs the local-inference
+    // // adapter, whose device settings re-stamp `draft_model` from this gate, so a
+    // // rebuild that ran first would put back the drafter the user just turned off.
+    // // Unconditional for the mic gate's reason: a cheap idempotent write.
+    // pond_core::models::domain::drafter::set_speculation_enabled(
+    //     merged.speculative_decoding_enabled,
+    // );
+
     // Same reasoning as the mic gate directly above: a network restriction the
     // user has to restart the pond to apply is not one. Unconditional rather
     // than keyed on the patch, because it is a cheap idempotent write and a
@@ -5334,9 +5641,22 @@ async fn update_settings(
 
     // A provider or model change makes the engine's warmed prefix stale, so
     // re-run the warm-up in the background. Fire-and-forget: the save must not
-    // wait on a model load.
-    if current.chat_provider != merged.chat_provider || current.chat_model != merged.chat_model {
+    // wait on a model load. So does the speculation switch, which the engine
+    // applies by evicting and reloading the model; the warm-up is what reloads it
+    // in the background instead of in front of the next reply. One condition, so
+    // a save that changes the model AND the switch still starts one warm-up.
+    if save_needs_prewarm(&current, &merged) {
         crate::spawn_prefix_prewarm(state.clone(), false);
+    }
+    // A newly chosen local model may need picture support fetched; returns at once. Only a
+    // GGUF has an encoder to provision, and the port takes no provider, so an Ollama tag that
+    // happens to name a Gemma family must not be handed to it.
+    let chat_changed =
+        current.chat_model != merged.chat_model || current.chat_provider != merged.chat_provider;
+    if chat_changed
+        && ModelCategory::for_chat_provider(&merged.chat_provider) == ModelCategory::Gguf
+    {
+        state.agent.prepare_model(&merged.chat_model);
     }
 
     // Return the full merged Settings so the frontend can sync its local state
@@ -5751,6 +6071,10 @@ fn record_to_dto(m: &ModelRecord, assignments: &[ModelRoleAssignment]) -> ModelS
         asr_size: m.asr_size.clone(),
         tts_engine: m.tts_engine.clone(),
         config_filename: m.config_filename.clone(),
+        // Filled by `list_models` for GGUF rows, from the agent: this conversion is sync and
+        // per row, and the agent's verdict can read a header.
+        reads_images: None,
+        image_support_bytes: None,
     }
 }
 
@@ -5851,6 +6175,18 @@ async fn scan_filesystem_extras(
                     } else {
                         None
                     };
+                    // An encoder or a drafter is not a chat model, and a row for one is a
+                    // "Load as chat model" button that loads something that cannot chat. Judged
+                    // by name first and by the header's own architecture second, for a
+                    // companion saved under a name that does not say so.
+                    if fname.ends_with(".gguf")
+                        && (is_companion_gguf(&fname)
+                            || is_companion_architecture(
+                                gguf.as_ref().and_then(|g| g.architecture.as_deref()),
+                            ))
+                    {
+                        continue;
+                    }
 
                     let name = fname
                         .trim_end_matches(".gguf")
@@ -5950,6 +6286,27 @@ async fn scan_filesystem_extras(
     }
 
     extras_from_disk
+}
+
+/// The completion hook for a download that names its file rather than a catalogue row: a GGUF
+/// is handed to `Agent::prepare_model` under the name a scan will give it (the file's stem), so
+/// its picture support starts as soon as the weights are on disk. Anything else has nothing to
+/// prepare.
+fn prepare_after_download(
+    state: &Arc<AppState>,
+    category: &str,
+    filename: &str,
+) -> impl std::future::Future<Output = ()> + Send + 'static {
+    let prepare = (category == "gguf")
+        .then(|| filename.strip_suffix(".gguf"))
+        .flatten()
+        .filter(|stem| !is_companion_gguf(filename) && !stem.is_empty())
+        .map(|stem| (state.agent.clone(), stem.to_string()));
+    async move {
+        if let Some((agent, model)) = prepare {
+            agent.prepare_model(&model);
+        }
+    }
 }
 
 /// Where a downloaded model file lands, by category.
@@ -6059,17 +6416,11 @@ async fn download_control(
     let dest = model_dest_path(&data_dir, &category, &filename);
     let tracker = Arc::clone(&state.download_tracker);
     let client = state.http_client.clone();
+    let on_done = prepare_after_download(&state, &category, &filename);
 
     tokio::spawn(async move {
         spawn_tracked_download(
-            url,
-            dest,
-            filename,
-            category,
-            tracker,
-            client,
-            data_dir,
-            async {},
+            url, dest, filename, category, tracker, client, data_dir, on_done,
         )
         .await;
     });
@@ -6129,6 +6480,28 @@ async fn list_models(
     })?;
     let assignments = model_repo.list_assignments().await.unwrap_or_default();
 
+    // Picture support per GGUF row, asked of the agent on the blocking pool in one batch: its
+    // verdict may read a header per row, and this page loads on every visit. A pure read, so
+    // listing never starts a fetch; a failed batch just leaves the fields out.
+    let gguf_names: Vec<String> = records
+        .iter()
+        .filter(|m| m.category == ModelCategory::Gguf)
+        .map(|m| m.name.clone())
+        .collect();
+    let agent = state.agent.clone();
+    let vision_facts: std::collections::HashMap<String, (bool, Option<u64>)> =
+        tokio::task::spawn_blocking(move || {
+            gguf_names
+                .into_iter()
+                .map(|name| {
+                    let facts = gguf_vision_facts(agent.as_ref(), &name);
+                    (name, facts)
+                })
+                .collect()
+        })
+        .await
+        .unwrap_or_default();
+
     let mut whisper = vec![];
     let mut llamafile = vec![];
     let mut tts = vec![];
@@ -6137,7 +6510,15 @@ async fn list_models(
     let mut embedding = vec![];
 
     for m in &records {
-        let v = serde_json::to_value(record_to_dto(m, &assignments)).unwrap_or_default();
+        let mut dto = record_to_dto(m, &assignments);
+        let facts = (m.category == ModelCategory::Gguf)
+            .then(|| vision_facts.get(&m.name))
+            .flatten();
+        if let Some((reads, bytes)) = facts {
+            dto.reads_images = Some(*reads);
+            dto.image_support_bytes = *bytes;
+        }
+        let v = serde_json::to_value(dto).unwrap_or_default();
         match m.category {
             ModelCategory::Whisper => whisper.push(v),
             ModelCategory::Llamafile => llamafile.push(v),
@@ -6439,6 +6820,9 @@ async fn download_model(
     let cfg_client = state.http_client.clone();
     let cfg_data_dir = data_dir.clone();
     let dl_data_dir = data_dir.clone();
+    // A GGUF that just arrived may need its picture support, and waiting for the household to
+    // activate it would put that download in front of their first photo.
+    let prepare = (cat == ModelCategory::Gguf).then(|| (state.agent.clone(), name.clone()));
 
     tokio::spawn(async move {
         spawn_tracked_download(
@@ -6479,6 +6863,9 @@ async fn download_model(
                     }
                 }
                 let _ = model_repo.set_downloaded(&model_id, true).await;
+                if let Some((agent, model)) = prepare {
+                    agent.prepare_model(&model);
+                }
             },
         )
         .await;
@@ -6585,6 +6972,14 @@ async fn delete_model(
                 Json(json!({"error": e.to_string()})),
             )
         })?;
+
+    // After the row reads not-downloaded, so this model no longer counts as a user of its own
+    // picture support. Best-effort: the model itself is gone either way.
+    if cat == ModelCategory::Gguf {
+        if let Some(data_dir) = &state.data_dir {
+            remove_orphaned_encoder_dir(data_dir, &m, &model_repo).await;
+        }
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -6768,6 +7163,19 @@ async fn activate_model(
             )
         })?;
 
+    // What the chat role held before this activation, so the warm-up below runs only on a real
+    // change, the same rule PUT /settings follows.
+    let chat_before = if role == "chat" {
+        state
+            .settings_repo
+            .get()
+            .await
+            .ok()
+            .map(|s| (s.chat_provider, s.chat_model))
+    } else {
+        None
+    };
+
     // Sync to settings KV hot-cache
     let settings_repo = state.settings_repo.clone();
     match role.as_str() {
@@ -6844,6 +7252,19 @@ async fn activate_model(
 
         let settings = state.settings_repo.get().await.unwrap_or_default();
         rebuild_llm_provider(&state, &settings).await;
+    }
+
+    // "Use" on the Models page is a model change like any other: the new model's picture support
+    // starts now rather than on the first photo, and its prefix is warmed in the background as
+    // PUT /settings does, rather than in front of the first reply.
+    if role == "chat" {
+        if cat == ModelCategory::Gguf {
+            state.agent.prepare_model(&name);
+        }
+        let now = (provider.to_string(), name.clone());
+        if chat_before.as_ref() != Some(&now) {
+            crate::spawn_prefix_prewarm(state.clone(), false);
+        }
     }
 
     Ok(Json(json!({"role": role, "model_id": model_id})))
@@ -7112,9 +7533,12 @@ async fn list_hf_model_files(
                 .as_array()
                 .map(|siblings| {
                     siblings.iter()
+                        // Chat models only: an encoder or drafter picked here would land in
+                        // models/gguf and be offered back as a chat model. Picture support and
+                        // the helper model arrive by themselves, into their own places.
                         .filter(|s| {
                             s["rfilename"].as_str()
-                                .map(|n| n.ends_with(".gguf"))
+                                .map(|n| n.ends_with(".gguf") && !is_companion_gguf(n))
                                 .unwrap_or(false)
                         })
                         .map(|s| {
@@ -7195,6 +7619,7 @@ async fn download_model_from_url(
 
     let dl_client = state.http_client.clone();
     let dl_data_dir = data_dir.clone();
+    let on_done = prepare_after_download(&state, &category, &filename);
     tokio::spawn(async move {
         spawn_tracked_download(
             url,
@@ -7204,7 +7629,7 @@ async fn download_model_from_url(
             tracker,
             dl_client,
             dl_data_dir,
-            async {},
+            on_done,
         )
         .await;
     });
@@ -10835,6 +11260,13 @@ async fn agent_chat_stream(
     if let Err(resp) = image_limit_response(&images) {
         return resp.into_response();
     }
+    // Before the stream is built, as in `/chat/stream`: the user message is persisted inside
+    // `stream!`, so this is the last point a refused picture leaves nothing behind. It is also
+    // this route's one settings read outside the stream, and only an image turn pays for it.
+    let images = match prepare_turn_images(&state, images).await {
+        Ok(images) => images,
+        Err(resp) => return resp.into_response(),
+    };
 
     let agent = state.agent.clone();
     let storage = state.session_storage.clone();
@@ -19256,5 +19688,259 @@ mod tests {
             RECIPE_EXTENSION_NAMES.len(),
             "the mapping list is not exercising the match arms"
         );
+    }
+
+    // ── picture support before a turn is persisted (design_v2 F) ────────
+
+    mod vision_gate {
+        use super::*;
+        use pond_core::models::domain::vision_encoder::{
+            encoder_for, EncoderState, FailReason, MESH_MESSAGE, NOT_DECLARED_MESSAGE,
+        };
+
+        const E2B: &str = "gemma-4-E2B-it-Q4_K_M";
+
+        fn refusal(
+            state: Option<EncoderState>,
+            provider: &str,
+            model: &str,
+        ) -> Option<(StatusCode, Value)> {
+            vision_refusal_response(state.as_ref(), provider, model)
+                .err()
+                .map(|(status, Json(body))| (status, body))
+        }
+
+        #[test]
+        fn unknown_and_ready_pass_so_a_backend_that_does_not_report_is_never_blocked() {
+            assert!(refusal(None, "local", E2B).is_none());
+            assert!(refusal(Some(EncoderState::Unknown), "local", E2B).is_none());
+            assert!(
+                refusal(Some(EncoderState::Ready { bytes: None }), "ollama", "llava").is_none()
+            );
+            assert!(refusal(
+                Some(EncoderState::Ready {
+                    bytes: Some(986_833_728)
+                }),
+                "local",
+                E2B
+            )
+            .is_none());
+        }
+
+        #[test]
+        fn a_model_that_cannot_read_pictures_is_a_409_unsupported_with_its_state() {
+            let (status, body) =
+                refusal(Some(EncoderState::NotDeclared), "local", "Llama-3.2-3B").unwrap();
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body["code"], "vision_unsupported");
+            assert_eq!(body["error"], NOT_DECLARED_MESSAGE);
+            assert_eq!(body["state"], json!({"kind": "not_declared"}));
+
+            let (_, body) = refusal(Some(EncoderState::NotOnThisDevice), "local", E2B).unwrap();
+            assert_eq!(body["code"], "vision_unsupported");
+            assert_eq!(body["state"]["kind"], "not_on_this_device");
+        }
+
+        #[test]
+        fn picture_support_on_its_way_is_a_409_not_ready_with_the_copy() {
+            let (status, body) = refusal(
+                Some(EncoderState::Downloading {
+                    done: 412 * 1_048_576,
+                    total: 986_833_728,
+                }),
+                "local",
+                E2B,
+            )
+            .unwrap();
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body["code"], "vision_not_ready");
+            assert_eq!(
+                body["error"],
+                "Getting picture support ready: 412 MB of 941 MB. Text chat works meanwhile."
+            );
+            assert_eq!(body["state"]["done"], 412 * 1_048_576);
+
+            for state in [
+                EncoderState::Absent,
+                EncoderState::Verifying,
+                EncoderState::Failed {
+                    reason: FailReason::ConnectionDropped,
+                    retry_at_unix_ms: 1,
+                },
+                EncoderState::Blocked {
+                    mode: "offline".into(),
+                    host: "huggingface.co".into(),
+                },
+            ] {
+                let kind = state.kind();
+                let (_, body) = refusal(Some(state), "local", E2B).unwrap();
+                assert_eq!(body["code"], "vision_not_ready", "{kind}");
+                assert_eq!(body["state"]["kind"], kind);
+            }
+        }
+
+        #[test]
+        fn another_pond_refuses_pictures_with_the_mesh_line_whatever_the_model() {
+            let (_, body) = refusal(Some(EncoderState::NotDeclared), "mesh", E2B).unwrap();
+            assert_eq!(body["code"], "vision_unsupported");
+            assert_eq!(body["error"], MESH_MESSAGE);
+        }
+
+        #[test]
+        fn the_status_line_speaks_only_where_the_server_has_something_to_say() {
+            let spec = encoder_for(E2B);
+            assert_eq!(
+                vision_status_message("local", &EncoderState::Absent, spec.as_ref()).as_deref(),
+                Some(
+                    "Picture support for Gemma 4 E2B needs a one-time 941 MB download. It starts \
+                     by itself; text chat works meanwhile."
+                )
+            );
+            for quiet in [
+                EncoderState::Unknown,
+                EncoderState::NotDeclared,
+                EncoderState::Ready { bytes: None },
+            ] {
+                assert_eq!(vision_status_message("local", &quiet, spec.as_ref()), None);
+            }
+            // The mesh reason is the wire, not the model: say so rather than "this model".
+            assert_eq!(
+                vision_status_message("mesh", &EncoderState::NotDeclared, spec.as_ref()).as_deref(),
+                Some(MESH_MESSAGE)
+            );
+        }
+
+        #[test]
+        fn the_status_size_is_the_encoders_and_only_where_one_is_involved() {
+            let spec = encoder_for(E2B);
+            assert_eq!(
+                vision_status_size(&EncoderState::Absent, spec.as_ref()),
+                Some(986_833_728)
+            );
+            assert_eq!(
+                vision_status_size(&EncoderState::Ready { bytes: Some(7) }, spec.as_ref()),
+                Some(7)
+            );
+            assert_eq!(
+                vision_status_size(&EncoderState::Ready { bytes: None }, spec.as_ref()),
+                None
+            );
+            assert_eq!(
+                vision_status_size(&EncoderState::NotDeclared, spec.as_ref()),
+                None
+            );
+            assert_eq!(vision_status_size(&EncoderState::Unknown, None), None);
+        }
+
+        #[test]
+        fn an_unreadable_picture_is_a_415_counted_from_one() {
+            let (status, Json(body)) =
+                image_unreadable_response(crate::image_normalize::Unreadable { index: 1 });
+            assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+            assert_eq!(body["code"], "image_unreadable");
+            assert_eq!(
+                body["error"],
+                "Picture 2 could not be read. Save it as a JPEG or PNG and attach it again."
+            );
+        }
+
+        #[test]
+        fn one_warm_up_for_a_new_engine_model_and_none_for_a_resend() {
+            let current = Settings::default();
+            assert!(!save_needs_prewarm(&current, &current.clone()));
+
+            let mut model = current.clone();
+            model.chat_model = "gemma-4-E4B-it-Q4_K_M".into();
+            assert!(save_needs_prewarm(&current, &model));
+
+            let mut provider = current.clone();
+            provider.chat_provider = "local".into();
+            assert!(save_needs_prewarm(&current, &provider));
+
+            // let mut switch = current.clone();
+            // switch.speculative_decoding_enabled = !current.speculative_decoding_enabled;
+            // assert!(save_needs_prewarm(&current, &switch));
+
+            // Unrelated fields never warm.
+            let mut other = current.clone();
+            other.assistant_name = "Heron".into();
+            other.mic_enabled = !current.mic_enabled;
+            assert!(!save_needs_prewarm(&current, &other));
+        }
+
+        #[test]
+        fn encoders_and_drafters_are_companions_and_chat_models_are_not() {
+            for companion in [
+                "mmproj-BF16.gguf",
+                "subdir/mmproj-F16.gguf",
+                "mtp-gemma-4-E2B-it.gguf",
+                "gemma-4-E2B-it-assistant-F16.gguf",
+                "gemma-4-E4B-it-assistant-Q8_0.gguf",
+            ] {
+                assert!(is_companion_gguf(companion), "{companion}");
+            }
+            for chat in [
+                "gemma-4-E2B-it-Q4_K_M.gguf",
+                "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf",
+                "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+                "Nemotron3-Nano-4B.gguf",
+            ] {
+                assert!(!is_companion_gguf(chat), "{chat}");
+            }
+            assert!(is_companion_architecture(Some("clip")));
+            assert!(is_companion_architecture(Some("gemma4-assistant")));
+            assert!(!is_companion_architecture(Some("gemma4")));
+            assert!(!is_companion_architecture(None));
+        }
+
+        /// An agent that answers `vision_state` from a fixed table, for `gguf_vision_facts`.
+        struct TableAgent(Option<EncoderState>);
+
+        #[async_trait::async_trait]
+        impl pond_core::models::ports::agent::Agent for TableAgent {
+            async fn chat(
+                &self,
+                _request: pond_core::shared::domain::agent::AgentRequest,
+            ) -> anyhow::Result<pond_core::shared::domain::agent::AgentResponse> {
+                unimplemented!("not exercised")
+            }
+            async fn chat_stream(
+                &self,
+                _request: pond_core::shared::domain::agent::AgentRequest,
+            ) -> anyhow::Result<
+                futures::stream::BoxStream<
+                    'static,
+                    anyhow::Result<pond_core::shared::domain::agent::AgentStreamEvent>,
+                >,
+            > {
+                unimplemented!("not exercised")
+            }
+            fn vision_state(&self, provider: &str, _model: &str) -> Option<EncoderState> {
+                assert_eq!(provider, "local", "a GGUF row is asked about as `local`");
+                self.0.clone()
+            }
+        }
+
+        #[test]
+        fn a_gguf_row_reads_images_by_the_agents_verdict_and_by_the_table_without_one() {
+            // The agent's verdict wins: on a budgeted device a Gemma may be declined.
+            assert_eq!(
+                gguf_vision_facts(&TableAgent(Some(EncoderState::NotOnThisDevice)), E2B),
+                (false, None)
+            );
+            assert_eq!(
+                gguf_vision_facts(&TableAgent(Some(EncoderState::Absent)), E2B),
+                (true, Some(986_833_728))
+            );
+            // No verdict, or unknown: pond-core's pinned table decides.
+            assert_eq!(
+                gguf_vision_facts(&TableAgent(None), E2B),
+                (true, Some(986_833_728))
+            );
+            assert_eq!(
+                gguf_vision_facts(&TableAgent(Some(EncoderState::Unknown)), "Llama-3.2-3B"),
+                (false, None)
+            );
+        }
     }
 }

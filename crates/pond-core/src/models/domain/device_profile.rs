@@ -46,11 +46,11 @@ impl DeviceProfile {
     pub fn builtin(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
             // The deployment. Every figure here was read off the board; see
-            // `pond_adapters_local_inference::scheduler::JETSON_TOTAL_RAM_MB`
-            // for why the total is 7620 and not 8192.
+            // `device_budget::JETSON_TOTAL_RAM_MB` for why the total is 7620
+            // and not 8192.
             "orin-nano-8gb" | "orin-nano" | "jetson" => Some(Self {
                 name: "orin-nano-8gb".to_string(),
-                total_ram_mb: 7620,
+                total_ram_mb: super::device_budget::JETSON_TOTAL_RAM_MB,
                 device_tree_model: Some(
                     // The exact string read from the device on 2026-08-16.
                     "NVIDIA Jetson Orin Nano Engineering Reference Developer Kit Super".to_string(),
@@ -64,7 +64,7 @@ impl DeviceProfile {
             // warning path can be exercised on a Mac.
             "orin-nano-8gb-cpu" | "orin-nano-cpu" => Some(Self {
                 name: "orin-nano-8gb-cpu".to_string(),
-                total_ram_mb: 7620,
+                total_ram_mb: super::device_budget::JETSON_TOTAL_RAM_MB,
                 device_tree_model: Some(
                     "NVIDIA Jetson Orin Nano Engineering Reference Developer Kit Super".to_string(),
                 ),

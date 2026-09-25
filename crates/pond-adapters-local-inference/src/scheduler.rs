@@ -12,44 +12,13 @@ use pond_core::models::ports::model_scheduler::{MemoryStatus, ModelScheduler};
 
 // ── Jetson / Linux memory constants ──────────────────────────────────────────
 
-/// Total device RAM on a Jetson Orin Nano 8 GB (MB), as the KERNEL reports it: `free -m` on the
-/// Orin says 7620, not the marketed 8192, because carveouts are taken before Linux sees the
-/// memory. Any phantom MB here is spent silently, since an over-large context does not fail to
-/// allocate, it swaps: the symptom is slowness, not an out-of-memory error.
-pub const JETSON_TOTAL_RAM_MB: u64 = 7620;
-/// Approximate headroom used by OS + GIAP server + UI at idle (MB).
-const SYSTEM_OVERHEAD_MB: u64 = 1500;
-/// Whisper base model resident size (MB).
-const STT_RESERVED_MB: u64 = 200;
-/// Reserved TTS resident size (MB).
-const TTS_RESERVED_MB: u64 = 100;
-/// Approximate MB available for a single LLM slot.
-pub const LLM_BUDGET_MB: u64 =
-    JETSON_TOTAL_RAM_MB - SYSTEM_OVERHEAD_MB - STT_RESERVED_MB - TTS_RESERVED_MB;
-
-/// Everything the LLM slot does not get: OS, GIAP server, UI, STT, TTS.
-///
-/// Named separately from [`LLM_BUDGET_MB`] because the budget is derived twice, once as a
-/// constant and once at runtime from the device profile; both subtract the same reservation.
-const RESERVED_MB: u64 = SYSTEM_OVERHEAD_MB + STT_RESERVED_MB + TTS_RESERVED_MB;
-
-/// Total RAM of the device this process should believe it is.
-///
-/// [`JETSON_TOTAL_RAM_MB`] unless a device profile overrides it, deliberately not a host probe:
-/// reading a developer Mac's real 64 GB makes every derivation downstream trivially satisfiable.
-pub fn total_ram_mb() -> u64 {
-    pond_core::models::domain::device_profile::active()
-        .map(|p| p.total_ram_mb)
-        .unwrap_or(JETSON_TOTAL_RAM_MB)
-}
-
-/// MB available for a single LLM slot on the device we believe we are.
-///
-/// The runtime twin of [`LLM_BUDGET_MB`]; identical to it when no profile is
-/// active, which is the case in production, in `deploy.sh` and in CI.
-pub fn llm_budget_mb() -> u64 {
-    total_ram_mb().saturating_sub(RESERVED_MB)
-}
+// The budget constants and the device-aware budget moved to pond-core's `device_budget`, so the
+// goose adapter can ask whether picture support fits beside a model with the SAME arithmetic
+// `apply_jetson_settings` sizes the window with. Re-exported under their old names so nothing
+// that reads `scheduler::LLM_BUDGET_MB` changes.
+pub use pond_core::models::domain::device_budget::{
+    llm_budget_mb, total_ram_mb, JETSON_TOTAL_RAM_MB, LLM_BUDGET_MB,
+};
 
 // ── ResourceAwareModelScheduler ──────────────────────────────────────────────
 

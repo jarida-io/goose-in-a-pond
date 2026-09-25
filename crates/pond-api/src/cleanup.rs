@@ -217,9 +217,19 @@ pub async fn collect_disk_usage(data_dir: &Path) -> anyhow::Result<DiskUsage> {
     // ── Per-category totals (symlinks resolve to target file size) ──────────
     let models_root = data_dir.join("models");
     if fs::metadata(&models_root).await.is_ok() {
-        for cat in &["gguf", "whisper", "tts", "embedding", "llamafile", "llm"] {
+        for cat in &[
+            "gguf",
+            "whisper",
+            "tts",
+            "embedding",
+            "llamafile",
+            "llm",
+            "mmproj",
+        ] {
             // "whisper" is virtual — files live in models/ root as ggml-*.bin,
-            // and "llm" is the on-disk dir for llamafile binaries.
+            // and "llm" is the on-disk dir for llamafile binaries. "mmproj" is
+            // picture support: one encoder per model family, about 941 MB each,
+            // which went uncounted while it sat beside the models it serves.
             match *cat {
                 "whisper" => {
                     let bytes = sum_files_matching(&models_root, |n| {
@@ -655,5 +665,30 @@ mod tests {
         assert_eq!(usage.total_bytes, 15);
         assert_eq!(usage.incomplete_bytes, 4);
         assert_eq!(usage.hf_cache_bytes, 5); // only the real blob1, not incomplete
+    }
+
+    /// Picture support is counted, through its link, under its own category: a regular file
+    /// (the older layout) and a link into the cache (the fetcher's) both count at their size.
+    #[tokio::test]
+    async fn disk_usage_counts_picture_support() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob = make_blob(
+            tmp.path(),
+            "models--unsloth--gemma-4-E2B-it-GGUF",
+            "a402f10f",
+            b"EEEEEE",
+        );
+        link_flat(tmp.path(), "mmproj/gemma-4-e2b-it/mmproj-BF16.gguf", &blob);
+        let legacy = tmp
+            .path()
+            .join("models")
+            .join("mmproj")
+            .join("gemma-4-E4B-it");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("mmproj-BF16.gguf"), b"FFFF").unwrap();
+
+        let usage = collect_disk_usage(tmp.path()).await.unwrap();
+        assert_eq!(usage.by_category.get("mmproj").copied(), Some(10));
+        assert_eq!(usage.total_bytes, 10);
     }
 }

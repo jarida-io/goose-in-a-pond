@@ -4,8 +4,11 @@ import { useState } from "react";
 interface ToggleProps {
   on?: boolean;
   onChange?: (on: boolean) => void;
+  /** Accessible name — the hub button otherwise carries none beyond
+   *  aria-pressed. Backward-compatible: every existing caller omits it. */
+  label?: string;
 }
-export function Toggle({ on: initial = false, onChange }: ToggleProps) {
+export function Toggle({ on: initial = false, onChange, label }: ToggleProps) {
   const [on, setOn] = useState(initial);
   function handleClick() {
     const next = !on;
@@ -18,6 +21,7 @@ export function Toggle({ on: initial = false, onChange }: ToggleProps) {
       data-on={on}
       onClick={handleClick}
       aria-pressed={on}
+      aria-label={label}
       type="button"
     >
       <span className="htoggle__knob" />

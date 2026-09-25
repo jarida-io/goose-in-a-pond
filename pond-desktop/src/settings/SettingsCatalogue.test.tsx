@@ -405,6 +405,36 @@ describe("SettingsCatalogue", () => {
     expect(values).not.toContain("base");
   });
 
+  // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98),
+  // so the switch these two tests drove is commented out; restore them with it.
+  // it("offers the guess-ahead switch under Models, drawn from the server value", async () => {
+  //   // Passed explicitly both ways -- the catalogue reads an ABSENT key as
+  //   // OFF (`Boolean(value)`), so a test relying on the default-true rather
+  //   // than passing the key would pass for the wrong reason.
+  //   await renderPage({ speculative_decoding_enabled: false });
+  //   fireEvent.click(screen.getByRole("button", { name: /^Models/ }));
+  //   const off = screen.getByLabelText("Guess ahead with a helper model") as HTMLInputElement;
+  //   expect(off.checked).toBe(false);
+  //   cleanup();
+  //
+  //   await renderPage({ speculative_decoding_enabled: true });
+  //   fireEvent.click(screen.getByRole("button", { name: /^Models/ }));
+  //   const on = screen.getByLabelText("Guess ahead with a helper model") as HTMLInputElement;
+  //   expect(on.checked).toBe(true);
+  // });
+  //
+  // it("saves only the guess-ahead key", async () => {
+  //   await renderPage({ speculative_decoding_enabled: true });
+  //   fireEvent.click(screen.getByRole("button", { name: /^Models/ }));
+  //   fireEvent.click(screen.getByLabelText("Guess ahead with a helper model"));
+  //
+  //   const save = await screen.findByRole("button", { name: /Save 1 change/ });
+  //   fireEvent.click(save);
+  //
+  //   await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledTimes(1));
+  //   expect(mockApi.updateSettings).toHaveBeenCalledWith({ speculative_decoding_enabled: false });
+  // });
+
   it("keeps a configured model the registry does not list", async () => {
     await renderPage({ chat_model: "some-model-i-removed" });
     fireEvent.click(screen.getByRole("button", { name: /^Models/ }));

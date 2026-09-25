@@ -32,9 +32,12 @@ import {
   followExternalSession,
   truncateFrom,
   patchMessage,
+  takeRefusedDraft,
 } from "./chatRunStore";
 import type { ChatRunBridge } from "./chatRunStore";
+import { ApiError } from "../api/types";
 import type { ChatEvent } from "../api/types";
+import type { PreparedImage } from "../lib/imageAttach";
 
 vi.mock("../api/PondApiClient", () => ({
   api: {
@@ -99,6 +102,27 @@ function deferredStream() {
 /** Let every already-scheduled microtask and macrotask settle. */
 async function flush(): Promise<void> {
   for (let i = 0; i < 5; i += 1) await new Promise((r) => setTimeout(r, 0));
+}
+
+/** A minimal PreparedImage, named for the preview URL so an assertion reads
+ *  as which attachment went where. */
+function fakePreparedImage(previewUrl: string): PreparedImage {
+  return {
+    data: "AAA",
+    mime_type: "image/png",
+    previewUrl,
+    width: 10,
+    height: 10,
+    byteSize: 3,
+  };
+}
+
+/** A generator that rejects immediately with `err` — the shape `chatStream`
+ *  takes when the server refuses a turn before the first SSE frame. */
+function rejectedStream(err: unknown): AsyncGenerator<ChatEvent> {
+  return (async function* () {
+    throw err;
+  })();
 }
 
 function bridge(over: Partial<ChatRunBridge> = {}): ChatRunBridge {
@@ -381,6 +405,92 @@ describe("image previews", () => {
     expect(revoke).toHaveBeenCalledTimes(1);
     expect(revoke).toHaveBeenCalledWith("blob:pond/one");
     revoke.mockRestore();
+  });
+});
+
+/**
+ * A refused turn (409/413/415/503/...) -- everything BUT 408, which a client
+ * timeout also produces and does not mean the server refused it. Every real
+ * refusal happens before `persist_user_message`, so the draft belongs back in
+ * the composer's box rather than on screen as an error bubble.
+ */
+describe("a refused turn", () => {
+  it("restores the draft on a 409 and does not touch the transcript or ownedPreviews", async () => {
+    const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    vi.mocked(api.chatStream).mockReturnValue(
+      rejectedStream(
+        new ApiError(409, "Picture support is not ready yet.", "vision_not_ready"),
+      ) as never,
+    );
+
+    sendTurn({
+      text: "what is this",
+      attachments: [fakePreparedImage("blob:pond/refused")],
+    });
+    await flush();
+
+    const run = getChatRun();
+    expect(run.messages).toEqual([]);
+    expect(run.busy).toBe(false);
+    // Not a completed turn -- nothing ran.
+    expect(run.completedTurns).toBe(0);
+    // Handed back, not freed: the composer's tray needs this preview again.
+    expect(revoke).not.toHaveBeenCalled();
+
+    const draft = takeRefusedDraft();
+    expect(draft).toEqual({
+      text: "what is this",
+      attachments: [fakePreparedImage("blob:pond/refused")],
+      message: "Picture support is not ready yet.",
+      code: "vision_not_ready",
+    });
+    // Taken once -- a second read (StrictMode's double effect) gets nothing.
+    expect(takeRefusedDraft()).toBeNull();
+
+    revoke.mockRestore();
+  });
+
+  it("publishes the code from an ApiError with no attachments too", async () => {
+    vi.mocked(api.chatStream).mockReturnValue(
+      rejectedStream(new ApiError(415, "Picture 1 could not be read.", "image_unreadable")) as never,
+    );
+
+    sendTurn({ text: "look at this", attachments: [fakePreparedImage("blob:pond/bad")] });
+    await flush();
+
+    expect(takeRefusedDraft()?.code).toBe("image_unreadable");
+  });
+
+  it("does NOT restore on a client timeout (408) -- the server may still be running it", async () => {
+    vi.mocked(api.chatStream).mockReturnValue(
+      rejectedStream(new ApiError(408, "Request timed out")) as never,
+    );
+
+    sendTurn({ text: "slow one", attachments: [fakePreparedImage("blob:pond/timeout")] });
+    await flush();
+
+    const run = getChatRun();
+    // The ordinary error path: an error bubble, one completed turn, nothing
+    // to restore.
+    expect(run.messages).toHaveLength(2);
+    expect(run.messages[1].error).toBe(true);
+    expect(run.completedTurns).toBe(1);
+    expect(run.refusedDraft).toBeNull();
+    expect(takeRefusedDraft()).toBeNull();
+  });
+
+  it("does NOT restore on a plain network error", async () => {
+    vi.mocked(api.chatStream).mockReturnValue(
+      rejectedStream(new TypeError("Failed to fetch")) as never,
+    );
+
+    sendTurn({ text: "offline", attachments: [fakePreparedImage("blob:pond/offline")] });
+    await flush();
+
+    const run = getChatRun();
+    expect(run.messages[1].error).toBe(true);
+    expect(run.completedTurns).toBe(1);
+    expect(takeRefusedDraft()).toBeNull();
   });
 });
 

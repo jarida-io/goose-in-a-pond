@@ -226,7 +226,16 @@ function AvailableRow({
         {facts.length > 0 && <span className="mdl-row__facts">{facts.join(" · ")}</span>}
       </div>
 
-      <span className="mdl-row__size">{formatSize(model.size_mb) || "—"}</span>
+      <span className="mdl-row__size">
+        {formatSize(model.size_mb) || "—"}
+        {/* Say the number before the spend (DESIGN.md section 5): picture
+            support is a second, one-time download this model triggers on
+            its own, so it belongs beside the weights size, not discovered
+            afterward. */}
+        {model.reads_images === true && model.image_support_bytes
+          ? ` + ${formatBytes(model.image_support_bytes)} for pictures`
+          : ""}
+      </span>
 
       {/* The fit meter earns its keep most here: this is the moment before
           several gigabytes are spent, which is the only moment the answer can
@@ -593,8 +602,18 @@ export function Models() {
   }
 
   async function remove(model: ModelEntry) {
+    const size = formatSize(model.size_mb) || "the file";
+    // Picture support is a shared, family-keyed file (see
+    // models/domain/vision_encoder.rs::EncoderSpec) — its bytes return only
+    // when no OTHER downloaded model needs the same encoder, so the confirm
+    // says "if no other model uses it" rather than promising an immediate
+    // reclaim it cannot make.
+    const removes =
+      model.reads_images === true && model.image_support_bytes
+        ? `This removes ${size}, plus ${formatBytes(model.image_support_bytes)} of picture support if no other model uses it.`
+        : `This removes ${size} from this device.`;
     const ok = await confirm(
-      `Delete “${modelLabel(model)}”? This removes ${formatSize(model.size_mb) || "the file"} from this device.`,
+      `Delete “${modelLabel(model)}”? ${removes}`,
       { title: "Delete model", confirmLabel: "Delete", destructive: true },
     );
     if (!ok) return;
@@ -619,7 +638,13 @@ export function Models() {
     setBusy(true);
     try {
       await api.downloadModel(model.category ?? model.provider, model.name);
-      say(`${modelLabel(model)} is downloading.`);
+      // Say the number before the spend: picture support follows on its own
+      // once the model lands, as a second, uninterrupted download.
+      const flash =
+        model.reads_images === true && model.image_support_bytes
+          ? `${modelLabel(model)} is downloading. Picture support (${formatBytes(model.image_support_bytes)}) follows.`
+          : `${modelLabel(model)} is downloading.`;
+      say(flash);
       await loadDownloads();
       pollDownloads();
     } catch (e) { say(e instanceof Error ? e.message : String(e), false); }

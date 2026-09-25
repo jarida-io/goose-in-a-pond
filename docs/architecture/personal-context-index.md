@@ -170,11 +170,17 @@ Jetson this competes with inference for CPU". Respect that.
 
 ### 1.8 Media
 
-Image input is wired (`attach_images`), `E2B` declares a vision encoder
-(`vision_encoder.rs :: featured_mmproj_for_stem`, asserted by test), and `SourceKind::Camera` exists.
-**But `find ~/.local/share/goose-in-a-pond/mmproj -type f` on the nano returns nothing** — no encoder
-bytes at all, worse than the "truncated file" previously recorded. `mmproj_ready` is false there, and
-`chat_stream` **errors** on an image request rather than degrading. One file to re-fetch.
+Image input is wired (`attach_images`) and `SourceKind::Camera` exists. **Corrected 2026-09-24:**
+the claim this section used to make, "`find ~/.local/share/goose-in-a-pond/mmproj -type f` on the
+nano returns nothing", looked in the wrong place: encoders live under `<data_dir>/models/mmproj/`.
+Measured there, read-only: the E4B encoder is complete (991,552,320 bytes, the NON-qat file), and the
+E2B encoder is TRUNCATED at 636,790,074 of 986,833,728 bytes, the "truncated file" recorded earlier,
+which was counted as ready and failed at every E2B load. The Orin's active model,
+`gemma-4-E4B-it-qat-UD-Q4_K_XL`, could not take a picture at all: the lookup never resolved a qat
+name, and the qat encoder is a different file from the non-qat one. Phase F6 of the context roadmap
+replaced the whole path. The Orin now declares no picture support until an encoder is measured
+there (`device_budget::DEVICE_MEASURED_VISION`), so media captioning on the nano waits on that
+measurement, not on missing bytes.
 
 ---
 
@@ -256,7 +262,7 @@ needed. Admit mail bodies and GPS tracks and it is millions, and §1.4 stops bei
 | **C** | Unified retrieval, scope in the SQL, `corpus` labelling | **LANDED 2026-08-13.** `PersonalContextRetrieval` (pond-core, policy) over `VectorIndex::search_resolved` (adapter, mechanism): one query answered across all three corpora, text read from LIVE rows in the same JOIN that filters scope and liveness. `three_way_isolation_two_members_and_a_guest` passes, plus guards for archived rows, unattributed (guest) summaries, and memory-wins-ties |
 | **D** | Idle staleness sweep, orphan prune, model-change re-embed | **LANDED 2026-08-13.** `run_index_maintenance` composes adopt -> embed-missing -> prune -> report, deferred 60 s from boot and cancellable. Live: index wiped and an orphan planted, 5 memories adopted and the orphan pruned ~45 s later; a model mismatch WARNs with its count; an unattributed (guest) session's summary is refused and indexed only once attributed |
 | **E** | Trigger subscribers (`BusEvent`) | **SATISFIED 2026-08-13 WITHOUT A NEW SUBSCRIBER.** A sensor/camera event already flows `BusIngest::absorb` -> `IngestPipeline::ingest` -> `save_item` -> the phase-B write-through, ending at the same terminal write. A second subscriber would be a parallel path to the same row with its own way of going wrong. Pinned end-to-end through the real pipeline; disconnecting a source now also removes its vectors |
-| **F** | On-demand route/tool + lazy media caption | **TOOL LANDED 2026-08-13** (`giap-context__recall`). **Media captioning DEFERRED** and not started: it needs the vision encoder, and 1.8 records that the mmproj bytes are absent on the nano |
+| **F** | On-demand route/tool + lazy media caption | **TOOL LANDED 2026-08-13** (`giap-context__recall`). **Media captioning DEFERRED** and not started: it needs picture support on the nano, which waits on an Orin measurement (1.8; the earlier "mmproj bytes are absent" reason was a wrong path) |
 | **G** | Retrieval surfaces: `giap-context` tool first, then a **measured** passive prompt tier | **TOOL HALF LANDED 2026-08-13**, which is the half the design says comes first. The passive prompt tier is **NOT DONE and deliberately not guessed**: whether an always-on block earns its tokens against a 7 568-token cold turn is a `pai-bench` measurement on the Orin |
 
 **G is last and empirical on purpose.** Whether an always-on prompt block earns its tokens against a
@@ -577,8 +583,9 @@ block earns its tokens against a 7 568-token cold turn is exactly the measuremen
 for, on the Orin, via `pai-bench`. The tool surface comes first precisely because a tool costs nothing
 on turns that do not use it while a prompt block costs every turn.
 
-**Media captioning (F's other half) is not started**, and is blocked on the same thing 1.8 records:
-`find ~/.local/share/goose-in-a-pond/mmproj -type f` on the nano returns nothing.
+**Media captioning (F's other half) is not started**, and on the nano it is blocked on what 1.8
+records: no picture support is declared on the Orin until an encoder has been measured resident
+there. The "no encoder bytes" reason recorded here before 2026-09-24 was a wrong path.
 
 **Probed the whole chain against the live agent 2026-08-14** (`scripts/context_recall_probe.py`).
 It plants one fact per corpus and asks the running assistant a question whose answer is only

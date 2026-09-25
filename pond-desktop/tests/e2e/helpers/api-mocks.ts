@@ -187,6 +187,16 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
   await page.route("**/api/v1/models/**", (route) =>
     route.fulfill({ json: { status: "ok" } }),
   );
+  // Picture support for the active chat model. Registered AFTER the models/**
+  // catch-all above on purpose: Playwright resolves the LAST-registered
+  // matching route first, so without this the catch-all's {status:"ok"} (no
+  // `state`) would win, and useVisionStatus's shape guard would settle every
+  // test to "unknown" rather than exercising a real state.
+  await page.route("**/api/v1/models/vision-status", (route) =>
+    route.fulfill({
+      json: { model: "", state: { kind: "unknown" }, size_bytes: null, message: null },
+    }),
+  );
 
   // Devices.
   //

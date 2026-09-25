@@ -3,7 +3,10 @@ import { render, screen, fireEvent, waitFor, cleanup, act } from "@testing-libra
 import { Chat } from "./Chat";
 import { api } from "../api/PondApiClient";
 import { __resetChatRunForTests, setChatRunBridge } from "../state/chatRunStore";
-import type { ChatEvent } from "../api/types";
+import { ApiError } from "../api/types";
+import type { ChatEvent, VisionStatus } from "../api/types";
+import { prepareImage } from "../lib/imageAttach";
+import type { PreparedImage } from "../lib/imageAttach";
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
@@ -28,6 +31,11 @@ vi.mock("../api/PondApiClient", () => ({
       structured_output: false,
       tool_calling: true,
     }),
+    // Ready by default, so tests that do not care about picture support see
+    // the send gate stay open.
+    getVisionStatus: vi.fn().mockResolvedValue({
+      model: "", state: { kind: "ready", bytes: null }, size_bytes: null, message: null,
+    } satisfies VisionStatus),
     getSessionAttachment: vi.fn(),
     compactSession: vi.fn(),
     retitleSession: vi.fn(),
@@ -54,6 +62,16 @@ vi.mock("../state/AppContext", () => ({
   useAppDispatch: () => vi.fn(),
 }));
 
+// Only `prepareImage` is faked — everything else (validateAttachmentSet, the
+// MIME lists AttachmentTray itself reads) stays real. happy-dom's <img> never
+// fires a real decode, so prepareImage cannot run end to end here; the tests
+// below only need SOME PreparedImage to reach the composer's state, the way
+// a real decode would.
+vi.mock("../lib/imageAttach", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/imageAttach")>();
+  return { ...actual, prepareImage: vi.fn() };
+});
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /** Build a mock async generator that yields the given events then returns. */
@@ -63,11 +81,28 @@ function makeStream(events: ChatEvent[]): AsyncGenerator<ChatEvent> {
   })();
 }
 
+function fakeFile(name = "photo.png"): File {
+  return new File(["fake"], name, { type: "image/png" });
+}
+
+function fakePrepared(previewUrl = "blob:pond/fake"): PreparedImage {
+  return { data: "AAA", mime_type: "image/png", previewUrl, width: 10, height: 10, byteSize: 3 };
+}
+
+const READY_STATUS: VisionStatus = {
+  model: "", state: { kind: "ready", bytes: null }, size_bytes: null, message: null,
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   appState.sessionId = null;
   vi.mocked(api.listSessions).mockResolvedValue([]);
   vi.mocked(api.getSessionMessages).mockResolvedValue([]);
+  // `mockResolvedValue` replaces the mock's implementation for good, not just
+  // for the test that called it, so a per-test override of getVisionStatus
+  // (or of prepareImage's resolved image) has to be re-established here too.
+  vi.mocked(api.getVisionStatus).mockResolvedValue(READY_STATUS);
+  vi.mocked(prepareImage).mockResolvedValue(fakePrepared());
   // The turn lives in a module singleton so it can outlive an unmount, which
   // means it also outlives `cleanup()` — without this, one test's transcript is
   // the next test's starting state. This file also mocks AppContext wholesale,
@@ -425,6 +460,9 @@ describe("Chat history — persisted reasoning (PAI-5 P6)", () => {
           structured_output: false,
           tool_calling: true,
         }),
+        getVisionStatus: vi.fn().mockResolvedValue({
+          model: "", state: { kind: "ready", bytes: null }, size_bytes: null, message: null,
+        } satisfies VisionStatus),
         getSessionAttachment: vi.fn(),
       },
     }));
@@ -557,6 +595,135 @@ describe("Chat history — images", () => {
     expect(img.getAttribute("src")).toMatch(/^blob:/);
     expect(vi.mocked(api.getSessionAttachment)).toHaveBeenCalledWith("sess-img", "att-1");
     expect(document.querySelector('img[src*="/attachments/"]')).toBeNull();
+  });
+});
+
+/**
+ * Picture support's own status, and the send/paste gate it drives.
+ *
+ * The paperclip is never disabled for a vision reason (see Chat.tsx), so
+ * these test the actual gate: the composer accepts an attachment into its
+ * tray regardless of status, and only refuses to SEND it.
+ */
+describe("Chat — picture support", () => {
+  async function attachOneImage() {
+    // The composer (and its file input) only exists once `view` resolves to
+    // "thread" -- a render or two after mount, unlike the Hub's ChatHubView,
+    // which has no such wall/thread split.
+    await screen.findByLabelText("Message input");
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(fileInput, { target: { files: [fakeFile()] } });
+    await screen.findByAltText("Attached image 1");
+  }
+
+  it("shows the status line while picture support is getting ready", async () => {
+    vi.mocked(api.getVisionStatus).mockResolvedValue({
+      model: "gemma-4-E2B-it-Q4_K_M",
+      state: { kind: "downloading", done: 412 * 1_048_576, total: 941 * 1_048_576 },
+      size_bytes: 986_833_728,
+      message: "Getting picture support ready: 412 MB of 941 MB. Text chat works meanwhile.",
+    } satisfies VisionStatus);
+
+    render(<Chat />);
+
+    await screen.findByText(/Getting picture support ready: 412 MB of 941 MB/);
+  });
+
+  it("blocks a click-to-send while picture support is not ready", async () => {
+    vi.mocked(api.getVisionStatus).mockResolvedValue({
+      model: "gemma-4-E2B-it-Q4_K_M",
+      state: { kind: "absent" },
+      size_bytes: null,
+      message: "Picture support for Gemma 4 E2B needs a one-time 941 MB download. It starts by itself; text chat works meanwhile.",
+    } satisfies VisionStatus);
+
+    render(<Chat />);
+    await attachOneImage();
+    fireEvent.change(screen.getByLabelText("Message input"), { target: { value: "what is this" } });
+    fireEvent.click(screen.getByLabelText("Send message"));
+
+    await screen.findByText(
+      "Pictures can be sent once picture support is ready. Remove them to send just the text.",
+    );
+    expect(api.chatStream).not.toHaveBeenCalled();
+    // The tray still holds it -- a blocked send does not discard the draft.
+    expect(screen.getByAltText("Attached image 1")).toBeTruthy();
+  });
+
+  it("blocks Cmd/Ctrl+Enter the same way", async () => {
+    vi.mocked(api.getVisionStatus).mockResolvedValue({
+      model: "x", state: { kind: "verifying" }, size_bytes: null,
+      message: "Checking picture support before its first use. Text chat works meanwhile.",
+    } satisfies VisionStatus);
+
+    render(<Chat />);
+    await attachOneImage();
+    const input = screen.getByLabelText("Message input");
+    fireEvent.change(input, { target: { value: "what is this" } });
+    fireEvent.keyDown(input, { key: "Enter", metaKey: true });
+
+    await screen.findByText(/Pictures can be sent once picture support is ready/);
+    expect(api.chatStream).not.toHaveBeenCalled();
+  });
+
+  it("blocks a suggestion chip too", async () => {
+    vi.mocked(api.getVisionStatus).mockResolvedValue({
+      model: "x", state: { kind: "not_declared" }, size_bytes: null, message: null,
+    } satisfies VisionStatus);
+
+    render(<Chat />);
+    await attachOneImage();
+    fireEvent.click(await screen.findByText("What can you help me with?"));
+
+    await screen.findByText(/Pictures can be sent once picture support is ready/);
+    expect(api.chatStream).not.toHaveBeenCalled();
+  });
+
+  it("blocks a paste of an image, and never adds it to the tray", async () => {
+    vi.mocked(api.getVisionStatus).mockResolvedValue({
+      model: "x", state: { kind: "blocked", mode: "offline", host: "huggingface.co" }, size_bytes: null,
+      message: "Picture support needs a one-time 941 MB download from huggingface.co, and Network reach is set to Offline, which blocks it. To allow it, set Network reach to Open in Settings, under Privacy & Security.",
+    } satisfies VisionStatus);
+
+    render(<Chat />);
+    // Wait for the mocked status to actually land before pasting -- otherwise
+    // the paste can race the hook's first fetch and land while gate.blocked
+    // is still evaluating from the (unblocked) capabilities fallback.
+    await screen.findByText(/Picture support needs a one-time 941 MB download/);
+    const input = screen.getByLabelText("Message input");
+    fireEvent.paste(input, { clipboardData: { files: [fakeFile()] } });
+
+    await screen.findByText(
+      "Pictures can be sent once picture support is ready. Remove them to send just the text.",
+    );
+    expect(prepareImage).not.toHaveBeenCalled();
+    expect(screen.queryByAltText("Attached image 1")).toBeNull();
+  });
+
+  it("restores the draft when the server refuses the turn (409)", async () => {
+    vi.mocked(api.chatStream).mockImplementation(() =>
+      (async function* () {
+        throw new ApiError(409, "Picture support is not ready yet.", "vision_not_ready");
+      })(),
+    );
+
+    render(<Chat />);
+    await attachOneImage();
+    fireEvent.change(screen.getByLabelText("Message input"), { target: { value: "what is this" } });
+    fireEvent.click(screen.getByLabelText("Send message"));
+
+    // The draft comes back: the text box, the tray, and a line naming why.
+    await waitFor(() => {
+      expect((screen.getByLabelText("Message input") as HTMLTextAreaElement).value).toBe(
+        "what is this",
+      );
+    });
+    expect(screen.getByAltText("Attached image 1")).toBeTruthy();
+    await screen.findByText(
+      "Picture support is not ready yet. Your message and pictures are back in the box; send them when it is ready.",
+    );
+    // No error bubble for a refused turn -- it never reached the transcript.
+    expect(screen.queryByText(/^error:/i)).toBeNull();
   });
 });
 

@@ -37,6 +37,7 @@ use futures::stream::{BoxStream, StreamExt};
 use pond_core::mcp::ports::tools::tool_dispatcher::ToolDispatcher;
 use pond_core::models::domain::message::{ChatMessage, Role, ToolCallRecord};
 use pond_core::models::domain::model_capabilities::ModelCapabilities;
+use pond_core::models::domain::vision_encoder::EncoderState;
 use pond_core::models::ports::agent::Agent;
 use pond_core::models::ports::inference::{InferenceOptions, InferenceProvider, ToolDefinition};
 use pond_core::models::services::context::context_budget::{
@@ -572,6 +573,13 @@ impl Agent for MistralRsAgent {
         self.provider.capabilities()
     }
 
+    /// No vision on this path (see the module docs), for every provider and model: reported as
+    /// not declared, so the API refuses a picture before anything is saved instead of this
+    /// agent dropping it and answering as if it had looked.
+    fn vision_state(&self, _provider: &str, _model: &str) -> Option<EncoderState> {
+        Some(EncoderState::NotDeclared)
+    }
+
     async fn call_tool(
         &self,
         _session_id: &str,
@@ -602,6 +610,35 @@ mod tests {
             thinking_mode: mode.to_string(),
             ..Default::default()
         }
+    }
+
+    /// The API asks the agent before it saves a turn carrying pictures. This agent drops them,
+    /// so it must answer "not declared" (refused as unsupported), never `None`, which the API
+    /// reads as unknown and lets through.
+    #[test]
+    fn pictures_are_reported_as_not_declared_for_every_provider() {
+        use pond_core::user_data::mocks::mock_session::InMemorySessionStorage;
+        use pond_core::user_data::mocks::mock_settings::MockSettingsRepository;
+        let agent = MistralRsAgent::new(
+            Arc::new(MistralRsProvider::new(
+                "http://127.0.0.1:9002",
+                "gemma-4-E2B-it",
+            )),
+            Arc::new(MockSettingsRepository::default()),
+            None,
+            None,
+            None,
+            Arc::new(InMemorySessionStorage::default()),
+            None,
+        );
+        for provider in ["local", "mistralrs", "ollama", ""] {
+            assert_eq!(
+                agent.vision_state(provider, "gemma-4-E2B-it"),
+                Some(EncoderState::NotDeclared),
+                "{provider}"
+            );
+        }
+        assert!(!agent.capabilities().vision);
     }
 
     #[test]

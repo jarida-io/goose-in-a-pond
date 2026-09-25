@@ -96,8 +96,8 @@ say() { printf '\n=== %s ===\n' "$1"; }
 # inode: the probe's registry may rewrite or delete ITS entry and the real one
 # is untouched, because unlinking one name of a two-named inode frees nothing.
 # It costs no disk and no copy time. Only the chat model is linked -- the
-# mmproj/vision encoder is deliberately absent, which the engine warns about and
-# continues past.
+# mmproj/vision encoder is deliberately absent, and POND_DISABLE_MODEL_PROVISIONING
+# (below) keeps the serve process from fetching one into the scratch pond at boot.
 case "$(uname -s)" in
   Darwin) REAL_MODELS="$HOME/Library/Application Support/goose-in-a-pond/models" ;;
   *)      REAL_MODELS="$HOME/.local/share/goose-in-a-pond/models" ;;
@@ -203,6 +203,9 @@ wait_for_health() {
 # a way that reads exactly like a miscompile.
 export RUSTFLAGS=""
 export SQLX_OFFLINE=true
+# No picture-support fetch into the scratch pond: it would cost ~1 GB per run
+# and die with the probe, leaving an .incomplete behind.
+export POND_DISABLE_MODEL_PROVISIONING=1
 
 BIN="$REPO_ROOT/target/release/pond-server"
 if [ "$DO_BUILD" -eq 1 ]; then

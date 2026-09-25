@@ -1,0 +1,35 @@
+/* ImageSupportStatus — status chrome, so hairline and slate, never the ink
+   offset (DESIGN.md rule 3: the edge marks content, never chrome). Shares
+   warmup.css's tokens and shape on purpose: two banners with different
+   geometry would read as two systems for one idea (a background job the
+   household is waiting on). */
+.vision-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-hairline, rgba(23, 22, 22, 0.12));
+  border-radius: 8px;
+  background: var(--bg-brand-soft, #f4ecff);
+  color: var(--color-text-secondary, #566178); /* slate, 5.97:1 on ground */
+  font-size: 13px;
+  margin: 0 0 8px;
+}
+
+.vision-status__spin {
+  animation: vision-status-rotate 1s linear infinite;
+  color: var(--color-accent, #8c4bff); /* accent as edge/motion, never a sentence */
+  flex-shrink: 0;
+}
+
+@keyframes vision-status-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vision-status__spin {
+    animation: none;
+  }
+}

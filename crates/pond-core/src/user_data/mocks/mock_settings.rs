@@ -92,6 +92,15 @@ fn build_settings(store: &HashMap<String, String>) -> Settings {
             s.context_monitor_enabled = b;
         }
     }
+    // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98),
+    // so this is commented out rather than deleted; restore it if it returns.
+    // // Default-true like the two above, so the same reason applies: a mock that dropped it
+    // // would let "turning speculation off sticks" pass while the drafter still ran.
+    // if let Some(v) = store.get("speculative_decoding_enabled") {
+    //     if let Ok(b) = v.parse() {
+    //         s.speculative_decoding_enabled = b;
+    //     }
+    // }
     if let Some(v) = store.get("voice_wake_word") {
         s.voice_wake_word = v.clone();
     }
@@ -178,6 +187,10 @@ impl SettingsRepository for MockSettingsRepository {
             "context_monitor_enabled".into(),
             settings.context_monitor_enabled.to_string(),
         );
+        // store.insert(
+        //     "speculative_decoding_enabled".into(),
+        //     settings.speculative_decoding_enabled.to_string(),
+        // );
         store.insert("voice_wake_word".into(), settings.voice_wake_word.clone());
         store.insert("voice_tts_voice".into(), settings.voice_tts_voice.clone());
         store.insert(

@@ -1,11 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Download, Check, RefreshCw, Loader2 } from "lucide-react";
+import { Download, Check, RefreshCw, Loader2, Image } from "lucide-react";
 import { HubIco } from "../../primitives/HubIco";
 import { DetailShell } from "./DetailShell";
-import { Card } from "./controls";
+// Row and Toggle are used only by the commented-out Speed card below.
+import { Card /* , Row, Toggle */ } from "./controls";
 import { api } from "../../../api/PondApiClient";
 import { voiceTitle } from "../../../voice/voiceCatalogue";
-import type { ModelEntry, ModelActiveRoles } from "../../../api/types";
+import { useVisionStatus } from "../../../api/useVisionStatus";
+import type { ModelEntry, ModelActiveRoles /* , Settings */ } from "../../../api/types";
 
 // ─── Icon path strings for this view ─────────────────────────
 const SICN = {
@@ -84,6 +86,19 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
   const [activating, setActivating] = useState<string | null>(null);
   const [flash, setFlash] = useState<{ text: string; ok: boolean } | null>(null);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Picture support for the active chat row only — every other row's fact is
+  // the static "pictures" tag, derived from `reads_images` on the list.
+  const { status: visionStatus } = useVisionStatus();
+
+  // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98),
+  // so the Speed card and its setting are commented out rather than deleted; restore them together.
+  // // Settings, loaded SEPARATELY from the model list above (Voice.tsx's
+  // // guard): a settings failure must not blank the whole page into the
+  // // offline view, and a settings success must not wait on — or block — the
+  // // model scan.
+  // const [settings, setSettings] = useState<Settings | null>(null);
+  // const [settingsLoaded, setSettingsLoaded] = useState(false);
+  // const [draftAheadPending, setDraftAheadPending] = useState(false);
 
   function showFlash(text: string, ok = true) {
     if (flashTimer.current) clearTimeout(flashTimer.current);
@@ -109,12 +124,61 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
     }
   }, []);
 
+  // const loadSettings = useCallback(async () => {
+  //   try {
+  //     const s = await api.getSettings();
+  //     if (s && typeof s === "object") {
+  //       setSettings(s);
+  //       setSettingsLoaded(true);
+  //     } else {
+  //       throw new Error("settings response was empty");
+  //     }
+  //   } catch (e) {
+  //     console.warn("[ModelsDetail] could not load settings:", e);
+  //     setSettingsLoaded(false);
+  //   }
+  // }, []);
+
   useEffect(() => {
     loadData();
+    // loadSettings();
     return () => {
       if (flashTimer.current) clearTimeout(flashTimer.current);
     };
-  }, [loadData]);
+  }, [loadData /* , loadSettings */]);
+
+  // // Defaults ON, so an absent key (a settings row saved before this field
+  // // existed) reads as ON — `!== false`, not `?? false`.
+  // const draftAhead = settings?.speculative_decoding_enabled !== false;
+  //
+  // async function handleDraftAheadChange(on: boolean) {
+  //   if (draftAheadPending || !settings) return;
+  //   setDraftAheadPending(true);
+  //   const previous = settings.speculative_decoding_enabled;
+  //   setSettings((prev) => (prev ? { ...prev, speculative_decoding_enabled: on } : prev));
+  //   try {
+  //     // Patch only the changed key — the key SET is what marks user intent,
+  //     // and the server echo is deliberately NOT adopted below (it can be
+  //     // stale against a fast second click).
+  //     await api.updateSettings({ speculative_decoding_enabled: on });
+  //     showFlash(
+  //       on
+  //         ? "Guessing ahead is on. The model is reloading, so the next reply waits for it."
+  //         : "Guessing ahead is off. The model is reloading, so the next reply waits for it.",
+  //     );
+  //   } catch (e) {
+  //     setSettings((prev) =>
+  //       prev ? { ...prev, speculative_decoding_enabled: previous } : prev,
+  //     );
+  //     const reason = e instanceof Error ? e.message : String(e);
+  //     showFlash(
+  //       `Could not turn guessing ahead ${on ? "on" : "off"}: ${reason}. It is still ${on ? "off" : "on"}; try again.`,
+  //       false,
+  //     );
+  //   } finally {
+  //     setDraftAheadPending(false);
+  //   }
+  // }
 
   async function handleActivate(provider: string, name: string, role: string) {
     const key = `${provider}/${name}/${role}`;
@@ -173,7 +237,7 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
           <button
             className="mrow__btn"
             type="button"
-            onClick={loadData}
+            onClick={() => { loadData(); /* loadSettings(); */ }}
             aria-label="Refresh models"
             style={{ minWidth: 32, display: "flex", alignItems: "center", justifyContent: "center" }}
           >
@@ -266,6 +330,12 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
               const tags: string[] = [];
               if (m.recommended_role === "chat" || (!m.recommended_role && isLlmModel(m))) tags.push("chat");
               if (/gemma.?4|qwen3|qwq|deepseek.?r1/.test(m.name.toLowerCase())) tags.push("think");
+              if (m.reads_images === true) tags.push("pictures");
+              // Picture support's OWN lifecycle (downloading, verifying, a
+              // device that declines the encoder) only means anything for the
+              // model actually in use — every other row's fact is the static
+              // "pictures" tag above.
+              const liveVision = active && visionStatus?.message ? visionStatus.message : null;
 
               return (
                 <div key={m.id} className={`mrow${active ? " mrow--active" : ""}`}>
@@ -278,12 +348,19 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
                       {m.provider} / {m.name}
                       {m.size_mb != null ? ` · ${(m.size_mb / 1024).toFixed(1)} GB` : ""}
                       {m.ram_estimate_mb != null ? ` · ${m.ram_estimate_mb} MB RAM` : ""}
+                      {liveVision ? ` · ${liveVision}` : ""}
                     </span>
                   </div>
                   <div className="mrow__tags">
-                    {tags.map((t) => (
-                      <span key={t} className="mtag">{t}</span>
-                    ))}
+                    {tags.map((t) =>
+                      t === "pictures" ? (
+                        <span key={t} className="mtag">
+                          <Image size={11} aria-hidden="true" /> pictures
+                        </span>
+                      ) : (
+                        <span key={t} className="mtag">{t}</span>
+                      ),
+                    )}
                   </div>
                   {active ? (
                     <span className="mrow__loaded">
@@ -306,6 +383,39 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
           )}
         </div>
       </Card>
+
+      {/* Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose
+          743649d98), so this card is commented out rather than deleted; restore it with the
+          setting.
+      Speed: the one knob this page owned. Between the language
+          models it applies to and Speech, so it reads as "how the model
+          above answers" rather than a stray setting.
+      <Card title="Speed">
+        {settingsLoaded ? (
+          <Row
+            label="Guess ahead with a helper model"
+            sub="Answers stay the same; only the speed changes. Faster on a Jetson, can be slower on a Mac. Only Gemma 4 E2B and E4B have a helper."
+            control={
+              // `key` on purpose — see Voice.tsx's thinking-tone toggle: the
+              // hub Toggle seeds its own state from `on` via useState and
+              // never re-reads the prop, and settings arrive a render after
+              // mount. Without the remount key a stored `false` draws ON.
+              <Toggle
+                key={`draft-ahead-${draftAhead}`}
+                on={draftAhead}
+                onChange={handleDraftAheadChange}
+                label="Guess ahead with a helper model"
+              />
+            }
+          />
+        ) : (
+          <Row
+            label="Guess ahead with a helper model"
+            sub="Could not read this setting. Use Refresh above to try again."
+          />
+        )}
+      </Card>
+      */}
 
       {/* Speech models */}
       <Card title="Speech">

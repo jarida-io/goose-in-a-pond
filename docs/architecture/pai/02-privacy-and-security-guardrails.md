@@ -880,6 +880,16 @@ cannot change class quietly.
   an actionable message (`EgressDenied` already renders mode, host and what to set), not a wider
   allowlist. Anyone on `allowlist` who wants models must move to `open` for the download.
 
+  **2026-09-24 -- the vision encoder no longer sends on its own.** Its raw `reqwest` fetch (one gate
+  on the entry URL, redirects followed inside `reqwest`, no resume, no pin) was replaced by
+  pond-hf-cache through `build_redirect_aware_client`, so each hop is gated like every other HF
+  download, and `vision_encoder.rs` left `EGRESS_TRACKED` because nothing in it sends any more. The
+  fetch now starts by itself -- in the serve process only, for the active chat model and for a model
+  whose download has just finished -- so `network_mode` is its only consent. A refusal reaches the
+  household as the setting and the host that blocked it, and a mode change during the ~941 MB
+  transfer pauses it, because the progress callback asks the gate again on every chunk. The size is
+  stated on the Download row and in the chat status line before and while it moves.
+
   **The largest hole was one the guard could not see.** `ensure_onnx_runtime()` downloads a ~100 MB
   ONNX Runtime tarball from github.com by shelling out to `curl`, so it never appeared in a scan
   that finds senders by looking for `reqwest`. It is gated with `check_egress` rather than

@@ -58,11 +58,24 @@ export function modelFit(
  * Prefers `size_mb` (on-disk weight residency — what actually has to fit in the
  * GPU budget) and falls back to `ram_estimate_mb`. Returns `null` when neither
  * is known.
+ *
+ * A declared-vision model keeps its encoder resident too (it loads eagerly,
+ * on the GPU, at every model load — see `models/domain/vision_encoder.rs`),
+ * so `image_support_bytes` is added on top whenever `reads_images` is true.
  */
-export function modelResidencyMb(m: Pick<ModelEntry, "size_mb" | "ram_estimate_mb">): number | null {
-  if (m.size_mb != null && m.size_mb > 0) return m.size_mb;
-  if (m.ram_estimate_mb != null && m.ram_estimate_mb > 0) return m.ram_estimate_mb;
-  return null;
+export function modelResidencyMb(
+  m: Pick<ModelEntry, "size_mb" | "ram_estimate_mb" | "reads_images" | "image_support_bytes">,
+): number | null {
+  const base =
+    m.size_mb != null && m.size_mb > 0
+      ? m.size_mb
+      : m.ram_estimate_mb != null && m.ram_estimate_mb > 0
+        ? m.ram_estimate_mb
+        : null;
+  if (base == null) return null;
+  const encoderMb =
+    m.reads_images === true && m.image_support_bytes ? m.image_support_bytes / 1_048_576 : 0;
+  return base + encoderMb;
 }
 
 /**
@@ -72,7 +85,7 @@ export function modelResidencyMb(m: Pick<ModelEntry, "size_mb" | "ram_estimate_m
  * (`total_mb <= 0` — NoopScheduler / memory-status unavailable on Mac/dev).
  */
 export function modelFitFor(
-  m: Pick<ModelEntry, "size_mb" | "ram_estimate_mb">,
+  m: Pick<ModelEntry, "size_mb" | "ram_estimate_mb" | "reads_images" | "image_support_bytes">,
   status: ModelMemoryStatus | null | undefined,
   headroomMb: number = DEFAULT_HEADROOM_MB,
 ): FitVerdict {
