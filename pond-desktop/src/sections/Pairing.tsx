@@ -1,3 +1,4 @@
+import i18n from '../i18n';
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Button, Chip } from "@heroui/react";
 import { RefreshCw, Smartphone, Wifi } from "lucide-react";
@@ -45,9 +46,13 @@ export function Pairing() {
       // `<host>.local` fails there and the phone needs the raw address; and
       // neither reaches the Pond once the phone leaves the house, which is what
       // the tailnet address is for. The client tries them in that order.
+      if (!sysInfo.https_port || !sysInfo.tls_spki_sha256) throw new Error(i18n.t('pairing.unavailable'));
       const params = new URLSearchParams({
+        v: "2",
+        scheme: "https",
+        pin: sysInfo.tls_spki_sha256,
         host: `${sysInfo.hostname}.local`,
-        port: String(sysInfo.port),
+        port: String(sysInfo.https_port),
         code: pc.code,
       });
       if (sysInfo.lan_address) params.set("ip", sysInfo.lan_address);
@@ -152,6 +157,13 @@ export function Pairing() {
             </div>
           </div>
 
+          {info && <div style={{ overflowWrap: "anywhere", marginBottom: 20 }}>
+            <p>{i18n.t('pairing.address')}</p>
+            <code>{`https://${new URL(info.pairUrl).searchParams.get("ip") || new URL(info.pairUrl).searchParams.get("host")}:${new URL(info.pairUrl).searchParams.get("port")}`}</code>
+            <p>{i18n.t('pairing.fingerprint')}</p>
+            <code>{new URL(info.pairUrl).searchParams.get("pin")}</code>
+            <p>{i18n.t('pairing.manual')}</p>
+          </div>}
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             <Step n={1} icon={<Wifi size={16} />}>
               Make sure your phone is on the <strong>same Wi-Fi network</strong> as this hub.

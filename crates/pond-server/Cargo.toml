@@ -120,6 +120,12 @@ lightning = ["dep:pond-adapters-lightning"]
 # side would have declared a feature whose modules no longer exist.
 
 [dependencies]
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
+x509-parser = { version = "0.18", features = ["verify-aws"] }
+time = "0.3"
+base64 = { workspace = true }
+tempfile = { workspace = true }
 # Advisory file locking for the single-voice-session guard (voice_lock.rs).
 fs2 = { workspace = true }
 # Optional: only compiled when --features goose-agent is passed.

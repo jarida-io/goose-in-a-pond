@@ -9,3 +9,5 @@ pub mod llm_memory_consolidator;
 pub mod llm_memory_extractor;
 pub mod schedule_executors;
 pub mod startup;
+
+pub mod tls_identity;

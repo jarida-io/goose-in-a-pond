@@ -13,6 +13,8 @@ build = "build.rs"
 local-inference = ["dep:pond-adapters-local-inference"]
 
 [dependencies]
+libc = "0.2"
+if-addrs = { version = "0.13", features = ["link-local"] }
 pond-adapters-caldav = { workspace = true }
 pond-core = { workspace = true }
 pond-hf-cache = { workspace = true }

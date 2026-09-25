@@ -5,6 +5,7 @@
 
 pub mod cleanup;
 pub mod middleware;
+pub mod network;
 pub mod oauth_callback;
 pub mod routes;
 pub mod runs;
@@ -530,6 +531,15 @@ pub fn web_ui_embedded() -> bool {
 /// Web dashboard: `/{route_name}`
 /// REST API:      `/api/v1/{route_name}`
 pub fn build_router(state: Arc<AppState>, static_dir: std::path::PathBuf) -> Router {
+    build_transport_router(state, Some(static_dir))
+}
+
+/// Companion listener: the same API guards, without desktop assets or root dev pages.
+pub fn build_companion_router(state: Arc<AppState>) -> Router {
+    build_transport_router(state, None)
+}
+
+fn build_transport_router(state: Arc<AppState>, static_dir: Option<std::path::PathBuf>) -> Router {
     // Rate limiter for remote clients (GOTG app, external integrations).
     // 600 req/60s = 10 req/s burst — generous for API use, still protects against abuse.
     // Loopback clients (local web dashboard) are exempted entirely in the middleware.
@@ -546,14 +556,14 @@ pub fn build_router(state: Arc<AppState>, static_dir: std::path::PathBuf) -> Rou
         std::time::Duration::from_secs(60),
     ));
 
-    Router::new()
-        // Dev test page — no auth required, returns HTML
-        .route("/dev/test", axum::routing::get(routes::dev_test_page))
-        .route("/dev/face", axum::routing::get(routes::dev_face_page))
-        .nest("/api/v1", routes::api_routes(state.clone()))
-        // Serve the web UI: embedded-into-the-binary (single executable) when the
-        // UI was built in, otherwise from the on-disk `static_dir` (dev).
-        .fallback(move |uri: axum::http::Uri| routes::serve_web(uri, static_dir.clone()))
+    let mut router = Router::new().nest("/api/v1", routes::api_routes(state.clone()));
+    if let Some(static_dir) = static_dir {
+        router = router
+            .route("/dev/test", axum::routing::get(routes::dev_test_page))
+            .route("/dev/face", axum::routing::get(routes::dev_face_page))
+            .fallback(move |uri: axum::http::Uri| routes::serve_web(uri, static_dir.clone()));
+    }
+    router
         // Log every request/response at DEBUG level.
         .layer(axum::middleware::from_fn(middleware::log_requests))
         // Enforce Bearer token authentication on all protected routes.

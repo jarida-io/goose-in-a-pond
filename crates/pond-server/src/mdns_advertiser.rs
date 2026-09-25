@@ -38,8 +38,13 @@ use mdns_sd::{IfKind, ServiceDaemon, ServiceInfo};
 /// `veth*`, `docker*` and `virbr*`.
 const TUNNEL_PREFIXES: &[&str] = &[
     // macOS / BSD
-    "utun", "ipsec", "ppp", // Linux: OpenVPN and IPIP, WireGuard, bridged tap
-    "tun", "wg", "tap",
+    "utun",
+    "ipsec",
+    "ppp", // Linux: OpenVPN and IPIP, WireGuard, bridged tap
+    "tun",
+    "wg",
+    "tap",
+    "tailscale",
 ];
 
 /// How many indices of each prefix to exclude, e.g. `utun0` through `utun15`.
@@ -112,6 +117,7 @@ pub fn advertise(hostname: &str, port: u16, version: &str) -> Result<MdnsHandle>
 
     let mut properties = std::collections::HashMap::new();
     properties.insert("v".to_string(), version.to_string());
+    properties.insert("scheme".to_string(), "https".to_string());
 
     let service = ServiceInfo::new(
         service_type,

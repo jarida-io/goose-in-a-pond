@@ -335,6 +335,8 @@ export class PondApiClient {
     lan_address: string | null;
     /** Tailscale IPv4, reachable from outside the house. Null unless this Pond is on a tailnet. */
     tailnet_address: string | null;
+    https_port: number | null;
+    tls_spki_sha256: string | null;
     port: number;
     version: string;
     platform: string;

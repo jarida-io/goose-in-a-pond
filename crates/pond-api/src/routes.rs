@@ -525,8 +525,13 @@ async fn health() -> Json<Value> {
 /// 3. Return connection details (hostname, port, capabilities)
 async fn handshake_handler(
     State(state): State<Arc<AppState>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
     body: Result<Json<HandshakeRequest>, JsonRejection>,
 ) -> Result<Json<HandshakeResponse>, (axum::http::StatusCode, Json<Value>)> {
+    crate::network::require_lan(peer.ok())?;
     let Json(request) = body.map_err(|e| {
         (
             axum::http::StatusCode::BAD_REQUEST,
@@ -571,8 +576,13 @@ fn bad_body() -> (StatusCode, Json<Value>) {
 /// Phase 1 of pairing: client requests a challenge (public).
 async fn handshake_init(
     State(state): State<Arc<AppState>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
     body: Result<Json<InitRequest>, JsonRejection>,
 ) -> Result<Json<ChallengeResponse>, (StatusCode, Json<Value>)> {
+    crate::network::require_lan(peer.ok())?;
     let Json(request) = body.map_err(|_| bad_body())?;
     let resp = state
         .handshake
@@ -706,9 +716,15 @@ async fn emit_pairing_outcome(
 /// Phase 2 of pairing: client proves the pairing code via MAC (public).
 async fn handshake_verify(
     State(state): State<Arc<AppState>>,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
     body: Result<Json<VerifyRequest>, JsonRejection>,
 ) -> Result<Json<HandshakeResponse>, (StatusCode, Json<Value>)> {
+    let peer = peer.ok();
+    crate::network::require_lan(peer)?;
+    let peer = peer.expect("LAN guard requires a connection address").0;
     // Rate-limit verify attempts per source IP (applies to loopback too — this
     // endpoint is security-sensitive regardless of origin).
     if let Err(remaining) = verify_limiter()
@@ -4096,7 +4112,11 @@ fn tailnet_address() -> Option<String> {
     is_tailnet_v4(v4).then(|| v4.to_string())
 }
 
-async fn system_info(State(state): State<Arc<AppState>>) -> Json<Value> {
+async fn system_info(
+    State(state): State<Arc<AppState>>,
+    transport: Option<axum::Extension<crate::network::CompanionTransport>>,
+) -> Json<Value> {
+    let (https_port, tls_spki_sha256) = crate::network::transport_fields(transport);
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
@@ -4114,6 +4134,8 @@ async fn system_info(State(state): State<Arc<AppState>>) -> Json<Value> {
         // house, so it is what a paired phone falls back to when the LAN
         // address does not answer.
         "tailnet_address": tailnet_address(),
+        "https_port": https_port,
+        "tls_spki_sha256": tls_spki_sha256,
         "port": state.api_port,
         "version": env!("CARGO_PKG_VERSION"),
         "platform": std::env::consts::OS,

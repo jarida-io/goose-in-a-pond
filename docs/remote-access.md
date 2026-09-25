@@ -1,114 +1,119 @@
-# Reaching a Pond from outside the house
+# Remote access with pinned HTTPS
 
-Pairing a phone happens at home and stays that way — the pairing code is only
-issued to a loopback caller (`routes.rs :: handshake_pairing_code`), so a phone
-can never mint one for itself. What this document covers is the other half: once
-paired, letting that phone reach its Pond from anywhere.
+## Connection model
 
-## Why not simply open a port
+The Android and iOS companion pairs on the Pond's directly attached LAN. Once paired,
+it uses HTTPS on the LAN at home and HTTPS inside Tailscale/WireGuard away from
+home. HTTPS is HTTP over TLS; WireGuard is an additional encrypted transport.
+TLS terminates on the Pond. No cloud service holds its private key.
 
-Two reasons, and the second is the one that usually decides it.
+Run Tailscale clients directly on both the Pond and phone. For Headscale, join
+with `tailscale up --login-server=https://headscale.example.com`. No embedded
+VPN client is included. Source-masking proxies and subnet routers are unsupported
+for pairing: the server classifies the actual TCP peer, never forwarding headers.
+Do not expose the companion listener to the public internet. Limit tailnet access
+with the coordinator's ACLs. Android permits one active VPN at a time.
 
-Port-forwarding puts the whole server on the public internet — every route, the
-embedded dashboard, and any future bug along with it. And most households cannot
-do it anyway: ISPs increasingly place subscribers behind carrier-grade NAT, where
-there is no public address to forward from.
+## Listeners and local tools
 
-Tunnelling services (Cloudflare Tunnel, ngrok, Tailscale Funnel) solve the
-reachability problem and break a different one: they **terminate TLS**. The
-provider decrypts, routes, and re-encrypts, so household conversation, voice
-transcripts and device state are plaintext on someone else's machine. GIAP's
-premise is that this data does not leave the Pond, so those are not options.
+- HTTP binds exclusively to `127.0.0.1`, normally port 4000. Desktop assets,
+  development pages, CLI, and OAuth callback integration remain local.
+- HTTPS binds to all IPv4 interfaces, normally port 4443, and serves the API.
+  `serve --https-port PORT` overrides its starting port. Each listener tries ten
+  consecutive ports. Neither listener falls back to plaintext network access.
+- Read `<data_dir>/.runtime_api_port` and `.runtime_https_port` for actual ports.
+  `/api/v1/system/info` publishes `https_port` and `tls_spki_sha256`.
+- mDNS `_pond._tcp.local.` publishes the HTTPS port and `scheme=https`.
+  Discovery supplies candidates; it never supplies trusted keys.
 
-## What GIAP expects instead
+To view the dashboard from another computer, use an authenticated SSH tunnel to
+the loopback HTTP port. Preserve the existing OAuth redirect port. Such tunnels
+are administrative access, not a supported remote mobile pairing mechanism.
 
-A WireGuard overlay — Tailscale, or Headscale if you would rather run the
-coordinator yourself. Both ends dial outward, so nothing is exposed inbound and
-CGNAT stops mattering. Traffic is encrypted end to end between phone and Pond;
-the coordinator distributes public keys and helps with NAT traversal, and the
-relays that carry packets when a direct path cannot be found carry ciphertext
-they hold no key for.
+## Pairing and identity
 
-GIAP does not install or manage this. The Pond simply notices it has a tailnet
-address and publishes it, which keeps the VPN the operator's to run, upgrade and
-revoke.
+Open the local dashboard or run the `pairing` CLI command. The dashboard, CLI,
+and startup output use the same payload contract:
 
-## Setting it up on the Pond
-
-Install Tailscale ([tailscale.com/download](https://tailscale.com/download)) and
-join the tailnet:
-
-```bash
-sudo tailscale up
+```text
+pond://pair?v=2&scheme=https&host=<hostname>.local&port=<https-port>&code=<6-digits>&pin=<url-encoded-sha256/base64-SPKI>&ip=<LAN-address>&ts=<tailnet-address>
 ```
 
-For a self-hosted Headscale coordinator, point the client at it:
+`ip` and `ts` are optional. The pin hashes DER SubjectPublicKeyInfo, not the
+certificate. Manual pairing requires the HTTPS address, full `sha256/...` pin,
+and pairing code displayed locally. Old HTTP-only profiles need a fresh local
+scan; an unauthenticated HTTP response cannot establish trust.
 
-```bash
-sudo tailscale up --login-server=https://headscale.example.com
-```
+The phone stages the pin before contacting the Pond. It probes only local
+candidates for initial pairing. The server independently guards legacy handshake,
+challenge initialization, and verification, returning 403 `pairing_requires_lan`
+for tailnet or unclassifiable peers. Knowing a code or starting a challenge at
+home does not permit completing it remotely. Code issuance remains loopback-only.
+Existing sessions and refresh tokens continue to work remotely.
 
-Then confirm the Pond can see its own tailnet address:
+Credentials and the pin are stored together in native SecureStore. Non-secret
+addresses are stored separately and associated with that secure profile. Failed
+pairing does not overwrite the previous secure identity. Cancellation clears
+staged native trust and restores the previous profile.
 
-```bash
-tailscale ip -4          # expect an address in 100.64.0.0/10
-bash scripts/giap.sh doctor
-```
+## Certificate lifecycle
 
-`doctor` reports three states deliberately: an address (fine), the daemon
-installed but not up (a warning — you believe you have remote access and do not),
-and not installed at all (a note, because a LAN-only Pond is a choice, not a
-fault).
+The Pond stores one atomic key/certificate bundle at `tls/identity.json` under
+its data directory. The directory is mode 0700 and identity is mode 0600 on Unix.
+An exclusive lifetime lock prevents competing writers. Missing material in an
+existing directory, invalid JSON, a mismatched key, unsafe permissions, or a
+symlink produces a visible startup failure. Restore the existing bundle from a
+secure backup; do not delete it to silence an error.
 
-The server picks the address up with no restart and no configuration; it asks the
-routing table which source address would reach `100.100.100.100`, Tailscale's own
-resolver, and publishes the answer only if it falls inside the tailnet range.
+The ECDSA P-256 key persists. Certificates are self-signed, valid for one year,
+and renewed within 30 days of expiry or when current address SANs change. The
+server checks every 30 seconds and reloads rustls without changing the pin. Key
+replacement requires local re-pairing on each phone. This transport identity is
+separate from any production signing key and requires no database migration.
 
-## Setting it up on the phone
+## Roaming and failures
 
-Install the Tailscale app and sign in to the same tailnet — with Headscale, use
-its login server. One caveat worth knowing before you commit to this: Android
-permits a single active VPN, so this will displace a work VPN while it runs.
+A shared manager selects endpoints for REST and foreground SSE. On Wi-Fi it
+prefers pinned local addresses, uses mDNS to find a changed address, then tries
+the saved tailnet address. Cellular uses tailnet. Network changes and foreground
+resume re-evaluate the choice; background probing pauses. Recovery is coalesced,
+uses a capped backoff, and stops after six failed attempts until another trigger
+or a manual retry. NetInfo does not perform external reachability probes or
+collect SSIDs.
+On Wi-Fi, six bounded local rechecks also allow a connected phone to return from
+tailnet after a temporary LAN outage without waiting for a network-change event.
 
-Then pair as usual, **at home**. The QR the dashboard shows carries every address
-the Pond has:
+Reads retry at most once after recovery. Writes and refresh-token rotations are
+never replayed after ambiguous transport failures. A failed write may have
+succeeded on the Pond; inspect the result before repeating it. Notification IDs
+are deduplicated across stream reconnections.
 
-```
-pond://pair?host=<hostname>.local&port=<port>&code=<6-digit>&ip=<lan>&ts=<tailnet>
-```
+The Android factory is installed before React Native and Expo initialization.
+Both Expo fetch and React Native XHR use it. The configured pin, certificate
+validity, and hostname must match before a Pond request is sent. Cross-origin
+redirects and plaintext Pond URLs are rejected. Unrelated HTTPS traffic retains
+platform trust validation. Release builds have no cleartext exception; debug
+builds permit loopback HTTP for Metro through `adb reverse` only. Run Expo
+prebuild to regenerate native integration from `plugins/with-pond-tls.js`.
 
-The app tries them in order — mDNS name, LAN address, tailnet address — so at
-home it takes the direct hop and only falls through to the tailnet when the
-others do not answer. That ordering is why remote access costs nothing at home:
-the VPN does not have to be up for local use.
+On iOS, both Expo fetch and React Native XHR install the shared Pond URL protocol
+before initialization. Only Pond requests use this protocol; each uses an
+ephemeral session with SPKI, validity, and hostname validation. Changing trust
+cancels active requests, including SSE. Unrelated traffic uses normal platform
+trust. Expo prebuild recreates the source files, bridge, and Xcode integration.
+The Apple transport core and 17 app-level iOS simulator checks pass, including
+real scratch-Pond pairing, refresh, REST/SSE, invalid-pin rejection, persistence
+and foreground resume. Physical roaming remains separate, as recorded in
+[verification](pinned-https-verification.md).
 
-## Checking it works
+## Verification
 
-Pair at home, then take the phone off the house wifi entirely — mobile data, VPN
-on — and open the app. It should reach the Pond without re-pairing, because the
-session token issued at pairing is still valid and the tailnet address is one the
-app already knows.
+Use the security tests and `scripts/live-test.sh` against scratch data, including
+a restart with populated databases. Device acceptance additionally requires
+physical Android/iOS phones and a Jetson: home LAN, cellular with VPN, another Wi-Fi,
+and home LAN again. Exercise app/server restarts, LAN address changes, unavailable
+VPN, certificate renewal, and incorrect-pin rejection by both REST and SSE.
+A build or unit-test pass does not establish physical roaming acceptance.
 
-If it does not:
-
-| Symptom | Likely cause |
-|---|---|
-| `tailnet_address` is `null` in `/api/v1/system/info` | the Pond is not on the tailnet; `tailscale ip -4` |
-| The QR has no `ts=` | the dashboard was loaded before the Pond joined; reload it |
-| Works at home, not away | the phone is not on the tailnet, or its VPN is off |
-| Nothing reachable either way | the Pond is down; `giap.sh status` |
-
-## What this does not do
-
-It does not encrypt the LAN leg. At home the phone talks to the Pond over plain
-HTTP on the local network, protected only by the boundary of your own wifi. That
-is a separate piece of work — TLS terminated on the Pond, with the certificate
-fingerprint pinned from the pairing QR — and until it lands, a release build of
-the app cannot use the LAN path at all, because Android forbids cleartext by
-default.
-
-It also does not reduce what a tailnet node may reach. Every device on your
-tailnet can see the Pond exactly as a device on your wifi can, including the
-unauthenticated dashboard. Tailscale ACLs are the right tool if you want that
-narrower; see `docs/auth-network-posture.md` for what is and is not behind
-authentication.
+HTTPS does not complete authorization hardening. See
+[the security posture](auth-network-posture.md) for the remaining W3 work.
