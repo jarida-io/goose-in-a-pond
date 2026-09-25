@@ -1,26 +1,17 @@
-//! Stateful streaming filter stripping reasoning and tool markup from token streams before TTS
-//! or display: Gemma 4 channel tags, Harmony tool markup, `<think>`/`<thinking>`/`<thought>`
-//! (Qwen3, DeepSeek-R1), sentinels such as `<eos>` and `<end_of_turn>`, and orphan close tags.
-//! Reuse one instance across a whole response. Holdback is conditional, see `safe_emit_len`.
+//! Streaming filter stripping reasoning and tool markup (Gemma 4, Harmony, Qwen3, DeepSeek-R1)
+//! before TTS or display. Reuse one instance per response; see `safe_emit_len` for holdback.
 
-/// Paired tags whose entire contents (and the tags themselves) are dropped.
-///
-/// Public because the second streaming filter at the SSE seam (`pond_api::thought_filter`)
-/// needs exactly this list: one table, two filters, or the copies drift.
+/// Paired tags dropped with their contents; shared with `pond_api::thought_filter`'s SSE filter.
 pub const PAIRED_TAGS: &[(&str, &str)] = &[
     ("<|channel>thought", "<channel|>"),
     ("<|tool_call>", "<tool_call|>"),
     ("<think>", "</think>"),
-    // `<thinking>` is a distinct literal, not a prefix match for `<think>`: the closing `>`
-    // makes them disjoint, so order here does not matter. Drop it and a model using the longer
-    // spelling has its whole reasoning spoken aloud in voice mode.
+    // Disjoint from `<think>` (the `>`), so order is free; without it voice speaks the reasoning.
     ("<thinking>", "</thinking>"),
     ("<thought>", "</thought>"),
 ];
 
-/// Standalone sentinels silently dropped wherever they appear.
-///
-/// Public for the same reason as [`PAIRED_TAGS`].
+/// Sentinels dropped wherever they appear; shared like [`PAIRED_TAGS`].
 pub const STANDALONE_SENTINELS: &[&str] = &[
     "<eos>",
     "<|eos|>",
@@ -95,16 +86,13 @@ impl ThoughtFilter {
         out
     }
 
-    /// Stream-end flush. Emits remaining buffered text in Normal state;
-    /// drops it if inside an unclosed block.
+    /// Stream-end flush: emits buffered text, or drops it inside an unclosed block.
     pub fn flush(&mut self) -> String {
         let pending = std::mem::take(&mut self.buf);
         match self.state {
             State::Normal => strip_standalones(&pending),
             State::InsideBlock(close) => {
-                // Dropping model output, so say so. On the voice path this is
-                // text that was never spoken; discarding it silently is what
-                // made this class of bug invisible.
+                // Warn, since a silent drop (unspoken text on voice) hides this class of bug.
                 tracing::warn!(
                     close_marker = close,
                     dropped_bytes = pending.len(),
@@ -116,9 +104,7 @@ impl ThoughtFilter {
     }
 }
 
-/// Every marker that can begin in `State::Normal`: the paired-tag OPEN markers
-/// plus the standalone sentinels. Derived from the tables so adding a tag cannot
-/// leave a stale copy behind, and built once because `push` runs per token.
+/// Every marker that can begin in `State::Normal`; built once because `push` runs per token.
 static NORMAL_MARKERS: std::sync::LazyLock<Vec<&'static str>> = std::sync::LazyLock::new(|| {
     PAIRED_TAGS
         .iter()
@@ -137,17 +123,13 @@ fn strip_standalones(s: &str) -> String {
     out
 }
 
-/// Byte index up to which `s` can be emitted right now: only a tail that is a *proper* prefix
-/// of a marker is withheld, so ordinary prose returns `s.len()`. A complete marker must not
-/// match, or it would be withheld forever. Every marker is ASCII, so the returned index is
-/// always a char boundary.
+/// Emittable byte length of `s`: only a tail that is a *proper* marker prefix is withheld,
+/// since a complete one would be held forever. Markers are ASCII, so this is a char boundary.
 fn safe_emit_len(s: &str, markers: &[&str]) -> usize {
     let longest = markers.iter().map(|m| m.len()).max().unwrap_or(0);
     let earliest = s.len().saturating_sub(longest.saturating_sub(1));
 
-    // First hit walking forwards is the longest withheld tail. `i < s.len()`
-    // keeps the empty suffix out -- every marker "starts with" it, and matching
-    // it would withhold the whole buffer.
+    // First forward hit is the longest withheld tail; `i < s.len()` excludes the empty suffix.
     for i in earliest..s.len() {
         if !s.is_char_boundary(i) {
             continue;
@@ -248,10 +230,7 @@ mod tests {
         assert_eq!(run(&refs), "Hello!");
     }
 
-    /// Voice regression: reasoning read aloud.
-    ///
-    /// Voice disables thinking, making `ThinkingOutputFilter::push_text` a pass-through without
-    /// stopping the model reasoning, so this filter is the last guard before TTS.
+    /// With thinking disabled `ThinkingOutputFilter` passes through, so this is TTS's last guard.
     #[test]
     fn every_thinking_spelling_is_stripped_before_speech() {
         for (open, close) in [
@@ -268,8 +247,6 @@ mod tests {
         }
     }
 
-    /// The tags are disjoint literals, so a longer spelling must not leave a
-    /// fragment behind from the shorter one matching its prefix.
     #[test]
     fn the_longer_spelling_leaves_no_fragment() {
         let out = run(&["<thinking>hmm</thinking>Hi."]);
@@ -278,15 +255,12 @@ mod tests {
         assert_eq!(out, "Hi.");
     }
 
-    /// Split across chunk boundaries, as a token stream actually arrives.
     #[test]
     fn the_longer_spelling_survives_chunk_boundaries() {
         assert_eq!(run(&["<think", "ing>hmm</think", "ing>Done."]), "Done.");
     }
     // ── Holdback behaviour ─────────────────────────────────────────────────
-    //
-    // These pin that the lookahead is conditional: a fixed-size holdback makes displayed and
-    // spoken text trail generation by that much and freeze mid-word when generation slows.
+    // A fixed-size holdback would make text trail generation and freeze mid-word on slowdowns.
 
     #[test]
     fn ordinary_text_is_emitted_with_no_holdback() {
@@ -297,8 +271,6 @@ mod tests {
 
     #[test]
     fn every_prefix_of_tag_free_text_is_emitted_as_it_arrives() {
-        // After feeding k characters the filter must have emitted exactly those
-        // k characters -- never lagging behind by a lookahead window.
         let raw = "The kettle is on and the door is locked.";
         let mut f = ThoughtFilter::new();
         let mut emitted = String::new();
@@ -321,10 +293,7 @@ mod tests {
 
     #[test]
     fn a_partial_sentinel_is_still_withheld_until_it_resolves() {
-        // The shape issue #153 was about: a reply ending mid-sentinel. It is a
-        // proper prefix of `<end_of_turn>`, so it is withheld at push time and
-        // released by flush -- which is what the regression test in
-        // `shared::services::chat` asserts.
+        // A proper prefix of `<end_of_turn>`: withheld by push, released by flush.
         let mut f = ThoughtFilter::new();
         assert_eq!(f.push("the code is 42<end_of_tu"), "the code is 42");
         assert_eq!(f.flush(), "<end_of_tu");
@@ -346,8 +315,7 @@ mod tests {
 
     #[test]
     fn every_marker_is_ascii_so_a_partial_never_starts_mid_character() {
-        // `safe_emit_len` relies on this. A non-ASCII marker would invalidate
-        // its char-boundary reasoning, and this test is what would catch it.
+        // `safe_emit_len`'s char-boundary reasoning relies on this.
         for (open, close) in PAIRED_TAGS {
             assert!(open.is_ascii(), "non-ASCII open marker: {open}");
             assert!(close.is_ascii(), "non-ASCII close marker: {close}");

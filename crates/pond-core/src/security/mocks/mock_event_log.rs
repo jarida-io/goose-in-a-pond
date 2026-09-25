@@ -1,7 +1,4 @@
-//! In-memory [`EventLog`] test double (#108).
-//!
-//! Append-only `Vec` with filtered, newest-first querying, standing in for the
-//! durable SQLite adapter (Q2-32).
+//! In-memory [`EventLog`] test double standing in for the durable SQLite adapter.
 
 use std::sync::Mutex;
 
@@ -186,8 +183,6 @@ mod tests {
         assert!(log.all().is_empty());
     }
 
-    /// #157 follow-up: the audit/activity read paths exclude Secret at the
-    /// store via `max_sensitivity`, so a row limit counts only visible events.
     #[tokio::test]
     async fn query_max_sensitivity_excludes_secret_and_limit_counts_visible() {
         let log = MockEventLog::new();
@@ -206,8 +201,7 @@ mod tests {
         .await
         .unwrap();
 
-        // With limit=2 and the Secret row filtered at the store, BOTH visible
-        // events come back — the Secret row never consumes limit budget.
+        // The filtered Secret row never consumes limit budget.
         let visible = log
             .query(EventQuery {
                 max_sensitivity: Some(PrivacySensitivity::Sensitive),

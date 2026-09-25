@@ -1,7 +1,4 @@
-//! FallbackProvider — transparent LLM provider fallback chain.
-//!
-//! Tries the primary provider first; on any error, transparently retries with the
-//! fallback provider. Chainable for multi-hop fallback.
+//! LLM provider fallback: any primary error retries on the fallback. Nest for multi-hop.
 
 use crate::models::domain::message::ChatMessage;
 use crate::models::ports::provider::LlmProvider;
@@ -55,7 +52,6 @@ mod tests {
     use super::*;
     use crate::models::mocks::mock_provider::MockProvider;
 
-    /// A provider that always fails, used to test fallback triggering.
     struct FailingProvider;
 
     #[async_trait]

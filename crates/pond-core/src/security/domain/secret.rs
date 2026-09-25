@@ -11,7 +11,6 @@ pub struct SecretRequirement {
     pub description: String,
     /// Whether the extension won't work without this secret
     pub required: bool,
-    /// How the secret is obtained
     pub kind: SecretKind,
 }
 

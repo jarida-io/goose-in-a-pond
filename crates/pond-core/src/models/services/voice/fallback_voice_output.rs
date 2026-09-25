@@ -1,7 +1,4 @@
-//! `FallbackVoiceOutput` — try the primary TTS engine; if it errors, use the fallback.
-//!
-//! Mirrors `FallbackProvider` for LLMs: attempt primary, log a warning on
-//! failure, retry with the fallback so a TTS error never aborts a turn.
+//! TTS with a fallback engine, so a primary TTS error never aborts a turn.
 
 use crate::models::ports::voice_output::VoiceOutput;
 use anyhow::Result;

@@ -1,7 +1,5 @@
-//! Redaction policy (PAI-2 P3). The regex engine lives in the adapter
-//! (`pond_infra::rule_redactor`); every rule here is a validator that rejects the
-//! adapter's deliberately over-permissive candidates, so ordinary prose survives.
-//! [`RedactionLevel`] derives from each [`RedactionKind`]'s [`PrivacySensitivity`].
+//! Redaction policy. Regexes live in `pond_infra::rule_redactor`; each rule here validates its
+//! deliberately over-permissive candidates so ordinary prose survives.
 
 use serde::{Deserialize, Serialize};
 
@@ -20,8 +18,7 @@ pub enum RedactionKind {
 }
 
 impl RedactionKind {
-    /// Every variant. Adding one breaks this array's length and forces both
-    /// the sensitivity mapping and the adapter's pattern table to be updated.
+    /// Every variant; keep it in step by hand when adding one.
     pub const ALL: [RedactionKind; 6] = [
         RedactionKind::EmailAddress,
         RedactionKind::PhoneNumber,
@@ -43,8 +40,7 @@ impl RedactionKind {
         }
     }
 
-    /// What replaces a match. Named rather than blanked so the transcript still
-    /// reads as a sentence and the user can see what was taken out.
+    /// Named, not blanked, so the text still reads and the user sees what was taken.
     pub fn placeholder(&self) -> &'static str {
         match self {
             Self::EmailAddress => "[redacted:email]",
@@ -79,9 +75,7 @@ pub enum RedactionLevel {
 }
 
 impl RedactionLevel {
-    /// Derived from the sensitivity mapping rather than listed separately, so
-    /// a new kind cannot end up classified `Secret` and still survive at the
-    /// `Secrets` level.
+    /// Derived from `sensitivity()`, so a new `Secret` kind can't survive at `Secrets` level.
     pub fn redacts(&self, kind: RedactionKind) -> bool {
         match self {
             Self::Detect => false,
@@ -94,8 +88,7 @@ impl RedactionLevel {
 /// The result of one redaction pass.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Redacted {
-    /// The text after replacement. Equal to the input when nothing was
-    /// replaced, including at [`RedactionLevel::Detect`].
+    /// The text after replacement; the input unchanged at [`RedactionLevel::Detect`].
     pub text: String,
     /// What was found, in order of appearance, whether or not it was replaced.
     pub findings: Vec<RedactionKind>,
@@ -122,8 +115,7 @@ impl Redacted {
 
 // -- The rules -------------------------------------------------------------
 
-/// Single dispatch so the adapter cannot forget a kind: the match is
-/// exhaustive, so adding a variant breaks the build here.
+/// Single exhaustive dispatch, so the adapter cannot forget a kind.
 pub fn candidate_is_real(kind: RedactionKind, candidate: &str) -> bool {
     match kind {
         RedactionKind::EmailAddress => is_email_shaped(candidate),
@@ -135,9 +127,7 @@ pub fn candidate_is_real(kind: RedactionKind, candidate: &str) -> bool {
     }
 }
 
-/// An address needs a local part, a dotted domain and an alphabetic TLD.
-/// `user@localhost` is not an address, and a trailing sentence full stop is
-/// not part of the domain.
+/// Local part, dotted domain, alphabetic TLD: rejects `user@localhost` and a trailing full stop.
 pub fn is_email_shaped(candidate: &str) -> bool {
     let mut parts = candidate.split('@');
     let local = match parts.next() {
@@ -167,10 +157,7 @@ pub fn is_email_shaped(candidate: &str) -> bool {
     tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic())
 }
 
-/// Separators a phone candidate may contain. `.` is deliberately absent: on a
-/// smart-home pond `192.168.1.50` and `10.0.19041.1234` are far commoner than
-/// a dot-separated phone number, and eating an IP address out of a memory is
-/// the exact "worse than none" failure.
+/// No `.`: on a smart-home pond, IP addresses far outnumber dot-separated phone numbers.
 const PHONE_SEPARATORS: [char; 4] = [' ', '-', '(', ')'];
 
 pub fn is_plausible_phone(candidate: &str) -> bool {
@@ -206,9 +193,7 @@ pub fn is_plausible_phone(candidate: &str) -> bool {
     if groups.len() > 1 {
         return (9..=15).contains(&digits);
     }
-    // A bare run is only a phone when it carries a national trunk prefix.
-    // Without that, a 13-digit millisecond timestamp and a 10-digit epoch
-    // second both read as phone numbers, and both appear in real memories.
+    // A bare run needs a trunk prefix, or epoch timestamps (10 and 13 digits) read as phones.
     rest.starts_with('0') && (10..=11).contains(&digits)
 }
 
@@ -230,9 +215,7 @@ const UK_INWARD_LETTERS: [char; 20] = [
 const UK_AREA_FIRST_EXCLUDED: [char; 3] = ['Q', 'V', 'X'];
 const UK_AREA_SECOND_EXCLUDED: [char; 3] = ['I', 'J', 'Z'];
 
-/// A structural UK postcode check, not a shape match. The inward-letter set is
-/// what keeps ordinary prose intact: "B2 3AM" matches every loose postcode
-/// regex ever written and is not a postcode, because M is not an inward letter.
+/// Structural UK postcode check: the inward-letter set rejects prose like "B2 3AM".
 pub fn is_uk_postcode(candidate: &str) -> bool {
     let compact: Vec<char> = candidate
         .chars()
@@ -273,8 +256,7 @@ pub fn is_uk_postcode(candidate: &str) -> bool {
     district.len() == 1 || district[1].is_ascii_alphanumeric()
 }
 
-/// Luhn is the whole rule. Without it every 16-digit run — an order number, a
-/// millisecond timestamp pair, a device serial — reads as a card.
+/// Luhn is the whole rule; without it every 16-digit order number or serial reads as a card.
 pub fn passes_luhn(digits: &str) -> bool {
     let mut sum: u32 = 0;
     let mut alt = false;
@@ -344,8 +326,7 @@ pub fn passes_iban_checksum(candidate: &str) -> bool {
     remainder == 1
 }
 
-/// Known credential prefixes. A prefix allowlist is the only cheap rule that
-/// does not eat git SHAs, UUIDs and long ordinary words.
+/// Known credential prefixes: the only cheap rule that spares git SHAs, UUIDs and long words.
 const API_KEY_PREFIXES: &[&str] = &[
     "sk-",
     "sk_live_",
@@ -387,10 +368,8 @@ pub fn is_api_key_shaped(candidate: &str) -> bool {
     is_high_entropy_secret(candidate)
 }
 
-/// The unprefixed fallback, kept deliberately narrow. A git SHA and a UUID are
-/// hex, so they are excluded; an ordinary long word has no digit; a base32
-/// token has no lower case. Requiring all three cases plus non-hex is what
-/// stops this rule eating identifiers that appear in real memories.
+/// Deliberately narrow unprefixed fallback: requiring all three cases plus non-hex spares git
+/// SHAs and UUIDs (hex), long words (no digit) and base32 tokens (no lower case).
 fn is_high_entropy_secret(t: &str) -> bool {
     if t.len() < 32 || t.len() > 128 {
         return false;
@@ -456,10 +435,7 @@ mod tests {
         }
     }
 
-    /// PAI-2 names this case: a postcode-shaped phrase inside ordinary prose
-    /// must not be mangled. Every one of these matches a loose postcode regex
-    /// and none of them is a postcode -- C, I, K, M, O and V never appear in a
-    /// real inward code, and Q/V/X never start an area.
+    /// Each matches a loose regex: no inward code uses C/I/K/M/O/V and Q/V/X never start an area.
     #[test]
     fn a_postcode_shaped_phrase_in_prose_is_not_a_postcode() {
         for bad in ["B2 3AM", "BA1 2AM", "A1 2CV", "V1 2AB", "S1 2IJ"] {
@@ -498,8 +474,7 @@ mod tests {
         assert!(is_api_key_shaped("AKIAIOSFODNN7EXAMPLE"));
     }
 
-    /// The identifiers that show up in a developer's own memories. A rule that
-    /// eats a commit SHA is a rule the user turns off.
+    /// A rule that eats a commit SHA is a rule the user turns off.
     #[test]
     fn an_ordinary_identifier_is_not_a_credential() {
         // A 40-character git SHA: long, alphanumeric, and entirely hex.

@@ -1,16 +1,10 @@
-//! InstantActivation — StreamingWakeWordDetector for keyboard / stdin mode.
-//!
-//! `wait_for_activation_with_audio()` returns immediately, so the workflow loop goes
-//! straight from Wait to Listen. The default in `ChatService` and in all tests.
+//! Wake-word detector for keyboard / stdin mode; the default in `ChatService` and all tests.
 
 use crate::models::ports::wake_word::{StreamingWakeWordDetector, WakeWordActivation};
 use anyhow::Result;
 use async_trait::async_trait;
 
-/// No-op wake-word detector: activates instantly without waiting.
-///
-/// Use this when the user drives the loop via keyboard (stdin) or when
-/// tests need deterministic, non-blocking behaviour.
+/// No-op wake-word detector: activates instantly, without waiting.
 pub struct InstantActivation;
 
 #[async_trait]
@@ -21,18 +15,12 @@ impl StreamingWakeWordDetector for InstantActivation {
         })
     }
 
-    /// Nothing to prompt for: this detector never waits. A keyboard prompt here
-    /// would be announced twice per turn by a `--no-wake-word` microphone
-    /// session, next to the real "listening" prompt. `run_loop` skips an empty
-    /// prompt.
+    /// Empty, which `run_loop` skips; a `--no-wake-word` mic session already prompts "listening".
     fn activation_prompt(&self) -> &str {
         ""
     }
 
-    /// `InstantActivation` resolves immediately, so it must NOT join `run_loop`'s
-    /// interrupt race: the wake future would win before any turn completed and
-    /// abort every turn. `false` makes `run_loop` await the turn directly in
-    /// stdin, `--no-wake-word` and whisper-load-failure modes.
+    /// False: resolving instantly, it would win `run_loop`'s interrupt race and abort every turn.
     fn supports_interruption(&self) -> bool {
         false
     }
@@ -52,22 +40,14 @@ mod tests {
 
     #[test]
     fn instant_activation_does_not_support_interruption() {
-        // Critical: InstantActivation resolves instantly, so run_loop must not
-        // race turns against it. Guards the class of bug where every turn is
-        // aborted before it can complete in stdin / --no-wake-word mode.
         let detector = InstantActivation;
         assert!(!detector.supports_interruption());
     }
 
-    /// An empty prompt is the contract, not an oversight: this detector does
-    /// not wait, so there is no waiting to describe. The previous text claimed
-    /// the user should type, which is wrong whenever `--no-wake-word` is
-    /// paired with a microphone. `run_loop` skips an empty prompt entirely.
     #[tokio::test]
     async fn instant_activation_announces_nothing_because_it_never_waits() {
         let detector = InstantActivation;
-        // Explicitly call through StreamingWakeWordDetector to avoid ambiguity
-        // with the deprecated WakeWordDetector blanket impl.
+        // Fully qualified: the deprecated `WakeWordDetector` blanket impl makes the call ambiguous.
         assert_eq!(
             StreamingWakeWordDetector::activation_prompt(&detector),
             "",
@@ -78,7 +58,6 @@ mod tests {
     #[tokio::test]
     #[allow(deprecated)]
     async fn instant_activation_satisfies_wake_word_detector_via_blanket() {
-        // The blanket impl provides WakeWordDetector automatically.
         let detector = InstantActivation;
         let det: &dyn WakeWordDetector = &detector;
         assert!(det.wait_for_activation().await.is_ok());

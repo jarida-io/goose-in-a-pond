@@ -1,7 +1,5 @@
-//! Model management service — the single entry-point for the model lifecycle: catalog,
-//! downloads, role assignment, and runtime resolution. It knows nothing of HTTP, SQLite or
-//! file paths; those live in the port implementations wired in `pond-server`. Startup calls
-//! `seed_catalog` (or `sync_disk_flags` on later runs), `model_for_role`, `ensure_downloaded`.
+//! Model lifecycle: catalog, downloads, role assignment. HTTP, SQLite and file paths live in
+//! the port implementations wired in `pond-server`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -40,31 +38,23 @@ impl ModelService {
 
     // ── Catalog ───────────────────────────────────────────────────────────────
 
-    /// Fetch the catalog from all upstream sources and upsert all records into the repository.
-    ///
-    /// Use this on **first run** (empty DB).  Returns the number of models upserted.
-    /// `is_custom=true` rows are never overwritten (enforced by `ModelRepository::upsert`).
+    /// Upsert the fetched catalog on first run; `ModelRepository::upsert` keeps `is_custom` set.
     pub async fn seed_catalog(&self) -> Result<usize> {
         let (models, _binaries) = self.catalog.fetch().await?;
         let count = models.len();
         for mut record in models {
-            // Set downloaded flag from disk before upserting
             record.downloaded = self.storage.is_present(&record);
             self.repo.upsert(&record).await?;
         }
         Ok(count)
     }
 
-    /// Fetch the catalog and refresh non-custom records.
-    ///
-    /// Same as `seed_catalog` but safe to call repeatedly — custom models are preserved.
+    /// Re-run `seed_catalog`; safe to repeat.
     pub async fn refresh_catalog(&self) -> Result<usize> {
         self.seed_catalog().await
     }
 
     /// Fetch tool binaries without touching the model catalog.
-    ///
-    /// Returns the `BinaryRecord` list so the caller can download required binaries.
     pub async fn fetch_binaries(&self) -> Result<Vec<BinaryRecord>> {
         let (_models, binaries) = self.catalog.fetch().await?;
         Ok(binaries)
@@ -72,10 +62,7 @@ impl ModelService {
 
     // ── Disk sync ─────────────────────────────────────────────────────────────
 
-    /// Walk all records in the repository and update `downloaded` flags from disk.
-    ///
-    /// Call on every startup after the first run to reflect files added/removed since
-    /// the last session.  Returns the number of records whose flag changed.
+    /// Refresh `downloaded` flags from disk on every later startup; returns how many changed.
     pub async fn sync_disk_flags(&self) -> Result<usize> {
         let records = self.repo.list_all().await?;
         let mut changed = 0usize;
@@ -91,7 +78,6 @@ impl ModelService {
 
     // ── Role assignments ──────────────────────────────────────────────────────
 
-    /// Return the `ModelRecord` assigned to `role`, or `None` if no assignment exists.
     pub async fn model_for_role(&self, role: &str) -> Result<Option<ModelRecord>> {
         let assignment = self.repo.get_assignment(role).await?;
         match assignment {
@@ -100,15 +86,11 @@ impl ModelService {
         }
     }
 
-    /// Return all current role assignments.
     pub async fn list_assignments(&self) -> Result<Vec<ModelRoleAssignment>> {
         self.repo.list_assignments().await
     }
 
-    /// Assign `model_id` to `role`.
-    ///
-    /// Validates that the model's category is compatible with the role
-    /// (e.g. only LLM models can be assigned to "chat"/"think"/"task").
+    /// Assign `model_id` to `role` if its category suits the role.
     pub async fn assign_role(&self, role: &str, model_id: &str) -> Result<()> {
         let record = self
             .repo
@@ -134,10 +116,7 @@ impl ModelService {
 
     // ── Download ──────────────────────────────────────────────────────────────
 
-    /// Ensure the model file for `model_id` is on disk.
-    ///
-    /// Returns the existing path, otherwise downloads from the record's `url` to the storage
-    /// path; errors when the record has no `url`.
+    /// Path of `model_id`'s file, downloading it from the record's `url` if missing.
     pub async fn ensure_downloaded(&self, model_id: &str) -> Result<PathBuf> {
         let record = self
             .repo
@@ -161,7 +140,6 @@ impl ModelService {
             .as_deref()
             .ok_or_else(|| anyhow!("Model '{}' has no download URL in the catalog", model_id))?;
 
-        // Create parent directory
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -193,7 +171,6 @@ impl ModelService {
 
         self.downloader.download(url, &path, 0).await?;
 
-        // Make the binary executable on Unix
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -207,12 +184,10 @@ impl ModelService {
 
     // ── Listing ───────────────────────────────────────────────────────────────
 
-    /// List all models, with `downloaded` flags refreshed from disk.
     pub async fn list_all(&self) -> Result<Vec<ModelRecord>> {
         self.repo.list_all().await
     }
 
-    /// List models in a single category, with `downloaded` flags refreshed from disk.
     pub async fn list_by_category(&self, category: &ModelCategory) -> Result<Vec<ModelRecord>> {
         self.repo.list_by_category(category).await
     }
@@ -414,16 +389,13 @@ mod tests {
         );
         repo.upsert(&m).await.unwrap();
 
-        // ensure_downloaded should call the downloader
         let path = svc.ensure_downloaded("llamafile/qwen").await.unwrap();
         assert_eq!(path, tmp.path().join("qwen.llamafile"));
 
-        // Verify the downloader was called with the right URL
         let urls = dl.called_urls.lock().unwrap();
         assert_eq!(urls.len(), 1);
         assert_eq!(urls[0], "https://example.com/qwen.llamafile");
 
-        // Verify DB flag was updated
         let record = repo.get_by_id("llamafile/qwen").await.unwrap().unwrap();
         assert!(
             record.downloaded,
@@ -438,7 +410,6 @@ mod tests {
         let dl = Arc::new(MockDownloader::new());
         let svc = make_service(repo.clone(), dl.clone(), tmp.path());
 
-        // Create the file on disk so it already exists
         let model_path = tmp.path().join("existing.llamafile");
         std::fs::File::create(&model_path).unwrap();
 
@@ -450,7 +421,6 @@ mod tests {
         );
         repo.upsert(&m).await.unwrap();
 
-        // ensure_downloaded should NOT call the downloader
         let path = svc.ensure_downloaded("llamafile/existing").await.unwrap();
         assert_eq!(path, model_path);
 
@@ -491,8 +461,7 @@ mod tests {
         );
     }
 
-    /// Validate that the shared mock infrastructure from services/ integrates
-    /// correctly with ModelService — these mocks are the ones used in integration tests.
+    /// The shared mocks used by integration tests work with `ModelService`.
     mod shared_mocks {
         use crate::models::domain::model_record::{ModelCategory, ModelRecord};
         use crate::models::mocks::mock_model_catalog_provider::MockModelCatalogProvider;
