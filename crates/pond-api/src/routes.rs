@@ -491,10 +491,15 @@ pub async fn serve_web(uri: axum::http::Uri, static_dir: std::path::PathBuf) -> 
 }
 
 async fn serve_from_disk(static_dir: &std::path::Path, rel: &str) -> Response<axum::body::Body> {
-    // Prevent path traversal: reject any candidate that escapes the root.
-    let candidate = static_dir.join(rel);
-    if candidate.starts_with(static_dir) {
-        if let Ok(bytes) = tokio::fs::read(&candidate).await {
+    // Only plain components: `Path::starts_with` is lexical, so `dir/..` would pass it.
+    let contained = std::path::Path::new(rel).components().all(|c| {
+        matches!(
+            c,
+            std::path::Component::Normal(_) | std::path::Component::CurDir
+        )
+    });
+    if contained {
+        if let Ok(bytes) = tokio::fs::read(static_dir.join(rel)).await {
             return file_response(rel, bytes);
         }
     }
@@ -18326,5 +18331,42 @@ mod tests {
             RECIPE_EXTENSION_NAMES.len(),
             "the mapping list is not exercising the match arms"
         );
+    }
+
+    /// The on-disk UI fallback is auth-exempt, so it must never read outside `static_dir`.
+    mod static_dir_containment {
+        use super::super::serve_from_disk;
+        use axum::http::StatusCode;
+
+        #[tokio::test]
+        async fn a_path_that_climbs_out_of_the_static_dir_is_not_served() {
+            let root = tempfile::tempdir().unwrap();
+            let dist = root.path().join("dist");
+            std::fs::create_dir_all(dist.join("assets")).unwrap();
+            std::fs::write(dist.join("index.html"), "app").unwrap();
+            std::fs::write(root.path().join("secret.txt"), "secret").unwrap();
+
+            for rel in [
+                "../secret.txt",
+                "assets/../../secret.txt",
+                "./../secret.txt",
+            ] {
+                let resp = serve_from_disk(&dist, rel).await;
+                assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{rel} was served");
+            }
+        }
+
+        #[tokio::test]
+        async fn files_inside_the_static_dir_are_still_served() {
+            let dist = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(dist.path().join("assets")).unwrap();
+            std::fs::write(dist.path().join("index.html"), "app").unwrap();
+            std::fs::write(dist.path().join("assets/app.js"), "js").unwrap();
+
+            for rel in ["index.html", "assets/app.js", "./assets/app.js", "settings"] {
+                let resp = serve_from_disk(dist.path(), rel).await;
+                assert_eq!(resp.status(), StatusCode::OK, "{rel} was not served");
+            }
+        }
     }
 }
