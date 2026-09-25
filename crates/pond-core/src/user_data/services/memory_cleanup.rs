@@ -1,10 +1,4 @@
-//! Memory decay and cleanup service.
-//!
-//! Computes effective scores for memories using an adaptive half-life formula
-//! where higher-importance memories literally decay slower.  Memories below
-//! threshold are archived or pruned.  Runs periodically as a background task.
-//!
-//! Adapted from boop-agent's adaptive decay formula.
+//! Memory decay and cleanup, using boop-agent's adaptive half-life formula.
 
 use crate::user_data::domain::memory::{
     MemoryEventKind, MemoryFragment, MemoryLifecycle, MemoryTier,
@@ -13,10 +7,7 @@ use crate::user_data::domain::profile::ProfileScope;
 use crate::user_data::ports::memory_repository::MemoryRepository;
 use anyhow::Result;
 
-// Test fixtures mirroring the production defaults, which live on `Settings`
-// (`default_memory_decay_base_half_life_days` / `default_memory_decay_beta`).
-// The live prune path takes these as parameters from settings; these constants
-// exist only so the tests below assert against the documented default values.
+// Test copies of the `Settings` defaults (`default_memory_decay_*`); production reads settings.
 #[cfg(test)]
 const DEFAULT_BASE_HALF_LIFE_DAYS: f32 = 11.25;
 #[cfg(test)]
@@ -46,7 +37,6 @@ pub fn effective_score(
     let importance = fragment.importance.unwrap_or(0.5);
     let decay_rate = fragment.decay_rate.unwrap_or(0.01);
 
-    // Permanent tier: no decay
     if fragment.tier.as_ref() == Some(&MemoryTier::Permanent) {
         return importance;
     }
@@ -58,12 +48,10 @@ pub fn effective_score(
             (diff.num_seconds() as f64 / 86400.0).max(0.0) as f32
         })
         .unwrap_or_else(|| {
-            // Never accessed: use time since creation
             let diff = chrono::Utc::now() - fragment.created_at;
             (diff.num_seconds() as f64 / 86400.0).max(0.0) as f32
         });
 
-    // Adaptive half-life: important memories get longer half-lives
     let adaptive_half_life = base_half_life_days * (1.0 + importance);
     let lambda = (2.0_f32.ln() / adaptive_half_life) * decay_beta * (1.0 + decay_rate);
     let decayed = importance * (-lambda * days_since_access).exp();
@@ -71,14 +59,8 @@ pub fn effective_score(
     (decayed * reinforcement).clamp(0.0, 1.0)
 }
 
-/// Run one cleanup pass: compute scores, archive/prune low-value memories.
-///
-/// `prune_threshold` — memories below this score are deleted (default 0.05).
-/// `archive_threshold` — memories below this score are archived (default 0.15).
-/// `base_half_life_days` — base half-life for adaptive decay (default 11.25).
-/// `decay_beta` — decay curve steepness (default 0.8).
-///
-/// Returns (scanned, archived, pruned) counts.
+/// One cleanup pass; returns `(scanned, archived, pruned)`. Both outcomes archive the row:
+/// below `prune_threshold` it is logged `Pruned`, below `archive_threshold` `Archived`.
 pub async fn run_cleanup(
     repo: &dyn MemoryRepository,
     prune_threshold: f32,
@@ -125,7 +107,6 @@ pub async fn run_cleanup(
     if !updates.is_empty() {
         repo.batch_update_lifecycle(&updates).await?;
 
-        // Audit log each lifecycle change
         for (id, kind) in &event_kinds {
             let _ = repo.log_event(kind.clone(), id, None, None).await;
         }
@@ -236,9 +217,7 @@ mod tests {
         let low = make_memory(0.3, 0.01, 20.0, 0, MemoryTier::Long);
         let score_high = effective_score(&high, BASE, BETA);
         let score_low = effective_score(&low, BASE, BETA);
-        // High importance gets adaptive_half_life = 11.25 * 1.85 = 20.8 days
-        // Low importance gets adaptive_half_life = 11.25 * 1.3 = 14.6 days
-        // So high-importance retains a larger fraction of its score
+        // Half-lives: 11.25 * 1.85 = 20.8 d (high) vs 11.25 * 1.3 = 14.6 d (low).
         let retention_high = score_high / 0.85;
         let retention_low = score_low / 0.3;
         assert!(
@@ -249,12 +228,10 @@ mod tests {
 
     #[test]
     fn adaptive_half_life_scales_with_importance() {
-        // At the half-life point, score should be approximately importance/2
-        // For importance=0.8: adaptive_half_life = 11.25 * 1.8 = 20.25 days
+        // At its half-life (11.25 * 1.8 = 20.25 d) the score should be about importance / 2.
         let mem = make_memory(0.8, 0.0, 20.25, 0, MemoryTier::Long);
         let score = effective_score(&mem, BASE, BETA);
-        // With decay_rate=0.0, lambda = ln(2)/20.25 * 0.8 * 1.0
-        // The score should be roughly around importance * 0.5 * reinforcement
+        // Loose tolerance: `decay_beta` < 1 leaves the score somewhat above half.
         let expected_half = 0.8 * 0.5;
         assert!(
             (score - expected_half).abs() < 0.15,

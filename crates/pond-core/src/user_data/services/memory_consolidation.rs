@@ -1,23 +1,5 @@
-//! Memory consolidation service.
-//!
-//! Two responsibilities, both shared by every consolidation mode:
-//!
-//! - [`select_batch`] picks the bounded slice of the memory store that a run is
-//!   allowed to reason about, so prompts stay inside a 3B model's context.
-//! - [`apply_actions`] is the single home for turning accepted
-//!   [`ConsolidationAction`]s into repository writes. Both the single-pass mode
-//!   ([`run_consolidation`], below) and the three-stage adversarial mode in
-//!   `pond-server` funnel through it, so the correction-safety guards cannot
-//!   drift between the two paths.
-//!
-//! Safety guards enforced in [`apply_actions`]:
-//! - Correction memories are never pruned.
-//! - Merges involving correction sources preserve the `corrects` metadata and
-//!   force the merged segment to `Correction`.
-//! - Splits propagate `corrects` onto the first `Correction`-segment entry.
-//! - A merge or split that fails to insert its replacement aborts before the
-//!   sources are marked superseded, so a write error can never orphan memories.
-//! - Every lifecycle change is logged as a `MemoryEvent` for auditability.
+//! Memory consolidation. [`select_batch`] keeps a run inside a 3B model's context, and
+//! [`apply_actions`] is the only write path, so both modes share its correction guards.
 
 use crate::user_data::domain::memory::{
     MemoryEventKind, MemoryFragment, MemoryLifecycle, MemorySegment,
@@ -29,8 +11,7 @@ use crate::user_data::services::consolidation_schedule::MIN_MEMORIES_TO_CONSOLID
 use anyhow::Result;
 use std::collections::HashMap;
 
-/// Mode label written to the `consolidation_runs` audit table for a single-pass
-/// run. Mirrors the `memory_consolidation_mode` setting value.
+/// Single-pass label in `consolidation_runs`, matching the `memory_consolidation_mode` value.
 pub const MODE_SINGLE: &str = "single";
 /// Mode label for a three-stage Proposer/Adversary/Judge run.
 pub const MODE_ADVERSARIAL: &str = "adversarial";
@@ -59,13 +40,7 @@ impl ConsolidationMode {
     }
 }
 
-/// Parse the `memory_consolidation_mode` setting.
-///
-/// Anything unrecognised resolves to [`ConsolidationMode::Single`], not
-/// adversarial. A typo or a value from a future version must not silently opt
-/// the user into triple the inference cost on an 8GB device — the cheap path is
-/// the safe default, and it is what `Settings::default()` asks for anyway.
-/// Matching is case-insensitive and tolerates surrounding whitespace.
+/// Parse `memory_consolidation_mode`; anything unrecognised falls back to the cheap `Single`.
 pub fn mode_from_setting(setting: &str) -> ConsolidationMode {
     if setting.trim().eq_ignore_ascii_case(MODE_ADVERSARIAL) {
         ConsolidationMode::Adversarial
@@ -74,16 +49,14 @@ pub fn mode_from_setting(setting: &str) -> ConsolidationMode {
     }
 }
 
-/// The bounded slice of the memory store a single consolidation run may see,
-/// plus how much was left behind.
+/// The bounded slice of memories one consolidation run may see, and how much was left out.
 #[derive(Debug, Clone)]
 pub struct BatchSelection {
     /// Memories this run may reason about, oldest first.
     pub batch: Vec<MemoryFragment>,
     /// How many scoreable, segmented memories were available in total.
     pub considered: usize,
-    /// How many were left for a future run because of the batch cap. Callers
-    /// should log this rather than dropping it silently.
+    /// How many the batch cap left for a future run; callers should log it.
     pub deferred: usize,
 }
 
@@ -94,26 +67,8 @@ impl BatchSelection {
     }
 }
 
-/// Choose which memories a consolidation run may reason about.
-///
-/// Only segmented memories are eligible — an unsegmented row has not been
-/// through extraction's categoriser yet and there is nothing to reason about.
-///
-/// Ordering is **oldest first** by `created_at`. Two reasons:
-///
-/// 1. Duplicates cluster in time. Extraction re-derives the same fact across
-///    nearby turns, so a *contiguous* window is far more likely to contain both
-///    halves of a duplicate pair than a score-ranked selection, which would
-///    scatter the pair across different runs and never let the model see them
-///    together.
-/// 2. The oldest facts are the stalest, so they are the most likely to have
-///    already been superseded or to have decayed into noise.
-///
-/// Known limitation: the window does not rotate. With a store larger than
-/// `batch_size` and a model that proposes nothing, the same oldest slice is
-/// re-examined every run and newer memories are never reached. Advancing a
-/// persisted cursor would need a schema column; until then the deferred count
-/// is logged so the shortfall is visible rather than silent.
+/// Choose which segmented memories a run may see: oldest first, as duplicates cluster in time.
+/// Limitation: the window never rotates, so a run proposing nothing re-reads the same slice.
 pub fn select_batch(memories: Vec<MemoryFragment>, batch_size: usize) -> BatchSelection {
     // A zero/absurd setting must not disable consolidation outright.
     let batch_size = batch_size.max(MIN_MEMORIES_TO_CONSOLIDATE);
@@ -153,12 +108,8 @@ impl ApplyOutcome {
     }
 }
 
-/// Apply accepted consolidation actions to the repository.
-///
-/// `batch` is the set of memories the actions were proposed against; it is used
-/// to look up source metadata (`corrects`, segment) for the correction guards.
-/// Actions naming an id outside the batch still apply, but cannot benefit from
-/// the guards — which is exactly why callers must pass the batch the model saw.
+/// Apply accepted consolidation actions. Pass the batch the model saw: the correction guards
+/// look sources up there, and ids outside it apply unguarded.
 pub async fn apply_actions(
     repo: &dyn MemoryRepository,
     batch: &[MemoryFragment],
@@ -177,8 +128,7 @@ pub async fn apply_actions(
                 segment,
                 importance,
             } => {
-                // Guard: if any source is a correction, the merged memory
-                // inherits correction status so a later pass cannot prune it.
+                // A correction source makes the merge a correction too, so it stays unprunable.
                 let any_correction = source_ids
                     .iter()
                     .filter_map(|id| memory_map.get(id.as_str()))
@@ -211,8 +161,7 @@ pub async fn apply_actions(
                     corrects,
                 );
                 let new_id = new_frag.id.clone();
-                // Propagate: if the replacement cannot be written, the sources
-                // must NOT be superseded.
+                // Bail if the replacement fails to write; its sources must not be superseded.
                 repo.add(new_frag).await?;
 
                 for src_id in &source_ids {
@@ -227,7 +176,6 @@ pub async fn apply_actions(
                 outcome.merged += 1;
             }
             ConsolidationAction::Prune { id } => {
-                // Guard: never prune correction memories.
                 if let Some(mem) = memory_map.get(id.as_str()) {
                     if mem.is_correction() {
                         tracing::warn!("[consolidation] blocked prune of correction memory {id}");
@@ -262,8 +210,7 @@ pub async fn apply_actions(
                 source_id,
                 new_memories,
             } => {
-                // If the source is a correction, propagate `corrects` to the
-                // first Correction-segment entry so the fix survives the split.
+                // Carry `corrects` to the first Correction entry so the fix survives the split.
                 let source_corrects = memory_map
                     .get(source_id.as_str())
                     .and_then(|m| m.corrects.clone());
@@ -318,18 +265,8 @@ pub async fn apply_actions(
     Ok(outcome)
 }
 
-/// Run one single-pass consolidation: select a batch, ask the consolidator for
-/// actions, apply them, and record an audit row.
-///
-/// This is the `"single"` value of `memory_consolidation_mode` — one LLM call
-/// instead of the three an adversarial run costs, which matters on a 3B
-/// on-device model. `pond-server` owns the three-stage variant because it needs
-/// a cancellation token and an SSE event sink; both share [`apply_actions`].
-///
-/// `batch_size` — max memories to reason about, from
-/// `memory_consolidation_batch_size`.
-///
-/// Returns (merged, pruned) counts.
+/// Run one single-pass consolidation and record an audit row; returns `(merged, pruned)`.
+/// The adversarial mode is in `pond-server`, which holds the cancel token and SSE sink.
 pub async fn run_consolidation(
     consolidator: &dyn MemoryConsolidator,
     repo: &dyn MemoryRepository,
@@ -415,7 +352,7 @@ mod tests {
         )
     }
 
-    // ── mode dispatch (E2) ──────────────────────────────────────────────────
+    // ── mode dispatch ───────────────────────────────────────────────────────
 
     #[test]
     fn mode_setting_selects_the_pipeline() {
@@ -435,8 +372,6 @@ mod tests {
         assert_eq!(mode_from_setting("SINGLE"), ConsolidationMode::Single);
     }
 
-    /// An unrecognised value must fall back to the CHEAP path — a typo must not
-    /// silently triple inference cost on an 8GB device.
     #[test]
     fn unknown_mode_falls_back_to_single_not_adversarial() {
         for bogus in ["", "three-stage", "adversarial-v2", "yes", "true"] {
@@ -452,13 +387,11 @@ mod tests {
     fn mode_labels_match_the_setting_values() {
         assert_eq!(ConsolidationMode::Single.as_str(), MODE_SINGLE);
         assert_eq!(ConsolidationMode::Adversarial.as_str(), MODE_ADVERSARIAL);
-        // Round-trips through the setting string.
         for mode in [ConsolidationMode::Single, ConsolidationMode::Adversarial] {
             assert_eq!(mode_from_setting(mode.as_str()), mode);
         }
     }
 
-    /// The shipped default must be the cheap mode.
     #[test]
     fn the_default_setting_resolves_to_single() {
         let defaults = crate::user_data::domain::settings::Settings::default();
@@ -468,7 +401,7 @@ mod tests {
         );
     }
 
-    // ── select_batch (E3) ───────────────────────────────────────────────────
+    // ── select_batch ────────────────────────────────────────────────────────
 
     #[test]
     fn select_batch_caps_and_reports_the_remainder() {
@@ -534,7 +467,7 @@ mod tests {
         assert_eq!(selection.batch.len(), MIN_MEMORIES_TO_CONSOLIDATE);
     }
 
-    // ── apply_actions correction safety (E4) ────────────────────────────────
+    // ── apply_actions correction safety ─────────────────────────────────────
 
     #[tokio::test]
     async fn prune_of_a_correction_is_blocked() {
@@ -642,7 +575,6 @@ mod tests {
         assert_eq!(created.segment, Some(MemorySegment::Correction));
         assert_eq!(created.corrects.as_deref(), Some("name is not Jeremy"));
 
-        // Both sources superseded by the new memory.
         let superseded = repo.superseded().await;
         assert_eq!(superseded.len(), 2);
         assert!(superseded.iter().all(|(_, by)| by == &created.id));
