@@ -26,8 +26,7 @@ function matterStatus(state: MatterStatus["state"], error?: string): MatterStatu
 beforeEach(() => {
   vi.clearAllMocks();
   mocked(api.listDevices).mockResolvedValue([]);
-  // Commissioning is only offered against a live controller, so that is the
-  // baseline; the tests that care about the other states set them explicitly.
+  // Commissioning needs a live controller, so that's the baseline; other states are set per test.
   mocked(api.getMatterStatus).mockResolvedValue(matterStatus("connected"));
   mocked(api.updateSettings).mockResolvedValue({});
 });
@@ -46,10 +45,8 @@ describe("Add device — Matter vs other", () => {
   it("asks for a setup code, not a description, when adding a Matter device", async () => {
     await openModal();
 
-    // Matter is the default: a setup code is what a Matter device needs.
     expect(await screen.findByText("Setup code")).toBeTruthy();
-    // The manual-entry fields must not be asked for — a commissioned device
-    // reports its own name and type.
+    // No manual-entry fields: a commissioned device reports its own name and type.
     expect(screen.queryByText("Device type")).toBeNull();
     expect(screen.queryByText("Hostname (optional)")).toBeNull();
   });
@@ -67,11 +64,9 @@ describe("Add device — Matter vs other", () => {
     fireEvent.change(input, { target: { value: "20202021" } });
     fireEvent.click(screen.getByText("Commission"));
 
-    // No name entered → code only, name undefined.
     await waitFor(() => expect(api.commissionDevice).toHaveBeenCalledWith("20202021", undefined));
     // Never a manual registry write: the bridge registers what it commissions.
     expect(api.registerDevice).not.toHaveBeenCalled();
-    // List reloads so the new device shows up.
     await waitFor(() => expect(mocked(api.listDevices).mock.calls.length).toBeGreaterThan(1));
   });
 
@@ -112,9 +107,7 @@ describe("Add device — Matter vs other", () => {
   });
 
   it("shows the pairing-mode guidance verbatim, since it is the fix as well as the reason", async () => {
-    // The server's wording for the commonest commissioning failure — a device
-    // whose 15-minute pairing window has closed. It is actionable copy, so the
-    // UI must not summarise or truncate it.
+    // The server's copy for the commonest failure: a closed 15-minute pairing window.
     const guidance =
       "No device found in pairing mode. Put the device into pairing mode and try again — " +
       "a Matter device stops accepting new connections about 15 minutes after it starts.";
@@ -126,8 +119,7 @@ describe("Add device — Matter vs other", () => {
     });
     fireEvent.click(screen.getByText("Commission"));
 
-    // Matched in fragments rather than as one string: the copy contains an em
-    // dash and wraps, so an exact-node match would be asserting the layout.
+    // In fragments: the copy has an em dash and wraps, so an exact match would test layout.
     expect(await screen.findByText(/No device found in pairing mode/)).toBeTruthy();
     expect(screen.getByText(/15 minutes after it starts/)).toBeTruthy();
     // The code stays put: the device is what needs attention, not the input.
@@ -137,8 +129,6 @@ describe("Add device — Matter vs other", () => {
   it("offers no path but Matter, because there is no other kind to add", async () => {
     await openModal();
 
-    // Phones pair with a pairing code and the desktop app is this app, so a
-    // chooser here had one real option in it and a form nobody could use.
     expect(await screen.findByText("Setup code")).toBeTruthy();
     expect(screen.queryByText("Other device")).toBeNull();
     expect(screen.queryByText("Device type")).toBeNull();
@@ -151,7 +141,6 @@ describe("Matter section — turning the fabric on", () => {
     mocked(api.getMatterStatus).mockResolvedValue(matterStatus("connecting"));
     render(<Devices />);
 
-    // "Saved and enabled" is not the same fact as "the controller is up".
     expect((await screen.findByTestId("matter-state")).textContent).toBe("Starting…");
   });
 
@@ -159,9 +148,7 @@ describe("Matter section — turning the fabric on", () => {
     render(<Devices />);
     await screen.findByTestId("matter-state");
 
-    // Matter installs its own controller and runs by default, so a toggle's
-    // only honest advice was "leave it on" — a question the appliance should
-    // not be asking. The address is an operator setting and lives in Settings.
+    // The controller address is an operator setting, in Settings.
     expect(screen.queryByLabelText("Enable Matter")).toBeNull();
     expect(screen.queryByLabelText("Controller address")).toBeNull();
   });
@@ -173,7 +160,6 @@ describe("Matter section — turning the fabric on", () => {
     fireEvent.change(await screen.findByPlaceholderText(/20202021/), {
       target: { value: "20202021" },
     });
-    // The old build let this through and failed on submit.
     expect(screen.getByText("Commission").closest("button")?.disabled).toBe(true);
     expect(screen.getByTestId("matter-not-ready").textContent).toMatch(/still starting up/);
   });
@@ -189,9 +175,7 @@ describe("Matter section — turning the fabric on", () => {
     );
     expect(screen.getByText(/connection refused/)).toBeTruthy();
 
-    // Retry re-sends the current address: the runtime treats an unchanged
-    // request while unreachable as a retry, because it compares against what is
-    // running rather than against the request.
+    // Retry re-sends the same address: the runtime compares against what's running, so that is a retry.
     fireEvent.click(screen.getByText("Retry"));
     await waitFor(() =>
       expect(api.updateSettings).toHaveBeenCalledWith({
@@ -201,9 +185,7 @@ describe("Matter section — turning the fabric on", () => {
   });
 
   it("shows the server's message without the ApiError class name", async () => {
-    // A real 503 body from `routes.rs`, not an invented one: the point of this
-    // test is that whatever the server says reaches the user verbatim, and a
-    // fixture the server can no longer produce stops testing that.
+    // A real 503 body from `routes.rs`; keep it one the server can still produce.
     const serverMessage =
       "Matter is still starting up — the controller is not ready yet.";
     mocked(api.commissionDevice).mockRejectedValue(

@@ -16,7 +16,6 @@ function TimeCard({ data, variant }: McpCardProps) {
   const utcOffset = data.utc_offset as string | undefined;
   const timezones = (data.timezones ?? []) as WorldClockEntry[];
 
-  // Loading state
   if (!time && timezones.length === 0) {
     return (
       <div className="ui-card ui-time">
@@ -29,7 +28,6 @@ function TimeCard({ data, variant }: McpCardProps) {
     );
   }
 
-  // World clock view — multiple timezones
   if (timezones.length > 0 && !time) {
     const visible = timezones.slice(0, isCompact ? 3 : 6);
     return (
@@ -53,7 +51,6 @@ function TimeCard({ data, variant }: McpCardProps) {
     );
   }
 
-  // Single time view
   return (
     <div className="ui-card ui-time">
       <div className="ui-time__header">

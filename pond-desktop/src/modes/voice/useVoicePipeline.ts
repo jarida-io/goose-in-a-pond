@@ -1,10 +1,4 @@
-// ────────────────────────────────────────────────────────────
-// useVoicePipeline — Orchestration hook for the voice mode
-//
-// Owns the state machine, creates the VoiceBackend, wires
-// callbacks to AppContext dispatch, and manages conversational
-// turn-taking, countdown timers, and silence detection.
-// ────────────────────────────────────────────────────────────
+// Voice-mode orchestration for the browser path; the desktop shell uses useVoiceSession.
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useAppState, useAppDispatch } from "../../state/AppContext";
@@ -45,22 +39,14 @@ export function useVoicePipeline(): VoicePipelineAPI {
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoStopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wakeVariantsRef = useRef<string[]>([]);
-  // `voice_thinking_tone_enabled`. A ref, not state, for the same reason as
-  // `wakeVariantsRef`: the runPipeline calls below live in effect closures, and
-  // a re-render is not wanted for a value nothing renders. `undefined` until the
-  // settings load resolves — the backends read that as ON.
+  // `voice_thinking_tone_enabled`, read in effect closures (hence a ref); undefined until loaded = on.
   const thinkingToneRef = useRef<boolean | undefined>(undefined);
 
-  // Keep latest state accessible without stale closures
   const stateRef = useRef(state);
   stateRef.current = state;
 
-  // Re-arm the wake listener whenever we land back in "wait" without a
-  // pipeline having run (no speech / dismissal / manual abort). runPipeline's
-  // own finally block handles the case where a pipeline DID run — this
-  // covers every dead-end path that skips it. Kept as a ref (reassigned
-  // every render, called from closures created in effects) so it never
-  // captures a stale `wakeWord`.
+  // Re-arms the wake listener on paths back to "wait" that skip runPipeline (whose finally does it).
+  // A ref reassigned each render, so effect closures never see a stale `wakeWord`.
   const restartWakeListenerRef = useRef<() => void>(() => {});
   restartWakeListenerRef.current = () => {
     const backend = backendRef.current;
@@ -86,7 +72,6 @@ export function useVoicePipeline(): VoicePipelineAPI {
       if (destroyed) { backend.destroy(); return; }
       backendRef.current = backend;
 
-      // Wire callbacks → dispatch
       backend.onAudioLevel = (level) => setAudioLevel(level);
 
       backend.onStateChange = (s) => {
@@ -160,7 +145,6 @@ export function useVoicePipeline(): VoicePipelineAPI {
 
       backend.onDismissed = (isExit) => {
         dispatch({ type: "SET_VOICE_STATE", payload: "idle" });
-        // If soft dismissal and wake word configured, return to wait
         if (!isExit && wakeWord) {
           setTimeout(() => {
             dispatch({ type: "SET_VOICE_STATE", payload: "wait" });
@@ -175,10 +159,9 @@ export function useVoicePipeline(): VoicePipelineAPI {
       backendRef.current?.destroy();
       backendRef.current = null;
     };
-    // Re-create if serverUrl changes
   }, [state.serverUrl]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Load settings (wake word, max duration) ────────────
+  // ── Load settings ──────────────────────────────────────
 
   useEffect(() => {
     api.getSettings().then((s) => {
@@ -216,15 +199,8 @@ export function useVoicePipeline(): VoicePipelineAPI {
   }, [wakeWord, dispatch]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Conversational turn-taking ─────────────────────────
-  // After Goose finishes speaking, auto-start recording.
-  // If no speech within 8s, return to wake listening or idle.
-  //
-  // Also fires on a "thinking" -> "idle" transition: that's what a
-  // barge-in during thinking looks like (onWakeInterrupt sets state
-  // straight to "idle" without ever reaching "speaking"). Without this,
-  // interrupting mid-thought correctly stops the thinking tone but never
-  // starts listening for the follow-up — indistinguishable from the
-  // barge-in "not working" at all.
+  // After a reply, auto-record the next turn. "thinking" -> "idle" counts too: that is a barge-in
+  // mid-thought, because onWakeInterrupt jumps straight to "idle".
 
   useEffect(() => {
     const prev = prevStateRef.current;
@@ -232,7 +208,6 @@ export function useVoicePipeline(): VoicePipelineAPI {
     prevStateRef.current = curr;
 
     if ((prev === "speaking" || prev === "thinking") && curr === "idle") {
-      // Goose finished speaking — auto-listen for next turn
       const backend = backendRef.current;
       if (!backend) return;
 
@@ -258,7 +233,6 @@ export function useVoicePipeline(): VoicePipelineAPI {
         }
       });
 
-      // 8s no-speech timeout
       if (noSpeechTimerRef.current) clearTimeout(noSpeechTimerRef.current);
       noSpeechTimerRef.current = setTimeout(() => {
         if (stateRef.current.voiceState === "recording") {
@@ -309,7 +283,6 @@ export function useVoicePipeline(): VoicePipelineAPI {
     clearTimers();
     dispatch({ type: "SET_VOICE_STATE", payload: "recording" });
 
-    // Start countdown
     setSecsLeft(maxSecs);
     countdownTimerRef.current = setInterval(() => {
       setSecsLeft((s) => Math.max(0, s - 1));
@@ -318,7 +291,6 @@ export function useVoicePipeline(): VoicePipelineAPI {
       stopAndSend();
     }, maxSecs * 1000);
 
-    // VAD recording
     backend.recordWithVad(stateRef.current.sessionToken ?? undefined, stateRef.current.sessionId ?? undefined).then((blob) => {
       clearTimers();
       if (blob) {
@@ -342,12 +314,10 @@ export function useVoicePipeline(): VoicePipelineAPI {
   }
 
   function stopAndSend() {
-    // Force-stop recording and send what we have
     clearTimers();
     const backend = backendRef.current;
     if (!backend) return;
-    // abortRecording will trigger the recordWithVad promise to resolve with null
-    // We need a different approach — just let VAD naturally resolve
+    // TODO: abortRecording resolves recordWithVad with null, so nothing is sent; let VAD finish instead.
     backend.abortRecording();
     dispatch({ type: "SET_VOICE_STATE", payload: wakeWord ? "wait" : "idle" });
     restartWakeListenerRef.current();

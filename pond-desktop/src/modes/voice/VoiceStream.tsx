@@ -1,17 +1,5 @@
-// ────────────────────────────────────────────────────────────
-// VoiceStream — the conversation, flowing either side of the orb.
-//
-// A single scroll container laid out as three grid columns: what the pond
-// said and did on the left, a reserved channel down the middle that the orb
-// occupies, and what you said on the right. Placement is the only thing that
-// says who spoke — no name chips, no avatars — because in a conversation with
-// exactly two participants, the side IS the attribution.
-//
-// Not TranscriptFeed: that component builds its own flex column and owns its
-// own scrolling, neither of which can put a message in a specific grid column.
-// The two coexist — TranscriptFeed still serves the browser voice path and the
-// chat panels, where a single stacked column is right.
-// ────────────────────────────────────────────────────────────
+// Voice transcript as a three-column grid (pond, orb channel, you); the side is the only attribution.
+// Not TranscriptFeed: its own flex column and scrolling can't place a message in a grid column.
 
 import { useEffect, useRef } from "react";
 import type { ContextCard, TranscriptMessage } from "../../state/reducer";
@@ -26,9 +14,6 @@ interface Props {
 export function VoiceStream({ messages, contextCards = [] }: Props) {
   const scrollerRef = useRef<HTMLDivElement>(null);
 
-  // Follow the conversation. This element IS the scroller (unlike the old
-  // drawer, where the feed inside never overflowed and scrollTo was a no-op),
-  // so it can scroll itself directly.
   useEffect(() => {
     const el = scrollerRef.current;
     if (!el) return;
@@ -54,8 +39,7 @@ export function VoiceStream({ messages, contextCards = [] }: Props) {
       aria-label="Conversation"
     >
       {messages.map((msg, idx) => {
-        // Cards timestamped after this message and before the next belong to
-        // this turn — same rule TranscriptFeed uses.
+        // Same card-to-turn rule as TranscriptFeed.
         const nextMsg = messages[idx + 1];
         const inlineCards = msg.role === "agent"
           ? contextCards.filter((c) => {
@@ -66,10 +50,7 @@ export function VoiceStream({ messages, contextCards = [] }: Props) {
           : [];
 
         return (
-          // Explicit row per message. Without it, grid auto-placement fills
-          // whichever cell is free — so a reply and the question that FOLLOWED
-          // it land on the same row, and the conversation reads as though the
-          // two of you talked over each other. One message, one row, in order.
+          // Explicit row: auto-placement would put a reply and the next question on the same row.
           <div
             key={msg.id}
             className={`vm-said vm-said--${msg.role}`}

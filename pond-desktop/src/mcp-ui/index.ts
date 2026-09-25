@@ -1,8 +1,4 @@
-// MCP-UI Card Registry — barrel export
-//
-// Importing this module triggers registerMcpCard() for all built-in cards.
-// To add a new card type: create a file in cards/ that calls registerMcpCard(),
-// then add the import here. Zero core code changes needed.
+// Side-effect imports register the built-in cards; add a new card's import here.
 
 import "./cards/WeatherCard";
 import "./cards/CalendarCard";

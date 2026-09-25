@@ -1,18 +1,4 @@
-// ────────────────────────────────────────────────────────────
-// VoiceMode — Pure UI component
-//
-// In Tauri: drives the persistent child-process voice session via
-// useVoiceSession. Entering voice mode starts the session; leaving
-// stops it. The orb, transcript, and context cards are all fed by
-// the voice-* Tauri events owned by useVoiceSession.
-//
-// In a plain browser: falls back to the existing per-turn HTTP
-// pipeline via useVoicePipeline (WebVoiceBackend). The browser path
-// is intentionally preserved and unchanged.
-//
-// Zero backend logic lives here — it delegates entirely to the
-// appropriate hook for the runtime.
-// ────────────────────────────────────────────────────────────
+// UI only: delegates to useVoiceSession (desktop shell) or useVoicePipeline (browser).
 
 import React, { useEffect, useRef, useState } from "react";
 import { Button } from "@heroui/react";
@@ -87,9 +73,7 @@ function VoiceModeChildProcess() {
   const serverDown  = !state.serverOnline;
   const [isSwitcherOpen, setSwitcherOpen] = useState(false);
 
-  // Fire a one-shot flash on the orb the moment the child confirms it heard
-  // the wake word (wait -> recording), so wake-word detection has a visible
-  // beat instead of just a silent state-label change.
+  // Flash the orb on wait -> recording so wake-word detection is visible, not just a label change.
   const prevVoiceStateRef = useRef(voiceState);
   const [pulseKey, setPulseKey] = useState(0);
   useEffect(() => {
@@ -99,29 +83,12 @@ function VoiceModeChildProcess() {
     prevVoiceStateRef.current = voiceState;
   }, [voiceState]);
 
-  // Start the session on mount; stop it on cleanup — but defer the stop by
-  // one tick so a fast remount (React StrictMode's dev double-invoke, or the
-  // user quickly leaving and re-entering the screen) can cancel it instead
-  // of tearing the session down and spawning another. Without this, every
-  // such remount killed a live child and started a new one within ~100ms —
-  // too fast for any session to survive long enough to do anything, and each
-  // respawn reloads the models.
-  //
-  // It also used to crash Tauri's event bridge outright, when an in-flight
-  // event raced the listener teardown and `listeners[eventId]` went
-  // undefined. That half no longer applies: subscription is synchronous and
-  // there is no eventId table to go stale. The defer stays for the reason
-  // above, which is the one that was always about the child.
+  // The stop is deferred a tick so a fast remount (StrictMode double-invoke, quick re-entry) can
+  // cancel it instead of killing the child and respawning it, which reloads the models.
   const pendingStopRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Conversation name ──────────────────────────────────────
-  // The heading answers "which conversation is this?", so it has to be the
-  // name a person would use. A truncated uuid answered "which row is this?" —
-  // a question nobody in a voice conversation is asking.
-  //
-  // The server names a session a turn or two in, so this refetches as the
-  // conversation grows rather than only on mount. Until a name exists the
-  // fallback states the truth plainly instead of inventing one.
+  // The server names a session a turn or two in, hence the per-turn refetch; never show the uuid.
   const [title, setTitle] = useState<string | null>(null);
   const turnCount = state.transcript.filter((m) => m.role === "user").length;
 
@@ -142,8 +109,7 @@ function VoiceModeChildProcess() {
 
   useEffect(() => {
     if (pendingStopRef.current !== null) {
-      // A remount landed before the deferred stop fired — cancel it and
-      // keep the session that's already running instead of restarting it.
+      // Remounted before the deferred stop fired: keep the running session.
       clearTimeout(pendingStopRef.current);
       pendingStopRef.current = null;
     } else {
@@ -153,7 +119,6 @@ function VoiceModeChildProcess() {
     return () => {
       pendingStopRef.current = setTimeout(() => {
         pendingStopRef.current = null;
-        // Stop when VoiceMode unmounts (user navigates back to GUI).
         session.stopSession();
       }, 0);
     };
@@ -443,12 +408,7 @@ function VoiceModePipeline() {
 // ── Public export: selects the correct path at runtime ──────
 
 export function VoiceMode() {
-  // The desktop shell gets the child-process path, where one pond-server
-  // process owns the mic, the model and the speaker with no transport
-  // boundaries between them. A browser has no such child and gets the HTTP
-  // pipeline. The check is for the bridge itself, not for a framework global:
-  // sniffing for the latter is how this silently picks the wrong path when
-  // the shell underneath changes.
+  // Test the bridge itself, not a framework global: sniffing one misroutes silently when the shell changes.
   if (isDesktopShell()) {
     return <VoiceModeChildProcess />;
   }

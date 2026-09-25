@@ -1,12 +1,4 @@
-/**
- * WebVoiceBackend -- Browser-native VoiceBackend implementation.
- *
- * Provides mic capture, ASR transcription, LLM chat streaming, sentence TTS,
- * wake word detection, and barge-in using Web Audio API + HTTP calls to
- * pond-server. Plain class with no React dependencies.
- *
- * @module WebVoiceBackend
- */
+// Browser VoiceBackend on Web Audio and pond-server HTTP; a plain class, no React.
 
 import { api } from "../../api/PondApiClient";
 import type {
@@ -60,17 +52,12 @@ export class WebVoiceBackend implements VoiceBackend {
   onWakeInterrupt: (() => void) | null = null;
   onDismissed: ((isExit: boolean) => void) | null = null;
 
-  // Private state
   private serverUrl: string;
   private cancelled = false;
   private pipelineActive = false;
   private abortController: AbortController | null = null;
   private ttsSource: AudioBufferSourceNode | null = null;
-  /**
-   * Stop function for the ambient working tone, or null when no tone is
-   * playing — which covers both "not started yet" and "switched off in
-   * settings", so every teardown path can call it the same way.
-   */
+  /** Stops the working tone; null when none is playing, including when it's disabled in settings. */
   private stopThinkingFn: (() => void) | null = null;
   private recording: RecordingContext | null = null;
   private wakeActive = false;
@@ -80,13 +67,10 @@ export class WebVoiceBackend implements VoiceBackend {
   private wakeStream: MediaStream | null = null;
   private wakeInterval: ReturnType<typeof setInterval> | null = null;
 
-  // Q2-26: ASR transcript computed speculatively during silence-confirm wait.
-  // Tagged with the Blob it belongs to; runPipeline() reuses it only for that
-  // exact blob (reference equality).
+  // ASR run during the silence-confirm wait; reused only for the identical Blob (reference equality).
   private speculative: { wav: Blob; transcript: string } | null = null;
 
-  // Q2-26: LLM fetch fired as soon as speculative ASR resolved (mid-window).
-  // runPipeline() drains it when the confirmed transcript matches.
+  // LLM fetch fired on speculative ASR; runPipeline uses it only if the confirmed transcript matches.
   private speculativeLlm: {
     transcript: string;
     response: Promise<Response>;
@@ -102,11 +86,8 @@ export class WebVoiceBackend implements VoiceBackend {
   // ════════════════════════════════════════════════════════════════
 
   async recordWithVad(authToken?: string, sessionId?: string): Promise<Blob | null> {
-    // Only one mic listener may own the microphone at a time. The wake
-    // listener may have just been restarted by a prior runPipeline() call's
-    // finally block — stop it before opening the conversational-follow-up
-    // stream, or both loops independently detect the same utterance and
-    // each call runPipeline(), producing overlapping/garbled responses.
+    // One mic owner at a time: a prior runPipeline's finally may have restarted the wake listener,
+    // and both loops would catch the same utterance and each run the pipeline.
     this.stopWakeInternal();
     this.closeMic();
     this.cancelled = false;
@@ -119,10 +100,7 @@ export class WebVoiceBackend implements VoiceBackend {
     const td = new Float32Array(ctx.analyser.fftSize);
     const t0 = Date.now();
 
-    // Q2-26: speculative transcribe overlap — fire the transcribe call the
-    // moment trailing silence starts (not yet confirmed), instead of
-    // starting it only after the full silenceTimeoutMs wait elapses. If
-    // speech resumes before confirmation, the result is discarded.
+    // Transcribe once trailing silence starts, not after silenceTimeoutMs; discarded if speech resumes.
     let speculative: Promise<string | null> | null = null;
 
     return new Promise<Blob | null>((resolve) => {
@@ -141,8 +119,7 @@ export class WebVoiceBackend implements VoiceBackend {
         if (wasSpeech && vad.phase === "trailing_silence") {
           const silenceOnset = Date.now();
           speculative = this.transcribe(this.collectWav());
-          // Q2-26 LLM overlap: fire the chat stream as soon as ASR resolves,
-          // still within the silence-confirmation window.
+          // Start the chat stream once ASR resolves, still inside the silence-confirmation window.
           speculative.then((transcript) => {
             if (!transcript || this.cancelled) return;
             const llmAbort = new AbortController();
@@ -152,28 +129,8 @@ export class WebVoiceBackend implements VoiceBackend {
             const responsePromise = fetch(`${this.serverUrl}/api/v1/chat/stream`, {
               method: "POST",
               headers,
-              // voice_mode: false — generate the exact same response the chat
-              // tab would produce for identical wording; the existing TTS
-              // pipeline (stripMarkdown/normalizeForSpeech/filterThinkingFull)
-              // already makes any response safe to speak, so a separate
-              // voice-tailored prompt variant isn't needed and was producing
-              // grammatically mangled text on small on-device models.
-              //
-              // KNOWN COST, kept deliberately rather than fixed blind: this
-              // flag does not only select the prompt variant. It also drops the
-              // tighter voice turn cap, and it is what `format_current_time`
-              // switches on — so `spoken_time` (added alongside this, to stop
-              // small models reading 5:23 back as "five oh three") never runs on
-              // THIS path. The terminal voice loop sends voice_mode: true and
-              // does get it.
-              //
-              // Both halves exist to fix the same class of bug and currently
-              // pull opposite ways, because one flag drives two decisions. The
-              // fix is to separate them — "apply the voice prompt section" and
-              // "this response will be spoken aloud" are different questions —
-              // and that is an API change worth measuring against a real model
-              // on the device, not a value to flip on the strength of reading
-              // the code.
+              // false: the voice prompt garbled small models, and TTS makes any reply speakable. Known cost: it
+              // also drops the voice turn cap and `spoken_time`; the fix is splitting the flag, not flipping it.
               body: JSON.stringify({ message: transcript, session_id: sessionId, voice_mode: false }),
               signal: llmAbort.signal,
             });
@@ -208,10 +165,7 @@ export class WebVoiceBackend implements VoiceBackend {
   }
 
   async runPipeline(wav: Blob, opts: PipelineOpts): Promise<void> {
-    // Guard against concurrent invocation (e.g. the wake listener and the
-    // conversational follow-up recording both grabbing the mic and both
-    // detecting the same utterance) — mirrors the Tauri-native
-    // compare_exchange guard in audio_cmd.rs::run_voice_pipeline.
+    // Reject concurrent runs: the wake listener and a follow-up recording can both catch one utterance.
     if (this.pipelineActive) return;
     this.cancelled = false;
     this.pipelineActive = true;
@@ -220,14 +174,13 @@ export class WebVoiceBackend implements VoiceBackend {
     this.abortController = ac;
 
     try {
-      // Step 1: Transcribe (Q2-26: reuse the speculative result if this is
-      // the same recording it was computed for — skips a redundant call).
+      // Reuse the speculative transcript if it was computed for this same recording.
       const reusable = this.speculative?.wav === wav ? this.speculative.transcript : null;
       this.speculative = null;
       let text = reusable ?? (await this.transcribe(await wav.arrayBuffer()));
       if (this.cancelled || !text) { this.onStateChange?.("idle"); return; }
 
-      // Q2-26 LLM overlap: drain the pre-started response if transcript matches.
+      // Use the pre-started LLM response if its transcript matches.
       const specLlm = this.speculativeLlm;
       this.speculativeLlm = null;
       const preStartedLlm =
@@ -236,7 +189,6 @@ export class WebVoiceBackend implements VoiceBackend {
           : null;
       if (specLlm && !preStartedLlm) specLlm.abort.abort();
 
-      // Step 1a: Strip wake word
       if (opts.stripWakeWord) {
         const idx = text.toLowerCase().indexOf(opts.stripWakeWord.toLowerCase());
         if (idx !== -1) text = text.slice(idx + opts.stripWakeWord.length).trim();
@@ -248,7 +200,6 @@ export class WebVoiceBackend implements VoiceBackend {
         }
       }
 
-      // Step 1b: Dismissal check
       const dm = checkDismissal(text);
       if (dm.dismissed) {
         const msg = dm.isExit
@@ -261,19 +212,16 @@ export class WebVoiceBackend implements VoiceBackend {
         return;
       }
 
-      // Step 1c: Dispatch transcript + thinking state
       this.onTranscript?.(text);
       this.onStateChange?.("thinking");
 
       // Concurrent quip + thinking tone while the LLM streams
       let quipDone = false;
       void this.playTtsSentence(getQuip(), ac.signal).catch(() => {}).then(() => { quipDone = true; });
-      // `!== false` rather than a truthiness test: an absent flag means the
-      // settings load has not resolved, and that should sound normal, not mute.
+      // `!== false`: absent means settings haven't loaded, which should sound normal, not mute.
       const stopThink = opts.thinkingTone !== false ? playThinkingTone() : null;
       this.stopThinkingFn = stopThink;
 
-      // Step 2: SSE chat stream (passes pre-started speculative response if any)
       await this.streamChat(text, opts, ac, () => {
         stopThink?.(); this.stopThinkingFn = null;
         // Stop quip if still playing so first real sentence starts immediately
@@ -303,13 +251,11 @@ export class WebVoiceBackend implements VoiceBackend {
     this.cancelled = true;
     this.pipelineActive = false;
     this.wakeDetecting = false;
-    // Don't restart wake listener here — the barge-in path calls runPostTrigger next,
-    // which fires onWakeDetected → runPipeline, and finally restarts the listener.
+    // Don't restart the wake listener: after a barge-in, the next runPipeline's finally does.
     this.abortController?.abort(); this.abortController = null;
     if (this.speculativeLlm) { this.speculativeLlm.abort.abort(); this.speculativeLlm = null; }
     if (this.stopThinkingFn) { this.stopThinkingFn(); this.stopThinkingFn = null; }
-    // Stop any in-progress TTS: kills the active source, resolves pending
-    // promises, and sets the interrupted flag so queued sentences are skipped.
+    // Also sets the interrupt flag, so queued sentences are skipped.
     stopTtsPlayback();
     this.ttsSource = null;
     this.closeMic();
@@ -449,7 +395,6 @@ export class WebVoiceBackend implements VoiceBackend {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (opts.authToken) headers["Authorization"] = `Bearer ${opts.authToken}`;
 
-    // Q2-26: use the pre-started speculative response if available, else fresh fetch.
     const [res, llmFiredAt, silenceOnset, usedSpeculative] = await (async (): Promise<
       [Response, number, number, boolean]
     > => {
@@ -617,8 +562,7 @@ export class WebVoiceBackend implements VoiceBackend {
       chunks = [];
 
       const ds = downsampleTo16k(merged, actx.sampleRate);
-      // Prevent re-entrance: if a prior detection is still resolving (transcribing or
-      // in post-trigger) skip this burst. pipelineActive covers the running-pipeline case.
+      // Skip bursts while a detection is still resolving or a pipeline runs.
       if (this.wakeDetecting || this.pipelineActive) { chunks = []; return; }
       this.wakeDetecting = true;
       try {
@@ -629,9 +573,8 @@ export class WebVoiceBackend implements VoiceBackend {
         // Barge-in: cancel running pipeline, leave wakeDetecting=false so listener re-arms.
         if (this.pipelineActive) { this.wakeDetecting = false; this.cancelPipeline(); this.onWakeInterrupt?.(); return; }
 
-        // Kill the detection interval NOW — clearInterval is the only guarantee against
-        // concurrent async ticks that may have already passed the wakeDetecting guard.
-        // runPipeline's finally restarts the listener when the pipeline finishes.
+        // Clear now: only clearInterval stops async ticks already past the wakeDetecting guard.
+        // runPipeline's finally restarts the listener.
         if (this.wakeInterval) { clearInterval(this.wakeInterval); this.wakeInterval = null; }
 
         playPingTone();

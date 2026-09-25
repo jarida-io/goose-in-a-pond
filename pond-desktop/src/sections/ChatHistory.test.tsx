@@ -24,8 +24,6 @@ function session(over: Partial<SessionSummary> = {}): SessionSummary {
 }
 
 describe("cardWeight", () => {
-  /// Height has to be earned from the content, or the wall is just noise with
-  /// a rhythm. These are the thresholds that make it mean something.
   it("grows a card with the conversation it holds", () => {
     expect(cardWeight(session({ message_count: 2, preview: "hi" }))).toBe("tile");
     expect(cardWeight(session({ message_count: 8, preview: "hi" }))).toBe("card");
@@ -113,9 +111,7 @@ describe("the wall", () => {
     const props = renderWall([session({ id: "a", title: "Wake word fires twice" })]);
 
     const card = screen.getByRole("button", { name: /Open conversation: Wake word fires twice/ });
-    // happy-dom reports zeroes for layout, so the geometry is stubbed: what is
-    // under test is that the card's centre is measured relative to the pane,
-    // not the viewport.
+    // happy-dom has no layout, so the geometry is stubbed.
     card.getBoundingClientRect = () => ({ left: 300, top: 200, width: 240, height: 160 }) as DOMRect;
     const pane = document.querySelector(".chist")!;
     pane.getBoundingClientRect = () => ({ left: 100, top: 50, width: 900, height: 700 }) as DOMRect;
@@ -140,7 +136,6 @@ describe("the wall", () => {
     expect(screen.getByText(/Nothing matches/)).toBeTruthy();
   });
 
-  /// An empty wall is a dead end, so it has to be an invitation instead.
   it("invites you to start one when there is nothing here", () => {
     const props = renderWall([]);
     expect(screen.getByText("No conversations yet.")).toBeTruthy();
@@ -158,7 +153,6 @@ describe("the wall", () => {
     const card = document.querySelector(".chist__card")!;
     fireEvent.click(within(card as HTMLElement).getByRole("button", { name: /Delete conversation/ }));
     expect(props.onDelete).toHaveBeenCalledWith("a");
-    // Pressing delete must never also open the conversation underneath it.
     expect(props.onOpen).not.toHaveBeenCalled();
   });
 

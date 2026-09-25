@@ -45,10 +45,7 @@ export function Chat() {
   const state    = useAppState();
   const dispatch = useAppDispatch();
 
-  // The transcript, the turn in flight and the queue behind it belong to the
-  // store, not to this component: pressing anything in the sidebar unmounts
-  // Chat, and a turn is not a property of whichever screen happens to be
-  // showing. See `state/chatRunStore`.
+  // Turn state lives in `state/chatRunStore`: any sidebar press unmounts Chat, and the turn must survive it.
   const run = useChatRun();
   const { messages, busy, queued, turnSeed, loadingSession } = run;
 
@@ -58,17 +55,11 @@ export function Chat() {
   const [editingTitle, setEditingTitle]     = useState(false);
   const [titleDraft, setTitleDraft]         = useState("");
   const titleInputRef                       = useRef<HTMLInputElement>(null);
-  /* Mirrors of render values, so the title callbacks can stay stable without
-     depending on things declared further down the component. */
+  // Render-value mirrors, assigned further down, so the title callbacks stay stable.
   const chatTitleRef                        = useRef("");
   const titleDraftRef                       = useRef("");
   const renameSessionRef                    = useRef<(id: string, title: string) => void>(() => {});
-  /**
-   * `null` until the session list says which screen this should be — unless a
-   * turn is live or finished-but-unseen, in which case the answer is already
-   * known and resolving it lazily avoids a frame of wall skeleton in front of a
-   * conversation that is mid-sentence.
-   */
+  /** `null` until the session list decides, except that a live or unseen turn opens the thread at once. */
   const [view, setView]                     = useState<"history" | "thread" | null>(
     () => (hasLiveThread() ? "thread" : null),
   );
@@ -83,28 +74,18 @@ export function Chat() {
   // Which user message (by local id) is being edited inline, if any.
   const [editingId, setEditingId]                 = useState<number | null>(null);
   const [editText, setEditText]                   = useState("");
-  // Fail-open: an unknown/failed capabilities fetch never disables attaching —
-  // it only disables once we've SUCCESSFULLY confirmed the model lacks vision.
+  // Fail open: attaching is disabled only once the model is confirmed to lack vision.
   const [visionCapable, setVisionCapable]         = useState(true);
   const [capabilitiesKnown, setCapabilitiesKnown] = useState(false);
-  // `thinking_mode` is a server setting ("auto" | "on" | "off") the agent reads
-  // each turn, so this toggle changes real behaviour rather than just a label.
+  // `thinking_mode` is a server setting ("auto" | "on" | "off") the agent reads each turn.
   const [thinkingMode, setThinkingMode]           = useState<string>("auto");
   const [thinkingSaving, setThinkingSaving]       = useState(false);
-  // What to restore when switching back on. Toggling off then on would
-  // otherwise collapse an explicit "on" into "auto" and quietly lose the
-  // distinction.
+  // Restored on re-enable, so an explicit "on" doesn't come back as "auto".
   const lastThinkingOnRef                         = useRef<string>("auto");
   // Used only to personalise the greeting; blank is fine and handled there.
   const [userName, setUserName]                   = useState<string>("");
-  // The currently *configured* provider/model, read once alongside the other
-  // settings below — used as the model-selector's fallback label so a
-  // provider with no per-turn model_name history (mesh, right after being
-  // selected in Settings) still shows correctly instead of the old hardcoded
-  // "local model" guess. `meshEnabled` also gates whether "mesh" is injected
-  // into the quick-switcher below, same principle as the Settings catalogue's
-  // provider dropdown (#132): it isn't a downloadable model, so it can never
-  // appear via the `listModels()` scan on its own.
+  // Configured provider: the model label's fallback before any turn reports a model_name. `meshEnabled`
+  // gates injecting "mesh" into the switcher, since no `listModels()` scan can find it.
   const [configuredProvider, setConfiguredProvider] = useState<string | null>(null);
   const [meshEnabled, setMeshEnabled]               = useState(false);
 
@@ -118,16 +99,8 @@ export function Chat() {
     ? "The active model cannot read images. Switch to a vision-capable model such as gemma-4-E2B-it."
     : "Attach image";
 
-  /**
-   * Revoke previews still sitting in the tray when this component goes away.
-   *
-   * The tray is the one piece of chat state that genuinely dies with the view:
-   * a sent image's preview is owned by the store from `sendTurn` onward, but an
-   * unsent one has no owner left once Chat unmounts, and before the store
-   * existed those object URLs simply leaked. Reads a ref rather than
-   * `attachments`, because a cleanup with the array as a dependency would
-   * revoke a live thumbnail every time another image was added.
-   */
+  // On unmount, revoke unsent tray previews (sent ones belong to the store). Via a ref: a cleanup
+  // depending on `attachments` would revoke a live thumbnail each time an image was added.
   const attachmentsRef = useRef<PreparedImage[]>([]);
   attachmentsRef.current = attachments;
   useEffect(() => () => {
@@ -192,8 +165,7 @@ export function Chat() {
     void addFiles(files);
   }
 
-  // Load vision capability once the server is reachable. Failure degrades to
-  // "let the server explain" (fail open) rather than hiding the affordance.
+  // A failed fetch leaves attaching on (fail open); the server explains any refusal.
   useEffect(() => {
     if (!state.serverOnline) return;
     api.getModelCapabilities()
@@ -201,21 +173,8 @@ export function Chat() {
       .catch(() => { setCapabilitiesKnown(false); });
   }, [state.serverOnline]);
 
-  /**
-   * Follow a session id set from OUTSIDE — a deep link, or the
-   * `session-created` event AppContext listens for.
-   *
-   * Keyed on app state actually changing, not on it disagreeing with the store.
-   * Those are different questions: opening a conversation from the wall sets
-   * the store first and dispatches second, so a disagreement is usually just
-   * this component's own change on its way round, and treating it as external
-   * would reload the history we already have — or, when the dispatch does not
-   * come back at all, quietly drop the open conversation.
-   *
-   * A cleared id records and stops. Somebody else clearing app state is not an
-   * instruction to throw away the transcript; "New chat" is, and it says so
-   * through `resetConversation`.
-   */
+  // Follows a session id set from outside (deep link, `session-created`). Keyed on app state changing, not
+  // on disagreeing with the store: our own wall opens disagree briefly. A cleared id keeps the transcript.
   const lastExternalIdRef = useRef<string | undefined>(state.sessionId ?? undefined);
   useEffect(() => {
     const newId = state.sessionId ?? undefined;
@@ -262,10 +221,7 @@ export function Chat() {
       if (cat === "whisper" || cat.startsWith("tts")) return false;
       return true;
     });
-    // "mesh" (#132) has no catalog row — it borrows a trusted peer's compute,
-    // it isn't a file this Pond downloaded — so it can never appear via the
-    // scan above. Synthesised here, gated on mesh_enabled, same principle as
-    // the Settings catalogue's provider dropdown.
+    // "mesh" is a peer's compute, not a downloaded file, so no scan finds it; synthesised when mesh_enabled.
     if (!meshEnabled) return real;
     const meshEntry: ModelEntry = {
       id: "mesh/mesh",
@@ -291,10 +247,7 @@ export function Chat() {
   const handleModelSwitch = useCallback(async (provider: string, name: string) => {
     setModelSwitching(true);
     try {
-      // "mesh" has no catalog row to activate — `POST /activate/{category}/…`
-      // only knows gguf/llamafile/ollama/whisper/tts_* categories and would
-      // 400 on "mesh". Setting chat_provider directly is the same mechanism
-      // the Settings catalogue's Provider dropdown uses (#132).
+      // `POST /activate/…` would 400 on "mesh", which has no catalog row; set chat_provider directly.
       if (provider === "mesh") {
         await api.updateSettings({ chat_provider: "mesh" });
         setConfiguredProvider("mesh");
@@ -329,8 +282,6 @@ export function Chat() {
     };
   }, [showModelSelector]);
 
-  // Load show_turn_stats once the server is reachable (cold-start safe:
-  // re-runs on the offline->online transition like the session loader below).
   useEffect(() => {
     if (!state.serverOnline) return;
     api.getSettings().then((s) => {
@@ -344,29 +295,8 @@ export function Chat() {
     }).catch(() => {});
   }, [state.serverOnline]);
 
-  /**
-   * Decide what this section opens on.
-   *
-   * The wall, not the last conversation. Resuming whatever happened to be most
-   * recent answers a question nobody asked — you came here to pick something —
-   * and it made the newest conversation the only one with a route to it.
-   *
-   * The one exception is a pond with no conversations at all: an empty wall is
-   * a dead end, so a first-time visit lands in a new chat, which is an
-   * invitation to type.
-   *
-   * A conversation already open in app state does NOT override this. Coming
-   * back to Chat lands on the wall even mid-conversation, and the card for the
-   * open one is one press away. That costs a click when you were only passing
-   * through another section, and it buys a section that always opens somewhere
-   * you can steer from.
-   *
-   * The one thing that DOES override it is a turn still running, or one that
-   * finished while nothing was mounted to show it — `hasLiveThread`, resolved
-   * in `view`'s initialiser above, so this effect's early return covers it.
-   * Arriving to find your own answer already written and never seen is not a
-   * choice about where to steer; it is the thing you came back for.
-   */
+  // Opens on the wall, even mid-conversation; an empty pond opens a new chat instead. Only a live or
+  // unseen turn overrides it, via `view`'s initialiser and the early return.
   useEffect(() => {
     if (!state.serverOnline || view !== null) return;
     api.listSessions()
@@ -381,20 +311,13 @@ export function Chat() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.serverOnline]);
 
-  // The resume path above skips the list, but "All chats" still has to have
-  // something behind it, so fetch it whichever screen we opened on.
+  // Fetched whichever screen opened, so "All chats" always has a list behind it.
   useEffect(() => {
     if (!state.serverOnline) return;
     refreshSessions();
   }, [state.serverOnline, refreshSessions]);
 
-  /**
-   * Stop resuming into a turn this surface has now shown.
-   *
-   * Without it, `hasLiveThread` would stay true forever and every later visit
-   * would reopen the same finished thread — which is the deliberate wall
-   * behaviour above, undone.
-   */
+  // Acknowledge a shown turn, or `hasLiveThread` stays true and every visit reopens it.
   useEffect(() => {
     if (view !== "thread" || busy) return;
     acknowledgeCompletion();
@@ -407,25 +330,17 @@ export function Chat() {
     acknowledgeCompletion();
     dispatch({ type: "SET_SESSION_ID", payload: id });
     dispatch({ type: "CLEAR_CONTEXT_CARDS" });
-    // Leaving a turn on purpose: stop it, rather than leaving the model
-    // generating an answer this window will never show.
+    // Opening another conversation stops the current turn rather than let it answer unseen.
     void openSession(id, { stopCurrentRun: true });
   }, [dispatch]);
 
-  /** Start typing a name for this conversation. */
   const beginTitleEdit = useCallback(() => {
     if (!getChatRun().sessionId) return;
     setTitleDraft(chatTitleRef.current);
     setEditingTitle(true);
   }, []);
 
-  /**
-   * Store the typed name, or abandon it if nothing changed.
-   *
-   * An empty box is treated as "I changed my mind", not as "call it nothing":
-   * clearing a title and walking away is far more likely to be a slip than an
-   * instruction, and there is no undo for the name it would replace.
-   */
+  /** An emptied box abandons the edit: likelier a slip than a wish for no name, and there's no undo. */
   const commitTitle = useCallback(() => {
     const id = getChatRun().sessionId;
     setEditingTitle(false);
@@ -446,8 +361,7 @@ export function Chat() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Select the whole name when editing starts: the common case is replacing it,
-  // and a caret parked at the end makes that a delete-and-retype.
+  // Select the whole name: the common edit replaces it.
   useEffect(() => {
     if (editingTitle) {
       titleInputRef.current?.focus();
@@ -469,15 +383,8 @@ export function Chat() {
   }
 
   /**
-   * Ask the model to name this conversation, now.
-   *
-   * Distinct from `renameSession`, which stores a name you typed. This one
-   * obeys rather than protects — the server replaces a name that still fits and
-   * one typed by hand, because asking for the conversation in front of you is
-   * consent about that conversation.
-   *
-   * The refresh afterwards is the feedback: the header title and the history
-   * list both read from `sessions`, so both catch up in one go.
+   * Asks the model to name this conversation now, replacing even a hand-typed name: asking is consent.
+   * The refresh is the feedback, since header and history both read `sessions`.
    */
   const retitleCurrent = useCallback(async () => {
     const id = getChatRun().sessionId;
@@ -498,8 +405,7 @@ export function Chat() {
   }, [retitling, refreshSessions]);
 
   const renameSession = useCallback(async (id: string, title: string) => {
-    // Optimistically update the row, then persist. Refresh reconciles with the
-    // server's stored/derived title on success or failure.
+    // Optimistic; the refresh reconciles with the server's title either way.
     setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, title } : s)));
     try {
       await api.renameSession(id, title);
@@ -516,7 +422,6 @@ export function Chat() {
     } catch (err) {
       console.warn("Delete failed (non-fatal):", err);
     }
-    // If the deleted conversation was the active one, drop back to a blank chat.
     if (getChatRun().sessionId === id) {
       newConversation();
     }
@@ -525,24 +430,13 @@ export function Chat() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshSessions]);
 
-  /**
-   * Hand a turn to the store, keeping only what belongs to the composer.
-   *
-   * The turn itself, the queue behind it and every frame it produces live in
-   * `chatRunStore` so they survive this component being unmounted. What stays
-   * here is the box you typed into: the draft, the attachment tray, and the
-   * textarea's height.
-   */
+  /** Hands the turn to the store; only the composer's draft, tray and textarea height stay here. */
   const sendMessage = useCallback((directText?: string) => {
     const text = (directText ?? input).trim();
     if ((!text && attachments.length === 0) || !state.serverOnline) return;
 
-    // A reply is still streaming: the store holds this one rather than dropping
-    // it, so the composer never has to wait for the model. Attachments are NOT
-    // queued -- they belong to the turn they were attached to, and silently
-    // re-binding them to a later message would send an image with the wrong
-    // question -- so a busy send with an empty box is a no-op rather than a
-    // silent discard of the tray.
+    // While busy the store queues the text, but not attachments (they'd pair an image with the wrong
+    // question), so a busy send with an empty box is a no-op that keeps the tray.
     if (busy && !text) return;
 
     setInput("");
@@ -553,9 +447,7 @@ export function Chat() {
       return;
     }
 
-    // The bubble keeps its own copy of each previewUrl and the store now owns
-    // revoking them, so the tray is cleared here WITHOUT revoking -- doing so
-    // would blank the thumbnail on the message just sent.
+    // The store owns these previews: clear the tray without revoking, or the sent thumbnail blanks.
     sendTurn({
       text,
       images: attachments.map((a) => ({ data: a.data, mime_type: a.mime_type })),
@@ -565,11 +457,7 @@ export function Chat() {
     setAttachError(null);
   }, [input, attachments, busy, state.serverOnline]);
 
-  // Two things `sendMessage`'s old `finally` did that belong to the view rather
-  // than to the turn: the session list carries the title the server derives
-  // from the first exchange, and the composer takes focus back when the model
-  // stops. Keyed on the store's completed-turn counter, so they fire once per
-  // turn even when the turn finished while this component was unmounted.
+  // On the busy -> idle edge: refresh the list (it carries the server-derived title) and refocus.
   const prevBusyRef = useRef(busy);
   useEffect(() => {
     const wasBusy = prevBusyRef.current;
@@ -583,17 +471,12 @@ export function Chat() {
     void navigator.clipboard.writeText(text).catch(() => {});
   }, []);
 
-  // Drop everything from `msgId` onward in the LOCAL list — used by both edit
-  // and refresh right before resending, so the stale pair never briefly shows
-  // next to the fresh one.
+  // Local truncation before a resend, so the stale pair never shows beside the fresh one.
   const truncateLocalFrom = useCallback((msgId: number) => {
     truncateFrom(msgId);
   }, []);
 
-  // Shared by refresh (same text) and edit-submit (new text): truncate the
-  // persisted history from this user message onward, then resend through the
-  // normal send path — no separate regenerate endpoint, `/chat/stream`
-  // already knows how to append a fresh turn.
+  // Refresh and edit both truncate persisted history from here and resend; there's no regenerate endpoint.
   const truncateAndResend = useCallback(async (msg: Message, text: string) => {
     const sessionId = getChatRun().sessionId;
     if (!msg.backendId || !sessionId || busy) return;
@@ -624,13 +507,7 @@ export function Chat() {
     void truncateAndResend(msg, trimmed);
   }, [editText, truncateAndResend]);
 
-  // Called from the AGENT bubble, but truncateAndResend needs a USER message
-  // to delete-from-and-resend — regenerating means "redo the answer to the
-  // prompt right before this one," so walk back to find it. Truncating from
-  // there removes both the old prompt row and its stale answer; resending
-  // the same text creates a fresh pair, keeping exactly one user/answer per
-  // turn (there's no lighter "keep the prompt, only replace the answer"
-  // primitive — see truncateAndResend's own comment).
+  // Regenerates from the preceding user message, so the old pair is replaced by one fresh pair.
   const refreshResponse = useCallback((agentMsg: Message) => {
     const idx = messages.findIndex((m) => m.id === agentMsg.id);
     const precedingUser = idx === -1 ? undefined : [...messages.slice(0, idx)].reverse().find((m) => m.role === "user");
@@ -638,8 +515,7 @@ export function Chat() {
     void truncateAndResend(precedingUser, precedingUser.text);
   }, [messages, truncateAndResend]);
 
-  // `null` clears a vote — clicking the already-active thumb toggles it off.
-  // Optimistic: flips locally first, reverts only if the PUT fails.
+  // Clicking the active thumb clears the vote (`null`). Optimistic; reverted if the PUT fails.
   const setFeedback = useCallback((msg: Message, liked: boolean) => {
     const sessionId = getChatRun().sessionId;
     if (!msg.backendId || !sessionId) return;
@@ -653,34 +529,26 @@ export function Chat() {
     });
   }, []);
 
-  // Held in state so the greeting is chosen once per conversation: recomputing
-  // it on render would reshuffle the line while someone was reading it.
+  // State, so the greeting is picked once per conversation, not reshuffled on every render.
   const [quipSeed, setQuipSeed] = useState(() => Date.now());
   const greetingLine = useMemo(() => greeting(userName, quipSeed), [userName, quipSeed]);
   const subtitleLine = useMemo(() => subtitle(quipSeed), [quipSeed]);
 
-  // What this conversation is about. The server titles a session after the
-  // first exchange, so a brand-new chat has nothing to show yet.
-  // What the backend says it is doing, from the stream's `status` frames
-  // ("Agent working…", "Using tool: …"). Shown in the working strip, so the
-  // line under the composer is the server's account of itself rather than a
-  // client-side guess.
+  // The server's own `status` frames ("Agent working…"), not a client-side guess.
   const lastMsg = messages[messages.length - 1];
   const liveStatus =
     lastMsg?.role === "agent" && lastMsg.streaming ? lastMsg.status : undefined;
 
+  // The server titles a session after its first exchange; until then it's "New Chat".
   const chatTitle =
     sessions.find((sn) => sn.id === state.sessionId)?.title?.trim() || "New Chat";
 
-  // Mirror the current render values so the title callbacks can read them
-  // without listing them as dependencies — `renameSession` is declared above
-  // but `chatTitle` is not, and a stale closure here would rename a
-  // conversation to the name it had two renders ago.
+  // Refreshed each render: a stale closure would rename a conversation to an earlier name.
   chatTitleRef.current = chatTitle;
   titleDraftRef.current = titleDraft;
   renameSessionRef.current = renameSession;
 
-  /** Flip thinking on or off, persisting it. Optimistic, reverted on failure. */
+  /** Optimistic; reverted if the save fails. */
   async function toggleThinking() {
     if (thinkingSaving) return;
     const next = thinkingMode === "off" ? lastThinkingOnRef.current : "off";
@@ -711,18 +579,11 @@ export function Chat() {
     el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
   }
 
-  // `lastResponseMeta` only exists once a turn in THIS session has actually
-  // completed, so a freshly opened chat — or one right after switching
-  // providers in Settings — fell back to a hardcoded "local model" guess
-  // regardless of what's actually configured. `configuredProvider` (fetched
-  // alongside the other settings above) is accurate from the start; still
-  // falls back to the old guess only if that fetch hasn't resolved yet.
+  // `lastResponseMeta` exists only after a turn completes; `configuredProvider` covers the time before.
   const modelLabel = state.lastResponseMeta?.modelName ?? configuredProvider ?? "local model";
 
   return (
-    // `null` means the session list has not answered yet. Showing the wall's
-    // skeleton rather than the composer avoids a flash of new-chat for someone
-    // who is about to land on the wall.
+    // While `view` is null, the wall's skeleton avoids a flash of new chat before the wall.
     view !== "thread" ? (
       <ChatHistory
         sessions={sessions}
@@ -792,9 +653,7 @@ export function Chat() {
                 type="button"
                 className="chat2__topicBtn"
                 onClick={beginTitleEdit}
-                /* Names the action AND the current title. Announced as its own
-                   text alone, this is a heading that happens to be focusable
-                   and nothing says it can be edited. */
+                /* Names the action and the title; the title alone reads as a focusable heading. */
                 aria-label={`Rename conversation: ${chatTitle}`}
                 title="Click to rename"
               >
@@ -896,8 +755,7 @@ export function Chat() {
                 {msg.role === "agent" && msg.thinkingBlocks && msg.thinkingBlocks.length > 0 && (
                   <ThinkingDisclosure
                     blocks={msg.thinkingBlocks}
-                    // Reasoning is over once the answer starts arriving, even
-                    // though the turn itself is still streaming.
+                    // Reasoning ends when the answer starts, though the turn still streams.
                     active={Boolean(msg.streaming) && !msg.text}
                     ms={
                       msg.thinkingStartedAt !== undefined && msg.thinkingEndedAt !== undefined

@@ -3,37 +3,13 @@ import { PenSquare, Search, Trash2 } from "lucide-react";
 import type { SessionSummary } from "../api/types";
 import "../styles/chat-history.css";
 
-/**
- * Every conversation this pond has had, as a wall of cards.
- *
- * # Why the cards are different heights
- *
- * The layout this is modelled on varies card height because some entries carry
- * a photograph. Conversations have no photographs, so height had to be earned
- * from something true about the content rather than invented for texture: a
- * card is as tall as the conversation was long. A three-message "what time is
- * it" is a tile; a forty-message debugging session is a column. The wall ends
- * up a rough histogram of where the household's attention went, which is
- * exactly the thing you are scanning for when you are trying to find a
- * conversation you only half remember.
- *
- * Ordering stays newest-first, left to right. That rules out CSS multi-column,
- * which is the easy way to get a masonry wall and would put the newest half of
- * the history in the left-hand column and the rest in the right — correct
- * masonry, unreadable chronology. Row spans keep the reading order and cost a
- * little raggedness at the bottom edge, which is the honest trade.
- */
+// A wall of conversation cards, as tall as each conversation was long. Newest-first reading order rules
+// out CSS multi-column masonry (it fills columns top to bottom); row spans keep the order.
 
 /** How much conversation a card has to show, which is how tall it gets. */
 export type CardWeight = "tile" | "card" | "column";
 
-/**
- * Bucket a conversation by how much was said in it.
- *
- * Deliberately coarse. Three heights tile predictably and read as deliberate;
- * a continuous mapping from message count to pixels produces a wall of
- * almost-but-not-quite equal cards, which reads as a rendering bug.
- */
+/** Deliberately three coarse buckets: a continuous height mapping reads as a rendering bug. */
 export function cardWeight(session: SessionSummary): CardWeight {
   const messages = session.message_count ?? 0;
   const preview = session.preview?.length ?? 0;
@@ -42,13 +18,7 @@ export function cardWeight(session: SessionSummary): CardWeight {
   return "tile";
 }
 
-/**
- * When a conversation last moved, in the shortest form that is still unambiguous.
- *
- * Same ladder the reference uses: a time for today, a word for yesterday, a
- * weekday inside the last week, then a date. Anything older than a week is
- * being scanned rather than recalled, and a weekday name stops helping.
- */
+/** Shortest unambiguous form: time today, yesterday, weekday within a week, then a date. */
 export function relativeWhen(iso: string, now: Date = new Date()): string {
   const then = new Date(iso);
   if (Number.isNaN(then.getTime())) return "";
@@ -80,7 +50,7 @@ export function matchesQuery(session: SessionSummary, query: string): boolean {
   );
 }
 
-/** Where on screen a card was when it was opened, in viewport pixels. */
+/** The opened card's centre, in pixels relative to the pane. */
 export interface OpenOrigin {
   x: number;
   y: number;
@@ -106,11 +76,7 @@ export function ChatHistory({ sessions, loading, onOpen, onNewChat, onDelete }: 
 
   function open(session: SessionSummary, event: React.MouseEvent<HTMLElement>) {
     const card = event.currentTarget.getBoundingClientRect();
-    // Pane-relative, not viewport-relative: the chat that grows out of this
-    // point fills the same pane this wall does, and `transform-origin` is
-    // measured from the element's own box. Viewport coordinates would put the
-    // origin off by the sidebar's width, so every card would appear to open
-    // from somewhere to its left.
+    // Pane-relative: `transform-origin` is measured from the pane-filling chat's own box, not the viewport.
     const pane = event.currentTarget.closest(".chist")?.getBoundingClientRect();
     onOpen(session.id, {
       x: card.left + card.width / 2 - (pane?.left ?? 0),

@@ -16,7 +16,6 @@ interface SensorData {
   icon?: string;
 }
 
-/* ── Inline SVG icon helper ── */
 function Ico({ d, size = 16, color = "currentColor", fill = "none" }: { d: string; size?: number; color?: string; fill?: string }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill={fill} stroke={color}
@@ -26,7 +25,6 @@ function Ico({ d, size = 16, color = "currentColor", fill = "none" }: { d: strin
   );
 }
 
-/* ── Sensor icon from label ── */
 function sensorIconPath(label: string): string {
   const l = label.toLowerCase();
   if (l.includes("door") || l.includes("lock")) return "M18 8h-1a6 6 0 0 0-12 0H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-6a2 2 0 0 0-2-2zM10 12a2 2 0 1 0 4 0 2 2 0 0 0-4 0z";

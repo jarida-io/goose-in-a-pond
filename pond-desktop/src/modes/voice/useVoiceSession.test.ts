@@ -1,46 +1,20 @@
-// ────────────────────────────────────────────────────────────
-// useVoiceSession — unit tests
-//
-// Verifies the persistent child-process voice session hook against
-// the Architecture A contract (voice-synthesis.json).
-//
-// Key assertions:
-//  1. Every voice-* event maps to EXACTLY ONE reducer dispatch
-//     (explicit double-dispatch regression test).
-//  2. The state-string mapping table is correct.
-//  3. start/stop session lifecycle (invoke calls + state transitions).
-//  4. voice-error and voice-session-ended with non-zero code surface errors.
-//  5. voice-session-ended with code 0 / clean reason returns to idle cleanly.
-//  6. Listener teardown race: listeners resolved after unmount are unregistered.
-//  7. Double-mount (StrictMode) results in a live session (start/stop/start).
-//  8. Stale session_id filtering on voice-session-ended.
-//  9. Reason-based exit classification (code null + reason "crashed" = abnormal).
-// 10. voice-tool-result dispatches UPDATE_CONTEXT_CARD (not PUSH_CONTEXT_CARD).
-// 11. voice-token events are batched via rAF accumulator.
-// ────────────────────────────────────────────────────────────
-
 import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from "vitest";
 import { renderHook, act, cleanup } from "@testing-library/react";
 import React from "react";
 
 // ── Shared mutable stores for the shell-bridge mock ─────────────────────────
 
-// event name -> array of registered handler functions
 const _listeners: Record<string, Array<(payload: unknown) => void>> = {};
 
-// Stored invoke mock
 let _invoke: Mock;
 
-// Emit a fake shell event to all registered listeners for that event name.
-// The bridge hands handlers the payload directly rather than an envelope.
+// The bridge hands handlers the bare payload, not an envelope.
 function emitShellEvent(name: string, payload: unknown): void {
   for (const h of _listeners[name] ?? []) h(payload);
 }
 
 // ── Mock requestAnimationFrame / cancelAnimationFrame ──────────────────────
-// In tests, rAF batching must be flushed synchronously via fake timers or
-// by calling the rAF callback directly.  We replace rAF with an immediate
-// synchronous call so batching tests are deterministic without fake timers.
+// Callbacks queue until flushRaf(), so batching tests are deterministic without fake timers.
 
 const _rafCallbacks: Map<number, FrameRequestCallback> = new Map();
 let _rafNextHandle = 1;
@@ -48,7 +22,6 @@ let _rafNextHandle = 1;
 vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback): number => {
   const handle = _rafNextHandle++;
   _rafCallbacks.set(handle, cb);
-  // Do NOT call synchronously here — caller must flush via flushRaf()
   return handle;
 });
 
@@ -65,11 +38,7 @@ function flushRaf(): void {
 }
 
 // ── Mock the shell bridge ────────────────────────────────────────────────────
-//
-// listen() is synchronous and returns its unsubscribe function directly, so
-// the mock has no promise machinery. The deferred-resolution switch that used
-// to live here existed solely to exercise a teardown race that Tauri's async
-// registration made possible; see the leak test below for what replaced it.
+// listen() is synchronous and returns its unsubscribe function, so the mock needs no promises.
 
 vi.mock("../../shell", () => ({
   get invoke() { return _invoke; },
@@ -90,8 +59,7 @@ const _dispatch = vi.fn((action: { type: string; payload?: unknown }) => {
   _dispatched.push(action);
 });
 
-// The conversation the chat view is on. `startSession` passes it to the child
-// so voice continues that conversation instead of starting a new one.
+// The chat view's session, which startSession hands to the child to continue.
 let _appSessionId: string | null = null;
 
 vi.mock("../../state/AppContext", () => ({
@@ -130,13 +98,12 @@ function clearDispatched() {
 
 // ── Import the hook under test (after mocks are in place) ────────────────────
 
-// We import dynamically AFTER vi.mock so the mocks resolve first.
 async function getHook() {
   const mod = await import("./useVoiceSession");
   return mod.useVoiceSession;
 }
 
-// Minimal wrapper so renderHook can access context (mocked above)
+// Context is mocked, so the wrapper provides nothing.
 function wrapper({ children }: { children: React.ReactNode }) {
   return React.createElement(React.Fragment, null, children);
 }
@@ -154,27 +121,21 @@ describe("useVoiceSession — state-string mapping", () => {
 
     clearDispatched();
 
-    // Contract: wait -> wait (wake-word listening state, not idle)
     act(() => { emitShellEvent("voice-state", "wait"); });
     expect(dispatchedOfType("SET_VOICE_STATE").at(-1)?.payload).toBe("wait");
 
-    // Contract: listen -> recording
     act(() => { emitShellEvent("voice-state", "listen"); });
     expect(dispatchedOfType("SET_VOICE_STATE").at(-1)?.payload).toBe("recording");
 
-    // Contract: thinking -> thinking
     act(() => { emitShellEvent("voice-state", "thinking"); });
     expect(dispatchedOfType("SET_VOICE_STATE").at(-1)?.payload).toBe("thinking");
 
-    // Contract: speak -> speaking
     act(() => { emitShellEvent("voice-state", "speak"); });
     expect(dispatchedOfType("SET_VOICE_STATE").at(-1)?.payload).toBe("speaking");
 
-    // Legacy compat: idle -> idle
     act(() => { emitShellEvent("voice-state", "idle"); });
     expect(dispatchedOfType("SET_VOICE_STATE").at(-1)?.payload).toBe("idle");
 
-    // Legacy compat: transcribing -> thinking
     act(() => { emitShellEvent("voice-state", "transcribing"); });
     expect(dispatchedOfType("SET_VOICE_STATE").at(-1)?.payload).toBe("thinking");
 
@@ -193,7 +154,6 @@ describe("useVoiceSession — state-string mapping", () => {
 
     const stateActions = dispatchedOfType("SET_VOICE_STATE");
     expect(stateActions.length).toBeGreaterThan(0);
-    // voice-ready should put the orb in the wake-word wait state
     expect(stateActions.at(-1)?.payload).toBe("wait");
 
     cleanup();
@@ -226,8 +186,7 @@ describe("useVoiceSession — start/stop lifecycle", () => {
       sessionId = await result.current.startSession();
     });
 
-    // No chat has happened, so there is nothing to continue — the child mints
-    // its own id and returns it.
+    // No chat yet: nothing to continue, so the child mints its own id.
     expect(_invoke).toHaveBeenCalledWith("start_voice_session", {
       sessionId: null,
     });
@@ -238,9 +197,6 @@ describe("useVoiceSession — start/stop lifecycle", () => {
   });
 
   it("startSession continues the conversation the chat view is on", async () => {
-    // The whole point of the change: speaking after typing must reach the same
-    // agent mid-conversation, not a stranger. The child resolves this GIAP
-    // session to its Goose session and hydrates it with the history.
     const useVoiceSession = await getHook();
     _appSessionId = "chat-session-7";
     // The child echoes back whichever id it used, which is this one.
@@ -294,9 +250,7 @@ describe("useVoiceSession — start/stop lifecycle", () => {
     expect(dispatchedOfType("SET_VOICE_ERROR").length).toBeGreaterThan(0);
     expect(dispatchedOfType("SET_VOICE_STATE").some((a) => a.payload === "error")).toBe(true);
 
-    // startSession's own optimistic "idle" dispatch fires once before the
-    // invoke rejects — but with no auto-clear timer, nothing should reset
-    // voiceState/voiceError back to idle/null afterward.
+    // The one "idle" is startSession's optimistic dispatch; no auto-clear timer resets anything after.
     const idleCount = dispatchedOfType("SET_VOICE_STATE").filter((a) => a.payload === "idle").length;
     expect(idleCount).toBe(1);
     expect(dispatchedOfType("SET_VOICE_ERROR").some((a) => a.payload === null)).toBe(false);
@@ -306,12 +260,7 @@ describe("useVoiceSession — start/stop lifecycle", () => {
 });
 
 describe("useVoiceSession — StrictMode double-mount (finding 4+13)", () => {
-  // The actual symmetric mount/cleanup is in VoiceMode.tsx's useEffect
-  // (which calls session.startSession() and returns session.stopSession()).
-  // The hook itself does NOT block startSession calls — there is no startedRef
-  // guard in the hook.  We verify that calling startSession twice works
-  // (simulating the StrictMode mount#1 -> cleanup -> mount#2 sequence that
-  // VoiceMode.tsx drives).
+  // VoiceMode.tsx drives mount/cleanup; the hook must not guard startSession, so start/stop/start works.
 
   beforeEach(() => {
     clearDispatched();
@@ -340,18 +289,14 @@ describe("useVoiceSession — StrictMode double-mount (finding 4+13)", () => {
     const { result } = renderHook(() => useVoiceSession(), { wrapper });
     await act(async () => { await Promise.resolve(); });
 
-    // Simulate mount #1: start
     await act(async () => { await result.current.startSession(); });
     expect(callCount).toBe(1);
 
-    // Simulate StrictMode cleanup: stop
     await act(async () => { await result.current.stopSession(); });
 
-    // Simulate mount #2: start again — must not be blocked by any ref guard
     await act(async () => { await result.current.startSession(); });
     expect(callCount).toBe(2);
 
-    // The second startSession dispatched a new SET_SESSION_ID
     const sessionIds = dispatchedOfType("SET_SESSION_ID");
     expect(sessionIds.length).toBeGreaterThanOrEqual(2);
     expect(sessionIds.at(-1)?.payload).toBe("sess-2");
@@ -371,12 +316,6 @@ describe("useVoiceSession — listener teardown race (finding 5+18)", () => {
     cleanup();
   });
 
-  // What this used to test: an unlisten function resolving AFTER teardown,
-  // which Tauri's async listen() made possible and which the hook guarded with
-  // a cancelled flag. Synchronous registration makes that unrepresentable, so
-  // the bug class is gone rather than merely tested for. The invariant it was
-  // protecting -- unmounting leaves nothing registered -- is still worth
-  // pinning, and now it can be asserted directly.
   it("leaves no listener registered after unmount", async () => {
     const useVoiceSession = await getHook();
     _invoke = vi.fn().mockResolvedValue("sess-race");
@@ -436,14 +375,11 @@ describe("useVoiceSession — double-dispatch regression", () => {
     act(() => { emitShellEvent("voice-token", { content: "hello" }); });
     act(() => { emitShellEvent("voice-token", { content: " world" }); });
 
-    // Before flushing rAF, dispatch should not have fired yet
     expect(dispatchedOfType("APPEND_AGENT_TOKEN")).toHaveLength(0);
 
-    // Flush the rAF
     act(() => { flushRaf(); });
 
     const tokenActions = dispatchedOfType("APPEND_AGENT_TOKEN");
-    // Both tokens coalesced into ONE dispatch with combined text
     expect(tokenActions).toHaveLength(1);
     expect(tokenActions[0].payload).toMatchObject({ token: "hello world", done: false });
   });
@@ -456,12 +392,10 @@ describe("useVoiceSession — double-dispatch regression", () => {
     await act(async () => { await Promise.resolve(); });
 
     clearDispatched();
-    // Send a token then immediately send done without flushing rAF
     act(() => { emitShellEvent("voice-token", { content: "last" }); });
     act(() => { emitShellEvent("voice-done", { session_id: "sess-abc" }); });
 
     const tokenActions = dispatchedOfType("APPEND_AGENT_TOKEN");
-    // Should have: one batch flush of "last" AND one done dispatch
     const batchAction = tokenActions.find((a) => (a.payload as { token: string }).token === "last");
     const doneAction = tokenActions.find((a) => (a.payload as { done: boolean }).done === true);
     expect(batchAction).toBeDefined();
@@ -502,9 +436,7 @@ describe("useVoiceSession — double-dispatch regression", () => {
       });
     });
 
-    // Must NOT push a new card
     expect(dispatchedOfType("PUSH_CONTEXT_CARD")).toHaveLength(0);
-    // Must UPDATE the existing card by callId
     const updateActions = dispatchedOfType("UPDATE_CONTEXT_CARD");
     expect(updateActions).toHaveLength(1);
     expect(updateActions[0].payload).toMatchObject({
@@ -523,7 +455,6 @@ describe("useVoiceSession — double-dispatch regression", () => {
     clearDispatched();
     act(() => { emitShellEvent("voice-done", { session_id: "sess-abc" }); });
 
-    // Flush any rAF
     act(() => { flushRaf(); });
 
     expect(dispatchedOfType("APPEND_AGENT_TOKEN")).toHaveLength(1);
@@ -531,7 +462,6 @@ describe("useVoiceSession — double-dispatch regression", () => {
     expect(dispatchedOfType("SET_SESSION_ID")).toHaveLength(1);
     expect(dispatchedOfType("SET_SESSION_ID")[0].payload).toBe("sess-abc");
     expect(dispatchedOfType("SET_VOICE_STATE")).toHaveLength(1);
-    // voice-done now returns to "wait" (wake-word state) not "idle"
     expect(dispatchedOfType("SET_VOICE_STATE")[0].payload).toBe("wait");
   });
 
@@ -575,7 +505,6 @@ describe("useVoiceSession — voice-session-ended handling", () => {
     const { result } = renderHook(() => useVoiceSession(), { wrapper });
     await act(async () => { await Promise.resolve(); });
 
-    // Simulate session active with a known session_id
     act(() => { emitShellEvent("voice-ready", { session_id: "s1" }); });
     expect(result.current.sessionActive).toBe(true);
 
@@ -586,9 +515,7 @@ describe("useVoiceSession — voice-session-ended handling", () => {
 
     expect(result.current.sessionActive).toBe(false);
     expect(result.current.connecting).toBe(false);
-    // No error dispatched
     expect(dispatchedOfType("SET_VOICE_ERROR").filter((a) => a.payload !== null)).toHaveLength(0);
-    // Returns to idle
     expect(dispatchedOfType("SET_VOICE_STATE").some((a) => a.payload === "idle")).toBe(true);
   });
 
@@ -632,15 +559,12 @@ describe("useVoiceSession — voice-session-ended handling", () => {
     expect(errorActions[0].payload).toMatch(/code 1/);
     expect(dispatchedOfType("SET_VOICE_STATE").some((a) => a.payload === "error")).toBe(true);
 
-    // No auto-clear timer anymore — stays in error state until dismissed/retried.
     expect(dispatchedOfType("SET_VOICE_STATE").some((a) => a.payload === "idle")).toBe(false);
 
     cleanup();
   });
 
   it("voice-session-ended with code null and reason crashed is abnormal (signal kill)", async () => {
-    // Finding 16+23: Unix signal-killed child reports code=null, reason="crashed"
-    // This must be treated as abnormal, not clean.
     vi.useFakeTimers();
     const useVoiceSession = await getHook();
     _invoke = vi.fn().mockResolvedValue("s3");
@@ -656,7 +580,6 @@ describe("useVoiceSession — voice-session-ended handling", () => {
     });
 
     expect(result.current.sessionActive).toBe(false);
-    // code=null + reason=crashed must surface an error, not silently go to idle
     const errorActions = dispatchedOfType("SET_VOICE_ERROR").filter((a) => a.payload !== null);
     expect(errorActions).toHaveLength(1);
     expect(dispatchedOfType("SET_VOICE_STATE").some((a) => a.payload === "error")).toBe(true);
@@ -674,12 +597,10 @@ describe("useVoiceSession — voice-session-ended handling", () => {
     const { result } = renderHook(() => useVoiceSession(), { wrapper });
     await act(async () => { await Promise.resolve(); });
 
-    // Start session A
     await act(async () => { await result.current.startSession(); });
     act(() => { emitShellEvent("voice-ready", { session_id: "session-A" }); });
     expect(result.current.sessionActive).toBe(true);
 
-    // Stop session A and immediately start session B
     await act(async () => { await result.current.stopSession(); });
     _invoke = vi.fn()
       .mockResolvedValueOnce("session-B")
@@ -690,7 +611,6 @@ describe("useVoiceSession — voice-session-ended handling", () => {
 
     clearDispatched();
 
-    // Now deliver a stale ended event for session-A (old child finally reaped)
     act(() => {
       emitShellEvent("voice-session-ended", {
         code: 1,
@@ -699,7 +619,6 @@ describe("useVoiceSession — voice-session-ended handling", () => {
       });
     });
 
-    // The event should have been ignored — no state changes for session B
     expect(result.current.sessionActive).toBe(true);
     expect(dispatchedOfType("SET_VOICE_STATE")).toHaveLength(0);
     expect(dispatchedOfType("SET_VOICE_ERROR")).toHaveLength(0);
@@ -718,7 +637,6 @@ describe("useVoiceSession — voice-session-ended handling", () => {
     expect(result.current.sessionActive).toBe(true);
     expect(result.current.connecting).toBe(false);
     expect(dispatchedOfType("SET_SESSION_ID")[0].payload).toBe("ready-sess");
-    // voice-ready puts the orb in the wake-word wait state
     expect(dispatchedOfType("SET_VOICE_STATE").some((a) => a.payload === "wait")).toBe(true);
   });
 });
@@ -789,13 +707,11 @@ describe("useVoiceSession — flashError persistence", () => {
 
     clearDispatched();
 
-    // Fire two errors in quick succession
     act(() => { emitShellEvent("voice-error", { message: "error 1" }); });
     act(() => { emitShellEvent("voice-error", { message: "error 2" }); });
 
     const errorPayloads = dispatchedOfType("SET_VOICE_ERROR").map((a) => a.payload);
     expect(errorPayloads).toEqual(["error 1", "error 2"]);
-    // No timer of any kind clears the state — it stays in error.
     const idleActions = dispatchedOfType("SET_VOICE_STATE").filter((a) => a.payload === "idle");
     expect(idleActions).toHaveLength(0);
   });
@@ -825,9 +741,6 @@ describe("useVoiceSession — full contract event sequence", () => {
 
     clearDispatched();
 
-    // Contract sequence: ready -> state wait -> state listen -> transcript ->
-    // state thinking -> tokens -> tool_call/tool_result -> state speak ->
-    // turn_complete -> state wait
     act(() => { emitShellEvent("voice-ready", { session_id: "seq-session" }); });
     act(() => { emitShellEvent("voice-state", "wait"); });
     act(() => { emitShellEvent("voice-state", "listen"); });
@@ -839,22 +752,19 @@ describe("useVoiceSession — full contract event sequence", () => {
     act(() => { emitShellEvent("voice-tool-result", { tool: "giap__weather", id: "c1", content: "22C" }); });
     act(() => { emitShellEvent("voice-state", "speak"); });
     act(() => { emitShellEvent("voice-done", { session_id: "seq-session" }); });
-    // voice-done flushes tokens and dispatches wait state
     act(() => { emitShellEvent("voice-state", "wait"); });
 
-    // Verify state transitions
     const stateActions = dispatchedOfType("SET_VOICE_STATE").map((a) => a.payload);
     expect(stateActions).toContain("wait");     // from voice-ready + voice-state wait + voice-done
     expect(stateActions).toContain("recording"); // from voice-state listen
     expect(stateActions).toContain("thinking");  // from voice-state thinking
     expect(stateActions).toContain("speaking");  // from voice-state speak
 
-    // Transcript was appended once (user + agent seed = 2 dispatches from one event)
+    // One transcript event: user message + agent seed.
     const transcriptActions = dispatchedOfType("APPEND_TRANSCRIPT");
     expect(transcriptActions).toHaveLength(2);
     expect(transcriptActions[0].payload).toMatchObject({ role: "user" });
 
-    // Two tokens dispatched as one batched APPEND_AGENT_TOKEN (rAF coalesced by voice-done flush)
     const tokenActions = dispatchedOfType("APPEND_AGENT_TOKEN").filter(
       (a) => (a.payload as { done: boolean }).done === false,
     );
@@ -862,9 +772,7 @@ describe("useVoiceSession — full contract event sequence", () => {
     expect(tokenActions).toHaveLength(1);
     expect((tokenActions[0].payload as { token: string }).token).toBe("The weather");
 
-    // One tool-call card pushed
     expect(dispatchedOfType("PUSH_CONTEXT_CARD")).toHaveLength(1);
-    // One tool-result update (not push)
     expect(dispatchedOfType("UPDATE_CONTEXT_CARD")).toHaveLength(1);
 
     // turn_complete: APPEND_AGENT_TOKEN(done) + SET_SESSION_ID + SET_VOICE_STATE(wait)
@@ -876,11 +784,6 @@ describe("useVoiceSession — full contract event sequence", () => {
 });
 
 // ── Startup failure: the child's own reason must reach the user ──────────────
-//
-// Regression: a sidecar staged weeks before the database was migrated exited 1
-// having emitted ZERO NDJSON lines. The shell called that "crashed" and the UI
-// said "Voice session exited (code 1, reason: crashed)" — true, and useless.
-// The actual cause was on the child's stderr, which the shell logged at debug.
 
 describe("useVoiceSession — failed_to_start", () => {
   it("surfaces the child's stderr reason instead of an exit code", async () => {
@@ -906,7 +809,6 @@ describe("useVoiceSession — failed_to_start", () => {
     const errors = dispatchedOfType("SET_VOICE_ERROR").filter((a) => a.payload !== null);
     expect(errors).toHaveLength(1);
     const msg = String(errors[0].payload);
-    // The cause, not the exit code, is what tells anyone what to do next.
     expect(msg).toContain("migration 29");
     expect(msg).not.toContain("reason: failed_to_start");
 
@@ -932,7 +834,6 @@ describe("useVoiceSession — failed_to_start", () => {
 
     const errors = dispatchedOfType("SET_VOICE_ERROR").filter((a) => a.payload !== null);
     expect(errors).toHaveLength(1);
-    // Absent detail must not render as a message that trails off into nothing.
     expect(String(errors[0].payload)).toContain("without reporting a reason");
 
     cleanup();

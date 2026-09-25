@@ -1,14 +1,7 @@
 import { Sigma, ExternalLink, Loader } from "lucide-react";
 import { registerMcpCard, type McpCardProps } from "../registry";
 
-/**
- * Wolfram|Alpha computation result.
- *
- * The shape is whatever `crates/pond-mcp-server/src/wolfram.rs` puts in its
- * `[[[mcp-ui:wolfram:{...}]]]` hint, so the two move together. Everything here
- * is optional on purpose: a hint that arrives half-built should render the part
- * it has rather than blanking the card.
- */
+// Mirrors the hint from `crates/pond-mcp-server/src/wolfram.rs`; all optional so a partial one renders.
 interface Pod {
   title?: string;
   text?: string;
@@ -30,8 +23,7 @@ function WolframCard({ data, onAction, variant }: McpCardProps) {
   const explore = (data.explore ?? []) as Suggestion[];
   const sourceUrl = data.source_url as string | undefined;
 
-  // Nothing has arrived yet. The tool call is already on screen by this point,
-  // so the card has to say it is working rather than render an empty box.
+  // Nothing yet, but the tool call is on screen: show progress, not an empty box.
   if (!primary && pods.length === 0 && explore.length === 0) {
     return (
       <div className="ui-wolfram ui-wolfram--loading">
@@ -99,23 +91,7 @@ function WolframCard({ data, onAction, variant }: McpCardProps) {
   );
 }
 
-/**
- * One explorable suggestion.
- *
- * Clicking it does NOT call the tool directly. It asks the assistant, which
- * re-asks `compute_answer` with the suggestion's own wording on the normal
- * engine path — so the follow-up is audited, policy-checked and part of the
- * conversation, the same as if the user had typed it. Reaching the tool from
- * here would need the knowledge tools on `DIRECT_DISPATCH_ALLOWLIST`, which
- * would hand them to every paired client and every sandboxed MCP App iframe.
- *
- * It used to send the suggestion's id for `explore_computation` to resolve.
- * That tool was removed on 2026-09-10, so the wording is now the whole message:
- * an id would name nothing.
- *
- * With no `onAction` wired (the Canvas surface, today) it renders as a plain
- * label rather than a button that does nothing when pressed.
- */
+/** Follow-ups go through `onAction`, never a direct tool call; see `McpCardProps.onAction`. */
 function SuggestionChip({
   suggestion,
   query,
@@ -139,8 +115,7 @@ function SuggestionChip({
     );
   }
 
-  // The wording is the whole message: nothing resolves an id any more, so the
-  // sent text has to stand on its own as something a person would say.
+  // Nothing resolves an id, so the text must stand alone as something a person would say.
   const prompt = query
     ? `For "${query}", ${verb} ${label}.`
     : `${verb.charAt(0).toUpperCase()}${verb.slice(1)} ${label}.`;

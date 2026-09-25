@@ -1,21 +1,6 @@
 // ─── Context: everything the pond knows about you ───────────────────────────
-//
-// The screen the sidebar's Context entry lands on, replacing the old Memories
-// tab. Four views of one subject, because "what the pond knows" is three
-// different questions a person actually asks:
-//
-//   Remembered  what you told it          (a wall, like Conversations)
-//   Collected   what it read from accounts (calendar events, mail subjects)
-//   Sources     where else it may read     (which accounts, and their health)
-//   Lineage     how any of it connects     (the advanced view)
-//
-// Remembered and Collected are kept apart because the provenance decides what
-// you DO about a row you disagree with: you correct a memory, and you
-// disconnect a source.
-//
-// It borrows Conversations' card treatment on purpose. That screen is the one
-// people already know how to scan, and a second wall that behaves differently
-// would be a second thing to learn for no reason.
+// Remembered (what you told it) stays apart from Collected (what it read from accounts): you correct a
+// memory but disconnect a source. The wall matches Conversations' cards on purpose.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Plus, Search, RefreshCw, Pencil, Trash2, Check, X } from "lucide-react";
@@ -36,11 +21,7 @@ const VIEWS: Array<{ id: View; label: string; blurb: string }> = [
   { id: "lineage", label: "Lineage", blurb: "How it all connects" },
 ];
 
-/** The skeleton shapes shown while the wall loads.
- *
- * Only the placeholders need a size: a real card is as tall as its memory,
- * because guessing a height from character count and clipping the overflow
- * amputated memories mid-sentence. */
+/** Only placeholders get a shape: a real card is as tall as its memory, never clipped to a guess. */
 const GHOST_SHAPES = ["tile", "card", "column", "card", "tile", "card"] as const;
 
 function relativeWhen(iso?: string): string {
@@ -74,16 +55,12 @@ export function Context() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      // 500 rather than the default 20: this screen is about the whole of what
-      // the pond holds, and the lineage view is meaningless over a slice of it.
+      // 500, not the default 20: the lineage view is meaningless over a slice.
       const [rows, index] = await Promise.all([
         api.listMemories(500),
         api.getContextIndexHealth().catch(() => null),
       ]);
-      // `request` returns undefined cast to T for a 204 or any empty body, so
-      // a method typed `Promise<MemoryFragment[]>` can hand back undefined and
-      // the type will not warn. Coerced here rather than trusted: the whole
-      // screen white-screens on the first `.filter`.
+      // For an empty body `request` returns undefined typed as T; coerce, or `.filter` white-screens.
       setMemories(Array.isArray(rows) ? rows : []);
       setHealth(index);
       setError(null);
@@ -133,9 +110,7 @@ export function Context() {
       return;
     }
     try {
-      // In place: the memory keeps its id, its age and its usage. It used to be
-      // add-then-delete, which turned a corrected long-held fact into a
-      // brand-new one that had never been used.
+      // In place, so the memory keeps its id, age and usage.
       await api.updateMemory(id, text);
       setEditingId(null);
       await load();
@@ -181,9 +156,7 @@ export function Context() {
             type="button"
             className="ctx__view"
             aria-pressed={view === v.id}
-            // The label and its question are separate spans, which a screen
-            // reader would otherwise run together into "Remembered what the
-            // pond has kept" as the button's name.
+            // Otherwise a screen reader runs the label and question spans together as the name.
             aria-label={v.label}
             onClick={() => setView(v.id)}
           >

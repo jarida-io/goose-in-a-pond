@@ -54,9 +54,9 @@ interface CanvasCard {
   tool: string;
   title: string;
   data: Record<string, unknown>;
-  /** Explicit card type from MCP-APP UI hint — takes priority over tool name pattern matching */
+  /** Card type from the UI hint; beats tool-name matching. */
   renderHint?: string;
-  /** MCP App HTML content (standard protocol — rendered in sandboxed iframe) */
+  /** MCP App HTML, rendered in a sandboxed iframe. */
   appHtml?: string;
   /** MCP App resource URI for refetching */
   appResourceUri?: string;
@@ -67,8 +67,7 @@ interface ChatMessage {
   text: string;
   tool?: string;
   status?: "running" | "ok";
-  /** Set when this bubble is showing an error, so later text starts a new one
-   *  instead of being appended onto the error sentence. */
+  /** An error bubble: later text starts a new bubble instead of appending to it. */
   error?: boolean;
 }
 
@@ -123,7 +122,6 @@ export function Canvas() {
     setAudioLevel(0);
   }, []);
 
-  // Cleanup mic on unmount
   useEffect(() => () => closeMic(), [closeMic]);
 
   const startVoiceRecording = useCallback(async () => {
@@ -170,7 +168,6 @@ export function Canvas() {
           if (Date.now() - t0 >= DEFAULT_VAD_CONFIG.maxDurationMs || advanceVad(vad, rms, Date.now(), DEFAULT_VAD_CONFIG)) {
             if (ctx.pump) clearInterval(ctx.pump);
             setAudioLevel(0);
-            // Collect WAV
             const total = chunks.reduce((s, c) => s + c.length, 0);
             const merged = new Float32Array(total);
             let off = 0;
@@ -184,7 +181,6 @@ export function Canvas() {
       closeMic();
       if (!wavBlob || voiceCancelledRef.current) { setVoiceRecState("idle"); return; }
 
-      // Transcribe
       setVoiceRecState("transcribing");
       const result = await api.transcribe(await wavBlob.arrayBuffer());
       const text = result.text?.trim();
@@ -279,7 +275,6 @@ export function Canvas() {
     setDraft("");
     setStreaming(true);
 
-    // Add user message + empty assistant placeholder
     setThread((t) => [
       ...t,
       { role: "user", text },
@@ -309,15 +304,12 @@ export function Canvas() {
           });
 
         } else if (ev.type === "tool_call" && ev.tool) {
-          // Show tool call chip in thread
           setThread((t) => [...t, { role: "tool", text: "", tool: ev.tool!, status: "running" }]);
 
-          // Create a canvas card for this tool
           const cardId = nextCardId();
           const toolName = ev.tool;
           const reg = findCardByHint(toolName) ?? findCardRenderer(toolName);
 
-          // Check if this tool has an MCP App resource (standard protocol)
           const meta = toolMetaRef.current.get(toolName);
           let appHtml: string | undefined;
           if (meta?.resourceUri) {
@@ -337,12 +329,10 @@ export function Canvas() {
             ...(appHtml ? { appHtml, appResourceUri: meta?.resourceUri } : {}),
           }, ...c]);
 
-          // Track for tool_result matching (by tool name and MCP request ID)
           pendingToolsRef.current.set(toolName, cardId);
           if (ev.id) pendingToolsRef.current.set(`__id:${ev.id}`, cardId);
 
         } else if (ev.type === "tool_result" && (ev.tool || ev.id)) {
-          // Update tool call chip status in thread
           const matchTool = ev.tool || ev.id || "";
           setThread((t) => t.map((m) =>
             m.role === "tool" && (m.tool === ev.tool || m.tool === matchTool)
@@ -350,10 +340,8 @@ export function Canvas() {
               : m
           ));
 
-          // Update the canvas card with real data
           const cardData = ev.ui?.data ?? { result: ev.content };
           const renderHint = ev.ui?.card_type;
-          // Match by tool name first, then by MCP request ID
           const cardId = (ev.tool && pendingToolsRef.current.get(ev.tool))
             ?? (ev.id && pendingToolsRef.current.get(`__id:${ev.id}`));
           if (cardId != null) {
@@ -400,7 +388,6 @@ export function Canvas() {
   }
 
   function renderCard(card: CanvasCard) {
-    // 0a. MCP App (standard protocol — sandboxed iframe)
     if (card.appHtml) {
       const toolResult = Object.keys(card.data).length > 0
         ? { content: [{ type: "text", text: JSON.stringify(card.data) }] }
@@ -414,7 +401,6 @@ export function Canvas() {
           toolInput={card.data}
           onClose={() => closeCard(card.id)}
           onToolCall={async (name, args) => {
-            // Proxy tool calls from MCP App to server
             const result = await api.callTool(name, args);
             return { content: [{ type: "text", text: typeof result === "string" ? result : JSON.stringify(result) }] };
           }}
@@ -423,7 +409,6 @@ export function Canvas() {
       );
     }
 
-    // 0b. Schedule debrief cards get their own rich renderer
     if (card.kind === "debrief" && card.data) {
       const run = {
         id: String(card.data.schedule_id ?? card.id),
@@ -444,9 +429,7 @@ export function Canvas() {
       );
     }
 
-    // 1. Try explicit MCP-APP hint (highest priority)
     const hintReg = card.renderHint ? findCardByHint(card.renderHint) : null;
-    // 2. Fall back to tool name pattern match
     const reg = hintReg ?? findCardRenderer(card.tool);
     if (reg) {
       const Renderer = reg.component;
@@ -456,7 +439,6 @@ export function Canvas() {
         </McpCardShell>
       );
     }
-    // 3. Fall back to GenericCard
     return (
       <McpCardShell key={card.id} tool={card.tool} label={card.title} onClose={() => closeCard(card.id)}>
         <GenericCard data={card.data} toolName={card.tool} />
