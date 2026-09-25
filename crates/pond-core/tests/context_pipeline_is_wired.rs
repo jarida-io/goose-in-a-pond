@@ -1,42 +1,8 @@
-//! PAI-8's ingest pipeline is reached from production, and this asserts it.
-//!
-//! # The record this file replaces
-//!
-//! It was `context_pipeline_is_not_wired_yet.rs`, written on 2026-08-11 and
-//! retired the same day, and the story is worth keeping because it is the one
-//! this programme keeps re-learning.
-//!
-//! PAI-8 P1 and P2 landed with a complete pipeline, corpus, retention, retrieval
-//! and scope filter that **nothing in production reached** -- and no guard
-//! saying so. `pub mod context;` makes it all compile, and a `pub` item in a
-//! library crate never earns a `dead_code` warning, so nothing complained.
-//! Reading the checklist row rather than the tree, I then wrote "PAI-8 is the
-//! only workstream with no landed code" into three documents. The guard was the
-//! correction: it walked the workspace asserting the absence, with a control
-//! proving the walk could see the files it excluded -- necessary beyond the
-//! usual, because its subject was an ABSENCE, where a broken walk passes.
-//!
-//! It fired the same day, naming all three new call sites, and carried a
-//! three-step instruction that was followed in order: stamp the phase, correct
-//! BOTH status documents, and re-check what the caller meant for PAI-2 P6b's
-//! third part (which turned out never to have been circularly blocked).
-//!
-//! # What is asserted now, and why it is not covered elsewhere
-//!
-//! `ci.yml` runs `cargo check -p pond-server` and never `cargo test -p
-//! pond-server`, so every line of wiring in `main.rs` is verified to COMPILE and
-//! nothing verifies it is still called. The same gap `proactive_reviewer_is_wired.rs`
-//! covers for PAI-7 P4.
-//!
-//! The registration half is NOT re-asserted here: `registration_matches_the_catalog.rs`
-//! already ties `giap_registration.rs`, `TOOL_GROUPS` and AGENTS.md's sentence
-//! to each other and fails if any two disagree.
+//! Asserts `main.rs` still reaches the context ingest pipeline.
+//! CI only `cargo check`s pond-server, and an unreached `pub` item never warns as dead code.
 
 const MAIN: &str = include_str!("../../pond-server/src/main.rs");
 
-/// Guard against the guard. Four of this programme's recorded vacuous-test
-/// incidents were an `include_str!` that had stopped pointing at its subject,
-/// after which every assertion passes by matching nothing.
 #[test]
 fn the_file_this_test_reads_is_the_one_it_thinks_it_is() {
     assert!(
@@ -45,10 +11,6 @@ fn the_file_this_test_reads_is_the_one_it_thinks_it_is() {
     );
 }
 
-/// The corpus has a producer, and the producer is subscribed to the bus.
-///
-/// Without the subscriber the pipeline is built and never called, which is
-/// indistinguishable at compile time from this working.
 #[test]
 fn the_bus_subscriber_that_feeds_the_corpus_is_still_spawned() {
     assert!(
@@ -63,13 +25,7 @@ fn the_bus_subscriber_that_feeds_the_corpus_is_still_spawned() {
     );
 }
 
-/// PAI-2 P3's third redaction chokepoint, which has no other guard.
-///
-/// `IngestPipeline::new` takes a `Redactor` by value rather than as an `Option`,
-/// so redaction-before-persistence is enforced by the type -- but only for code
-/// that constructs a pipeline. This asserts production still does, because the
-/// ledger recorded that chokepoint as blocked for weeks and its unblocking is
-/// this one call site.
+/// Sole guard on this redaction chokepoint: the type only protects a pipeline that gets built.
 #[test]
 fn the_ingest_pipeline_is_constructed_with_a_redactor() {
     assert!(
@@ -84,12 +40,6 @@ fn the_ingest_pipeline_is_constructed_with_a_redactor() {
          every call -- while looking exactly like a working guard, which PAI-6 P5 records as the \
          most misleading failure shape available here."
     );
-    // Both binary paths, not just `serve`. One call satisfied the assertion
-    // above while the voice/CLI chat path had none -- and its first session to
-    // load giap-context panicked with "init_context_deps() not called"
-    // (2026-08-27). audit/vision/sensors each learned this same lesson
-    // separately (#115/#157, #130, and the sensors comment in main.rs); this
-    // pins context to the pattern so the fifth extension copies it too.
     assert!(
         MAIN.matches("init_context_deps").count() >= 2,
         "`init_context_deps` is called on only one binary path. `serve` and the voice/CLI chat \

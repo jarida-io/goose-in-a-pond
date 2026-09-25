@@ -1,27 +1,7 @@
-//! The registration list and the tool-group catalog describe the same set.
-//!
-//! PAI-6 P5 owed this test, and the reason it was owed is that the failure mode
-//! is silent AND it widens. `tool_selection.rs :: is_catalog_extension` treats
-//! anything the catalog does not know about as a **user-added MCP server**, which
-//! selection deliberately never narrows — the user added it on purpose and GIAP
-//! has no description to score it against. So a builtin registered under a name
-//! the catalog does not carry is not "missing from a list": it becomes the one
-//! extension that can never be selected away, is never subtracted for a guest by
-//! the group-level pass, and is never withheld from a subagent. For
-//! `giap-orchestrator`, which should be the least present extension on the pond,
-//! that inverts the whole intent.
-//!
-//! It lives in `pond-core`'s test directory rather than in `pond-adapters-goose`
-//! for one reason: CI runs `cargo test -p pond-core` and only `cargo check`s
-//! `pond-adapters-goose`. A guard that CI never executes is a guard that fails
-//! for the first time during a release.
-//!
-//! # Why this parses source instead of calling `register_giap_extensions`
-//!
-//! Calling it would need the goose submodule, twelve repositories and a
-//! `Settings` with every toggle on — and `REGISTERED_EXTENSIONS` is a `OnceLock`,
-//! so a second call in the same process is a no-op. Source is the honest input
-//! here; what matters is that the parser cannot silently see nothing.
+//! The builtin registration list and the tool-group catalog must describe the same set.
+//! An uncatalogued builtin counts as a user-added MCP server: never narrowed, even for guests.
+//! Parses source: registering needs the goose submodule, and `REGISTERED_EXTENSIONS` is a
+//! `OnceLock`. In pond-core because CI only runs pond-core's tests.
 
 use pond_core::mcp::domain::tool_group::{ORCHESTRATOR_EXTENSION, TOOLKIT_EXTENSION, TOOL_GROUPS};
 use std::collections::BTreeSet;
@@ -40,9 +20,7 @@ fn registration_source() -> String {
     let path = workspace_root().join("crates/pond-adapters-goose/src/giap_registration.rs");
     let src = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-    // Line comments out, so a commented-out registration cannot be counted and
-    // so prose in a doc comment cannot satisfy this guard. (Recorded vacuity
-    // shape 1: a guard satisfied by comment text rather than by code.)
+    // Line comments out, so neither commented-out code nor prose can satisfy this guard.
     src.lines()
         .map(|line| match line.find("//") {
             Some(i) => &line[..i],
@@ -52,14 +30,8 @@ fn registration_source() -> String {
         .join("\n")
 }
 
-/// The first argument of every `register_builtin_extension(...)` call, resolved
-/// to the extension name it actually registers.
-///
-/// **The resolver refuses to skip.** An argument it cannot resolve panics rather
-/// than being dropped, because dropping one is precisely how this programme got
-/// the extension count wrong twice: `giap-toolkit` registers through a const, so
-/// every grep for a `"giap-*"` string literal undercounted by one, and the
-/// correction was applied in the wrong direction with confidence.
+/// Every `register_builtin_extension(...)` call's first argument, resolved to its name.
+/// An unresolvable argument panics rather than being dropped: `giap-toolkit` uses a const.
 fn registered_extensions_from_source() -> Vec<String> {
     let src = registration_source();
     let mut names = Vec::new();
@@ -92,13 +64,11 @@ fn registered_extensions_from_source() -> Vec<String> {
     names
 }
 
-/// Turn one call argument into the name it registers.
 fn resolve_argument(arg: &str) -> String {
     if let Some(literal) = arg.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
         return literal.to_string();
     }
-    // A path ending in a const this crate owns. Compared on the LAST segment so
-    // the `pond_core::mcp::domain::tool_group::` prefix is irrelevant.
+    // A path to one of this crate's consts, matched on its last segment.
     let last = arg.rsplit("::").next().unwrap_or(arg).trim();
     match last {
         "TOOLKIT_EXTENSION" => TOOLKIT_EXTENSION.to_string(),
@@ -112,13 +82,7 @@ fn resolve_argument(arg: &str) -> String {
     }
 }
 
-/// The parser sees real registrations, so every assertion below is about the
-/// content rather than about an empty set.
-///
-/// Recorded vacuity shape: a source-reading guard that silently matches nothing
-/// passes everything. The bound is deliberately loose — it is a "the parser
-/// works" control, not a pin on today's number, which the set equality below
-/// already is.
+/// Vacuity control with a deliberately loose bound; the set equality below pins the rest.
 #[test]
 fn the_parser_actually_finds_registrations() {
     let found = registered_extensions_from_source();
@@ -140,14 +104,7 @@ fn the_parser_actually_finds_registrations() {
     );
 }
 
-/// Registration and catalog describe the SAME set, in both directions.
-///
-/// - A registered extension the catalog does not know about is treated as a
-///   user-added MCP server: never narrowed by selection, never subtracted for a
-///   guest by the group pass, never withheld from a subagent.
-/// - A catalogued extension nothing registers is a group the scorer can choose,
-///   `giap-toolkit` can be asked to enable, and which does not exist — a dead
-///   end the model spends turns discovering.
+/// A catalogued group nothing registers is a dead end the model can still be offered.
 #[test]
 fn every_registered_extension_is_in_the_catalog_and_the_reverse() {
     let registered: BTreeSet<String> = registered_extensions_from_source().into_iter().collect();
@@ -172,32 +129,12 @@ fn every_registered_extension_is_in_the_catalog_and_the_reverse() {
     );
 }
 
-/// The extension count is a number that goes stale. It has been wrong twice in
-/// this programme — once at 14 when the answer was 15, and once "corrected" from
-/// 15 back to 14 by a grep that could not see the const.
-///
-/// # Why this pins a literal instead of reading the guidance document
-///
-/// It used to read that number out of `CLAUDE.md`, and then `AGENTS.md`, and
-/// assert the prose against the code. That tie is no longer possible: the agent
-/// guidance is deliberately **not tracked** (`/AGENTS.md` and `/CLAUDE.md` are
-/// both gitignored), so on a CI checkout there is no file to read and the test
-/// would fail with "cannot read" rather than with anything about extensions.
-///
-/// Reading it *if present* was the other option and is worse: it passes
-/// vacuously wherever the file is absent, which is exactly where the guard is
-/// supposed to run. So the claim is re-anchored to the only place left in the
-/// tree — this literal. Changing the number still costs a deliberate edit with
-/// this comment in front of it, which is the property that mattered. Update the
-/// local `AGENTS.md` sentence in the same change; nothing can check that for you
-/// any more.
+/// Pinned here because `AGENTS.md` is untracked; update its sentence in the same change.
 #[test]
 fn the_extension_count_is_pinned() {
     const CLAIMED: usize = 11;
 
-    // The REGISTRATION count, not the catalog's length: it is what the counting
-    // recipe in the guidance produces, and the two are pinned to each other by
-    // the test above.
+    // The registration count, which the test above ties to the catalog's.
     let registered = registered_extensions_from_source().len();
     assert_eq!(
         CLAIMED, registered,
@@ -211,11 +148,7 @@ fn the_extension_count_is_pinned() {
 // ── The third list in the family ───────────────────────────────────────────
 
 /// `dispatcher.rs`'s routed prefixes, as extension names.
-///
-/// Parsed from `prefix: PREFIX_X` occurrences rather than from the `PREFIX_*`
-/// declarations, because the two differ on purpose: `PREFIX_AUDIT` is declared
-/// and deliberately not routed, and a guard that read declarations would call
-/// that a match.
+/// Read from `prefix: PREFIX_X` uses, not declarations: `PREFIX_AUDIT` is declared but unrouted.
 fn dispatcher_routed_extensions() -> BTreeSet<String> {
     let path = workspace_root().join("crates/pond-mcp-server/src/dispatcher.rs");
     let src = std::fs::read_to_string(&path)
@@ -270,11 +203,7 @@ fn dispatcher_routed_extensions() -> BTreeSet<String> {
     routed
 }
 
-/// Extensions the direct dispatcher deliberately does not route, and why.
-///
-/// Every entry is a REASON, not a name on a list. Adding a new extension makes
-/// the test below fail until somebody either routes it or writes down why not,
-/// which is the point: this drifted to 11-against-17 silently.
+/// Extensions the direct dispatcher deliberately doesn't route, each with its reason.
 const DISPATCHER_EXCLUSIONS: &[(&str, &str)] = &[
     (
         "giap-sensors",
@@ -295,19 +224,8 @@ const DISPATCHER_EXCLUSIONS: &[(&str, &str)] = &[
     ),
 ];
 
-/// The dispatcher, the registration list and the catalog are three views of one
-/// set, and only two of them were tied together.
-///
-/// `dispatcher.rs` is a SECOND live dispatch path — `main.rs` binds it into
-/// `AppState` unconditionally and `POST /api/v1/tools/invoke` and
-/// `POST /api/v1/mcp/tools/call` serve it. Its `servers` vec had drifted to 11
-/// against `giap_registration.rs`'s 17, and for four of the six missing ones the
-/// omission was undocumented — so nobody could tell an intentional exclusion
-/// from a forgotten one.
-///
-/// What actually keeps that path safe is `routes.rs :: DIRECT_DISPATCH_ALLOWLIST`,
-/// which is three tools. This test does not weaken that: it only requires the
-/// two lists to agree about what EXISTS.
+/// `dispatcher.rs` is a second live dispatch path (the direct `/api/v1` tool routes).
+/// Its safety is `DIRECT_DISPATCH_ALLOWLIST`; this only checks the lists agree on what exists.
 #[test]
 fn the_dispatcher_routes_a_documented_subset_of_the_registered_extensions() {
     let registered: BTreeSet<String> = registered_extensions_from_source().into_iter().collect();
@@ -322,8 +240,7 @@ fn the_dispatcher_routes_a_documented_subset_of_the_registered_extensions() {
         "the dispatcher routes nothing — parser broken"
     );
 
-    // 1. Nothing routed that is not registered: a phantom prefix can never match
-    //    a real tool.
+    // 1. Nothing routed that isn't registered: a phantom prefix never matches a real tool.
     for ext in &routed {
         assert!(
             registered.contains(ext),
@@ -331,8 +248,7 @@ fn the_dispatcher_routes_a_documented_subset_of_the_registered_extensions() {
         );
     }
 
-    // 2. Nothing both excluded and routed — a contradiction inside this test's
-    //    own input.
+    // 2. Nothing both excluded and routed.
     for ext in &excluded {
         assert!(
             !routed.contains(ext),
@@ -353,8 +269,7 @@ fn the_dispatcher_routes_a_documented_subset_of_the_registered_extensions() {
          indistinguishable from a forgotten one, which is how this drifted."
     );
 
-    // 4. Vacuity control on the exclusion list: an entry naming an extension
-    //    that no longer exists is dead weight that hides real drift.
+    // 4. No exclusion names an extension that no longer exists; stale entries hide drift.
     for (ext, reason) in DISPATCHER_EXCLUSIONS {
         assert!(
             registered.contains(&ext.to_string()),

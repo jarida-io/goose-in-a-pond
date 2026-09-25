@@ -1,34 +1,6 @@
-//! Idle re-titling — giving a conversation a name worth finding again.
-//!
-//! A session gets its first title as soon as it has a user message: the first
-//! six words of that message, verbatim, from `derive_title_from_text`. That is
-//! a reliable label and a poor name. "so i was wondering whether" tells you
-//! nothing from the sidebar three weeks later.
-//!
-//! This service replaces those with something recognisable at a glance, and it
-//! only ever runs when the machine is otherwise doing nothing. On an 8GB
-//! Jetson there is one inference slot, and a title is never worth taking it
-//! from a person: every model call here races a [`CancellationToken`] and
-//! persists nothing if it loses.
-//!
-//! # What it will and will not rename
-//!
-//! Provenance is recorded per title (`sessions.title_source`) because the three
-//! kinds have to be treated differently:
-//!
-//! - `derived` — the six-word fallback. Always eligible.
-//! - `model` — written by this service. Eligible again only once the
-//!   conversation has moved substantially past what the title covers, so a chat
-//!   that began about DNS and became about the Jetson stops being filed under
-//!   DNS.
-//! - `user` — someone typed it. Never touched, at any interval, for any reason.
-//!
-//! A row written before the provenance column existed reads as `None`, and is
-//! treated as `user` **unless** its title is exactly what the fallback would
-//! have produced. That asymmetry is deliberate: guessing wrong in the lenient
-//! direction silently overwrites a name a person chose, and there is no undo
-//! for that. Guessing wrong in the strict direction leaves a mediocre title
-//! alone, which is the failure everyone can live with.
+//! Idle re-titling: swaps the six-word fallback, or a stale model title, for a model-written one.
+//! Never touches a `user` title, or a legacy row's title unless it is exactly the fallback.
+//! Every model call races a [`CancellationToken`] and persists nothing if it loses.
 
 use std::sync::Arc;
 
@@ -39,31 +11,24 @@ use crate::models::domain::message::{ChatMessage, Role};
 use crate::models::ports::provider::LlmProvider;
 use crate::user_data::ports::session_storage::SessionStorage;
 
-/// Hard ceiling on a title, as asked for: ten words, never eleven.
 pub const MAX_TITLE_WORDS: usize = 10;
 
 /// Character cap, so a title of ten very long words still fits the sidebar.
 pub const MAX_TITLE_CHARS: usize = 72;
 
-/// Past this, the model did not answer the question it was asked — it wrote a
-/// sentence, or explained itself. Truncating that to ten words produces a
-/// confident-looking fragment, which is worse than keeping the dull title we
-/// already had, so the response is rejected whole.
+/// Past this the reply is prose, not a name: reject it whole rather than truncate to a fragment.
 const REJECT_OVER_WORDS: usize = 20;
 
-/// A session needs at least this many messages before it is worth naming. One
-/// lone user message is exactly what the six-word fallback already handles.
+/// Fewer messages than this are left to the six-word fallback.
 pub const MIN_MESSAGES_TO_TITLE: usize = 3;
 
-/// How far a conversation must move past its current model-written title
-/// before that title is rebuilt.
+/// Messages past a model title's coverage before it is rebuilt.
 pub const REFRESH_AFTER_MESSAGES: usize = 8;
 
 /// How many recent messages to show the model when there is no rolling summary.
 const EVIDENCE_MESSAGES: usize = 10;
 
-/// Per-message truncation for that evidence — enough to carry the subject,
-/// bounded so a long paste cannot blow the context on a small board.
+/// Per-message evidence cap, so a long paste can't blow a small board's context.
 const EVIDENCE_CHARS_PER_MESSAGE: usize = 280;
 
 /// Who last wrote `sessions.title`.
@@ -87,8 +52,7 @@ impl TitleSource {
         }
     }
 
-    /// Parse the column back. An unrecognised value reads as `None`, which the
-    /// gate treats with the same suspicion as a legacy row.
+    /// An unrecognised value reads as `None`, which the gate treats like a legacy row.
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
             "derived" => Some(TitleSource::Derived),
@@ -99,21 +63,16 @@ impl TitleSource {
     }
 }
 
-/// Everything the gate needs, as plain values, so the policy is testable
-/// without a database or a model.
+/// The gate's inputs as plain values, so the policy tests need no database or model.
 #[derive(Debug, Clone, Copy)]
 pub struct TitleGateInputs<'a> {
-    /// The title as stored, if any.
     pub title: Option<&'a str>,
     /// `sessions.title_source`, or `None` for a row that predates the column.
     pub source: Option<TitleSource>,
-    /// What `derive_title_from_text` would produce from the first user message
-    /// right now. Used only to identify a legacy fallback title.
+    /// The fallback title for the first user message; only used to spot a legacy fallback.
     pub derived_fallback: Option<&'a str>,
-    /// Total messages in the session.
     pub total_messages: usize,
-    /// Messages added since the id the current model title covers. Meaningless
-    /// unless `source` is [`TitleSource::Model`].
+    /// Only meaningful when `source` is [`TitleSource::Model`].
     pub messages_since_covered: usize,
 }
 
@@ -124,8 +83,7 @@ pub enum SkipReason {
     TooShort,
     /// Someone typed this name. Off limits.
     UserNamed,
-    /// A row older than the provenance column whose title is not the fallback,
-    /// so it is assumed to have been chosen deliberately.
+    /// Legacy row whose title isn't the fallback, so assumed chosen by a person.
     UnknownProvenance,
     /// Model-written and still current enough.
     StillCurrent,
@@ -156,11 +114,6 @@ impl TitleDecision {
     }
 }
 
-/// Decide whether this session should be renamed now.
-///
-/// Ordered so the protective rules run before the permissive ones: a
-/// user-named session is refused before anything else gets a chance to
-/// consider it eligible.
 pub fn should_retitle(inputs: TitleGateInputs<'_>) -> TitleDecision {
     if inputs.total_messages < MIN_MESSAGES_TO_TITLE {
         return TitleDecision::Skip(SkipReason::TooShort);
@@ -179,11 +132,7 @@ pub fn should_retitle(inputs: TitleGateInputs<'_>) -> TitleDecision {
             }
         }
 
-        // Legacy row, or an unrecognised column value. An empty title is
-        // nobody's deliberate choice, so it is safe to fill. Otherwise the
-        // title is only touched when it is byte-identical to what the fallback
-        // would have written — that is the one case where we know no person
-        // composed it.
+        // Legacy/unknown source: only an empty or exact-fallback title is surely not a person's.
         None => match (inputs.title, inputs.derived_fallback) {
             (None, _) => TitleDecision::Retitle,
             (Some(t), _) if t.trim().is_empty() => TitleDecision::Retitle,
@@ -193,17 +142,9 @@ pub fn should_retitle(inputs: TitleGateInputs<'_>) -> TitleDecision {
     }
 }
 
-/// Clean up whatever the model said and decide whether it is usable as a title.
-///
-/// Models reliably do three things the prompt asked them not to: wrap the
-/// answer in quotes, prefix it with "Title:", and add a full stop. Rejecting
-/// those would throw away good names over punctuation, so they are stripped.
-/// Length is different — a model that returns a paragraph did not understand
-/// the task, and truncating that produces a fragment that reads like a real
-/// title while meaning something else. Those are refused outright.
+/// Strips the quotes, "Title:" labels and full stops models add; refuses prose outright.
 pub fn normalise_title(raw: &str) -> Option<String> {
-    // Only ever the first line. Anything after it is the model explaining
-    // itself, which is not part of the name.
+    // Only the first non-empty line; the rest is the model explaining itself.
     let first_line = raw.lines().find(|l| !l.trim().is_empty())?;
 
     let mut cleaned = first_line.trim();
@@ -232,7 +173,6 @@ pub fn normalise_title(raw: &str) -> Option<String> {
     if words.is_empty() {
         return None;
     }
-    // The model wrote prose rather than a name. Keep the old title.
     if words.len() > REJECT_OVER_WORDS {
         return None;
     }
@@ -244,8 +184,7 @@ pub fn normalise_title(raw: &str) -> Option<String> {
         .collect::<Vec<_>>()
         .join(" ");
 
-    // Char cap, on a word boundary where one is available, so the result never
-    // ends mid-word.
+    // Char cap, cut on a word boundary where there is one.
     if title.chars().count() > MAX_TITLE_CHARS {
         let truncated: String = title.chars().take(MAX_TITLE_CHARS).collect();
         title = match truncated.rsplit_once(' ') {
@@ -254,7 +193,6 @@ pub fn normalise_title(raw: &str) -> Option<String> {
         };
     }
 
-    // A title made only of punctuation is not a title.
     if !title.chars().any(|c| c.is_alphanumeric()) {
         return None;
     }
@@ -262,13 +200,7 @@ pub fn normalise_title(raw: &str) -> Option<String> {
     Some(title)
 }
 
-/// Case-insensitive prefix strip that cannot panic on a multi-byte character.
-///
-/// `str::get` returns `None` rather than panicking when the range lands inside
-/// a character, which is the whole reason it is used here: slicing
-/// `s[..prefix.len()]` directly crashed on any title starting with a
-/// multi-byte character close enough to the front — "Déjà vu…" against the
-/// five-byte prefix "name:" cuts the "à" in half.
+/// Case-insensitive prefix strip; uses `str::get` so a multi-byte char at the cut can't panic.
 fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     let head = s.get(..prefix.len())?;
     if head.eq_ignore_ascii_case(prefix) {
@@ -278,12 +210,8 @@ fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     }
 }
 
-/// The instruction. Written to be read by a small on-device model, so the
-/// rules are short, positive where possible, and each one is demonstrated.
-///
-/// Public because the chat service names a conversation after its first
-/// exchange too, and two prompts for one job is how the two paths drift into
-/// disagreeing about what a title is.
+/// Title prompt for a small on-device model: short rules, positive where possible.
+/// Public so the chat service's first-exchange naming uses the same prompt.
 pub const TITLE_SYSTEM_PROMPT: &str = "\
 You name conversations. Reply with the name and nothing else.
 
@@ -320,16 +248,7 @@ impl SessionTitleService {
         Self { provider, storage }
     }
 
-    /// Consider one session, and rename it if it qualifies.
-    ///
-    /// Every rule applies: a name typed by hand is refused, a model-written
-    /// name that still fits is left alone, a conversation too short to describe
-    /// is left to the fallback. This is what both sweeps use, because a sweep
-    /// acts on conversations nobody is looking at.
-    ///
-    /// Cancellation is checked before the model call, raced against it, and
-    /// checked again after — a cancelled attempt writes nothing at all, so
-    /// interrupting can never leave a half-considered name behind.
+    /// Sweep entry point: renames only if the gate allows; a cancelled attempt writes nothing.
     pub async fn retitle(
         &self,
         session_id: &str,
@@ -338,14 +257,7 @@ impl SessionTitleService {
         self.run(session_id, false, cancel).await
     }
 
-    /// Rename one named conversation because somebody asked for that one.
-    ///
-    /// Skips "already current" and replaces a name typed by hand. The
-    /// protections exist because a sweep touches conversations out of sight; a
-    /// click on the conversation in front of you is consent about that
-    /// conversation, and a button that silently declined would be the worse
-    /// behaviour. Still refuses a conversation too short to describe, because
-    /// there the problem is that there is nothing to say, not permission.
+    /// On-request rename (a click is consent): overrides every skip except `TooShort`.
     pub async fn retitle_now(
         &self,
         session_id: &str,
@@ -368,19 +280,8 @@ impl SessionTitleService {
         let (source_raw, covered_through) = self.storage.get_title_provenance(session_id).await?;
         let source = source_raw.as_deref().and_then(TitleSource::parse);
 
-        // Everything the gate needs, by cheap queries only.
-        //
-        // This runs over every conversation on the pond every five minutes, and
-        // its steady state is "already named, nothing new since" — so the
-        // history is deliberately NOT loaded until the gate has said yes.
-        // Loading it first, which is the obvious way to write this, means
-        // re-reading every message of every conversation forever to be told
-        // nothing needs doing.
-        //
-        // Note `count_messages` defaults to 0 on an adapter that does not
-        // override it, which reads as `TooShort` and skips. That is the
-        // narrowing direction — a storage backend that cannot count cheaply
-        // declines to be re-titled rather than being re-titled wrongly.
+        // Cheap queries only (every session, every 5 min); history is read only after a yes.
+        // An adapter without `count_messages` reports 0, so it skips as `TooShort`: the safe side.
         let total_messages = self.storage.count_messages(session_id).await? as usize;
 
         let messages_since_covered = match (source, covered_through.as_deref()) {
@@ -388,14 +289,12 @@ impl SessionTitleService {
                 .storage
                 .messages_after(session_id, through)
                 .await?
-                // The covered message is gone (deleted, or a rebuilt history).
-                // Treat the title as covering nothing rather than as current.
+                // Covered message gone: the title covers nothing, rather than being current.
                 .map_or(total_messages, |n| n as usize),
             _ => total_messages,
         };
 
-        // Only a row with no recorded provenance needs this, and only so the
-        // gate can recognise the six-word fallback and rule out a human name.
+        // Only a legacy row needs this, to recognise the six-word fallback.
         let derived_fallback = match source {
             None => self
                 .storage
@@ -414,25 +313,20 @@ impl SessionTitleService {
         });
 
         if let TitleDecision::Skip(reason) = decision {
-            // A forced run overrides permission, never possibility. `TooShort`
-            // is the one refusal that is about there being nothing to describe
-            // rather than about who is allowed to describe it.
+            // Force overrides permission, not possibility: `TooShort` is nothing to describe.
             let overridable = force && reason != SkipReason::TooShort;
             if !overridable {
                 return Ok(RetitleOutcome::Skipped(reason));
             }
         }
 
-        // The gate said yes, so the history is now worth its read.
         let messages = self.storage.get_messages(session_id).await?;
         let Some(newest) = messages.last() else {
             return Ok(RetitleOutcome::Skipped(SkipReason::TooShort));
         };
         let through_message_id = newest.id.clone();
 
-        // Prefer the rolling summary: it is already a condensed account of this
-        // conversation, it costs nothing extra to reuse, and on a small board
-        // that is the difference between a cheap call and an expensive one.
+        // Prefer the rolling summary: already condensed, so a much cheaper call on a small board.
         let (summary, _) = self.storage.get_rolling_summary(session_id).await?;
         let evidence = match summary {
             Some(s) if !s.trim().is_empty() => {
@@ -449,8 +343,7 @@ impl SessionTitleService {
             "{evidence}\n\nName this conversation."
         ))];
 
-        // The model call is the long pole. Race it, so a returning user
-        // reclaims the serial on-device engine immediately.
+        // Race cancellation so a returning user reclaims the serial on-device engine at once.
         let response = tokio::select! {
             r = self.provider.complete(TITLE_SYSTEM_PROMPT, prompt) => r?,
             _ = cancel.cancelled() => return Ok(RetitleOutcome::Cancelled),
@@ -475,13 +368,8 @@ impl SessionTitleService {
     }
 }
 
-/// The six-word fallback, reproduced here so the gate can recognise one.
-///
-/// Deliberately a copy of `ChatService::derive_title_from_text`'s rule rather
-/// than a call into it: that function is private to the chat service, and the
-/// two have different jobs. If the fallback rule ever changes, the only cost
-/// here is that a legacy title stops being recognised as a fallback and is
-/// therefore left alone — the safe direction.
+/// A copy of chat's private `derive_title_from_text` rule, so the gate can spot a fallback.
+/// If the two drift, legacy fallbacks are merely left alone: the safe direction.
 fn derive_fallback_title(text: &str) -> String {
     const MAX_WORDS: usize = 6;
     const MAX_CHARS: usize = 60;
@@ -497,11 +385,7 @@ fn derive_fallback_title(text: &str) -> String {
     title.chars().take(MAX_CHARS).collect()
 }
 
-/// Build the transcript excerpt shown to the model when no summary exists.
-///
-/// The first user message plus the tail, because the opening says what the
-/// conversation was for and the tail says what it became — and those are the
-/// two things a good name has to reconcile.
+/// First user message plus the tail: what the conversation was for, and what it became.
 fn transcript_evidence(messages: &[crate::user_data::domain::session::SessionMessage]) -> String {
     let mut lines: Vec<String> = Vec::new();
 
@@ -528,8 +412,7 @@ fn transcript_evidence(messages: &[crate::user_data::domain::session::SessionMes
     lines.join("\n")
 }
 
-/// Truncate on a char boundary, marking that something was cut so the model
-/// does not read a severed sentence as a finished thought.
+/// Char-boundary truncate that marks the cut, so the model doesn't take it as a whole thought.
 fn truncate(text: &str, max_chars: usize) -> String {
     let trimmed = text.trim();
     if trimmed.chars().count() <= max_chars {
@@ -543,24 +426,9 @@ fn truncate(text: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
 
-    /// The prompt must not hand the model a ready-made title.
-    ///
-    /// It used to say: `Be concrete. "Wake word fires twice on the Jetson"
-    /// beats "Technical discussion".` That example satisfies every rule the
-    /// prompt states — under ten words, sentence case, no quotes, no full stop,
-    /// concrete — and names this user's actual hardware. A model at this size
-    /// copies worked examples, and `normalise_title` accepts it unchanged, so
-    /// the copy is PERSISTED as the conversation's real name.
-    ///
-    /// That makes it worse than a bad chat reply, which is transient. The user
-    /// ends up with several unrelated conversations all called the same thing,
-    /// written to the database, with nothing marking them as machine error.
-    ///
-    /// The rule survives; only the ready-made instance is gone.
+    /// Small models copy worked examples, and a copied one would be persisted as the real name.
     #[test]
     fn the_prompt_offers_no_title_a_model_could_copy() {
-        // A quoted, capitalised, multi-word phrase in a prompt that asks for
-        // exactly that shape is a title waiting to be echoed.
         let quoted: Vec<&str> = TITLE_SYSTEM_PROMPT.split('"').collect();
         for (i, chunk) in quoted.iter().enumerate() {
             if i % 2 == 0 {
@@ -596,7 +464,6 @@ mod tests {
         assert_eq!(should_retitle(base()), TitleDecision::Retitle);
     }
 
-    /// The rule the whole provenance column exists to enforce.
     #[test]
     fn a_name_someone_typed_is_never_touched() {
         let inputs = TitleGateInputs {
@@ -652,8 +519,6 @@ mod tests {
 
     // ── legacy rows, where the asymmetry lives ──────────────────────────────
 
-    /// A pre-migration row whose title is exactly the fallback: we know no
-    /// person wrote that, so it is safe to improve.
     #[test]
     fn a_legacy_fallback_title_is_recognised_and_replaced() {
         let inputs = TitleGateInputs {
@@ -665,8 +530,6 @@ mod tests {
         assert_eq!(should_retitle(inputs), TitleDecision::Retitle);
     }
 
-    /// The one that protects data: a pre-migration row with a title that is
-    /// NOT the fallback was probably typed by someone, and is left alone.
     #[test]
     fn a_legacy_title_that_is_not_the_fallback_is_assumed_deliberate() {
         let inputs = TitleGateInputs {
@@ -751,9 +614,6 @@ mod tests {
         );
     }
 
-    /// A model that writes prose did not do the task. Truncating it to ten
-    /// words would read like a real title while meaning something else, so the
-    /// old title is kept instead.
     #[test]
     fn prose_is_refused_rather_than_truncated() {
         let raw = "Certainly, here is a suitable name for this particular conversation \
@@ -787,9 +647,6 @@ mod tests {
         assert_eq!(normalise_title(raw).as_deref(), Some(raw));
     }
 
-    /// The prefix strip used to slice by byte offset, so any title with a
-    /// multi-byte character straddling one of the prefix lengths panicked and
-    /// took the whole background job down with it.
     #[test]
     fn a_multi_byte_character_at_a_prefix_boundary_does_not_panic() {
         for raw in [
@@ -911,8 +768,6 @@ mod tests {
             );
         }
 
-        /// The rule that matters most, and the cheapest way to prove it: a
-        /// user-named session must not even reach the model.
         #[tokio::test]
         async fn a_user_named_session_costs_no_inference_at_all() {
             let storage = Arc::new(InMemorySessionStorage::new());
@@ -1049,9 +904,6 @@ mod tests {
             assert_eq!(provider.calls(), 0);
         }
 
-        /// A title whose covered message has since been deleted must read as
-        /// covering nothing, not as still current — otherwise a compacted or
-        /// rebuilt history would freeze its name forever.
         #[tokio::test]
         async fn a_title_pointing_at_a_vanished_message_is_rebuilt() {
             let storage = Arc::new(InMemorySessionStorage::new());

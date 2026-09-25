@@ -1,59 +1,15 @@
-//! What a live turn is authorised to delegate — PAI-6 P3.
-//!
-//! PAI-6 P1 made a [`DelegationAuthority`] impossible to forge: it has no
-//! `Default`, no `Deserialize` and no field-wise constructor, so the only way to
-//! hold one is to be handed one. That is only worth anything if the real one —
-//! the parent turn's — is reachable from the place a `delegate` call arrives.
-//! It is not: an MCP tool handler runs in `pond-mcp-server`, is given the
-//! caller's ENGINE session id in `_meta`, and has no access to the adapter's
-//! per-turn locals.
-//!
-//! This is the seam between the two. The adapter publishes the turn's authority
-//! here as it starts the turn, keyed by the engine session id; a tool handler
-//! looks it up by the id the engine stamped.
-//!
-//! # Why the engine session id is the right key
-//!
-//! It is the only session identity a tool call carries that the model cannot
-//! choose. `inject_session_context_into_extensions` in the engine `retain`s away
-//! any caller-supplied `agent-session-id` (case-insensitively) and re-inserts
-//! the value from its own task-local before the request leaves. So a model that
-//! emits a session id in its arguments changes nothing, and a subagent's calls
-//! carry the CHILD's id rather than the parent's — which is what makes "is this
-//! caller allowed to delegate" answerable at all.
-//!
-//! # Why entries are leased rather than overwritten
-//!
-//! An authority outliving its turn is a stale answer to an authorisation
-//! question, and this programme's rule is that access narrows on failure.
-//! [`TurnAuthorityRegistry::publish`] returns a [`TurnAuthorityLease`] whose
-//! `Drop` revokes the entry, so a turn that ends — normally, by cancellation, or
-//! by the client hanging up and the stream being dropped — takes its delegation
-//! authority with it. The lookup then answers `None`, and P1's contract is that
-//! `None` means refuse.
-//!
-//! # What is deliberately NOT here
-//!
-//! Persistence. An authority is derived from a turn's resolved scope and its
-//! post-selection tool set, both of which are recomputed on every turn from
-//! rows that ARE persisted. Writing one down would create a second source of
-//! truth for an authorisation input, which is how one gets widened.
+//! Lets an MCP tool handler find the live turn's [`DelegationAuthority`] by engine session id.
+//! The model can't pick that id: Goose drops any caller-supplied `agent-session-id` and stamps
+//! its own, so a subagent carries the child's id. Leases revoke on drop and `None` means refuse.
+//! Never persisted: a second source of truth for an authorisation input is how one widens.
 
 use crate::shared::domain::orchestration::DelegationAuthority;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock, Weak};
 use tokio_util::sync::CancellationToken;
 
-/// How many live turns keep a published authority.
-///
-/// Concurrent chat streams are bounded far below this by the SSE semaphore, so
-/// in practice the map holds a handful of entries and the lease keeps it that
-/// way. The cap exists so a leaked lease cannot grow the map for the lifetime of
-/// a home server that is never restarted.
-///
-/// Eviction only ever removes the ABILITY to delegate, never widens one, so
-/// evicting the wrong entry costs a refused delegation rather than an
-/// unauthorised one.
+/// Cap so a leaked lease can't grow the map forever (the SSE semaphore keeps it far below).
+/// Eviction only ever removes authority, so a wrong eviction just refuses a delegation.
 pub const MAX_TRACKED_TURNS: usize = 64;
 
 /// A live turn's delegation authority, plus the token that ends it.
@@ -69,8 +25,7 @@ struct Entries {
     order: VecDeque<String>,
 }
 
-/// Where a live turn's [`DelegationAuthority`] can be found by the engine
-/// session id its tool calls carry.
+/// Live turns' [`DelegationAuthority`], keyed by the engine session id their tool calls carry.
 #[derive(Default)]
 pub struct TurnAuthorityRegistry {
     entries: RwLock<Entries>,
@@ -81,18 +36,8 @@ impl TurnAuthorityRegistry {
         Self::default()
     }
 
-    /// Publish `authority` for the duration of the returned lease.
-    ///
-    /// `cancel` is the turn's own cancellation token. It is held here for one
-    /// reason: PAI-6 invariant 5 says cancelling a parent cancels its children,
-    /// and the parent's token is otherwise a stack local inside the adapter's
-    /// stream closure, stored in no map and exposed by no accessor. An
-    /// orchestrator that derives the child's token from
-    /// [`parent_turn_token`](Self::parent_turn_token) gets that half of the
-    /// invariant by construction rather than by remembering to wire a callback.
-    ///
-    /// Takes `&Arc<Self>` because the lease holds a [`Weak`] back: a lease that
-    /// outlived the registry must be inert, not a dangling revoke.
+    /// Publishes `authority` until the returned lease drops.
+    /// `cancel` backs [`parent_turn_token`](Self::parent_turn_token): children die with the turn.
     pub fn publish(
         self: &Arc<Self>,
         engine_session_id: &str,
@@ -121,14 +66,7 @@ impl TurnAuthorityRegistry {
         }
     }
 
-    /// The authority of the live turn running in `engine_session_id`, if there
-    /// is one.
-    ///
-    /// `None` is the answer for a subagent's own session, for a session whose
-    /// turn has ended, and for an engine session GIAP never chatted in. All
-    /// three must refuse, and returning the same `None` for all three is
-    /// deliberate: a caller that could tell them apart would eventually treat
-    /// one of them as benign.
+    /// Same `None` for a subagent's session, an ended turn or an unknown one; all must refuse.
     pub fn authority_for_engine_session(
         &self,
         engine_session_id: &str,
@@ -141,15 +79,8 @@ impl TurnAuthorityRegistry {
             .map(|entry| entry.authority.clone())
     }
 
-    /// The cancellation token of the live turn belonging to a GIAP session.
-    ///
-    /// Keyed differently from [`authority_for_engine_session`](Self::authority_for_engine_session)
-    /// on purpose. A `TaskSpec` carries `parent_session_id`, which is the GIAP
-    /// session id, because that is what the adapter resolves an engine session
-    /// from; the registry is keyed by the engine id, because that is what a tool
-    /// call carries. Rather than store the pairing a third time, this scans —
-    /// the map holds at most [`MAX_TRACKED_TURNS`] entries and this runs once
-    /// per spawn.
+    /// The live turn's token by GIAP session id, which is what a `TaskSpec` carries.
+    /// A linear scan is fine: at most [`MAX_TRACKED_TURNS`] entries, once per spawn.
     pub fn parent_turn_token(&self, giap_session_id: &str) -> Option<CancellationToken> {
         self.entries
             .read()
@@ -181,11 +112,7 @@ impl TurnAuthorityRegistry {
     }
 }
 
-/// Holds one published authority alive. Dropping it revokes.
-///
-/// Deliberately has no method to extend, refresh or detach. The turn owns it;
-/// when the turn's value goes out of scope — including when the stream is
-/// dropped because the client hung up — the authority goes with it.
+/// Revokes its authority on drop; deliberately cannot be extended, refreshed or detached.
 pub struct TurnAuthorityLease {
     registry: Weak<TurnAuthorityRegistry>,
     engine_session_id: String,
@@ -229,9 +156,6 @@ mod tests {
         assert!(found.tool_groups().contains("giap-weather"));
     }
 
-    /// The three cases that must all refuse, and must refuse identically: a
-    /// session that never chatted, a subagent's own session, and a turn that
-    /// has ended.
     #[test]
     fn an_unknown_or_finished_turn_has_no_authority() {
         let registry = Arc::new(TurnAuthorityRegistry::new());
@@ -244,8 +168,7 @@ mod tests {
             authority("giap-1", ProfileScope::Household),
             CancellationToken::new(),
         );
-        // A child's session id is not the parent's, so a subagent asking under
-        // its own id gets nothing even while the parent's turn is live.
+        // A subagent asking under its own id gets nothing, even while the parent's turn is live.
         assert!(registry
             .authority_for_engine_session("goose-1-child")
             .is_none());
@@ -258,9 +181,7 @@ mod tests {
         assert_eq!(registry.tracked_turns(), 0);
     }
 
-    /// Vacuity control for the test above: revocation must be about the lease
-    /// ending, not about the lookup never working. Proven by asserting the
-    /// positive case in the same test.
+    /// Vacuity control for the test above: the lookup does work while the lease lives.
     #[test]
     fn revocation_removes_only_the_turn_that_ended() {
         let registry = Arc::new(TurnAuthorityRegistry::new());
@@ -285,9 +206,6 @@ mod tests {
         assert_eq!(registry.tracked_turns(), 1);
     }
 
-    /// Invariant 5's other end: the orchestrator finds the PARENT's token by
-    /// the GIAP session id a `TaskSpec` carries, so a child token derived from
-    /// it dies when the parent's turn does.
     #[test]
     fn the_parents_turn_token_is_reachable_by_its_giap_session_id() {
         let registry = Arc::new(TurnAuthorityRegistry::new());
@@ -311,8 +229,7 @@ mod tests {
         assert!(registry.parent_turn_token("giap-other").is_none());
     }
 
-    /// Re-publishing the same session must replace rather than accumulate, or
-    /// a long conversation grows one entry per turn and evicts everything else.
+    /// Accumulating instead would let one long conversation evict every other turn.
     #[test]
     fn republishing_a_session_replaces_its_entry() {
         let registry = Arc::new(TurnAuthorityRegistry::new());
@@ -335,8 +252,7 @@ mod tests {
             &ProfileScope::Guest,
             "the newer turn's scope must win"
         );
-        // Dropping the superseded lease still revokes, which is the narrowing
-        // direction: the worst case is a refused delegation, never a stale one.
+        // The superseded lease still revokes on drop: a refused delegation beats a stale one.
         drop(first);
         assert!(registry.authority_for_engine_session("goose-1").is_none());
     }
@@ -362,9 +278,7 @@ mod tests {
             .is_some());
     }
 
-    /// A lease that outlives its registry must be inert rather than a dangling
-    /// revoke. `Weak` makes it so; this pins that it is `Weak` and not `Arc`,
-    /// because an `Arc` here would keep the registry alive forever.
+    /// Pins `Weak` over `Arc`: an `Arc` in the lease would keep the registry alive forever.
     #[test]
     fn a_lease_outliving_its_registry_is_inert() {
         let registry = Arc::new(TurnAuthorityRegistry::new());

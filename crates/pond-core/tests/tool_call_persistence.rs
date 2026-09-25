@@ -1,30 +1,6 @@
 //! A stored tool result must name the call that produced it.
-//!
-//! Found by forensics, not by a test. Diagnosing a turn that called one tool
-//! twenty-five times meant joining tool rows to the assistant message that
-//! asked for them, and the join was impossible: across the whole live database
-//! there were 508 assistant rows, **none** carrying tool calls, against 488
-//! tool rows. Every stored result was an orphan.
-//!
-//! Neither column was ever written. `ChatMessage::assistant` hardcodes an empty
-//! `tool_calls`, and `persist_assistant_turn` passed `String::new()` as the
-//! tool-call id -- while the id was right there, inside the JSON blob it wrote
-//! into the row's content, and the REST API's history endpoint has always
-//! served both fields.
-//!
-//! What this costs when it is wrong:
-//!
-//!   * A conversation replayed to a provider that requires a tool result to
-//!     follow the call that produced it is malformed. The goose path is
-//!     insulated only because goose keeps its own conversation, which is why
-//!     nobody noticed.
-//!   * The model, on a later turn, reads tool RESULTS with no record that it
-//!     was the one who asked -- itself a plausible nudge toward asking again.
-//!   * Forensics cannot tie a result to its call, which is the join that had to
-//!     be done by hand to find the loop.
-//!
-//! These assertions are about linkage rather than symbols: the ids written on
-//! the tool rows must be exactly the ids named by the assistant row.
+//! Tool-row ids must be exactly the assistant row's call ids, or replay to a provider that
+//! pairs results with calls is malformed (Goose is spared only by keeping its own history).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -212,9 +188,7 @@ async fn the_assistant_row_records_the_calls_the_turn_made() {
     );
 }
 
-/// The point of the pair: every id on a tool row is named by the assistant row,
-/// and every id the assistant row names has a result. Either half alone can be
-/// satisfied by a constant.
+/// Both directions, since either half alone can be satisfied by a constant.
 #[tokio::test]
 async fn every_result_links_to_a_call_and_every_call_to_a_result() {
     let storage = run_turn(vec![
@@ -245,9 +219,7 @@ async fn every_result_links_to_a_call_and_every_call_to_a_result() {
     assert!(!call_ids.is_empty(), "the turn recorded no calls at all");
 }
 
-/// The arguments are the only part not present in the result event, so they are
-/// carried from the call. A record naming a call nobody can reproduce is a
-/// weaker record than one that can be replayed.
+/// Arguments aren't in the result event, so they must be carried over from the call.
 #[tokio::test]
 async fn a_recorded_call_keeps_the_arguments_it_was_made_with() {
     let storage = run_turn(vec![tool_result_blob(
@@ -269,9 +241,6 @@ async fn a_recorded_call_keeps_the_arguments_it_was_made_with() {
     );
 }
 
-/// A blob that does not parse must still persist its content. Losing a result
-/// because its envelope was malformed would be a worse failure than the one
-/// this file is about.
 #[tokio::test]
 async fn a_malformed_blob_still_persists_its_content() {
     let storage = run_turn(vec!["not json at all".to_string()]).await;

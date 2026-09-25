@@ -1,46 +1,20 @@
-//! Guard: every place that mints a row in `pond_system.db`'s `sessions` table
-//! is a place whose origin [`SessionOrigin`] has been decided (PAI-7 P1).
-//!
-//! `SessionOrigin::of` is a deny-list -- `POND_AUTHORED_SESSION_PREFIXES`, one
-//! entry, the scheduler's `sched-` -- because a person's session id has no
-//! shape to require: it is whatever client opened the conversation chose. A
-//! deny-list of today's prefixes is worth exactly as much as the audit behind
-//! it, and an audit written into a comment rots in a week. This is that audit,
-//! executable.
-//!
-//! What it catches: a new background feature that creates its own session and
-//! does not say so. The session-activity observer publishes every unclassified
-//! session as a person arriving, and PAI-7 exists to decide whether to
-//! interrupt a *person* -- presence fabricated from the pond's own work is
-//! worse than no presence signal at all, because P4's reviewer acts on it with
-//! confidence.
-//!
-//! What it does not catch: a second call added inside a file that already
-//! mints. The unit of classification is the file, because that is the unit
-//! whose reason is written down.
-//!
-//! A runtime walk rather than `include_str!`, for the same reason as
-//! `egress_guard.rs`: it has to see a file that does not exist yet.
+//! Every production file that mints a `sessions` row must have a decided [`SessionOrigin`].
+//! `SessionOrigin::of` is a prefix deny-list (a person's id has no shape), so this is its
+//! audit: an unlisted minter would be published as a person arriving. Per file, not per call.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use pond_core::shared::domain::session_activity::{SessionOrigin, POND_AUTHORED_SESSION_PREFIXES};
 
-/// The call form. Not the bare symbol: `create_session` appears in the port
-/// definition, in doc comments, and in this file's own prose, and a guard
-/// satisfied by comment prose is the recorded failure shape this tree has hit
-/// most often.
+/// The call form, not the bare symbol, which also appears in the port and in prose.
 const MINT_CALL: &str = ".create_session(";
 
 /// Below this the walk has broken, not the tree shrunk.
 const MIN_FILES_SCANNED: usize = 300;
 
-/// Every production file that mints a session row, and what its rows mean.
-///
-/// Paths are workspace-relative with forward slashes. The reason is the point
-/// of the entry: it is what a reader checks against
-/// [`POND_AUTHORED_SESSION_PREFIXES`] when this test fails.
+/// Production files that mint session rows, and what their rows mean.
+/// On failure, check the new entry's reason against [`POND_AUTHORED_SESSION_PREFIXES`].
 const KNOWN_MINTERS: &[(&str, &str)] = &[
     (
         "crates/pond-api/src/routes.rs",
@@ -90,18 +64,7 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// The file with every `#[cfg(test)]` ITEM removed, and nothing else.
-///
-/// Lifted from `egress_guard.rs :: production_source`, including the blind spot
-/// that guard's own mutation run found: "everything before the first
-/// `#[cfg(test)]`" looks like the convention and is not one -- 11 files here
-/// carry more than one, and truncating discards the production code between
-/// them.
-///
-/// Test code has to come out or this guard is about fixtures: nearly every
-/// session-storage test calls `create_session` to set one up, and classifying
-/// those files would bury the two production entries that matter in a list
-/// nobody reads.
+/// The file minus every `#[cfg(test)]` item (as in `egress_guard.rs`): test fixtures mint too.
 fn production_source(src: &str) -> String {
     let lines: Vec<&str> = src.lines().collect();
     let mut out = String::with_capacity(src.len());
@@ -115,8 +78,7 @@ fn production_source(src: &str) -> String {
             continue;
         }
         let indent = line.len() - line.trim_start().len();
-        // A single-line item has no block to close; drop just the item it
-        // annotates, or the search below eats up to the next item's brace.
+        // A single-line item has no block: drop just it, or the search eats up to the next brace.
         let opens_block = lines
             .get(i + 1)
             .map(|l| l.trim_end().ends_with('{'))
@@ -135,12 +97,7 @@ fn production_source(src: &str) -> String {
     out
 }
 
-/// The decision, over `(path, source)` pairs: which files mint a session row
-/// and are not in [`KNOWN_MINTERS`].
-///
-/// Split out from the walk so it can be run against sources that do not exist
-/// on disk -- a guard that only ever sees a clean tree has never been shown to
-/// fail.
+/// Minting files not in [`KNOWN_MINTERS`]; separate from the walk so tests can feed it fakes.
 fn unclassified_minters(sources: &[(String, String)]) -> Vec<String> {
     let known: BTreeSet<&str> = KNOWN_MINTERS.iter().map(|(path, _)| *path).collect();
     sources
@@ -160,14 +117,7 @@ fn collect_rs(dir: &Path, root: &Path, out: &mut Vec<String>) {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
         if path.is_dir() {
-            // `tests/` holds integration tests, which are tests by definition.
-            // `examples/` and `benches/` are developer harnesses run by hand:
-            // nothing the server spawns is in them, so a session they create
-            // exists only in whatever pond the developer pointed them at, and
-            // never reaches the observer running in a serving process.
-            // (`pond-adapters-goose/examples/tool_calling_test.rs` is the one
-            // that made this exclusion explicit -- it was found by this guard
-            // failing, which is the first evidence that the walk works.)
+            // Tests, examples and benches never run inside the server the observer watches.
             if name == "target"
                 || name == "tests"
                 || name == "examples"
@@ -217,7 +167,6 @@ fn scan() -> Vec<(String, String)> {
         .collect()
 }
 
-/// The audit itself.
 #[test]
 fn every_production_session_minter_has_a_decided_origin() {
     let sources = scan();
@@ -234,9 +183,7 @@ fn every_production_session_minter_has_a_decided_origin() {
     );
 }
 
-/// Vacuity control 1: the detector still finds the site the deny-list was
-/// written against. If this stops matching, the test above passes because it
-/// sees nothing at all.
+/// Vacuity control: without this, a broken detector passes the test above by seeing nothing.
 #[test]
 fn the_scan_still_finds_the_scheduler_minting_its_sessions() {
     let sources = scan();
@@ -258,9 +205,7 @@ fn the_scan_still_finds_the_scheduler_minting_its_sessions() {
     );
 }
 
-/// Vacuity control 2: the decision really does report a file it has not been
-/// told about. Run against sources that are not on disk, because a guard whose
-/// only input is a clean tree has never been shown to fail.
+/// Vacuity control on fake sources, since a clean tree can't show the guard failing.
 #[test]
 fn a_new_background_feature_that_mints_sessions_is_reported() {
     let clean = vec![
@@ -290,9 +235,7 @@ fn a_new_background_feature_that_mints_sessions_is_reported() {
          it exists for"
     );
 
-    // ... and the same file with its minting inside `#[cfg(test)]` is not
-    // reported, so the slicer is doing the work claimed for it rather than
-    // matching everything.
+    // ... and not once the minting moves into `#[cfg(test)]`, so the slicer does its job.
     let mut only_in_tests = with_a_newcomer;
     only_in_tests.pop();
     only_in_tests.push((

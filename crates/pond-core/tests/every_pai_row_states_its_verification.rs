@@ -1,37 +1,9 @@
-//! Every PAI status row must say whether the capability has been RUN, not only
-//! whether the code landed.
-//!
-//! # Why this is a test and not a convention
-//!
-//! Because it was a convention, and on 2026-08-12 the convention was wrong in
-//! three places at once, all of which passed the entire test suite:
-//!
-//! * **PAI-8** read `DESIGNED` while its domain, migrations, adapter, ingest
-//!   pipeline and MCP server were all written — and unreachable. Working from
-//!   the row rather than the tree, I then asserted "PAI-8 is the only workstream
-//!   with no landed code" in two more documents.
-//! * **PAI-7** read `COMPLETE — P1-P8 LANDED` while producing zero proposals on
-//!   an Orin. Every mechanism worked: the schedule fired, the audience resolved,
-//!   the child ran and answered. The yield was nothing.
-//! * **Twenty-two settings switches** rendered and were not operable at all —
-//!   no input, no accessible name, no `onChange`.
-//!
-//! `LANDED` and `VERIFIED` are different claims. This file makes a row that
-//! omits the second one fail the build, so the next person cannot quietly leave
-//! it out — which is the only reason the three above survived as long as they
-//! did.
-//!
-//! # What it does NOT do
-//!
-//! It cannot check that a `VERIFIED` claim is true; only that the claim is made.
-//! A row saying `VERIFIED` when nobody ran anything is a lie this cannot catch,
-//! and `scripts/pai-bench.sh` is what makes the lie cheap to disprove. What this
-//! removes is the SILENT case — the row that says neither.
+//! Every PAI checklist row must say whether the capability was RUN, not only whether it landed.
+//! This checks the claim is made, not that it's true; `scripts/pai-bench.sh` is for that.
 
 const CHECKLIST: &str = include_str!("../../../docs/architecture/pai/00-checklist.md");
 
-/// The eight requirement rows in section 1, identified by the PAI document each
-/// one links to.
+/// Section 1's requirement rows, by the PAI document each links to.
 const PAI_DOCS: &[&str] = &[
     "01-identity",
     "02-privacy",
@@ -59,10 +31,7 @@ fn requirement_rows() -> Vec<(&'static str, &'static str)> {
     rows
 }
 
-/// Guard against the guard. If `include_str!` stops pointing at the checklist,
-/// or section 1's table is reshaped, every assertion below passes by matching
-/// nothing — four of this programme's recorded vacuous-test incidents were
-/// exactly that shape.
+/// Without this, a moved file or reshaped table makes every test below pass vacuously.
 #[test]
 fn the_file_this_test_reads_is_the_checklist_and_it_still_has_a_table() {
     assert!(
@@ -81,8 +50,6 @@ fn the_file_this_test_reads_is_the_checklist_and_it_still_has_a_table() {
     );
 }
 
-/// The claim. A row that says only whether the code landed is the shape that
-/// let PAI-7 read COMPLETE while producing nothing.
 #[test]
 fn every_requirement_row_states_whether_it_has_been_run() {
     let silent: Vec<&str> = requirement_rows()
@@ -104,13 +71,7 @@ fn every_requirement_row_states_whether_it_has_been_run() {
     );
 }
 
-/// A row that claims `VERIFIED` must say where, because "it worked on my laptop"
-/// is not the claim anybody needs.
-///
-/// The Mac and the Orin differ by roughly 30x on decode and disagree about KV
-/// geometry outright -- a measurement taken on brew llama.cpp said E4B's second
-/// cache was a fixed 40 MiB, and the device said it scales with `n_ctx`. A
-/// verification that does not name its hardware cannot be checked or repeated.
+/// Mac and Orin differ ~30x on decode and on KV geometry: a claim must name its hardware.
 #[test]
 fn a_verified_row_names_the_hardware_and_the_date() {
     let vague: Vec<&str> = requirement_rows()

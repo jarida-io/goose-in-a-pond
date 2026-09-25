@@ -1,12 +1,5 @@
-//! Device-control domain types (#84).
-//!
-//! Protocol-agnostic, *typed* representations of a controllable device's
-//! capabilities and state. There is deliberately no opaque `String`/JSON state
-//! blob: every value carries its type via [`DeviceStateValue`], so adapters and
-//! the rules engine reason about state without parsing untyped text (which also
-//! removes a string-injection vector at the control boundary).
-//!
-//! Pure domain — no `tokio`, `sqlx`, `reqwest`, or other framework imports.
+//! Protocol-agnostic device-control domain types, with no framework imports.
+//! State is typed via [`DeviceStateValue`], never an opaque blob: no injection through strings.
 
 use std::collections::BTreeMap;
 
@@ -14,9 +7,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Stable identifier for a controllable device.
-///
-/// A newtype rather than a bare `String` so a device id can't be silently
-/// confused with any other string (sensor id, session id, …) at a call site.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DeviceId(String);
 
@@ -48,8 +38,7 @@ impl From<String> for DeviceId {
     }
 }
 
-/// A capability a device advertises. Adapters map their protocol's features
-/// onto this closed set so the Core can negotiate control generically.
+/// A capability a device advertises; adapters map their protocol's features onto this set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceCapability {
@@ -69,8 +58,7 @@ pub enum DeviceCapability {
     FanSpeed,
 }
 
-/// A single typed state value. The closed variant set keeps state values
-/// machine-checkable end-to-end (no opaque strings to parse or inject through).
+/// A single typed state value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceStateValue {
@@ -113,8 +101,7 @@ impl DeviceStateValue {
 /// The canonical state-map key for on/off power.
 pub const POWER_KEY: &str = "power";
 
-/// A device's full key→value state. Backed by a `BTreeMap` for deterministic
-/// ordering (stable serialization, reproducible test assertions).
+/// A device's full key→value state; a `BTreeMap` for stable serialization order.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DeviceState {
     pub values: BTreeMap<String, DeviceStateValue>,
@@ -133,14 +120,12 @@ impl DeviceState {
         self.values.insert(key.into(), value);
     }
 
-    /// Convenience accessor for the canonical power key.
     pub fn power(&self) -> Option<bool> {
         self.get(POWER_KEY).and_then(DeviceStateValue::as_bool)
     }
 }
 
-/// Emitted on the [`crate::shared::ports::event_bus::EventBus`] when a device's state
-/// changes, so reactive consumers (e.g. the rules engine) can respond.
+/// Published on the [`crate::shared::ports::event_bus::EventBus`] when a device's state changes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceStateChanged {
     pub device_id: DeviceId,
