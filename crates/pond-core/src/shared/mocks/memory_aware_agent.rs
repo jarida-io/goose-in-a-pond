@@ -9,14 +9,8 @@ use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Test mock agent that reads and writes to a `MemoryRepository`.
-///
-/// Recognises two message patterns:
-/// - `"remember <fact>"` → saves `fact` to the repository and returns an ack.
-/// - anything else       → returns all stored memories so the test can assert recall.
-///
-/// The same `Arc<dyn MemoryRepository>` is shared with `AppState` (desktop path)
-/// or held by the test directly (CLI path), so both turns see the same data.
+/// Test agent over a shared `MemoryRepository`, so recall can be asserted across turns.
+/// `"remember <fact>"` saves the fact; any other message returns every stored memory.
 pub struct MemoryAwareAgent {
     memory_repo: Arc<dyn MemoryRepository>,
 }

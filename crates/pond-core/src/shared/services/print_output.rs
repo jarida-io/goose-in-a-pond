@@ -1,8 +1,4 @@
-//! PrintOutput — default VoiceOutput that writes to stdout.
-//!
-//! Used when no TTS engine is configured (stdin/keyboard mode, tests).
-//! Moves the bare `println!` from the Speak state into the port so
-//! `ChatService` never has a hard dependency on stdout.
+//! `VoiceOutput`s for runs with no TTS engine: print to stdout, or stay silent.
 
 use crate::models::ports::voice_output::VoiceOutput;
 use anyhow::Result;
@@ -25,11 +21,7 @@ impl VoiceOutput for PrintOutput {
     }
 }
 
-/// VoiceOutput that discards all output. Used when the response is surfaced by
-/// another channel and stdout must stay clean — e.g. `pond-server chat
-/// --json-events`, where the assistant text is streamed as NDJSON `token`
-/// events and stdout carries NOTHING but the JSON contract lines. Also handy
-/// for headless runs and tests that assert on the event sink, not on TTS.
+/// Discards all output: `chat --json-events` stdout must carry nothing but NDJSON lines.
 pub struct SilentOutput;
 
 impl Default for SilentOutput {
@@ -58,14 +50,12 @@ mod tests {
 
     #[tokio::test]
     async fn print_output_compiles_as_voice_output() {
-        // Verify it type-checks as Arc<dyn VoiceOutput>
         let _out: Arc<dyn VoiceOutput> = Arc::new(PrintOutput);
     }
 
     #[tokio::test]
     async fn silent_output_speaks_nothing() {
         let out = SilentOutput;
-        // speak() must succeed and write nothing to stdout.
         assert!(out.speak("this must not print").await.is_ok());
         let _out: Arc<dyn VoiceOutput> = Arc::new(SilentOutput);
     }

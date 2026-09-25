@@ -1,7 +1,5 @@
-//! PAI-2 P3, chokepoint 2: redact event attributes before they reach the log.
-//!
-//! A decorator, not edits at each call site: every `EventLog::append` caller resolves
-//! to the one `Arc` built in `run_server`, so wrapping it also covers future ones.
+//! Redacts event attributes before they reach the log.
+//! A decorator: every `EventLog::append` caller shares the one `Arc` built in `run_server`.
 
 use std::sync::Arc;
 
@@ -22,9 +20,7 @@ pub struct RedactingEventLog {
 }
 
 impl RedactingEventLog {
-    /// Event attributes are telemetry: nobody recalls them, the activity API
-    /// and the audit MCP tools surface them, and they have no business
-    /// carrying a phone number. `Full`, not `Secrets`.
+    /// `Full`, not `Secrets`: attributes are telemetry, surfaced by the activity API.
     pub const LEVEL: RedactionLevel = RedactionLevel::Full;
 
     pub fn new(inner: Arc<dyn EventLog>, redactor: Arc<dyn Redactor>) -> Self {
@@ -50,9 +46,7 @@ impl RedactingEventLog {
             *text = result.text;
         }
         if let Some(s) = highest {
-            // Raise, never lower. Both consequences narrow: the audit MCP read
-            // path excludes `Secret` at the store, and pruning caps
-            // Sensitive/Secret at 7 days against 30 for everything else.
+            // Raise, never lower: a higher sensitivity only narrows surfacing and retention.
             if event.privacy_sensitivity < s {
                 event.privacy_sensitivity = s;
             }

@@ -1,37 +1,11 @@
-//! Wall-clock ticks on the reactive event spine (PAI-7 P1).
-//!
-//! A pond driven only by sensors and by the user has no way to notice that
-//! *nothing has happened*. [`TimeTick`] is the heartbeat later phases hang
-//! "it is six and the freezer never reported" on. P1 publishes it and nothing
-//! consumes it: the value of the phase is that the event exists and is true.
-//!
-//! Pure domain, and deliberately clockless -- the publisher in `pond-server`
-//! owns the timer, everything here is a function of the numbers it is handed,
-//! so the cadence is unit-testable without sleeping.
+//! Wall-clock ticks on the reactive event spine, so the pond can notice that nothing happened.
+//! Clockless: the `pond-server` publisher owns the timer and passes in the readings.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Which wall-clock boundary a [`TimeTick`] marks.
-///
-/// **One variant, deliberately.** Section 3.1 of
-/// `docs/architecture/pai/07-proactive-intelligence.md` also names dawn/dusk
-/// and quiet-hours boundaries. P1 ships neither, because neither can be
-/// computed truthfully today:
-///
-/// - **Dawn/dusk needs a location.** The only coordinates in `Settings` are
-///   `weather_latitude`/`weather_longitude`, which default to `0.0` and stay
-///   there on every install that onboarded with a place *name* -- the weather
-///   adapter geocodes the name on demand, over the network. A tick derived
-///   from those defaults would announce sunrise in the Gulf of Guinea, and
-///   resolving the real coordinates would put a network call inside a
-///   background timer.
-/// - **Quiet hours do not exist.** There is no `quiet_hours` field on
-///   `Settings`, and no other representation of them anywhere in the tree. P6
-///   introduces them together with the speech gating that gives them meaning.
-///
-/// Adding either later is one variant and one match arm. Publishing a boundary
-/// nobody can compute is more expensive than that, because it is wrong.
+/// Hour only: `Settings` has no reliable coordinates for dawn/dusk and no quiet hours.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TimeBoundary {
@@ -54,37 +28,18 @@ pub struct TimeTick {
     pub boundary: TimeBoundary,
     /// When the boundary was observed, in UTC.
     pub at: DateTime<Utc>,
-    /// Local wall-clock hour, `0..=23`, read from the same clock the rules
-    /// engine evaluates its time windows against (the host's zone). This is
-    /// carried rather than derived so every consumer answers "what hour is it
-    /// here" the same way; `Settings::timezone` is deliberately not consulted,
-    /// because two clocks disagreeing about "after sunset" is worse than one
-    /// clock that is merely the host's.
+    /// Local hour `0..=23` in the host's zone, the same clock the rules engine uses.
+    /// `Settings::timezone` is deliberately ignored so the two clocks cannot disagree.
     pub local_hour: u8,
 }
 
-/// Seconds from `now` until the top of the next hour.
-///
-/// **The only public form, and it takes the clock reading rather than two
-/// numbers off it.** The publisher's one production call site used to pass
-/// `(minute, second)` as bare `u32`s, which swap silently: read the other way
-/// round, 12:34:56 waits 206 seconds instead of 1504, and the hourly heartbeat
-/// becomes one every few minutes. That call site sits inside a timer loop, so
-/// nothing observed it — an unguarded argument order was the whole of the
-/// defect, and removing the argument is a better fix than testing it.
+/// Seconds from `now` to the top of the next hour; takes the clock so the fields can't swap.
 pub fn secs_to_next_hour_from<T: chrono::Timelike>(now: &T) -> u64 {
     secs_to_next_hour(now.minute(), now.second())
 }
 
 /// Seconds from `minute`:`second` past the hour until the top of the next hour.
-///
-/// Pure, so the publisher's cadence is testable without a timer. **Never
-/// returns zero**: the publisher sleeps this long between ticks, and a
-/// zero-length sleep turns that loop into a spin that would publish an
-/// unbounded burst of ticks. A leap second (`second == 60`) and any other
-/// out-of-range input therefore round to one second rather than to none.
-///
-/// Private: see [`secs_to_next_hour_from`].
+/// Never zero (even for a leap second): the publisher sleeps this long, and zero would spin.
 fn secs_to_next_hour(minute: u32, second: u32) -> u64 {
     const HOUR: u64 = 3600;
     HOUR.saturating_sub(u64::from(minute) * 60 + u64::from(second))
@@ -111,9 +66,6 @@ mod tests {
         assert_eq!(secs_to_next_hour(59, 59), 1);
     }
 
-    /// A leap second, or any clock that reports past the end of the hour, must
-    /// not produce a zero-length sleep -- that is the difference between one
-    /// tick an hour and a spinning publisher.
     #[test]
     fn a_leap_second_never_yields_a_zero_wait() {
         for (minute, second) in [(59, 60), (60, 60), (u32::MAX, u32::MAX)] {
@@ -128,10 +80,7 @@ mod tests {
         }
     }
 
-    /// Every reachable wall-clock position lands inside `1..=3600`, and only
-    /// the top of the hour waits a whole hour. Written as a sweep rather than
-    /// as three literals because a regression here is off-by-one at one end of
-    /// the range, which a handful of chosen points can miss.
+    /// A sweep, not sample points: a regression here is off-by-one at one end of the range.
     #[test]
     fn every_position_in_the_hour_waits_between_one_second_and_an_hour() {
         for minute in 0..60 {
@@ -150,11 +99,7 @@ mod tests {
         }
     }
 
-    /// The publisher's actual entry point, at a time whose two halves cannot
-    /// be confused for one another. 1504 is 12:34:56 read correctly; 206 is
-    /// the same clock read as `(second, minute)` — the swap that turns an
-    /// hourly heartbeat into one every three and a half minutes, inside a
-    /// timer loop where nobody would see it.
+    /// 1504 is 12:34:56 read correctly; 206 is the same clock read as `(second, minute)`.
     #[test]
     fn the_wait_is_read_off_the_clock_the_right_way_round() {
         let at = chrono::NaiveTime::from_hms_opt(12, 34, 56).expect("valid time");
@@ -166,9 +111,7 @@ mod tests {
         assert_eq!(wait, 1504);
     }
 
-    /// Vacuity control for the assertion above: the two readings really are
-    /// different numbers, so `assert_ne!(wait, 206)` is a claim about the
-    /// order and not a comparison that could never fail.
+    /// Vacuity control: proves the `assert_ne!(wait, 206)` above can fail.
     #[test]
     fn the_two_readings_of_that_clock_are_different_numbers() {
         assert_eq!(secs_to_next_hour(34, 56), 1504);

@@ -1,15 +1,10 @@
-//! In-memory implementation of [`TelemetryPort`] for testing and lightweight
-//! deployments. A SQLite-backed adapter writing to `pond_logs.db` can replace it
-//! without changing any consumer.
+//! In-memory [`TelemetryPort`] for tests and lightweight deployments.
 
 use crate::security::domain::turn_metrics::{TelemetrySummary, TurnMetrics};
 use crate::security::ports::telemetry::TelemetryPort;
 use tokio::sync::RwLock;
 
-/// In-memory telemetry store backed by a `RwLock<Vec<TurnMetrics>>`.
-///
-/// `RwLock` is chosen over `Mutex` because reads (API queries) are expected
-/// to dominate over writes (one per chat turn).
+/// In-memory telemetry store; `RwLock` because API reads outnumber writes (one per turn).
 pub struct InMemoryTelemetry {
     turns: RwLock<Vec<TurnMetrics>>,
 }
@@ -130,20 +125,15 @@ mod tests {
     async fn summary_computes_correct_averages() {
         let telemetry = InMemoryTelemetry::new();
 
-        // Turn 1: ttft=210, completion=50, ctx=31.0
+        // make_turn(n): ttft 200+10n, completion 50n, ctx 30+n.
         telemetry.record_turn(make_turn("sess-1", 1)).await.unwrap();
-        // Turn 2: ttft=220, completion=100, ctx=32.0
         telemetry.record_turn(make_turn("sess-1", 2)).await.unwrap();
-        // Turn 3: ttft=230, completion=150, ctx=33.0
         telemetry.record_turn(make_turn("sess-1", 3)).await.unwrap();
 
         let summary = telemetry.get_summary("sess-1").await.unwrap();
         assert_eq!(summary.total_turns, 3);
-        // avg_ttft = (210+220+230)/3 = 220.0
         assert!((summary.avg_ttft_ms - 220.0).abs() < 0.01);
-        // avg_completion = (50+100+150)/3 = 100.0
         assert!((summary.avg_completion_tokens - 100.0).abs() < 0.01);
-        // avg_ctx = (31+32+33)/3 = 32.0
         assert!((summary.avg_context_utilization - 32.0).abs() < 0.01);
     }
 
@@ -183,7 +173,6 @@ mod tests {
     async fn turns_returned_in_order() {
         let telemetry = InMemoryTelemetry::new();
 
-        // Insert out of order
         telemetry.record_turn(make_turn("sess-1", 3)).await.unwrap();
         telemetry.record_turn(make_turn("sess-1", 1)).await.unwrap();
         telemetry.record_turn(make_turn("sess-1", 2)).await.unwrap();

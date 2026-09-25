@@ -5,18 +5,10 @@ use futures::stream::{BoxStream, StreamExt};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// Mock adapter for the Agent port.
-///
-/// Echoes back the user's message for testing the workflow loop
-/// without a real LLM provider. Captures the last `AgentRequest` it
-/// received so tests can assert on fields callers set (e.g. `voice_mode`).
+/// Mock Agent port that echoes the message and records the last request for assertions.
 pub struct MockAgent {
     last_request: Mutex<Option<AgentRequest>>,
     /// Every session id `forget_session` was called with, in order.
-    ///
-    /// Recorded because the port's default body is `{}` -- a test that only
-    /// calls the method proves nothing, since the no-op satisfies it just as
-    /// well as a real implementation would.
     forgotten: Mutex<Vec<String>>,
 }
 
@@ -48,7 +40,6 @@ impl Agent for MockAgent {
     async fn chat(&self, request: AgentRequest) -> Result<AgentResponse> {
         *self.last_request.lock().unwrap() = Some(request.clone());
 
-        // Simulate a tiny "thinking" delay
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
         Ok(AgentResponse {
