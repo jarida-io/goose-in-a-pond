@@ -78,6 +78,22 @@ describe("modelResidencyMb", () => {
     expect(modelResidencyMb({})).toBeNull();
     expect(modelResidencyMb({ size_mb: 0, ram_estimate_mb: 0 })).toBeNull();
   });
+
+  it("adds the encoder's resident bytes when the model reads pictures", () => {
+    // A declared-vision model keeps the encoder resident too (eager load, on
+    // the GPU, at every model load) — the fit meter must count it or a model
+    // that "fits" can still spill once its encoder lands.
+    expect(
+      modelResidencyMb({ size_mb: 2600, reads_images: true, image_support_bytes: 986_833_728 }),
+    ).toBeCloseTo(2600 + 986_833_728 / 1_048_576, 6);
+  });
+
+  it("never adds encoder bytes when reads_images is not exactly true", () => {
+    expect(
+      modelResidencyMb({ size_mb: 2600, reads_images: false, image_support_bytes: 986_833_728 }),
+    ).toBe(2600);
+    expect(modelResidencyMb({ size_mb: 2600, image_support_bytes: 986_833_728 })).toBe(2600);
+  });
 });
 
 describe("modelFitFor", () => {

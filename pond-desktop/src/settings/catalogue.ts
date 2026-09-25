@@ -308,6 +308,9 @@ export const CATALOGUE: CatalogueCategory[] = [
             ] },
             validate: oneOf(["goose"]),
           },
+          // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98),
+          // so this switch is commented out rather than deleted; restore it with the setting.
+          // { key: "speculative_decoding_enabled", label: "Guess ahead with a helper model", description: "A small helper model guesses the next few words and the main model checks each one, so answers stay the same and only the speed changes (this is called speculative decoding). On a Jetson it measured faster; on a Mac it measured slower, so try it off if replies feel slow. Only Gemma 4 E2B and E4B have a helper; turning it on downloads it (57 MB) if it is not on this device. Changing it reloads the model, so the next reply waits for that.", control: { kind: "toggle" }, consumer: "live" },
         ],
       },
       {
@@ -338,9 +341,10 @@ export const CATALOGUE: CatalogueCategory[] = [
         entries: [
           { key: "agent_memory_inject", label: "Use memories in replies", description: "Let it recall what it knows about you when answering.", control: { kind: "toggle" }, consumer: "live" },
           { key: "agent_memory_limit", label: "Memories per reply", description: "How many remembered things it may bring to a single answer.", control: { kind: "number", min: 0, max: 100 }, consumer: "live", validate: all(integer, range(0, 100)) },
-          { key: "memory_extraction_enabled", label: "Learn from conversations", description: "Remember lasting facts from your conversations.", control: { kind: "toggle" }, consumer: "live" },
-          { key: "memory_extraction_max_facts", label: "Facts kept per conversation", description: "How many things it may remember from one exchange.", control: { kind: "number", min: 0, max: 50 }, consumer: "live", validate: all(integer, range(0, 50)) },
-          { key: "memory_extraction_interval_secs", label: "Wait between learning", description: "How long to wait between remembering, so it does not do it constantly.", control: { kind: "number", min: 0, unit: "seconds" }, consumer: "live", validate: all(integer, atLeast(0, "seconds")) },
+          { key: "memory_extraction_enabled", label: "Learn from conversations", description: "Read your conversations back in quiet moments and remember what lasts. Nothing is remembered while you are talking, so this takes a while to show up \u2014 and a long history takes a few nights.", control: { kind: "toggle" }, consumer: "live" },
+          { key: "memory_extraction_max_facts", label: "Most things kept at once", description: "How many things it may remember from one stretch of conversation. Fewer is better: a store full of near-misses crowds out what matters.", control: { kind: "number", min: 0, max: 50 }, consumer: "live", validate: all(integer, range(0, 50)) },
+          { key: "memory_extraction_interval_secs", label: "Wait between readings", description: "The shortest gap between two readings. It only ever makes them rarer.", control: { kind: "number", min: 0, unit: "seconds" }, consumer: "live", validate: all(integer, atLeast(0, "seconds")) },
+          { key: "suggestion_generation_enabled", label: "Suggest things to ask", description: "Turn what it remembers about you into questions on the Home screen. Off, Home still suggests \u2014 but only the same general questions every day.", control: { kind: "toggle" }, consumer: "live" },
         ],
       },
       {
@@ -509,9 +513,9 @@ export const CATALOGUE: CatalogueCategory[] = [
   },
   {
     id: "automation",
-    name: "Automation & Proactivity",
+    name: "Automations",
     tier: "Household",
-    blurb: "What runs on its own, and whether the assistant may speak before you do.",
+    blurb: "What runs on its own, what it is doing right now, and whether the assistant may speak before you do.",
     groups: [
       {
         name: "Schedules",
@@ -544,6 +548,12 @@ export const CATALOGUE: CatalogueCategory[] = [
         name: "Thinking unprompted",
         entries: [
           { key: "proactive_review_enabled", label: "Review the day on its own", description: "Let it think over the day without being asked.", control: { kind: "toggle" }, consumer: "live" },
+          // The only writer of this list today. A per-kind "Don't suggest
+          // this" on the Home card is the intended way in, and it is NOT built
+          // -- this comment used to say it was. The control is text because the
+          // value is a list of suggestor ids, parsed as a list (see LIST_TEXT in
+          // SettingsCatalogue); clearing it unmutes everything.
+          { key: "suggestions_muted", label: "Suggestions you have hidden", description: "Kinds of suggestion Home will not offer. Clear this to see them again.", control: { kind: "text", placeholder: "Nothing hidden" }, consumer: "live" },
           // Only ever touches names the pond wrote itself. A title typed by
           // hand is left alone whatever this is set to, so the control does not
           // need to warn about losing one.

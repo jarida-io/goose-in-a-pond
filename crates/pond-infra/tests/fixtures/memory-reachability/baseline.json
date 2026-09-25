@@ -1,0 +1,155 @@
+{
+  "recorded_at": "2026-09-16",
+  "measured_by": "cargo test -p pond-infra --test memory_reachability_corpus -- --nocapture",
+  "against": "the batch memory-extraction engine in its shipped writing mode: BatchExtractionService::run_pass driven one window per turn, with the date DETECTOR (`carries_calendar_date` inside `fact_defect`), the five-value catalogue, the names_subject gate, and the Same/Related bands dropping a match. Nothing edits a note: what reaches the store is the model's own sentence, normalised for whitespace and a label prefix and nothing else. No reinforcement, no retrieval_text, no semantic union on the keyword path.",
+  "note": "These are the numbers taken after the date STRIPPER was deleted. A dated note is refused whole now, so date_leak_rate is zero by refusal rather than by rewriting -- which is the only version of that zero worth having: four passes of rewriting bought the same zero while storing \"The user swims morning.\" and \"The user prefers model of the tractor.\", and a metric that counts dates in stored rows cannot see either of those. A value here is only changed in the commit that deliberately moves it, with the reason written down in `history`. The zero has FOUR vacuity controls and all four are two-sided. The fixtures must contain dates, per class, so a zero cannot be reached by the auditor having nothing to find (t30-t34, t37-t38). The recurrences must reach the store WHOLE, including their clock times (t06:0, t18:0, t33:0, t34:0, t35:0, t35:1), because a zero is otherwise purchasable by destroying every weekday the gate sees. The not-dates must reach it whole too (t36:0, t36:1, t37:0). And t39-t42 plant the four classes the DETECTOR gets wrong: four of them must be STORED verbatim, because a false positive now costs the entire fact rather than a few words of it, and four must be REFUSED as the boundary this design draws on purpose -- a year used as a name looks exactly like a year used as a date, and only the model can tell them apart.",
+  "metrics": {
+    "facts_recorded": 71,
+    "stored": 43,
+    "deduped": 5,
+    "refused": 23,
+    "date_leak_rate": 0.0,
+    "dup_rate": 0.0,
+    "near_dup_pairs": 0,
+    "band_same": 1,
+    "band_related": 4,
+    "band_new": 43,
+    "recall_at_5": 0.71428571428,
+    "answerable_queries": 21,
+    "reachable_at_4096": 0.61904761904,
+    "reachable_at_8192": 0.71428571428,
+    "reachable_at_16384": 0.80952380952
+  },
+  "history": [
+    {
+      "date": "2026-09-15",
+      "phase": 0,
+      "change": "first recording",
+      "against": "the per-turn extraction path: LlmMemoryExtractor + MemoryExtractionService, no reinforcement, no date gate, no retrieval_text, no semantic union on the keyword path.",
+      "metrics": {
+        "facts_recorded": 45,
+        "stored": 38,
+        "deduped": 3,
+        "refused": 4,
+        "date_leak_rate": 0.15789473684,
+        "dup_rate": 0.0,
+        "near_dup_pairs": 2,
+        "band_same": 1,
+        "band_related": 4,
+        "band_new": 36,
+        "recall_at_5": 0.63636363636,
+        "answerable_queries": 22,
+        "reachable_at_4096": 0.45454545454,
+        "reachable_at_8192": 0.63636363636,
+        "reachable_at_16384": 0.68181818181
+      }
+    },
+    {
+      "date": "2026-09-15",
+      "phase": 2,
+      "change": "the cutover: the per-turn path was removed and the same fixtures now replay through the batch write gate. Ten numbers moved, each for a named reason, and none of them is a retrieval improvement being claimed.",
+      "why": {
+        "date_leak_rate": "0.158 -> 0.000. THE POINT OF THE PHASE. Six of the 45 recorded facts carry a calendar date; the per-turn path stored all six intact, and six of 38 stored rows asserted a year, a weekday or a clock time that would be read back months later as a fact. strip_calendar_dates now removes them before the gate, so the move survives and the year does not.",
+        "refused": "4 -> 3. EXTRACTION_EXAMPLE_FACTS is empty, because the batch prompt shows no worked example for a model to copy. t01:0 -- 'The user's mother Florence lives in Kisumu' -- was refused as an echo and is now stored, which is right: with no prompt demonstrating it, refusing it only loses a real household's real mother.",
+        "stored": "38 -> 37. One more fact admitted (t01:0 above) and two more dropped as restatements (below), net minus one.",
+        "deduped": "3 -> 5. Date stripping makes two dated sentences collapse onto the undated facts they restate, so the band sees a duplicate where the per-turn path saw two different sentences. That is the date rule working, not dedup getting stricter.",
+        "near_dup_pairs": "2 -> 0. Same cause: the two stored pairs that sat above the Related band were pairs whose only difference was a date. With the date gone, one of each pair is dropped at write time instead of living in the store beside the other.",
+        "band_new": "36 -> 37. One more well-formed candidate reaches a band, because one fewer is refused. The Same and Related counts are unchanged, which is the number that matters: the restatement corpus still exercises both bands.",
+        "recall_at_5": "0.636 -> 0.682. NOT a retrieval improvement and must not be reported as one -- nothing in this phase touched the ranker. The store is one row smaller and two near-duplicate rows are gone, so the five injection slots hold five distinct things more often. Phase 4's A/B is the only thing that may claim recall.",
+        "reachable_at_4096": "0.455 -> 0.591, and the same cause at 8192 (0.636 -> 0.682) and 16384 (0.682 -> 0.727). A 3-row block at 4096 wastes a slot on a near-duplicate far less often once the duplicates are not stored."
+      }
+    },
+    {
+      "date": "2026-09-15",
+      "phase": 2,
+      "change": "the date stripper widened to the classes a word-list over whitespace tokens could not see, and five turns added that contain them",
+      "against": "the same engine as the row above. What changed is `scan_calendar_dates` -- ISO and slash dates, spelled days of the month, spelled clock hours, plural weekdays, decades, months in a list, counted stretches of time -- plus `FactDefect::Fragment`, and fixtures t30-t34 carrying one of each.",
+      "why": {
+        "facts_recorded": "45 -> 55. Five turns, ten facts. The previous zero for date_leak_rate was measured over fixtures that contained none of these classes, so for them the gate was passing vacuously: eleven probes returned had_date=false AND defect=None from the stripper, and nine of the eleven were stored whole. A gate that cannot fail is not a gate.",
+        "stored": "37 -> 42. Five of the ten new facts reach the store once their dates are stripped -- the lease, the swim, growing up in Kisumu, the maize planting and the repaint. The other five are either restatements of a fact the corpus already holds or nothing but a date.",
+        "deduped": "5 -> 8. Three of the new facts are the same facts the corpus already had, said with a date in a shape the stripper used to miss: the passport (ISO), Amara's birth (slash), the standup (spelled hour). Stripped, each one is word for word what is already stored, so it is dropped -- which is the point. If the stripper regressed, none of the three would dedup and all three would appear in date_leak_rate instead.",
+        "band_same": "1 -> 4. The same three, each scoring 1.000 against the row it restates.",
+        "band_new": "37 -> 42. The five new stored rows.",
+        "refused": "3 -> 5. Two new refusals, both the new FactDefect::Fragment: \"The user's anniversary is the third of May\" and \"The user's standup is at six\" have nothing left but a copula once the date is taken out. Refusing is the direction the date decision points -- a refused fact is still in the conversation, a stored one that asserts nothing is read back forever. The corpus now exercises four defect classes rather than three.",
+        "reachable_at_16384": "0.727 -> 0.682, and this one is a LOSS, not an artefact of the new fixtures: it moves the same amount with the corpus untouched. \"The user's household eats no meat on weekdays\" now stores as \"The user's household eats no meat\", and the query \"What should I cook on a Wednesday night?\" had exactly one token linking it to that row. At 16384 the 6-fragment block used to hold the answer and no longer does. That is what the decision costs: a memory stripped of the dimension a query asks about is harder to reach, and the alternative is a stored weekday the pond cannot re-check. recall@5, reachable@4096 and reachable@8192 are unmoved."
+      }
+    },
+    {
+      "date": "2026-09-15",
+      "phase": 2,
+      "change": "the stripper stopped conflating a RECURRENCE with a CALENDAR DATE, and four turns were added so the gate is measured over the classes that distinction creates",
+      "against": "the same engine. What changed is `scan_calendar_dates`, which now recognises a recurrence -- \"each Saturday\", \"on Saturdays\", \"each March and October\", \"from Mon to Fri\" -- and keeps it whole; the auditor in memory_reachability_corpus.rs, which made the same mistake one level up and would otherwise have reported every kept habit as a leak; and the ordinal, numeric-group, written-out-date and clock rules, which were leaking or mangling nine shapes and eating two that were never dates at all.",
+      "why": {
+        "recall_at_5": "0.682 -> 0.727, MEASURED ON THE CORPUS UNTOUCHED -- the four new turns do not move it at all, which is what makes it attributable. Not a ranker change: nothing in this commit touches retrieval. t06:0 was stored as \"The user runs the Jarida standup.\" and is now stored as \"The user runs the Jarida standup every Monday.\", so \"What is happening on Monday morning?\" has a row to reach. The recurrence WAS the answer to the question, and the old rule deleted it.",
+        "reachable_at_16384": "0.682 -> 0.773, with 4096 (0.591 -> 0.636) and 8192 (0.682 -> 0.727) moving for the same reason and by the same single-query step. This recovers the loss the entry above recorded and called the price of the decision: \"The user's household eats no meat on weekdays\" was being stored as \"The user's household eats no meat\", and \"What should I cook on a Wednesday night?\" lost the one dimension it asked about. That was never the price of the date rule. It was the price of the conflation, and it is refunded.",
+        "band_same": "4 -> 3 on the untouched corpus, and back to 4 with the new turns. Two candidates leave Same. t26:0 (\"eats no meat on weekdays as a standing rule\") falls to Related at 0.845, because the row it restates now keeps \"on weekdays\" and so does it, and two longer sentences share proportionally less of their token bags than the two stripped stubs did. t32:0 (\"The user runs the Jarida standup at six pm\") falls to New, because the row it used to match at 1.000 now carries \"every Monday\"; it is still dropped, by the lexical rung instead of the semantic one, which is why `deduped` does not move with it. t38:0 takes the fourth slot back.",
+        "band_new": "42 -> 50. One is t32:0 arriving from Same as described above; the other seven are the new turns' facts.",
+        "facts_recorded": "55 -> 63. Four turns, eight facts, and they are what stops the new zero being as vacuous as the old one was per class. t35 and t36 carry the recurrences and the not-dates -- a marked weekday, a marked month list, birth order, a blood pressure, a version string -- so the corpus now contains the classes the gate must NOT touch, and deleting one fails the build. t37 and t38 carry the date shapes the stripper was leaking or mangling: a bare-digit clock time written as one token (9am), a day-month-year where only the month is a word (3 November 2027), and a numbered day of the month with the unit it repeats on (the 1st of every month).",
+        "stored": "42 -> 49. Seven of the eight new facts reach the store. The eighth is the passport, which strips to exactly what t30:0 already says.",
+        "deduped": "8 -> 9. That passport, and nothing else: the two sentences say the same thing in two date notations, and both notations are now read."
+      },
+      "not_moved_on_purpose": "date_leak_rate stays 0.000 and refused stays 5. The first is the number this whole half of the design is judged by; the second says the gate still refuses the four defect classes it refused before, so nothing was loosened to make a row fit. The recurrences are kept AND the leak rate is zero, which is only possible because the auditor was corrected too -- it is the measurement of the distinction, so it had to learn the distinction. It now fails the build in both directions: a stored calendar date, and a recurrence that did not reach the store whole."
+    },
+    {
+      "date": "2026-09-15",
+      "phase": 3,
+      "change": "widened the post-strip damage gate; detection left exactly as it was",
+      "against": "the same batch write gate, plus four turns (t39-t42, eight facts) planting the four over-strip classes the detector produces and the gate previously stored.",
+      "metrics": {
+        "facts_recorded": 71,
+        "stored": 49,
+        "deduped": 9,
+        "refused": 13,
+        "date_leak_rate": 0.0,
+        "dup_rate": 0.0,
+        "near_dup_pairs": 0,
+        "band_same": 4,
+        "band_related": 4,
+        "band_new": 50,
+        "recall_at_5": 0.72727272727,
+        "answerable_queries": 22,
+        "reachable_at_4096": 0.63636363636,
+        "reachable_at_8192": 0.72727272727,
+        "reachable_at_16384": 0.77272727272
+      },
+      "why": "Three passes had widened the DETECTOR. Each fixed its own probe list and opened a class of over-strip nobody had listed, and every one of those returned defect=None and was STORED: \"The user swims each Saturday morning\" became \"The user swims morning\"; \"The user prefers the 2019 model of the tractor\" became \"The user prefers model of the tractor\"; \"The user keeps the oven at 180\" became \"The user keeps the oven\" and filed 180 as a reminder. A word list over a token window cannot be made correct by adding rules, so this pass changed no rule in date_span, is_date_word or recurrence_span. It widened the readability rung instead -- which was has_stranded_number alone, a trailing bare number and nothing else -- into a gate that reads the EDIT rather than the remainder, and refuses the fact when the edit cannot be lived with. The failure direction is \"we refused a fact we could have kept\", which is the trade the date decision already chose: a refused fact is still in the conversation and can be extracted again, a mangled one is read back forever.",
+      "facts_recorded": "63 -> 71. Four turns, eight facts, one class per turn: a year used as a modifier (t39), a quantity after a clock lead at a clause end (t40), a month or weekday word doing another job -- the modal \"may\", the cat called Midnight (t41), and an ordinal numeral naming a floor or a placing (t42). Added for the same reason t30-t34 were: every one of them returned defect=None from the gate as it stood and was stored, so for these four classes the gate was passing vacuously. A gate that cannot fail is not a gate.",
+      "refused": "5 -> 13. THE POINT OF THE PASS, and all eight are the new turns: 5 refusals over t01-t38 are unchanged, so nothing that used to be kept is now thrown away. The gate refuses on four signals, in this order -- the strike did not sit at a clause edge (so the determiner or preposition it took belonged to the word that follows, not to the date); the strike took a naked run of digits wearing none of the morphology a date wears; and fewer than four tokens survived. The fourth is one part of speech over: DANGLING_TAIL_WORDS grew the naming and linking verbs, so \"The user's cat is called.\" is refused the way \"The user's anniversary is.\" already was.",
+      "not_moved_on_purpose": "date_leak_rate stays 0.000, stored stays 49, deduped stays 9, and recall_at_5 and all three reachable_at_* stay exactly where they were. Together these say the widening is one-sided: it refuses eight facts that were being MANGLED and touches nothing that was being kept. If any clean strip had been caught by the new rungs, stored would have fallen and recall would have followed it. The recurrence control and the not-a-date control are untouched and still pass, so the gate was not widened by destroying the patterns the engine exists to find -- which is the other way a zero is purchasable and the way the pass before last bought it."
+    },
+    {
+      "date": "2026-09-16",
+      "phase": 4,
+      "change": "deleted the date stripper. The gate is a DETECTOR now: a note that carries a date is refused whole, never rewritten.",
+      "against": "the same batch write gate, same 42 turns, same 71 recorded facts. What changed is that nothing edits a note on its way to the store: `strip_calendar_dates`, `scan_calendar_dates_checked`, the damage gate, the strike walk and every helper that decided WHICH WORDS to remove are gone, replaced by `carries_calendar_date`, which answers yes or no. The prompt changed with it -- a habit keeps its timing, a one-off date is a reminder -- and the auditor learned the two distinctions that follow from that: a clock time inside a habit is not a date, and \"may\" is a month only where a preposition or a day number says so.",
+      "metrics": {
+        "facts_recorded": 71,
+        "stored": 49,
+        "deduped": 9,
+        "refused": 13,
+        "date_leak_rate": 0.0,
+        "dup_rate": 0.0,
+        "near_dup_pairs": 0,
+        "band_same": 4,
+        "band_related": 4,
+        "band_new": 50,
+        "recall_at_5": 0.72727272727,
+        "answerable_queries": 22,
+        "reachable_at_4096": 0.63636363636,
+        "reachable_at_8192": 0.72727272727,
+        "reachable_at_16384": 0.77272727272
+      },
+      "why": "Four passes at rewriting a dated sentence produced four classes of wreckage and no end in sight: \"The user swims morning.\", \"The user prefers model of the tractor.\", \"The user keeps the oven.\" plus a reminder for 180, and finally a damage gate that refused 19 of 19 clean strips because it could not tell a clean result from a mangle either. That is not a bug four fixes away. Deciding which words in a sentence are a date, and whether what is left still says what it said, is a judgement about meaning: \"2019\" is a date in \"moved to Kisumu in 2019\" and a model number in \"the 2019 model of the tractor\", and nothing in the token stream separates them. The thing that CAN separate them wrote the sentence. So the rewriting is deleted and the model is the only thing that decides what a memory says. The measurement behind it: 432 live replies through this prompt and this parser across six local models. Every date that turned up inside a note was in a class that carries one -- a recurring habit, a recurring clock time, a version year, an appointment, a biographical year, a date mid-sentence -- and the six classes that carry none (preference, relationship, correction, context, a number that is not a date, a window with nothing in it) were 0 of 207. The oven-at-180 and 40-psi probes came back clean 36 times of 36. The recurring class is the one the old prompt was wrong about: the shipped model and the larger one kept the weekday in all 12 recurring windows between them, at greedy and at both seeds, and granite did the same -- so the prompt now asks for the timing to stay and the gate keeps it.",
+      "stored": "49 -> 43. Six facts that used to reach the store as an EDITED sentence are refused whole instead: the Nairobi move without its 2017, Amara's birth without its March, the passport without its November, the lease without its fourteenth, the 1990s childhood without its decade, the 9am pills without their hour. Every one of those was a clean strip, and every one was indistinguishable at the gate from the mangles above. Four facts move the other way and are STORED now, word for word, that the stripper was destroying: the oven at 180, the thermostat at 21, the cat called Midnight, and \"The user may travel to Kisumu\". That trade is the point of the change, and t40-t41 assert it.",
+      "refused": "13 -> 23, of which 20 are the date rule. It fires on 20 of 71 recorded facts here, against 22% of notes on the shipped model in the live probe -- the corpus is deliberately dense in dates, so this is an upper bound and not a rate to expect. The refusal is affordable only because the date goes somewhere: the shipped model filed a reminder on 31 of its 36 dated windows and lost no date at all, while one of the six filed none on any of 36. `memories_dates_lost` in PassReport counts the windows where it did not, which is the model disobeying half a prompt that asks for both halves -- exposed rather than swallowed.",
+      "deduped": "9 -> 5. Four of the old dedupes existed only because the stripper collapsed two different dated sentences into one identical undated one -- the passport in ISO and the passport written out, Amara's birth date twice. The dedupe was real, and what it was deduping was the editor's output rather than the household's words. With no editor the sentences are different, both carry dates, and both are refused.",
+      "band_same": "4 -> 1, band_new 50 -> 43. Banding happens after the write gate, so the ten extra refusals never reach it: 48 candidates banded where 58 did. Three of the four Same-band hits were the stripper-made collisions described under `deduped`.",
+      "answerable_queries": "22 -> 21. \"Do I need to renew any documents?\" has no answer in the store any more: every fact about the passport carried its expiry date and all three are refused. This is the honest face of the decision -- that question is a REMINDER's job, and the model files it as one. It is recorded here rather than smoothed away because it is the clearest single cost of the change.",
+      "recall_at_5": "0.727 -> 0.714. 15 of 21 where it was 16 of 22; the query lost is the passport one above, and one fewer hit follows it. Within noise of a corpus this size, and moved by which facts exist rather than by how they are ranked -- nothing in the ranker changed.",
+      "reachable_at_4096": "0.636 -> 0.619 and reachable_at_8192 0.727 -> 0.714, both for the same reason as recall_at_5: one fewer answerable query and one fewer hit.",
+      "reachable_at_16384": "0.773 -> 0.810. Up, and not by luck: a 6-slot block over 43 rows reaches a larger share of the store than over 49, and the six rows it drops are the edited ones that were competing for those slots while asserting less than the sentences they were made from.",
+      "not_moved_on_purpose": "date_leak_rate stays 0.000, dup_rate stays 0.000, near_dup_pairs stays 0, facts_recorded stays 71, band_related stays 4. The first is the number this whole half of the design is judged by, and it is now reached by REFUSAL and never by editing -- which is what makes it worth something: the old zero was partly purchased by rewriting sentences until the auditor could not see a date in them, and t39-t42 exist because that is invisible to this metric by construction. All four vacuity controls stand and none was loosened. The fixtures still carry one fact per date class (t30-t34, t37-t38) and the auditor must still find each. The recurrences (t18:0, t33:0, t34:0, t35:0, t35:1) must still reach the store WHOLE, and t06:0 now reaches it whole including its \"at 09:00\" -- which is the carve-out being real rather than asserted. The not-dates (t36:0, t36:1, t37:0) are untouched. And the third control changed direction rather than weakening: four of its eight facts must now be STORED verbatim, because with no editor a false positive costs the whole fact, and the other four must be refused with the CalendarDate defect and never rewritten.",
+      "corrected_by": "2026-09-16, phase 5. The sentence above -- \"`memories_dates_lost` in PassReport counts the windows where it did not\" -- was true when written and is not true now. It was a per-WINDOW test applied per NOTE, so one reminder marked every dated note in its window as kept: a window holding \"dentist next Tuesday\" and \"collecting the tractor on 3 March\" with one reminder about the dentist reported dated=2, dates_lost=0, and threw the 3 March away with every counter reading clean. The counter is now per note, matched by reminder_covers_note, and resolves towards LOST wherever it cannot tell -- so it over-reports loss rather than under-reporting it. The entry is left as written rather than edited, because this array is the only record of why the locked metrics moved and a rewritten past reads as one that was never wrong."
+    }
+  ]
+}

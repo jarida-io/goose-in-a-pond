@@ -18,7 +18,11 @@ license = "Apache-2.0"
 pond-core             = { path = "../pond-core", features = ["test-mocks"] }
 pond-mcp-server       = { path = "../pond-mcp-server" }
 pond-adapters-weather = { path = "../pond-adapters-weather" }
-goose            = { path = "../../goose/crates/goose", default-features = false, features = ["rustls-tls", "local-inference"] }
+# The one transport for the companion files this adapter provisions (the vision encoder and,
+# when the speculation switch turns on with it absent, the drafter): resumable, pinned by size
+# and sha256, and gated per redirect hop, which only holds with its redirect-aware client.
+pond-hf-cache         = { path = "../pond-hf-cache" }
+goose            ={ path = "../../goose/crates/goose", default-features = false, features = ["rustls-tls", "local-inference"] }
 # ModelConfig and the Provider trait moved into the extracted goose-providers
 # crate and are not re-exported as types from `goose`.
 goose-providers  = { path = "../../goose/crates/goose-providers", default-features = false }
@@ -35,6 +39,9 @@ tracing = "0.1"
 uuid = { version = "1.11", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 tokio-util = "0.7"
+# The encoder's identity check: its sha256 is its Hugging Face LFS oid. The same major the
+# other workspace crates hash with, so no second copy is built.
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = { workspace = true }

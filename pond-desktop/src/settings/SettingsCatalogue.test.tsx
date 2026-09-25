@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup, within } from "@testing-library/react";
-import { SettingsCatalogueView, summariseRetitle } from "./SettingsCatalogue";
+import { SettingsCatalogueView, summariseRetitle, parseText } from "./SettingsCatalogue";
 import { api } from "../api/PondApiClient";
 
 // ── Mocks ─────────────────────────────────────────────────────
@@ -72,16 +72,7 @@ const mockApi = api as unknown as {
 
 /** A re-titling reply with the boring fields filled in. */
 function retitleReply(over: Record<string, unknown> = {}) {
-  return {
-    renamed: [],
-    renamed_count: 0,
-    considered: 0,
-    capped: false,
-    unusable: 0,
-    failed: 0,
-    skipped: { user_named: 0, still_current: 0, too_short: 0, unknown_provenance: 0 },
-    ...over,
-  };
+  return { started: true, ...over };
 }
 
 /** Render and wait for the first paint after settings load. */
@@ -361,7 +352,7 @@ describe("SettingsCatalogue", () => {
 
   it("blocks the save while a field is invalid, and says which", async () => {
     await renderPage();
-    fireEvent.click(screen.getByRole("button", { name: /Automation & Proactivity/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Automations/ }));
 
     const quiet = screen.getByLabelText("Quiet from");
     fireEvent.change(quiet, { target: { value: "10pm" } });
@@ -413,6 +404,36 @@ describe("SettingsCatalogue", () => {
     // Whisper models belong to the ASR picker, not this one.
     expect(values).not.toContain("base");
   });
+
+  // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98),
+  // so the switch these two tests drove is commented out; restore them with it.
+  // it("offers the guess-ahead switch under Models, drawn from the server value", async () => {
+  //   // Passed explicitly both ways -- the catalogue reads an ABSENT key as
+  //   // OFF (`Boolean(value)`), so a test relying on the default-true rather
+  //   // than passing the key would pass for the wrong reason.
+  //   await renderPage({ speculative_decoding_enabled: false });
+  //   fireEvent.click(screen.getByRole("button", { name: /^Models/ }));
+  //   const off = screen.getByLabelText("Guess ahead with a helper model") as HTMLInputElement;
+  //   expect(off.checked).toBe(false);
+  //   cleanup();
+  //
+  //   await renderPage({ speculative_decoding_enabled: true });
+  //   fireEvent.click(screen.getByRole("button", { name: /^Models/ }));
+  //   const on = screen.getByLabelText("Guess ahead with a helper model") as HTMLInputElement;
+  //   expect(on.checked).toBe(true);
+  // });
+  //
+  // it("saves only the guess-ahead key", async () => {
+  //   await renderPage({ speculative_decoding_enabled: true });
+  //   fireEvent.click(screen.getByRole("button", { name: /^Models/ }));
+  //   fireEvent.click(screen.getByLabelText("Guess ahead with a helper model"));
+  //
+  //   const save = await screen.findByRole("button", { name: /Save 1 change/ });
+  //   fireEvent.click(save);
+  //
+  //   await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledTimes(1));
+  //   expect(mockApi.updateSettings).toHaveBeenCalledWith({ speculative_decoding_enabled: false });
+  // });
 
   it("keeps a configured model the registry does not list", async () => {
     await renderPage({ chat_model: "some-model-i-removed" });
@@ -503,41 +524,34 @@ describe("SettingsCatalogue", () => {
 });
 
 describe("summariseRetitle", () => {
-  it("counts what it renamed, and says when there is more to do", () => {
-    expect(summariseRetitle(retitleReply({ renamed_count: 1 }))).toBe("Renamed 1 conversation");
-    expect(summariseRetitle(retitleReply({ renamed_count: 4 }))).toBe("Renamed 4 conversations");
-    expect(summariseRetitle(retitleReply({ renamed_count: 20, capped: true })))
-      .toBe("Renamed 20 conversations — press again for more");
+  it("says a pass has started", () => {
+    expect(summariseRetitle(retitleReply())).toBe("Renaming — names appear as it goes");
   });
 
-  /// The distinction the copy exists for: "nothing needed doing" and "nothing
-  /// was allowed" look identical from a count alone, and a person told the
-  /// first would press the button again expecting a different answer.
-  it("separates nothing-to-do from nothing-allowed", () => {
-    expect(summariseRetitle(retitleReply({ considered: 0 })))
-      .toBe("No conversations to rename");
+  /// The distinction the copy exists for: a pond whose titling loop never
+  /// spawned has nothing to wake, and a person told "it did not work" would
+  /// press the button again expecting a different answer.
+  it("separates nothing-here-to-run from a failure", () => {
     expect(summariseRetitle(retitleReply({
-      considered: 3, skipped: { user_named: 3, still_current: 0, too_short: 0, unknown_provenance: 0 },
-    }))).toBe("All of these are named by hand");
-    expect(summariseRetitle(retitleReply({
-      considered: 3, skipped: { user_named: 0, still_current: 3, too_short: 0, unknown_provenance: 0 },
-    }))).toBe("Nothing needed a new name");
+      started: false,
+      reason: "the titling job has no loop in this process",
+    }))).toBe("the titling job has no loop in this process");
+    expect(summariseRetitle(retitleReply({ started: false })))
+      .toBe("Nothing here to run");
   });
 
-  it("reports a model that gave nothing usable, and an outright failure", () => {
-    expect(summariseRetitle(retitleReply({ considered: 2, unusable: 2 })))
-      .toBe("The model gave no usable name");
-    expect(summariseRetitle(retitleReply({ considered: 2, failed: 2 })))
-      .toBe("Could not rename any of them");
-  });
-
-  it("never claims success when nothing was renamed", () => {
-    for (const over of [
-      { considered: 5, failed: 5 },
-      { considered: 5, unusable: 5 },
-      { considered: 5, skipped: { user_named: 5, still_current: 0, too_short: 0, unknown_provenance: 0 } },
+  /// The button used to hold the request open through every model call so it
+  /// could report a count. On the Orin that was minutes against a 30 s client
+  /// timeout, so the count it promised arrived as an error. Claiming a result
+  /// this reply cannot contain is the specific regression to guard.
+  it("never claims a count it could not have", () => {
+    for (const reply of [
+      retitleReply(),
+      retitleReply({ started: false }),
+      retitleReply({ started: false, reason: "this process has no inference lane" }),
     ]) {
-      expect(summariseRetitle(retitleReply(over))).not.toMatch(/^Renamed/);
+      expect(summariseRetitle(reply)).not.toMatch(/\bRenamed\b/);
+      expect(summariseRetitle(reply)).not.toMatch(/\d/);
     }
   });
 });
@@ -545,44 +559,37 @@ describe("summariseRetitle", () => {
 describe("the rename-now button", () => {
   async function openAutomation() {
     await renderPage();
-    fireEvent.click(screen.getByRole("button", { name: /Automation & Proactivity/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Automations/ }));
   }
 
-  it("renames on demand and reports what happened", async () => {
-    mockApi.retitleSessions.mockResolvedValue(retitleReply({
-      renamed_count: 2,
-      renamed: [
-        { session_id: "a", title: "Wake word fires twice" },
-        { session_id: "b", title: "Jetson build stamp is lying" },
-      ],
-      considered: 5,
-    }));
+  it("asks for a pass and reports that it started", async () => {
+    mockApi.retitleSessions.mockResolvedValue(retitleReply());
     await openAutomation();
 
     fireEvent.click(screen.getByRole("button", { name: /Rename now/ }));
 
-    await screen.findByText("Renamed 2 conversations");
+    await screen.findByText("Renaming — names appear as it goes");
     expect(mockApi.retitleSessions).toHaveBeenCalledTimes(1);
     // Renaming is not a settings change; it must not dirty the save button.
     expect(mockApi.updateSettings).not.toHaveBeenCalled();
   });
 
-  /// One model call per conversation, so a pass is slow on a small board. The
-  /// button has to say so and refuse to be pressed twice.
-  it("says it is working and cannot be pressed again mid-run", async () => {
+  /// The request is short now, but it is still a request, and a double press
+  /// would ask the lane twice for a pass it is already going to run.
+  it("says it is asking and cannot be pressed again mid-request", async () => {
     let release!: (v: unknown) => void;
     mockApi.retitleSessions.mockReturnValue(new Promise((r) => { release = r; }));
     await openAutomation();
 
     fireEvent.click(screen.getByRole("button", { name: /Rename now/ }));
 
-    const busy = await screen.findByRole("button", { name: /Renaming/ });
+    const busy = await screen.findByRole("button", { name: /Asking/ });
     expect((busy as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(busy);
     expect(mockApi.retitleSessions).toHaveBeenCalledTimes(1);
 
-    release(retitleReply({ renamed_count: 1, considered: 1 }));
-    await screen.findByText("Renamed 1 conversation");
+    release(retitleReply());
+    await screen.findByText("Renaming — names appear as it goes");
   });
 
   it("shows the failure rather than a silent no-op", async () => {
@@ -592,7 +599,7 @@ describe("the rename-now button", () => {
     fireEvent.click(screen.getByRole("button", { name: /Rename now/ }));
 
     await screen.findByText("No language model is configured");
-    // Recoverable: the button comes back rather than staying stuck on "Renaming".
+    // Recoverable: the button comes back rather than staying stuck on "Asking".
     await waitFor(() =>
       expect((screen.getByRole("button", { name: /Rename now/ }) as HTMLButtonElement).disabled)
         .toBe(false));
@@ -604,9 +611,34 @@ describe("the rename-now button", () => {
   it("is offered even when the automatic pass is switched off", async () => {
     mockApi.retitleSessions.mockResolvedValue(retitleReply());
     await renderPage({ session_titling_enabled: false });
-    fireEvent.click(screen.getByRole("button", { name: /Automation & Proactivity/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Automations/ }));
 
     const button = screen.getByRole("button", { name: /Rename now/ }) as HTMLButtonElement;
     expect(button.disabled).toBe(false);
+  });
+});
+
+// The server's `suggestions_muted` is a `Vec<String>`. Sent as the raw string it
+// was refused with a 422, and that refusal took every other edit in the same
+// Save with it -- so touching this one box made Settings unsavable.
+describe("parseText: list-valued text boxes", () => {
+  it("sends the hidden-suggestions box as a list, not the string it was typed as", () => {
+    expect(parseText("suggestions_muted", "weather_today, devices_online")).toEqual([
+      "weather_today",
+      "devices_online",
+    ]);
+  });
+
+  it("reads an emptied box as the empty list, which is what 'clear to unmute' means", () => {
+    // `""` against a baseline of `[]` is what made the page dirty with a change
+    // it could never save.
+    expect(parseText("suggestions_muted", "")).toEqual([]);
+    expect(parseText("suggestions_muted", " , ")).toEqual([]);
+  });
+
+  it("leaves an ordinary text field a string -- the control for the two above", () => {
+    // Without this, a parseText that split EVERY field would pass both tests
+    // and send the assistant's name as an array.
+    expect(parseText("assistant_name", "Goose, the pond")).toBe("Goose, the pond");
   });
 });

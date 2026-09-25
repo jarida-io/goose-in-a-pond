@@ -31,6 +31,8 @@ struct Harness {
     /// The same state, reached from a LAN address.
     remote: axum::Router,
     profiles: Arc<SqliteProfileRepository>,
+    /// The pond's own pool, for the one test that has to break the attribution read on purpose.
+    pool: sqlx::Pool<sqlx::Sqlite>,
     _tmp: tempfile::TempDir,
 }
 
@@ -44,6 +46,9 @@ async fn make_app() -> Harness {
 
     let state = Arc::new(AppState {
         warmup: Default::default(),
+        suggestion_queue: std::sync::Arc::new(
+            pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
+        ),
         db,
         onboarding_repo: Arc::new(pond_infra::onboarding::SqlxOnboardingRepository::new(
             pool.clone(),
@@ -69,6 +74,7 @@ async fn make_app() -> Harness {
         embedding_provider: None,
         vector_index: None,
         index_reindex: None,
+        lane: None,
         account_sync: None,
         sensor_storage: Arc::new(MockSensorStorage::new()),
         camera_storage: Arc::new(MockCameraStorage::new()),
@@ -105,8 +111,7 @@ async fn make_app() -> Harness {
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         notification_sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         answer_reviewer: None,
-        memory_extractor: None,
-        memory_extraction_service: None,
+        extraction_status: None,
         last_user_activity: Arc::new(tokio::sync::RwLock::new(std::time::Instant::now())),
         consolidation_cancel: Arc::new(tokio::sync::RwLock::new(None)),
         consolidation_event_tx: tokio::sync::broadcast::channel(16).0,
@@ -149,6 +154,7 @@ async fn make_app() -> Harness {
         loopback,
         remote,
         profiles,
+        pool,
         _tmp: tmp,
     }
 }
@@ -432,4 +438,206 @@ async fn re_displaying_the_code_names_the_member_it_is_bound_to() {
         body["profile_id"], liz,
         "the re-display must name the member too; body: {body}"
     );
+}
+
+// ── Who a paired device belongs to: `GET /devices/self` ──────────────────────
+//
+// Everything above stops at the code: it proves `pairing_codes.profile_id` is written and
+// leaves the code-to-device step to `sqlite_handshake`. These go the rest of the way. The pair
+// is completed over HTTP with a MAC computed the way a phone computes it, and `/devices/self`
+// is called with the token the pond issued -- so the device the route reads came out of
+// `auth_middleware` via `caller_for_token`, exactly as it does for a real phone, and no test
+// here writes a `Principal` by hand.
+
+type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+
+/// What a phone computes: `HMAC-SHA256(pairing_code, challenge || client_id)`, lowercase hex.
+fn client_mac(code: &str, challenge_b64: &str, client_id: &str) -> String {
+    use base64::Engine as _;
+    use hmac::Mac as _;
+    let challenge = base64::engine::general_purpose::STANDARD
+        .decode(challenge_b64.as_bytes())
+        .unwrap();
+    let mut mac = HmacSha256::new_from_slice(code.as_bytes()).unwrap();
+    mac.update(&challenge);
+    mac.update(client_id.as_bytes());
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+async fn post_json(router: &axum::Router, uri: &str, body: Value) -> (StatusCode, Value) {
+    let resp = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(uri)
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// Pair `client_id` from a LAN address with `code` and return the session token the pond issued.
+async fn pair(h: &Harness, code: &str, client_id: &str) -> String {
+    let (status, init) = post_json(
+        &h.remote,
+        "/api/v1/handshake/init",
+        serde_json::json!({
+            "client_id": client_id,
+            "client_type": "gotg",
+            "client_version": "1.0.0",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "handshake/init: {init}");
+    let (status, verified) = post_json(
+        &h.remote,
+        "/api/v1/handshake/verify",
+        serde_json::json!({
+            "challenge_id": init["challenge_id"],
+            "mac": client_mac(code, init["challenge"].as_str().unwrap(), client_id),
+            "device_name": format!("{client_id} phone"),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "handshake/verify: {verified}");
+    assert_eq!(
+        verified["accepted"], true,
+        "the pair was refused: {verified}"
+    );
+    verified["session_token"]
+        .as_str()
+        .expect("an accepted pair mints a session token")
+        .to_string()
+}
+
+/// `GET /devices/self` from a LAN address, with `token` if one is given.
+async fn device_self(h: &Harness, token: Option<&str>) -> (StatusCode, Value) {
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/devices/self");
+    if let Some(token) = token {
+        req = req.header("Authorization", format!("Bearer {token}"));
+    }
+    let resp = h
+        .remote
+        .clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+fn code_of(body: &Value) -> String {
+    body["code"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no code was issued: {body}"))
+        .to_string()
+}
+
+#[tokio::test]
+async fn a_phone_paired_with_a_members_code_reads_that_member_back() {
+    let h = make_app().await;
+    let liz = a_member(&h, "Liz").await;
+    let (_, issued) = issue(&h.loopback, Some(&format!(r#"{{"profile_id":"{liz}"}}"#))).await;
+    let token = pair(&h, &code_of(&issued), "liz-phone").await;
+
+    let (status, body) = device_self(&h, Some(&token)).await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        body["device_id"], "liz-phone",
+        "the device the token was issued to; body: {body}"
+    );
+    assert_eq!(body["profile"]["id"], liz, "body: {body}");
+    assert_eq!(body["profile"]["display_name"], "Liz", "body: {body}");
+    // Display only, and only what a greeting needs. A member's preferences are theirs, and
+    // the avatar is not something this route has any business handing out.
+    let profile = body["profile"].as_object().expect("profile is an object");
+    assert_eq!(
+        profile.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["display_name", "id"],
+        "`/devices/self` returns the member's id and name and nothing else; body: {body}"
+    );
+}
+
+/// NULL is *nobody has claimed this device*, not an error and not everybody. Migration 0043's
+/// normal case, since pairing happens before anyone says who they are.
+#[tokio::test]
+async fn a_phone_paired_with_an_unattributed_code_reads_no_member() {
+    let h = make_app().await;
+    // Two members, so the code is not bound to the sole member automatically.
+    a_member(&h, "Liz").await;
+    a_member(&h, "Jerry").await;
+    let (_, issued) = issue(&h.loopback, None).await;
+    let token = pair(&h, &code_of(&issued), "kitchen-tablet").await;
+
+    let (status, body) = device_self(&h, Some(&token)).await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["device_id"], "kitchen-tablet", "body: {body}");
+    assert!(
+        body["profile"].is_null(),
+        "an unclaimed device names nobody; body: {body}"
+    );
+}
+
+/// The one this route could get wrong quietly. A failed attribution read is `Unavailable`, and
+/// reporting it as "no member" would look exactly like an unclaimed phone -- a greeting with no
+/// name, and nothing anywhere saying the pond could not tell. `DeviceRung::rung` consumes the
+/// `Result` so that cannot be spelled away; this holds the route to the same rule.
+#[tokio::test]
+async fn a_failed_attribution_read_is_reported_rather_than_read_as_unclaimed() {
+    let h = make_app().await;
+    let liz = a_member(&h, "Liz").await;
+    let (_, issued) = issue(&h.loopback, Some(&format!(r#"{{"profile_id":"{liz}"}}"#))).await;
+    let token = pair(&h, &code_of(&issued), "liz-phone").await;
+
+    // Break only the attribution read. Authentication reads `session_tokens` and never this
+    // column, so the request still arrives with its device and fails exactly where it should.
+    sqlx::query("ALTER TABLE devices RENAME COLUMN profile_id TO profile_id_unreadable")
+        .execute(&h.pool)
+        .await
+        .unwrap();
+
+    let (status, body) = device_self(&h, Some(&token)).await;
+
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a read that failed must not answer 200 with no member; body: {body}"
+    );
+    assert!(
+        body.get("profile").is_none(),
+        "no member may be claimed, and none denied, from a read that did not happen; body: {body}"
+    );
+}
+
+/// Not on `PUBLIC_ROUTES`: who a device belongs to is not an anonymous question.
+#[tokio::test]
+async fn devices_self_requires_a_token() {
+    let h = make_app().await;
+    let (status, body) = device_self(&h, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
 }

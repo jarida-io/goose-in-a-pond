@@ -7,6 +7,7 @@
  */
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
+import { navigateTo } from "./helpers/nav";
 
 const MOCK_LOGS = [
   { id: 1, timestamp: "2026-06-04T08:50:02Z", level: "INFO",  source: "pond",    message: "Server bound to 127.0.0.1:4000" },
@@ -108,9 +109,9 @@ async function goToLogsScreen(page: Page) {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
   await page.waitForSelector(".ghub", { timeout: 10_000 });
-  await page.getByRole("button", { name: "Settings", exact: true }).first().click();
-  await page.waitForSelector(".set", { timeout: 5_000 });
-  await page.getByRole("button", { name: /^Logs$/ }).first().click();
+  // The rail is a drawer now: Logs is a chip under "Manage", and in the hub it
+  // resolves to the Logs detail screen directly, without the Settings list.
+  await navigateTo(page, "Logs");
   await page.waitForTimeout(600);
 }
 

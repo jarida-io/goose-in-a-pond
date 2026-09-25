@@ -1,0 +1,231 @@
+/* ────────────────────────────────────────────────────────────
+   Now Playing card.
+
+   Every colour is a token except one: the album-art gradient is the design's
+   own literal #7C3AED → #2A0C66, kept because it is a fixed piece of the
+   artwork placeholder and not a state. It is decoration only — nothing about
+   playback is ever encoded in it, so it never has to be read.
+
+   Sizes follow the design except the transport, which the touch floor wins:
+   the mockup drew 36px buttons, this ships on a 1024x600 finger-driven panel,
+   so they are 44px. The play button goes to 48px so it still reads as the
+   primary against two siblings that are now the same size it was.
+   ──────────────────────────────────────────────────────────── */
+
+.mcard {
+  box-sizing: border-box;
+  height: 100%;
+  border-radius: 12px;
+  background: var(--color-surface);
+  padding: 14px;
+  display: flex;
+  gap: 14px;
+}
+
+/* ── Album art ────────────────────────────────────────────── */
+
+.mcard__art {
+  flex: none;
+  width: 76px;
+  height: 76px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: linear-gradient(140deg, #7C3AED, #2A0C66);
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding: 6px;
+}
+
+/* The 6px inset is the glyph's margin in the gradient tile. Real cover art
+   fills the tile instead, so the padding goes with the glyph. */
+.mcard__art:has(.mcard__art-img) {
+  padding: 0;
+}
+
+.mcard__art-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* ── Titles, scrubber, transport ──────────────────────────── */
+
+.mcard__col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mcard__titles {
+  min-width: 0;
+}
+
+.mcard__track {
+  display: block;
+  font: 600 16px Quicksand, sans-serif;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mcard__artist {
+  display: block;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mcard__scrub {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mcard__time {
+  font: 500 11px 'JetBrains Mono', monospace;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-secondary);
+}
+
+.mcard__rail {
+  flex: 1;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--grey-200);
+  position: relative;
+}
+
+.mcard__fill {
+  display: block;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--pp);
+}
+
+.mcard__thumb {
+  position: absolute;
+  top: -3px;
+  width: 10px;
+  height: 10px;
+  margin-left: -5px;
+  border-radius: 999px;
+  background: var(--pp);
+}
+
+.mcard__transport {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mcard__btn {
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--color-text);
+  transition: background var(--dur-fast) var(--ink-ease);
+}
+
+.mcard__btn:hover:not(:disabled) {
+  background: var(--color-hover);
+}
+
+.mcard__btn:active:not(:disabled) {
+  background: var(--color-pressed);
+}
+
+.mcard__play {
+  width: 48px;
+  height: 48px;
+  border-radius: 999px;
+  background: var(--color-text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border: 0;
+  transition: transform var(--dur-fast) var(--ink-ease);
+}
+
+/* The face is already the text colour at full strength; there is no darker
+   step to press into, so the press is the only feedback it gets. */
+.mcard__play:active {
+  transform: scale(0.96);
+}
+
+/* ── The two message states: disconnected and refused ─────── */
+
+.mcard__empty {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 8px;
+}
+
+.mcard__empty-title {
+  font: 600 15px Quicksand, sans-serif;
+}
+
+/* Wraps, unlike the track line. Spotify's refusal sentence is a sentence, and
+   an ellipsis in the middle of it would hide the half that says what to do. */
+.mcard__empty-sub {
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--color-text-secondary);
+}
+
+.mcard__empty button,
+.mcard__retry {
+  min-height: 44px;
+  padding: 0 16px;
+  border: 2px solid var(--color-text);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-text);
+  font: 600 14px Quicksand, sans-serif;
+  display: inline-flex;
+  align-items: center;
+  /* Explicit: the global button rule in base.css centres flex buttons. */
+  justify-content: flex-start;
+  gap: 8px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ink-ease);
+}
+
+.mcard__empty button:hover,
+.mcard__retry:hover {
+  background: var(--color-hover);
+}
+
+.mcard__empty button:active,
+.mcard__retry:active {
+  background: var(--color-pressed);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mcard__btn,
+  .mcard__play,
+  .mcard__empty button,
+  .mcard__retry {
+    transition: none;
+  }
+
+  .mcard__play:active {
+    transform: none;
+  }
+}

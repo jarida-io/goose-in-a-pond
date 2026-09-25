@@ -9,6 +9,7 @@ import {
   hasLiveThread,
   acknowledgeCompletion,
   sendTurn,
+  takeRefusedDraft,
   openSession,
   followExternalSession,
   resetConversation,
@@ -21,6 +22,12 @@ import { ChatHistory, type OpenOrigin } from "./ChatHistory";
 import { ThinkingPlaceholder } from "../components/ThinkingPlaceholder";
 import { ThinkingDisclosure } from "../hub/views/chat/ThinkingDisclosure";
 import { AttachmentTray } from "../components/AttachmentTray";
+import {
+  ImageSupportStatus,
+  COMPOSER_GATE_LINE,
+  refusalClientClause,
+} from "../components/ImageSupportStatus";
+import { useVisionStatus } from "../api/useVisionStatus";
 import { TypingIndicator } from "../hub/views/chat/TypingIndicator";
 import { Goose } from "../components/Goose";
 import { greeting, subtitle } from "../components/quips";
@@ -32,18 +39,16 @@ import { ContextPressureNote } from "../components/ContextPressureNote";
 import { SubagentTree } from "../components/SubagentTree";
 import { prepareImage, validateAttachmentSet } from "../lib/imageAttach";
 import type { PreparedImage } from "../lib/imageAttach";
+import { useSuggestedPrompts } from "../hooks/useSuggestedPrompts";
 
-const CHIPS = [
-  "What can you help me with?",
-  "Check the weather",
-  "Set a schedule",
-  "Show my devices",
-  "Manage my models",
-];
 
 export function Chat() {
   const state    = useAppState();
   const dispatch = useAppDispatch();
+
+  // The starting quips, from the suggestion engine rather than a fixed list.
+  // See `useSuggestedPrompts`.
+  const chips = useSuggestedPrompts(state.sessionId);
 
   // The transcript, the turn in flight and the queue behind it belong to the
   // store, not to this component: pressing anything in the sidebar unmounts
@@ -113,10 +118,29 @@ export function Chat() {
   const modelSelectorRef = useRef<HTMLDivElement>(null);
   const fileInputRef     = useRef<HTMLInputElement>(null);
 
-  const attachDisabled = capabilitiesKnown && !visionCapable;
-  const attachTitle = attachDisabled
-    ? "The active model cannot read images. Switch to a vision-capable model such as gemma-4-E2B-it."
-    : "Attach image";
+  // Picture support's own lifecycle — download progress, readiness, a device
+  // that declines the encoder entirely. `useVisionStatus` is the primary
+  // attach decision now; `capabilities.vision` above is the fallback while a
+  // per-model answer is unknown (an older server, or the probe still in
+  // flight).
+  const { status: visionStatus, refresh: refreshVisionStatus } = useVisionStatus();
+  // Whether the household has just now reached for the paperclip or tried to
+  // paste — the only moment a PERMANENT reason (not_declared /
+  // not_on_this_device) earns a line; see ImageSupportStatus.
+  const [attachReasonShown, setAttachReasonShown] = useState(false);
+
+  const visionKind = visionStatus?.state.kind;
+  const visionKnown = !!visionStatus && visionKind !== "unknown";
+  // gate.blocked: status known && kind !== "ready".
+  const gateBlocked = visionKnown
+    ? visionKind !== "ready"
+    : capabilitiesKnown && !visionCapable;
+  const attachTitle = !gateBlocked
+    ? "Attach image"
+    : (visionStatus?.message ??
+        (visionKind === "not_declared"
+          ? "This model cannot look at pictures. To send one, choose a model marked Reads pictures on the Models page."
+          : "The active model cannot read images. Switch to a model marked Reads pictures on the Models page."));
 
   /**
    * Revoke previews still sitting in the tray when this component goes away.
@@ -175,7 +199,13 @@ export function Chat() {
     setAttachments((prev) => [...prev, ...prepared]);
   }, [attachments]);
 
+  // The paperclip is NEVER disabled for vision reasons — a tap always opens
+  // the file picker. What a tap DOES do, when picture support is not ready,
+  // is surface the reason: the button's title (a mouse hover) and, now, an
+  // on-demand ImageSupportStatus line reachable by touch, which a disabled
+  // button's title attribute never was.
   function onAttachClick() {
+    if (gateBlocked) setAttachReasonShown(true);
     fileInputRef.current?.click();
   }
 
@@ -189,6 +219,11 @@ export function Chat() {
     const files = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/"));
     if (files.length === 0) return;
     e.preventDefault();
+    if (gateBlocked) {
+      setAttachReasonShown(true);
+      setAttachError(COMPOSER_GATE_LINE);
+      return;
+    }
     void addFiles(files);
   }
 
@@ -200,6 +235,24 @@ export function Chat() {
       .then((caps) => { setVisionCapable(caps.vision); setCapabilitiesKnown(true); })
       .catch(() => { setCapabilitiesKnown(false); });
   }, [state.serverOnline]);
+
+  // A refused turn (409/413/415/...) hands its draft back here rather than
+  // leaving an error bubble nobody can act on. `run.refusedDraft` is
+  // referentially stable across commits that do not touch it, so this only
+  // fires once per refusal, and `takeRefusedDraft` clears it so a second
+  // effect run (StrictMode) cannot restore the same draft twice.
+  useEffect(() => {
+    if (!run.refusedDraft) return;
+    const draft = takeRefusedDraft();
+    if (!draft) return;
+    if (!input.trim()) setInput(draft.text);
+    setAttachments(draft.attachments);
+    setAttachError(draft.message + refusalClientClause(draft.code));
+    refreshVisionStatus();
+    // `input` deliberately excluded: this must run exactly once per refusal,
+    // not on every keystroke afterward.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [run.refusedDraft]);
 
   /**
    * Follow a session id set from OUTSIDE — a deep link, or the
@@ -302,13 +355,16 @@ export function Chat() {
         await api.activateModel(provider, name, "chat");
       }
       dispatch({ type: "SET_LAST_RESPONSE_META", payload: { modelName: name, modelRole: "chat", completionTokens: 0 } });
+      // The new model may have a different (or no) encoder, or none at all
+      // for mesh -- ask again rather than waiting for the next poll tick.
+      refreshVisionStatus();
     } catch (e) {
       console.warn("Model switch failed:", e);
     } finally {
       setModelSwitching(false);
       setShowModelSelector(false);
     }
-  }, [dispatch]);
+  }, [dispatch, refreshVisionStatus]);
 
   // Close model selector on outside click / Escape
   useEffect(() => {
@@ -545,6 +601,14 @@ export function Chat() {
     // silent discard of the tray.
     if (busy && !text) return;
 
+    // Gated here rather than by disabling Send: this is the one path every
+    // way of sending funnels through (the button, Enter, a suggestion chip,
+    // Continue), so gating here covers all of them at once.
+    if (attachments.length > 0 && gateBlocked) {
+      setAttachError(COMPOSER_GATE_LINE);
+      return;
+    }
+
     setInput("");
     if (textareaRef.current) textareaRef.current.style.height = "auto";
 
@@ -556,14 +620,10 @@ export function Chat() {
     // The bubble keeps its own copy of each previewUrl and the store now owns
     // revoking them, so the tray is cleared here WITHOUT revoking -- doing so
     // would blank the thumbnail on the message just sent.
-    sendTurn({
-      text,
-      images: attachments.map((a) => ({ data: a.data, mime_type: a.mime_type })),
-      previewUrls: attachments.map((a) => a.previewUrl),
-    });
+    sendTurn({ text, attachments });
     setAttachments([]);
     setAttachError(null);
-  }, [input, attachments, busy, state.serverOnline]);
+  }, [input, attachments, busy, state.serverOnline, gateBlocked]);
 
   // Two things `sendMessage`'s old `finally` did that belong to the view rather
   // than to the turn: the session list carries the title the server derives
@@ -1066,7 +1126,8 @@ export function Chat() {
         <div ref={bottomRef} />
       </div>
 
-      {/* Pending image attachments */}
+      {/* Picture support's own status, then any pending attachments. */}
+      <ImageSupportStatus status={visionStatus} revealed={attachReasonShown} />
       <AttachmentTray attachments={attachments} onRemove={removeAttachment} />
       {attachError && <p className="attach-error" role="alert">{attachError}</p>}
 
@@ -1083,7 +1144,8 @@ export function Chat() {
         <button
           className="ch-icon-btn"
           onClick={onAttachClick}
-          disabled={!state.serverOnline || attachDisabled}
+          disabled={!state.serverOnline}
+          aria-disabled={gateBlocked || undefined}
           aria-label="Attach image"
           onMouseDown={(e) => e.preventDefault()}
           title={attachTitle}
@@ -1137,7 +1199,7 @@ export function Chat() {
       {/* Quips, below the composer — a starting point, not a header. */}
       {!loadingSession && messages.length === 0 && (
         <div className="chat2__chips" role="group" aria-label="Suggestions">
-          {CHIPS.map((c, i) => (
+          {chips.map((c, i) => (
             <button
               key={c}
               className="ch-chip"

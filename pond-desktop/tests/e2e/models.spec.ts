@@ -13,14 +13,12 @@
  */
 import { test, expect } from "@playwright/test";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
+import { navigateTo } from "./helpers/nav";
 
 async function goToModels(page: Parameters<typeof mockAllApiRoutes>[0]) {
   await page.goto("/");
-  const modelsBtn = page
-    .getByRole("button", { name: /models/i })
-    .or(page.locator('[title="Models"]'))
-    .first();
-  await modelsBtn.click({ timeout: 10_000 });
+  // Models sits behind the drawer's "Manage" group; navigateTo expands it.
+  await navigateTo(page, "Models");
   // No tab hop any more. The screen used to open on a guided-setup wizard with
   // the real view behind a "Manage" tab; that split was removed deliberately —
   // see the header comment in `src/sections/Models.tsx` — so roles, memory and
@@ -278,8 +276,7 @@ test.describe("Models — live provider tests", () => {
   test("live memory status shows real data", async ({ page }) => {
     await page.goto(process.env.GIAP_SERVER_URL!);
 
-    const modelsBtn = page.getByRole("button", { name: /models/i }).first();
-    await modelsBtn.click({ timeout: 10_000 });
+    await navigateTo(page, "Models");
 
     // Memory status section should show non-zero data or "external"
     await expect(

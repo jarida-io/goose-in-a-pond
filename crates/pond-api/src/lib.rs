@@ -4,6 +4,7 @@
 //! Clients are rate limited to 600 requests per 60 seconds; `routes.rs` holds the route list.
 
 pub mod cleanup;
+pub(crate) mod image_normalize;
 pub mod middleware;
 pub mod oauth_callback;
 pub mod routes;
@@ -146,6 +147,21 @@ pub struct AppState {
     /// pass skips the quiet period it would otherwise wait for. `None` when there is no sweep to
     /// wake (no embedder, or a CLI process); the route still clears, so the next process refills.
     pub index_reindex: Option<Arc<tokio::sync::Notify>>,
+    /// Seeing the inference lane, and asking one of its jobs to run now.
+    ///
+    /// `None` in a process that has no lane — the CLI paths, and every
+    /// integration test that builds an `AppState` by hand. The routes answer
+    /// with "there is no lane here" rather than an empty list, because a
+    /// household looking at six jobs all reading "never run" deserves to know
+    /// whether that is the lane's answer or the absence of one.
+    pub lane: Option<Arc<dyn pond_core::user_data::ports::lane_control::LaneControl>>,
+    /// The suggestions the pond composed out of the household'''s own memories.
+    ///
+    /// Not an `Option`: unlike the lane, this is a table, and every process
+    /// that has a database has one. A `None` here would make "no composed
+    /// suggestions" and "this build cannot compose" the same empty list.
+    pub suggestion_queue:
+        Arc<dyn pond_core::user_data::ports::suggestion_queue::SuggestionQueueRepository>,
     /// Pull every connected account now instead of waiting for the timer. The half-hourly sweep
     /// suits a calendar that changes weekly, not somebody who has just entered a password and
     /// wants to know whether it worked. `None` where nothing can sync (no secret store, or a CLI
@@ -261,13 +277,21 @@ pub struct AppState {
     /// Answer Reviewer — adversarial post-inference review that evaluates
     /// answer quality and triggers revision when below threshold.
     pub answer_reviewer: Option<Arc<dyn pond_core::models::ports::answer_reviewer::AnswerReviewer>>,
-    /// Memory Extractor — extracts durable facts from conversation turns.
-    /// `None` when `memory_extraction_enabled` is false.
-    pub memory_extractor:
-        Option<Arc<dyn pond_core::user_data::ports::memory_extractor::MemoryExtractor>>,
-    /// Shared extraction service instance (rate limiter + dedup state).
-    pub memory_extraction_service:
-        Option<Arc<pond_core::user_data::services::memory_extraction::MemoryExtractionService>>,
+    /// Live state of the BATCH extraction engine, written by its lane job in
+    /// `pond-server` and read by `GET /api/v1/memories/extraction-status`.
+    ///
+    /// `None` on CLI paths and in tests, which the route reports as "not
+    /// running" rather than as a zeroed pass that never happened. The two are
+    /// different answers and a household deserves the true one: a pond whose
+    /// embedder never loaded looks identical, from the outside, to one with
+    /// nothing left to extract.
+    pub extraction_status: Option<
+        Arc<
+            tokio::sync::RwLock<
+                pond_core::user_data::services::memory_extraction::ExtractionEngineStatus,
+            >,
+        >,
+    >,
     /// Timestamp of the last user request — used by the inactivity-based
     /// consolidation scheduler. Updated on every chat/API call.
     pub last_user_activity: Arc<tokio::sync::RwLock<std::time::Instant>>,
@@ -517,6 +541,16 @@ pub struct ModelStatusEntry {
     /// Companion config filename (.onnx.json). TTS models only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config_filename: Option<String>,
+    /// Whether this model can look at pictures on THIS device, as the agent declares it (a Jetson
+    /// may decline a model whose encoder would cost it conversation room). GGUF rows only; a
+    /// static fact, never the live download state, which `GET /models/vision-status` carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reads_images: Option<bool>,
+    /// The picture-support download this model needs, in bytes: the encoder's pinned size.
+    /// Present only when `reads_images` is true, so the Models page can state the number before
+    /// the household spends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_support_bytes: Option<u64>,
 }
 
 /// Build the full API router.

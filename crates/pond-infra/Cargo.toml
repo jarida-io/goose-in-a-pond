@@ -46,6 +46,9 @@ regex = { workspace = true }
 # pond-server, nothing here reaches for a mock outside `cfg(test)`.
 pond-core = { workspace = true, features = ["test-mocks"] }
 tempfile = { workspace = true }
+# The batch extraction engine takes a cancellation token, and the memory
+# reachability harness drives it through its real `run_pass`.
+tokio-util = { workspace = true }
 wiremock = { workspace = true }
 serde_json = { workspace = true }
 rsa = { workspace = true }

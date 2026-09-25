@@ -119,6 +119,10 @@ impl SettingsRepository for SqliteSettingsRepository {
             serde_json::to_string(&settings.voice_wake_word_transcriptions)
                 .unwrap_or_else(|_| "[]".to_string())
         );
+        upsert!(
+            "suggestions_muted",
+            serde_json::to_string(&settings.suggestions_muted).unwrap_or_else(|_| "[]".to_string())
+        );
         upsert!("voice_tts_voice", &settings.voice_tts_voice);
         upsert!("voice_tts_speed", settings.voice_tts_speed.to_string());
         upsert!("voice_tts_quality", &settings.voice_tts_quality);
@@ -297,6 +301,16 @@ impl SettingsRepository for SqliteSettingsRepository {
                 "false"
             }
         );
+        // Speculation left the engine on 2026-09-24 (goose 743649d98); its switch is commented out,
+        // and restoring it means restoring this upsert and the apply_key arm together.
+        // upsert!(
+        //     "speculative_decoding_enabled",
+        //     if settings.speculative_decoding_enabled {
+        //         "true"
+        //     } else {
+        //         "false"
+        //     }
+        // );
         upsert!(
             "hybrid_compaction_enabled",
             if settings.hybrid_compaction_enabled {
@@ -321,6 +335,14 @@ impl SettingsRepository for SqliteSettingsRepository {
         upsert!(
             "memory_extraction_enabled",
             if settings.memory_extraction_enabled {
+                "true"
+            } else {
+                "false"
+            }
+        );
+        upsert!(
+            "suggestion_generation_enabled",
+            if settings.suggestion_generation_enabled {
                 "true"
             } else {
                 "false"
@@ -427,6 +449,40 @@ impl SettingsRepository for SqliteSettingsRepository {
         upsert!(
             "memory_extraction_interval_secs",
             settings.memory_extraction_interval_secs.to_string()
+        );
+        // Batch memory extraction
+        upsert!(
+            "memory_extraction_sessions_per_pass",
+            settings.memory_extraction_sessions_per_pass.to_string()
+        );
+        upsert!(
+            "memory_extraction_window_messages",
+            settings.memory_extraction_window_messages.to_string()
+        );
+        upsert!(
+            "memory_extraction_idle_secs",
+            settings.memory_extraction_idle_secs.to_string()
+        );
+        upsert!(
+            "memory_reinforce_threshold",
+            settings.memory_reinforce_threshold.to_string()
+        );
+        upsert!(
+            "memory_relate_threshold",
+            settings.memory_relate_threshold.to_string()
+        );
+        upsert!(
+            "memory_date_proposals_enabled",
+            if settings.memory_date_proposals_enabled {
+                "true"
+            } else {
+                "false"
+            }
+        );
+        upsert!("memory_extraction_mode", &settings.memory_extraction_mode);
+        upsert!(
+            "memory_extraction_first_pass_at",
+            &settings.memory_extraction_first_pass_at
         );
         // Scheduling
         upsert!(
@@ -752,6 +808,11 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
                 s.voice_wake_word_transcriptions = v;
             }
         }
+        "suggestions_muted" => {
+            if let Ok(v) = serde_json::from_str::<Vec<String>>(value) {
+                s.suggestions_muted = v;
+            }
+        }
         "voice_tts_voice" => s.voice_tts_voice = value.to_string(),
         // Stored faithfully, NOT clamped. Clamping here would make a write and
         // the following read disagree, which is exactly what
@@ -922,6 +983,7 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
             }
         }
         "show_turn_stats" => s.show_turn_stats = value == "true",
+        // "speculative_decoding_enabled" => s.speculative_decoding_enabled = value == "true",
         "hybrid_compaction_enabled" => s.hybrid_compaction_enabled = value == "true",
         "summary_idle_secs" => {
             if let Ok(v) = value.parse() {
@@ -962,6 +1024,7 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
         "network_mode" => s.network_mode = value.to_string(),
         // Memory lifecycle
         "memory_extraction_enabled" => s.memory_extraction_enabled = value == "true",
+        "suggestion_generation_enabled" => s.suggestion_generation_enabled = value == "true",
         "memory_cleanup_enabled" => s.memory_cleanup_enabled = value == "true",
         "memory_consolidation_enabled" => s.memory_consolidation_enabled = value == "true",
         "session_titling_enabled" => s.session_titling_enabled = value == "true",
@@ -1013,6 +1076,35 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
                 s.memory_extraction_interval_secs = v;
             }
         }
+        // Batch memory extraction
+        "memory_extraction_sessions_per_pass" => {
+            if let Ok(v) = value.parse() {
+                s.memory_extraction_sessions_per_pass = v;
+            }
+        }
+        "memory_extraction_window_messages" => {
+            if let Ok(v) = value.parse() {
+                s.memory_extraction_window_messages = v;
+            }
+        }
+        "memory_extraction_idle_secs" => {
+            if let Ok(v) = value.parse() {
+                s.memory_extraction_idle_secs = v;
+            }
+        }
+        "memory_reinforce_threshold" => {
+            if let Ok(v) = value.parse() {
+                s.memory_reinforce_threshold = v;
+            }
+        }
+        "memory_relate_threshold" => {
+            if let Ok(v) = value.parse() {
+                s.memory_relate_threshold = v;
+            }
+        }
+        "memory_date_proposals_enabled" => s.memory_date_proposals_enabled = value == "true",
+        "memory_extraction_mode" => s.memory_extraction_mode = value.to_string(),
+        "memory_extraction_first_pass_at" => s.memory_extraction_first_pass_at = value.to_string(),
         // Scheduling
         "schedule_result_notify" => s.schedule_result_notify = value == "true",
         "schedule_max_concurrent" => {

@@ -223,26 +223,35 @@ impl LocalInferenceLlmAdapter {
         Self::new(model_id).await
     }
 
+    // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98),
+    // so this is commented out rather than deleted; restore it if it returns.
+    // /// The drafter id to hand the engine, or `None` to decode without speculation.
+    // ///
+    // /// `None` whenever the speculation switch in Settings is off: every call site stamps the
+    // /// whole settings block, so a drafter decided here would switch speculation back on behind
+    // /// the household's back at the next adapter build.
+    // ///
+    // /// Checks the file, not just the row: a registry entry whose weights have
+    // /// been deleted would otherwise fail inside context creation on the next
+    // /// turn, which reads as the engine breaking rather than as a missing file.
+    // fn registered_drafter(model_id: &str) -> Option<String> {
+    //     use goose::providers::local_inference::local_model_registry::get_registry;
+    //     use pond_core::models::domain::drafter::{drafter_for, speculation_enabled};
+    //
+    //     if !speculation_enabled() {
+    //         return None;
+    //     }
+    //     let spec = drafter_for(model_id)?;
+    //     let registry = get_registry().lock().ok()?;
+    //     let entry = registry.get_model(spec.id)?;
+    //     entry.local_path.exists().then(|| spec.id.to_string())
+    // }
+
     /// Stamp the model registry so llama-cpp-2 picks up device settings at load time.
     ///
     /// A device profile lets a non-CUDA build take the Jetson branch on purpose: otherwise
-    /// `jetson_context_size`, the arithmetic that can OOM the board, has no caller off-device.
-
-    /// The drafter id to hand the engine, or `None` to decode without speculation.
-    ///
-    /// Checks the file, not just the row: a registry entry whose weights have
-    /// been deleted would otherwise fail inside context creation on the next
-    /// turn, which reads as the engine breaking rather than as a missing file.
-    fn registered_drafter(model_id: &str) -> Option<String> {
-        use goose::providers::local_inference::local_model_registry::get_registry;
-        use pond_core::models::domain::drafter::drafter_for;
-
-        let spec = drafter_for(model_id)?;
-        let registry = get_registry().lock().ok()?;
-        let entry = registry.get_model(spec.id)?;
-        entry.local_path.exists().then(|| spec.id.to_string())
-    }
-
+    /// `device_budget::device_window`, the arithmetic that can OOM the board, has no caller
+    /// off-device.
     fn apply_model_settings(model_id: &str) {
         #[cfg(feature = "cuda")]
         Self::apply_jetson_settings(model_id);
@@ -305,6 +314,14 @@ impl LocalInferenceLlmAdapter {
             // ForceEmulated instead of declarations with nowhere to go.
             tool_calling: tools,
             enable_thinking: thinking,
+            // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose
+            // 743649d98), so this is commented out rather than deleted; restore it if it returns.
+            // // Speculation on every row naming this file, decided the same way the Jetson block
+            // // decides it (the switch, then the registered drafter on disk). Leaving it to
+            // // `Default` here set it to None on this row while the chat path pointed the
+            // // canonical row at the drafter, so which one loaded depended on which caller
+            // // cold-loaded the shared slot first.
+            // draft_model: Self::registered_drafter(model_id),
             // `enable_thinking` is set above from the template rather than left to inherit
             // goose's `default_true()`. Thread count is left for llama.cpp to auto-detect,
             // which is the right choice on Apple Silicon.
@@ -313,14 +330,15 @@ impl LocalInferenceLlmAdapter {
 
         match get_registry().lock() {
             Ok(mut registry) => {
-                if let Err(e) = registry.update_model_settings(model_id, settings) {
+                let applied = Self::stamp_every_row_naming(&mut registry, model_id, &settings);
+                if applied.is_empty() {
                     tracing::debug!(
-                        "Platform settings not applied to '{}' (model not yet registered): {}",
-                        model_id,
-                        e
+                        "Platform settings not applied to '{}' (model not yet registered)",
+                        model_id
                     );
                 } else {
                     tracing::info!(
+                        rows = ?applied,
                         "{} settings applied to model '{}' (n_gpu_layers=99, ctx=dynamic, flash_attn=true)",
                         // On aarch64 Linux this branch means the `cuda` feature
                         // was NOT compiled in, so n_gpu_layers=99 is a request no
@@ -400,140 +418,6 @@ impl LocalInferenceLlmAdapter {
         parse_gguf_file(path).map(|info| ModelProbe::from_gguf(&info))
     }
 
-    /// The model's KV cost per token from its own GGUF header, or `None` when the header cannot
-    /// settle it and the caller must keep the measured constant. Exact for a dense model; where
-    /// `key_length_swa` is present the global-to-SWA layer ratio the header omits is worth a
-    /// factor of two in the direction that OOMs a board, so trust only confirmed architectures.
-    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
-    fn kv_cost_from_header(path: &std::path::Path) -> Option<u64> {
-        use pond_core::models::domain::gguf::parse_gguf_header;
-
-        /// Architectures whose global:SWA layer ratio has been confirmed against
-        /// llama.cpp's own `llama_kv_cache ... size = N MiB (C cells, L layers)`
-        /// lines on the Orin. Gemma 4: 1 global per 5 sliding, verified at both
-        /// sizes (E4B 4+20 of 24 owning layers, E2B 3+12 of 15).
-        const CONFIRMED_SWA_PATTERNS: &[(&str, u32)] = &[("gemma4", 5)];
-
-        // Geometry sits in the first ~2 KB of every file measured -- offsets
-        // 924-1,829 on gemma-4-E2B, well before `tokenizer.ggml.tokens` at
-        // 2,061. 64 KiB is generous cover for that without reading the token
-        // array, let alone the 15 MB it takes to reach the chat template.
-        const HEAD_BYTES: usize = 64 * 1024;
-
-        let mut buf = vec![0u8; HEAD_BYTES];
-        let n = {
-            use std::io::Read as _;
-            let mut f = std::fs::File::open(path).ok()?;
-            f.read(&mut buf).ok()?
-        };
-        buf.truncate(n);
-
-        let info = parse_gguf_header(&buf)?;
-        let arch = info.architecture.as_deref().unwrap_or_default();
-
-        if info.key_length_swa.is_none() {
-            // Dense: exact whatever the architecture. The ratio argument is
-            // unused on this path.
-            return info.kv_kib_per_token(0);
-        }
-
-        let (_, swa_per_global) = CONFIRMED_SWA_PATTERNS
-            .iter()
-            .find(|(name, _)| *name == arch)?;
-        info.kv_kib_per_token(*swa_per_global)
-    }
-
-    /// Context size that fits THIS model in the Jetson's LLM budget: the budget less the weights
-    /// and the compute buffers, divided by a measured per-token KV cost, floored to
-    /// `CTX_GRANULARITY`. A single hardcoded constant OOM-killed a board, so only a measurement
-    /// from the Orin may move it. `apply_jetson_settings` re-stamps the registry at every init.
-    fn jetson_context_size(
-        model_bytes: u64,
-        drafter_bytes: u64,
-        kv_kib_per_token: Option<u64>,
-    ) -> u32 {
-        // The budget of the device we BELIEVE we are: the constant unless a
-        // device profile is emulating another board. See `scripts/jetson-emu.sh`.
-        Self::context_size_for_budget(
-            crate::scheduler::llm_budget_mb(),
-            model_bytes,
-            drafter_bytes,
-            kv_kib_per_token,
-        )
-    }
-
-    /// The derivation itself, against an explicit budget.
-    ///
-    /// Split from [`Self::jetson_context_size`] so another board's budget can be asked for
-    /// without touching the process environment, a data race in a threaded test binary.
-    fn context_size_for_budget(
-        budget_mb: u64,
-        model_bytes: u64,
-        drafter_bytes: u64,
-        kv_kib_per_token: Option<u64>,
-    ) -> u32 {
-        /// Per-token KV cost for the widest geometry we ship, MEASURED on the Orin (the Mac said
-        /// 16): E4B is 56 KiB/token across both caches, E2B 18. No padding here (it lives in the
-        /// budget) and no constant term, since both caches carry `n_ctx` cells on this llama.cpp.
-        /// Padding to 64 floored E4B to 4096, under its own 4,678-token turn-1 prompt.
-        const KV_KIB_PER_TOKEN: u64 = 56;
-        /// llama.cpp's compute buffers. Nearly flat in `n_ctx` -- measured
-        /// 522 MiB at both 4096 and 16384, rising to 582 MiB at 32768 -- so 600
-        /// covers the range this function can return.
-        const COMPUTE_BUFFER_MB: u64 = 600;
-        /// The drafter's compute buffers and graph, on top of its weights.
-        ///
-        /// Its KV is NOT here, and that is the point: with `ctx_other` the
-        /// drafter shares the target's cache, which is visible in the phase
-        /// timings as `process` costing 0.0 ms/step -- llama.cpp skips the
-        /// catch-up decode only when the memory is shared. So the drafter's
-        /// cost is flat in `n_ctx` and belongs in the budget, not in the slope.
-        ///
-        /// 64 rather than a measured figure: the honest measurement (MemAvailable
-        /// either side of building a drafter context) read 38-47 MB at 8192 and
-        /// 16384 against a 57 MB file, and it is an UNDER-estimate -- mmap'd
-        /// weights come out of reclaimable page cache, which MemAvailable counts
-        /// as available. Rounding up past the file size costs a few hundred
-        /// tokens of window and buys the margin that measurement could not
-        /// establish.
-        const DRAFTER_COMPUTE_MB: u64 = 64;
-        const MIN_CTX: u32 = 2048;
-        const MAX_CTX: u32 = 16384;
-        /// Round the answer DOWN to a multiple of this. Not a power of two: those are 2x apart,
-        /// so flooring to one discards up to HALF of a window the budget already proved
-        /// affordable (E4B IQ4_XS: 13,220 allowed, 8,192 handed out). `n_ctx` needs no power of
-        /// two in llama.cpp; safety comes from the slope, the compute buffer and the budget.
-        const CTX_GRANULARITY: u32 = 1024;
-
-        let model_mb = model_bytes / (1024 * 1024);
-        // A drafter is a second set of weights resident for the whole session.
-        // Leaving it out of the budget is what let the window be sized as though
-        // only one model were loaded.
-        let drafter_mb = if drafter_bytes > 0 {
-            drafter_bytes / (1024 * 1024) + DRAFTER_COMPUTE_MB
-        } else {
-            0
-        };
-        let kv_mb = budget_mb
-            .saturating_sub(model_mb)
-            .saturating_sub(COMPUTE_BUFFER_MB)
-            .saturating_sub(drafter_mb);
-        // The model's own header when it could answer, else the conservative fallback.
-        // `kv_cost_from_header` returns None rather than guessing, so an unreadable or unfamiliar
-        // model gets exactly the fallback behaviour and this is never a new risk.
-        let slope = kv_kib_per_token
-            .filter(|k| *k > 0)
-            .unwrap_or(KV_KIB_PER_TOKEN);
-        let tokens = (kv_mb * 1024) / slope;
-
-        // Largest multiple of CTX_GRANULARITY that fits, clamped. Saturating at
-        // MAX_CTX before the cast keeps a huge allowance (E2B's is ~41k) from
-        // wrapping u32.
-        let granularity = CTX_GRANULARITY as u64;
-        let floored = (tokens / granularity) * granularity;
-        floored.min(MAX_CTX as u64).max(MIN_CTX as u64) as u32
-    }
-
     /// Patch the Goose model registry with Jetson Orin Nano settings; errors (model not yet
     /// downloaded, poisoned lock) are ignored and defaults apply. Not yet fail-closed on memory
     /// fit: `n_gpu_layers = 99` silently partial-offloads to CPU past the budget. An on-device
@@ -543,49 +427,35 @@ impl LocalInferenceLlmAdapter {
             get_registry, ModelSettings, ToolCallingMode,
         };
 
-        // Size the context to THIS model. Read the weights' size from the
-        // registry entry we are about to stamp; if the row or the file is not
-        // there yet, assume the largest model we ship so the first load is
-        // conservative rather than fatal.
-        const ASSUMED_LARGEST_MODEL_BYTES: u64 = 5 * 1024 * 1024 * 1024;
-        let model_bytes = get_registry()
-            .lock()
-            .ok()
-            .and_then(|reg| {
-                reg.get_model(model_id)
-                    .and_then(|e| std::fs::metadata(&e.local_path).ok())
-                    .map(|m| m.len())
-            })
-            .unwrap_or(ASSUMED_LARGEST_MODEL_BYTES);
-        let kv_kib = get_registry()
-            .lock()
-            .ok()
-            .and_then(|reg| reg.get_model(model_id).map(|e| e.local_path.clone()))
-            .and_then(|p| Self::kv_cost_from_header(&p));
-        // Decided BEFORE the window is sized, not after: a drafter is a second
-        // set of weights resident for the whole session, so the window has to be
-        // computed against what will actually be loaded. Sizing first and
-        // attaching a drafter afterwards is how a window gets handed out that
-        // only fits when speculation is off.
-        let draft_model = Self::registered_drafter(model_id);
-        let drafter_bytes = draft_model
-            .as_deref()
-            .and_then(|id| {
-                get_registry()
-                    .lock()
-                    .ok()?
-                    .get_model(id)
-                    .and_then(|e| std::fs::metadata(&e.local_path).ok())
-                    .map(|m| m.len())
-            })
-            .unwrap_or(0);
-        let context_size = Self::jetson_context_size(model_bytes, drafter_bytes, kv_kib);
+        // Size the context to THIS model, through pond-core's one derivation. The goose adapter
+        // asks the same function whether picture support fits beside the model, so the window
+        // stamped here and that answer cannot come from different inputs: the RESOLVED file's
+        // length and header slope, never a registry row by name. A file that cannot be read is
+        // charged as the largest model we ship, so the first load is conservative, not fatal.
+        let gguf = get_registry().lock().ok().and_then(|reg| {
+            reg.get_model(model_id)
+                .map(|e| Self::resolved(&e.local_path))
+        });
+        let sizing =
+            pond_core::models::domain::device_budget::device_window(gguf.as_deref(), model_id);
+        let context_size = sizing.window;
+        // The window above still charges this model's drafter (see `device_budget`), although
+        // the engine no longer loads one: that keeps the Orin's windows at the values they were
+        // measured at. Uncharging it is a separate, device-measured change.
+        // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose
+        // 743649d98), so this is commented out rather than deleted; restore it if it returns.
+        // let draft_model = Self::registered_drafter(model_id);
         tracing::info!(
             model = model_id,
-            model_mb = model_bytes / (1024 * 1024),
-            kv_kib_per_token = kv_kib.map_or("fallback".to_string(), |k| k.to_string()),
+            model_mb = sizing.model_bytes / (1024 * 1024),
+            weights_known = sizing.weights_known,
+            kv_kib_per_token = sizing
+                .kv_kib_per_token
+                .map_or("fallback".to_string(), |k| k.to_string()),
             context_size,
-            drafter_mb = drafter_bytes / (1024 * 1024),
+            drafter_mb = sizing.drafter_bytes / (1024 * 1024),
+            encoder_mb = sizing.encoder_bytes / (1024 * 1024),
+            // speculation = draft_model.is_some(),
             "Jetson context sized to fit this model's KV cache in the LLM budget"
         );
 
@@ -642,63 +512,27 @@ impl LocalInferenceLlmAdapter {
             // `tool_and_thinking_for`.
             tool_calling: tools,
             enable_thinking: thinking,
-            // Speculative decoding, when this model's drafter is registered AND
-            // its weights are still on disk. Re-decided on every provider build
-            // rather than configured once: `update_model_settings` below
-            // replaces the whole block, so a `draft_model` set by hand in
-            // registry.json is erased here anyway. Deciding it from the file
-            // system each time is what makes that safe -- a deleted drafter
-            // stops being referenced instead of failing the next context
-            // creation, and a newly downloaded one is picked up without a
-            // restart.
-            draft_model,
+            // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose
+            // 743649d98), so this is commented out rather than deleted; restore it if it returns.
+            // // Speculative decoding, when the switch in Settings is on AND this
+            // // model's drafter is registered AND its weights are still on disk.
+            // // Re-decided on every provider build
+            // // rather than configured once: `update_model_settings` below
+            // // replaces the whole block, so a `draft_model` set by hand in
+            // // registry.json is erased here anyway. Deciding it from the file
+            // // system each time is what makes that safe -- a deleted drafter
+            // // stops being referenced instead of failing the next context
+            // // creation, and a newly downloaded one is picked up without a
+            // // restart.
+            // draft_model,
             // `enable_thinking` is set above from the template, not inherited.
             ..Default::default()
         };
 
         match get_registry().lock() {
             Ok(mut registry) => {
-                // Every row naming this same GGUF, not only the id we were
-                // handed. One file is registered under more than one id -- the
-                // spelling in settings (`gemma-4-E2B-it-qat-UD-Q4_K_XL`) and the
-                // canonical stem `register_gguf_model` returns
-                // (`gemma-4-E2B-it-qat`) -- and inference resolves the canonical
-                // one. Stamping only the id passed in put the whole tuning block
-                // on a row the engine never reads: measured on the Orin, the row
-                // it does read carried context_size, flash_attention, type_k,
-                // type_v, n_batch and n_ubatch all None, so the pond ran with an
-                // f16 KV cache and the default 2048/512 batch instead of q8_0 and
-                // 512/128 -- roughly 700 MB of footprint on a 7.6 GB board.
-                //
-                // Matching on the resolved path rather than on a name rule: the
-                // spellings are produced by two different canonicalisers in two
-                // crates, and a rule that tried to reproduce either would be one
-                // more thing to keep in step. Two rows for one file is the real
-                // defect; until that is gone, tuning all of them is what keeps
-                // the engine's row correct whichever one it picks.
-                let target = registry
-                    .get_model(model_id)
-                    .map(|e| Self::resolved(&e.local_path));
-                let ids: Vec<String> = match &target {
-                    Some(path) => registry
-                        .list_models()
-                        .iter()
-                        .filter(|e| Self::resolved(&e.local_path) == *path)
-                        .map(|e| e.id.clone())
-                        .collect(),
-                    None => vec![model_id.to_string()],
-                };
-                let mut applied = Vec::new();
-                for id in &ids {
-                    match registry.update_model_settings(id, jetson_settings.clone()) {
-                        Ok(()) => applied.push(id.as_str()),
-                        Err(e) => tracing::debug!(
-                            "Jetson settings not applied to '{}' (model not yet registered): {}",
-                            id,
-                            e
-                        ),
-                    }
-                }
+                let applied =
+                    Self::stamp_every_row_naming(&mut registry, model_id, &jetson_settings);
                 if applied.is_empty() {
                     tracing::debug!("Jetson settings applied to no row for '{}'", model_id);
                 } else {
@@ -715,6 +549,66 @@ impl LocalInferenceLlmAdapter {
                 );
             }
         }
+    }
+
+    /// Stamp `settings` on every registry row naming the same GGUF as `model_id`, returning the
+    /// ids that took it.
+    ///
+    /// Every row, not only the id we were handed. One file is registered under more than one id
+    /// -- the spelling in settings (`gemma-4-E2B-it-qat-UD-Q4_K_XL`) and the canonical stem
+    /// `register_gguf_model` returns (`gemma-4-E2B-it-qat`) -- and they share one engine slot.
+    /// Stamping only the id passed in put the whole tuning block on a row the engine never read:
+    /// measured on the Orin, the row it did read carried context_size, flash_attention, type_k,
+    /// type_v, n_batch and n_ubatch all None, so the pond ran with an f16 KV cache and the
+    /// default 2048/512 batch instead of q8_0 and 512/128 -- roughly 700 MB of footprint on a
+    /// 7.6 GB board. On the Mac the same split decided whether the drafter loaded by which
+    /// caller happened to cold-load the slot first.
+    ///
+    /// Matching on the resolved path rather than on a name rule: the spellings are produced by
+    /// two different canonicalisers in two crates, and a rule that tried to reproduce either
+    /// would be one more thing to keep in step.
+    ///
+    /// Each row keeps its own copy of the picture-support fields (`mmproj_size_bytes`,
+    /// `vision_capable`): the goose adapter's encoder stamp owns them, and a block that zeroed
+    /// them at every build left the settings copy disagreeing with the row it sits on.
+    fn stamp_every_row_naming(
+        registry: &mut goose::providers::local_inference::local_model_registry::LocalModelRegistry,
+        model_id: &str,
+        settings: &goose::providers::local_inference::local_model_registry::ModelSettings,
+    ) -> Vec<String> {
+        let target = registry
+            .get_model(model_id)
+            .map(|e| Self::resolved(&e.local_path));
+        let rows: Vec<(String, u64, bool)> = match &target {
+            Some(path) => registry
+                .list_models()
+                .iter()
+                .filter(|e| Self::resolved(&e.local_path) == *path)
+                .map(|e| {
+                    (
+                        e.id.clone(),
+                        e.settings.mmproj_size_bytes,
+                        e.settings.vision_capable,
+                    )
+                })
+                .collect(),
+            None => vec![(model_id.to_string(), 0, false)],
+        };
+        let mut applied = Vec::new();
+        for (id, mmproj_size_bytes, vision_capable) in rows {
+            let mut row_settings = settings.clone();
+            row_settings.mmproj_size_bytes = mmproj_size_bytes;
+            row_settings.vision_capable = vision_capable;
+            match registry.update_model_settings(&id, row_settings) {
+                Ok(()) => applied.push(id),
+                Err(e) => tracing::debug!(
+                    "settings not applied to '{}' (model not yet registered): {}",
+                    id,
+                    e
+                ),
+            }
+        }
+        applied
     }
 
     /// Follow symlinks so two rows naming one GGUF compare equal.
@@ -825,253 +719,6 @@ impl LocalInferenceLlmAdapter {
 
 #[cfg(test)]
 mod tests {
-
-    /// Both shipped models, against the DEVICE-measured cost. Not `#[cfg(feature = "cuda")]`:
-    /// this is pure arithmetic that can kill a board, and a developer machine or CI is the only
-    /// place it CAN run, since the device build is `cargo check`-only.
-    #[test]
-    fn jetson_context_fits_each_model_in_the_budget() {
-        // The EXACT sizes of the two GGUFs on the device (`stat -Lc %s`, 2026-08-16): the answer
-        // is a step function of weight size, so approximations can land on a different step than
-        // the board does (a 336 MB gap once hid over half of E4B's free KV budget).
-        let e2b = LocalInferenceLlmAdapter::jetson_context_size(3_106_738_272, 0, None);
-        let e4b = LocalInferenceLlmAdapter::jetson_context_size(4_977_171_584, 0, None);
-        assert_eq!(e2b, 16384, "E2B should keep the full window");
-        assert_eq!(
-            e4b, 8192,
-            "E4B should get half the window. It briefly got 16384, on a budget that claimed the \
-             marketing 8192 MB of RAM; the kernel reports 7620, and at the real figure E4B's \
-             16384 needs 896 MiB of KV it does not have -- it was running out of swap."
-        );
-        assert!(
-            e4b <= e2b,
-            "a bigger model must never get a bigger context, got E4B {e4b} vs E2B {e2b}"
-        );
-    }
-
-    /// The emulator's whole claim, as arithmetic: a different device budget produces a different
-    /// window for the same weights. If the budget stopped reaching the derivation,
-    /// `scripts/jetson-emu.sh` would still announce it was emulating while testing the Mac, and
-    /// that failure is silent by construction.
-    #[test]
-    fn a_different_device_budget_produces_a_different_window() {
-        /// E4B Q4_K_M, `stat -Lc %s` on the device.
-        const E4B: u64 = 4_977_171_584;
-        // Budgets computed the way the scheduler computes them: total RAM less
-        // the fixed OS/STT/TTS reservation.
-        let nano = 7620 - (1500 + 200 + 100);
-        let nx = 15564 - (1500 + 200 + 100);
-
-        let on_nano = LocalInferenceLlmAdapter::context_size_for_budget(nano, E4B, 0, None);
-        let on_nx = LocalInferenceLlmAdapter::context_size_for_budget(nx, E4B, 0, None);
-
-        assert_eq!(on_nano, 8192, "the board we actually have");
-        assert!(
-            on_nx > on_nano,
-            "twice the RAM must buy E4B a wider window, got {on_nx} against {on_nano} -- if these \
-             are equal the profile is not reaching the derivation and the emulator is theatre"
-        );
-    }
-
-    /// The emulated path and the device path are the same code, so the profile
-    /// for the board we own must reproduce the board's own answers exactly.
-    /// This is what makes a tier-1 result worth anything.
-    #[test]
-    fn the_orin_profile_reproduces_the_devices_own_windows() {
-        let budget = 7620 - (1500 + 200 + 100);
-        assert_eq!(
-            LocalInferenceLlmAdapter::context_size_for_budget(budget, 3_106_738_272, 0, None),
-            16384,
-            "E2B"
-        );
-        assert_eq!(
-            LocalInferenceLlmAdapter::context_size_for_budget(budget, 4_977_171_584, 0, None),
-            8192,
-            "E4B"
-        );
-    }
-
-    /// A budget smaller than the weights must clamp, not underflow into a huge
-    /// window. Reachable from a Mac now that POND_DEVICE_TOTAL_RAM_MB exists,
-    /// and previously reachable only by shipping a bigger model to the board.
-    #[test]
-    fn an_impossible_budget_clamps_instead_of_wrapping() {
-        assert_eq!(
-            LocalInferenceLlmAdapter::context_size_for_budget(512, 4_977_171_584, 0, None),
-            2048,
-            "a budget the model cannot fit must land on MIN_CTX; a saturating_sub that wrapped \
-             would hand llama.cpp a window of billions of tokens"
-        );
-    }
-
-    /// E4B at its window fits the MEASURED budget with real headroom, and doubling again does not
-    /// fit at all, which is why 8192 is E4B's honest ceiling on memory grounds and not merely
-    /// because `MAX_CTX` says so. The arithmetic is redone here rather than copied from the
-    /// function, so a test cannot agree with the same mistake.
-    #[test]
-    fn e4b_fits_its_window_and_could_not_take_another_doubling() {
-        /// Measured on the Orin: 128 MiB + 320 MiB at n_ctx 8192, both caches
-        /// carrying n_ctx cells, so 56 KiB/token with no constant term.
-        const MEASURED_KIB_PER_TOKEN: u64 = 56;
-        let weights_mb = 4_640_000_000u64 / (1024 * 1024);
-        let free_mb = crate::scheduler::LLM_BUDGET_MB - weights_mb - 600;
-
-        let chosen = LocalInferenceLlmAdapter::jetson_context_size(4_640_000_000, 0, None) as u64;
-        let needed_mb = (chosen * MEASURED_KIB_PER_TOKEN) / 1024;
-        assert!(
-            needed_mb < free_mb,
-            "E4B was given {chosen} tokens, needing {needed_mb} MiB of KV against {free_mb} MiB \
-             free. Exceeding this is what OOM-killed the board and took gnome-shell with it."
-        );
-
-        let doubled_mb = (chosen * 2 * MEASURED_KIB_PER_TOKEN) / 1024;
-        assert!(
-            doubled_mb > free_mb,
-            "doubling E4B's window now fits ({doubled_mb} MiB vs {free_mb} MiB free), so memory \
-             is no longer what caps it. If the budget really grew, raise MAX_CTX deliberately -- \
-             and weigh prefill, which is 19.97 s cold at 16384 and degrades with depth."
-        );
-    }
-
-    /// The slope itself, pinned where the ceiling cannot hide it. E4B is budget-bound and guards
-    /// it too, but this survives somebody changing which models ship: a ~4.5 GB model sits where
-    /// the BUDGET decides below the ceiling, giving 12,288 at the measured cost and 16,384 (the
-    /// clamp) at the Mac's. The size lands MID-BAND (12,800 tokens, 512 clear of both floors).
-    #[test]
-    fn the_per_token_slope_is_observable_on_a_model_the_ceiling_does_not_cap() {
-        let ctx = LocalInferenceLlmAdapter::jetson_context_size(4_739_563_520, 0, None);
-        assert_eq!(
-            ctx, 12288,
-            "a 4.5 GB model got {ctx} tokens. At the device-measured cost it should get 12288; \
-             16384 means the slope has been lowered towards the Mac's 16 KiB/token, which \
-             describes a newer llama.cpp than the one this device ships and understates the real \
-             allocation by roughly three times."
-        );
-    }
-
-    /// The granularity itself: E4B IQ4_XS (4,496 MB of weights) affords 13,220 tokens, and a
-    /// power-of-two floor handed back 8,192, under the 4,678-token preamble plus growth, so
-    /// compaction fired on turn one. Any rounding coarser than this reintroduces that.
-    #[test]
-    fn rounding_does_not_discard_context_the_budget_affords() {
-        // The real IQ4_XS file on the device: 4,715,416,704 bytes.
-        let ctx = LocalInferenceLlmAdapter::jetson_context_size(4_715_416_704, 0, None);
-        assert_eq!(
-            ctx, 12288,
-            "E4B IQ4_XS got {ctx}. Its budget affords 13,220 tokens, so anything at or below \
-             8192 means the rounding went back to powers of two and is discarding a third of \
-             the window the board can actually hold."
-        );
-
-        // And the floor still rounds DOWN, never up, at every offset.
-        for bytes in [4_600_000_000u64, 4_700_000_000, 4_800_000_000] {
-            let ctx = LocalInferenceLlmAdapter::jetson_context_size(bytes, 0, None) as u64;
-            let model_mb = bytes / (1024 * 1024);
-            let kv_mb = crate::scheduler::LLM_BUDGET_MB
-                .saturating_sub(model_mb)
-                .saturating_sub(600);
-            let affords = (kv_mb * 1024) / 56;
-            assert!(
-                ctx <= affords.max(2048),
-                "{bytes} bytes: handed {ctx} tokens against an affordable {affords}"
-            );
-            assert_eq!(
-                ctx % 1024,
-                0,
-                "{bytes} bytes: {ctx} is not a multiple of 1024"
-            );
-        }
-    }
-
-    #[test]
-    fn e2b_is_ceiling_bound_and_e4b_is_budget_bound() {
-        const E2B_KIB_PER_TOKEN: u64 = 18;
-        let e2b_weights = 2_890_000_000u64 / (1024 * 1024);
-        let e2b_free = crate::scheduler::LLM_BUDGET_MB - e2b_weights - 600;
-        let e2b_allows = (e2b_free * 1024) / E2B_KIB_PER_TOKEN;
-        assert!(
-            e2b_allows > 100_000,
-            "E2B's memory should allow far more than it gets ({e2b_allows}); it is MAX_CTX that \
-             stops it, and that is a latency decision rather than a memory one"
-        );
-
-        const E4B_KIB_PER_TOKEN: u64 = 56;
-        let e4b_weights = 4_640_000_000u64 / (1024 * 1024);
-        let e4b_free = crate::scheduler::LLM_BUDGET_MB - e4b_weights - 600;
-        let e4b_allows = (e4b_free * 1024) / E4B_KIB_PER_TOKEN;
-        assert!(
-            (8_192..16_384).contains(&e4b_allows),
-            "E4B's memory should allow its 8192 window but not a doubling of it, got \
-             {e4b_allows}. Outside that range the budget is no longer what binds it and this \
-             test's name is a lie."
-        );
-    }
-
-    /// Wiring the header-derived cost in must not move either shipped model, which is why it
-    /// could land without the device: E2B computes 18 KiB/token but is `MAX_CTX`-bound either
-    /// way, and both E4B quants compute exactly the 56 the constant already carries.
-    #[test]
-    fn header_derived_cost_is_a_no_op_for_the_shipped_models() {
-        // (weights, computed KiB/token, expected window)
-        let cases = [
-            (3_106_738_272u64, 18u64, 16384u32), // E2B Q4_K_M
-            (4_977_171_584, 56, 8192),           // E4B Q4_K_M
-            (4_715_416_704, 56, 12288),          // E4B IQ4_XS
-        ];
-        for (bytes, kv, want) in cases {
-            let fallback = LocalInferenceLlmAdapter::jetson_context_size(bytes, 0, None);
-            let derived = LocalInferenceLlmAdapter::jetson_context_size(bytes, 0, Some(kv));
-            assert_eq!(
-                derived, want,
-                "{bytes} bytes at {kv} KiB/token should give {want}, got {derived}"
-            );
-            assert_eq!(
-                derived, fallback,
-                "{bytes} bytes: header-derived {derived} must match the fallback {fallback}                  for a model we already ship -- if this moved, the wiring changed behaviour                  on hardware nobody re-measured"
-            );
-        }
-    }
-
-    /// A cheaper model gets the context its own geometry affords, which is the point of reading
-    /// the header. The size matters: a light model is `MAX_CTX`-bound at BOTH costs and proves
-    /// nothing. At 4,500 MB the KV budget is 720 MB: 13,166 tokens at 56 KiB (floors to 12,288)
-    /// against 26,331 at 28 (ceiling-bound at 16,384).
-    #[test]
-    fn a_cheaper_model_is_no_longer_charged_the_widest_geometry() {
-        let bytes = 4_500u64 * 1024 * 1024;
-        let blanket = LocalInferenceLlmAdapter::jetson_context_size(bytes, 0, None);
-        let real = LocalInferenceLlmAdapter::jetson_context_size(bytes, 0, Some(28));
-        assert!(
-            real > blanket,
-            "a 28 KiB/token model should get more than the 56 KiB/token fallback allows,              got {real} against {blanket}"
-        );
-    }
-
-    /// The direction that matters: a WIDER model must be charged more and get less, rather than
-    /// inheriting a constant that flatters it. 168 KiB/token is the figure this file once carried
-    /// for E4B before the device corrected it.
-    #[test]
-    fn a_wider_model_is_charged_for_it() {
-        let bytes = 4_000_000_000u64;
-        let blanket = LocalInferenceLlmAdapter::jetson_context_size(bytes, 0, None);
-        let real = LocalInferenceLlmAdapter::jetson_context_size(bytes, 0, Some(168));
-        assert!(
-            real < blanket,
-            "a 168 KiB/token model must get LESS than the 56 fallback grants, got {real}              against {blanket}; this is the direction that OOMs the board"
-        );
-    }
-
-    /// A zero or absent slope must fall back, never divide by zero and never
-    /// hand out an unbounded window.
-    #[test]
-    fn a_useless_slope_falls_back_rather_than_dividing_by_zero() {
-        let bytes = 4_977_171_584u64;
-        let fallback = LocalInferenceLlmAdapter::jetson_context_size(bytes, 0, None);
-        assert_eq!(
-            LocalInferenceLlmAdapter::jetson_context_size(bytes, 0, Some(0)),
-            fallback
-        );
-    }
 
     /// The adapter's probe path end to end against real GGUFs: `probe_model` must read a
     /// `ModelProbe` off each file and the decisions must differ across the collection (a probe
@@ -1202,13 +849,6 @@ mod tests {
         assert!(!thinking);
     }
 
-    #[test]
-    fn jetson_context_floors_for_an_oversized_model() {
-        assert_eq!(
-            LocalInferenceLlmAdapter::jetson_context_size(9_000_000_000, 0, None),
-            2048
-        );
-    }
     /// Tests needing a real model are `#[ignore]` and gated on `GIAP_TEST_MODEL_PATH`. Run with
     /// `GIAP_TEST_MODEL_PATH=/path/to/model.gguf` set and
     /// `cargo test -p pond-adapters-local-inference -- --ignored`.
@@ -1299,45 +939,6 @@ mod tests {
         assert_eq!(
             LocalInferenceLlmAdapter::resolved(p),
             LocalInferenceLlmAdapter::resolved(p)
-        );
-    }
-
-    /// A drafter is a second resident model, and the window has to pay for it.
-    #[test]
-    fn a_drafter_costs_window() {
-        const E2B: u64 = 3_106_738_272;
-        const DRAFTER: u64 = 59_235_648; // the real mtp-gemma-4-E2B-it.gguf
-        let without = LocalInferenceLlmAdapter::jetson_context_size(E2B, 0, Some(18));
-        let with = LocalInferenceLlmAdapter::jetson_context_size(E2B, DRAFTER, Some(18));
-        assert!(
-            with <= without,
-            "attaching a drafter must not grow the window: {without} -> {with}"
-        );
-        assert!(
-            with >= 8192,
-            "E2B should still get a usable window with a drafter attached, got {with}"
-        );
-    }
-
-    /// The drafter's cost is flat in `n_ctx`, so it must not be folded into the
-    /// per-token slope. It shares the target's KV cache -- visible as `process`
-    /// costing 0.0 ms/step in the MTP phase timings -- so charging it per token
-    /// would shrink the window roughly twice over on the wider geometry.
-    #[test]
-    fn the_drafter_is_charged_once_not_per_token() {
-        const E4B: u64 = 4_977_171_584;
-        const DRAFTER: u64 = 59_678_016;
-        let budget = crate::scheduler::llm_budget_mb();
-        let without =
-            LocalInferenceLlmAdapter::context_size_for_budget(budget, E4B, 0, Some(56)) as u64;
-        let with = LocalInferenceLlmAdapter::context_size_for_budget(budget, E4B, DRAFTER, Some(56))
-            as u64;
-        // 57 MB of weights + a 64 MB allowance, against 56 KiB/token.
-        let expected_loss = (57 + 64) * 1024 / 56;
-        let actual_loss = without.saturating_sub(with);
-        assert!(
-            actual_loss <= expected_loss + 1024,
-            "lost {actual_loss} tokens for a drafter that should cost about {expected_loss}"
         );
     }
 

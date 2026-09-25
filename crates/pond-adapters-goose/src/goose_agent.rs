@@ -88,6 +88,15 @@ const GOOSE_MAX_TURNS_MESSAGE: &str = "I've reached the maximum number of action
 const GOOSE_EMPTY_TURN_MESSAGE: &str =
     "The model returned an empty response. Please resend your message to continue.";
 
+/// How goose's agent loop opens the assistant text it writes in place of a provider error
+/// (`agents/agent.rs`, the generic `Err(ref provider_err)` arm).
+///
+/// Used only to pick WHICH text to replace, never to decide that a picture failed: that comes
+/// typed, from the provider shim's count of engine refusals on image-bearing requests. For a
+/// picture the engine's own sentence sends the household to "Settings > Local Inference", a
+/// screen GIAP does not have. Canary: `goose_still_prefixes_a_provider_error_the_same_way`.
+const GOOSE_PROVIDER_ERROR_PREFIX: &str = "Ran into this error: ";
+
 /// The prefix of the notification goose emits each time it re-arms the
 /// completeness check.
 ///
@@ -263,7 +272,7 @@ This usually clears if you reword the question — or start a new chat if it kee
 /// The goose env knobs GIAP sets. `hybrid_compaction` used to be a parameter;
 /// since C1/C2 it governs none of them, so taking it would be a lie the
 /// signature tells.
-fn goose_env_knobs(provider: &str, effective_ctx: usize) -> [(&'static str, Option<String>); 5] {
+fn goose_env_knobs(provider: &str, effective_ctx: usize) -> [(&'static str, Option<String>); 6] {
     let local = matches!(provider, "local" | "gguf");
     [
         // Without this Goose's ModelConfig defaults context_limit to 128K and
@@ -314,6 +323,18 @@ fn goose_env_knobs(provider: &str, effective_ctx: usize) -> [(&'static str, Opti
             "GOOSE_MAX_TOOL_RESPONSE_SIZE",
             local.then(|| ((effective_ctx / 4) * 4).to_string()),
         ),
+        // Goose's `<turn-context>` is duplicate information on this host: the
+        // envelope already carries the time, the turn budget and the memories,
+        // the working directory means nothing to a household assistant, and no
+        // extension contributes to the block. It is also injected on a clone
+        // the engine never sees stored, so a prefix cache re-prefilled it plus
+        // whatever followed it on every provider call. Measured 2026-09-24 on
+        // the Mac (E2B, release): the completeness-check inference redid 471
+        // tokens with the block prepended, 130-161 appended, 58 with it off;
+        // a no-tool turn prefilled a quarter fewer tokens. Local providers
+        // only, where every token is prefilled on the pond's own GPU; an HTTP
+        // provider keeps goose's default. Fork `d4157795d` reads this.
+        ("GOOSE_DISABLE_MOIM", local.then(|| "1".to_string())),
     ]
 }
 
@@ -526,6 +547,22 @@ pub struct GooseAdapter {
     /// cell means a failed first attempt is a value the cell keeps forever, which
     /// on the Jetson silently disabled narrowing for the whole process.
     group_embeddings: tokio::sync::OnceCell<Vec<(String, Vec<f32>)>>,
+    /// Picture support for the in-process engine: the ONE status map, in-flight set and
+    /// backoff behind the provider-build stamp, the chat-stream backstop, `vision_state` and
+    /// `prepare_model`. Shared with the tasks it spawns, hence the `Arc`.
+    pictures: Arc<crate::vision_encoder::PictureSupport>,
+    // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98),
+    // so this is commented out rather than deleted; restore it if it returns.
+    // /// Which speculation-switch position the engine's loaded slot reflects. See
+    // /// `mtp_drafter::SpeculationLedger`; shared with the turn's stream, which reports cold
+    // /// loads back into it.
+    // speculation: Arc<Mutex<crate::mtp_drafter::SpeculationLedger>>,
+    // /// The canonical registry key the in-process provider was last built for: the id the engine
+    // /// loads under, and the one the speculation reconcile evicts.
+    // local_registry_key: Mutex<Option<String>>,
+    // /// Set by [`GooseAdapter::enable_model_provisioning`], so background work (a drafter that
+    // /// finished downloading) can run this adapter's own warm-up.
+    // self_handle: std::sync::OnceLock<std::sync::Weak<GooseAdapter>>,
 }
 
 /// Hard ceiling on a single buffered reasoning passage, in bytes.
@@ -692,7 +729,24 @@ impl GooseAdapter {
             session_tool_groups: tokio::sync::RwLock::new(HashMap::new()),
             session_permitted_groups: tokio::sync::RwLock::new(HashMap::new()),
             group_embeddings: tokio::sync::OnceCell::new(),
+            pictures: Arc::new(crate::vision_encoder::PictureSupport::new()),
+            // speculation: Arc::new(Mutex::new(crate::mtp_drafter::SpeculationLedger::default())),
+            // local_registry_key: Mutex::new(None),
+            // self_handle: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Opt this process in to provisioning companion files: hashing, repairing and fetching the
+    /// vision encoder, and fetching the drafter when the speculation switch turns on without it.
+    ///
+    /// The serve process only. The voice child, `pond chat` and `pond agent` build adapters on
+    /// the same data directory; they validate and stamp what is on disk, and report the rest as
+    /// absent or verifying, because a short-lived process that starts a gigabyte transfer, or
+    /// renames a file a sibling is reading, helps nobody. Takes the `Arc` so background work can
+    /// reach this adapter's own warm-up later without keeping it alive.
+    pub fn enable_model_provisioning(self: &Arc<Self>) {
+        self.pictures.enable_provisioning();
+        // let _ = self.self_handle.set(Arc::downgrade(self));
     }
 
     /// Enable voice mode — prompt templates will include instructions for
@@ -1763,27 +1817,57 @@ impl GooseAdapter {
         }
     }
 
-    /// Whether the ACTIVE model can accept image content.
+    /// Whether the ACTIVE model can accept image content, provider by provider.
     ///
-    /// For the in-process engine this is the model registry's answer — does
-    /// this GGUF declare an mmproj — because the registry is the same thing the
-    /// engine gates its multimodal path on. HTTP providers have no registry to
-    /// ask, so they get `ModelCapabilities::name_implies_vision`, which mirrors
-    /// the registry's own verdicts (E1B excluded) and recognises the vision
-    /// models an Ollama install actually serves.
+    /// For the in-process engine this is pond-core's device-aware declaration:
+    /// the model has a pinned encoder, and on a budgeted device (the Orin) the
+    /// encoder fits beside it and has been measured there. HTTP providers have
+    /// no encoder to ask about, so they get `ModelCapabilities::name_implies_vision`,
+    /// which recognises the vision models an Ollama install actually serves. The
+    /// mesh wire carries text only, and a mistral.rs server has never been
+    /// checked with a picture: both would drop one silently while the prompt
+    /// told the model it could see, so neither claims vision.
     ///
     /// DECLARED, not downloaded. The encoder is ~941 MB and lands in the
     /// background, so "the bytes exist" flips mid-session; this does not. Two
     /// things depend on that stability: `ModelCapabilities.vision`, and the
     /// `<vision>` section of the system prompt, which sits inside the KV-cached
-    /// static prefix. A turn that actually needs the encoder before it has
-    /// landed is refused up front in `chat_stream`, with a message that says so.
-    fn model_supports_vision(provider: &str, model: &str) -> bool {
+    /// static prefix. A turn that actually needs the encoder before it is ready
+    /// is refused up front in `chat_stream`, with the household's own copy.
+    fn model_supports_vision(
+        provider: &str,
+        model: &str,
+        data_dir: Option<&std::path::Path>,
+    ) -> bool {
         match provider {
-            "local" | "gguf" => crate::vision_encoder::declares_vision(model),
+            "local" | "gguf" => crate::vision_encoder::declaration(data_dir, model).is_declared(),
+            "mesh" | "mistralrs" => false,
             _ => pond_core::models::domain::model_capabilities::ModelCapabilities::name_implies_vision(
                 model,
             ),
+        }
+    }
+
+    /// Where picture support stands for `model` under `provider`, as a pure read. The body of
+    /// `AgentPort::vision_state`, over its inputs.
+    ///
+    /// In-process: the encoder's state, or `None` (unknown, callers fail open) without a data
+    /// directory to look in. Mesh and mistral.rs: not declared, which the API refuses as
+    /// unsupported. Anything else carries its own pictures, so it is ready exactly when the
+    /// model is declared to see.
+    fn vision_state_for(
+        pictures: &crate::vision_encoder::PictureSupport,
+        data_dir: Option<&std::path::Path>,
+        provider: &str,
+        model: &str,
+    ) -> Option<pond_core::models::domain::vision_encoder::EncoderState> {
+        use pond_core::models::domain::vision_encoder::EncoderState;
+        match provider {
+            "local" | "gguf" => Some(pictures.state(data_dir?, model)),
+            _ if Self::model_supports_vision(provider, model, data_dir) => {
+                Some(EncoderState::Ready { bytes: None })
+            }
+            _ => Some(EncoderState::NotDeclared),
         }
     }
 
@@ -1802,8 +1886,13 @@ impl GooseAdapter {
     /// it is fixed for the life of the process, so it cannot flip the static
     /// prefix between turns of one session and forfeit the KV cache — which a
     /// per-request flag, alternating text and voice turns, would.
-    fn vision_section_applies(provider: &str, model: &str, voice: bool) -> bool {
-        !voice && Self::model_supports_vision(provider, model)
+    fn vision_section_applies(
+        provider: &str,
+        model: &str,
+        voice: bool,
+        data_dir: Option<&std::path::Path>,
+    ) -> bool {
+        !voice && Self::model_supports_vision(provider, model, data_dir)
     }
 
     /// Whether THIS turn's system prompt should carry the `<thinking>` section
@@ -2279,24 +2368,47 @@ impl GooseAdapter {
                     Some(ref dd) => Self::register_gguf_model(&model_name, dd),
                     None => model_name.trim_end_matches(".gguf").to_string(),
                 };
-                // Phase F1. `register_gguf_model` leaves `mmproj_path: None`
-                // (GIAP registers a bare stem, which goose's featured-model
-                // lookup cannot match), and the engine's vision gate is
-                // exactly that field. Attach the encoder if it is on disk;
-                // otherwise start fetching it in the background and stamp the
-                // registry when it lands — `resolve_model_path` runs on every
-                // generation, so no restart is needed. Non-blocking on
-                // purpose: the encoder is ~1 GB.
+                // Phase F1. The engine's vision gate is the registry row's
+                // `mmproj_path`, and it loads a stamped encoder EAGERLY at every
+                // model load, whether or not a picture is ever sent. So the
+                // stamp is decided here, synchronously, before the provider is
+                // built and before anything loads: declared on this device and
+                // verified stamps every row naming this GGUF, anything else
+                // clears them. The ~1 GB hash or fetch, when one is owed, runs
+                // in the background (serve process only) and stamps when it
+                // lands; `resolve_model_path` re-reads the row per generation,
+                // so no restart is needed.
                 if let Some(ref dd) = self.data_dir {
-                    crate::vision_encoder::ensure_mmproj_available(dd, &registry_key);
-                    // Speculative decoding's drafter, for the same reason and on
-                    // the same terms as the encoder above: the engine resolves it
-                    // by name through the registry, so a drafter file with no row
-                    // is invisible. Re-checked on every provider build, so one
-                    // that arrives later is used without a restart and one that
-                    // has been deleted simply stops being referenced.
-                    crate::mtp_drafter::ensure_drafter_registered(dd, &registry_key);
+                    let gguf = self
+                        .registry_row_path(&registry_key)
+                        .unwrap_or_else(|| crate::vision_encoder::chat_gguf_path(dd, &model_name));
+                    if self
+                        .pictures
+                        .settle_stamp(dd, &settings.chat_model, &gguf)
+                        .is_some()
+                    {
+                        self.pictures.spawn_ensure(dd, &settings.chat_model);
+                    }
+                    // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24
+                    // (goose 743649d98), so this is commented out rather than deleted; restore it
+                    // if it returns.
+                    // // Speculative decoding's drafter, for the same reason and on
+                    // // the same terms as the encoder above: the engine resolves it
+                    // // by name through the registry, so a drafter file with no row
+                    // // is invisible. Re-checked on every provider build, so one
+                    // // that arrives later is used without a restart and one that
+                    // // has been deleted simply stops being referenced. It honours
+                    // // the switch as this turn's settings row has it.
+                    // crate::mtp_drafter::ensure_drafter_registered_with(
+                    //     dd,
+                    //     &registry_key,
+                    //     settings.speculative_decoding_enabled,
+                    // );
                 }
+                // *self
+                //     .local_registry_key
+                //     .lock()
+                //     .unwrap_or_else(|e| e.into_inner()) = Some(registry_key.clone());
                 let cfg = goose_providers::model::ModelConfig::new(&registry_key);
                 tracing::debug!(
                     "[model-switch] building LocalInferenceProvider for '{}'...",
@@ -2521,8 +2633,11 @@ impl GooseAdapter {
                 pond_core::models::domain::model_capabilities::ModelCapabilities::from_model_name(
                     &settings.chat_model,
                 );
-            caps.vision =
-                Self::model_supports_vision(&settings.chat_provider, &settings.chat_model);
+            caps.vision = Self::model_supports_vision(
+                &settings.chat_provider,
+                &settings.chat_model,
+                self.data_dir.as_deref(),
+            );
             caps.thinking = crate::model_traits::model_reasons(
                 &settings.chat_provider,
                 &settings.chat_model,
@@ -3283,6 +3398,172 @@ impl GooseAdapter {
         stem
     }
 
+    /// The file a registry row names, resolved through symlinks: the GGUF the engine loads for
+    /// that id, and so the one every other row naming the same file shares a slot with. The
+    /// guard is dropped before this returns.
+    fn registry_row_path(&self, registry_key: &str) -> Option<PathBuf> {
+        use goose::providers::local_inference::local_model_registry::get_registry;
+        let path = get_registry()
+            .lock()
+            .ok()?
+            .get_model(registry_key)
+            .map(|e| e.local_path.clone())?;
+        Some(crate::registry_rows::resolve(&path))
+    }
+
+    // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98),
+    // so this is commented out rather than deleted; restore it if it returns.
+    // /// Apply the speculation switch to the loaded model before a local turn streams.
+    // ///
+    // /// Compares (canonical key, switch as THIS turn's settings row has it, drafter on disk)
+    // /// with what the ledger says the loaded slot reflects. When they differ: register the
+    // /// drafter (it takes the registry lock itself, so before any guard), reconcile every row in
+    // /// one save, and evict the slot so the next load resolves the new rows, whether or not the
+    // /// reconcile changed a row (see `SpeculationLedger`). The registry guard is never held
+    // /// across the evict, which takes it again. Returns the epoch this turn evicted under, for
+    // /// the stream to confirm with a cold load.
+    // async fn apply_speculation_switch(
+    //     &self,
+    //     settings: &pond_core::user_data::domain::settings::Settings,
+    // ) -> Option<u64> {
+    //     use crate::mtp_drafter::{DraftTuple, LedgerStep};
+    //     use pond_core::models::domain::drafter::{drafter_for, drafter_path};
+    //
+    //     if !matches!(settings.chat_provider.as_str(), "local" | "gguf") {
+    //         return None;
+    //     }
+    //     let dd = self.data_dir.as_deref()?;
+    //     let key = self
+    //         .local_registry_key
+    //         .lock()
+    //         .unwrap_or_else(|e| e.into_inner())
+    //         .clone()?;
+    //     let enabled = settings.speculative_decoding_enabled;
+    //     let drafter = drafter_for(&settings.chat_model);
+    //     let present = drafter
+    //         .as_ref()
+    //         .is_some_and(|spec| drafter_path(dd, spec).exists());
+    //     let tuple = DraftTuple {
+    //         key: key.clone(),
+    //         enabled,
+    //         present,
+    //     };
+    //
+    //     let step = self
+    //         .speculation
+    //         .lock()
+    //         .unwrap_or_else(|e| e.into_inner())
+    //         .step(&tuple);
+    //     let epoch = match step {
+    //         LedgerStep::Nothing => return None,
+    //         LedgerStep::EvictAgain { epoch } => epoch,
+    //         LedgerStep::Reconcile => {
+    //             if let Some(source) = crate::mtp_drafter::draft_override_source() {
+    //                 static WARNED: std::sync::atomic::AtomicBool =
+    //                     std::sync::atomic::AtomicBool::new(false);
+    //                 if !WARNED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    //                     tracing::warn!(
+    //                         source,
+    //                         "GOOSE_LOCAL_DRAFT_MODEL is set in {source}; the engine uses it for any \
+    //                          row without a drafter, so it outranks the speculation switch in Settings"
+    //                     );
+    //                 }
+    //             }
+    //             let drafter_id =
+    //                 crate::mtp_drafter::ensure_drafter_registered_with(dd, &key, enabled);
+    //             let target = self.registry_row_path(&key).unwrap_or_else(|| {
+    //                 crate::vision_encoder::chat_gguf_path(dd, &settings.chat_model)
+    //             });
+    //             let changes = crate::mtp_drafter::reconcile_drafter(
+    //                 &crate::registry_rows::GooseRegistry,
+    //                 &target,
+    //                 drafter_id.as_deref(),
+    //                 enabled,
+    //             );
+    //             if !changes.is_empty() {
+    //                 tracing::info!(
+    //                     model = %key,
+    //                     speculative_decoding_enabled = enabled,
+    //                     drafter_present = present,
+    //                     rows = changes.len(),
+    //                     "speculation switch applied to the registry; reloading the model"
+    //                 );
+    //             }
+    //             if enabled && drafter.is_some() && !present {
+    //                 self.spawn_drafter_fetch(dd, &settings.chat_model);
+    //             }
+    //             self.speculation
+    //                 .lock()
+    //                 .unwrap_or_else(|e| e.into_inner())
+    //                 .reconciled(tuple)
+    //         }
+    //     };
+    //
+    //     let evicted = match goose::providers::local_inference::evict_model(&key).await {
+    //         Ok(evicted) => evicted,
+    //         Err(e) => {
+    //             tracing::warn!(model = %key, error = %e, "could not evict the model to apply the speculation switch; retrying next turn");
+    //             false
+    //         }
+    //     };
+    //     self.speculation
+    //         .lock()
+    //         .unwrap_or_else(|e| e.into_inner())
+    //         .evicted(epoch, evicted);
+    //     // PAI-4 P5. Only an evict that emptied a slot destroyed a prefix; on a first turn or a
+    //     // model switch nothing was loaded, and the swap has already recorded its own reason.
+    //     if evicted {
+    //         self.note_prefix_invalidated(InvalidationReason::ProviderRebuilt);
+    //     }
+    //     Some(epoch)
+    // }
+    //
+    // /// The switch turned on with the drafter not on disk: fetch it in the background (serve
+    // /// process only), then run this adapter's own warm-up, so the reconcile, evict and reload
+    // /// happen there rather than in the household's next turn.
+    // fn spawn_drafter_fetch(&self, data_dir: &std::path::Path, chat_model: &str) {
+    //     if !self.pictures.provisioning_enabled() {
+    //         return;
+    //     }
+    //     let Ok(handle) = tokio::runtime::Handle::try_current() else {
+    //         return;
+    //     };
+    //     if !self
+    //         .speculation
+    //         .lock()
+    //         .unwrap_or_else(|e| e.into_inner())
+    //         .begin_fetch()
+    //     {
+    //         return;
+    //     }
+    //     let dd = data_dir.to_path_buf();
+    //     let model = chat_model.to_string();
+    //     let ledger = self.speculation.clone();
+    //     let gate = self.pictures.warmup().clone();
+    //     let adapter = self.self_handle.get().cloned();
+    //     let voice = self.voice_mode.load(std::sync::atomic::Ordering::Relaxed);
+    //     handle.spawn(async move {
+    //         if pond_core::models::domain::device_budget::budgeted_device() {
+    //             gate.wait().await;
+    //         }
+    //         let fetched = crate::mtp_drafter::fetch_drafter(&dd, &model).await;
+    //         ledger.lock().unwrap_or_else(|e| e.into_inner()).end_fetch();
+    //         match fetched {
+    //             Ok(path) => {
+    //                 tracing::info!(path = %path.display(), "MTP drafter fetched after the switch turned on");
+    //                 if let Some(adapter) = adapter.and_then(|w| w.upgrade()) {
+    //                     let quiet: Arc<dyn Fn(WarmupPhase) + Send + Sync> = Arc::new(|_| {});
+    //                     AgentPort::prewarm(adapter.as_ref(), voice, quiet).await;
+    //                 }
+    //             }
+    //             Err(e) => tracing::warn!(
+    //                 error = %format!("{e:#}"),
+    //                 "could not fetch the MTP drafter; replies arrive without speculation"
+    //             ),
+    //         }
+    //     });
+    // }
+
     pub async fn chat_stream(
         &self,
         request: AgentRequest,
@@ -3296,32 +3577,34 @@ impl GooseAdapter {
         // Without this the engine silently rewrites each image part into
         // "[Image attached - image input is not supported with the currently
         // selected model]" and the model answers as if it had looked, which is
-        // the worst possible outcome. Two distinguishable causes, two messages.
-        if !request.images.is_empty() && matches!(settings.chat_provider.as_str(), "local" | "gguf")
-        {
+        // the worst possible outcome. This is the backstop: the API refuses the
+        // same turns before anything is persisted, with the same pond-core copy,
+        // and this catches every other caller. It covers every provider, since
+        // the mesh wire and a model that cannot see drop pictures too.
+        if !request.images.is_empty() {
+            use pond_core::models::domain::vision_encoder::{
+                encoder_for, refusal_for, RefusalCode,
+            };
+            let provider = settings.chat_provider.as_str();
             let model = settings.chat_model.as_str();
-            if !crate::vision_encoder::declares_vision(model) {
-                anyhow::bail!(
-                    "The active model ({model}) cannot read images. Switch to a vision-capable \
-                     model such as gemma-4-E2B-it and try again."
-                );
-            }
-            let ready = self
-                .data_dir
-                .as_ref()
-                .is_some_and(|dd| crate::vision_encoder::mmproj_ready(dd, model));
-            if !ready {
-                if let Some(ref dd) = self.data_dir {
-                    // A turn is the strongest signal that the encoder is wanted;
-                    // make sure a fetch is running even if the provider was built
-                    // before this code existed.
-                    crate::vision_encoder::ensure_mmproj_available(dd, model);
+            let state =
+                Self::vision_state_for(&self.pictures, self.data_dir.as_deref(), provider, model);
+            let spec = encoder_for(model);
+            if let Some(refusal) = refusal_for(state.as_ref(), spec.as_ref(), provider) {
+                if refusal.code == RefusalCode::NotReady {
+                    // A turn is the strongest signal that the encoder is wanted.
+                    if let Some(ref dd) = self.data_dir {
+                        self.pictures.spawn_ensure(dd, model);
+                    }
                 }
-                anyhow::bail!(
-                    "The vision encoder for {model} is still downloading. Image input becomes \
-                     available as soon as it finishes - no restart needed. Your message was not \
-                     sent."
+                tracing::info!(
+                    target: "giap::vision",
+                    provider,
+                    model,
+                    code = refusal.code.as_str(),
+                    "refused a turn carrying pictures"
                 );
+                anyhow::bail!("{}", refusal.message);
             }
         }
 
@@ -3576,6 +3859,7 @@ impl GooseAdapter {
                 &settings.chat_provider,
                 &settings.chat_model,
                 voice_instance,
+                self.data_dir.as_deref(),
             ),
             prompt_state.compact_prompt,
         );
@@ -3750,13 +4034,8 @@ impl GooseAdapter {
             }
         }
 
-        self.shim_controls
-            .session(&goose_sid)
-            .set_turn_appendix(if shim_appendix.is_empty() {
-                None
-            } else {
-                Some(shim_appendix.join("\n\n"))
-            });
+        // The appendix is published further down, once the dormant tool-groups
+        // note exists to ride it.
 
         // ── Token-budgeted memory injection ──────────────────────────────
         // Memories go into <system-context> in the user message (not the system
@@ -3862,6 +4141,13 @@ impl GooseAdapter {
                  model in Settings, then try again."
             );
         }
+
+        // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose
+        // 743649d98), so this is commented out rather than deleted; restore it if it returns.
+        // // ── 5a. The speculation switch ────────────────────────────────────────
+        // // After the provider is current (so the canonical key is known) and before
+        // // this turn streams, so the load it may trigger resolves the new rows.
+        // let draft_epoch = self.apply_speculation_switch(&settings).await;
 
         // ── 6. Extension cleanup ──────────────────────────────────────────────
         // Strip Goose default extensions that would pollute the prompt.
@@ -4114,6 +4400,25 @@ impl GooseAdapter {
         // withheld groups out of the dormant-groups note". It did the opposite:
         // the note was built from `registered_extensions()`, so every withheld
         // group appeared on it. `permitted_groups` is what makes the claim true.
+        // D2, moved off the per-turn envelope on 2026-09-24. What the model
+        // could load but cannot see rides the system appendix now. It is
+        // session-scoped and changes only when a group is enabled -- the moment
+        // the tools block changes anyway -- so it never moves the prefix on its
+        // own, and in "minimal" mode every session starts with the same dormant
+        // set, so the boot-time warm-up covers it for all of them. In the
+        // envelope it was ~150 tokens re-prefilled on every turn; here it is
+        // prefilled once per session.
+        if !dormant_groups_note.is_empty() {
+            shim_appendix.push(dormant_groups_note.clone());
+        }
+        self.shim_controls
+            .session(&goose_sid)
+            .set_turn_appendix(if shim_appendix.is_empty() {
+                None
+            } else {
+                Some(shim_appendix.join("\n\n"))
+            });
+
         let allowed_tools = if turn_scope.excludes_everything() {
             let before = allowed_tools.len();
             let kept: HashSet<String> =
@@ -4190,6 +4495,30 @@ impl GooseAdapter {
         let session_controls = self.shim_controls.session(&goose_sid);
         session_controls.set_allowed_tools(allowed_tools.clone());
 
+        // CR-9 and CR-2. Whether a picture a TOOL returns may be shown to the model, and which
+        // encoder to hold at could-not-start if the engine refuses this turn's picture. Only
+        // the in-process engine needs either: every other provider carries its own pictures.
+        let local_picture_spec = if matches!(settings.chat_provider.as_str(), "local" | "gguf") {
+            let state = Self::vision_state_for(
+                &self.pictures,
+                self.data_dir.as_deref(),
+                &settings.chat_provider,
+                &settings.chat_model,
+            );
+            session_controls.set_pictures_readable(state.as_ref().is_none_or(|s| {
+                s.is_ready()
+                    || *s == pond_core::models::domain::vision_encoder::EncoderState::Unknown
+            }));
+            crate::vision_encoder::declaration(self.data_dir.as_deref(), &settings.chat_model)
+                .spec()
+                .copied()
+        } else {
+            None
+        };
+        let image_failures_at_start = session_controls.image_failures();
+        let pictures = self.pictures.clone();
+        // let speculation = self.speculation.clone();
+
         // ── 7. GooseMode from model_role ──────────────────────────────────────
         let goose_mode = GooseMode::Auto;
         self.agent
@@ -4249,15 +4578,9 @@ impl GooseAdapter {
                 msg.push_str(&memory_block_for_user_msg);
                 msg.push_str("\n</memories>\n");
             }
-            // D2: what the model could load but currently cannot see. Rides the
-            // user message, never the system prompt — it is session-specific and
-            // the prefix must stay byte-identical across sessions for KV reuse.
-            // Empty (zero tokens) whenever nothing is dormant, so the default
-            // "all" mode is unaffected.
-            if !dormant_groups_note.is_empty() {
-                msg.push_str(&dormant_groups_note);
-                msg.push('\n');
-            }
+            // The dormant tool-groups note used to ride here; it is in the
+            // system appendix now (see where `set_turn_appendix` is called),
+            // so it is prefilled once per session instead of once per turn.
             msg.push_str(&turn_budget_block);
             msg.push('\n');
             // Last inside the envelope, and the envelope now trails the user's
@@ -4483,6 +4806,8 @@ impl GooseAdapter {
             // question, so a repeat that straddles an attempt boundary is still
             // a repeat and must not get a fresh budget.
             let mut goal_rechecks: u32 = 0;
+            // Whether this turn already reported the engine refusing its picture.
+            let mut picture_failure_reported = false;
             let mut tool_call_counts: HashMap<(String, u64), usize> = HashMap::new();
             let mut guard_tripped = false;
             // Set when a repetition guard trips. Cancelling is not enough on its
@@ -4939,6 +5264,26 @@ impl GooseAdapter {
                                 // the stateful filter (it eats close tags the filter
                                 // is waiting for, causing answer text to be swallowed).
                                 let raw_text = msg.as_concat_text();
+                                // CR-2. The engine refused this turn's picture (the shim
+                                // counted it, typed) and goose wrote its own prose for it,
+                                // which names a settings screen GIAP does not have. The
+                                // household gets pond-core's line instead, and the encoder is
+                                // held at could-not-start so the next picture is refused
+                                // honestly rather than failing the same way.
+                                let raw_text = match local_picture_spec {
+                                    Some(spec)
+                                        if guard_controls.image_failures() > image_failures_at_start
+                                            && raw_text.starts_with(GOOSE_PROVIDER_ERROR_PREFIX) =>
+                                    {
+                                        picture_failure_reported = true;
+                                        pictures.mark_could_not_start(&spec);
+                                        pond_core::models::domain::vision_encoder::failed_message(
+                                            pond_core::models::domain::vision_encoder::FailReason::CouldNotStart,
+                                            Some(&spec),
+                                        )
+                                    }
+                                    _ => raw_text,
+                                };
                                 if !raw_text.is_empty() && raw_text.trim() == GOOSE_EMPTY_TURN_MESSAGE {
                                     // Goose reporting the turn produced nothing. That is
                                     // a signal to the harness, not an answer to the user
@@ -5072,6 +5417,15 @@ impl GooseAdapter {
                                     if let Some(load) = stats.model_load_ms {
                                         turn_stats.model_load_ms =
                                             Some(turn_stats.model_load_ms.unwrap_or(0) + load);
+                                        // // A cold load in a turn that applied the speculation
+                                        // // switch resolved the reconciled rows: the switch is
+                                        // // now what the loaded slot reflects.
+                                        // if let Some(epoch) = draft_epoch {
+                                        //     speculation
+                                        //         .lock()
+                                        //         .unwrap_or_else(|e| e.into_inner())
+                                        //         .loaded(epoch);
+                                        // }
                                     }
                                     if let Some(prefill) = stats.prefill_ms {
                                         turn_stats.prefill_ms =
@@ -5175,6 +5529,15 @@ impl GooseAdapter {
             // roots their log at.
             turn_stats.reengagements = attempt as u32;
 
+            // CR-2, the other way goose can surface the refusal: as an error, not prose.
+            if !picture_failure_reported
+                && guard_controls.image_failures() > image_failures_at_start
+            {
+                if let Some(spec) = local_picture_spec {
+                    pictures.mark_could_not_start(&spec);
+                }
+            }
+
             // Per-turn usage from the provider's per-inference Usage events.
             // Fall back to the chars/4 heuristic only when the provider emitted
             // no Usage events at all (some HTTP providers).
@@ -5249,6 +5612,9 @@ impl AgentPort for GooseAdapter {
         voice_mode: bool,
         progress: std::sync::Arc<dyn Fn(WarmupPhase) + Send + Sync>,
     ) {
+        // Held for the whole warm-up, every exit included: a budgeted device's companion
+        // worker waits on it before it moves or hashes a gigabyte under a -ngl 99 cold load.
+        let _warming = self.pictures.warmup().begin();
         if std::env::var("POND_DISABLE_PREWARM").as_deref() == Ok("1") {
             progress(WarmupPhase::Skipped {
                 reason: "POND_DISABLE_PREWARM=1".to_string(),
@@ -5363,6 +5729,22 @@ impl AgentPort for GooseAdapter {
             caps.audio_input = false;
         }
         caps
+    }
+
+    fn vision_state(
+        &self,
+        provider: &str,
+        model: &str,
+    ) -> Option<pond_core::models::domain::vision_encoder::EncoderState> {
+        Self::vision_state_for(&self.pictures, self.data_dir.as_deref(), provider, model)
+    }
+
+    /// A model arrived or became active: start its encoder's ensure in the background. A no-op
+    /// outside the serve process, and for a model that declares no encoder on this device.
+    fn prepare_model(&self, model: &str) {
+        if let Some(ref dd) = self.data_dir {
+            self.pictures.spawn_ensure(dd, model);
+        }
     }
 
     async fn chat(&self, request: AgentRequest) -> Result<AgentResponse> {
@@ -6057,7 +6439,7 @@ fn attach_images(
 }
 
 /// Number of image parts carried by a Goose message.
-fn image_part_count(msg: &Message) -> usize {
+pub(crate) fn image_part_count(msg: &Message) -> usize {
     msg.content
         .iter()
         .filter(|c| matches!(c, goose::conversation::message::MessageContent::Image(_)))
@@ -6072,7 +6454,7 @@ fn image_part_count(msg: &Message) -> usize {
 /// `truncate_tool_response_text`, which preserves ids and error flags
 /// byte-for-byte. Camera tools DO return images inside a tool response; those
 /// ride the tool-result truncation path, not this one.
-fn has_tool_parts(msg: &Message) -> bool {
+pub(crate) fn has_tool_parts(msg: &Message) -> bool {
     use goose::conversation::message::MessageContent as C;
     msg.content.iter().any(|c| {
         matches!(
@@ -6111,7 +6493,7 @@ fn has_tool_parts(msg: &Message) -> bool {
 /// existing placeholder is stripped first and exactly one is re-emitted for the
 /// state the message ends up in: the partial wording while an image survives,
 /// the all-dropped wording once none do.
-fn cap_message_images(original: &Message, keep: usize, text: &str) -> Message {
+pub(crate) fn cap_message_images(original: &Message, keep: usize, text: &str) -> Message {
     use goose::conversation::message::MessageContent as C;
     use pond_core::models::services::context::image_history::{
         contains_history_image_placeholder, history_image_placeholder,
@@ -8062,27 +8444,36 @@ mod tests {
         assert!(compact.len() < verbose.len());
     }
 
-    /// The registry (mmproj presence), not the `gemma-4*` name heuristic, is the
-    /// truth for the in-process engine: E1B is a gemma-4 with no vision encoder.
+    /// pond-core's declaration, not the `gemma-4*` name heuristic, is the truth for
+    /// the in-process engine: E1B is a gemma-4 with no vision encoder. Off a
+    /// budgeted device the declaration is the name; on one (the Orin, or
+    /// `scripts/jetson-emu.sh test`) nothing is declared until an encoder has been
+    /// measured there, and the measured list ships empty.
     #[test]
-    fn local_vision_capability_comes_from_the_mmproj_registry() {
+    fn local_vision_capability_comes_from_the_device_aware_declaration() {
+        let declared = !pond_core::models::domain::device_budget::budgeted_device();
         for provider in ["local", "gguf"] {
-            assert!(GooseAdapter::model_supports_vision(
-                provider,
-                "gemma-4-E2B-it"
-            ));
-            assert!(GooseAdapter::model_supports_vision(
-                provider,
-                "gemma-4-E4B-it-Q4_K_M"
-            ));
+            for model in [
+                "gemma-4-E2B-it",
+                "gemma-4-E4B-it-Q4_K_M",
+                "gemma-4-E4B-it-qat-UD-Q4_K_XL",
+            ] {
+                assert_eq!(
+                    GooseAdapter::model_supports_vision(provider, model, None),
+                    declared,
+                    "{provider}/{model}"
+                );
+            }
             assert!(
-                !GooseAdapter::model_supports_vision(provider, "gemma-4-E1B-it"),
+                !GooseAdapter::model_supports_vision(provider, "gemma-4-E1B-it", None),
                 "E1B declares no mmproj — the name heuristic would wrongly say yes"
             );
-            assert!(!GooseAdapter::model_supports_vision(
-                provider,
-                "Llama-3.2-3B-Instruct"
-            ));
+            for model in ["Llama-3.2-3B-Instruct", "mtp-gemma-4-E2B-it"] {
+                assert!(
+                    !GooseAdapter::model_supports_vision(provider, model, None),
+                    "{model}"
+                );
+            }
         }
     }
 
@@ -8095,11 +8486,11 @@ mod tests {
     fn http_vision_capability_matches_the_registry_and_covers_real_ollama_tags() {
         for provider in ["ollama", "llamafile", "openai"] {
             assert!(
-                !GooseAdapter::model_supports_vision(provider, "gemma-4-E1B-it"),
+                !GooseAdapter::model_supports_vision(provider, "gemma-4-E1B-it", None),
                 "{provider}: E1B has no vision encoder on ANY provider"
             );
             assert!(
-                !GooseAdapter::model_supports_vision(provider, "gemma3n:e1b"),
+                !GooseAdapter::model_supports_vision(provider, "gemma3n:e1b", None),
                 "{provider}: same model, Ollama's spelling"
             );
             for model in [
@@ -8111,19 +8502,116 @@ mod tests {
                 "pixtral-12b",
             ] {
                 assert!(
-                    GooseAdapter::model_supports_vision(provider, model),
+                    GooseAdapter::model_supports_vision(provider, model, None),
                     "{provider}/{model} accepts images"
                 );
             }
             assert!(!GooseAdapter::model_supports_vision(
                 provider,
-                "Llama-3.2-3B-Instruct"
+                "Llama-3.2-3B-Instruct",
+                None
             ));
             assert!(!GooseAdapter::model_supports_vision(
                 provider,
-                "llama3.2:3b"
+                "llama3.2:3b",
+                None
             ));
         }
+    }
+
+    /// CR-6. The mesh wire carries text only and a mistral.rs server has never been checked
+    /// with a picture, so neither claims vision, whatever the (stale, local) chat model is.
+    /// Switching to mesh sets only `chat_provider`, so `chat_model` still names the last
+    /// local Gemma, which the name rule would call a vision model.
+    #[test]
+    fn providers_that_drop_pictures_never_claim_vision() {
+        for provider in ["mesh", "mistralrs"] {
+            for model in ["gemma-4-E2B-it-Q4_K_M", "llama3.2-vision:11b"] {
+                assert!(
+                    !GooseAdapter::model_supports_vision(provider, model, None),
+                    "{provider}/{model}"
+                );
+                assert!(!GooseAdapter::vision_section_applies(
+                    provider, model, false, None
+                ));
+            }
+        }
+    }
+
+    /// `vision_state`, provider by provider: the in-process engine reports its encoder, a
+    /// provider that drops pictures reports not-declared (which the API refuses as unsupported,
+    /// with the mesh line for mesh), and one that carries its own pictures is ready exactly when
+    /// the model can see.
+    #[test]
+    fn vision_state_is_provider_aware() {
+        use pond_core::models::domain::vision_encoder::{refusal_for, EncoderState, RefusalCode};
+        let pictures = crate::vision_encoder::PictureSupport::with_rows(Arc::new(
+            crate::registry_rows::MemoryRows::default(),
+        ));
+        let tmp = tempfile::tempdir().unwrap();
+        let state = |provider: &str, model: &str, dd: Option<&std::path::Path>| {
+            GooseAdapter::vision_state_for(&pictures, dd, provider, model)
+        };
+
+        let local = state("local", "gemma-4-E2B-it-Q4_K_M", Some(tmp.path()));
+        if pond_core::models::domain::device_budget::budgeted_device() {
+            assert_eq!(local, Some(EncoderState::NotOnThisDevice));
+        } else {
+            assert_eq!(
+                local,
+                Some(EncoderState::Absent),
+                "declared, and nothing on disk yet"
+            );
+        }
+        assert_eq!(
+            state("gguf", "Llama-3.2-3B-Instruct", Some(tmp.path())),
+            Some(EncoderState::NotDeclared)
+        );
+        assert_eq!(
+            state("local", "gemma-4-E2B-it", None),
+            None,
+            "no data directory to look in: unknown, and callers fail open"
+        );
+
+        let mesh = state("mesh", "gemma-4-E2B-it-Q4_K_M", Some(tmp.path()));
+        assert_eq!(mesh, Some(EncoderState::NotDeclared));
+        let refusal = refusal_for(mesh.as_ref(), None, "mesh").expect("mesh refuses pictures");
+        assert_eq!(refusal.code, RefusalCode::Unsupported);
+        assert_eq!(
+            refusal.message,
+            pond_core::models::domain::vision_encoder::MESH_MESSAGE
+        );
+        assert_eq!(
+            state("mistralrs", "gemma-4-E2B-it", None),
+            Some(EncoderState::NotDeclared)
+        );
+
+        assert_eq!(
+            state("ollama", "llama3.2-vision:11b", None),
+            Some(EncoderState::Ready { bytes: None })
+        );
+        assert_eq!(
+            state("ollama", "llama3.2:3b", None),
+            Some(EncoderState::NotDeclared)
+        );
+    }
+
+    /// Canary for [`GOOSE_PROVIDER_ERROR_PREFIX`]: the CR-2 backstop replaces the assistant
+    /// text goose writes for a refused picture, and finds it by this opening. A fork sync that
+    /// reworded it would leave the household reading "Settings > Local Inference" again.
+    #[test]
+    fn goose_still_prefixes_a_provider_error_the_same_way() {
+        let agent_rs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../goose/crates/goose/src/agents/agent.rs");
+        let Ok(source) = std::fs::read_to_string(&agent_rs) else {
+            eprintln!("skipping: {} unavailable", agent_rs.display());
+            return;
+        };
+        assert!(
+            source.contains(&format!("\"{GOOSE_PROVIDER_ERROR_PREFIX}{{provider_err}}")),
+            "goose no longer opens a provider error with {GOOSE_PROVIDER_ERROR_PREFIX:?}; update \
+             the constant or the picture-failure text is shown to the household verbatim"
+        );
     }
 
     /// D4: the prompt must not assert a capability `capabilities()` denies.
@@ -8135,10 +8623,11 @@ mod tests {
         assert!(GooseAdapter::vision_section_applies(
             vision_model.0,
             vision_model.1,
-            false
+            false,
+            None
         ));
         assert!(
-            !GooseAdapter::vision_section_applies(vision_model.0, vision_model.1, true),
+            !GooseAdapter::vision_section_applies(vision_model.0, vision_model.1, true, None),
             "voice mode reports vision=false; the prompt must not claim otherwise"
         );
         // A text-only model stays off in both modes.
@@ -8146,7 +8635,8 @@ mod tests {
             assert!(!GooseAdapter::vision_section_applies(
                 "ollama",
                 "Llama-3.2-3B-Instruct",
-                voice
+                voice,
+                None
             ));
         }
     }
@@ -8665,6 +9155,18 @@ mod tests {
             assert!(
                 knob(&knobs, "GOOSE_TOOL_PAIR_SUMMARIZATION").is_none(),
                 "unset, so goose's background tool-pair summaries run (ctx {ctx})"
+            );
+            assert_eq!(
+                knob(&knobs, "GOOSE_DISABLE_MOIM").as_deref(),
+                Some("1"),
+                "a local pond prefills every token itself; goose's turn-context is duplicate \
+                 information there and cost ~100 re-prefilled tokens per inference (ctx {ctx})"
+            );
+        }
+        for provider in ["ollama", "llamafile"] {
+            assert!(
+                knob(&goose_env_knobs(provider, 8192), "GOOSE_DISABLE_MOIM").is_none(),
+                "{provider}: an HTTP provider keeps goose's default turn-context"
             );
         }
     }

@@ -8,7 +8,7 @@ import { api } from "../api/PondApiClient";
 import { PageHeader, useConfirm } from "../components/shared";
 import type { UserSkill } from "../api/types";
 
-// ── Icon set — a small curated palette, same pattern as Sidebar's NAV_ICONS ──
+// ── Icon set — a small curated palette, one lucide icon per skill kind ──
 const SKILL_ICONS: Record<string, React.ElementType> = {
   sparkles: Sparkles,
   bell: Bell,

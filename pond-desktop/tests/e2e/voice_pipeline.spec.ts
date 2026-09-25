@@ -1,8 +1,8 @@
 /**
  * Voice pipeline E2E tests.
  *
- * We can't drive actual Tauri IPC from Playwright (the app runs as a Vite SPA
- * in test mode, not a native Tauri binary), so these tests verify:
+ * We can't drive actual shell IPC from Playwright (the app runs as a Vite SPA
+ * in test mode, not the packaged Electron binary), so these tests verify:
  *   - VoiceMode renders when the user switches to it
  *   - The UI presents the correct initial state ("Waiting…")
  *   - Voice mode can be exited back to GUI mode
@@ -13,10 +13,7 @@
  */
 import { test, expect } from "@playwright/test";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
-
-// The sidebar footer has a button with exact aria-label "Voice mode"
-// (not to be confused with other buttons that contain "voice mode" in their text)
-const VOICE_BTN = '[aria-label="Voice mode"]';
+import { navigateTo, openDrawer } from "./helpers/nav";
 
 test.beforeEach(async ({ page }) => {
   await mockAllApiRoutes(page);
@@ -24,8 +21,9 @@ test.beforeEach(async ({ page }) => {
 });
 
 test.describe("Voice mode", () => {
-  test("clicking Voice mode button switches the view", async ({ page }) => {
-    const voiceBtn = page.locator(VOICE_BTN);
+  test("clicking Voice in the drawer switches the view", async ({ page }) => {
+    const goTo = await openDrawer(page);
+    const voiceBtn = goTo.getByRole("button", { name: "Voice", exact: true });
     await expect(voiceBtn).toBeVisible();
     await voiceBtn.click();
 
@@ -37,7 +35,7 @@ test.describe("Voice mode", () => {
   });
 
   test("VoiceMode shows a mic-related control", async ({ page }) => {
-    await page.locator(VOICE_BTN).click();
+    await navigateTo(page, "Voice");
 
     // There should be at least one button inside the voice mode view
     // (Record / Stop / Back)
@@ -46,7 +44,7 @@ test.describe("Voice mode", () => {
   });
 
   test("back button returns to GUI mode", async ({ page }) => {
-    await page.locator(VOICE_BTN).click();
+    await navigateTo(page, "Voice");
 
     // Wait for voice mode to render
     await page.waitForTimeout(500);
@@ -60,9 +58,9 @@ test.describe("Voice mode", () => {
 
     if (await backBtn.isVisible()) {
       await backBtn.click();
-      // Should return to sidebar nav
+      // Should return to the GUI shell, which carries the drawer's trigger
       await expect(
-        page.locator('aside[aria-label="Navigation"]')
+        page.locator('[aria-label="Open menu"]')
       ).toBeVisible({ timeout: 5_000 });
     }
   });
@@ -87,7 +85,7 @@ test.describe("Voice mode", () => {
   });
 
   test("TranscriptFeed container is rendered in voice mode", async ({ page }) => {
-    await page.locator(VOICE_BTN).click();
+    await navigateTo(page, "Voice");
 
     // TranscriptFeed renders a scrollable container
     // It doesn't need entries; the container itself must exist

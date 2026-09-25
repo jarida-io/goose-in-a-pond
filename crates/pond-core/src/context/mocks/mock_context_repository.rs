@@ -8,7 +8,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use crate::context::domain::{ContextItem, ContextSource};
+use crate::context::domain::{ContextItem, ContextSource, SourceKind};
 use crate::context::ports::ContextRepository;
 use crate::context::retention::ContextRetention;
 use crate::context::scope::{item_is_visible, source_is_visible};
@@ -213,6 +213,28 @@ impl ContextRepository for MockContextRepository {
             .unwrap()
             .iter()
             .filter(|i| i.profile_id() == profile_id)
+            .count() as u64)
+    }
+
+    async fn count_in_window(
+        &self,
+        scope: &ProfileScope,
+        kind: SourceKind,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<u64> {
+        // A real count, not `Ok(0)`. A mock that answers zero unconditionally
+        // makes every test of a silent suggestor pass for the wrong reason.
+        if scope.excludes_everything() {
+            return Ok(0);
+        }
+        Ok(self
+            .items
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|i| i.source_kind() == kind)
+            .filter(|i| i.occurred_at() >= from && i.occurred_at() < to)
             .count() as u64)
     }
 

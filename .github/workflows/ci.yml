@@ -132,7 +132,8 @@ jobs:
             -p pond-adapters-mcp-memory \
             -p pond-mesh-protocol \
             -p pond-mcp-server \
-            -p pond-adapters-mistralrs
+            -p pond-adapters-mistralrs \
+            -p pond-hf-cache
 
       # --ignored is NOT passed so the 28 live-hardware tests are skipped.
       - name: cargo test (fast crates)
@@ -154,7 +155,8 @@ jobs:
             -p pond-adapters-imap \
             -p pond-adapters-mcp-memory \
             -p pond-mesh-protocol \
-            -p pond-mcp-server
+            -p pond-mcp-server \
+            -p pond-hf-cache
 
       # Gate the PRODUCTION binary's compilation (pulls the Goose submodule); slow on a cold cache.
       # `--all-targets` is load-bearing: without a target selector cargo builds lib + bins ONLY, so
@@ -328,7 +330,7 @@ jobs:
       # lands in ~/.cache/electron. Without this the ~100 MB download happens
       # on every run; keyed on the lockfile so it only misses on a real bump.
       - name: Cache the Electron binary
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cache/electron
@@ -412,7 +414,7 @@ jobs:
           cache-dependency-path: pond-desktop/package-lock.json
 
       - name: Cache the Electron binary
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cache/electron

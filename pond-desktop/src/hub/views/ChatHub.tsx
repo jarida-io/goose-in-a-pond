@@ -3,7 +3,7 @@ import { WarmupBanner } from "../../components/WarmupBanner";
 import { Paperclip } from "lucide-react";
 import { api } from "../../api/PondApiClient";
 import { useAppState, useAppDispatch } from "../../state/AppContext";
-import { useChatRun, sendTurn } from "../../state/chatRunStore";
+import { useChatRun, sendTurn, takeRefusedDraft } from "../../state/chatRunStore";
 import type { Message } from "../../state/chatRunStore";
 import { CONTINUE_TURN_MESSAGE } from "../../api/types";
 import type { ContextWarning, TurnStats } from "../../api/types";
@@ -18,8 +18,15 @@ import { ContextPressureNote } from "../../components/ContextPressureNote";
 import { SubagentTree } from "../../components/SubagentTree";
 import type { SubagentRun } from "../../components/SubagentTree";
 import { AttachmentTray } from "../../components/AttachmentTray";
+import {
+  ImageSupportStatus,
+  COMPOSER_GATE_LINE,
+  refusalClientClause,
+} from "../../components/ImageSupportStatus";
+import { useVisionStatus } from "../../api/useVisionStatus";
 import { prepareImage, validateAttachmentSet } from "../../lib/imageAttach";
 import type { PreparedImage } from "../../lib/imageAttach";
+import { useSuggestedPrompts } from "../../hooks/useSuggestedPrompts";
 import "./chat.css";
 
 // ── Types ─────────────────────────────────────────────────────
@@ -77,13 +84,6 @@ function makeSeed(userName: string): Row[] {
   ];
 }
 
-const CHIPS = [
-  "Set Movie Time",
-  "Lock everything",
-  "Bedroom to 67°",
-  "Show the driveway",
-  "New sticky note",
-];
 
 /** Project a stored message into what this surface renders. */
 function toRow(m: Message): Row {
@@ -127,6 +127,10 @@ export function ChatHubView() {
   const run = useChatRun();
   const { messages, busy } = run;
 
+  // The composer's chips, grounded. See `useSuggestedPrompts` for why the five
+  // hardcoded ones went: three of them named hardware a pond may not own.
+  const chips = useSuggestedPrompts(state.sessionId);
+
   // Presentation, not conversation: an empty pond opens on something to read
   // rather than a blank pane. The seed is replaced by the first real message
   // and never enters the store.
@@ -150,6 +154,15 @@ export function ChatHubView() {
   // it only disables once we've SUCCESSFULLY confirmed the model lacks vision.
   const [visionCapable, setVisionCapable] = useState(true);
   const [capabilitiesKnown, setCapabilitiesKnown] = useState(false);
+  // Picture support's own lifecycle — download progress, readiness, a device
+  // that declines the encoder entirely. `useVisionStatus` replaces this
+  // fetch-once probe as the primary attach decision; `capabilities.vision`
+  // below is now only the fallback while a per-model answer is unknown.
+  const { status: visionStatus, refresh: refreshVisionStatus } = useVisionStatus();
+  // Whether the household has just now reached for the paperclip or tried to
+  // paste — the only moment a PERMANENT reason (not_declared /
+  // not_on_this_device) earns a line; see ImageSupportStatus.
+  const [attachReasonShown, setAttachReasonShown] = useState(false);
 
   // Load vision capability once the server is reachable.
   useEffect(() => {
@@ -159,10 +172,39 @@ export function ChatHubView() {
       .catch(() => { setCapabilitiesKnown(false); });
   }, [state.serverOnline]);
 
-  const attachDisabled = capabilitiesKnown && !visionCapable;
-  const attachTitle = attachDisabled
-    ? "The active model cannot read images. Switch to a vision-capable model such as gemma-4-E2B-it."
-    : "Attach image";
+  const visionKind = visionStatus?.state.kind;
+  const visionKnown = !!visionStatus && visionKind !== "unknown";
+  // gate.blocked: status known && kind !== "ready". While the richer status
+  // is unknown, fall back to the coarser capabilities probe rather than
+  // failing open outright — a model this pond has already confirmed cannot
+  // see pictures should not be offered as if it could.
+  const gateBlocked = visionKnown
+    ? visionKind !== "ready"
+    : capabilitiesKnown && !visionCapable;
+  const attachTitle = !gateBlocked
+    ? "Attach image"
+    : (visionStatus?.message ??
+        (visionKind === "not_declared"
+          ? "This model cannot look at pictures. To send one, choose a model marked Reads pictures on the Models page."
+          : "The active model cannot read images. Switch to a model marked Reads pictures on the Models page."));
+
+  // A refused turn (409/413/415/...) hands its draft back here rather than
+  // leaving an error bubble nobody can act on. `run.refusedDraft` is
+  // referentially stable across commits that do not touch it, so this only
+  // fires once per refusal, and `takeRefusedDraft` clears it so a second
+  // effect run (StrictMode) cannot restore the same draft twice.
+  useEffect(() => {
+    if (!run.refusedDraft) return;
+    const draft = takeRefusedDraft();
+    if (!draft) return;
+    if (!text.trim()) setText(draft.text);
+    setAttachments(draft.attachments);
+    setAttachError(draft.message + refusalClientClause(draft.code));
+    refreshVisionStatus();
+    // `text` deliberately excluded: this must run exactly once per refusal,
+    // not on every keystroke afterward.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [run.refusedDraft]);
 
   const removeAttachment = useCallback((index: number) => {
     setAttachments((prev) => {
@@ -199,7 +241,13 @@ export function ChatHubView() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // The paperclip is NEVER disabled for vision reasons — a tap always opens
+  // the file picker. What a tap DOES do, when picture support is not ready,
+  // is surface the reason: the button's title (a mouse hover) and, now, an
+  // on-demand ImageSupportStatus line reachable by touch, which a disabled
+  // button's title attribute never was.
   function onAttachClick() {
+    if (gateBlocked) setAttachReasonShown(true);
     fileInputRef.current?.click();
   }
 
@@ -213,6 +261,11 @@ export function ChatHubView() {
     const files = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/"));
     if (files.length === 0) return;
     e.preventDefault();
+    if (gateBlocked) {
+      setAttachReasonShown(true);
+      setAttachError(COMPOSER_GATE_LINE);
+      return;
+    }
     void addFiles(files);
   }
 
@@ -236,21 +289,24 @@ export function ChatHubView() {
     (raw?: string) => {
       const t = (raw ?? text).trim();
       if ((!t && attachments.length === 0) || busy) return;
+      // Gated here rather than by disabling Send: this is the one path every
+      // way of sending funnels through (the button, Enter, a suggestion chip,
+      // Continue), so gating here covers all of them at once.
+      if (attachments.length > 0 && gateBlocked) {
+        setAttachError(COMPOSER_GATE_LINE);
+        return;
+      }
 
       setText("");
 
       // The bubble keeps its own copy of each previewUrl and the store owns
       // revoking them, so clear the tray WITHOUT revoking -- doing so would
       // blank the thumbnail on the message just sent.
-      sendTurn({
-        text: t,
-        images: attachments.map((a) => ({ data: a.data, mime_type: a.mime_type })),
-        previewUrls: attachments.map((a) => a.previewUrl),
-      });
+      sendTurn({ text: t, attachments });
       setAttachments([]);
       setAttachError(null);
     },
-    [text, attachments, busy],
+    [text, attachments, busy, gateBlocked],
   );
 
   // Take focus back when the model stops -- what the old stream loop's
@@ -374,7 +430,7 @@ export function ChatHubView() {
         role="group"
         aria-label="Quick suggestions"
       >
-        {CHIPS.map((c) => (
+        {chips.map((c) => (
           <button
             key={c}
             className="ch-chip"
@@ -387,7 +443,8 @@ export function ChatHubView() {
         ))}
       </div>
 
-      {/* Pending image attachments */}
+      {/* Picture support's own status, then any pending attachments. */}
+      <ImageSupportStatus status={visionStatus} revealed={attachReasonShown} />
       <AttachmentTray attachments={attachments} onRemove={removeAttachment} />
       {attachError && <p className="attach-error" role="alert">{attachError}</p>}
 
@@ -405,7 +462,8 @@ export function ChatHubView() {
         <button
           className="ch-attach"
           onClick={onAttachClick}
-          disabled={busy || attachDisabled}
+          disabled={busy}
+          aria-disabled={gateBlocked || undefined}
           aria-label="Attach image"
           title={attachTitle}
           type="button"

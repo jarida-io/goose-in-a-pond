@@ -198,7 +198,7 @@ npm install
 npm run dev:electron
 ```
 
-The desktop app starts `pond-server` automatically and provides three modes: GUI sidebar, Voice orb, and Canvas floating overlay.
+The desktop app starts `pond-server` automatically and provides three modes: the GUI, the Voice orb, and the Canvas floating overlay.
 
 ---
 

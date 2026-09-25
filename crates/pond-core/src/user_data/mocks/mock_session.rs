@@ -1,5 +1,7 @@
 use crate::models::domain::message::ImageAttachment;
-use crate::user_data::domain::session::{MessageAttachment, Session, SessionMessage};
+use crate::user_data::domain::session::{
+    ExtractionCursor, MessageAttachment, Session, SessionIdentity, SessionMessage,
+};
 use crate::user_data::ports::session_storage::{SessionStorage, SessionStorageError};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,6 +26,24 @@ pub struct InMemorySessionStorage {
     /// always answered "unknown" would make the one rule worth testing —
     /// never overwrite a name a person typed — untestable.
     title_provenance: Arc<RwLock<HashMap<String, (Option<String>, Option<String>)>>>,
+    /// GIAP session id -> how far batch extraction has read into it.
+    ///
+    /// Modelled here rather than left to the trait default for the same reason
+    /// as `title_provenance`: the default reads every conversation as never
+    /// examined and silently discards every write, so a walk driven against it
+    /// re-reads one window forever. A mock that cannot hold a cursor cannot
+    /// test the thing the cursor exists for.
+    extraction_cursors: Arc<RwLock<HashMap<String, ExtractionCursor>>>,
+    /// GIAP session id -> who the pond believes was speaking.
+    ///
+    /// Modelled here for the same reason as the cursor above: the trait default
+    /// reads every conversation as unattributed and discards every write, so a
+    /// test of "whose memory is this" cannot reach the branch where the answer
+    /// is somebody. Batch extraction resolves a window's subject from exactly
+    /// this value, and on a multi-member pond the difference between "Amara"
+    /// and "nobody" is the difference between a memory stored and a window
+    /// deliberately left unread.
+    identities: Arc<RwLock<HashMap<String, SessionIdentity>>>,
 }
 
 impl InMemorySessionStorage {
@@ -35,6 +55,8 @@ impl InMemorySessionStorage {
             engine_sessions: Arc::new(RwLock::new(HashMap::new())),
             tool_groups: Arc::new(RwLock::new(HashMap::new())),
             title_provenance: Arc::new(RwLock::new(HashMap::new())),
+            extraction_cursors: Arc::new(RwLock::new(HashMap::new())),
+            identities: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -193,6 +215,81 @@ impl SessionStorage for InMemorySessionStorage {
         let mut result: Vec<Session> = sessions.values().cloned().collect();
         result.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         Ok(result)
+    }
+
+    async fn extraction_cursor(
+        &self,
+        session_id: &str,
+    ) -> Result<ExtractionCursor, SessionStorageError> {
+        Ok(self
+            .extraction_cursors
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+            .unwrap_or_else(ExtractionCursor::unstarted))
+    }
+
+    /// Move or clear the watermark, mirroring the SQLite adapter -- including
+    /// the part that matters most: `updated_at` is NOT touched. That column is
+    /// an activity source, and a mock that bumped it would let a wiring bug
+    /// pass here and cancel every pass in production.
+    async fn set_extraction_cursor(
+        &self,
+        session_id: &str,
+        through_message_id: Option<&str>,
+    ) -> Result<(), SessionStorageError> {
+        let mut cursors = self.extraction_cursors.write().await;
+        match through_message_id {
+            Some(id) => cursors.insert(
+                session_id.to_string(),
+                ExtractionCursor {
+                    through_message_id: Some(id.to_string()),
+                    extracted_at: Some(chrono::Utc::now()),
+                    attempts: 0,
+                },
+            ),
+            None => cursors.insert(session_id.to_string(), ExtractionCursor::unstarted()),
+        };
+        Ok(())
+    }
+
+    async fn get_session_identity(
+        &self,
+        session_id: &str,
+    ) -> Result<SessionIdentity, SessionStorageError> {
+        Ok(self
+            .identities
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+            .unwrap_or_else(SessionIdentity::unknown))
+    }
+
+    async fn set_session_identity(
+        &self,
+        session_id: &str,
+        identity: &SessionIdentity,
+    ) -> Result<(), SessionStorageError> {
+        // The row has to exist, matching the SQLite adapter: an attribution
+        // accepted and then silently dropped is the failure the identity work
+        // exists to end.
+        self.get_session(session_id).await?;
+        self.identities
+            .write()
+            .await
+            .insert(session_id.to_string(), identity.clone());
+        Ok(())
+    }
+
+    async fn note_extraction_attempt(&self, session_id: &str) -> Result<u32, SessionStorageError> {
+        let mut cursors = self.extraction_cursors.write().await;
+        let cursor = cursors
+            .entry(session_id.to_string())
+            .or_insert_with(ExtractionCursor::unstarted);
+        cursor.attempts += 1;
+        Ok(cursor.attempts)
     }
 
     async fn get_messages_paginated(

@@ -14,7 +14,7 @@
  * written to the database, and was invisible to the person who asked for it.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook } from "@testing-library/react";
 import { api } from "../api/PondApiClient";
 import {
@@ -29,11 +29,15 @@ import {
   acknowledgeCompletion,
   resetConversation,
   openSession,
+  followExternalSession,
   truncateFrom,
   patchMessage,
+  takeRefusedDraft,
 } from "./chatRunStore";
 import type { ChatRunBridge } from "./chatRunStore";
+import { ApiError } from "../api/types";
 import type { ChatEvent } from "../api/types";
+import type { PreparedImage } from "../lib/imageAttach";
 
 vi.mock("../api/PondApiClient", () => ({
   api: {
@@ -43,10 +47,7 @@ vi.mock("../api/PondApiClient", () => ({
     getActiveRun: vi.fn(),
     reattachRun: vi.fn(),
     cancelRun: vi.fn(),
-    sessionAttachmentUrl: vi.fn(
-      (sessionId: string, id: string) =>
-        `/api/v1/sessions/${sessionId}/attachments/${id}`,
-    ),
+    getSessionAttachment: vi.fn(),
   },
 }));
 
@@ -101,6 +102,27 @@ function deferredStream() {
 /** Let every already-scheduled microtask and macrotask settle. */
 async function flush(): Promise<void> {
   for (let i = 0; i < 5; i += 1) await new Promise((r) => setTimeout(r, 0));
+}
+
+/** A minimal PreparedImage, named for the preview URL so an assertion reads
+ *  as which attachment went where. */
+function fakePreparedImage(previewUrl: string): PreparedImage {
+  return {
+    data: "AAA",
+    mime_type: "image/png",
+    previewUrl,
+    width: 10,
+    height: 10,
+    byteSize: 3,
+  };
+}
+
+/** A generator that rejects immediately with `err` — the shape `chatStream`
+ *  takes when the server refuses a turn before the first SSE frame. */
+function rejectedStream(err: unknown): AsyncGenerator<ChatEvent> {
+  return (async function* () {
+    throw err;
+  })();
 }
 
 function bridge(over: Partial<ChatRunBridge> = {}): ChatRunBridge {
@@ -371,10 +393,11 @@ describe("image previews", () => {
       images: [{ data: "AAA", mime_type: "image/png" }],
       previewUrls: ["blob:pond/one"],
     });
-    // A history image on the same transcript: an ordinary http URL that this
-    // store did not make and must not claim to free.
+    // A URL on the same transcript that this store did not make, and so must
+    // not claim to free. (History images used to be the example here; they are
+    // object URLs the store owns now -- see "history images" below.)
     patchMessage(getChatRun().messages[1].id, {
-      images: ["/api/v1/sessions/s/attachments/a1"],
+      images: ["https://example.com/not-ours.png"],
     });
 
     resetConversation();
@@ -382,6 +405,275 @@ describe("image previews", () => {
     expect(revoke).toHaveBeenCalledTimes(1);
     expect(revoke).toHaveBeenCalledWith("blob:pond/one");
     revoke.mockRestore();
+  });
+});
+
+/**
+ * A refused turn (409/413/415/503/...) -- everything BUT 408, which a client
+ * timeout also produces and does not mean the server refused it. Every real
+ * refusal happens before `persist_user_message`, so the draft belongs back in
+ * the composer's box rather than on screen as an error bubble.
+ */
+describe("a refused turn", () => {
+  it("restores the draft on a 409 and does not touch the transcript or ownedPreviews", async () => {
+    const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    vi.mocked(api.chatStream).mockReturnValue(
+      rejectedStream(
+        new ApiError(409, "Picture support is not ready yet.", "vision_not_ready"),
+      ) as never,
+    );
+
+    sendTurn({
+      text: "what is this",
+      attachments: [fakePreparedImage("blob:pond/refused")],
+    });
+    await flush();
+
+    const run = getChatRun();
+    expect(run.messages).toEqual([]);
+    expect(run.busy).toBe(false);
+    // Not a completed turn -- nothing ran.
+    expect(run.completedTurns).toBe(0);
+    // Handed back, not freed: the composer's tray needs this preview again.
+    expect(revoke).not.toHaveBeenCalled();
+
+    const draft = takeRefusedDraft();
+    expect(draft).toEqual({
+      text: "what is this",
+      attachments: [fakePreparedImage("blob:pond/refused")],
+      message: "Picture support is not ready yet.",
+      code: "vision_not_ready",
+    });
+    // Taken once -- a second read (StrictMode's double effect) gets nothing.
+    expect(takeRefusedDraft()).toBeNull();
+
+    revoke.mockRestore();
+  });
+
+  it("publishes the code from an ApiError with no attachments too", async () => {
+    vi.mocked(api.chatStream).mockReturnValue(
+      rejectedStream(new ApiError(415, "Picture 1 could not be read.", "image_unreadable")) as never,
+    );
+
+    sendTurn({ text: "look at this", attachments: [fakePreparedImage("blob:pond/bad")] });
+    await flush();
+
+    expect(takeRefusedDraft()?.code).toBe("image_unreadable");
+  });
+
+  it("does NOT restore on a client timeout (408) -- the server may still be running it", async () => {
+    vi.mocked(api.chatStream).mockReturnValue(
+      rejectedStream(new ApiError(408, "Request timed out")) as never,
+    );
+
+    sendTurn({ text: "slow one", attachments: [fakePreparedImage("blob:pond/timeout")] });
+    await flush();
+
+    const run = getChatRun();
+    // The ordinary error path: an error bubble, one completed turn, nothing
+    // to restore.
+    expect(run.messages).toHaveLength(2);
+    expect(run.messages[1].error).toBe(true);
+    expect(run.completedTurns).toBe(1);
+    expect(run.refusedDraft).toBeNull();
+    expect(takeRefusedDraft()).toBeNull();
+  });
+
+  it("does NOT restore on a plain network error", async () => {
+    vi.mocked(api.chatStream).mockReturnValue(
+      rejectedStream(new TypeError("Failed to fetch")) as never,
+    );
+
+    sendTurn({ text: "offline", attachments: [fakePreparedImage("blob:pond/offline")] });
+    await flush();
+
+    const run = getChatRun();
+    expect(run.messages[1].error).toBe(true);
+    expect(run.completedTurns).toBe(1);
+    expect(takeRefusedDraft()).toBeNull();
+  });
+});
+
+/**
+ * Images on a replayed conversation.
+ *
+ * The attachment route is protected and accepts only a bearer header, which an
+ * `<img src>` cannot send, so the bare URL this store used to hand both chat
+ * surfaces answered 401 on every pond without the loopback dev bypass -- seen
+ * against a live server started without it, 2026-09-24. The bytes now come
+ * through the client and are shown through object URLs this store owns.
+ */
+describe("history images", () => {
+  /** A user row carrying `ids` as attachments, shaped as the history read sends it. */
+  function rowWithImages(sessionId: string, ...ids: string[]) {
+    return {
+      id: `m-${sessionId}`,
+      session_id: sessionId,
+      role: "user",
+      content: "what is this",
+      created_at: "",
+      images: ids.map((id) => ({
+        id,
+        mime_type: "image/png",
+        byte_size: 3,
+        url: `/api/v1/sessions/${sessionId}/attachments/${id}`,
+      })),
+    };
+  }
+
+  // Every blob is named for the attachment it holds, and every object URL for
+  // the blob it was made from, so an assertion reads as which image went where.
+  const named = new Map<Blob, string>();
+  const blobFor = (id: string) => {
+    const b = new Blob([id], { type: "image/png" });
+    named.set(b, id);
+    return b;
+  };
+  let create: ReturnType<typeof vi.spyOn>;
+  let revoke: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    named.clear();
+    create = vi
+      .spyOn(URL, "createObjectURL")
+      .mockImplementation(
+        (b) => `blob:pond/${named.get(b as Blob) ?? "unknown"}`,
+      );
+    revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    vi.mocked(api.getSessionAttachment).mockImplementation(async (_s, id) =>
+      blobFor(id),
+    );
+  });
+
+  afterEach(() => {
+    create.mockRestore();
+    revoke.mockRestore();
+  });
+
+  it("fetches through the client and shows an object URL, never the attachment URL", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      rowWithImages("s-img", "a1"),
+    ] as never);
+
+    await openSession("s-img");
+    await flush();
+
+    // Through the client, which is what carries the bearer token...
+    expect(api.getSessionAttachment).toHaveBeenCalledWith("s-img", "a1");
+    // ...and on screen as the URL made from its bytes. The attachment URL is
+    // what used to be here.
+    expect(getChatRun().messages[0].images).toEqual(["blob:pond/a1"]);
+  });
+
+  it("owns them: leaving the conversation revokes them", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      rowWithImages("s-img", "a1"),
+    ] as never);
+    await openSession("s-img");
+    await flush();
+
+    resetConversation();
+
+    expect(revoke).toHaveBeenCalledWith("blob:pond/a1");
+  });
+
+  it("shows the text without waiting for the images", async () => {
+    let land!: () => void;
+    const held = new Promise<void>((r) => {
+      land = r;
+    });
+    vi.mocked(api.getSessionAttachment).mockImplementation(async (_s, id) => {
+      await held;
+      return blobFor(id);
+    });
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      rowWithImages("s-img", "a1"),
+    ] as never);
+
+    await openSession("s-img");
+
+    expect(getChatRun().loadingSession).toBe(false);
+    expect(getChatRun().messages[0].text).toBe("what is this");
+    expect(getChatRun().messages[0].images).toBeUndefined();
+
+    land();
+    await flush();
+    expect(getChatRun().messages[0].images).toEqual(["blob:pond/a1"]);
+  });
+
+  it("makes no URL for bytes that land after the conversation moved on", async () => {
+    let land!: () => void;
+    const held = new Promise<void>((r) => {
+      land = r;
+    });
+    vi.mocked(api.getSessionAttachment).mockImplementation(async (_s, id) => {
+      await held;
+      return blobFor(id);
+    });
+    vi.mocked(api.getSessionMessages).mockResolvedValueOnce([
+      rowWithImages("s-img", "a1"),
+    ] as never);
+    await openSession("s-img");
+
+    // Somewhere else before the image arrived.
+    vi.mocked(api.getSessionMessages).mockResolvedValueOnce([
+      {
+        id: "m-other",
+        session_id: "s-other",
+        role: "user",
+        content: "something else",
+        created_at: "",
+      },
+    ] as never);
+    await openSession("s-other");
+    land();
+    await flush();
+
+    // Made now, a URL would be shown by nothing and so revoked by nothing...
+    expect(create).not.toHaveBeenCalled();
+    // ...and it must not turn up on the conversation that replaced its own.
+    expect(getChatRun().messages[0].text).toBe("something else");
+    expect(getChatRun().messages[0].images).toBeUndefined();
+  });
+
+  it("leaves out an image it cannot fetch and keeps the rest in order", async () => {
+    let releaseFirst!: () => void;
+    const firstHeld = new Promise<void>((r) => {
+      releaseFirst = r;
+    });
+    vi.mocked(api.getSessionAttachment).mockImplementation(async (_s, id) => {
+      if (id === "gone") throw new Error("404 Attachment bytes are no longer available");
+      // The first image lands last, so order cannot come from arrival.
+      if (id === "a1") await firstHeld;
+      return blobFor(id);
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      rowWithImages("s-img", "a1", "gone", "a3"),
+    ] as never);
+
+    await openSession("s-img");
+    await flush();
+    releaseFirst();
+    await flush();
+
+    expect(getChatRun().messages[0].images).toEqual([
+      "blob:pond/a1",
+      "blob:pond/a3",
+    ]);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("loads them for a session followed from outside, too", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      rowWithImages("s-deep", "a1"),
+    ] as never);
+
+    await followExternalSession("s-deep");
+    await flush();
+
+    expect(getChatRun().messages[0].images).toEqual(["blob:pond/a1"]);
   });
 });
 

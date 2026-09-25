@@ -56,6 +56,7 @@ All errors return JSON:
 | GET | /sessions | Protected | List conversation sessions |
 | PATCH | /sessions/{id} | Protected | Rename session |
 | GET | /sessions/{id}/messages | Protected | Get session messages |
+| GET | /sessions/{id}/attachments/{attachment_id} | Protected | Raw bytes of one chat-image attachment |
 | GET | /models | Protected | List model catalog |
 | GET | /models/capabilities | Protected | Active model's runtime capabilities |
 | GET | /models/active-roles | Protected | Current role assignments |
@@ -78,6 +79,7 @@ All errors return JSON:
 | GET | /profiles/{id} | Protected | Get a profile |
 | DELETE | /profiles/{id} | Protected | Delete a profile |
 | GET | /devices | Protected | List registered devices |
+| GET | /devices/self | Protected | The calling device, and the household member it belongs to |
 | POST | /devices | Protected | Register a device |
 | DELETE | /devices/{id} | Protected | Unregister a device |
 | POST | /devices/{id}/heartbeat | Protected | Update device last-seen |
@@ -557,7 +559,30 @@ Returns all messages in a session, oldest first.
 }
 ```
 
-`role` values: `"user"` | `"assistant"` | `"system"`
+`role` values: `"user"` | `"assistant"` | `"system"` | `"tool"`
+
+Two optional fields, each ABSENT rather than empty when it does not apply:
+
+- `images` — on a message that had images attached:
+  `[{ "id": "...", "mime_type": "image/png", "byte_size": 70, "url": "/api/v1/sessions/<sid>/attachments/<aid>" }]`.
+  `url` is relative to the API base and is protected; see the next route before using it.
+- `thinking` — on an assistant message recorded while `persist_thinking` was on: the reasoning
+  passages that produced it, in order, as `string[]`. Absent means nothing was kept; `[]` means it
+  was kept and there was none.
+
+---
+
+### GET /sessions/{session_id}/attachments/{attachment_id}
+
+The raw bytes of one persisted chat image, with its `Content-Type` and
+`Cache-Control: private, max-age=31536000, immutable`. 404 when the attachment does not belong to
+that session, or its bytes are gone.
+
+**Send the bearer token.** This is on the protected router and the middleware reads only
+`Authorization: Bearer`, so a loader that cannot set a header — a bare `<img src>` — gets a 401 on
+every pond not started with `POND_DEV_ALLOW_LOOPBACK`. The desktop fetches the bytes with its token
+and shows them through an object URL (`PondApiClient.getSessionAttachment`); React Native's
+`Image` takes `source={{ uri, headers: { Authorization: "Bearer <token>" } }}`.
 
 ---
 
@@ -1042,6 +1067,31 @@ Devices are GOTG mobile clients, IoT sensors, cameras, or other Pond instances.
 
 ---
 
+### GET /devices/self
+
+The calling device, and the household member it is attributed to, if anyone. **For display only:** a greeting, the name on a profile screen. It proves nothing and grants nothing. `Principal::profile_id` is not populated from it, and it never feeds `ProfileScope`.
+
+The device comes from `proven_device()`, the token this Pond issued at pairing, never from anything the client sends about itself. The attribution comes from the pairing code (migration 0043). The route is scoped to the caller on purpose. Adding `profile_id` to every row of `GET /devices` would hand every paired client the whole device-to-member map.
+
+**Response 200**, attributed:
+```json
+{ "device_id": "liz-phone", "profile": { "id": "p-1", "display_name": "Liz" } }
+```
+
+**Response 200**, unattributed. Nobody has claimed this device, which is the normal case, because pairing happens before anyone says who they are:
+```json
+{ "device_id": "kitchen-tablet", "profile": null }
+```
+
+| Status | Meaning |
+|---|---|
+| 200 | `profile` is the member, or `null`. Only `id` and `display_name` are returned, not preferences and not the avatar. |
+| 401 | No token. The route is not on `PUBLIC_ROUTES`. |
+| 404 | The request did not come from a paired device, for example a loopback bypass. |
+| 503 | The attribution read failed. It is logged, and it is deliberately **not** reported as `profile: null`, which would look exactly like an unclaimed device. |
+
+A Pond from before this route answers a GET here with **405**, because the request falls through to `/devices/{id}`, which only accepts DELETE and PUT. Clients should treat 404 and 405 as "this Pond cannot say".
+
 ### POST /devices
 
 **Request**
@@ -1068,6 +1118,16 @@ Devices are GOTG mobile clients, IoT sensors, cameras, or other Pond instances.
 ### POST /devices/{id}/heartbeat
 
 Updates `last_seen` and marks device online.
+
+`is_online` is not stored as a fact the registry is told. It is derived when read, from `last_seen` against `ONLINE_THRESHOLD_SECS` (300s, `crates/pond-infra/src/sqlite_device_registry.rs`). **A device that registered itself through the handshake has to keep calling this, or it ages out and reads offline while in use.** The handshake's upsert is the only other write to its row.
+
+| Caller | Cadence | Where |
+|---|---|---|
+| The desktop app, for its own row | every 120s while it has a session (`SELF_HEARTBEAT_MS`) | `pond-desktop/src/state/AppContext.tsx`, via `heartbeatSelf()` |
+| Goose On The Go, for its own row | every 120s while in the foreground | the phone app's `ServerProvider` |
+| The Matter bridge | as it syncs each device | `crates/pond-adapters-matter/src/bridge.rs` |
+
+`{id}` must be the id the device registered under. For a client that paired, that is the `client_id` it sent at `/handshake/init`. A beat against any other id succeeds and refreshes nothing. The desktop therefore beats through its own `clientId()` rather than taking an id as an argument.
 
 **Response 200**
 ```json

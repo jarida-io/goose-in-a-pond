@@ -1,16 +1,12 @@
 import { test, expect } from "@playwright/test";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
+import { navigateTo } from "./helpers/nav";
 
 // ── Helpers ───────────────────────────────────────────────────
 
+// Schedules lives behind the drawer's "Manage" group now; navigateTo expands it.
 async function goToSchedules(page: import("@playwright/test").Page) {
-  // Find the Schedules nav item (may be collapsed → title attr, or expanded → text)
-  const schedBtn = page
-    .getByRole("button")
-    .filter({ hasText: /schedules?/i })
-    .or(page.locator('[title="Schedules"]'))
-    .first();
-  await schedBtn.click();
+  await navigateTo(page, "Schedules");
 }
 
 // ── Tests ─────────────────────────────────────────────────────

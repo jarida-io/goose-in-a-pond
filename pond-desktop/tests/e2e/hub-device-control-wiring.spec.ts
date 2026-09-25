@@ -13,7 +13,7 @@ async function openHubHome(page: import("@playwright/test").Page) {
   });
   await page.goto("/");
   await expect(page.locator(".ghub")).toBeVisible({ timeout: 10_000 });
-  await expect(page.locator(".dtile").first()).toBeVisible({ timeout: 8_000 });
+  await expect(page.locator('[data-hook="home-controls"] .hcc__tile').first()).toBeVisible({ timeout: 8_000 });
 }
 
 test("device tile click fires POST /tools/invoke with the device-control tool", async ({ page }) => {
@@ -23,8 +23,8 @@ test("device tile click fires POST /tools/invoke with the device-control tool", 
     (r) => r.url().includes("/api/v1/tools/invoke") && r.method() === "POST",
   );
 
-  const tile = page.locator(".dtile").first();
-  await tile.click({ position: { x: 60, y: 80 } });
+  const tile = page.locator('[data-hook="home-controls"] .hcc__tile').first();
+  await tile.click();
 
   const req = await invokePromise;
   const body = req.postDataJSON() as {
@@ -39,12 +39,21 @@ test("device tile click fires POST /tools/invoke with the device-control tool", 
   expect(body.args.power).toBe(true);
 
   // Optimistic UI: the mocked success keeps it On (no revert).
-  await expect(tile.locator(".dtile__status")).toContainText("On", { timeout: 5000 });
+  await expect(tile.locator(".hcc__value")).toContainText("On", { timeout: 5000 });
 });
 
-test("optimistic state reverts when the backend call fails", async ({ page }) => {
+/**
+ * There is no optimistic state left to revert, which is the point.
+ *
+ * The old tile wrote "On" locally and rolled back on a 500, so a backend that
+ * was down still produced a tile confidently reporting a switch position. The
+ * card asks instead, and a device that did not answer says so: "Not reporting",
+ * and a tap that opens the control sheet rather than a switch whose direction
+ * nobody knows.
+ */
+test("a device that cannot be read says so rather than claiming a state", async ({ page }) => {
   await mockAllApiRoutes(page);
-  // Override the invoke route to fail.
+  // Override the invoke route to fail — both the read and the write.
   await page.route("**/api/v1/tools/invoke", (route) =>
     route.fulfill({ status: 500, json: { error: "device offline" } }),
   );
@@ -54,12 +63,9 @@ test("optimistic state reverts when the backend call fails", async ({ page }) =>
     localStorage.setItem("goosehub_route", "home");
   });
   await page.goto("/");
-  await expect(page.locator(".dtile").first()).toBeVisible({ timeout: 10_000 });
 
-  const tile = page.locator(".dtile").first();
-  await expect(tile.locator(".dtile__status")).toHaveText("Off", { timeout: 5000 });
-  await tile.click({ position: { x: 60, y: 80 } });
-
-  // Optimistic flips to On, then reverts to Off after the 500 response.
-  await expect(tile.locator(".dtile__status")).toHaveText("Off", { timeout: 5000 });
+  const tile = page.locator('[data-hook="home-controls"] .hcc__tile').first();
+  await expect(tile).toBeVisible({ timeout: 10_000 });
+  await expect(tile.locator(".hcc__value")).toHaveText("Not reporting", { timeout: 5000 });
+  await expect(tile).toHaveAttribute("aria-label", /not reporting/);
 });

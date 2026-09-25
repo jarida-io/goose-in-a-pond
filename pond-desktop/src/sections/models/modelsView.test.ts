@@ -243,6 +243,13 @@ describe("what the file says about itself", () => {
     expect(modelFacts({})).toEqual([]);
     expect(modelFacts({ quantization: undefined, context_length: 0 })).toEqual([]);
   });
+
+  it("adds Reads pictures only when the server said exactly true", () => {
+    expect(modelFacts({ quantization: "Q4_K_M", reads_images: true }))
+      .toEqual(["Q4_K_M", "Reads pictures"]);
+    expect(modelFacts({ reads_images: false })).toEqual([]);
+    expect(modelFacts({ reads_images: undefined })).toEqual([]);
+  });
 });
 
 describe("what can still be added", () => {

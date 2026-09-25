@@ -99,6 +99,9 @@ async fn make_memory_app() -> (axum::Router, Arc<MockMemoryRepository>, tempfile
 
     let state = Arc::new(AppState {
         warmup: Default::default(),
+        suggestion_queue: std::sync::Arc::new(
+            pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
+        ),
         db: Arc::new(db),
         onboarding_repo: Arc::new(CompletedOnboarding),
         handshake: Arc::new(mock_hs),
@@ -119,6 +122,7 @@ async fn make_memory_app() -> (axum::Router, Arc<MockMemoryRepository>, tempfile
         embedding_provider: None,
         vector_index: None,
         index_reindex: None,
+        lane: None,
         account_sync: None,
         sensor_storage: Arc::new(MockSensorStorage::new()),
         camera_storage: Arc::new(MockCameraStorage::new()),
@@ -155,8 +159,7 @@ async fn make_memory_app() -> (axum::Router, Arc<MockMemoryRepository>, tempfile
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         answer_reviewer: None,
-        memory_extractor: None,
-        memory_extraction_service: None,
+        extraction_status: None,
         last_user_activity: Arc::new(tokio::sync::RwLock::new(std::time::Instant::now())),
         consolidation_cancel: Arc::new(tokio::sync::RwLock::new(None)),
         consolidation_event_tx: tokio::sync::broadcast::channel(16).0,

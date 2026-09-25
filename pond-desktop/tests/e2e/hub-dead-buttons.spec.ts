@@ -1,11 +1,33 @@
 import { test } from "@playwright/test";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
+import { navigateTo } from "./helpers/nav";
 
 interface ButtonInfo {
   view: string;
   text: string;
   effect: string; // 'route-change' | 'dom-change' | 'console' | 'no-op' | 'error'
 }
+
+/**
+ * The five views the icon rail used to list, and the drawer row that reaches
+ * each one now.
+ *
+ * Two changed name rather than moving: the rail's "Goose" is the drawer's
+ * "Chat" under Pond, and the rail's "Routines" is the "Schedules" chip under
+ * Manage, which the hub renders as its routines route.
+ *
+ * Canvas has no drawer row at all -- it is a hidden section, reached in the hub
+ * from a notification's "View on Canvas" -- so it is taken by its persisted
+ * route instead. That is done here rather than in helpers/nav.ts because it is
+ * not navigation through the drawer and does not belong in a shared helper.
+ */
+const VIEWS: Array<{ view: string; drawer: string | null }> = [
+  { view: "Home",     drawer: "Home" },
+  { view: "Goose",    drawer: "Chat" },
+  { view: "Routines", drawer: "Schedules" },
+  { view: "Settings", drawer: "Settings" },
+  { view: "Canvas",   drawer: null },
+];
 
 test.setTimeout(180_000);
 test("Hub dead-button audit", async ({ page }) => {
@@ -19,11 +41,21 @@ test("Hub dead-button audit", async ({ page }) => {
   await page.goto("/");
   await page.waitForSelector(".ghub", { timeout: 10_000 });
 
-  const VIEWS = ["Home", "Goose", "Canvas", "Routines", "Settings"];
   const inventory: Array<{ view: string; text: string; hasOnClick: boolean; cls: string }> = [];
 
-  for (const viewName of VIEWS) {
-    await page.getByRole("button", { name: viewName, exact: true }).first().click();
+  for (const { view: viewName, drawer } of VIEWS) {
+    if (drawer) {
+      await navigateTo(page, drawer);
+    } else {
+      // Canvas. A second init script wins over the first, so this re-opens the
+      // app on the canvas route rather than on home. Canvas is last in VIEWS
+      // for that reason: it is the only step that reloads.
+      await page.addInitScript(() => {
+        localStorage.setItem("goosehub_route", "canvas");
+      });
+      await page.goto("/");
+      await page.waitForSelector(".ghub", { timeout: 10_000 });
+    }
     await page.waitForTimeout(300);
 
     const buttons = await page.evaluate(() => {

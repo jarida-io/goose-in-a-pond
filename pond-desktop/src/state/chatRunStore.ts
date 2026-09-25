@@ -34,6 +34,7 @@ import type {
 import { filterThinking } from "../lib/thinkFilter";
 import { applySubagentProgress } from "../components/SubagentTree";
 import type { SubagentRun } from "../components/SubagentTree";
+import { ApiError } from "../api/types";
 import type {
   ChatEvent,
   ContextWarning,
@@ -41,6 +42,7 @@ import type {
   SessionMessage,
   TurnStats,
 } from "../api/types";
+import type { PreparedImage } from "../lib/imageAttach";
 
 // ── The message model ─────────────────────────────────────────────────────────
 
@@ -73,8 +75,11 @@ export interface Message {
    *  frames. Rendered WHILE streaming, unlike every other note here: a tree
    *  nobody sees until the turn ends is the spinner it replaces. */
   delegations?: SubagentRun[];
-  /** Image preview URLs — either a live send's local previewUrl, or a
-   *  built `${apiBase}${url}` for images replayed from session history. */
+  /** Object URLs for the bubble's images, every one of them this store's to
+   *  revoke: a live send's composer previews, or the ones `loadHistoryImages`
+   *  makes from attachment bytes when history is replayed. Never the
+   *  attachment URL itself — that route needs the bearer token, and an
+   *  `<img src>` cannot send it. */
   images?: string[];
   /** The persisted session_messages.id this bubble corresponds to. Absent
    *  for a just-sent live turn until the "done" event backfills it (see
@@ -102,13 +107,28 @@ function friendlyToolStatus(rawName: string): string {
   return `Working on: ${bare.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}…`;
 }
 
-function sessionMessagesToMessages(raw: SessionMessage[]): Message[] {
+/**
+ * A replayed bubble's images, still on the server.
+ *
+ * Kept beside the transcript rather than on the bubble: until the bytes arrive
+ * there is nothing a surface can render, and a bubble carrying the attachment
+ * URL instead is exactly what both surfaces used to put in `<img src>`.
+ */
+interface HistoryImages {
+  /** The bubble, by local id. One that is gone when the bytes land gets none. */
+  messageId: number;
+  sessionId: string;
+  attachmentIds: string[];
+}
+
+function sessionMessagesToMessages(raw: readonly SessionMessage[]): {
+  messages: Message[];
+  images: HistoryImages[];
+} {
   const out: Message[] = [];
+  const pending: HistoryImages[] = [];
   for (const m of raw) {
     if (m.role === "tool") continue;
-    const images = m.images?.length
-      ? m.images.map((img) => api.sessionAttachmentUrl(m.session_id, img.id))
-      : undefined;
     if (m.role === "assistant") {
       const hasContent = m.content.trim().length > 0;
       const hasToolCalls = (m.tool_calls?.length ?? 0) > 0;
@@ -130,7 +150,6 @@ function sessionMessagesToMessages(raw: SessionMessage[]): Message[] {
         role: "agent",
         text: m.content,
         historyToolNames,
-        images,
         thinkingBlocks,
         // The persisted id and the vote ride the SAME row as the reasoning.
         // Pushing them as a second entry renders every assistant turn twice on
@@ -145,12 +164,62 @@ function sessionMessagesToMessages(raw: SessionMessage[]): Message[] {
         id: ++_msgId,
         role: "user",
         text: m.content,
-        images,
         backendId: m.id,
       });
     }
+    // Against the bubble just pushed, so the bytes can find it by id.
+    if (m.images?.length)
+      pending.push({
+        messageId: out[out.length - 1].id,
+        sessionId: m.session_id,
+        attachmentIds: m.images.map((img) => img.id),
+      });
   }
-  return out;
+  return { messages: out, images: pending };
+}
+
+/**
+ * Fetch the images a replayed transcript refers to, and give each bubble
+ * object URLs it can display.
+ *
+ * Not the attachment URL itself: that route is protected, `<img src>` cannot
+ * send the bearer token, and so every history image was a 401 on any pond
+ * without the loopback dev bypass. The bytes come through `PondApiClient`,
+ * which carries the token, and the URLs join `ownedPreviews`, under the same
+ * rule as a live send's composer previews.
+ *
+ * An image that cannot be fetched is left out and said so on the console; the
+ * rest of its bubble still loads.
+ */
+async function loadHistoryImages(
+  pending: readonly HistoryImages[],
+): Promise<void> {
+  await Promise.all(
+    pending.map(async ({ messageId, sessionId, attachmentIds }) => {
+      const settled = await Promise.allSettled(
+        // `async`, so a synchronous throw is settled like any other failure.
+        attachmentIds.map(async (id) =>
+          api.getSessionAttachment(sessionId, id),
+        ),
+      );
+      const blobs: Blob[] = [];
+      for (const r of settled) {
+        if (r.status === "fulfilled") blobs.push(r.value);
+        else console.warn("Could not load a history image (non-fatal):", r.reason);
+      }
+      if (blobs.length === 0) return;
+      // Made HERE, after the wait, and only for a bubble still on screen. A URL
+      // made earlier would strand whenever the conversation is left while its
+      // bytes are in flight: no surviving message would show it, so
+      // `revokeOwnedPreviews` would never be asked about it.
+      if (!state.messages.some((m) => m.id === messageId)) return;
+      const urls = blobs.map((b) => URL.createObjectURL(b));
+      for (const url of urls) state.ownedPreviews.add(url);
+      mutate((prev) =>
+        prev.map((m) => (m.id === messageId ? { ...m, images: urls } : m)),
+      );
+    }),
+  );
 }
 
 // ── What a subscriber sees ────────────────────────────────────────────────────
@@ -167,6 +236,23 @@ export interface ChatRunSnapshot {
   readonly sessionId: string | undefined;
   /** Monotonic. Anything that must happen once per finished turn keys on it. */
   readonly completedTurns: number;
+  /** A turn the server refused before persisting anything (409/415/... --
+   *  any status but 408, which a network hiccup can also produce and which
+   *  therefore does NOT mean "nothing was saved"). A composer watches this to
+   *  put the draft back in the box; `takeRefusedDraft` is how it consumes it. */
+  readonly refusedDraft: RefusedDraft | null;
+}
+
+/** What a refused turn hands back to whichever composer sent it. */
+export interface RefusedDraft {
+  text: string;
+  attachments: PreparedImage[];
+  /** The server's `error` field -- the state sentence, e.g. "Picture support
+   *  is not ready yet." A composer appends its own client-side clause. */
+  message: string;
+  /** The server's `code`, e.g. "vision_not_ready" -- absent for a plain
+   *  ApiError that carried no structured body. */
+  code?: string;
 }
 
 /**
@@ -212,6 +298,10 @@ interface InternalState {
   /** How far this client has read. What a reattach resumes from. */
   lastSeq: number;
   bridge: ChatRunBridge | null;
+  /** See `RefusedDraft` -- set by `runTurn`'s catch, consumed and cleared by
+   *  `takeRefusedDraft`. Never both this and a bubble on screen for the same
+   *  turn: the refusal path removes the bubbles it just added. */
+  refusedDraft: RefusedDraft | null;
   snapshot: ChatRunSnapshot;
   subs: Set<Subscriber>;
 }
@@ -232,6 +322,7 @@ const state: InternalState = {
   epoch: null,
   lastSeq: 0,
   bridge: null,
+  refusedDraft: null,
   snapshot: {
     messages: [],
     busy: false,
@@ -240,6 +331,7 @@ const state: InternalState = {
     loadingSession: false,
     sessionId: undefined,
     completedTurns: 0,
+    refusedDraft: null,
   },
   subs: new Set(),
 };
@@ -260,6 +352,7 @@ function commit(): void {
     loadingSession: state.loadingSession,
     sessionId: state.sessionId,
     completedTurns: state.completedTurns,
+    refusedDraft: state.refusedDraft,
   };
   state.subs.forEach((f) => f());
 }
@@ -352,11 +445,14 @@ export function setChatRunBridge(bridge: ChatRunBridge): () => void {
 // ── Object URLs ───────────────────────────────────────────────────────────────
 
 /**
- * Revoke previews this store created that no surviving message still shows.
+ * Revoke object URLs this store created that no surviving message still shows.
  *
- * Never touches a URL from `api.sessionAttachmentUrl`: history images are
- * ordinary http URLs, and revoking one is a no-op that would still be a lie
- * about who owns what.
+ * Two kinds, one rule: the composer previews a live send hands over, and the
+ * URLs `loadHistoryImages` makes from attachment bytes on a replay. History
+ * images used to be bare attachment URLs that this store did not make and so
+ * never revoked; they are object URLs now because the bare URL cannot carry
+ * the bearer token. Anything in `images` that is not in `ownedPreviews` was
+ * put there by someone else, and is still not this store's to free.
  */
 function revokeOwnedPreviews(surviving: readonly Message[]): void {
   if (state.ownedPreviews.size === 0) return;
@@ -378,6 +474,26 @@ export interface SendTurn {
   /** Composer preview object URLs. The store takes ownership of revoking them:
    *  the bubble outlives the tray now, so the tray must not. */
   previewUrls?: string[];
+  /**
+   * The composer's own prepared images, kept verbatim. When present this is
+   * the source of truth -- `images` and `previewUrls` are DERIVED from it and
+   * any values passed alongside it are ignored -- because a refused turn has
+   * to hand the composer back something it can re-render as a tray again
+   * (width/height/byteSize), not just the wire pair and a bare preview URL.
+   */
+  attachments?: PreparedImage[];
+}
+
+/** Take the pending refused-turn draft, if any, and clear it. A composer
+ *  calls this from an effect on `run.refusedDraft` so StrictMode's double
+ *  effect (or two mounted composers) cannot both restore the same draft. */
+export function takeRefusedDraft(): RefusedDraft | null {
+  const draft = state.refusedDraft;
+  if (draft) {
+    state.refusedDraft = null;
+    commit();
+  }
+  return draft;
 }
 
 /**
@@ -678,7 +794,14 @@ async function consume(
 
 async function runTurn(turn: SendTurn): Promise<void> {
   const text = turn.text.trim();
-  const images = turn.images ?? [];
+  // `attachments`, when given, is the source of truth -- see SendTurn's doc.
+  const attachments = turn.attachments ?? [];
+  const images: ImageAttachment[] = turn.attachments
+    ? attachments.map((a) => ({ data: a.data, mime_type: a.mime_type }))
+    : (turn.images ?? []);
+  const previewUrls: string[] = turn.attachments
+    ? attachments.map((a) => a.previewUrl)
+    : (turn.previewUrls ?? []);
   if (!text && images.length === 0) return;
 
   // Claimed synchronously, before the first await, so two sends in one tick
@@ -694,13 +817,13 @@ async function runTurn(turn: SendTurn): Promise<void> {
   state.epoch = null;
   state.lastSeq = 0;
 
-  for (const url of turn.previewUrls ?? []) state.ownedPreviews.add(url);
+  for (const url of previewUrls) state.ownedPreviews.add(url);
 
   const userMsg: Message = {
     id: ++_msgId,
     role: "user",
     text,
-    images: turn.previewUrls?.length ? turn.previewUrls : undefined,
+    images: previewUrls.length ? previewUrls : undefined,
   };
   const agentMsg: Message = {
     id: ++_msgId,
@@ -716,6 +839,10 @@ async function runTurn(turn: SendTurn): Promise<void> {
     userMsgId: userMsg.id,
     agentMsgId: agentMsg.id,
   };
+
+  // Set only on a refusal (see below), so `finally` can skip the completed-
+  // turn bookkeeping for a turn that never actually ran.
+  let refused = false;
 
   try {
     const token = state.bridge?.sessionToken ?? null;
@@ -736,15 +863,34 @@ async function runTurn(turn: SendTurn): Promise<void> {
     );
   } catch (e) {
     if (stale()) return;
-    // Loud on the console as well as in the bubble: with no surface mounted the
-    // bubble is the only record, and it is not read until someone comes back.
-    console.warn("Chat turn failed:", e);
-    patchLastAgent((last) => ({
-      ...last,
-      text: `Error: ${String(e)}`,
-      streaming: false,
-      error: true,
-    }));
+    // A status the server actually returned before the first frame --
+    // 400/409/413/415/503 and the rest, but never 408, which a client-side
+    // timeout also produces and which therefore does NOT mean the server
+    // refused the turn (it may still be running it). Every real refusal
+    // happens before persist_user_message, so nothing was saved: the turn
+    // goes back to the composer as a draft rather than sitting on screen as
+    // an error bubble nobody can act on.
+    if (e instanceof ApiError && e.status !== 408) {
+      refused = true;
+      mutate((prev) =>
+        prev.filter((m) => m.id !== userMsg.id && m.id !== agentMsg.id),
+      );
+      // Handed back, not revoked -- the composer's tray needs these previews
+      // to render again.
+      for (const url of previewUrls) state.ownedPreviews.delete(url);
+      state.refusedDraft = { text, attachments, message: e.message, code: e.code };
+    } else {
+      // Loud on the console as well as in the bubble: with no surface
+      // mounted the bubble is the only record, and it is not read until
+      // someone comes back.
+      console.warn("Chat turn failed:", e);
+      patchLastAgent((last) => ({
+        ...last,
+        text: `Error: ${String(e)}`,
+        streaming: false,
+        error: true,
+      }));
+    }
   } finally {
     if (!stale()) {
       mutate((prev) => {
@@ -753,7 +899,7 @@ async function runTurn(turn: SendTurn): Promise<void> {
         return [...prev.slice(0, -1), { ...last, streaming: false }];
       });
       state.busy = false;
-      state.completedTurns += 1;
+      if (!refused) state.completedTurns += 1;
       commit();
       // A microtask, so a run that rejects before its first await cannot
       // recurse straight back into itself on this stack.
@@ -998,6 +1144,16 @@ function replaceMessages(next: Message[]): void {
   commit();
 }
 
+/** Lay down a persisted transcript, then fetch the images it refers to. */
+function replayHistory(raw: readonly SessionMessage[]): void {
+  const { messages, images } = sessionMessagesToMessages(raw);
+  replaceMessages(messages);
+  // Not awaited: the text shows now, and a slow image must not hold it back.
+  void loadHistoryImages(images).catch((e) =>
+    console.warn("Could not show history images (non-fatal):", e),
+  );
+}
+
 /**
  * Open one conversation, replaying its persisted history.
  *
@@ -1024,7 +1180,7 @@ export async function openSession(
   try {
     const msgs = await api.getSessionMessages(sessionId);
     if (state.sessionId !== sessionId) return;
-    replaceMessages(sessionMessagesToMessages(msgs ?? []));
+    replayHistory(msgs ?? []);
   } catch (err) {
     console.warn("Could not open conversation (non-fatal):", err);
   } finally {
@@ -1049,7 +1205,7 @@ export async function followExternalSession(sessionId: string): Promise<void> {
   try {
     const msgs = await api.getSessionMessages(sessionId);
     if (state.sessionId !== sessionId) return;
-    replaceMessages(sessionMessagesToMessages(msgs ?? []));
+    replayHistory(msgs ?? []);
   } catch (err) {
     console.warn("Could not load session history (non-fatal):", err);
   }
@@ -1111,6 +1267,7 @@ export function __resetChatRunForTests(): void {
   state.lastSeq = 0;
   forgetRun();
   state.bridge = null;
+  state.refusedDraft = null;
   state.subs.clear();
   commit();
 }

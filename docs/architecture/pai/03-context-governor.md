@@ -453,6 +453,24 @@ Once occupancy is measured rather than estimated, `ContextHealth.should_compact`
   recorded is now bounded: `inferCapabilities` still supplies the thinking/vision/audio badges and
   still disagrees with `from_model_name` on those, but the context-window badge no longer comes from
   it whenever the catalog has an answer.
+- **2026-09-24 -- the Orin window's arithmetic moved into pond-core, and picture support joined it.**
+  `context_size_for_budget`, `kv_cost_from_header` and the budget constants now live in
+  `pond-core`'s `models/domain/device_budget.rs`; `pond-adapters-local-inference` calls them through
+  `device_window(resolved_gguf, model)`, and `scheduler.rs` re-exports the constants under their old
+  names. They moved, rather than being copied, because the goose adapter now asks the same question
+  (does picture support fit beside this model?) and a second copy would have answered it with
+  different inputs: the header slope was private to the adapter that sizes the window, so the goose
+  side would have used the 56 KiB fallback where the sizing used E2B's 18. Three inputs changed on
+  purpose. The weights come from the RESOLVED file, never a registry row by name. The drafter is
+  charged at its catalogue size whenever the model has one, file present or not, so the window never
+  depends on a download. And an encoder term exists (`ENCODER_COMPUTE_MB` = 256, **UNMEASURED**, and
+  only an Orin measurement may move it) that is zero on the Orin, because a model declares picture
+  support on a budgeted device only when its encoder fits without costing the window anything AND
+  the encoder is on `DEVICE_MEASURED_VISION`, which ships empty. Pinned behaviour-identical for the
+  five shipped Orin files (E4B-qat plus its drafter still 16,384). **The pai-bench PAI-3 re-run on
+  the Orin after the move is owed.** The drafter charge stays although speculative decoding left the
+  engine the same day: it is what the board was measured with, and E4B IQ4_XS gets its 2,048 tokens
+  back only in a change that runs on the board.
 
 ---
 

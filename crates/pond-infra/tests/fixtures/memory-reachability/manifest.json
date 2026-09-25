@@ -1,0 +1,13 @@
+{
+  "corpus_now": "2026-09-15T09:00:00Z",
+  "subject": "the user",
+  "assistant": "Goose",
+  "note": "A synthetic household history for the memory-reachability harness. The replies are written in the schema the CURRENT per-turn extraction prompt asks for, so the corpus can be replayed against the extractor that is being replaced and produce a baseline the batch engine is judged against. Dates are planted deliberately: a date gate that only ever sees date-free fixtures cannot fail. Turns t25-t29 deliberately restate facts an earlier turn already produced: without them the Same and Related bands the batch engine deduplicates and reinforces on are empty, and a histogram with one populated bucket calibrates nothing. Turns t30-t34 carry the date classes the stripper could not see -- ISO and slash dates, spelled days of the month, spelled clock hours, decades, counted stretches of time -- because the first zero for date_leak_rate was measured over fixtures that contained none of them, and a gate that cannot fail is not a gate. They are dated across the existing history rather than piled at the end of it, so that adding them does not dominate the recency term and move recall for a reason that has nothing to do with dates. Turns t35-t38 were added when the stripper stopped conflating a RECURRENCE with a CALENDAR DATE, and they are planted in BOTH directions. t35 and t36 are what the gate must not touch: a weekday marked by \"each\", one marked by \"every\", birth order, a blood pressure, a version string. Every one of them was being rewritten into a sentence that is not one, and a date_leak_rate of zero is purchasable by exactly that -- destroy every weekday and nothing leaks, while the engine has thrown away the habits it exists to find. t37 and t38 are what it must take: a clock time written as one token, a day-month-year where only the month is a word, and a numbered day of the month with the unit it repeats on. The last of those is the line: a NAMED unit that repeats is a habit, a NUMBERED day is the thing a reminder is set for.",
+  "sessions": {
+    "s1": "Nairobi, family and the move",
+    "s2": "Jarida work",
+    "s3": "the greenhouse",
+    "s4": "kitchen and food",
+    "s5": "the pond itself"
+  }
+}

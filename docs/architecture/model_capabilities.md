@@ -135,13 +135,20 @@ Defaults are conservative. Adapters override.
 
 Two `GooseAdapter` behaviours matter more than the table suggests.
 
-**`vision` does not come from the name on the in-process engine.**
-`GooseAdapter::model_supports_vision` asks the local model registry whether the GGUF declares an
-mmproj, because that is the same thing the engine gates its multimodal path on. HTTP providers have
-no registry to ask and fall back to `name_implies_vision`. It reports what is **declared**, not
-what is downloaded: the encoder is ~941 MB and lands in the background, and a flag that flipped
+**`vision` does not come from the name alone on the in-process engine.**
+`GooseAdapter::model_supports_vision` asks pond-core's device-aware declaration
+(`device_budget::vision_declaration`): does the model have a pinned encoder
+(`vision_encoder::encoder_for`, keyed by family AND qat-ness, because qat and non-qat Gemma 4
+encoders are different files of identical size), and, on a budgeted device such as the Orin, does
+that encoder fit without costing the window anything and has it been measured there
+(`DEVICE_MEASURED_VISION`, empty as of 2026-09-24, so the Orin declares no vision). HTTP providers
+fall back to `name_implies_vision`; `mesh` and `mistralrs` declare none, because the mesh wire is
+text-only and a mistral.rs server has never been checked with a picture, and both would drop a
+photo silently while the prompt said the model could see. It reports what is **declared**, not what
+is downloaded: the encoder is ~941 MB and lands in the background, and a flag that flipped
 mid-session would move the `<vision>` prompt section, which sits inside the KV-cached static
-prefix.
+prefix. Whether the bytes are there, verified and ready is a separate question with its own answer,
+`GET /api/v1/models/vision-status` (below), which never feeds the prompt.
 
 **The cache is stale on turn one, and that stale read once cost 3.7 s per session.** The cache is
 refreshed only inside the swap branch, which runs *later* in the same turn that builds the prompt,
@@ -214,8 +221,14 @@ Replacing that with a continuous function is PAI-3 P4.
 - `GooseAdapter` attaches images via `Message::with_image()` when vision is true.
 - The `<vision>` system-prompt section is appended to the **template**, before Tera runs, so it
   lands inside `static_prefix` and `prefix_hash` covers it.
-- The frontend shows the image upload button only when `capabilities.vision` is true (`Chat.tsx`,
-  `ChatHub.tsx`).
+- Readiness is `GET /api/v1/models/vision-status`: `{model, state, size_bytes, message}`, where
+  `state` is pond-core's `EncoderState` tagged by `kind` (`unknown`, `not_declared`,
+  `not_on_this_device`, `absent`, `verifying`, `downloading`, `ready`, `failed`, `blocked`) and
+  `message` is the household sentence for it. Both chat shells poll it (`useVisionStatus`) and gate
+  sending pictures on it, and the chat routes refuse a picture turn that is not ready with 409
+  `vision_not_ready` / `vision_unsupported` before anything is saved.
+- The paperclip is never disabled for vision reasons; it is muted, and a tap or a paste shows the
+  reason. `capabilities.vision` is only the fallback when vision-status cannot be read.
 
 ### Tool calling (`tool_calling: true`)
 
@@ -255,7 +268,9 @@ has 4K?" -- the question PAI-3 introduced the enum for.
   real `GET /models/capabilities` response. The banner has no "Model features" label; the badges
   sit inline under the role chips. The two badge lists also use different context thresholds --
   the per-model list shows the ctx badge above 8192, the banner above 4096.
-- **Chat (`Chat.tsx`, `ChatHub.tsx`)** -- image upload gated on `caps.vision`.
+- **Chat (`Chat.tsx`, `ChatHub.tsx`)** -- sending pictures gated on `GET /models/vision-status`
+  (falling back to `caps.vision` when it cannot be read), with an `ImageSupportStatus` line for the
+  states in between. Model rows carry a server-computed `reads_images` rather than a name rule.
 - **Settings (`Settings.tsx`)** -- Thinking mode selector (`auto` / `on` / `off`).
 
 ### `inferCapabilities` has drifted from `from_model_name`, in both directions

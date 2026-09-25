@@ -50,6 +50,24 @@ pub const SUPPORTED_IMAGE_MIME_TYPES: &[&str] = &[
     "image/bmp",
 ];
 
+/// MIME types the ENGINE can decode, a strict subset of [`SUPPORTED_IMAGE_MIME_TYPES`].
+///
+/// mtmd decodes with `stb_image` alone (`mtmd-helper.cpp`), and the vendored `stb_image.h` has
+/// no WebP decoder; the video fallthrough that might have caught it is behind `MTMD_VIDEO`,
+/// which the build never defines. So WebP is accepted at the API and must be re-encoded to one
+/// of these before it reaches the engine: sent as-is it fails deep inside the turn as "Failed to
+/// decode image", and because the picture then stays the newest in history, every later turn
+/// in the conversation fails the same way.
+pub const ENGINE_DECODABLE_IMAGE_TYPES: &[&str] =
+    &["image/jpeg", "image/png", "image/gif", "image/bmp"];
+
+/// Whether the engine can decode `mime_type` as sent, parameters and case ignored.
+pub fn is_engine_decodable(mime_type: &str) -> bool {
+    let mime = mime_type.trim().to_ascii_lowercase();
+    let base = mime.split(';').next().unwrap_or("").trim();
+    ENGINE_DECODABLE_IMAGE_TYPES.contains(&base)
+}
+
 /// Why a turn's image attachments were rejected.
 ///
 /// Deliberately carries the offending numbers so the HTTP layer can render an
@@ -358,5 +376,23 @@ mod tests {
         assert_eq!(extension_for_mime("image/bmp"), "bmp");
         assert_eq!(extension_for_mime("image/jpeg"), "jpg");
         assert_eq!(extension_for_mime("IMAGE/PNG; q=1"), "png");
+    }
+
+    /// What the engine decodes is a subset of what the API accepts, and WebP is the gap the API
+    /// has to close by re-encoding.
+    #[test]
+    fn the_engine_decodes_everything_accepted_except_webp() {
+        for m in ENGINE_DECODABLE_IMAGE_TYPES {
+            assert!(SUPPORTED_IMAGE_MIME_TYPES.contains(m), "{m}");
+        }
+        let gap: Vec<&str> = SUPPORTED_IMAGE_MIME_TYPES
+            .iter()
+            .copied()
+            .filter(|m| !ENGINE_DECODABLE_IMAGE_TYPES.contains(m))
+            .collect();
+        assert_eq!(gap, ["image/webp"]);
+        assert!(is_engine_decodable("IMAGE/JPEG; charset=binary"));
+        assert!(!is_engine_decodable("image/webp"));
+        assert!(!is_engine_decodable("image/heic"));
     }
 }

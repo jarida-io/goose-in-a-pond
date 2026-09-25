@@ -25,6 +25,35 @@ export const MAX_IMAGE_EDGE_PX = 1024;
 
 export type SupportedImageMimeType = (typeof SUPPORTED_IMAGE_MIME_TYPES)[number];
 
+/**
+ * MIME types the on-device vision encoder can actually decode — it uses
+ * stb_image, which has no WebP support at all (mirrors pond-core's
+ * `ENGINE_DECODABLE_IMAGE_TYPES`). WebP is still accepted at attach time (see
+ * `SUPPORTED_IMAGE_MIME_TYPES`), but it is always re-encoded below, whatever
+ * its size — the "keep the original bytes" fast path is for formats the
+ * engine can actually read.
+ */
+export const ENGINE_DECODABLE_MIME = [
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/bmp",
+] as const;
+
+/**
+ * Which format a re-encode should target, given whether the decoded pixels
+ * carry transparency. Pure, so it is unit-testable without a canvas — `mime`
+ * is carried for a caller that wants to log or branch on the source format,
+ * but the target format itself depends only on alpha: JPEG has no alpha
+ * channel, so anything with one becomes PNG.
+ */
+export function reencodeTarget(
+  _mime: string,
+  hasAlpha: boolean,
+): "image/png" | "image/jpeg" {
+  return hasAlpha ? "image/png" : "image/jpeg";
+}
+
 export interface PreparedImage {
   /** Raw base64 (no `data:...;base64,` prefix) — matches the wire ImageAttachment shape. */
   data: string;
@@ -88,12 +117,34 @@ function decodeImageElement(objectUrl: string): Promise<HTMLImageElement> {
   });
 }
 
-/** Draw `img` onto an offscreen canvas, downscaled so the longest edge is at most `maxEdge`. */
-function downscaleToJpeg(
+/** Whether any sampled pixel is not fully opaque. Called on a canvas already
+ *  downscaled to at most `MAX_IMAGE_EDGE_PX` per edge, so this is always a
+ *  read of at most 1024x1024 pixels. */
+function canvasHasAlpha(ctx: CanvasRenderingContext2D, width: number, height: number): boolean {
+  const { data } = ctx.getImageData(0, 0, width, height);
+  for (let i = 3; i < data.length; i += 4) {
+    if (data[i] !== 255) return true;
+  }
+  return false;
+}
+
+/**
+ * Draw `img` onto an offscreen canvas, downscaled so the longest edge is at
+ * most `maxEdge`, and encode it as PNG (alpha present) or JPEG (opaque), per
+ * `reencodeTarget`. A PNG that comes out over `MAX_IMAGE_BYTES` falls back to
+ * JPEG — better a photo with its alpha flattened than one the size cap
+ * refuses outright.
+ *
+ * JPEG has no alpha channel, so a transparent source needs a white background
+ * filled BEFORE the draw: an unfilled canvas defaults to transparent BLACK,
+ * which is what made a large transparent PNG render with a black backing.
+ */
+function downscaleAndEncode(
   img: HTMLImageElement,
+  mime: string,
   maxEdge: number,
   quality: number,
-): { dataUrl: string; width: number; height: number } {
+): { dataUrl: string; width: number; height: number; mime: "image/png" | "image/jpeg" } {
   const w = img.naturalWidth;
   const h = img.naturalHeight;
   const scale = Math.min(1, maxEdge / Math.max(w, h));
@@ -110,7 +161,27 @@ function downscaleToJpeg(
   // intentionally flattens an animated GIF to a single still frame — there
   // is no meaningful "motion" to preserve within one vision-model turn.
   ctx.drawImage(img, 0, 0, width, height);
-  return { dataUrl: canvas.toDataURL("image/jpeg", quality), width, height };
+
+  const target = reencodeTarget(mime, canvasHasAlpha(ctx, width, height));
+  if (target === "image/png") {
+    const dataUrl = canvas.toDataURL("image/png");
+    if (decodedBase64Length(parseDataUrl(dataUrl).data) <= MAX_IMAGE_BYTES) {
+      return { dataUrl, width, height, mime: "image/png" };
+    }
+    // Too large as PNG — fall through to the JPEG branch below.
+  }
+
+  // Re-drawn on a FRESH canvas rather than filling the one above: filling
+  // white after drawing would paint over the image's own opaque pixels too.
+  const jpegCanvas = document.createElement("canvas");
+  jpegCanvas.width = width;
+  jpegCanvas.height = height;
+  const jctx = jpegCanvas.getContext("2d");
+  if (!jctx) throw new Error("Canvas 2D context unavailable");
+  jctx.fillStyle = "#fff";
+  jctx.fillRect(0, 0, width, height);
+  jctx.drawImage(img, 0, 0, width, height);
+  return { dataUrl: jpegCanvas.toDataURL("image/jpeg", quality), width, height, mime: "image/jpeg" };
 }
 
 /**
@@ -142,8 +213,12 @@ export async function prepareImage(file: File | Blob): Promise<PreparedImage> {
   const longestEdge = Math.max(img.naturalWidth, img.naturalHeight);
   const withinEdgeLimit = longestEdge <= MAX_IMAGE_EDGE_PX;
   const withinByteLimit = file.size <= MAX_IMAGE_BYTES;
+  // The engine cannot read WebP at all (see ENGINE_DECODABLE_MIME) — keeping
+  // the original bytes is only safe for a format it can actually decode, so a
+  // small WebP still goes through the re-encode path below.
+  const isEngineDecodable = (ENGINE_DECODABLE_MIME as readonly string[]).includes(mime);
 
-  if (withinEdgeLimit && withinByteLimit) {
+  if (withinEdgeLimit && withinByteLimit && isEngineDecodable) {
     const dataUrl = await readAsDataUrl(file);
     const { data } = parseDataUrl(dataUrl);
     return {
@@ -156,12 +231,17 @@ export async function prepareImage(file: File | Blob): Promise<PreparedImage> {
     };
   }
 
-  const { dataUrl, width, height } = downscaleToJpeg(img, MAX_IMAGE_EDGE_PX, 0.85);
+  const { dataUrl, width, height, mime: outMime } = downscaleAndEncode(
+    img,
+    mime,
+    MAX_IMAGE_EDGE_PX,
+    0.85,
+  );
   URL.revokeObjectURL(objectUrl);
   const { data } = parseDataUrl(dataUrl);
   return {
     data,
-    mime_type: "image/jpeg",
+    mime_type: outMime,
     previewUrl: dataUrl,
     width,
     height,

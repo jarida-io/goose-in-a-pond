@@ -35,6 +35,10 @@ reqwest = { workspace = true, features = ["json", "multipart", "stream"] }
 sha2 = "0.10"
 base64 = { workspace = true }
 hostname = { workspace = true }
+# Re-encoding a WebP picture the engine cannot decode, before the turn is persisted
+# (`image_normalize.rs`). The workspace pin is jpeg/png/webp only, and CI's fast pass already
+# builds it through pond-adapters-vision.
+image = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -68,3 +72,6 @@ uuid = { workspace = true }
 # Tests only: seed sensor_readings at chosen timestamps, which `record` cannot
 # do because it always stamps datetime('now').
 sqlx = { workspace = true }
+# Tests only: complete a real handshake the way a phone does, so `/devices/self`
+# is exercised with a token the pond issued rather than a hand-built principal.
+hmac = { workspace = true }

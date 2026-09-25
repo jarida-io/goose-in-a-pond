@@ -3,7 +3,6 @@ import { Bell, Calendar, Shield, Camera, Sparkles, BatteryLow } from "lucide-rea
 import { useAppState } from "../../state/AppContext";
 import type { ScheduleRunNotification } from "../../api/types";
 import {
-  MOCK_NOTIFICATIONS,
   CATEGORY_COLOR,
   groupNotifications,
   relativeTime,
@@ -122,12 +121,21 @@ export function NotificationsView({ go }: NotificationsViewProps) {
   const { serverOnline, scheduleRuns } = useAppState();
   const [readIds, setReadIds] = useState<Set<string>>(new Set());
 
-  // Derive all items from state.scheduleRuns (already kept fresh by AppContext) + mock data
+  // Schedule runs, and nothing else. Seven fixtures used to be concatenated on
+  // unconditionally — a front door "unlocked remotely at 8:14 AM", a driveway
+  // camera, a garage door left open — and they were not marked as a demo
+  // anywhere on the screen. Three of them carried `read: false`, so the bell
+  // showed no badge (it counts real runs) and the header one tap later read
+  // "3 unread": two contradictory counts in the same app at the same moment,
+  // the larger of which was about events that never happened. They also made
+  // the empty state below unreachable in every configuration.
+  //
+  // The other categories — security, camera, battery — come back when the
+  // EventLog port (Q2-32) can answer for them.
   const allItems = useMemo<Notification[]>(() => {
-    const runNotifs = scheduleRuns.map(buildNotificationFromRun);
-    return [...runNotifs, ...MOCK_NOTIFICATIONS].sort(
-      (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
-    );
+    return scheduleRuns
+      .map(buildNotificationFromRun)
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
   }, [scheduleRuns]);
 
   // Overlay local read state

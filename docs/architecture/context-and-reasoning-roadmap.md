@@ -335,7 +335,7 @@ then consolidation hardening, then multimodality.
   in flight within ~500 ms.
 - E8 DONE. `docs/architecture/memory_system.md` refreshed.
 
-### Phase F — Multimodality — F1/F2/F3/F5 LANDED (F4 deferred)
+### Phase F — Multimodality — F1/F2/F3/F5 LANDED, F6 LANDED (Mac only) (F4 deferred)
 
 **A second blocking gap the scouting missed.** `with_image` was necessary but
 not sufficient. `GooseAdapter::register_gguf_model` hard-coded
@@ -400,7 +400,9 @@ ever produce the engine's "[Image attached - image input is not supported...]".
   lifts tool-result images into a trailing user message — the one place the
   engine's extractor looks — gated to the `local`/`gguf` inner provider because
   the HTTP formats already relocate correctly and would otherwise double up.
-  New tools: `look_at_camera_snapshot`, `look_at_camera_window`.
+  New tools: `look_at_camera_snapshot`, `look_at_camera_window` (both removed with the
+  `giap-vision` group on 2026-09-10; see `pai/00-checklist.md`. The promotion path stays for
+  user-added MCP tools that return pictures, and since F6 it checks the encoder is ready first).
 - **F5 DONE as camera-event window sampling**, `look_at_camera_window`: up to 4
   evenly-spaced frames (`pick_evenly_spaced` always includes both ends, so three
   frames show a change rather than one moment three times). Deliberately NOT
@@ -422,6 +424,40 @@ ever produce the engine's "[Image attached - image input is not supported...]".
   unconditional `strip_image_parts_from_messages` problem for audio parts.
   That is five touch points across two fork crates — a milestone, not a phase
   tail. Whisper ASR remains the audio route.
+- **F6 LANDED 2026-09-24 (Mac only; the Orin run is owed) — picture support sets
+  itself up.** F1's fetch is replaced, because on the Orin it had already failed
+  in every way it could: the E2B encoder there was 636,790,074 of its 986,833,728
+  bytes and counted as ready (the only check was "not empty"), and the Orin's
+  active model, `gemma-4-E4B-it-qat-UD-Q4_K_XL`, never resolved to an encoder at
+  all. What replaced it:
+  - A pinned pond-core table (`vision_encoder::ENCODER_SPECS`), keyed by family
+    AND qat-ness: qat and non-qat Gemma 4 encoders are different files with
+    identical sizes, so identity is the HF LFS sha256, checked once and kept in a
+    `.verified` sidecar.
+  - The fetch goes through pond-hf-cache, pinned to a revision: resumable, gated
+    per redirect hop, locked against a second process. It runs in the serve
+    process only, and is refused cleanly by `network_mode`.
+  - A bad file is set aside (renamed), never deleted, and fetched again.
+  - Before any load, the provider build stamps every registry row naming the
+    GGUF, or clears them.
+  - Triggers: serve start (the active chat model), a finished model download,
+    activation, and a chat-model change.
+  - `GET /models/vision-status`, and the chat routes refuse a picture turn that
+    is not ready with 409 before anything is saved. WebP is transcoded (the
+    engine's `stb_image` cannot read it).
+  - A picture the engine could not read is scrubbed from the session, so one
+    failure cannot poison the conversation.
+  - Both shells show the state in a status line and keep the draft and the photo
+    when a turn is refused.
+
+  On a budgeted device, a model declares vision only if its encoder fits without
+  costing the window anything AND has been measured there.
+  `device_budget::DEVICE_MEASURED_VISION` ships empty, so the Orin declares no
+  picture support for now and no longer loads its broken E2B encoder at every E2B
+  load. E4B there would drop from 16,384 to 2,048 tokens with the BF16 encoder,
+  62% of which is an audio tower the engine cannot use. F1's "still downloading"
+  wording, its "no new endpoint" gating and the burn-in note below are superseded
+  by this entry.
 
 **Measured (Mac M-series, gemma-4-E2B-it Q4_K_M, 60 tools, same question, fresh
 session each, model already resident):**

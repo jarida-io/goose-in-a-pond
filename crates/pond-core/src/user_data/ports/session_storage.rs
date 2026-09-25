@@ -1,6 +1,6 @@
 use crate::models::domain::message::ImageAttachment;
 use crate::user_data::domain::session::{
-    MessageAttachment, Session, SessionIdentity, SessionMessage,
+    ExtractionCursor, MessageAttachment, Session, SessionIdentity, SessionMessage,
 };
 use thiserror::Error;
 
@@ -377,6 +377,41 @@ pub trait SessionStorage: Send + Sync {
         Ok(true)
     }
 
+    /// Bind an unattributed session to `identity`, or strengthen a binding that
+    /// is already to the SAME member. Never moves a session to a different one.
+    ///
+    /// For implicit claims -- an inference about who is making THIS request --
+    /// as opposed to [`set_session_identity_if_stronger`], which is for
+    /// deliberate ones. The difference is exactly the case that method is
+    /// designed to allow: "this is Liz", typed at the pond, must be able to
+    /// correct a face match that bound the session to Jerry, so strength alone
+    /// decides there. A paired phone that merely OPENS a conversation is not a
+    /// statement about whose conversation it is. `PairedDevice` is the
+    /// strongest source there is, so under strength alone Liz's phone reading
+    /// the proposals for Jerry's session would take it -- and after that
+    /// Jerry's next turn at the kiosk is answered with Liz's context, and the
+    /// batch extractor files what Jerry said as Liz's memories.
+    ///
+    /// Returns `true` when the write happened, `false` when the session is
+    /// bound to somebody else or a stronger source already holds it.
+    ///
+    /// Like the method above, the default is **not** race-free; real adapters
+    /// do the comparison inside the write.
+    async fn claim_session_identity(
+        &self,
+        session_id: &str,
+        identity: &SessionIdentity,
+    ) -> Result<bool, SessionStorageError> {
+        let existing = self.get_session_identity(session_id).await?;
+        let someone_else =
+            existing.profile_id.is_some() && existing.profile_id != identity.profile_id;
+        if someone_else || !identity.supersedes(&existing) {
+            return Ok(false);
+        }
+        self.set_session_identity(session_id, identity).await?;
+        Ok(true)
+    }
+
     /// The tool GROUPS (MCP extension names) selected for this session, if any.
     ///
     /// Phase D2 chooses a session's tool surface once, from its opening message,
@@ -518,6 +553,65 @@ pub trait SessionStorage: Send + Sync {
         Err(SessionStorageError::General(
             "message feedback is not supported by this SessionStorage adapter".to_string(),
         ))
+    }
+
+    // ── Batch memory extraction cursor (migration 0056) ─────────────────────
+    //
+    // Three defaulted methods, for the same reason as every other default in
+    // this trait: four non-SQLite implementors exist and none of them has a
+    // conversation worth mining. The cost of a default is that deleting the
+    // real override leaves the tree green, so the SQLite adapter carries its
+    // own behavioural tests rather than a grep.
+    //
+    // The defaults are the narrowing direction. An adapter that does not
+    // override reads as "never examined" and silently discards every write, so
+    // the batch engine re-walks the same window forever rather than advancing
+    // past conversations it never read. Wasteful, never wrong.
+
+    /// How far batch memory extraction has read into this conversation.
+    async fn extraction_cursor(
+        &self,
+        _session_id: &str,
+    ) -> Result<ExtractionCursor, SessionStorageError> {
+        Ok(ExtractionCursor::unstarted())
+    }
+
+    /// Move the watermark, or clear it.
+    ///
+    /// `Some(id)` records that the walk has covered everything up to and
+    /// including that message, stamps the time, and resets the attempt count --
+    /// a watermark that moved is a watermark nothing has failed against yet.
+    ///
+    /// `None` clears the cursor back to unstarted, which is what a walk does
+    /// when its anchor has been deleted (see
+    /// [`messages_after`](Self::messages_after) returning `None`). The stamp is
+    /// cleared with it, deliberately: a conversation that must be re-walked
+    /// from message one has not been examined, and leaving the stamp would sort
+    /// it to the back of a backlog it has not started.
+    ///
+    /// **Implementations must not touch `sessions.updated_at`.** That column is
+    /// one of the two activity sources the idle gate reads
+    /// (`consolidation_schedule::saw_activity_since_start`), so a background
+    /// writer stamping it looks exactly like a person coming back: the pass's
+    /// own watcher would cancel it mid-run, and every pass would shove the idle
+    /// clock forward. Both existing title writers already avoid this for the
+    /// same reason, and a source-grep test pins it.
+    async fn set_extraction_cursor(
+        &self,
+        _session_id: &str,
+        _through_message_id: Option<&str>,
+    ) -> Result<(), SessionStorageError> {
+        Ok(())
+    }
+
+    /// Record that a window was read and came back unparseable, returning the
+    /// new consecutive-attempt count.
+    ///
+    /// Separate from [`set_extraction_cursor`](Self::set_extraction_cursor)
+    /// because the watermark must NOT move: the window has not been examined,
+    /// only attempted. Same `updated_at` rule applies.
+    async fn note_extraction_attempt(&self, _session_id: &str) -> Result<u32, SessionStorageError> {
+        Ok(0)
     }
 
     /// Delete `message_id` and every later message in the same session (by

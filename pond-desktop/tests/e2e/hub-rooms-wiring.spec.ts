@@ -10,6 +10,7 @@
  */
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
+import { navigateTo } from "./helpers/nav";
 
 // ─── Mock data ──────────────────────────────────────────────────
 const MOCK_DEVICES = {
@@ -90,7 +91,8 @@ async function goToRoomsScreen(page: Page) {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
   await page.waitForSelector(".ghub", { timeout: 10_000 });
-  await page.getByRole("button", { name: "Settings", exact: true }).first().click();
+  // The hub's icon rail is gone; Settings now lives in the drawer.
+  await navigateTo(page, "Settings");
   await page.waitForSelector(".set", { timeout: 5_000 });
   await page.getByRole("button", { name: /^Rooms/ }).first().click();
   await page.waitForTimeout(600);

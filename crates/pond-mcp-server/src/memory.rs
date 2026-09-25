@@ -479,6 +479,9 @@ pub fn parse_memory_segment(s: &str) -> Option<MemorySegment> {
         "correction" => Some(MemorySegment::Correction),
         "relationship" => Some(MemorySegment::Relationship),
         "project" => Some(MemorySegment::Project),
+        // The batch engine's habit bin. Accepted here so a routine row the
+        // engine wrote can be read back by the same name the tool takes.
+        "routine" => Some(MemorySegment::Routine),
         "knowledge" => Some(MemorySegment::Knowledge),
         "context" => Some(MemorySegment::Context),
         _ => None,

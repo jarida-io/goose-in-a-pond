@@ -16,6 +16,7 @@ use crate::models::ports::embedding::EmbeddingProvider;
 use crate::user_data::domain::memory::MemoryFragment;
 use crate::user_data::ports::memory_repository::MemoryRepository;
 use chrono::{DateTime, Utc};
+use tokio_util::sync::CancellationToken;
 
 // ── Keyword fallback ─────────────────────────────────────────────────────────
 
@@ -431,6 +432,44 @@ pub async fn run_backfill(
         pause_ms,
         "memory-backfill",
         None,
+        None,
+        usize::MAX,
+    )
+    .await
+}
+
+/// The RECURRING repair of the same defect [`run_backfill`] fixes once at boot.
+///
+/// `run_backfill` is spawned a single time per process, so every unembedded row
+/// minted afterwards stays invisible to `search_similar` until the next restart
+/// — and three ordinary paths mint them: consolidation's `apply_actions` writes
+/// `embedding: None`, `update_content` nulls the vector on purpose (its own
+/// comment promises a "next sweep" that until now did not exist), and any embed
+/// that simply failed. The index sweep did not cover it either: adoption only
+/// COPIES vectors that already exist.
+///
+/// Same batch size and pause as the backfill, because it competes with
+/// inference for the same CPU. Two things the boot-time pass does not need and
+/// a scheduled one does: a cancellation token, so a member coming back takes
+/// the machine straight back, and `max_batches`, so a background tick takes one
+/// bite of a long backlog instead of holding the lane slot until it drains.
+pub async fn run_memory_embedding_sweep(
+    repo: &dyn MemoryRepository,
+    embedder: &dyn EmbeddingProvider,
+    batch_size: usize,
+    pause_ms: u64,
+    cancel: &CancellationToken,
+    max_batches: usize,
+) -> usize {
+    embed_in_batches(
+        repo,
+        embedder,
+        batch_size,
+        pause_ms,
+        "memory-sweep",
+        None,
+        Some(cancel),
+        max_batches,
     )
     .await
 }
@@ -464,12 +503,20 @@ pub async fn run_dimension_repair(
         pause_ms,
         "memory-reembed",
         Some(expected),
+        None,
+        usize::MAX,
     )
     .await
 }
 
 /// The shared batching loop. `stale_dims` selects which rows are fetched: `None`
 /// means "never embedded", `Some(d)` means "embedded at some width other than d".
+///
+/// `cancel` is `None` for the two boot-time passes, which own the process's idle
+/// moment and have nothing to yield to; `max_batches` bounds a scheduled caller
+/// to one bite. Both are inert for those callers rather than absent, so there is
+/// one loop to reason about and not two.
+#[allow(clippy::too_many_arguments)]
 async fn embed_in_batches(
     repo: &dyn MemoryRepository,
     embedder: &dyn EmbeddingProvider,
@@ -477,9 +524,17 @@ async fn embed_in_batches(
     pause_ms: u64,
     label: &str,
     stale_dims: Option<usize>,
+    cancel: Option<&CancellationToken>,
+    max_batches: usize,
 ) -> usize {
+    let cancelled = || cancel.is_some_and(|c| c.is_cancelled());
     let mut embedded = 0usize;
+    let mut batches = 0usize;
     loop {
+        if cancelled() || batches >= max_batches {
+            break;
+        }
+        batches += 1;
         let fetched = match stale_dims {
             Some(dims) => repo.search_stale_dimension(dims, batch_size).await,
             None => repo.search_unembedded(batch_size).await,
@@ -495,6 +550,9 @@ async fn embed_in_batches(
 
         let mut progressed = false;
         for fragment in &batch {
+            if cancelled() {
+                break;
+            }
             match embedder.embed(&fragment.content).await {
                 Ok(vector) => match repo.update_embedding(&fragment.id, &vector).await {
                     Ok(()) => {
@@ -513,6 +571,12 @@ async fn embed_in_batches(
         // forever — stop instead of spinning.
         if !progressed {
             tracing::warn!("[{label}] no progress in a batch — stopping");
+            break;
+        }
+
+        // Before the pause, not after it: a caller allowed one batch would
+        // otherwise sleep a quarter-second holding the lane slot for nothing.
+        if batches >= max_batches || cancelled() {
             break;
         }
 

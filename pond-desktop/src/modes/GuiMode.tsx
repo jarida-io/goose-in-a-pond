@@ -1,8 +1,10 @@
-import { Sidebar } from "../components/Sidebar";
+import { useState } from "react";
 import { ToastContainer } from "../components/Toast";
-import { useAppState } from "../state/AppContext";
+import { useAppState, useAppDispatch } from "../state/AppContext";
 import type { GuiSection } from "../desktopState";
 import { Hub } from "../hub/Hub";
+import { HubDrawer, type DrawerNav } from "../hub/HubDrawer";
+import { ShellBar } from "../hub/ShellBar";
 import { HubOverlay } from "../hub/overlays/HubOverlay";
 
 // Lazy section imports
@@ -49,20 +51,40 @@ function SectionContent({ section }: { section: GuiSection }) {
 
 export function GuiMode() {
   const state = useAppState();
+  const dispatch = useAppDispatch();
+  const [menuOpen, setMenuOpen] = useState(false);
 
-  // Hub mode: render the full Hub shell (no sidebar, no app-shell chrome)
+  function navigate(nav: DrawerNav) {
+    if (nav.kind === "voice") {
+      dispatch({ type: "SET_MODE", payload: "voice" });
+      return;
+    }
+    dispatch({ type: "SET_SECTION", payload: nav.section });
+  }
+
+  // Hub mode: the hub shell carries its own copy of the same drawer.
   if (state.section === "hub") {
     return <Hub />;
   }
 
   return (
     <div className="app-shell">
-      <Sidebar />
       <div className="app-main">
+        <ShellBar
+          onMenu={() => setMenuOpen(true)}
+          onBell={() => dispatch({ type: "SET_SECTION", payload: "notifications" })}
+          unread={state.unreadRunCount}
+        />
         <main className="app-content">
           <SectionContent section={state.section} />
         </main>
       </div>
+      <HubDrawer
+        open={menuOpen}
+        onClose={() => setMenuOpen(false)}
+        active={state.section}
+        onNavigate={navigate}
+      />
       <ToastContainer />
       <HubOverlay />
     </div>

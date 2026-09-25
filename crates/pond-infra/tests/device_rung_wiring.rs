@@ -648,3 +648,47 @@ fn the_only_thing_that_can_fill_the_paired_device_rung_is_the_device_rung() {
          turn's scope is decided, so if it is not here it is not on the turn path: {sites:#?}"
     );
 }
+
+/// The body of a top-level function in `src`, from its signature to the first
+/// closing brace at column zero after it. Empty when the signature is absent --
+/// which the caller treats as the scan having read nothing.
+fn top_level_fn_body<'a>(src: &'a str, signature: &str) -> &'a str {
+    let Some(start) = src.find(signature) else {
+        return "";
+    };
+    let end = src[start..]
+        .find("\n}\n")
+        .map_or(src.len(), |e| start + e + 3);
+    &src[start..end]
+}
+
+/// The paired-device rung is persisted as a CLAIM, never by strength alone.
+///
+/// `resolve_turn_scope` writes the rung so the batch extractor can attribute a
+/// conversation it reads long after the request is gone -- and it also
+/// resolves scope for read routes that take a session id from the query
+/// string. `PairedDevice` is the strongest source there is, so the
+/// strength-only write let Liz's phone, merely opening the proposals for
+/// Jerry's session, take the session from him: his next turn answered with her
+/// context, his words filed as her memories. `claim_session_identity` refuses
+/// to move a session to a different member; the storage tests prove that, and
+/// this proves it is the write this function makes. A behavioural test would
+/// need a real paired device end to end, which is why this is a tripwire.
+#[test]
+fn the_device_rung_is_persisted_as_a_claim_never_by_strength_alone() {
+    let body = top_level_fn_body(ROUTES, "async fn resolve_turn_scope(");
+    assert!(
+        body.contains("DeviceRung::Member"),
+        "vacuity: this did not find resolve_turn_scope's device arm, so every assertion \
+         below would pass by reading nothing"
+    );
+    assert!(
+        body.contains(".claim_session_identity("),
+        "resolve_turn_scope no longer persists the device rung as a claim"
+    );
+    assert!(
+        !body.contains(".set_session_identity_if_stronger("),
+        "resolve_turn_scope persists the device rung by strength alone again -- a paired \
+         phone reading another member's conversation will take it from them"
+    );
+}

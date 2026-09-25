@@ -554,6 +554,13 @@
   cursor: not-allowed;
 }
 
+/* Muted, NOT disabled: picture support is not ready, but the button still
+   opens the file picker and, on a tap, reveals why — an actually-disabled
+   button has no way to say that on a touch panel. */
+.ch-attach[aria-disabled="true"]:not(:disabled) {
+  opacity: 0.55;
+}
+
 /* Pending attachment tray — shown above the input row while images are queued */
 .attachment-tray {
   display: flex;
@@ -1184,6 +1191,13 @@
 }
 
 .ch-icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Muted, NOT disabled — see .ch-attach[aria-disabled] above; the classic
+   composer's attach button is one of these, distinguished from the voice
+   button beside it only by which one ever carries aria-disabled. */
+.ch-icon-btn[aria-disabled="true"]:not(:disabled) {
+  opacity: 0.55;
+}
 
 /* The only filled thing in the composer, so there is never a question about
    which control commits. */

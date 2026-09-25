@@ -1090,6 +1090,10 @@ rolling summary stays idle-only and cancellable. Images stay out of the trimmer
 - **Measured, Orin and Mac** — TTFT on the turn following a compaction, warm-cache versus cold-cache.
   P5 is only correct if cold-cache recompaction shows no TTFT penalty and warm-cache turns show no
   new re-prefills.
+  **Mac half, 2026-09-24:** warm-cache re-prefills were present and came from goose prepending
+  `<turn-context>` to a cached user message, not from compaction; fork patch `36413f065` appends it
+  (471 -> 97 and 589 -> 147 tokens redone per inference on E2B). Orin half still owed. Full numbers in
+  `docs/developer/realtime-inference-audit-2026-09-24.md`.
 - **Integration** — resume a session after `resume_compaction_idle_secs`, assert compaction completed
   *before* the first token of the next turn.
 - **Regression** — a long Jetson conversation produces no `ContextLengthExceeded` and no reactive
