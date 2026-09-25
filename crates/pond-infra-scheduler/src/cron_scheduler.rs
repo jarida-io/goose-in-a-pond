@@ -1,10 +1,4 @@
-//! `CronSchedulerAdapter` — implements `SchedulerPort` via `tokio-cron-scheduler`.
-//!
-//! Task state (id, label, cron, kind, timezone, paused) is persisted to a JSON
-//! file so tasks survive process restarts.  The scheduler job map is rebuilt
-//! from the persisted state on startup.
-//!
-//! Execution history is stored in a separate JSON file via [`JsonRunHistory`].
+//! `SchedulerPort` on `tokio-cron-scheduler`, with tasks persisted to JSON and rebuilt on start.
 
 use crate::run_history::JsonRunHistory;
 use anyhow::{bail, Result};
@@ -35,8 +29,7 @@ struct PersistedTask {
     /// IANA timezone.  Defaults to "UTC" for legacy tasks.
     #[serde(default = "default_timezone")]
     timezone: String,
-    /// What the task does on each fire.
-    /// `None` for legacy tasks — migrated from `payload` during rehydration.
+    /// `None` only in legacy files; filled from `payload` during rehydration.
     #[serde(default)]
     kind: Option<TaskKind>,
     /// Legacy field — kept for backward-compat deserialization.
@@ -45,19 +38,10 @@ struct PersistedTask {
     paused: bool,
     #[serde(default)]
     created_at: Option<chrono::DateTime<Utc>>,
-    /// When this task last FIRED (not when it finished). Set for every kind;
-    /// what [`durable_fire_stamp`] decides is which kinds a fire is worth a
-    /// write FOR, so a sensor rule's cooldown survives a restart and a cron
-    /// task's stamp reaches disk on the next save somebody else asks for.
-    /// `None` on a file written before PAI-7 P8, which reads as "never fired":
-    /// the first event after an upgrade fires once, and the stamp exists from
-    /// then on.
+    /// When the task last fired (not finished). See [`durable_fire_stamp`] for when it hits disk.
     #[serde(default)]
     last_run: Option<chrono::DateTime<Utc>>,
-    /// Fire ONCE at this instant, then delete. `None` for a recurring task.
-    ///
-    /// `#[serde(default)]`, so a state file written before one-shots existed
-    /// rehydrates as recurring — which is what it was.
+    /// Fire once at this instant, then delete; `None` for a recurring task.
     #[serde(default)]
     fire_at: Option<chrono::DateTime<Utc>>,
 }
@@ -90,11 +74,7 @@ pub struct CronSchedulerAdapter {
 }
 
 impl CronSchedulerAdapter {
-    /// Create (or rehydrate) the scheduler.
-    ///
-    /// `persist_path`  — path to the JSON file used to persist task definitions.
-    /// `runs_path`     — path to the JSON file for execution history.
-    /// `executor`      — called on each job fire.
+    /// Creates the scheduler, rehydrating tasks from `persist_path`; history goes to `runs_path`.
     pub async fn new(
         persist_path: PathBuf,
         runs_path: PathBuf,
@@ -103,7 +83,6 @@ impl CronSchedulerAdapter {
         Self::with_options(persist_path, runs_path, executor, None, 50).await
     }
 
-    /// Create with all options.
     pub async fn with_options(
         persist_path: PathBuf,
         runs_path: PathBuf,
@@ -128,7 +107,6 @@ impl CronSchedulerAdapter {
             result_tx,
         };
 
-        // Rehydrate persisted tasks
         adapter.rehydrate().await?;
 
         adapter.scheduler.start().await?;
@@ -140,8 +118,7 @@ impl CronSchedulerAdapter {
 
     async fn save(&self) -> Result<()> {
         let guard = self.tasks.lock().await;
-        // The ticket is taken here, under the tasks lock, so it orders this
-        // snapshot by when its CONTENTS were read. See [`SnapshotWriter`].
+        // Ticket under the tasks lock: it orders snapshots by when their contents were read.
         let seq = self.persist.ticket();
         let records: Vec<PersistedTask> = guard.values().map(|e| e.persisted.clone()).collect();
         drop(guard);
@@ -149,17 +126,8 @@ impl CronSchedulerAdapter {
         self.persist.publish(seq, &records).await
     }
 
-    /// Record that `id` just FIRED — in memory always, and on disk for the
-    /// kinds whose debounce reads the stamp back after a restart.
-    ///
-    /// Stamped at the START of the run, not at the end, and that is the point:
-    /// a pond that crashes or is killed mid-run has still fired, and a stamp
-    /// written only on completion is exactly the one a crash loop never gets to
-    /// write. `last_run` therefore means "last fired", which is also what the
-    /// scheduler UI is asking.
-    ///
-    /// Takes the pieces rather than `&self` because both fire paths run inside
-    /// a spawned task that has outlived the borrow.
+    /// Records that `id` fired, at run start so a crash mid-run still counts as a fire.
+    /// Takes the pieces, not `&self`: both fire paths run in a spawned task.
     async fn stamp_fire(
         tasks: &Arc<Mutex<HashMap<String, TaskEntry>>>,
         persist: &Arc<SnapshotWriter>,
@@ -171,17 +139,13 @@ impl CronSchedulerAdapter {
             let Some(entry) = guard.get_mut(id) else {
                 return;
             };
-            // In memory for every kind, because "last run" is what the
-            // schedules UI shows and a cron task has one too. What
-            // `durable_fire_stamp` gates below is the WRITE.
+            // Memory for every kind (the UI shows it); `durable_fire_stamp` gates only the write.
             entry.last_run = Some(now);
             entry.persisted.last_run = Some(now);
             if !durable_fire_stamp(&Self::resolve_kind(entry)) {
                 return;
             }
-            // Ticketed under the tasks lock, same as `save`. A fire stamp and
-            // an API edit are the two writers that race in production, and
-            // this is what stops the slower one publishing the older state.
+            // Ticket under the lock, as `save` does, so a racing API edit can't land older state.
             (
                 persist.ticket(),
                 guard.values().map(|e| e.persisted.clone()).collect(),
@@ -189,8 +153,7 @@ impl CronSchedulerAdapter {
         };
 
         if let Err(e) = persist.publish(seq, &records).await {
-            // A lost stamp re-fires the rule after the next restart, which is
-            // the defect this exists to fix — so it is a warning, not a debug.
+            // Warn: a lost stamp re-fires the rule after the next restart.
             tracing::warn!(task = %id, error = %e, "could not persist fire stamp");
         }
     }
@@ -205,14 +168,8 @@ impl CronSchedulerAdapter {
         let records: Vec<PersistedTask> = match serde_json::from_str(&json) {
             Ok(records) => records,
             Err(e) => {
-                // A file that does not parse is not a file to keep reading on
-                // every boot. `pond-server` turns this constructor's Err into
-                // `scheduler = None`, so returning one here means every
-                // schedule endpoint answers 503 for the life of the install
-                // and the next boot does the same. Start empty instead -- but
-                // never by deleting the only copy of the household's
-                // automations, so the unreadable file is moved aside and
-                // named in the log.
+                // An Err here means 503 on every schedule endpoint, every boot. Start empty, but
+                // move the file aside: it's the household's only copy of its automations.
                 let kept = quarantine_unreadable(path).await;
                 let kept = kept
                     .as_ref()
@@ -230,8 +187,7 @@ impl CronSchedulerAdapter {
 
         let mut migrated = false;
         for mut record in records {
-            // ── Backward-compatible migration ────────────────────────────
-            // Old tasks have `payload` but no `kind`.  Infer from payload.
+            // Legacy tasks have `payload` but no `kind`.
             if record.kind.is_none() {
                 record.kind = Some(migrate_kind_from_payload(&record));
                 migrated = true;
@@ -241,16 +197,8 @@ impl CronSchedulerAdapter {
                 migrated = true;
             }
 
-            // A paused task and an event-triggered rule (#92) both load with
-            // no cron job -- the nil id is what "no job" means for either. A
-            // one-shot's stored `cron` is the `"@once"` sentinel — parsing it
-            // as cron here (rather than checking `fire_at` first, same as
-            // `create_task`) takes down the WHOLE scheduler on this record
-            // alone: `?` on a `ParseSchedule` error fails this loop, which
-            // fails `rehydrate()`, which fails the constructor, which is why
-            // `pond-server` logs "scheduler init failed" and every schedule
-            // endpoint answers 503 — for every household schedule, not just
-            // the one-shot that caused it.
+            // Paused tasks and event rules get the nil "no job" id. Test `fire_at` before `cron`:
+            // parsing a one-shot's `"@once"` fails `rehydrate()` and with it every schedule.
             let job_id = if record.paused {
                 uuid::Uuid::nil()
             } else {
@@ -265,13 +213,7 @@ impl CronSchedulerAdapter {
                 }
             };
 
-            // ONE place the persisted fire stamp can be dropped, and that is
-            // why this is one insert rather than two. It was written as two,
-            // carrying the stamp separately on the paused branch and on the
-            // active one, and only the active branch had a test: setting the
-            // paused copy to `None` reintroduced PAI-7 P8's whole defect on
-            // the pause-restart-resume path with the suite green. See
-            // `a_paused_rules_fire_stamp_survives_a_restart`.
+            // One insert for paused and active tasks alike, so neither can drop the fire stamp.
             let last_run = record.last_run;
             let mut guard = self.tasks.lock().await;
             guard.insert(
@@ -285,7 +227,6 @@ impl CronSchedulerAdapter {
             );
         }
 
-        // Re-save if any tasks were migrated to the new format.
         if migrated {
             self.save().await?;
         }
@@ -326,14 +267,8 @@ impl CronSchedulerAdapter {
         Ok(job_id)
     }
 
-    /// Register a task that fires ONCE at `at`, then removes itself.
-    ///
-    /// `Job::new_one_shot_at_instant_async` takes a `std::time::Instant`, which
-    /// is monotonic and meaningless across a restart — so the delay is derived
-    /// here from the stored absolute `fire_at` every time the task is
-    /// registered, including on rehydration. A `fire_at` already in the past
-    /// fires immediately rather than being dropped: a timer the pond was asleep
-    /// for is late, not cancelled, and the user asked for it.
+    /// Registers a task that fires once at `at`, then removes itself. A past `at` fires now:
+    /// a timer the pond slept through is late, not cancelled.
     async fn add_one_shot_to_scheduler(
         &self,
         task_id: &str,
@@ -366,11 +301,8 @@ impl CronSchedulerAdapter {
                 let persist = ctx.persist.clone();
                 let id = ctx.id.clone();
                 ctx.run().await;
-                // Self-delete. A fired one-shot that stays in the list is a
-                // corpse: `list_schedules` accumulates them and a small model
-                // reading that list gets worse at using it over time. Pausing
-                // instead would leave something a user could "resume" into a
-                // timer for a moment that has passed.
+                // Delete, don't pause: spent one-shots clutter `list_schedules` for the model,
+                // and a resume would target a moment already past.
                 let records = {
                     let mut guard = tasks.lock().await;
                     guard.remove(&id);
@@ -391,7 +323,6 @@ impl CronSchedulerAdapter {
         Ok(job_id)
     }
 
-    /// Resolve the `TaskKind` for a task entry.
     fn resolve_kind(entry: &TaskEntry) -> TaskKind {
         entry
             .persisted
@@ -400,14 +331,11 @@ impl CronSchedulerAdapter {
             .unwrap_or_else(|| migrate_kind_from_payload(&entry.persisted))
     }
 
-    /// Convert a `TaskEntry` into a `Schedule` domain object.
     fn to_schedule(entry: &TaskEntry) -> Schedule {
         let next_run = if entry.persisted.paused {
             None
         } else if let Some(at) = entry.persisted.fire_at {
-            // A one-shot's next run IS its fire time. `compute_next_run` would
-            // try to parse the "@once" sentinel and return None, which reads to
-            // a caller as "never runs".
+            // `compute_next_run` can't parse the "@once" sentinel and would report "never runs".
             Some(at)
         } else {
             compute_next_run(&entry.persisted.cron, &entry.persisted.timezone)
@@ -428,32 +356,10 @@ impl CronSchedulerAdapter {
     }
 }
 
-/// Compute the next fire time for a cron expression from now, in the given
-/// IANA timezone.
-///
-/// Returns `None` if the cron expression is invalid or no upcoming occurrence
-/// can be found within a reasonable search window. An unparseable timezone
-/// falls back to UTC, same as `PersistedTask`'s own default.
-///
-/// This used to ignore `timezone` — "9" in a stored cron was read as 9am UTC
-/// regardless of the schedule's own zone. That was a display-only quirk while
-/// this only fed the `next_run` estimate (the real fire time came from
-/// `tokio-cron-scheduler`'s own timezone-correct engine, via
-/// `add_job_to_scheduler`). It stopped being display-only the moment a
-/// one-shot's `fire_at` started being DERIVED from this function's answer
-/// (`once: true`, see `create_task`/`update_task`): that instant is the one
-/// that actually gets scheduled, so "Once" at 14:00 Africa/Nairobi was firing
-/// at 14:00 UTC — three hours off what was on screen.
+/// Next fire time of `cron_expr` in IANA `timezone` (UTC if unparseable); `None` if invalid.
 fn compute_next_run(cron_expr: &str, timezone: &str) -> Option<chrono::DateTime<Utc>> {
-    // tokio-cron-scheduler uses 6-field cron (sec min hour dom month dow), and
-    // both 5- and 6-field expressions have to parse. croner 3 makes that the
-    // default — `Seconds::Optional` — so the explicit `.with_seconds_optional()`
-    // builder that 2.x needed is gone rather than merely renamed.
-    //
-    // This must stay on the same croner MAJOR as the one inside
-    // `tokio-cron-scheduler`: that copy decides when the job actually fires,
-    // this one decides the `next_run` the UI promises (and, for a one-shot,
-    // the instant that actually fires). They were 2.x and 3.x.
+    // croner 3 accepts 5- and 6-field cron by default. Keep croner on `tokio-cron-scheduler`'s
+    // major: that copy decides when jobs fire, this one what `next_run` promises.
     let cron: croner::Cron = cron_expr.parse().ok()?;
     let tz: chrono_tz::Tz = timezone.parse().unwrap_or(chrono_tz::UTC);
     let now = Utc::now().with_timezone(&tz);
@@ -470,11 +376,7 @@ fn compute_next_run(cron_expr: &str, timezone: &str) -> Option<chrono::DateTime<
     }
 }
 
-/// Refuse a task kind the scheduler must not store.
-///
-/// Only sensor rules have anything to check today — the domain owns what makes
-/// one storable ([`SensorTriggerSpec::validate`]) and this is the seam that
-/// makes the answer unavoidable rather than per-caller.
+/// Refuses a kind the scheduler must not store; every create and update passes here.
 fn validate_kind(kind: &TaskKind) -> Result<()> {
     if let TaskKind::SensorTrigger(spec) = kind {
         spec.validate()
@@ -483,69 +385,18 @@ fn validate_kind(kind: &TaskKind) -> Result<()> {
     Ok(())
 }
 
-/// Is this kind's fire worth a WRITE of its own?
-///
-/// Read the question precisely, because the loose version of it ("which kinds
-/// are persisted") is not what this decides, and the commit that added it said
-/// otherwise. `stamp_fire` sets `last_run` in memory for EVERY kind — a cron
-/// task has a last run and the schedules UI shows it — and the copy it sets
-/// includes the persisted record, so any later create, update, delete, pause or
-/// resume carries a cron task's stamp to disk on its own `save()`, and
-/// rehydration restores it. What is gated here is only whether a FIRE is itself
-/// a reason to rewrite the file, which is the part that costs flash.
-///
-/// Only a sensor rule reads its own last fire back: the rules engine debounces
-/// on it, so a lost stamp re-fires the rule the moment the pond comes back, and
-/// a pond that crash-loops fires it every time. That read-back is also what
-/// bounds the write — a rule cannot be stamped more often than once per
-/// `cooldown_secs`, because the cooldown is the thing the stamp enforces.
-///
-/// A cron task's next fire is computed from its expression rather than from its
-/// last fire, so a write per fire buys nothing, and a 6-field expression is
-/// allowed to fire every second — which on the Jetson's flash would be a
-/// whole-file rewrite per second. A rule with `cooldown_secs == 0` is excluded
-/// for the same reason: it debounces nothing, so it would write on every
-/// matching event. Riding along on a save somebody else asked for costs neither
-/// of them anything, which is why the in-memory assignment is not gated too.
+/// Whether a fire alone is worth a file rewrite: only cooldown rules read the stamp back, and
+/// the cooldown caps those writes; other stamps ride along on the next save, sparing flash.
 fn durable_fire_stamp(kind: &TaskKind) -> bool {
     matches!(kind, TaskKind::SensorTrigger(spec) if spec.cooldown_secs > 0)
 }
 
-/// Publishes `schedules.json`: one writer at a time, in content order, and
-/// through a scratch file no other writer can be holding.
-///
-/// `rename(2)` is atomic; the WRITE that fills the file it renames is not, and
-/// filling that file was the step with no exclusion at all. Every writer used
-/// one fixed `schedules.json.tmp`, so two of them truncated and wrote the same
-/// inode and the rename published the mixture — and a writer still holding that
-/// descriptor went on writing into the file another writer's rename had already
-/// made the LIVE `schedules.json`, which no later rename undoes. Atomicity of
-/// the wrong step buys nothing.
-///
-/// It is not a rare shape. `rules_engine` calls `run_now` for EVERY rule
-/// matching one bus event and `run_now` returns as soon as it has spawned, so
-/// one motion event with two rules on it is two concurrent fire stamps; and
-/// PAI-7 P8 put every rule cooldown through this file, so it is written on each
-/// fire now rather than on each schedule edit. What is at stake is not one
-/// cooldown: a `schedules.json` that does not parse is every schedule and every
-/// rule in the pond.
-///
-/// Two properties, and both are guarded:
-///
-/// * **A scratch path of its own per write** ([`temp_path`]), so no two writers
-///   are ever filling one file. This is the one that stops corruption.
-/// * **An order taken from the CONTENT rather than from the writer.**
-///   `ticket()` is called while its caller still holds the tasks lock, and a
-///   snapshot is skipped when a higher ticket is already on disk. Without it
-///   the slow writer lands last and publishes the older state — which for two
-///   fire stamps means losing the newest one, the defect this phase exists to
-///   fix.
+/// Publishes `schedules.json`: one writer at a time, each through its own scratch file, and in
+/// ticket (content) order, so a slow writer can't publish older state over newer.
 struct SnapshotWriter {
     path: PathBuf,
     next_seq: AtomicU64,
-    /// The highest ticket already published, and the write exclusion itself:
-    /// held across the write AND the rename, so nothing can be published
-    /// between the staleness check and the rename that acts on it.
+    /// Highest published ticket. Held across write and rename so nothing lands after the check.
     published: Mutex<u64>,
 }
 
@@ -553,8 +404,7 @@ impl SnapshotWriter {
     fn new(path: PathBuf) -> Self {
         Self {
             path,
-            // Tickets start at 1 so that 0 can mean "nothing published yet"
-            // without the first write comparing equal to it.
+            // Start at 1: 0 means "nothing published yet".
             next_seq: AtomicU64::new(1),
             published: Mutex::new(0),
         }
@@ -564,21 +414,16 @@ impl SnapshotWriter {
         &self.path
     }
 
-    /// Take a publication ticket. Call this while still holding the lock the
-    /// records are read under — a ticket taken afterwards orders WRITERS, which
-    /// is not the thing that needs ordering.
+    /// Call while holding the lock the records are read under, or it orders writers, not contents.
     fn ticket(&self) -> u64 {
         self.next_seq.fetch_add(1, Ordering::SeqCst)
     }
 
-    /// Publish `records` under ticket `seq`, unless something newer is already
-    /// on disk.
+    /// Publishes `records` under ticket `seq`, unless something newer is already on disk.
     async fn publish(&self, seq: u64, records: &[PersistedTask]) -> Result<()> {
         let mut published = self.published.lock().await;
         if *published > seq {
-            // Every snapshot is the whole task map, so the newer one on disk
-            // already says everything this one would have: writing it is not
-            // merely redundant, it is wrong.
+            // Snapshots are the whole map, so the newer one on disk supersedes this.
             return Ok(());
         }
         write_snapshot(&self.path, &temp_path(&self.path, seq), records).await?;
@@ -587,12 +432,8 @@ impl SnapshotWriter {
     }
 }
 
-/// The scratch path for one write.
-///
-/// Unique per write and per process — the ticket separates writers inside this
-/// pond, the pid separates two ponds pointed at one data directory. It stays a
-/// SIBLING of the published file, because `rename(2)` is only atomic within one
-/// filesystem and a scratch file under `/tmp` would not be.
+/// Scratch path for one write, unique by ticket and pid. A sibling of the target, because
+/// `rename(2)` is only atomic within one filesystem.
 fn temp_path(persist_path: &Path, seq: u64) -> PathBuf {
     let name = persist_path
         .file_name()
@@ -613,10 +454,7 @@ async fn write_snapshot(persist_path: &Path, tmp: &Path, records: &[PersistedTas
     let staged = async {
         let mut file = tokio::fs::File::create(tmp).await?;
         file.write_all(json.as_bytes()).await?;
-        // The rename only protects a crash if the bytes reached the device
-        // before it. Without this, a power cut on the Jetson's flash can
-        // publish an empty or half-written file under the real name, which is
-        // the failure write-then-rename is here to prevent.
+        // Sync before the rename, or a power cut can publish an empty or torn file.
         file.sync_all().await
     }
     .await;
@@ -628,10 +466,7 @@ async fn write_snapshot(persist_path: &Path, tmp: &Path, records: &[PersistedTas
 
     tokio::fs::rename(tmp, persist_path).await?;
 
-    // The rename is a directory change and needs its own flush. It has already
-    // taken effect for anything reading the file, so a failure here costs
-    // durability across a power cut and nothing else — reporting it as a failed
-    // write would have `stamp_fire` warn about a stamp that is on disk.
+    // The rename already took effect, so a failed dir flush only costs power-cut durability.
     if let Some(parent) = persist_path.parent().filter(|p| !p.as_os_str().is_empty()) {
         if let Err(e) = fsync_dir(parent).await {
             tracing::debug!(dir = %parent.display(), error = %e, "could not flush the schedules directory");
@@ -648,11 +483,7 @@ async fn fsync_dir(dir: &Path) -> std::io::Result<()> {
         .map_err(std::io::Error::other)?
 }
 
-/// Move an unreadable `schedules.json` aside and say where it went.
-///
-/// Renamed rather than deleted: it is the only copy of the household's
-/// automations, and why it stopped parsing is worth being able to look at.
-/// `None` means even that failed, and the caller reports it.
+/// Renames an unreadable `schedules.json` aside (never deletes it); `None` if that failed too.
 async fn quarantine_unreadable(persist_path: &Path) -> Option<PathBuf> {
     let name = persist_path.file_name().and_then(|n| n.to_str())?;
     let kept = persist_path.with_file_name(format!(
@@ -682,7 +513,6 @@ fn migrate_kind_from_payload(record: &PersistedTask) -> TaskKind {
             };
         }
     }
-    // Fallback: use the label as a prompt.
     TaskKind::AgentPrompt {
         prompt: record.label.clone(),
     }
@@ -693,27 +523,9 @@ fn migrate_kind_from_payload(record: &PersistedTask) -> TaskKind {
 #[async_trait]
 impl SchedulerPort for CronSchedulerAdapter {
     async fn create_task(&self, req: CreateScheduleRequest) -> Result<Schedule> {
-        // A rule that can never fire is refused at the STORE, not at one of the
-        // doors. There are four: `POST /rules`, `POST /schedules`, the
-        // `create_sensor_rule` MCP tool and the `update` paths — and the MCP
-        // tool reaches this port directly without passing through the API at
-        // all, so a check that lived only in `routes.rs` would be a check on
-        // three doors of four, which is not a check.
-        //
-        // What that fourth door actually lets through is narrower than the
-        // commit adding this said, and the difference is worth writing down:
-        // `create_sensor_rule` already rejects a malformed `after`/`before`
-        // with the identical `%H:%M` parse, already strips an empty
-        // `device_id`/`signal`, and already refuses an empty action list. Of
-        // `RuleRejection`'s five classes only two are newly reachable through
-        // it — `HalfCondition`, because the tool takes `op` and `value` from
-        // independent parameters, and `EmptyAction` for a `Notify` whose title
-        // and body are both blank, because those two it passes through
-        // unchanged. The seam is right regardless: the tool's own checks are a
-        // property of one caller, this is a property of the store.
+        // Validated at the store: the `create_sensor_rule` MCP tool bypasses the API checks.
         validate_kind(&req.kind)?;
 
-        // Reject duplicates
         {
             let guard = self.tasks.lock().await;
             if guard.contains_key(&req.id) {
@@ -721,13 +533,7 @@ impl SchedulerPort for CronSchedulerAdapter {
             }
         }
 
-        // `once` is an alternate way to arrive at `fire_at`: instead of the
-        // caller supplying an absolute instant, it supplies a normal cron
-        // expression and asks for that expression's NEXT occurrence, fired
-        // once. Resolved here, once, so everything below only ever has to
-        // reason about `fire_at` — the single source of truth for "is this a
-        // one-shot" — exactly as it already did for the explicit-instant path
-        // (e.g. the `set_timer` MCP tool).
+        // `once` resolves to the cron's next occurrence; below, only `fire_at` marks a one-shot.
         let fire_at = req.fire_at.or_else(|| {
             if req.once {
                 compute_next_run(&req.cron, &req.timezone)
@@ -761,14 +567,7 @@ impl SchedulerPort for CronSchedulerAdapter {
             fire_at,
         };
 
-        // Event-triggered rules (#92) never register a cron job — the rules
-        // engine fires them via `run_now` when a matching bus event arrives.
-        // The nil job id marks "no cron job", same as the paused state.
-        // Three registration shapes, and only one of them is cron.
-        //
-        // An event rule waits for the bus; a one-shot waits for a wall-clock
-        // instant; everything else waits for a cadence. The nil job id marks
-        // "no cron job", same as the paused state.
+        // Event rules get no job (the rules engine fires them via `run_now`); nil id means no job.
         let job_id = if req.kind.is_event_triggered() {
             uuid::Uuid::nil()
         } else if let Some(at) = fire_at {
@@ -875,8 +674,7 @@ impl SchedulerPort for CronSchedulerAdapter {
             (entry.persisted.cron.clone(), Self::resolve_kind(entry))
         };
 
-        // Event-triggered rules have no cron job to re-register (#92);
-        // clearing `paused` is enough — the rules engine checks the flag.
+        // Event rules have no job to re-register; the rules engine checks `paused` itself.
         let job_id = if kind.is_event_triggered() {
             uuid::Uuid::nil()
         } else {
@@ -913,16 +711,13 @@ impl SchedulerPort for CronSchedulerAdapter {
         let persist = self.persist.clone();
         let id = id.to_string();
         tokio::spawn(async move {
-            // Mark running
             {
                 let mut guard = tasks.lock().await;
                 if let Some(entry) = guard.get_mut(&id) {
                     entry.currently_running = true;
                 }
             }
-            // Every sensor-rule fire arrives here: the rules engine fires a
-            // rule through `run_now`, so this is the stamp its cooldown reads
-            // back after a restart.
+            // Rules fire via `run_now`; their cooldown reads this stamp back after a restart.
             CronSchedulerAdapter::stamp_fire(&tasks, &persist, &id).await;
 
             let run_id = run_history.record_start(&id).await;
@@ -960,7 +755,6 @@ impl SchedulerPort for CronSchedulerAdapter {
                 }
             };
 
-            // Broadcast result event
             if let Some(tx) = &result_tx {
                 let _ = tx.send(ScheduleResultEvent {
                     schedule_id: id.clone(),
@@ -986,22 +780,13 @@ impl SchedulerPort for CronSchedulerAdapter {
     }
 
     async fn update_task(&self, id: &str, req: UpdateScheduleRequest) -> Result<Schedule> {
-        // Same reasoning as `create_task`: an update is another way to arrive
-        // at a stored rule that can never fire.
+        // Validated at the store, as in `create_task`.
         if let Some(kind) = &req.kind {
             validate_kind(kind)?;
         }
 
-        // `fire_at` and `cron` are mutually exclusive shapes, mirroring
-        // `CreateScheduleRequest`: providing `fire_at` (explicit or, via
-        // `once`, derived from `cron`'s next occurrence) converts the
-        // schedule to a one-shot (cron becomes the `"@once"` sentinel, never
-        // parsed); providing a real `cron` without `fire_at`/`once` converts
-        // it back to recurring, clearing any previously stored one-shot
-        // instant. Without this, a schedule edited from "Daily" to "Once" in
-        // the UI kept its old recurring cron forever — the picker had
-        // nowhere to put "once" that survived a round trip through
-        // `parseCronToConfig`.
+        // `fire_at` (given, or derived via `once`) makes a one-shot with the `"@once"` cron;
+        // a real `cron` alone makes it recurring again and clears `fire_at`.
         let shape_changed = req.cron.is_some() || req.fire_at.is_some() || req.once;
 
         // Read current state and apply non-shape changes first.
@@ -1045,17 +830,13 @@ impl SchedulerPort for CronSchedulerAdapter {
             (old_job_id, cron, fire_at, kind, paused)
         };
 
-        // If the schedule's shape changed and it is active, reschedule the job.
-        // Create the new job FIRST — if it fails (e.g. invalid cron), the old job
-        // stays active and the schedule keeps running with the previous shape.
+        // Create the new job first, so a bad cron leaves the old job running.
         if shape_changed && !was_paused {
             let new_job_id = if let Some(at) = new_fire_at {
                 self.add_one_shot_to_scheduler(id, at, new_kind).await?
             } else {
                 self.add_job_to_scheduler(id, &new_cron, new_kind).await?
             };
-            // New job created successfully — now safe to remove the old one and commit
-            // the shape change to in-memory metadata.
             if old_job_id != uuid::Uuid::nil() {
                 let _ = self.scheduler.remove(&old_job_id).await;
             }
@@ -1106,8 +887,7 @@ impl SchedulerPort for CronSchedulerAdapter {
     }
 
     async fn set_executor(&self, _executor: Arc<dyn ScheduleExecutor>) -> Result<()> {
-        // The executor is injected at construction time via `DeferredExecutor`.
-        // This method exists on the trait for flexibility but is a no-op here.
+        // No-op: the executor is injected at construction via `DeferredExecutor`.
         Ok(())
     }
 }
@@ -1116,7 +896,7 @@ impl SchedulerPort for CronSchedulerAdapter {
 
 impl Drop for CronSchedulerAdapter {
     fn drop(&mut self) {
-        let _now = Utc::now(); // suppress unused import warning
+        let _now = Utc::now();
     }
 }
 
@@ -1277,13 +1057,11 @@ mod tests {
             .await
             .unwrap();
 
-        // next_run should be populated for an active schedule.
         assert!(
             schedule.next_run.is_some(),
             "next_run should be computed for an active schedule"
         );
 
-        // The next run should be in the future.
         let next = schedule.next_run.unwrap();
         assert!(
             next > chrono::Utc::now(),
@@ -1315,8 +1093,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let sched = make_scheduler(tmp.path()).await;
 
-        // Create two tasks: one fires at noon, the other at 6am.
-        // The 6am task should sort before the noon task.
+        // The 6am task must sort before the noon one.
         sched
             .create_task(create_req("noon", "0 0 12 * * *"))
             .await
@@ -1329,11 +1106,9 @@ mod tests {
         let upcoming = sched.list_upcoming(10).await.unwrap();
         assert_eq!(upcoming.len(), 2);
 
-        // Both should have next_run populated.
         assert!(upcoming[0].next_run.is_some());
         assert!(upcoming[1].next_run.is_some());
 
-        // First should fire before or equal to the second.
         assert!(
             upcoming[0].next_run.unwrap() <= upcoming[1].next_run.unwrap(),
             "upcoming schedules should be sorted by next_run"
@@ -1353,9 +1128,6 @@ mod tests {
         assert!(next.is_none(), "invalid cron should return None");
     }
 
-    /// The bug a real household hit: "14:00" in a schedule's own timezone was
-    /// being read as 14:00 UTC. Harmless while this only fed a display
-    /// estimate; wrong the moment it also derives a one-shot's `fire_at`.
     #[test]
     fn compute_next_run_honors_the_schedules_own_timezone() {
         // 14:00 in Africa/Nairobi (UTC+3, no DST) is 11:00 UTC.
@@ -1408,10 +1180,6 @@ mod tests {
         }
     }
 
-    /// The bug this exists for: editing a schedule's cadence from "Daily" to
-    /// "Once" in the UI kept the old daily cron, because `UpdateScheduleRequest`
-    /// had nowhere to put "once" that survived — a 6-field cron cannot express
-    /// it, so it silently round-tripped back to "Daily" every time.
     #[tokio::test]
     async fn switching_a_daily_schedule_to_once_actually_converts_it() {
         use pond_core::user_data::ports::scheduler::UpdateScheduleRequest;
@@ -1449,8 +1217,7 @@ mod tests {
             "a one-shot's next_run IS its fire_at"
         );
 
-        // And back: providing a real cron without `once` must clear fire_at,
-        // converting it back to recurring.
+        // And back: a real cron without `once` clears `fire_at`.
         let reverted = sched
             .update_task(
                 "cadence1",
@@ -1500,12 +1267,6 @@ mod tests {
         assert!(task.fire_at.is_none());
     }
 
-    /// A one-shot's persisted `cron` is the `"@once"` sentinel. Rehydration
-    /// (every server restart) must recognize that from `fire_at` rather than
-    /// trying to parse it as cron — the failure mode when it doesn't is not
-    /// "this one schedule is broken", it is "the constructor's `?` fails,
-    /// `scheduler = None`, and every schedule endpoint answers 503" for the
-    /// whole household, which is exactly what a restart hit in practice.
     #[tokio::test]
     async fn a_one_shot_survives_a_restart_instead_of_taking_the_scheduler_down() {
         use pond_core::user_data::ports::scheduler::UpdateScheduleRequest;
@@ -1529,9 +1290,7 @@ mod tests {
                 .unwrap();
         }
 
-        // Simulate a restart: a fresh adapter rehydrating from the same
-        // schedules.json. Before the fix, this line panicked via
-        // `.expect("scheduler init failed")`.
+        // Simulate a restart: a fresh adapter rehydrating from the same schedules.json.
         let restarted = make_scheduler(tmp.path()).await;
         let tasks = restarted.list_tasks().await.unwrap();
         let task = tasks.iter().find(|t| t.id == "cadence3").unwrap();
@@ -1593,7 +1352,7 @@ mod tests {
             .is_err());
     }
 
-    // ── Rules that can never fire are refused at the STORE (PAI-7 P8) ────
+    // ── Rules that can never fire are refused at the STORE ───────────────
 
     fn rule_req(
         id: &str,
@@ -1636,8 +1395,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let sched = make_scheduler(tmp.path()).await;
 
-        // The control first, so "refused" below is about the SPEC and not about
-        // the fixture or the adapter.
+        // Control: a valid rule is accepted, so the refusals below are about the spec.
         sched.create_task(rule_req("good", notify())).await.unwrap();
 
         let err = sched
@@ -1679,10 +1437,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_rule_stored_before_the_check_existed_still_loads() {
-        // Rehydration deliberately does NOT validate. Refusing to load would
-        // delete somebody's automation on upgrade, which is a worse answer than
-        // keeping a rule that does nothing — and they can now see why it does
-        // nothing, because an edit to it is refused with the reason.
+        // Rehydration doesn't validate: refusing would drop someone's automation on upgrade.
         let tmp = tempfile::tempdir().unwrap();
         let stored = serde_json::json!([{
             "id": "legacy-rule",
@@ -1704,7 +1459,7 @@ mod tests {
         assert_eq!(tasks.len(), 1, "an existing rule must survive the upgrade");
     }
 
-    // ── The file every schedule lives in (PAI-7 P8 repair) ───────────────
+    // ── The file every schedule lives in ─────────────────────────────────
 
     fn snapshot_of(ids: &[&str], pad: usize) -> Vec<PersistedTask> {
         ids.iter()
@@ -1727,10 +1482,6 @@ mod tests {
 
     #[test]
     fn no_two_writes_share_a_scratch_file() {
-        // The corruption this replaces: one fixed `schedules.json.tmp` for
-        // every writer, so two of them truncated and wrote the same inode and
-        // the rename published the mixture. The rename was always atomic; the
-        // write into the file it renames was the unguarded step.
         let target = std::path::Path::new("/var/pond/schedules.json");
         let a = temp_path(target, 1);
         let b = temp_path(target, 2);
@@ -1742,8 +1493,6 @@ mod tests {
         );
 
         for p in [&a, &b] {
-            // `rename(2)` is only atomic within one filesystem, so the scratch
-            // file has to be a sibling of the file it becomes.
             assert_eq!(
                 p.parent(),
                 target.parent(),
@@ -1756,10 +1505,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_stale_snapshot_does_not_overwrite_a_newer_one() {
-        // Two writers publishing in the reverse of the order their contents
-        // were read — a fire stamp racing an API edit is exactly this. Without
-        // the ordering the older snapshot lands last and the newest fire stamp
-        // is gone, which is the defect the phase exists to fix.
         let tmp = tempfile::tempdir().unwrap();
         let writer = SnapshotWriter::new(tmp.path().join("schedules.json"));
 
@@ -1782,23 +1527,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn concurrent_writers_leave_one_whole_snapshot() {
-        // The production shape: `rules_engine` fires EVERY rule matching one
-        // event through its own `run_now` task, and any of those can land on an
-        // API create or pause. The two payloads differ in size so a torn file
-        // cannot pass by being the right length.
-        //
-        // This one is a smoke test and says so: it can only catch a tear it
-        // happens to hit. What carries the property is
-        // `no_two_writes_share_a_scratch_file` above — with a scratch file per
-        // write there is no shared inode left to tear.
+        // Smoke test only; `no_two_writes_share_a_scratch_file` is what guards the property.
         let tmp = tempfile::tempdir().unwrap();
         let writer = Arc::new(SnapshotWriter::new(tmp.path().join("schedules.json")));
 
         let mut handles = Vec::new();
         let mut expected = 0usize;
         for i in 0..32u64 {
-            // The LAST ticket is the big snapshot, so "which one won" is a
-            // question with a visible answer.
+            // The last ticket is the big snapshot, so the winner is visible.
             let records = if i % 2 == 1 {
                 snapshot_of(&["a", "b", "c", "d", "e", "f", "g", "h"], 512)
             } else {
@@ -1829,9 +1565,7 @@ mod tests {
             expected,
             "the last-read snapshot is not the one on disk"
         );
-        // Vacuity control: the two payloads really do differ in length, so the
-        // assertion above is about WHICH snapshot won and not about a shape
-        // both of them share.
+        // Vacuity control: the payloads differ in length, so the check above is about which won.
         assert_ne!(snapshot_of(&["a"], 1).len(), expected);
 
         // And nothing was left behind for the next writer to find.
@@ -1844,11 +1578,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_unreadable_schedules_file_is_kept_and_the_pond_still_starts() {
-        // `pond-server` turns a constructor Err into `scheduler = None`, so
-        // returning one here means 503 from every schedule endpoint for the
-        // life of the install and the same again on the next boot. Start empty
-        // instead — but never by deleting the only copy of the household's
-        // automations.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("schedules.json");
         let corrupt = "[{\"id\":\"nightly-backup\",\"label\":\"Backup\"}, {\"id\":";
@@ -1885,12 +1614,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_paused_rules_fire_stamp_survives_a_restart() {
-        // The fixture is what `pause_task` writes after a fire: paused, with
-        // the stamp of the last one. Rehydration used to carry that stamp on
-        // two separate branches and only the active branch had a test, so the
-        // paused copy could be dropped with the suite green — and then a pause,
-        // a deploy and a resume put an hour-long cooldown back to "never
-        // fired", which is PAI-7 P8's whole defect on the pause path.
+        // The fixture is what `pause_task` writes after a fire: paused, with the last stamp.
         let tmp = tempfile::tempdir().unwrap();
         let fired_at = Utc::now() - chrono::Duration::seconds(45);
         let stored = serde_json::json!([{
@@ -1972,8 +1696,7 @@ mod tests {
     }
 }
 
-/// Everything one task fire needs, so a cron job and a one-shot can share the
-/// body rather than keeping two copies of it in sync.
+/// What one task fire needs, shared by cron jobs and one-shots.
 struct TaskRunContext {
     executor: Arc<dyn ScheduleExecutor>,
     tasks: Arc<Mutex<HashMap<String, TaskEntry>>>,
@@ -1999,7 +1722,6 @@ impl TaskRunContext {
             kind,
         } = self;
 
-        // Get label for the event
         let label = {
             let guard = tasks.lock().await;
             guard
@@ -2008,7 +1730,6 @@ impl TaskRunContext {
                 .unwrap_or_default()
         };
 
-        // Mark running
         {
             let mut guard = tasks.lock().await;
             if let Some(entry) = guard.get_mut(&id) {
@@ -2017,7 +1738,6 @@ impl TaskRunContext {
         }
         CronSchedulerAdapter::stamp_fire(&tasks, &persist, &id).await;
 
-        // Record run start
         let run_id = run_history.record_start(&id).await;
         let start = std::time::Instant::now();
 
@@ -2034,11 +1754,9 @@ impl TaskRunContext {
             });
         }
 
-        // Execute
         let result = executor.execute(&id, &kind).await;
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        // Record run finish + broadcast event
         let (status, result_text, error_text) = match &result {
             Ok(text) => {
                 run_history

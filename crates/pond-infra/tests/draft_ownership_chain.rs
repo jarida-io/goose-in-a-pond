@@ -1,20 +1,5 @@
-//! The draft-ownership chain, end to end, against real SQLite.
-//!
-//! This test exists because of a recorded failure in this programme, not
-//! because the unit tests looked thin. `ProfileScope::Owner` was a no-op in
-//! production for a whole phase while every test of it passed, because every
-//! fixture set the owner column by hand and no production code path ever did.
-//! `RepoDraftAuthority` is the only thing that can stamp a draft's owner in
-//! production, and it is stubbed out in every `pond-mcp-server` unit test. If
-//! the chain it walks is broken at any link, `save_draft` stamps NULL forever,
-//! `is_draft_decision_permitted` never reaches its `Some(owner)` arm, and every
-//! deny test in `policy.rs` still passes.
-//!
-//! So walk the whole chain through the writers production actually uses:
-//! `ProfileRepository::create`, `SessionStorage::create_session`,
-//! `set_session_identity_if_stronger` (what `PUT /sessions/:id/user` calls),
-//! and `set_engine_session_id` (what `GooseAdapter::remember_goose_session`
-//! calls on every turn). Nothing here writes a column directly.
+//! The draft-ownership chain end to end on real SQLite, every column written by production code.
+//! Unit tests stub `RepoDraftAuthority`, so only this sees a chain that stamps owners NULL.
 
 use std::sync::Arc;
 
@@ -39,9 +24,7 @@ struct Fixture {
     _tmp: tempfile::TempDir,
 }
 
-/// Two household members, a session bound to one of them the way the REST route
-/// binds it, and that session paired to an engine session the way every turn
-/// pairs it.
+/// Two members and a session owned by one, bound and engine-paired via production writers.
 async fn two_member_pond(engine_session_id: &str) -> Fixture {
     let tmp = tempfile::tempdir().unwrap();
     let db = Database::init(tmp.path()).await.unwrap();
@@ -97,11 +80,7 @@ async fn two_member_pond(engine_session_id: &str) -> Fixture {
     }
 }
 
-/// The link that decides whether any of this is real: an engine session id, of
-/// the shape the MCP request `_meta` carries, resolving to a NAMED member.
-///
-/// If this returns `Household` or `None`, `save_draft` writes `profile_id`
-/// NULL on every pond and the ownership rule is decoration.
+/// If this yields `Household`/`None`, `save_draft` stamps NULL owners and the rule is inert.
 #[tokio::test]
 async fn an_engine_session_resolves_to_the_member_who_owns_the_giap_session() {
     let f = two_member_pond("20260805_9").await;
@@ -120,8 +99,7 @@ async fn an_engine_session_resolves_to_the_member_who_owns_the_giap_session() {
         "provenance must survive the whole chain: PAI-1 invariant 3"
     );
 
-    // ...and that is a scope the rule's Some(owner) arm actually discriminates
-    // on, in both directions.
+    // ...and the rule's `Some(owner)` arm discriminates on it both ways.
     assert_eq!(
         is_draft_decision_permitted(
             Some(&scope),
@@ -143,10 +121,7 @@ async fn an_engine_session_resolves_to_the_member_who_owns_the_giap_session() {
     );
 }
 
-/// Every way the chain can fail must produce a refusal, never a permission.
-/// An engine session nobody mapped is the common case on an upgraded pond,
-/// where `engine_session_map` has rows only for sessions seen since the map
-/// landed in 0032.
+/// Unmapped is common on upgraded ponds: `engine_session_map` (0032) lacks older sessions.
 #[tokio::test]
 async fn an_unmapped_or_blank_engine_session_refuses_rather_than_widens() {
     let f = two_member_pond("20260805_9").await;
@@ -164,8 +139,7 @@ async fn an_unmapped_or_blank_engine_session_refuses_rather_than_widens() {
     }
 }
 
-/// The mode is read from settings on every decision. Default is audit, and a
-/// pond that has never been configured must not silently be in `off`.
+/// An unconfigured pond must never silently be in `off`.
 #[tokio::test]
 async fn the_mode_comes_from_settings_and_defaults_to_audit() {
     let f = two_member_pond("20260805_9").await;

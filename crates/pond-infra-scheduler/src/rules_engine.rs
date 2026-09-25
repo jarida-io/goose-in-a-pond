@@ -1,26 +1,5 @@
-//! Sensor/event-triggered rules engine (#92).
-//!
-//! Subscribes to the [`EventBus`] stream and, for every sensor/camera/device
-//! event, fires any enabled [`TaskKind::SensorTrigger`] rule whose source +
-//! condition match — via the scheduler's own `run_now` path, so rule fires get
-//! the exact same run records, result broadcasts, and executor dispatch as
-//! cron fires.
-//!
-//! Debounce: each rule carries a `cooldown_secs`; the engine suppresses
-//! re-fires inside that window. Time-window conditions ("after sunset" ≈
-//! `after "18:30"`) are evaluated against the server's local wall clock.
-//!
-//! The cooldown is DURABLE (PAI-7 P8). It used to live only in this process's
-//! `HashMap<String, Instant>`, so every cooldown reset on restart: a rule with
-//! an hour's cooldown fired again the moment the pond came back, and a pond
-//! that crash-looped fired it every time. The scheduler now stamps each fire on
-//! the rule itself (`Schedule::last_run`, persisted by `CronSchedulerAdapter`),
-//! and the engine debounces against the LATER of that stamp and its own
-//! in-process map — the map because the rules snapshot is cached for a few
-//! seconds and `run_now` stamps asynchronously, the stamp because the map does
-//! not survive a restart.
-//!
-//! [`EventBus`]: pond_core::shared::ports::event_bus::EventBus
+//! Fires enabled [`TaskKind::SensorTrigger`] rules matching a bus event via `run_now`, debounced
+//! by `cooldown_secs`. Time windows use the server's local wall clock.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,26 +11,11 @@ use pond_core::shared::ports::event_bus::{BusEvent, BusStream};
 use pond_core::user_data::domain::schedule::{Schedule, TaskKind};
 use pond_core::user_data::ports::scheduler::SchedulerPort;
 
-/// How long a fetched rules list is reused before re-reading from the
-/// scheduler. Sensor events can arrive at high frequency; a short TTL keeps
-/// per-event overhead flat while newly created rules still take effect within
-/// a few seconds.
+/// Rules-list reuse window: flat per-event cost, while new rules still apply within seconds.
 const RULES_CACHE_TTL: Duration = Duration::from_secs(5);
 
-/// Decide which rules `event` fires right now, stamping their cooldowns.
-///
-/// Pure over its inputs (clock passed in), so debounce/matching is unit-tested
-/// without a scheduler or a bus. A rule fires when it is an enabled
-/// `SensorTrigger`, its spec matches the event at `local_time`, and its
-/// cooldown window has elapsed since the LATER of this process's own stamp and
-/// the rule's persisted `last_run`.
-///
-/// `now` is wall-clock rather than an `Instant` because a persisted stamp can
-/// only be a wall-clock time. The cost is that the clock can move: if it moves
-/// backwards (an NTP step on a Jetson with no RTC is the realistic case), the
-/// elapsed time comes out negative and the rule is SUPPRESSED rather than
-/// fired. That direction is deliberate — a debounce that fails open is a rule
-/// firing repeatedly at 3am.
+/// Which rules `event` fires now, stamping their cooldowns. `now` is wall-clock to compare with
+/// persisted stamps; a clock stepped backwards suppresses rather than fires (fails closed).
 fn rules_to_fire(
     rules: &[Schedule],
     event: &BusEvent,
@@ -59,10 +23,8 @@ fn rules_to_fire(
     now: DateTime<Utc>,
     cooldowns: &mut HashMap<String, DateTime<Utc>>,
 ) -> Vec<String> {
-    // Not every bus event is device-shaped. A time tick or a session
-    // transition (PAI-7 P1) has no device, signal or value, so no rule can
-    // match it — and it must not be given a placeholder view, because a rule
-    // with no device/signal filter matches everything in its family.
+    // Non-device events (ticks, session changes) match nothing; a placeholder view would
+    // match every rule with no device/signal filter.
     let Some(view) = event.trigger_view() else {
         return Vec::new();
     };
@@ -74,10 +36,8 @@ fn rules_to_fire(
         if rule.paused || !spec.matches(&view, local_time) {
             continue;
         }
-        // The persisted stamp and this process's map are both partial views:
-        // the stamp survives a restart but lags by the rules-cache TTL and by
-        // `run_now`'s spawn, the map is current but empty after a restart.
-        // Debounce against whichever is later.
+        // The stamp survives restarts but lags (cache TTL, async `run_now`); the map is current
+        // but empty after a restart. Debounce against the later.
         let last_fired = [cooldowns.get(&rule.id).copied(), rule.last_run]
             .into_iter()
             .flatten()
@@ -94,9 +54,7 @@ fn rules_to_fire(
     fired
 }
 
-/// `cooldown_secs` is a `u64` off the wire; `chrono::Duration::seconds` takes
-/// an `i64` and panics past its own limit. Saturate instead of wrapping — a
-/// wrapped cooldown is a NEGATIVE window, which fires on every event.
+/// Saturating `u64` -> `i64`: chrono panics past its limit, and wrapping would fire every event.
 fn clamp_cooldown_secs(secs: u64) -> i64 {
     const MAX: u64 = i64::MAX as u64 / 1000; // chrono's own seconds ceiling
     secs.min(MAX) as i64
@@ -115,9 +73,7 @@ pub async fn run_rules_engine(mut events: BusStream, scheduler: Arc<dyn Schedule
     let mut cache: Option<(Instant, Vec<Schedule>)> = None;
 
     while let Some(event) = events.next().await {
-        // Refresh the rules snapshot when stale. The CACHE age stays on the
-        // monotonic clock — it is an interval in this process, and nothing
-        // reads it back from disk.
+        // Cache age uses the monotonic clock: it is never persisted.
         let cached_at = Instant::now();
         let now = Utc::now();
         let stale = cache
@@ -138,8 +94,7 @@ pub async fn run_rules_engine(mut events: BusStream, scheduler: Arc<dyn Schedule
         let local_time = chrono::Local::now().time();
         for rule_id in rules_to_fire(rules, &event, local_time, now, &mut cooldowns) {
             tracing::info!(rule = %rule_id, "rules engine: rule matched — firing");
-            // `run_now` reuses the scheduler's execution path: run history,
-            // Running/Completed result broadcasts, and the executor.
+            // `run_now` gives rule fires the same run records and broadcasts as cron fires.
             if let Err(e) = scheduler.run_now(&rule_id).await {
                 tracing::warn!(rule = %rule_id, error = %e, "rules engine: fire failed");
             }
@@ -167,8 +122,7 @@ mod tests {
         })
     }
 
-    /// A rule carrying a persisted fire stamp, as one rehydrated from
-    /// `schedules.json` after a restart would.
+    /// A rule with a persisted fire stamp, as rehydrated after a restart.
     fn rule_last_fired(
         id: &str,
         cooldown_secs: u64,
@@ -282,11 +236,8 @@ mod tests {
         assert!(fired.is_empty());
     }
 
-    // ── Durable cooldowns (PAI-7 P8) ──────────────────────────────────────
-    //
-    // Every one of these runs with an EMPTY `cooldowns` map, which is the state
-    // a freshly started process is in. Before the persisted stamp existed, all
-    // of them fired.
+    // ── Durable cooldowns ─────────────────────────────────────────────────
+    // Each test starts with an empty `cooldowns` map, as a restarted process does.
 
     #[test]
     fn persisted_fire_stamp_debounces_a_restarted_process() {
@@ -309,9 +260,7 @@ mod tests {
 
     #[test]
     fn persisted_fire_stamp_older_than_the_cooldown_still_fires() {
-        // Vacuity control for the test above: the same fixture, the same empty
-        // map, only the stamp's age differs. If this one does not fire, the
-        // test above proves nothing about the STAMP.
+        // Vacuity control for the test above: same fixture, only the stamp's age differs.
         let now = Utc::now();
         let rules = vec![rule_last_fired(
             "r1",
@@ -326,9 +275,7 @@ mod tests {
 
     #[test]
     fn no_persisted_stamp_fires() {
-        // The upgrade case: `schedules.json` written before P8 carries no
-        // stamp, and must not be read as "fired at the epoch" or as "fired
-        // now". First event after the upgrade fires.
+        // Upgrade case: an old `schedules.json` has no stamp, which must read as never fired.
         let now = Utc::now();
         let rules = vec![rule_last_fired("r1", 3600, None)];
         let mut cooldowns = HashMap::new();
@@ -338,10 +285,7 @@ mod tests {
 
     #[test]
     fn the_later_of_the_two_stamps_wins() {
-        // The in-memory map is ahead of the persisted stamp for the length of
-        // the rules-cache TTL, because `run_now` stamps asynchronously and the
-        // snapshot is a few seconds old. Taking the persisted stamp alone would
-        // re-fire inside that window.
+        // The map leads the cached stamp by up to the cache TTL; the stamp alone would re-fire.
         let now = Utc::now();
         let rules = vec![rule_last_fired(
             "r1",
@@ -368,9 +312,7 @@ mod tests {
 
     #[test]
     fn a_clock_that_moved_backwards_suppresses_rather_than_fires() {
-        // A wall-clock stamp can be in the future of `now` after an NTP step —
-        // realistic on a Jetson with no battery-backed RTC. Failing open here
-        // means a rule firing repeatedly at 3am, so it fails closed.
+        // An NTP step on an RTC-less Jetson can put a stamp in the future.
         let now = Utc::now();
         let rules = vec![rule_last_fired(
             "r1",
@@ -384,9 +326,6 @@ mod tests {
 
     #[test]
     fn an_absurd_cooldown_does_not_wrap_into_firing_every_event() {
-        // `cooldown_secs` is a u64 from the wire and chrono takes an i64.
-        // Casting straight through makes u64::MAX a NEGATIVE window, which
-        // fires on every event — the opposite of what was asked for.
         let now = Utc::now();
         let rules = vec![rule_last_fired(
             "r1",
@@ -404,14 +343,8 @@ mod tests {
         assert_eq!(clamp_cooldown_secs(60), 60);
     }
 
-    // ── Acceptance (#92): a rule fires end-to-end on a simulated sensor event ─
-    //
-    // Real CronSchedulerAdapter + a counting executor + the real in-process
-    // EventBus: create a SensorTrigger rule, publish a simulated motion
-    // reading, and observe the executor invoked via the scheduler's `run_now`
-    // path with a Completed run recorded. (The "after sunset" window is
-    // covered by the domain tests — a wall-clock-dependent window here would
-    // make the test flaky.)
+    // ── Acceptance: a rule fires end-to-end on a simulated sensor event ───────
+    // The "after sunset" window is left to domain tests; a wall-clock window here would be flaky.
     mod end_to_end {
         use super::*;
         use anyhow::Result;
@@ -434,9 +367,7 @@ mod tests {
             }
         }
 
-        /// Records WHICH tasks fired, not just how many. The restart test needs
-        /// to tell "the debounced rule was suppressed" from "nothing reached
-        /// the restarted engine at all", and a counter cannot.
+        /// Records which tasks fired, so the restart test can tell suppression from no delivery.
         struct RecordingExecutor(Arc<std::sync::Mutex<Vec<String>>>);
 
         #[async_trait]
@@ -509,8 +440,7 @@ mod tests {
             }
             assert_eq!(fired, 1, "exactly one fire (second event debounced)");
 
-            // The fire went through the scheduler's execution path: a run
-            // record exists and completed.
+            // It went through the scheduler's path: a completed run record exists.
             let mut completed = false;
             for _ in 0..40 {
                 let runs = scheduler.get_runs("rule-e2e", 10).await.unwrap();
@@ -525,14 +455,6 @@ mod tests {
             assert!(completed, "run record shows the completed rule fire");
         }
 
-        /// PAI-7 P8 repair 1, end to end: the cooldown has to survive the
-        /// process, because the failure it exists to stop is a restart loop.
-        ///
-        /// Two adapter lifetimes over ONE data directory, a fresh rules engine
-        /// each time (so the in-memory map really is empty the second time),
-        /// and a control rule that fires on the same event — without the
-        /// control this test would pass just as happily if the restarted engine
-        /// were never delivered anything.
         #[tokio::test]
         async fn a_rule_cooldown_survives_a_restart() {
             let tmp = tempfile::tempdir().unwrap();
@@ -594,11 +516,7 @@ mod tests {
                 );
             }
 
-            // The stamp is on disk, not only in the dropped process's memory.
-            //
-            // Parsed, not grepped: `"last_run"` appears in the file whether the
-            // value is a timestamp or `null`, so the substring form of this
-            // assertion passed against a build that never stamped anything.
+            // The stamp is on disk. Parsed, not grepped: `"last_run"` is present even when `null`.
             let on_disk = tokio::fs::read_to_string(tmp.path().join("schedules.json"))
                 .await
                 .unwrap();
@@ -629,8 +547,7 @@ mod tests {
                 "rehydration dropped the fire stamp"
             );
 
-            // The control: same event, no cooldown, created AFTER the restart
-            // so it has never fired. It proves the restarted engine is live.
+            // Control: a no-cooldown rule created after the restart proves the engine is live.
             scheduler
                 .create_task(CreateScheduleRequest {
                     fire_at: None,

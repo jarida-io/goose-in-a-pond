@@ -1,40 +1,5 @@
-//! Context MCP Server — `search_context` and `get_recent_context` (PAI-8 P2).
-//!
-//! Read-only. There is no `ingest_context` tool and there will not be one: the
-//! corpus is written by the ingest pipeline from sources the household
-//! connected, and a tool that let the model write into it would let a prompt
-//! injection plant a memo the assistant later quotes as fact.
-//!
-//! # The resolution, which is the whole substance
-//!
-//! An MCP tool handler has no access to the adapter's per-turn locals. What it
-//! has is the caller's ENGINE session id, stamped into `_meta` by the engine and
-//! un-forgeable by the model ([`crate::session_meta`]). That id resolves to a
-//! [`ProfileScope`] through [`DraftAuthority::actor_for_engine_session`], and the
-//! scope is what every read here is filtered by.
-//!
-//! Three inputs produce a refusal and they are the phase's boundary:
-//!
-//! 1. **No `_meta`.** No caller, so no scope, so nothing to show.
-//! 2. **An unresolvable session** — one GIAP never chatted in, a subagent's own,
-//!    or a turn that has ended. `actor_for_engine_session` answers `None` and
-//!    `None` is a refusal, never a fallback to `Household`. A default of
-//!    `Household` reached by ordering is the exact defect PAI-1 recorded: a
-//!    `ChatService` built before the turn's scope resolved attributed a Guest's
-//!    memory to the household.
-//! 3. **A `Guest`.** PAI-8 invariant 2: an unidentified speaker sees no context
-//!    items. None. Enforced here rather than only in the tool-group denylist,
-//!    because a denylist is a list and this is the boundary.
-//!
-//! # Why the port is called `DraftAuthority`
-//!
-//! Because it is the only port that answers "who is speaking in this engine
-//! session", `RepoDraftAuthority` already implements it against the identity
-//! chain PAI-1 built, and a second implementation would be a second answer that
-//! could disagree with the first — which is what
-//! `identity_resolution::resolve_turn_scope`'s doc warns about. The name has
-//! outgrown the type; renaming it is a tidy-up for whoever wires this, not a
-//! reason to duplicate the resolution.
+//! Read-only context tools, scoped via `DraftAuthority` (the one who-is-speaking port) from the
+//! `_meta` engine session. No `_meta`, an unresolved session or a Guest is refused, never widened.
 
 use std::sync::Arc;
 
@@ -58,23 +23,11 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-/// The MCP extension name.
-///
-/// **Three other places must spell this the same way**, and none of them is in
-/// this crate: the catalog entry in `pond_core::mcp::domain::tool_group::TOOL_GROUPS`,
-/// the guest denylist beside it, and the `register_builtin_extension` call in
-/// `pond-adapters-goose`. An extension name the catalog does not carry is
-/// treated as a user-added MCP server — never narrowed by selection, never
-/// subtracted for a guest, never withheld from a subagent — so a typo here does
-/// not fail, it widens. `crates/pond-core/tests/registration_matches_the_catalog.rs`
-/// is what catches it, and it is the reason this is a const.
+/// Extension name; must match `TOOL_GROUPS`, the guest denylist and Goose's registration.
+/// A name the catalog lacks is treated as a user MCP server, which widens rather than fails.
 pub const CONTEXT_EXTENSION: &str = "giap-context";
 
-/// Most items any one call will return, whatever the model asks for.
-///
-/// A tool result is re-prefilled into the prompt like everything else, and a
-/// model that asks for 200 mail items on a 8K-class window has ended the
-/// conversation rather than answered it.
+/// Per-call item cap whatever the model asks: results are re-prefilled into a small window.
 const MAX_LIMIT: usize = 20;
 const DEFAULT_LIMIT: usize = 5;
 
@@ -97,18 +50,14 @@ pub struct RecentContextParams {
 /// Why a call was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
-    /// No caller could be resolved. **One string for every input that produces
-    /// it** — no `_meta`, an unmapped session, a subagent's own session, a turn
-    /// that has ended — because a caller that could tell them apart would
-    /// eventually treat one of them as benign.
+    /// No caller resolved; one message for every cause, so none can be treated as benign.
     Unresolved,
     /// The caller is an unidentified speaker.
     Guest,
 }
 
 impl Refusal {
-    /// The text the model reads. Every branch ends by saying what to do instead:
-    /// a refusal a 2-4B model cannot act on is one it retries verbatim.
+    /// Model-facing text; each ends with what to do instead, or a small model retries verbatim.
     pub fn message(&self) -> &'static str {
         match self {
             Refusal::Unresolved => {
@@ -137,12 +86,7 @@ pub struct ContextMcpServer {
 
 #[tool_router]
 impl ContextMcpServer {
-    /// Every tool this server exposes, without constructing it or its deps.
-    ///
-    /// `tool_router()` is generated private to this module, so inventory code
-    /// outside it could not reach the real definitions and resorted to scanning
-    /// source text for `#[tool(` instead. This is the enumeration that scan was
-    /// standing in for.
+    /// Every tool this server exposes, without constructing it; `tool_router()` is module-private.
     pub(crate) fn tool_defs() -> Vec<rmcp::model::Tool> {
         Self::tool_router().list_all()
     }
@@ -157,9 +101,7 @@ impl ContextMcpServer {
         }
     }
 
-    /// Attach unified retrieval. Without it `recall` answers nothing rather than
-    /// silently degrading to context-only results, which would make the tool's
-    /// own description a lie.
+    /// Attaches unified retrieval; without it `recall` answers nothing, never context-only.
     pub fn with_retrieval(mut self, retrieval: Option<Arc<PersonalContextRetrieval>>) -> Self {
         self.retrieval = retrieval;
         self
@@ -173,14 +115,7 @@ impl ContextMcpServer {
         self
     }
 
-    /// Install the caller resolution.
-    ///
-    /// `None` means **every** call is refused, not that every call is permitted.
-    /// That is the opposite of what `DraftMcpServer` did before PAI-2 P5 found
-    /// it: an absent authority made every decision unresolvable, and
-    /// unresolvable under the default `PolicyMode::Audit` is *permitted*. There
-    /// is no policy mode here — an unresolved caller has no scope, and a read
-    /// with no scope is not a read this module knows how to narrow.
+    /// Installs the caller resolution; `None` refuses every call (there is no policy mode here).
     pub fn with_authority(mut self, authority: Option<Arc<dyn DraftAuthority>>) -> Self {
         self.authority = authority;
         self
@@ -200,8 +135,7 @@ impl ContextMcpServer {
         Ok(scope)
     }
 
-    /// The body of `search_context`, separated from the rmcp wrapper so tests
-    /// can drive the decision rather than the transport.
+    /// The body of `search_context`, apart from the rmcp wrapper so tests can call it.
     pub async fn run_search(
         &self,
         meta: &Meta,
@@ -214,9 +148,7 @@ impl ContextMcpServer {
             return Ok(self.recent(&scope, limit).await);
         }
 
-        // Semantic when an embedder is wired, ranked on the context blend rather
-        // than on raw cosine, so a near-future item can displace a marginally
-        // more similar one from last month.
+        // Semantic hits rank on the context blend, not raw cosine, so recency can beat similarity.
         if let Some(embedder) = &self.embedder {
             // A query, not a document -- see EmbeddingProvider::embed_query.
             if let Ok(vector) = embedder.embed_query(&query).await {
@@ -247,8 +179,7 @@ impl ContextMcpServer {
         }
     }
 
-    /// The body of `recall`: one question answered across everything the pond
-    /// knows, each line saying where it came from.
+    /// The body of `recall`: answers across all sources, each line carrying its provenance.
     pub async fn run_recall(
         &self,
         meta: &Meta,
@@ -348,11 +279,7 @@ fn clamp_limit(requested: Option<u32>) -> usize {
         .clamp(1, MAX_LIMIT)
 }
 
-/// Render an answer or a refusal.
-///
-/// A refusal is a successful tool result carrying an explanation, not an MCP
-/// protocol error: a protocol error is what makes a small model retry the
-/// identical call.
+/// Renders a refusal as a successful result, not a protocol error, which small models retry.
 fn to_result(outcome: Result<Vec<ContextItem>, Refusal>) -> CallToolResult {
     let text = match outcome {
         Err(refusal) => refusal.message().to_string(),
@@ -389,11 +316,7 @@ impl ServerHandler for ContextMcpServer {
 }
 
 // ── Static deps + spawn function for Goose's builtin registry ───────────────
-//
-// Same shape as `init_orchestrator_deps`, and for the same
-// reason: `SpawnServerFn` is `fn(DuplexStream, DuplexStream)` — no parameters,
-// no capture — so the repositories have to arrive through a global installed at
-// startup.
+// `SpawnServerFn` takes no captures, so deps arrive through globals installed at startup.
 
 use std::sync::OnceLock;
 use tokio::io::DuplexStream;
@@ -401,8 +324,7 @@ use tokio::io::DuplexStream;
 struct ContextDeps {
     repo: Arc<dyn ContextRepository>,
     embedder: Option<Arc<dyn EmbeddingProvider + Send + Sync>>,
-    /// Unified retrieval across memory, context and summaries (phase C). Absent
-    /// on a pond with no embedder, where `recall` answers nothing.
+    /// Unified retrieval across memory, context and summaries; `None` without an embedder.
     retrieval: Option<Arc<PersonalContextRetrieval>>,
 }
 
@@ -422,18 +344,14 @@ pub fn init_context_deps(
     });
 }
 
-/// Install the caller resolution. Absent, every call is refused — see
-/// [`ContextMcpServer::with_authority`].
+/// Installs the caller resolution; `None` refuses every call.
 pub fn init_context_authority(authority: Option<Arc<dyn DraftAuthority>>) {
     let _ = CONTEXT_AUTHORITY.set(authority);
 }
 
 /// Spawn function compatible with Goose's `SpawnServerFn` type.
 pub fn spawn_context_server(reader: DuplexStream, writer: DuplexStream) {
-    // Missing deps = this path never initialised this extension (the voice/CLI
-    // binary vs `serve` install different families). A skipped extension is a
-    // logged, contained failure; a panic here took down every builtin server's
-    // startup at once (2026-08-27, giap-context in the voice child).
+    // Not every binary installs these deps; a panic here would take down every builtin server.
     let Some(deps) = CONTEXT_DEPS.get() else {
         tracing::error!(
             "spawn_context_server called before init_context_deps — extension will not start"
@@ -442,9 +360,6 @@ pub fn spawn_context_server(reader: DuplexStream, writer: DuplexStream) {
     };
     let server = ContextMcpServer::new(deps.repo.clone())
         .with_embedder(deps.embedder.clone())
-        // Without this the `recall` tool is registered, offered to the model and
-        // permanently answers nothing -- the exact reader-with-no-writer shape
-        // this programme keeps recording.
         .with_retrieval(deps.retrieval.clone())
         .with_authority(CONTEXT_AUTHORITY.get().cloned().flatten());
     crate::serve_builtin(CONTEXT_EXTENSION, server, reader, writer);
@@ -452,20 +367,7 @@ pub fn spawn_context_server(reader: DuplexStream, writer: DuplexStream) {
 
 #[cfg(test)]
 mod tests {
-    //! `the_extension_is_read_only` at the bottom of this module was dead from
-    //! the day it was written until 2026-08. A merge left its `#[test]` stacked
-    //! above the NEXT test's doc comment, so the attribute bound to
-    //! `the_recall_tool_is_actually_handed_its_retrieval` instead: that test ran
-    //! twice and reported two passes, while the read-only guard compiled as an
-    //! ordinary private fn nothing ever called. The only signal was a
-    //! `dead_code` warning among the crate's others, and the test count went UP,
-    //! not down -- both of which read as healthy at a glance.
-    //!
-    //! Attributes and doc comments are both attributes to the parser and it
-    //! accepts them in any order, so `#[test]` separated from its `fn` by prose
-    //! is not an error. When editing here, check that every `#[test]` sits
-    //! immediately above the `fn` it names, and that the run lists each test
-    //! exactly once.
+    //! Keep each `#[test]` right above its own `fn`; a stray one silently binds to the next fn.
 
     use super::*;
     use async_trait::async_trait;
@@ -480,8 +382,7 @@ mod tests {
     use pond_core::user_data::domain::session::IdentificationSource;
     use serde_json::Value;
 
-    /// A redactor that finds nothing. The redaction guards live in pond-core;
-    /// what is under test here is the scope resolution.
+    /// A redactor that finds nothing; redaction is tested in pond-core.
     struct NoopRedactor;
     impl Redactor for NoopRedactor {
         fn redact(&self, text: &str, _level: RedactionLevel) -> Redacted {
@@ -489,10 +390,7 @@ mod tests {
         }
     }
 
-    /// A read-only store holding one item per member.
-    ///
-    /// It applies `item_is_visible` rather than returning everything: a stub
-    /// that ignored the scope would make every assertion below pass.
+    /// One item per member, filtered by `item_is_visible`: an unscoped stub would pass vacuously.
     struct StubRepo {
         items: Vec<ContextItem>,
     }
@@ -663,8 +561,7 @@ mod tests {
         assert_eq!(searched.len(), 1, "search is not scoped");
         assert_eq!(searched[0].profile_id(), EXEMPLAR_OWNER_ID);
 
-        // Vacuity control: the household sees both, so the assertions above are
-        // about the scope and not about a store with one row in it.
+        // Vacuity control: the household sees both items.
         let household = server_for(Some(ProfileScope::Household));
         assert_eq!(
             household
@@ -678,7 +575,6 @@ mod tests {
         );
     }
 
-    /// PAI-8 invariant 2, at the boundary rather than in a denylist.
     #[tokio::test]
     async fn a_guest_is_refused_by_both_tools() {
         let server = server_for(Some(ProfileScope::Guest));
@@ -704,8 +600,6 @@ mod tests {
         );
     }
 
-    /// An unresolvable caller is refused, not defaulted to `Household`. Three
-    /// inputs, one refusal.
     #[tokio::test]
     async fn an_unresolvable_caller_is_refused_rather_than_defaulted() {
         // (1) no `_meta` at all.
@@ -728,8 +622,7 @@ mod tests {
             Refusal::Unresolved
         );
 
-        // (3) no authority installed at all -- the case that used to mean
-        // "permitted" on the draft server.
+        // (3) no authority installed at all.
         let server = ContextMcpServer::new(Arc::new(StubRepo::with_one_item_each()));
         assert_eq!(
             server
@@ -740,8 +633,6 @@ mod tests {
         );
     }
 
-    /// Both refusals render as a successful tool result carrying an
-    /// explanation, and neither leaks a row.
     #[test]
     fn a_refusal_reads_as_an_instruction_and_carries_no_items() {
         for refusal in [Refusal::Unresolved, Refusal::Guest] {
@@ -783,12 +674,7 @@ mod tests {
         assert!(items.len() <= MAX_LIMIT);
     }
 
-    /// `recall` must actually be wired, not merely registered.
-    ///
-    /// A tool that is offered to the model and always answers nothing is worse
-    /// than an absent one: it burns a schema in every turn's prompt and teaches
-    /// the model that asking is pointless. `spawn_context_server` is where that
-    /// would silently happen, so this pins the builder call.
+    /// An always-empty `recall` costs a schema per prompt and teaches the model not to ask.
     #[test]
     fn the_recall_tool_is_actually_handed_its_retrieval() {
         const SRC: &str = include_str!("context.rs");
@@ -804,14 +690,8 @@ mod tests {
         );
     }
 
-    /// The extension has no write tool, and must not grow one: a tool that let
-    /// the model add to the corpus would let a prompt injection plant something
-    /// the assistant later quotes as fact.
-    ///
-    /// It reads the PRODUCTION half of this file only. The test module below
-    /// contains the same needle in string literals, and counting those made the
-    /// first version of this guard report two handlers that do not exist -- a
-    /// parser reading itself is the shape that turns a source guard into noise.
+    /// A write tool would let a prompt injection plant "facts". Reads only the production half:
+    /// the tests hold the same needle in string literals.
     #[test]
     fn the_extension_is_read_only() {
         const SRC: &str = include_str!("context.rs");
@@ -819,8 +699,7 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("split always yields one");
-        // Line comments out, so prose in a doc comment cannot satisfy this and a
-        // commented-out tool cannot be counted. (Recorded vacuity shape 1.)
+        // Strip line comments so prose or commented-out tools can't count.
         let stripped: String = production
             .lines()
             .map(|line| match line.find("//") {
