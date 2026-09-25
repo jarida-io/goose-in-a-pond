@@ -1,7 +1,4 @@
-//! SQLite-backed implementation of the UsageTally port (#132 Milestone 4).
-//!
-//! Wraps `Pool<Sqlite>` pointing at `pond_system.db`. Table created by
-//! `migrations/system/0046_mesh_ledger.sql`.
+//! SQLite-backed `UsageTally` over the `mesh_usage_tally` table in `pond_system.db`.
 
 use async_trait::async_trait;
 use pond_core::mesh::domain::peer_id::PeerId;
@@ -78,10 +75,7 @@ impl UsageTally for SqliteUsageTally {
     }
 
     async fn mark_settled(&self, peer: PeerId, up_to: TokenCount) -> Result<(), UsageTallyError> {
-        // Atomic conditional decrement — see SqliteCreditLedger::debit for why
-        // this is safe under concurrent callers without a transaction/lock.
-        // Only ever touches tokens_borrowed: settlement pays what we owe,
-        // never what we're owed.
+        // The `>= ?` guard runs inside this single UPDATE, so concurrent settles can't overdraw.
         let result = sqlx::query(
             "UPDATE mesh_usage_tally \
              SET tokens_borrowed = tokens_borrowed - ?, updated_at = datetime('now') \
@@ -165,7 +159,6 @@ mod tests {
             .unwrap();
         let result = tally.mark_settled(peer, TokenCount::new(11)).await;
         assert!(result.is_err());
-        // Pending is unchanged after a failed settle.
         assert_eq!(
             tally.pending_borrowed(peer).await.unwrap(),
             TokenCount::new(10)
@@ -199,7 +192,6 @@ mod tests {
         );
         assert_eq!(tally.pending_lent(peer).await.unwrap(), TokenCount::new(70));
 
-        // Settling the borrowed side must not touch what we're owed.
         tally.mark_settled(peer, TokenCount::new(30)).await.unwrap();
         assert_eq!(
             tally.pending_borrowed(peer).await.unwrap(),

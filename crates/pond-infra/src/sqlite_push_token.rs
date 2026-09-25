@@ -1,7 +1,4 @@
-//! SQLite-backed implementation of `PushTokenRepository` (#95).
-//!
-//! Uses the `push_tokens` table in `pond_system.db` (migration `0026`):
-//! one current token per device, keyed by `device_id`.
+//! SQLite-backed `PushTokenRepository` over `push_tokens`: one current token per device.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -41,7 +38,6 @@ fn row_to_token(row: PushTokenRow) -> Result<PushToken> {
 #[async_trait]
 impl PushTokenRepository for SqlitePushTokenRepository {
     async fn upsert(&self, token: PushToken) -> Result<()> {
-        // One token per device — replace on conflict, stamping a fresh time.
         sqlx::query(
             "INSERT INTO push_tokens (device_id, token, platform, updated_at) \
              VALUES (?, ?, ?, datetime('now')) \
@@ -128,7 +124,6 @@ mod tests {
         assert_eq!(got.platform, PushPlatform::Expo);
         assert!(!got.updated_at.is_empty(), "updated_at stamped on write");
 
-        // Upsert replaces (one token per device).
         repo.upsert(tok("dev-1", "fcm-xyz", PushPlatform::Fcm))
             .await
             .unwrap();
