@@ -28,11 +28,7 @@ impl Default for MockEmbeddingProvider {
     }
 }
 
-/// In-memory twin of `sqlite_memory::scope_sql`.
-///
-/// These two must agree or every mock-backed test is testing a fiction. The
-/// rule: an `Owner` sees their own rows plus unattributed shared ones, a
-/// `Household` sees everything, and a `Guest` sees nothing.
+/// In-memory twin of `sqlite_memory::scope_sql`; the two must agree.
 fn scope_matches(f: &MemoryFragment, scope: &ProfileScope) -> bool {
     match scope {
         ProfileScope::Owner(id) => {
@@ -54,17 +50,10 @@ impl EmbeddingProvider for MockEmbeddingProvider {
     }
 }
 
-/// One row of the mock's `consolidation_runs` table:
-/// (mode, memory_count, accepted, rejected).
+/// One mock `consolidation_runs` row: (mode, memory_count, accepted, rejected).
 pub type RecordedConsolidationRun = (String, usize, usize, usize);
 
-/// Mock memory repository — stores fragments in-memory.
-///
-/// `search_similar` mirrors the SQLite adapter: cosine over rows that actually
-/// carry an embedding, falling back to `search_recent` when none do.
-///
-/// The lifecycle / supersede / segment / event writes are recorded rather than
-/// dropped so consolidation's correction-safety guards can be asserted on.
+/// In-memory repository that records consolidation writes so tests can assert on them.
 pub struct MockMemoryRepository {
     fragments: Arc<RwLock<Vec<MemoryFragment>>>,
     lifecycle_updates: Arc<RwLock<Vec<(String, MemoryLifecycle)>>>,
@@ -136,7 +125,6 @@ impl MemoryRepository for MockMemoryRepository {
             .filter(|f| scope_matches(f, scope))
             .cloned()
             .collect();
-        // newest first, then truncate
         results.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         results.truncate(limit);
         Ok(results)
@@ -161,8 +149,7 @@ impl MemoryRepository for MockMemoryRepository {
                 .collect()
         };
 
-        // Same contract as the SQLite adapter: with nothing embedded at all,
-        // degrade to recency rather than returning an empty result.
+        // Like the SQLite adapter: with nothing embedded, degrade to recency, not empty.
         if scored.is_empty() {
             return self.search_recent(scope, limit).await;
         }
@@ -197,7 +184,6 @@ impl MemoryRepository for MockMemoryRepository {
     }
 
     // ── Consolidation-observable writes ────────────────────────────────────
-    // Recorded (not no-op'd) so the correction-safety guards are assertable.
 
     async fn update_lifecycle(&self, id: &str, lifecycle: MemoryLifecycle) -> Result<()> {
         self.lifecycle_updates

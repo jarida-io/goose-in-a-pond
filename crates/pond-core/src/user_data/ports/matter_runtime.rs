@@ -1,21 +1,5 @@
-//! Driven Port: Matter Runtime
-//!
-//! Turning Matter on used to be a startup-only decision: `serve()` read
-//! `matter_enabled`, either connected to a controller or fell back to the
-//! logging stub, and that choice stood until the process restarted. A user
-//! flipping the setting therefore changed nothing until someone rebooted the
-//! Pond — the same class of defect the mic gate fixed for privacy.
-//!
-//! This port is the seam that makes the decision reconcilable at runtime. The
-//! API layer asks for a desired state and reads back what actually happened;
-//! the adapter owns the controller process, the WebSocket, and the bridge
-//! supervisor behind it.
-//!
-//! Reporting matters as much as switching. "Enabled" and "actually talking to a
-//! controller" are different facts, and collapsing them into one `Option` is
-//! what made an unreachable controller report itself as "Matter is not
-//! enabled". [`MatterState`] keeps them apart so the user is told which of the
-//! two is true.
+//! Driven port: reconcile Matter on/off at runtime. [`MatterState`] keeps "enabled" apart
+//! from "talking to a controller" so an unreachable controller isn't reported as off.
 
 use super::device_commissioning::DeviceCommissioningPort;
 use async_trait::async_trait;
@@ -28,14 +12,11 @@ use std::sync::Arc;
 pub enum MatterState {
     /// Turned off. Nothing is running and nothing is being attempted.
     Disabled,
-    /// Enabled and converging: installing or starting the controller, or
-    /// opening the WebSocket. The first enable on a fresh install downloads a
-    /// controller's dependencies, so this can legitimately last minutes.
+    /// Enabled and converging; the first enable downloads the controller, so minutes is normal.
     Connecting,
     /// Enabled and connected — commissioning and device control are live.
     Connected,
-    /// Enabled, but the controller could not be reached. Carries the failure so
-    /// the user is shown the actual reason instead of a generic "off".
+    /// Enabled, but the controller could not be reached; carries the reason for the user.
     Unreachable { error: String },
 }
 
@@ -49,8 +30,7 @@ impl MatterState {
 /// A snapshot of the runtime, safe to serialize straight to the UI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MatterStatus {
-    /// Whether the integration is meant to be running at all. On by default;
-    /// not a user-facing toggle.
+    /// Whether the integration should run at all; on by default, not a user-facing toggle.
     pub enabled: bool,
     /// The controller URL currently in effect.
     pub url: String,
@@ -71,37 +51,20 @@ impl MatterStatus {
 }
 
 /// What the Matter integration is being asked to be.
-///
-/// A struct rather than a widening argument list. `apply(url, true)` at the call
-/// site says nothing about what the flag turns on, and a second bool after it
-/// would be worse — the field name is the documentation, and it travels.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatterConfig {
-    /// WebSocket address of the controller. A loopback address is one GIAP will
-    /// install and run itself; anything else is someone else's controller.
+    /// Controller WebSocket address; loopback means GIAP installs and runs it itself.
     pub url: String,
-    /// Whether to ask the controller for a Bluetooth transport.
-    ///
-    /// Off by default, and worth the setting rather than always-on. BLE is how a
-    /// device that has never been on the network is paired at all — out of its
-    /// box it has no Wi-Fi credentials, so it cannot advertise on mDNS — but the
-    /// radio needs a native module that may not be installed and permission a
-    /// headless service does not have: `cap_net_raw` on Linux, and on macOS an
-    /// `NSBluetoothAlwaysUsageDescription` in the bundle's Info.plist, without
-    /// which the OS kills the process outright.
+    /// Ask the controller for BLE, needed to pair out-of-box devices. Off by default: Linux
+    /// needs `cap_net_raw`; macOS kills it without `NSBluetoothAlwaysUsageDescription`.
     pub ble: bool,
 }
 
 /// Driven Port: reconcile the Matter integration to a desired state.
 #[async_trait]
 pub trait MatterRuntimePort: Send + Sync {
-    /// Request a desired state. Returns immediately — the runtime converges in
-    /// the background and reports progress through [`status`](Self::status).
-    ///
-    /// Fire-and-forget on purpose: enabling can take minutes (controller
-    /// install plus startup), and the settings write that triggers it must not
-    /// block on that. Idempotent — asking for the state already in effect does
-    /// nothing, so repeated saves do not churn the connection.
+    /// Request a desired state; returns at once and converges in the background (see
+    /// [`status`](Self::status)). Idempotent, so repeated saves don't churn the connection.
     fn apply(&self, config: MatterConfig);
 
     /// What the runtime is currently doing.
@@ -110,9 +73,7 @@ pub trait MatterRuntimePort: Send + Sync {
     /// The live commissioner, or `None` unless [`MatterState::Connected`].
     async fn commissioner(&self) -> Option<Arc<dyn DeviceCommissioningPort>>;
 
-    /// Tear everything down: stop the bridge and the controller GIAP started.
-    /// Called on server shutdown, where leaving the controller running would
-    /// orphan it beyond the Pond's lifetime.
+    /// Stop the bridge and any controller GIAP started, so none outlives the Pond.
     async fn shutdown(&self);
 }
 
@@ -131,9 +92,7 @@ mod tests {
         .is_connected());
     }
 
-    /// The UI branches on a flat `state` discriminant, and distinguishes
-    /// "unreachable" from "off" by the error it carries — both have to survive
-    /// serialization.
+    /// The UI branches on the flat `state` tag and shows the carried error.
     #[test]
     fn status_serializes_flat_with_the_failure_reason() {
         let json = serde_json::to_value(MatterStatus {

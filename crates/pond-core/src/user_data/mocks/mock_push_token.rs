@@ -1,4 +1,4 @@
-//! In-memory [`PushTokenRepository`] test double (#95).
+//! In-memory [`PushTokenRepository`] test double.
 
 use std::collections::HashMap;
 use std::sync::Mutex;

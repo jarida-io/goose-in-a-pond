@@ -26,12 +26,8 @@ pub trait SensorStorage: Send + Sync {
         until: Option<DateTime<Utc>>,
     ) -> Result<Vec<SensorReading>>;
 
-    /// Like [`SensorStorage::get_history`], but capped at `limit` rows (newest
-    /// first), so a caller serving a request cannot pull a whole retention
-    /// window into memory.
-    ///
-    /// The default post-truncates `get_history`; an adapter backed by a query
-    /// engine should override it so the bound reaches the query.
+    /// [`SensorStorage::get_history`] capped at `limit` rows, newest first. The default
+    /// post-truncates; query-backed adapters should override so the bound reaches the query.
     async fn get_history_limited(
         &self,
         device_id: &str,
@@ -47,11 +43,7 @@ pub trait SensorStorage: Send + Sync {
         Ok(readings)
     }
 
-    /// Summary statistics over a window.
-    ///
-    /// The default folds `get_history` so in-memory stores need no extra code;
-    /// a SQL-backed adapter should override it with a single aggregate query
-    /// that never materialises the rows.
+    /// Summary statistics over a window; SQL adapters should override with one aggregate query.
     async fn aggregate(
         &self,
         device_id: &str,

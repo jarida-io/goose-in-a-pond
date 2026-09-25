@@ -2,12 +2,7 @@ use crate::user_data::domain::recipe::AgentRecipe;
 use anyhow::Result;
 use async_trait::async_trait;
 
-/// Driven Port: agent recipe persistence.
-///
-/// Recipes are Goose-compatible YAML automations stored in the DB.
-/// They are executed via `POST /api/v1/recipes/{name}/run` — there is no
-/// MCP tool for self-invocation by the agent; a recipe run is always
-/// caller-initiated.
+/// Driven Port: Goose-compatible YAML recipes. Runs are caller-initiated only (no MCP tool).
 #[async_trait]
 pub trait AgentRecipeRepository: Send + Sync {
     /// Return all recipes, ordered by name.

@@ -11,9 +11,7 @@ use tokio::sync::RwLock;
 /// In-memory settings store. Starts empty (all reads return defaults).
 pub struct MockSettingsRepository {
     store: Arc<RwLock<HashMap<String, String>>>,
-    /// Keys the user deliberately chose — tracked separately from the values
-    /// exactly as the SQLite adapter tracks them in a separate column, so a
-    /// snapshot write cannot imply intent.
+    /// Keys the user chose, tracked apart from values so a snapshot write implies no intent.
     user_set: Arc<RwLock<HashSet<String>>>,
 }
 
@@ -70,18 +68,13 @@ fn build_settings(store: &HashMap<String, String>) -> Settings {
     if let Some(v) = store.get("llm_provider") {
         s.llm_provider = v.clone();
     }
-    // Privacy toggle. Must round-trip: a mock that silently returns the
-    // default here makes any test of "does turning the mic off stick" pass
-    // for the wrong reason, or fail for one.
+    // Privacy toggle: must round-trip or mic-off tests pass for the wrong reason.
     if let Some(v) = store.get("mic_enabled") {
         if let Ok(b) = v.parse() {
             s.mic_enabled = b;
         }
     }
-    // The two compaction switches, for the same reason as `mic_enabled` above:
-    // both default to true, so a mock that dropped them would make every test of
-    // "does turning compaction off actually turn it off" pass while the feature
-    // ran anyway. Added by PAI-4 P7, whose manual endpoint reads both.
+    // Both default to true: dropping them would let "compaction off" tests pass vacuously.
     if let Some(v) = store.get("hybrid_compaction_enabled") {
         if let Ok(b) = v.parse() {
             s.hybrid_compaction_enabled = b;
@@ -130,9 +123,7 @@ fn build_settings(store: &HashMap<String, String>) -> Settings {
     if let Some(v) = store.get("prompt_addendum") {
         s.prompt_addendum = v.clone();
     }
-    // Egress gate (PAI-2 P5). Same reason mic_enabled is here: a mock that
-    // silently returns the default makes "does the network restriction stick"
-    // pass without the value ever having been stored.
+    // Egress gate: must round-trip, for the same reason as `mic_enabled`.
     if let Some(v) = store.get("network_mode") {
         s.network_mode = v.clone();
     }
@@ -284,8 +275,7 @@ mod tests {
         );
     }
 
-    /// A full snapshot write pins every key but claims no intent; only an
-    /// explicit `mark_user_set` (the PUT patch key set) does.
+    /// Only an explicit `mark_user_set` (the PUT patch key set) claims intent.
     #[tokio::test]
     async fn snapshot_write_does_not_imply_user_intent() {
         let repo = MockSettingsRepository::new();

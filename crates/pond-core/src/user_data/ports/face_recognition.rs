@@ -1,18 +1,5 @@
-//! FaceRecognition port — public biometric identity differentiation.
-//!
-//! Exposes register / identify / delete operations over household-member face
-//! embeddings.  Implementors compose a [`crate::user_data::ports::face_embedding_extractor::FaceEmbeddingExtractor`]
-//! with an optional [`crate::user_data::ports::face_detector::FaceDetector`] and a
-//! persistent store (typically SQLite).  Matching uses top-K mean cosine
-//! similarity with a runner-up margin to suppress the "everyone ~0.6"
-//! failure mode.
-//!
-//! # Privacy guarantees
-//! - Raw image bytes MUST be discarded immediately after embedding extraction.
-//! - Stored embeddings are opaque BLOBs and are not reconstructable back to
-//!   the original biometric.
-//! - `delete_embeddings` removes every row for a profile to satisfy the
-//!   "forget all biometric data" requirement of the onboarding contract.
+//! Driven port: face registration and matching. Raw images MUST be dropped after embedding,
+//! and `delete_embeddings` must erase every row for a profile ("forget all biometric data").
 
 use crate::user_data::domain::face_recognition::{
     BoundingBox, FaceEmbedding, FaceIdentification, FaceLandmarks,
@@ -20,24 +7,13 @@ use crate::user_data::domain::face_recognition::{
 use anyhow::Result;
 use async_trait::async_trait;
 
-/// Rich identification result returned by
-/// [`FaceRecognition::identify_with_diagnostics`] — the basic verdict plus
-/// the intermediate signals that let a caller build multi-frame liveness
-/// checks (landmark motion, inter-frame embedding similarity) on top of
-/// the normal matcher.
-///
-/// All auxiliary fields are optional because preprocessing can reject a
-/// frame (no face, too blurry, spoof-gate tripped) before they are
-/// produced.  `identification` always reflects the verdict for that frame.
+/// [`FaceRecognition::identify_with_diagnostics`] result: the verdict plus liveness signals.
 #[derive(Debug, Clone)]
 pub struct FaceIdentificationDetails {
     pub identification: FaceIdentification,
-    /// 5-point landmarks from the detector, when present.  Absent if the
-    /// detector produced bbox-only output (e.g. UltraFace fallback).
+    /// 5-point landmarks; absent for bbox-only detectors (e.g. UltraFace fallback).
     pub landmarks: Option<FaceLandmarks>,
-    /// L2-normalised embedding that was scored against the database.
-    /// Absent if the preprocessing gate rejected the frame (returned
-    /// early before inference).
+    /// The L2-normalised embedding scored; absent if preprocessing rejected the frame.
     pub embedding: Option<Vec<f32>>,
     /// Detected bounding box, when the detector produced one.
     pub bbox: Option<BoundingBox>,
@@ -46,10 +22,7 @@ pub struct FaceIdentificationDetails {
 /// Driven port: biometric face registration + matching.
 #[async_trait]
 pub trait FaceRecognition: Send + Sync {
-    /// Enroll a new face for `profile_id`.  Runs the detector (if one is
-    /// configured) against `image_bytes` to locate a face + landmarks, then
-    /// computes and persists the embedding.  Multiple enrollments per
-    /// profile are allowed (improves matching robustness).
+    /// Enroll a face for `profile_id`; multiple enrollments per profile are allowed.
     async fn register_face(
         &self,
         profile_id: &str,
@@ -70,23 +43,15 @@ pub trait FaceRecognition: Send + Sync {
     /// Delete every stored face embedding for a profile.
     async fn delete_embeddings(&self, profile_id: &str) -> Result<u64>;
 
-    /// Cosine-similarity threshold above which an identification is
-    /// considered conclusive.  Combined with a runner-up margin in the
-    /// default implementation.
+    /// Cosine-similarity threshold above which an identification is conclusive.
     fn match_threshold(&self) -> f32;
 
-    /// Read the per-profile threshold override.  `Ok(None)` means no
-    /// override is configured and the global [`Self::match_threshold`]
-    /// applies.  Implementations that don't support per-profile overrides
-    /// should always return `Ok(None)`.
+    /// Per-profile threshold override; `Ok(None)` means [`Self::match_threshold`] applies.
     async fn get_profile_threshold(&self, _profile_id: &str) -> Result<Option<f32>> {
         Ok(None)
     }
 
-    /// Install / clear a per-profile threshold override.  Pass
-    /// `Some(value)` to upsert; `None` to remove the override.  Optional
-    /// `note` is a free-form audit string ("tightened after sibling
-    /// false-match on YYYY-MM-DD").
+    /// Set (`Some`) or clear (`None`) a profile's threshold override; `note` is for audit.
     async fn set_profile_threshold(
         &self,
         _profile_id: &str,
@@ -98,17 +63,7 @@ pub trait FaceRecognition: Send + Sync {
         ))
     }
 
-    /// Same as [`Self::identify_face`] but also surfaces the detected
-    /// landmarks and the L2-normalised embedding that was scored.  Callers
-    /// use the extra signals to build multi-frame liveness checks
-    /// (landmark-motion std-dev, inter-frame embedding cosine); a still
-    /// photo shows near-zero values on both and can be rejected before the
-    /// identity verdict is surfaced to the user.
-    ///
-    /// Default implementation simply wraps [`Self::identify_face`] and
-    /// returns `None` for the diagnostic fields; implementations that can
-    /// cheaply capture the landmarks + embedding should override to
-    /// populate them.
+    /// [`Self::identify_face`] plus the landmarks and embedding, for multi-frame liveness checks.
     async fn identify_with_diagnostics(
         &self,
         image_bytes: &[u8],
@@ -123,14 +78,7 @@ pub trait FaceRecognition: Send + Sync {
         })
     }
 
-    /// Diagnostic: pairwise cosine similarity across every stored embedding.
-    ///
-    /// Returned rows are `(id_a, id_b, profile_a, profile_b, similarity)`
-    /// for every unordered pair.  Meant for the `/faces/debug/pairwise`
-    /// endpoint — lets an operator visually verify embeddings are diverse
-    /// between different people and consistent within one person.  A healthy
-    /// embedder produces within-profile scores of 0.6–0.9 and cross-profile
-    /// scores below 0.4; collapsed embedders produce ~1.0 for every pair.
+    /// Diagnostic: cosine similarity of every stored pair (~1.0 for all = collapsed embedder).
     async fn pairwise_similarities(&self) -> Result<Vec<PairwiseSimilarity>>;
 }
 
@@ -141,8 +89,7 @@ pub struct PairwiseSimilarity {
     pub id_b: String,
     pub profile_a: String,
     pub profile_b: String,
-    /// Cosine similarity in \[-1.0, 1.0\].  Same profile → ideally 0.6–0.95;
-    /// different profile → ideally below 0.4.
+    /// Cosine in \[-1, 1\]; ideally 0.6–0.95 for one profile, below 0.4 across profiles.
     pub similarity: f32,
     /// Convenience flag: `profile_a == profile_b`.
     pub same_profile: bool,

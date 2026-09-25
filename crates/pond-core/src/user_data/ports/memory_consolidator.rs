@@ -1,7 +1,4 @@
 //! MemoryConsolidator port — merges duplicate/contradicting memories.
-//!
-//! Runs periodically as a background task. The adapter uses the LLM
-//! to propose merge/prune actions on the current memory set.
 
 use crate::user_data::domain::memory::{MemoryFragment, MemorySegment};
 use anyhow::Result;
