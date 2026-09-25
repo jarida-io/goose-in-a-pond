@@ -1093,6 +1093,16 @@ Devices are GOTG mobile clients, IoT sensors, cameras, or other Pond instances.
 
 Updates `last_seen` and marks device online.
 
+`is_online` is not stored as a fact the registry is told. It is derived when read, from `last_seen` against `ONLINE_THRESHOLD_SECS` (300s, `crates/pond-infra/src/sqlite_device_registry.rs`). **A device that registered itself through the handshake has to keep calling this, or it ages out and reads offline while in use.** The handshake's upsert is the only other write to its row.
+
+| Caller | Cadence | Where |
+|---|---|---|
+| The desktop app, for its own row | every 120s while it has a session (`SELF_HEARTBEAT_MS`) | `pond-desktop/src/state/AppContext.tsx`, via `heartbeatSelf()` |
+| Goose On The Go, for its own row | every 120s while in the foreground | the phone app's `ServerProvider` |
+| The Matter bridge | as it syncs each device | `crates/pond-adapters-matter/src/bridge.rs` |
+
+`{id}` must be the id the device registered under. For a client that paired, that is the `client_id` it sent at `/handshake/init`. A beat against any other id succeeds and refreshes nothing. The desktop therefore beats through its own `clientId()` rather than taking an id as an argument.
+
 **Response 200**
 ```json
 { "status": "ok" }
