@@ -40,26 +40,19 @@ describe("unit conversions", () => {
   });
 
   it("maps kelvin onto mireds, inverting the order", () => {
-    // Mireds are reciprocal megakelvin, so the mapping is its own inverse and hotter is
-    // SMALLER. A conversion that preserved order would put warm white where cool goes.
     expect(kelvinToMireds(2700)).toBe(370);
     expect(kelvinToMireds(6500)).toBe(154);
     expect(miredsToKelvin(370)).toBe(2703);
     expect(miredsToKelvin(154)).toBe(6494);
 
-    // Clamped to the cluster's own field range, and zero is not a colour: the spec's
-    // defaults include 0 mireds, which would divide to infinity.
+    // Clamped to the field's range; 0 mireds, a spec default, would divide to infinity.
     expect(kelvinToMireds(0)).toBe(0xfeff);
     expect(kelvinToMireds(-1)).toBe(0xfeff);
     expect(miredsToKelvin(0)).toBe(0);
   });
 
   it("reads a hue back as one that would put the device where it is", () => {
-    // NOT numeric equality, and the difference is the point. ColorControl quantises 360
-    // degrees onto 0-254, so a step is ~1.4 degrees and 90 comes back as 91 -- there is
-    // no conversion that avoids that. What the doc actually promises is that a value
-    // read here would put the device back where it is, and THAT is exact: writing the
-    // read-back lands on the same raw value.
+    // Not numeric equality: 360° onto 0-254 is ~1.4° a step, but writing the read-back is exact.
     for (const degrees of [0, 45, 90, 180, 300, 359]) {
       const raw = hueToMatter(degrees);
       expect(hueToMatter(matterToHue(raw))).toBe(raw);
@@ -90,8 +83,6 @@ describe("unit conversions", () => {
   });
 
   it("converts percent open into hundredths-of-a-percent closed", () => {
-    // GIAP speaks in percent open because that is how users phrase it; Matter's
-    // GoToLiftPercentage is the other way round.
     expect(positionOpenToLift100ths(100)).toBe(0);
     expect(positionOpenToLift100ths(0)).toBe(10000);
     expect(positionOpenToLift100ths(50)).toBe(5000);
@@ -119,8 +110,6 @@ describe("control planning", () => {
   });
 
   it("switches a fan through FanMode when it has no On/Off cluster", () => {
-    // Without this branch "turn on the fan" could only fail: most fans, the Matter
-    // Virtual Device's included, implement no On/Off cluster at all.
     const plan = planControl(fanNode(), "matter-18", "power", true);
     expect(plan.actions).toEqual([
       { kind: "write", endpoint: 1, cluster: "fanControl", attribute: "fanMode", value: FAN_MODE_ON },
@@ -177,8 +166,6 @@ describe("control planning", () => {
   });
 
   it("refuses a verb the device has no cluster for", () => {
-    // Refusing is the point: the logging stub answering every verb with success is
-    // what let the agent tell a user a fan was on when nothing had been sent anywhere.
     expect(() => planControl(lightNode(), "matter-2", "position", 50)).toThrow(OpError);
     try {
       planControl(lightNode(), "matter-2", "position", 50);
@@ -209,12 +196,8 @@ describe("control planning", () => {
   });
 
   it("gives commands that take no fields an EMPTY payload", () => {
-    // The contract `controller.ts` reads: an empty payload means invoke the
-    // command with NO argument. matter.js validates against the cluster schema
-    // and rejects `{}` on a void command with "Expected void, got object", so
-    // On, Off, LockDoor and UnlockDoor all failed while the commands that do
-    // take fields worked — a half-working state that is very hard to read from
-    // the outside. Anything added here with a void command must keep this shape.
+    // `controller.ts` invokes an empty payload with NO argument: matter.js rejects `{}` on a void
+    // command ("Expected void, got object").
     const voidCommands: [ReturnType<typeof planControl>, string][] = [
       [planControl(lightNode(), "matter-2", "power", true), "on"],
       [planControl(lightNode(), "matter-2", "power", false), "off"],
@@ -269,9 +252,7 @@ describe("colour temperature control", () => {
   });
 
   it("reports the kelvin the device will sit at, not the one requested", () => {
-    // The round trip through whole mireds is lossy. Echoing 2700 back would overstate
-    // the precision -- the device is actually at 2703 -- and `applied` exists precisely
-    // so the answer is what happened rather than what was asked.
+    // Whole mireds are lossy: 2700 K lands at 2703.
     const plan = planControl(extendedColorLightNode(), "matter-51", "color_temp", 2700);
 
     expect(plan.applied).toEqual({ color_temp: 2703 });
@@ -288,9 +269,6 @@ describe("colour temperature control", () => {
 
 describe("reading back what the device actually did", () => {
   it("reports the fan speed the device settled on, not the one requested", () => {
-    // The report this came from. Asked for 85%, the fan quantised onto its High mode and
-    // sat at 90 -- and GIAP said "speed is set to 85%", which is the number the user
-    // typed. A result that echoes the request cannot show that anything happened.
     const fan = node(1, [
       named("Fan"),
       endpoint(1, { fanControl: { fanMode: 3, percentSetting: 85, percentCurrent: 90 } }),
@@ -300,8 +278,7 @@ describe("reading back what the device actually did", () => {
   });
 
   it("reads percentCurrent rather than the setting that was written", () => {
-    // percentSetting is the request stored on the device. Reading it back would echo the
-    // request with extra steps and look like it had been verified.
+    // percentSetting is the stored request, not what the fan did.
     const disagreeing = node(2, [
       named("Fan"),
       endpoint(1, { fanControl: { percentSetting: 20, percentCurrent: 55 } }),
@@ -325,23 +302,19 @@ describe("reading back what the device actually did", () => {
   });
 
   it("says nothing for a verb that cannot land somewhere else", () => {
-    // A boolean has nowhere else to land, so waiting for a report buys nothing. Empty
-    // here is what tells the controller not to wait.
+    // Empty tells the controller not to wait for a report.
     expect(observedFor(lightNode(), "power")).toEqual({});
     expect(observedFor(lightNode(), "locked")).toEqual({});
   });
 
   it("says nothing when the device reports no value for the verb", () => {
-    // Absent is not evidence of a different value: the plan's own applied stands rather
-    // than a reading being invented.
+    // The plan's own `applied` then stands.
     expect(observedFor(lightNode(), "fan_speed")).toEqual({});
     expect(observedFor(lightNode(), "tilt")).toEqual({});
   });
 
   it("accepts every verb at the wire boundary", () => {
-    // `server.ts` rejects a verb this set does not hold, and `color_temp` was missing
-    // from it for a whole commit -- unreachable in production while every unit test
-    // passed, because these tests call planControl directly and never cross that check.
+    // `server.ts` rejects verbs not in VERBS, a check the planControl tests never cross.
     for (const verb of ["power", "brightness", "color", "color_temp", "fan_speed", "mode"]) {
       expect(VERBS.has(verb), `'${verb}' would be refused as an unknown verb`).toBe(true);
     }
@@ -352,9 +325,7 @@ describe("media control", () => {
   it("writes the volume to the speaker's endpoint, not the player's", () => {
     const plan = planControl(videoPlayerNode(), "matter-81", "volume", 50);
 
-    // A command. This test asserted a WRITE and passed, because it checked what the plan
-    // said rather than what Matter accepts -- `currentLevel` is read-only and the device
-    // refused every volume it was ever sent.
+    // A command: `currentLevel` is read-only.
     expect(plan.actions).toEqual([
       {
         kind: "command",
@@ -399,25 +370,12 @@ describe("media control", () => {
 
   it("reads the volume back off the speaker", () => {
     expect(observedFor(videoPlayerNode(), "volume")).toEqual({ volume: 50 });
-    // And does not report the same level under the wrong name: a television has no
-    // brightness to read, so reading one would be the volume wearing a disguise.
     expect(observedFor(videoPlayerNode(), "brightness")).toEqual({});
-    // A bulb is unaffected -- its level is still a brightness.
     expect(observedFor(lightNode(), "brightness")).toEqual({ brightness: 50 });
   });
 });
 
-/**
- * Matter attributes a controller may READ but never WRITE.
- *
- * Every one of these has a command that sets it instead — `moveToLevel` for a level,
- * `moveToHueAndSaturation` for a colour, `lockDoor` for a bolt. Writing them is answered
- * with "Unsupported write", which is exactly what a television did to every volume it was
- * ever sent: the `volume` case was written as an attribute write while `brightness`, three
- * cases away in the same file, had always used the command.
- *
- * Not exhaustive over Matter — it is the set this repo's verbs could plausibly reach.
- */
+/** Attributes Matter answers "Unsupported write" for (a command sets each); the ones our verbs reach. */
 const READ_ONLY: ReadonlySet<string> = new Set([
   "levelControl.currentLevel",
   "onOff.onOff",
@@ -442,10 +400,6 @@ const READ_ONLY: ReadonlySet<string> = new Set([
 
 describe("no plan writes an attribute the device will refuse", () => {
   it("sets every verb through a command where the attribute is read-only", () => {
-    // A unit test can assert what a plan SAYS; it cannot assert that Matter accepts it.
-    // This is the gap that let a broken volume ship green -- the test asserted the write
-    // it was given. Naming the read-only attributes is the cheap half of the check the
-    // device would otherwise have to make for us.
     const cases: [ReturnType<typeof lightNode>, string, unknown][] = [
       [lightNode(), "power", true],
       [lightNode(), "brightness", 60],

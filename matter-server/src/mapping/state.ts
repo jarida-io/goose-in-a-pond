@@ -1,26 +1,6 @@
 /**
- * What a device currently is, in the same words as what it can be told to do.
- *
- * `describe` answers "what can this device do"; nothing answered "what is it doing".
- * A model asked whether the washer was running had to drive it to find out, and
- * whether a light was on was equally unanswerable — the state was in the controller
- * the whole time, with no way to ask for it.
- *
- * Every name here is one `describe` also uses: the control verb for a scalar
- * ("power", "brightness"), the setting name for a selectable ("spin speed"), or the
- * sensor type for something measured ("hepa_filter_condition"). So a reading names
- * the thing that changes it where there is one, and a reader can go from "spin speed
- * is Low" to the call that makes it High without a second lookup.
- *
- * Both halves belong here. A device's state is what it is, not only what it can be
- * told to be: asked about an air purifier, an answer of power and fan speed alone
- * had to add that the filter conditions "are not measured in this reading" -- while
- * both sat in the snapshot at 100%.
- *
- * Values are read through the inverses of the conversions `control` writes with, so
- * a position reported as 40% open is the same 40% that put it there. Anything the
- * device does not report is absent rather than guessed: "unknown" invented here is
- * indistinguishable from a real reading further up.
+ * A device's current state, named as `describe` names things (verb, setting or sensor type) and
+ * read through the inverses of `control`'s conversions. Unreported values are absent, not guessed.
  */
 
 import type { DeviceState, StateValue } from "../protocol.js";
@@ -70,16 +50,7 @@ function numberAt(node: NodeSnapshot, cluster: string, attribute: string): numbe
   return typeof value === "number" ? value : undefined;
 }
 
-/** Everything this device currently reports, in the order a person would ask. */
-/**
- * Is a valve reporting any fault at all?
- *
- * `valveFault` is a bitmap, and matter.js may hand it over decoded into named flags
- * or as the raw number -- the same tolerance `colorSupport` and `fanModes` apply.
- * Which fault it is stays out of this: the words are the spec's ("general fault",
- * "blocked", "leaking"), a device may report several at once, and "the valve has
- * faulted" is the fact a caller acts on.
- */
+/** Is a valve reporting any fault? `valveFault` may arrive as decoded flags or a raw bitmap. */
 function faultsPresent(raw: unknown): boolean {
   if (typeof raw === "number") return raw !== 0;
   if (typeof raw === "object" && raw !== null) {
@@ -88,6 +59,7 @@ function faultsPresent(raw: unknown): boolean {
   return false;
 }
 
+/** Everything this device currently reports, in the order a person would ask. */
 export function stateOf(node: NodeSnapshot): DeviceState {
   const values: StateValue[] = [];
   const add = (name: string, value: string | undefined) => {
@@ -101,16 +73,12 @@ export function stateOf(node: NodeSnapshot): DeviceState {
   const speakerLevel = speaker?.clusters[CLUSTER_LEVEL_CONTROL]?.["currentLevel"];
   if (typeof speakerLevel === "number") add("volume", `${levelToBrightness(speakerLevel)}%`);
 
-  // Only where the level is NOT a speaker's, or a television reports its volume twice
-  // and calls one of them brightness.
   if (levelIsBrightness(node)) {
     const level = numberAt(node, CLUSTER_LEVEL_CONTROL, "currentLevel");
     if (level !== undefined) add("brightness", `${levelToBrightness(level)}%`);
   }
 
-  // The setpoint `target_temp` would write, which is the one the mode has live.
-  // Reporting the heating one to a cooling thermostat describes a number that is
-  // not currently steering anything.
+  // The setpoint `target_temp` would write: the one the current mode has live.
   const appliance = applianceSetpoint(node);
   if (appliance !== undefined) {
     const set = numberAt(node, "temperatureControl", "temperatureSetpoint");
@@ -125,15 +93,10 @@ export function stateOf(node: NodeSnapshot): DeviceState {
   const lock = numberAt(node, CLUSTER_DOOR_LOCK, "lockState");
   if (lock !== undefined) add("locked", LOCK_STATES[lock]);
 
-  // Where the door itself is, which `locked` cannot answer: a bolt thrown into an open
-  // frame reports "locked" quite happily, and jammed and forced open have no reading
-  // here at all otherwise.
+  // Door position, which `locked` cannot answer: a bolt thrown into an open frame reads "locked".
   add("door", doorStateWord(valueAt(node, CLUSTER_DOOR_LOCK, "doorState")));
 
-  // Where the valve is, in the same three words `describe` lists -- from the same
-  // reader, so "transitioning" cannot come out as something else here. Its level,
-  // where it has one, is reported as `position`: the thing reported is the thing
-  // `position` sets, which is the rule the covering above follows.
+  // A valve's level is reported as `position`, the control that sets it.
   add("valve_state", valveStateWord(valueAt(node, CLUSTER_VALVE, "currentState")));
   const valveLevel = numberAt(node, CLUSTER_VALVE, "currentLevel");
   if (valveLevel !== undefined) add("position", `${Math.round(valveLevel)}%`);
@@ -144,18 +107,10 @@ export function stateOf(node: NodeSnapshot): DeviceState {
   const pin = valueAt(node, CLUSTER_DOOR_LOCK, "requirePinForRemoteOperation");
   if (typeof pin === "boolean") add("pin_required", pin ? "required" : "not required");
 
-  // Which way a switch is thrown, and which kind of switch it is. Named exactly as
-  // `statesOf` names them, and the kind comes from the same reader, so a description
-  // and a reading cannot disagree about either.
   const position = numberAt(node, CLUSTER_SWITCH, "currentPosition");
   if (position !== undefined) add("switch_position", `${position}`);
   add("switch_kind", switchKindOf(node));
-  // What colour it is, which had no answer at all before: `state` never touched
-  // ColorControl, so "what colour is the light?" could only be answered by changing it.
-  //
-  // Reported by the mode the device says it is IN, not by every attribute it holds. A
-  // bulb sitting at 2700K still has a stale hue in `currentHue` from whenever it was
-  // last set that way, and reporting both makes the reading contradict itself.
+  // By the `colorMode` it is IN: a bulb at 2700K keeps a stale `currentHue`.
   const colorMode = valueAt(node, CLUSTER_COLOR_CONTROL, "colorMode");
   const inTemperatureMode =
     colorMode === 2 || (typeof colorMode === "string" && /temperature|mireds/i.test(colorMode));
@@ -168,16 +123,10 @@ export function stateOf(node: NodeSnapshot): DeviceState {
     const hue = numberAt(node, CLUSTER_COLOR_CONTROL, "currentHue");
     const saturation = numberAt(node, CLUSTER_COLOR_CONTROL, "currentSaturation");
     if (hue !== undefined && saturation !== undefined) {
-      // Back through the inverses of what `color` writes, so the numbers read here are
-      // the numbers that would put it here.
       add("color", `hue ${matterToHue(hue)}, saturation ${matterToSaturation(saturation)}%`);
     }
   }
 
-  // What the alarm is expressing, which neither the smoke reading nor the CO reading
-  // says on its own: a device sounding for carbon monoxide while its smoke level sits at
-  // Critical is reporting two different facts, and only this one answers "what is it
-  // doing".
   add("alarm", expressedStateWord(valueAt(node, CLUSTER_SMOKE_CO_ALARM, "expressedState")));
 
   const service = valueAt(node, CLUSTER_SMOKE_CO_ALARM, "endOfServiceAlert");
@@ -196,16 +145,8 @@ export function stateOf(node: NodeSnapshot): DeviceState {
   const fanMode = numberAt(node, CLUSTER_FAN_CONTROL, "fanMode");
   if (fanMode !== undefined) add("fan_mode", fanModeName(fanMode));
 
-  // Reported as percent open, matching how `position` is written and how people say
-  // it, rather than WindowCovering's percent closed.
-  // Where it is, and where it is going when those differ. A covering takes time to
-  // travel, so the two disagree for as long as it moves -- and a device that took
-  // the command without moving is indistinguishable from one that ignored it unless
-  // the target is visible. Asked to close, a covering reported "100% open" with
-  // nothing to say its target had just become fully closed.
-  //
-  // Said in one reading rather than two, so the name stays `position`: the thing
-  // reported is the thing `position` sets.
+  // Percent open (WindowCovering stores percent closed), plus the target while it differs: a
+  // covering that took the command but has not moved otherwise looks like one that ignored it.
   const lift = numberAt(node, CLUSTER_WINDOW_COVERING, "currentPositionLiftPercent100ths");
   if (lift !== undefined) {
     const target = numberAt(node, CLUSTER_WINDOW_COVERING, "targetPositionLiftPercent100ths");
@@ -231,50 +172,31 @@ export function stateOf(node: NodeSnapshot): DeviceState {
     );
   }
 
-  // Selectable settings, named exactly as `describe` names them and as `control`
-  // takes them, each carrying the label the device chose for its current value.
   for (const setting of settingsOf(node)) {
     add(setting.name, currentLabel(node, setting));
   }
 
   add("operation", observedOperation(node));
 
-  // What it measures, after what it can be told to do. Asked for an air purifier's
-  // state, GIAP answered power and fan speed and had to add that the filter
-  // conditions "are not measured in this reading" -- while both were sitting in the
-  // snapshot at 100%. A device's state is what it is, and for a purifier the state
-  // of its filters is most of that.
-  //
-  // Read through the same table `describe` lists its sensors from, so a device
-  // cannot be described as measuring something its state then omits.
   for (const sensor of SENSORS) {
     const endpoint = endpointWith(node, sensor.cluster);
-    // The same precedence `describe` applies, from the same function: one bit on
-    // Boolean State is four different facts and the device type says which.
     if (!sensorApplies(sensor, endpoint?.deviceTypes ?? [])) continue;
     const raw = endpoint?.clusters[sensor.cluster]?.[sensor.attribute];
     const reading = sensor.read(raw);
     if (reading === undefined) continue;
 
-    // An enum reading is said in the device's own words. The purifier's screen
-    // shows "Critical" for a spent filter while GIAP reported "2 state", which is
-    // the same fact with the meaning removed -- and the meaning is the whole of
-    // what a person asked for. The number stays in the reading itself, where a
-    // rule threshold compares it.
+    // Enum readings in the device's words; the number stays in the reading for rule thresholds.
     const worded = sensor.words?.[reading];
     if (worded !== undefined) {
       add(sensor.sensorType, worded);
       continue;
     }
 
-    // "50%" for a fan speed and "100 %" for a filter, in one list, reads as two
-    // different systems. A percentage closes up; everything else keeps its space.
+    // A percentage closes up, matching fan speed's "50%"; other units keep their space.
     add(sensor.sensorType, sensor.unit === "%" ? `${reading}%` : `${reading} ${sensor.unit}`);
   }
 
-  // The device this state is OF, endpoint included. Without the endpoint every
-  // bridged child reported its hub's id back, so a caller correlating a reply with
-  // the device it asked about got the hub for all twelve.
+  // Endpoint included, or every bridged child reports its hub's id.
   return { device_id: deviceIdForNode(node.nodeId, node.rootEndpoint), values };
 }
 
@@ -286,9 +208,6 @@ function currentLabel(
   const state = node.endpoints.find(e => e.number === setting.endpoint)?.clusters[setting.cluster];
   if (state === undefined) return undefined;
 
-  // Where the value lives depends on how it is written: ModeBase keeps the choice in
-  // `currentMode` and matches it against the codes the device published, while the
-  // attribute-written ones are an index into the labels themselves.
   const current =
     setting.current !== undefined
       ? state[setting.current]
@@ -297,7 +216,6 @@ function currentLabel(
         : state[setting.write.attribute];
   if (typeof current !== "number") return undefined;
 
-  // ModeBase codes need not be positions in the list, so ask the setting which label
-  // carries this code rather than indexing into it.
+  // ModeBase codes need not be list positions, so match by code rather than index.
   return setting.values.find(label => setting.valueFor(label) === current);
 }

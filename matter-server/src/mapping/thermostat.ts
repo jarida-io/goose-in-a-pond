@@ -1,23 +1,6 @@
 /**
- * Which setpoint a thermostat is actually being asked about.
- *
- * A thermostat has two: one it heats up to and one it cools down to. `target_temp`
- * always wrote the heating one, whatever the device was doing — so a thermostat
- * sitting in Cool, told "set it to 20", had its *heating* setpoint moved to 20 and
- * carried on cooling to whatever its cooling setpoint said. The write succeeded,
- * the reported value was 20, and nothing about the device changed in the way the
- * person meant.
- *
- * The mode decides. Cool means the cooling setpoint, Heat means the heating one.
- * Auto and Off run neither exclusively, so there the value picks: whichever setpoint
- * it is nearer to is the one being adjusted, which is how a person naming a
- * temperature means it — "make it 28" against a 12/26 pair is plainly about cooling.
- *
- * The two carry different limits, and each is bounded by the other. They must stay
- * `minSetpointDeadBand` apart wherever the device supports Auto, so raising one
- * lowers the other's headroom: this is why a thermostat advertising a 30 degree
- * maximum refuses 24, and why the honest answer to "what will it take" depends on
- * which setpoint the question is about.
+ * Which of a thermostat's two setpoints a request is about: Cool → cooling, Heat → heating,
+ * Auto/Off → the one nearer the requested value. `minSetpointDeadBand` makes each bound the other.
  */
 
 import type { EndpointSnapshot, NodeSnapshot } from "./snapshot.js";
@@ -59,15 +42,7 @@ const SYSTEM_MODE_NAMES: ReadonlyMap<string, number> = new Map([
   ["sleep", 9],
 ]);
 
-/**
- * The mode the thermostat is in, whichever way matter.js decoded it.
- *
- * Read as a number only, every comparison against it failed for a device that reported
- * "Cool" — so a cooling-only air conditioner sitting in Cool mode was treated as a
- * thermostat with no settled mode, and got the union of both setpoints' ranges: 7 to
- * 32 C on a device that cannot go anywhere near 7. The same tolerance `fanModes` and
- * `doorStateWord` already apply, for the same reason.
- */
+/** The thermostat's mode, whether matter.js decoded it as a number or a name. */
 export function systemMode(endpoint: EndpointSnapshot): number | undefined {
   const raw = endpoint.clusters[CLUSTER_THERMOSTAT]?.["systemMode"];
   if (typeof raw === "number") return raw;
@@ -78,18 +53,8 @@ export function systemMode(endpoint: EndpointSnapshot): number | undefined {
 }
 
 /**
- * Which setpoints this thermostat actually has.
- *
- * `controlSequenceOfOperation` is MANDATORY on the cluster and says exactly this —
- * whether the device cools, heats, or both — and nothing here read it. Presence was
- * inferred with `"occupiedCoolingSetpoint" in clusters` instead, which is a KEY check:
- * matter.js populates a key for every attribute in the cluster model and leaves the
- * unsupported ones `undefined`, so every thermostat looked like it had both. A
- * cooling-only air conditioner was offered a heating setpoint it does not implement.
- *
- * Claims first, evidence second, and neither is allowed to STRIP a control that might
- * work: a device stating nothing at all keeps both, because withholding a setpoint on
- * silence would break a thermostat that under-reports. Same order as `colorSupport`.
+ * Which setpoints it has: `controlSequenceOfOperation`, else the reported values (matter.js keys
+ * every model attribute, so `in` proves nothing), else both rather than strip one that works.
  */
 export function setpointsAvailable(endpoint: EndpointSnapshot): {
   heating: boolean;
@@ -106,23 +71,15 @@ export function setpointsAvailable(endpoint: EndpointSnapshot): {
   const cooling = attr(endpoint, "occupiedCoolingSetpoint") !== undefined;
   if (heating || cooling) return { heating, cooling };
 
-  // Says nothing and reports nothing. Keep offering both rather than describing a
-  // thermostat as having no temperature control at all.
   return { heating: true, cooling: true };
 }
 
-/** The tighter of a configured limit and the absolute one the hardware states. */
+/** The configured limit, else the absolute one the hardware states. */
 function floor(endpoint: EndpointSnapshot, configured: string, absolute: string) {
   return attr(endpoint, configured) ?? attr(endpoint, absolute);
 }
 
-/**
- * The gap the two setpoints must keep, in hundredths.
- *
- * `minSetpointDeadBand` is in TENTHS of a degree — an int8 whose legal range is 0
- * to 25, meaning 0 to 2.5 degrees. Reading it as whole degrees turns a 2.5 degree
- * band into 25, which is wrong rather than absurd and shows up nowhere but here.
- */
+/** The setpoints' required gap in hundredths; `minSetpointDeadBand` is in TENTHS of a degree (0–25). */
 function deadband(endpoint: EndpointSnapshot): number {
   return (attr(endpoint, "minSetpointDeadBand") ?? 0) * 10;
 }
@@ -131,8 +88,7 @@ function heatingSetpoint(endpoint: EndpointSnapshot): Setpoint {
   const cooling = attr(endpoint, "occupiedCoolingSetpoint");
   let max = floor(endpoint, "maxHeatSetpointLimit", "absMaxHeatSetpointLimit");
 
-  // Capped below the cooling setpoint. Absent deadband means zero, not "no rule":
-  // the two still may not cross.
+  // Capped below the cooling setpoint; an absent deadband is zero, so they still may not cross.
   if (cooling !== undefined) {
     const ceiling = cooling - deadband(endpoint);
     max = max === undefined ? ceiling : Math.min(max, ceiling);
@@ -168,22 +124,13 @@ function coolingSetpoint(endpoint: EndpointSnapshot): Setpoint {
   };
 }
 
-/**
- * The setpoint a request is about.
- *
- * `celsius` is the value being asked for, where there is one. Without it — as when
- * describing a device rather than driving it — a mode that names one setpoint still
- * answers definitely, and Auto or Off fall back to heating, which is the setpoint
- * every thermostat has.
- */
+/** The setpoint a request is about; without `celsius`, Auto and Off fall back to heating. */
 export function targetSetpoint(node: NodeSnapshot, celsius?: number): Setpoint | undefined {
   const endpoint = endpointWith(node, CLUSTER_THERMOSTAT);
   if (endpoint === undefined) return undefined;
 
   const available = setpointsAvailable(endpoint);
   const heating = heatingSetpoint(endpoint);
-  // A cool-only device has no heating setpoint to write, and vice versa. Naming one the
-  // device does not implement is a write it refuses.
   if (!available.cooling) return available.heating ? heating : undefined;
   if (!available.heating) return coolingSetpoint(endpoint);
 
@@ -198,8 +145,7 @@ export function targetSetpoint(node: NodeSnapshot, celsius?: number): Setpoint |
       break;
   }
 
-  // Auto or Off: neither setpoint is the obvious one, so the value decides. A
-  // request nearer the cooling setpoint is a request about cooling.
+  // Auto or Off: the setpoint nearer the requested value.
   if (celsius === undefined) return heating;
   const hundredths = celsius * 100;
   const toHeating = Math.abs(hundredths - (attr(endpoint, "occupiedHeatingSetpoint") ?? 0));
@@ -207,10 +153,7 @@ export function targetSetpoint(node: NodeSnapshot, celsius?: number): Setpoint |
   return toCooling < toHeating ? cooling : heating;
 }
 
-/**
- * Both setpoints' ranges together, for describing a device whose mode does not
- * settle which one a request would land on.
- */
+/** Both setpoints' ranges together, for a mode that does not settle which one applies. */
 export function reachableRange(node: NodeSnapshot): { min?: number; max?: number } | undefined {
   const endpoint = endpointWith(node, CLUSTER_THERMOSTAT);
   if (endpoint === undefined) return undefined;
@@ -223,8 +166,7 @@ export function reachableRange(node: NodeSnapshot): { min?: number; max?: number
   }
 
   const cooling = coolingSetpoint(endpoint);
-  // Cool-only: the union below would take its floor from a heating setpoint that does
-  // not exist, which is how an air conditioner came to advertise 7 C.
+  // Cool-only: the union would take its floor from a nonexistent heating setpoint.
   if (!available.heating) {
     return { ...(cooling.min === undefined ? {} : { min: cooling.min }),
              ...(cooling.max === undefined ? {} : { max: cooling.max }) };
@@ -235,21 +177,7 @@ export function reachableRange(node: NodeSnapshot): { min?: number; max?: number
   return { ...(min === undefined ? {} : { min }), ...(max === undefined ? {} : { max }) };
 }
 
-/**
- * An appliance's own temperature setpoint, where it keeps one.
- *
- * Temperature Control has two shapes and this is the other one. The washer named
- * levels — Low, Medium, High — and `settingsOf` reads those as a mode. A dishwasher
- * states a number instead: `temperatureSetpoint` in hundredths, with its own
- * minimum, maximum and step. Reading only the levels, GIAP told a household "no,
- * you cannot set a temperature for the dishwasher" about a device showing a 49 to
- * 82 degree slider on its own screen.
- *
- * It answers to `target_temp` rather than a verb of its own. GIAP already has a
- * verb meaning "a temperature in Celsius", and a dishwasher's wash temperature is
- * that: adding `dishwasher_temp` would be the per-appliance vocabulary this whole
- * area exists to avoid.
- */
+/** An appliance's numeric Temperature Control setpoint, driven via `target_temp`; levels are a mode. */
 export interface ApplianceSetpoint {
   endpoint: number;
   /** Hundredths of a degree, as Matter states them. Absent where unstated. */
@@ -266,8 +194,7 @@ export function applianceSetpoint(node: NodeSnapshot): ApplianceSetpoint | undef
   const state = endpoint?.clusters[TEMPERATURE_CONTROL];
   if (endpoint === undefined || state === undefined) return undefined;
 
-  // The number feature, not the level one: a device offering levels is read as a
-  // mode, and one offering neither has nothing to set.
+  // The number feature only; levels are read as a mode.
   const number = (name: string) => {
     const value = state[name];
     return typeof value === "number" ? value : undefined;

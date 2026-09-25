@@ -1,15 +1,8 @@
 #!/usr/bin/env node
 /**
- * GIAP's Matter controller — matter.js behind the `giap-matter` WebSocket protocol.
- *
- * Started by pond-server (`crates/pond-adapters-matter/src/server_setup.rs`), which
- * owns the process lifetime. See `docs/matter-protocol.md` for the wire contract.
- *
+ * GIAP's Matter controller, spawned by pond-server (`server_setup.rs`):
  *   node --import tsx src/server.ts --port 5580 --storage-path <dir>
- *
- * Both arguments are required in practice and parsed here. `--storage-path` is NOT
- * left to matter.js's own argv parser, which reads it as a boolean — see
- * `Controller.start`.
+ * `--storage-path` is parsed here: matter.js's own argv parser reads it as a boolean.
  */
 
 import { readFileSync } from "node:fs";
@@ -36,19 +29,12 @@ import {
 } from "./protocol.js";
 
 /**
- * Loopback only, and not configurable.
- *
- * A Matter controller holds the fabric's operational credentials: anything that can
- * reach this socket can drive and unpair every device in the house, with no
- * authentication of its own. GIAP only ever manages a controller on 127.0.0.1 (see
- * `local_port_from_ws_url`), so binding wider would create exposure nothing asked for.
- * An operator who wants a shared controller runs their own and points `matter_ws_url`
- * at it, which is a deliberate act rather than a default.
+ * Loopback only, not configurable: the socket is unauthenticated and holds the fabric's credentials,
+ * so anything reaching it can drive or unpair every device. A shared controller is the operator's own.
  */
 const BIND_HOST = "127.0.0.1";
 
-/** The protocol's path. Naming the protocol means an address left over from an
- *  earlier release fails loudly rather than half-working. */
+/** Named for the protocol, so a stale address fails loudly rather than half-working. */
 const PATH = "/giap";
 
 const DEFAULT_PORT = 5580;
@@ -70,14 +56,7 @@ function parsePort(argv: string[]): number {
   return port;
 }
 
-/**
- * `--ble` asks for the Bluetooth transport. Absent means off.
- *
- * A flag rather than a default: BLE needs a native module that may not be
- * installed and permission a headless service does not have, and turning a radio
- * on is not something to do to someone's machine because a controller started.
- * See `ble.ts`.
- */
+/** `--ble` opts in: BLE needs a native module and permissions a headless service may lack. */
 function parseBle(argv: string[]): boolean {
   return argv.includes("--ble");
 }
@@ -91,13 +70,8 @@ function parseStoragePath(argv: string[]): string {
 }
 
 /**
- * Put matter.js's own logging on stderr.
- *
- * It writes to stdout by default, and stdout is the one stream this process must keep
- * clean — the Rust side treats stderr as the diagnostic channel and relays it into
- * `tracing`, so matter.js's output would otherwise be the half of the story that never
- * reaches a GIAP log. Plain format because the relay reads lines, and ANSI escapes in
- * a log file help nobody.
+ * Moves matter.js logging (stdout by default) to stderr, which the Rust side relays into `tracing`;
+ * stdout must stay clean. Plain format, because the relay reads lines.
  */
 function routeMatterLogsToStderr(): void {
   Logger.format = LogFormat.PLAIN;
@@ -113,9 +87,7 @@ async function main(): Promise<void> {
   const port = parsePort(argv);
   const storagePath = parseStoragePath(argv);
   routeMatterLogsToStderr();
-  // Before the ServerNode exists: matter.js resolves `Ble` out of the environment
-  // when the node is created, so registering it afterwards registers it for
-  // nothing. See `ble.ts`.
+  // Before the ServerNode exists: matter.js resolves `Ble` from the environment at creation.
   const ble: BleStatus = parseBle(argv) ? await enableBle() : "off";
   const clients = new Set<WebSocket>();
 
@@ -126,10 +98,8 @@ async function main(): Promise<void> {
     }
   };
 
-  // The Matter operational port takes the same NUMBER as the WebSocket port.
-  // They are different protocols (UDP and TCP) so they cannot collide, it needs
-  // no extra configuration, and it moves with `--port` — so two Ponds on one
-  // host stay out of each other's way as well as out of 5540's.
+  // Matter's UDP operational port reuses the WebSocket's TCP port number: no collision, and it
+  // moves with `--port`, keeping two Ponds on one host apart (and off the default 5540).
   const controller = await Controller.start(storagePath, port, {
     deviceAdded: (device: Device) => broadcast("device_added", { device }),
     deviceUpdated: (device: Device) => broadcast("device_updated", { device }),
@@ -139,10 +109,7 @@ async function main(): Promise<void> {
     reading: (reading: Reading) => broadcast("reading", reading),
   });
 
-  // Also fan log records out over the socket. stderr already carries them, but the
-  // relay on the other side only reads stderr while the process is a child it spawned
-  // — an operator running their own controller has no such pipe, and this keeps their
-  // GIAP log as informative as a managed one.
+  // Logs over the socket too: a controller pond-server did not spawn has no stderr relay.
   onLog((record: LogRecord) => broadcast("log", record));
 
   const wss = new WebSocketServer({ host: BIND_HOST, port, path: PATH });
@@ -154,8 +121,7 @@ async function main(): Promise<void> {
       version: PROTOCOL_VERSION,
       fabric_id: controller.fabricId(),
       matter_js: matterJsVersion(),
-      // What the transport actually IS, not what was asked for: `unavailable`
-      // reads as off to a client, which is the truth about what it can pair.
+      // What the transport IS, not what was asked for: `unavailable` is off.
       ble: ble === "on",
     };
     socket.send(JSON.stringify(greeting));
@@ -179,9 +145,7 @@ async function main(): Promise<void> {
     log.info("listening", "controller is accepting connections", { port, path: PATH }),
   );
 
-  // SIGTERM is how pond-server stops us; SIGINT is a human at a terminal. Both must
-  // close the fabric cleanly, because an abandoned subscription leaves every device
-  // holding a session it will not reuse.
+  // SIGTERM and SIGINT must close the fabric cleanly, or devices keep sessions they won't reuse.
   const stop = async (signal: string): Promise<void> => {
     log.info("stopping", "shutting the controller down", { signal });
     wss.close();
@@ -201,8 +165,7 @@ async function handleMessage(
   try {
     request = JSON.parse(raw) as Request;
   } catch {
-    // No id to answer against, so there is nothing to reply to. Logged rather than
-    // dropped silently: a client sending garbage is a bug worth seeing.
+    // No id to reply against; logged, since a client sending garbage is a bug.
     log.warn("unparseable_request", "a client sent something that is not JSON");
     return;
   }
@@ -243,9 +206,7 @@ async function dispatch(controller: Controller, request: Request): Promise<unkno
       return {};
 
     case "subscribe":
-      // The full snapshot, so a fresh connection knows the fabric without waiting for
-      // something to change. Events carry every change from here on — which is why
-      // this also re-checks that every commissioned peer is wired for them.
+      // Full snapshot; events carry every change after, so re-check every peer is wired for them.
       controller.observeCommissioned();
       return { devices: controller.devices(), readings: controller.readings() };
 
@@ -298,8 +259,7 @@ function requireDeviceId(value: unknown): string {
 }
 
 function matterJsVersion(): string {
-  // Reported in the greeting purely so an operator reading a log can tell which
-  // controller answered. Never load-bearing, so a failure to resolve it is not fatal.
+  // Informational only (for logs), so failing to resolve it is not fatal.
   try {
     const manifest = readFileSync(
       new URL("../node_modules/@matter/main/package.json", import.meta.url),
@@ -312,8 +272,7 @@ function matterJsVersion(): string {
 }
 
 main().catch((error: unknown) => {
-  // The last line the Rust side's stderr ring will hold, and therefore the reason it
-  // reports when the controller dies before it is ready.
+  // The Rust side reports the last stderr line as the reason a startup failed.
   log.error("startup_failed", describeError(error), { stack: stackOf(error) });
   process.exit(1);
 });
