@@ -1,13 +1,7 @@
-//! Built-in OAuth provider configurations.
-//!
-//! Each entry defines the endpoints, scopes, and secret-key names for a
-//! supported OAuth PKCE provider.  The `bundled_client_id` is a
-//! placeholder until the real GIAP app is registered with each provider;
-//! users can override it via `{PROVIDER_ID}_CLIENT_ID` in the secret store.
+//! Built-in OAuth PKCE providers; `{PROVIDER_ID}_CLIENT_ID` secrets override the client id.
 
 use crate::security::domain::oauth_provider::OAuthProviderConfig;
 
-/// Returns the list of OAuth providers that GIAP supports out of the box.
 pub fn builtin_oauth_providers() -> Vec<OAuthProviderConfig> {
     vec![OAuthProviderConfig {
         id: "spotify".to_string(),
@@ -21,14 +15,8 @@ pub fn builtin_oauth_providers() -> Vec<OAuthProviderConfig> {
             "playlist-read-private".to_string(),
             "playlist-modify-public".to_string(),
             "playlist-modify-private".to_string(),
-            // Library and listening history. Adding a scope does not upgrade
-            // tokens already issued: existing installs keep getting
-            // "Insufficient client scope" until the user signs in again, which
-            // the music extension detects and says so rather than reporting a
-            // bare 403.
-            // Read only: PUT/DELETE /me/tracks answer 403 Forbidden for this app
-            // even when user-library-modify is granted, so asking for it would
-            // widen the consent screen for a capability GIAP cannot use.
+            // Read-only: Spotify 403s PUT/DELETE /me/tracks here even with user-library-modify.
+            // New scopes only reach tokens issued after the user signs in again.
             "user-library-read".to_string(),
             "user-top-read".to_string(),
             "user-read-recently-played".to_string(),

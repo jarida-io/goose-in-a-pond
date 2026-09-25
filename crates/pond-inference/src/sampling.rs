@@ -2,14 +2,7 @@
 
 use llama_cpp_2::sampling::LlamaSampler;
 
-/// Build a sampler chain for the given temperature.
-///
-/// - `temperature <= 0.01`: greedy (deterministic) sampling.
-/// - Otherwise: top-k(40) -> top-p(0.95) -> min-p(0.05) -> temp -> dist.
-///
-/// The chain order matches llama.cpp's recommended pipeline: filtering
-/// samplers first (top-k, top-p, min-p), then temperature scaling, then
-/// the final categorical distribution draw.
+/// Greedy at `temperature <= 0.01`, else filters then temp then dist (llama.cpp's order).
 pub(crate) fn build_sampler(temperature: Option<f32>) -> LlamaSampler {
     let t = temperature.unwrap_or(0.8);
 
@@ -27,11 +20,7 @@ pub(crate) fn build_sampler(temperature: Option<f32>) -> LlamaSampler {
     }
 }
 
-/// Generate a random seed for the distribution sampler.
-///
-/// Uses the lower 32 bits of a high-resolution timestamp to avoid pulling
-/// in the `rand` crate just for a seed. This is not cryptographic -- it
-/// only needs to vary across inference runs.
+/// Non-cryptographic sampler seed from the clock, to avoid a `rand` dependency.
 fn rand_seed() -> u32 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()

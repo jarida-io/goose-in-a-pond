@@ -1,8 +1,4 @@
-//! [`InferenceProvider`] implementation for [`LlamaCppEngine`].
-//!
-//! The generation loop runs inside `tokio::task::spawn_blocking` because
-//! llama-cpp-2 calls are blocking CPU/GPU operations. A `tokio::sync::mpsc`
-//! channel bridges the blocking thread to the async [`ChatEventStream`].
+//! [`InferenceProvider`] for [`LlamaCppEngine`]; generation runs blocking and streams via mpsc.
 
 use crate::engine::{LlamaCppEngine, ModelSlot};
 use crate::memory::effective_context_size;
@@ -40,7 +36,6 @@ impl InferenceProvider for LlamaCppEngine {
     ) -> ChatEventStream {
         let (tx, rx) = mpsc::channel::<Result<ChatEvent>>(64);
 
-        // Clone everything we need to move into the blocking task.
         let system_prompt = system_prompt.to_string();
         let messages = messages.to_vec();
         let tools = tools.to_vec();
@@ -73,23 +68,12 @@ impl InferenceProvider for LlamaCppEngine {
     }
 
     fn capabilities(&self) -> ModelCapabilities {
-        // Use the lock-free capabilities cache. This avoids contending with
-        // the model mutex, which is held for the entire duration of generation.
-        // The old try_lock() approach silently returned defaults (tool_calling=false)
-        // whenever a generation task was in progress.
+        // Not try_lock: the model mutex is held during generation, which would yield defaults.
         self.cached_capabilities()
     }
 }
 
-/// Blocking generation task that runs inside `spawn_blocking`.
-///
-/// Acquires the model lock, builds the prompt, creates a context, and runs
-/// the autoregressive generation loop, sending [`ChatEvent`]s through the
-/// channel.
-///
-/// When `cache_path` is provided, the context state is saved after generation
-/// and loaded before the next call. Prefix matching skips re-decoding tokens
-/// already in the KV cache, saving 5-15s on Jetson for stable system prompts.
+/// Blocking generation (run in `spawn_blocking`), streaming [`ChatEvent`]s through `tx`.
 fn generation_task(
     model_slot: ModelSlot,
     backend: Arc<LlamaBackend>,
@@ -116,14 +100,11 @@ fn generation_task(
         .clone()
         .or_else(|| tool_calling::compact_tools_json(&tools));
 
-    // On small-context platforms (Jetson ≤4096), full tool schemas always exceed
-    // the budget. Skip directly to compact to avoid wasting time on serialization,
-    // Jinja rendering, and tokenization that will be discarded immediately.
+    // At n_ctx_train <= 4096 (Jetson) full tool schemas never fit, so go straight to compact.
     let n_ctx_train = loaded.model.n_ctx_train() as usize;
     let use_compact_directly = n_ctx_train <= 4096;
 
-    // Prefer pre-formatted JSON from the dispatcher (matches Goose's format_tools() exactly).
-    // Fall back to re-serializing ToolDefinition objects only when no override is provided.
+    // Prefer the dispatcher's JSON (matches Goose's format_tools() exactly) over re-serialising.
     let full_tools_json = if let Some(ref override_json) = options.tools_json_override {
         tracing::info!(
             schema_len = override_json.len(),
@@ -170,9 +151,7 @@ fn generation_task(
     let prompt = &template_result.prompt;
     let additional_stops = &template_result.additional_stops;
 
-    // Dump full rendered prompt to file when GIAP_DUMP_PROMPT is set.
-    // This lets you see exactly what the model receives (system prompt +
-    // tool declarations + user message) rendered through the Jinja template.
+    // GIAP_DUMP_PROMPT dumps the fully rendered prompt to a file.
     if std::env::var("GIAP_DUMP_PROMPT").is_ok() {
         let dump_val = std::env::var("GIAP_DUMP_PROMPT").unwrap_or_default();
         let dump_path = if dump_val == "1" || dump_val.is_empty() {
@@ -192,8 +171,6 @@ fn generation_task(
         }
     }
 
-    // Debug: log the formatted prompt and tool state so we can diagnose
-    // whether the chat template is including tools properly.
     tracing::debug!(
         tools_count = tools.len(),
         has_tools_json = full_tools_json.is_some(),
@@ -223,7 +200,6 @@ fn generation_task(
             .collect();
         tracing::debug!(triggers = ?trigger_values, "grammar triggers");
     }
-    // Log the last 500 chars of the prompt to see if tools are included.
     let prompt_tail = if prompt.len() > 500 {
         &prompt[prompt.len() - 500..]
     } else {
@@ -262,11 +238,7 @@ fn generation_task(
     }
 
     // ── In-memory KV-cache reuse ───────────────────────────────────────────
-    // Try to reuse the persistent context from the previous turn. If the prefix
-    // matches, we skip re-decoding thousands of tokens (system prompt + tools).
-    // If no cached context exists (first call), create a fresh one.
 
-    // Helper: create a fresh context sized for the current prompt.
     let create_fresh_ctx = |model: &llama_cpp_2::model::LlamaModel,
                             backend: &LlamaBackend,
                             ctx_size: usize|
@@ -277,17 +249,12 @@ fn generation_task(
         let ctx = model
             .new_context(backend, params)
             .map_err(|e| anyhow::anyhow!("failed to create context: {}", e))?;
-        // SAFETY: Context borrows from model which lives in the same LoadedModel struct.
-        // We guarantee it's dropped before the model (see LoadedModel docs).
+        // SAFETY: borrows `loaded.model`; must be cleared before it drops (see `LoadedModel`).
         Ok(unsafe { std::mem::transmute(ctx) })
     };
 
-    // Check if we can reuse the persistent context.
     let (mut ctx, tokens_to_decode_start) = if let Some(ref cached) = loaded.cached_ctx {
-        // Check if the new prompt fits in the cached context's allocation.
-        // The context was sized for an earlier (smaller) prompt — if the conversation
-        // grew beyond it, we must create a fresh context with the right size.
-        // Reserve 512 tokens for generation headroom.
+        // The cached context fits an older prompt; rebuild if this one + 512 headroom won't fit.
         let cached_n_ctx = cached.ctx.n_ctx() as usize;
         if tokens.len() + 512 > cached_n_ctx {
             tracing::info!(
@@ -305,7 +272,6 @@ fn generation_task(
                 }
             }
         } else {
-            // Context fits — check prefix match.
             let action = crate::kv_cache::plan_cache_reuse(&cached.tokens_in_cache, &tokens);
             match action {
                 crate::kv_cache::CacheAction::FullHit => {
@@ -357,8 +323,7 @@ fn generation_task(
 
     let tokens_to_decode = &tokens[tokens_to_decode_start..];
 
-    // Prefill tokens in batches (only the delta when cache hit).
-    // If decode fails (NoKvCacheSlot), drop the cache and retry with a fresh context.
+    // Prefill in batches; on decode failure (NoKvCacheSlot) retry with a fresh context.
     if !tokens_to_decode.is_empty() {
         let n_batch = ctx.n_batch() as usize;
         let mut decode_failed = false;
@@ -376,7 +341,6 @@ fn generation_task(
                 break;
             }
         }
-        // Retry: create fresh context and full prefill if cached decode failed.
         if decode_failed {
             drop(ctx);
             ctx = match create_fresh_ctx(&loaded.model, &backend, ctx_size) {
@@ -405,17 +369,10 @@ fn generation_task(
     }
 
     // ── Generation loop with streaming parser (matches Goose's approach) ──
-    //
-    // Uses llama-cpp-2's ChatParseStateOaicompat to parse tool calls from the
-    // model's native format (e.g. Gemma 4's <|tool_call>call:NAME{...}<tool_call|>).
-    // This is the SAME parser Goose uses — it handles all the native escape
-    // formats correctly, including <|"|> string delimiters.
+    // ChatParseStateOaicompat is Goose's parser too; it handles native escapes like <|"|>.
 
     let mut sampler = build_sampler(options.temperature);
 
-    // Initialize the streaming parser from the template result.
-    // This understands the model's chat format and extracts structured deltas
-    // (content, reasoning_content, tool_calls) from raw token output.
     let mut stream_parser = match template_result.streaming_state_oaicompat() {
         Ok(parser) => {
             tracing::debug!(
@@ -448,9 +405,7 @@ fn generation_task(
     let mut generated_text = String::new();
     let mut output_token_count: u32 = 0;
     let mut ttft_ms: Option<u64> = None;
-    // Accumulate RAW tool call deltas — merge by index after generation completes.
-    // Arguments arrive as partial strings across multiple deltas and must be
-    // concatenated before JSON parsing (same approach as Goose).
+    // Raw tool-call deltas, merged by index at the end: arguments arrive as partial strings.
     let mut raw_tool_deltas: Vec<serde_json::Value> = Vec::new();
 
     for _ in 0..max_output {
@@ -478,14 +433,12 @@ fn generation_task(
             generated_text.push_str(&piece);
 
             if let Some(ref mut parser) = stream_parser {
-                // Feed token to the streaming parser (same as Goose).
                 match parser.update(&piece, true) {
                     Ok(deltas) => {
                         for delta_json in deltas {
                             if let Ok(delta) =
                                 serde_json::from_str::<serde_json::Value>(&delta_json)
                             {
-                                // Stream text content immediately.
                                 if let Some(content) = delta.get("content").and_then(|v| v.as_str())
                                 {
                                     if !content.is_empty() {
@@ -494,8 +447,7 @@ fn generation_task(
                                         )));
                                     }
                                 }
-                                // Accumulate tool call deltas — DON'T parse args yet.
-                                // Arguments arrive as partial strings across deltas.
+                                // Accumulate only; args are partial until merged.
                                 if let Some(tool_calls) =
                                     delta.get("tool_calls").and_then(|v| v.as_array())
                                 {
@@ -511,7 +463,7 @@ fn generation_task(
                     }
                 }
             } else {
-                // Fallback: stream text with safe boundary (old approach).
+                // No streaming parser: stream text up to a safe boundary.
                 let stream_up_to = tool_calling::safe_stream_end(&generated_text);
                 let streamed_so_far = generated_text.len() - piece.len();
                 if stream_up_to > streamed_so_far {
@@ -523,7 +475,6 @@ fn generation_task(
                 }
             }
 
-            // Check additional stop sequences from the template.
             let should_stop = additional_stops
                 .iter()
                 .any(|stop| generated_text.ends_with(stop));
@@ -532,7 +483,6 @@ fn generation_task(
             }
         }
 
-        // Decode next token.
         let next_tokens = [token];
         let mut next_batch = match LlamaBatch::get_one(&next_tokens) {
             Ok(b) => b,
@@ -590,8 +540,7 @@ fn generation_task(
             }
         }
 
-        // Merge accumulated deltas by index — concatenate argument strings,
-        // THEN parse the complete JSON. Same as Goose's extract_oai_tool_call_contents.
+        // Concatenate args per index, then parse (as in Goose's extract_oai_tool_call_contents).
         if !raw_tool_deltas.is_empty() {
             let mut merged: std::collections::BTreeMap<u64, (String, String, String)> =
                 std::collections::BTreeMap::new();
@@ -614,7 +563,7 @@ fn generation_task(
                         }
                     }
                     if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
-                        entry.2.push_str(args); // ACCUMULATE, don't parse yet
+                        entry.2.push_str(args);
                     }
                 }
             }
@@ -671,8 +620,6 @@ fn generation_task(
     }
 
     // ── Persist context in memory for next turn ─────────────────────────────
-    // Store the context + token log back into LoadedModel so the next call
-    // can skip re-prefilling the stable prefix. Zero disk I/O.
     loaded.cached_ctx = Some(crate::engine::CachedInferenceContext {
         ctx,
         tokens_in_cache: tokens,
@@ -682,28 +629,17 @@ fn generation_task(
         "KV cache persisted in memory for next turn"
     );
 
-    // Emit usage stats.
     let _ = tx.blocking_send(Ok(ChatEvent::Usage(UsageStats {
         prompt_tokens: prompt_token_count as u32,
         completion_tokens: output_token_count,
-        // The oaicompat delta loop here reads `content` and `tool_calls` only —
-        // `reasoning_content` is documented as parsed and is not consumed. This
-        // engine feeds the quarantined PondAgent loop (Q2-05), so PAI-5 P2 left
-        // it alone rather than counting a channel nothing reads.
+        // `reasoning_content` deltas are not consumed here, so there is nothing to count.
         reasoning_tokens: None,
     })));
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Apply the chat template using the OpenAI-compat API with jinja.
-///
-/// Tries full tool schema first; falls back to compact (name+description only)
-/// if the full version fails or exceeds the token budget.
-///
-/// Returns the full [`ChatTemplateResult`] which includes the rendered prompt,
-/// grammar constraints for tool calling, additional stop sequences, and trigger
-/// information for lazy grammar sampling.
+/// Render the jinja chat template with full tool schemas, else compact (on error or overflow).
 fn apply_template(
     model: &llama_cpp_2::model::LlamaModel,
     template: &llama_cpp_2::model::LlamaChatTemplate,
@@ -732,10 +668,8 @@ fn apply_template(
         model.apply_chat_template_oaicompat(template, &params)
     };
 
-    // Try full tools first.
     match apply(full_tools_json) {
         Ok(result) => {
-            // Check token count -- if too large, fall back to compact.
             let token_count = model
                 .str_to_token(&result.prompt, AddBos::Never)
                 .map(|t| t.len())
@@ -763,18 +697,7 @@ fn apply_template(
     }
 }
 
-/// Build a lazy grammar sampler from the template's grammar and triggers.
-///
-/// Lazy grammar sampling means the grammar constraints only activate when
-/// specific trigger words/tokens/patterns are encountered in the output.
-/// This allows the model to generate free-form text normally, and only
-/// constrains output to valid tool-call JSON when a tool-call pattern starts.
-///
-/// The trigger classification:
-/// - `GrammarTriggerType::Word` -> passed as `trigger_words` to `grammar_lazy()`
-/// - `GrammarTriggerType::Token` -> passed as `trigger_tokens` to `grammar_lazy()`
-/// - `GrammarTriggerType::Pattern` / `PatternFull` -> passed as patterns to
-///   `grammar_lazy_patterns()`
+/// Lazy grammar sampler: tool-call grammar applies only once a template trigger appears.
 #[allow(dead_code)]
 fn build_grammar_sampler_lazy(
     model: &llama_cpp_2::model::LlamaModel,
@@ -801,7 +724,6 @@ fn build_grammar_sampler_lazy(
         }
     }
 
-    // Use pattern-based lazy grammar if any regex patterns are present.
     if !pattern_triggers.is_empty() {
         tracing::debug!(
             patterns = ?pattern_triggers,
@@ -838,11 +760,7 @@ fn build_grammar_sampler_lazy(
     }
 }
 
-/// Build OpenAI-compatible messages JSON array.
-///
-/// Emits `tool_calls` on assistant messages and `tool_call_id` on tool messages
-/// per the OpenAI tools API. This is required for multi-turn tool round-tripping
-/// — without it the model only sees a flat history and forgets it called a tool.
+/// OpenAI-style messages JSON, keeping `tool_calls`/`tool_call_id` so tool round-trips survive.
 fn build_openai_messages_json(system_prompt: &str, messages: &[ChatMessage]) -> String {
     let mut arr: Vec<serde_json::Value> = vec![serde_json::json!({
         "role": "system",
@@ -854,9 +772,7 @@ fn build_openai_messages_json(system_prompt: &str, messages: &[ChatMessage]) -> 
             Role::User => "user",
             Role::Assistant => "assistant",
             Role::System => "system",
-            // Tool results use "tool" role so the model recognizes them as
-            // tool responses (not user input). This prevents the model from
-            // asking follow-up questions about tool results.
+            // "tool", not "user", or the model asks follow-up questions about the results.
             Role::Tool => "tool",
         };
 

@@ -1,19 +1,9 @@
-//! HF-compatible cache layout for model downloads.
-//!
-//! Mirrors the upstream `huggingface/hf-hub` crate's on-disk layout so that
-//! files written here are interoperable with the Python `huggingface_hub`
-//! cache. Path encoding + token discovery are pure; `HfFetch::download_to_blob`
-//! performs the network + filesystem work for one file.
+//! Model-download cache using `huggingface_hub`'s on-disk layout, so Python tools can share it.
 
 use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
 
-/// A download that stopped because its progress callback asked it to.
-///
-/// Its own type rather than a string, because the caller has to tell this
-/// apart from a real failure: a stop is expected and leaves a resumable
-/// `.incomplete` file behind, while a failure is not and may not. Match it
-/// with [`is_stopped`].
+/// A download its progress callback stopped; the `.incomplete` file stays resumable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stopped;
 
@@ -25,8 +15,7 @@ impl std::fmt::Display for Stopped {
 
 impl std::error::Error for Stopped {}
 
-/// Did this error come from a caller stopping the download, rather than a
-/// transfer that went wrong?
+/// Whether `err` is a caller-requested stop rather than a transfer failure.
 pub fn is_stopped(err: &anyhow::Error) -> bool {
     err.downcast_ref::<Stopped>().is_some()
 }
@@ -68,7 +57,6 @@ impl HfCache {
         Self { root, token }
     }
 
-    /// Cache root directory.
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -170,7 +158,6 @@ impl<'a> HfRepo<'a> {
         p
     }
 
-    /// Build a file handle within this repo.
     pub fn file(&self, filename: impl Into<String>) -> HfFetch<'_> {
         HfFetch {
             repo: self,
@@ -187,7 +174,6 @@ impl<'a> HfFetch<'a> {
         p
     }
 
-    /// `{blobs}/{etag}` — same as `HfRepo::blob_path`.
     pub fn blob_path(&self, etag: &str) -> PathBuf {
         self.repo.blob_path(etag)
     }
@@ -210,9 +196,7 @@ fn url_escape_revision(rev: &str) -> String {
 
 // ── URL parsing ──────────────────────────────────────────────────────────────
 
-/// Parse `https://huggingface.co/{org}/{repo}/resolve/{revision}/{path}` into
-/// `(repo_id, revision, filename)`. Returns `None` for any URL that does not
-/// match this exact shape.
+/// Split an HF `resolve` URL into `(repo_id, revision, filename)`; `None` if it isn't one.
 pub fn parse_hf_url(url: &str) -> Option<(String, String, String)> {
     let after_scheme = url
         .strip_prefix("https://")
@@ -250,8 +234,7 @@ fn urldecode_simple(s: &str) -> String {
 
 // ── Host policy ──────────────────────────────────────────────────────────────
 
-/// Hosts that may receive a forwarded HF bearer token across a redirect.
-/// Covers `huggingface.co` itself and its CDN domains (CloudFront-fronted).
+/// Hosts (HF and its CloudFront CDN domains) that may get the bearer token across a redirect.
 pub(crate) fn should_send_auth_on_redirect(host: &str) -> bool {
     let host = host.to_ascii_lowercase();
     host == "huggingface.co"
@@ -261,9 +244,7 @@ pub(crate) fn should_send_auth_on_redirect(host: &str) -> bool {
 
 // ── Redirect-aware reqwest client ────────────────────────────────────────────
 
-/// Build a `reqwest::Client` with redirects disabled — the hf_cache module
-/// drives redirect chains manually so the bearer token can be re-attached only
-/// on hops to HF / CloudFront hosts (and stripped on any other host).
+/// Client with redirects off: we follow them by hand to send the token only to HF/CDN hosts.
 pub fn build_redirect_aware_client(_token: Option<&str>) -> Result<reqwest::Client> {
     use reqwest::redirect::Policy;
 
@@ -279,27 +260,8 @@ fn unquote_etag(s: &str) -> String {
 }
 
 impl<'a> HfFetch<'a> {
-    /// Resumable, etag-aware download to the content-addressed blob path.
-    ///
-    /// 1. `HEAD` → capture final URL, etag (or `x-linked-etag`), content-length,
-    ///    and commit hash from `x-repo-commit` (else `"main"`).
-    /// 2. If `blobs/{etag}` already exists with matching size, return it.
-    /// 3. Else stream `GET` (with `Range: bytes={n}-` if `.incomplete` exists)
-    ///    into `{blob}.incomplete`. Call `progress(downloaded, total)` per chunk.
-    /// 4. Atomic rename to `blobs/{etag}`.
-    /// 5. Write `refs/main` and create the snapshot symlink.
-    ///
-    /// # Stopping
-    ///
-    /// `progress` returns whether to keep going. Answering `false` stops the
-    /// stream and returns [`Stopped`], leaving `{blob}.incomplete` where it is
-    /// — which is exactly what step 3 resumes from, so a stopped download is a
-    /// paused one and calling this again picks up where it left off. Deleting
-    /// that file instead turns the same stop into a cancel.
-    ///
-    /// The signal rides the progress callback rather than a separate parameter
-    /// because the callback is already invoked per chunk: there is no second
-    /// place to check, and no way for the two to disagree about when.
+    /// Resumable, etag-aware download to the content-addressed blob path. `progress` returning
+    /// `false` returns [`Stopped`], keeping `{blob}.incomplete` to resume; delete it to cancel.
     pub async fn download_to_blob<F>(
         &self,
         client: &reqwest::Client,
@@ -375,8 +337,7 @@ impl<'a> HfFetch<'a> {
         incomplete_path.set_file_name(incomplete_name);
 
         // ── Per-blob advisory lock — at most one process does the GET ───────
-        // Lock file sits beside the blob: `blobs/{etag}.lock`. The lock is
-        // released when `_lock_guard` drops, or when the process exits.
+        // Released when `_lock_guard` drops or the process exits.
         let lock_path = {
             let mut p = blob_path.clone();
             p.set_file_name(format!("{etag}.lock"));
@@ -393,15 +354,12 @@ impl<'a> HfFetch<'a> {
         let _lock_guard = match lock_outcome {
             LockOutcome::Acquired(guard) => guard,
             LockOutcome::AnotherFinished => {
-                // Winner finished while we waited. Finalise pointers and return.
                 finalize_pointers(self, &etag, &commit, &blob_path).await?;
                 return Ok(blob_path);
             }
         };
 
-        // After acquiring the lock, the previous holder may have finalised the
-        // blob just before releasing — re-check the fast path so we don't
-        // re-download bytes that are already on disk.
+        // The previous lock holder may have just finished the blob; re-check the fast path.
         if let Ok(meta) = tokio::fs::metadata(&blob_path).await {
             if total == 0 || meta.len() == total {
                 progress(meta.len(), meta.len());
@@ -448,10 +406,7 @@ impl<'a> HfFetch<'a> {
                 .with_context(|| format!("write {}", incomplete_path.display()))?;
             downloaded += chunk.len() as u64;
             if !progress(downloaded, total) {
-                // Flushed and left in place, NOT removed: `.incomplete` is what
-                // the range request at the top of this function resumes from,
-                // so stopping here is a pause. A caller that meant cancel
-                // deletes the file itself.
+                // Keep `.incomplete`: the next call resumes from it, so a stop is a pause.
                 file.flush().await.ok();
                 return Err(anyhow!(Stopped));
             }
@@ -476,14 +431,11 @@ impl<'a> HfFetch<'a> {
 
 // ── Per-blob advisory locking ────────────────────────────────────────────────
 
-/// Maximum number of poll iterations while waiting for another process to
-/// finish downloading the same blob. Combined with `BLOB_LOCK_POLL_INTERVAL`
-/// this bounds the wait at 10 minutes.
+/// Polls while another process downloads the same blob; at 1 s each, a 10-minute cap.
 const BLOB_LOCK_MAX_POLLS: u32 = 600;
 const BLOB_LOCK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Holds an acquired advisory lock for the lifetime of one download attempt.
-/// Dropping the inner `File` releases the OS-level lock.
+/// Advisory lock held for one download attempt; dropping the `File` releases it.
 struct BlobLockGuard {
     _file: std::fs::File,
 }
@@ -494,11 +446,8 @@ enum LockOutcome {
     AnotherFinished,
 }
 
-/// Try to take an exclusive advisory lock on `lock_path`. If another process
-/// holds it, poll until either (a) the blob appears (winner finalised), or
-/// (b) the lock becomes available (winner died). While polling, surface the
-/// current `.incomplete` size through `progress` so a UI can show download
-/// activity even when this caller isn't the one doing the bytes.
+/// Take an exclusive lock on `lock_path`, or poll until the blob appears or the holder dies,
+/// reporting the holder's `.incomplete` size through `progress` meanwhile.
 async fn acquire_blob_lock<F>(
     lock_path: &Path,
     blob_path: &Path,
@@ -507,22 +456,16 @@ async fn acquire_blob_lock<F>(
     progress: &mut F,
 ) -> Result<LockOutcome>
 where
-    // Same signal as the download loop; the return is ignored here because
-    // this only mirrors another process's progress while waiting for a lock.
-    // Stopping is the download's decision, and it makes it as soon as this
-    // returns.
+    // The return is ignored: this only mirrors another process's progress.
     F: FnMut(u64, u64) -> bool,
 {
     use fs2::FileExt as _;
     use std::fs::OpenOptions;
 
-    // Ensure the parent (blobs/) dir exists — the caller already created it
-    // for blob_path, but be defensive in case lock_path's parent differs.
     if let Some(parent) = lock_path.parent() {
         tokio::fs::create_dir_all(parent).await.ok();
     }
 
-    // Open or create the lock file. The handle is what fs2 locks.
     let open_lock = || -> Result<std::fs::File> {
         OpenOptions::new()
             .read(true)
@@ -539,12 +482,9 @@ where
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
         Err(e) => return Err(anyhow!("lock {}: {e}", lock_path.display())),
     }
-    // Drop the un-locked handle before polling — keeping it open is harmless
-    // but cleaner to reopen on each poll attempt.
     drop(file);
 
     for _ in 0..BLOB_LOCK_MAX_POLLS {
-        // Winner finished?
         if let Ok(meta) = tokio::fs::metadata(blob_path).await {
             if total == 0 || meta.len() == total {
                 progress(meta.len(), if total == 0 { meta.len() } else { total });
@@ -588,8 +528,7 @@ impl HeadResult {
     }
 }
 
-/// HEAD the URL, following redirects manually. Re-attach the bearer token only
-/// on hops to HF/CloudFront hosts. Returns the final URL + response headers.
+/// HEAD `url`, following redirects by hand so the token only reaches HF/CloudFront hosts.
 async fn head_with_redirects(
     client: &reqwest::Client,
     url: &str,
@@ -609,11 +548,7 @@ async fn head_with_redirects(
                 }
             }
         }
-        // PAI-2 P6a: gate PER HOP, not once on the entry URL. Redirects are
-        // followed by hand here precisely because the host changes mid-chain --
-        // that is the whole reason `should_send_auth_on_redirect` exists two
-        // lines up -- so a one-shot check on `url` would wave through exactly
-        // the case that matters: huggingface.co redirecting to a third party.
+        // Egress-gate every hop, not just `url`: an HF redirect may point at a third-party host.
         let call = pond_core::shared::services::egress::begin(&current, "HEAD")?;
         let sent = req.send().await;
         call.finish(sent.as_ref().ok().map(|r| r.status().as_u16()));
@@ -640,10 +575,7 @@ async fn head_with_redirects(
     Err(anyhow!("too many redirects following HEAD {url}"))
 }
 
-/// GET the URL, following redirects manually so the bearer token is only
-/// re-attached on hops to HF/CloudFront hosts. Returns the response stream on
-/// the first non-redirect hop. Honours an optional `Range` header — re-sent on
-/// every hop until the body is reached.
+/// GET `url` following redirects like `head_with_redirects`, re-sending `Range` on every hop.
 async fn get_with_redirects(
     client: &reqwest::Client,
     url: &str,
@@ -667,10 +599,7 @@ async fn get_with_redirects(
         if let Some(r) = range {
             req = req.header(reqwest::header::RANGE, r);
         }
-        // PAI-2 P6a: per hop, for the same reason as the HEAD loop above. This
-        // is the second of the two sites in this file; gating only one would
-        // still satisfy the file-level egress guard, which is why there is a
-        // behavioural test for each.
+        // Per hop, as in the HEAD loop; the file-level egress guard can't see a missed site.
         let call = pond_core::shared::services::egress::begin(&current, "GET")?;
         let sent = req.send().await;
         call.finish(sent.as_ref().ok().map(|r| r.status().as_u16()));
@@ -693,8 +622,7 @@ async fn get_with_redirects(
     Err(anyhow!("too many redirects following GET {url}"))
 }
 
-/// Resolve a `Location` header value (which may be relative) against the
-/// current request URL.
+/// Resolve a possibly relative `Location` header against the current URL.
 fn absolute_url(current: &str, location: &str) -> Result<String> {
     let base = url::Url::parse(current).map_err(|e| anyhow!("parse {current}: {e}"))?;
     let joined = base
@@ -987,24 +915,15 @@ mod tests {
         );
     }
 
-    // ── PAI-2 P6a: the network-mode gate, per redirect hop ──────────────────
-    //
-    // These are behavioural, not symbol-presence: `egress_guard.rs` checks that
-    // this FILE mentions a tracker symbol, which one gated hop would satisfy
-    // while the other still phoned out. There is one test per site.
-    //
-    // `network_mode` is a process-global `RwLock`. All three tests below want
-    // the same value and put it back, and nothing else in this binary reads it,
-    // so they do not need the `ENV_LOCK` treatment. A test that wanted a
-    // DIFFERENT mode would.
+    // ── Network-mode gate, per redirect hop ─────────────────────────────────
+    // Behavioural, one test per site: `egress_guard.rs` only checks the file mentions a tracker.
+    // `network_mode` is process-global; a test wanting a different mode needs serialising.
 
     use pond_core::shared::services::egress::{network_mode, set_network_mode, NetworkMode};
     use wiremock::matchers::{method as wm_method, path as wm_path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    /// Restores `NetworkMode::Open` however the test exits, including a panic
-    /// inside an assertion -- otherwise one failing test takes the rest of the
-    /// binary offline and the report blames the wrong thing.
+    /// Restores `NetworkMode::Open` on drop, so a panicking test can't leave the binary offline.
     struct ModeGuard(NetworkMode);
 
     impl ModeGuard {
@@ -1039,9 +958,7 @@ mod tests {
 
     #[tokio::test]
     async fn head_redirect_to_a_non_loopback_host_is_refused_at_the_hop() {
-        // `.invalid` is reserved and never resolves (RFC 2606), so if the gate
-        // ever stopped firing this would fail with a DNS error instead -- which
-        // is exactly what the message assertions below distinguish.
+        // `.invalid` never resolves (RFC 2606), so a missed gate fails with a DNS error instead.
         let server = redirector("https://cdn.invalid/blob").await;
         let _mode = ModeGuard::set(NetworkMode::Allowlist);
 
@@ -1083,9 +1000,7 @@ mod tests {
         );
     }
 
-    /// The vacuity control. A gate that refused every hop would make both tests
-    /// above pass for the wrong reason, and would also break redirect following
-    /// outright. This asserts a permitted chain still completes end to end.
+    /// Vacuity control: a gate refusing every hop would pass the two tests above.
     #[tokio::test]
     async fn a_permitted_redirect_chain_still_completes() {
         let destination = MockServer::start().await;

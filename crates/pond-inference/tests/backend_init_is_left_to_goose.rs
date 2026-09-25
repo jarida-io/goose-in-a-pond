@@ -1,22 +1,5 @@
-//! GIAP must never enter `LlamaBackend::init()`'s process-global CAS.
-//!
-//! `llama-cpp-2` tracks backend initialisation in one process-wide `AtomicBool`,
-//! and cargo unifies that crate between this workspace and Goose, so the static
-//! is shared. Goose treats losing the CAS as `unreachable!` and PANICS
-//! (`goose-local-inference/src/llamacpp/mod.rs`). Reproduced on a Mac
-//! 2026-08-13: an `ollama` pond embedded at startup, GIAP won the CAS, and the
-//! next local chat model panicked a tokio worker, after which the API stopped
-//! answering.
-//!
-//! The fix is structural: `engine.rs :: get_or_init_backend` calls
-//! `llama_cpp_sys_2::llama_backend_init()` directly and constructs the
-//! proof-of-init token itself, so the flag is only ever set by Goose and its CAS
-//! always succeeds. These tests exist because that property is invisible at the
-//! call site -- `LlamaBackend::init()` is the obvious, documented, wrong thing to
-//! reach for, and nothing but this test would notice it coming back.
-//!
-//! Source-scanning rather than behavioural on purpose: the failure needs Goose
-//! and a real model in one process, which no unit test in this crate can build.
+//! GIAP must never enter `LlamaBackend::init()`'s CAS: the flag is shared with Goose, which
+//! panics if it loses it. Source-scanned, since reproducing needs Goose and a real model.
 
 use std::path::Path;
 
@@ -49,10 +32,7 @@ fn crate_sources() -> Vec<(String, String)> {
     out
 }
 
-/// Strip `//` line comments so the prose in `get_or_init_backend`'s doc comment
-/// -- which necessarily NAMES `LlamaBackend::init()` to explain why it is not
-/// called -- does not trip the scan. Without this the guard fires on its own
-/// rationale, which is how a tripwire gets deleted instead of heeded.
+/// Strip `//` comments so docs that name `LlamaBackend::init()` don't trip the scan.
 fn strip_line_comments(src: &str) -> String {
     src.lines()
         .map(|l| match l.find("//") {
@@ -84,11 +64,7 @@ fn no_giap_code_calls_llama_backend_init() {
     );
 }
 
-/// The token must never be dropped: `impl Drop for LlamaBackend` resets the
-/// global flag AND calls `llama_backend_free()`, which in a two-consumer process
-/// frees the backend under the other consumer and makes the second dropper panic
-/// inside a destructor. Holding a strong `Arc` in a `OnceLock` for the life of
-/// the process is what prevents that, so a `Weak` here is a regression.
+/// Dropping `LlamaBackend` resets the flag and frees the backend under Goose.
 #[test]
 fn the_backend_handle_is_held_strongly_and_never_freed() {
     let engine = crate_sources()

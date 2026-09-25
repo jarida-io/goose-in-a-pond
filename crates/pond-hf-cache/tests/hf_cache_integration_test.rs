@@ -1,8 +1,4 @@
-//! Integration tests for `pond_hf_cache::HfFetch::download_to_blob`.
-//!
-//! Covers the four contract properties: resumable downloads via Range,
-//! etag-skip fast path, auth-stripping on cross-host redirect, and
-//! monotonic progress callbacks.
+//! Integration tests for the `download_to_blob` contract: resume, etag skip, auth strip, progress.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -20,29 +16,7 @@ const COMMIT: &str = "abc123commit";
 
 /// Build the resolve URL pointing at a local wiremock server.
 fn resolve_url(server: &MockServer) -> String {
-    // The hf_cache module constructs URLs as
-    //   https://huggingface.co/{repo}/resolve/{rev}/{file}
-    // but `download_to_blob` itself does not enforce the host — it just
-    // performs HEAD/GET against `fetch.url()`. For these tests we override
-    // the URL by hooking the cache config: easier to just call
-    // `download_to_blob` through a fetch whose url() happens to point at
-    // the mock. We do that by setting an HfCache rooted at a tempdir AND
-    // building a fetch whose repo URL we can intercept.
-    //
-    // Because hf_cache::HfFetch::url() bakes huggingface.co into the URL,
-    // we instead drive the same logic via a small shim: we hit the mock
-    // directly via reqwest with the same redirect-aware client and route
-    // through the public `download_to_blob` API by faking the URL.
-    //
-    // Simpler approach: monkey-patch via env var? No — keep tests pure.
-    // We make the mock server respond to the *path* the real URL has, then
-    // pass the mock's URL through a `RewriteFetch` wrapper. To keep things
-    // simple we accept that `download_to_blob` calls `self.url()` and we
-    // intercept by giving the repo a fake repo_id of `{server_host}/repo`.
-    //
-    // Cleanest path: skip the URL shaping and just point reqwest at
-    // `{server.uri()}/owner/repo/resolve/main/weights.bin`. We don't need
-    // the URL to *be* huggingface.co — `download_to_blob` doesn't check.
+    // Same path shape as a real HF resolve URL, on the mock's host.
     format!(
         "{}/{}/resolve/{}/{}",
         server.uri(),
@@ -52,15 +26,7 @@ fn resolve_url(server: &MockServer) -> String {
     )
 }
 
-/// Construct an HfFetch handle whose URL points at `server` instead of
-/// huggingface.co. The cache root is rooted at `tmp` (kept alive by caller).
-///
-/// We achieve the URL override by giving the cache a repo_id that already
-/// contains the host as a path prefix — this leaks into the URL the cache
-/// would emit, but in these tests we don't use `fetch.url()` directly,
-/// we just need the on-disk paths and the cache structure to be intact.
-/// Therefore the test calls `download_to_blob` via the lower-level
-/// `download_to_blob_with_url` shim defined in this file.
+/// Download `url` into a cache rooted at `tmp` via the in-test mirror; returns blob and progress.
 async fn run_download(
     tmp: &TempDir,
     url: &str,
@@ -74,9 +40,7 @@ async fn run_download(
     let progress_log: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
     let pl = progress_log.clone();
 
-    // The real `download_to_blob` calls `self.url()` which bakes in
-    // huggingface.co. For testing we use the `download_to_blob_at_url`
-    // backdoor exposed below.
+    // `download_to_blob` always targets huggingface.co, so drive the in-test mirror instead.
     let blob = download_to_blob_at_url(&fetch, &client, token, url, move |n, t| {
         pl.lock().unwrap().push((n, t));
     })
@@ -88,11 +52,7 @@ async fn run_download(
     Ok((blob, log))
 }
 
-/// In-test wrapper that performs the same algorithm as
-/// `HfFetch::download_to_blob`, but parameterised on an arbitrary URL. The
-/// only difference is the URL source — the on-disk layout, the redirect
-/// policy, the resume logic, and the progress contract are exercised
-/// against the real `hf_cache` API surface where possible.
+/// Test copy of `HfFetch::download_to_blob`'s algorithm, taking an arbitrary URL.
 async fn download_to_blob_at_url<F>(
     fetch: &pond_hf_cache::HfFetch<'_>,
     client: &reqwest::Client,
@@ -106,9 +66,7 @@ where
     use anyhow::{anyhow, Context};
     use tokio::io::AsyncWriteExt as _;
 
-    // HEAD with manual redirects (re-uses hf_cache logic via copy here —
-    // the integration test asserts the algorithmic behaviour, not the
-    // internal helpers, which are pub(crate)).
+    // A single HEAD; the lib's redirect-following helpers are private.
     let head = client
         .head(url)
         .send()
@@ -176,8 +134,7 @@ where
         }
     };
 
-    // Re-check fast path after taking the lock — previous holder may have
-    // finalised just before releasing.
+    // Re-check the fast path: the previous holder may have just finalised.
     if let Ok(meta) = tokio::fs::metadata(&blob_path).await {
         if total == 0 || meta.len() == total {
             progress(meta.len(), meta.len());
@@ -227,9 +184,7 @@ where
     Ok(blob_path)
 }
 
-/// Test-side mirror of `lib::acquire_blob_lock`. Returns `Some(guard)` if we
-/// own the lock and should proceed, `None` if the blob materialised while we
-/// were waiting (another caller finished).
+/// Mirror of `lib::acquire_blob_lock`; `None` means another caller finished the blob.
 async fn acquire_blob_lock_for_test<F>(
     lock_path: &std::path::Path,
     blob_path: &std::path::Path,
@@ -359,9 +314,7 @@ async fn etag_match_skips_get_request() {
         .mount(&server)
         .await;
 
-    // GET would fail loudly if hit — but no `.expect(0)` API; we install
-    // a 500-only matcher; the test verifies the blob is returned without
-    // any GET firing because the blob already exists on disk.
+    // Any GET fails the test: the blob is already on disk.
     Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(500))
         .expect(0)
@@ -425,12 +378,7 @@ async fn progress_callback_invoked_with_monotonic_bytes() {
 
 #[tokio::test]
 async fn auth_header_stripped_on_cross_host_redirect() {
-    // Two mock servers on different ports stand in for two distinct hosts.
-    // The first 302s to the second with a Location pointing at the second.
-    // build_redirect_aware_client uses Policy::none(), so the lower-level
-    // single-hop GET against host A receives Authorization, but the
-    // automatic redirect chain is disabled — proving the client does not
-    // leak the token across hosts on its own.
+    // Two mock servers stand in for two hosts; the client must not follow A's 302 to B itself.
     let host_a = MockServer::start().await;
     let host_b = MockServer::start().await;
     let token = "secret_token_xyz";
@@ -453,8 +401,7 @@ async fn auth_header_stripped_on_cross_host_redirect() {
         .mount(&host_a)
         .await;
 
-    // Host B: must not receive an Authorization header. Mount a strict
-    // matcher: only matches when authorization is ABSENT.
+    // Host B: must not receive an Authorization header (checked from its request log below).
     Mock::given(method("GET"))
         .and(path(final_path))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ok".to_vec()))
@@ -476,8 +423,7 @@ async fn auth_header_stripped_on_cross_host_redirect() {
         "host A should have seen Authorization"
     );
 
-    // Manual second hop to host B WITHOUT auth (the documented behaviour:
-    // do not re-attach token on hop to a non-HF host).
+    // Manual second hop to host B without auth, as for any non-HF host.
     let loc = resp_a
         .headers()
         .get("location")
@@ -499,9 +445,7 @@ async fn auth_header_stripped_on_cross_host_redirect() {
     }
 }
 
-/// Two concurrent `download_to_blob_at_url` callers for the same blob must
-/// dedupe at the advisory-lock layer — exactly one GET should hit wiremock,
-/// and both callers should end up holding the same finalised blob path.
+/// Exactly one GET reaches the server, and both callers get the same blob path.
 #[tokio::test]
 async fn concurrent_downloads_dedup() {
     let server = MockServer::start().await;
@@ -520,8 +464,7 @@ async fn concurrent_downloads_dedup() {
         .mount(&server)
         .await;
 
-    // Slow-trickle the GET so the second caller is forced to wait on the
-    // lock instead of racing through the fast path.
+    // Slow GET so the second caller waits on the lock rather than hitting the fast path.
     Mock::given(method("GET"))
         .respond_with(
             ResponseTemplate::new(200)

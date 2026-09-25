@@ -1,16 +1,4 @@
-//! Memory relevance — retrieval-side scoring shared by the injection path and
-//! the extraction pipeline.
-//!
-//! Three concerns live here, all pure so they stay testable in the fast-crate
-//! pass:
-//!
-//! 1. [`keyword_terms`] — the stopword-filtered fallback used when no
-//!    embedding provider is wired (or embedding the turn's message failed).
-//! 2. [`relevance_score`] / [`rank_by_relevance`] — the blend of semantic
-//!    similarity, importance, and recency that decides which memories survive
-//!    the per-turn token budget.
-//! 3. [`SEMANTIC_DEDUP_THRESHOLD`] — the cosine floor above which a newly
-//!    extracted fact is considered a paraphrase of one already stored.
+//! Memory retrieval scoring and dedup shared by the injection path and the extraction pipeline.
 
 use crate::models::ports::embedding::EmbeddingProvider;
 use crate::user_data::domain::memory::MemoryFragment;
@@ -19,9 +7,7 @@ use chrono::{DateTime, Utc};
 
 // ── Keyword fallback ─────────────────────────────────────────────────────────
 
-/// Words carrying no retrieval signal. Kept small and English-only on purpose:
-/// this list is only reached when semantic search is unavailable, and a bigger
-/// list is a bigger chance of dropping a genuinely topical short word.
+/// Keyword-fallback stopwords; kept small since each extra entry risks dropping a topical word.
 const STOPWORDS: &[&str] = &[
     "the", "and", "for", "are", "but", "not", "you", "your", "yours", "all", "any", "can", "had",
     "has", "have", "her", "his", "its", "our", "out", "was", "were", "who", "whom", "will", "with",
@@ -33,15 +19,10 @@ const STOPWORDS: &[&str] = &[
     "one", "two", "now", "new", "old", "yes", "sure", "okay", "hey", "hi", "hello",
 ];
 
-/// Minimum keyword length. Shorter tokens are almost always function words and
-/// match far too broadly through a SQL `LIKE %kw%`.
+/// Shorter tokens are mostly function words and match too broadly via SQL `LIKE %kw%`.
 const MIN_KEYWORD_LEN: usize = 3;
 
-/// Derive fallback search keywords from a user message.
-///
-/// Lowercases, strips surrounding punctuation, drops tokens shorter than
-/// [`MIN_KEYWORD_LEN`] and known stopwords, and de-duplicates while preserving
-/// first-seen order.
+/// Fallback search keywords: lowercased, de-punctuated, stopword-free, deduped in first-seen order.
 pub fn keyword_terms(message: &str) -> Vec<String> {
     let mut seen: Vec<String> = Vec::new();
     for raw in message.split_whitespace() {
@@ -62,33 +43,17 @@ pub fn keyword_terms(message: &str) -> Vec<String> {
 
 /// Weight of semantic similarity in the injection score.
 pub const SIMILARITY_WEIGHT: f32 = 0.5;
-/// Weight of the stored importance score.
 pub const IMPORTANCE_WEIGHT: f32 = 0.3;
-/// Weight of the recency term.
 pub const RECENCY_WEIGHT: f32 = 0.2;
 
 /// Importance assumed for fragments written before importance was recorded.
 const DEFAULT_IMPORTANCE: f32 = 0.5;
 
-/// Half-life of the recency term, in days. A memory touched today scores 1.0;
-/// one untouched for two weeks scores 0.5. Deliberately short: recency is the
-/// tiebreaker between comparably relevant memories, not a retention policy
-/// (that is `memory_cleanup`'s decay).
+/// Short on purpose: recency is a tiebreaker, not retention (that's `memory_cleanup`'s decay).
 pub const RECENCY_HALF_LIFE_DAYS: f32 = 14.0;
 
-/// Recency term in `[0, 1]` for a fragment, measured from when it was WRITTEN.
-///
-/// Deliberately not `last_accessed_at`. Injecting a memory refreshes that
-/// timestamp, so reading from it made being injected the very thing that kept a
-/// memory recent — an incumbency ratchet. On the device a memory already in the
-/// prompt carried a structural head start of 0.100, meaning a genuinely more
-/// relevant challenger needed a cosine edge of 0.20 just to displace it. That is
-/// why "I am a computer program" and "User is an individual" kept reappearing
-/// turn after turn while two real preferences never surfaced once.
-///
-/// `last_accessed_at` and `access_count` are still recorded and still read by
-/// `memory_cleanup` for decay and reinforcement — this changes what RANKS a
-/// memory for injection, not what keeps it alive.
+/// Recency in `[0, 1]` from `created_at`, not `last_accessed_at`: injection refreshes the latter,
+/// so ranking on it would keep already-injected memories winning.
 pub fn recency_score(fragment: &MemoryFragment, now: DateTime<Utc>) -> f32 {
     let reference = fragment.created_at;
     let days = (now - reference).num_seconds() as f32 / 86_400.0;
@@ -98,12 +63,8 @@ pub fn recency_score(fragment: &MemoryFragment, now: DateTime<Utc>) -> f32 {
     0.5_f32.powf(days / RECENCY_HALF_LIFE_DAYS)
 }
 
-/// Blended injection score for one candidate memory.
-///
-/// `similarity` is `None` for candidates that arrived by recency alone; they
-/// forfeit the similarity term rather than being assigned a neutral value, so a
-/// topical semantic hit can displace a standing high-importance identity
-/// memory instead of always losing to it.
+/// Blended injection score. `None` similarity (recency-only candidates) scores 0, not neutral,
+/// so a topical hit can displace a high-importance identity memory.
 pub fn relevance_score(
     fragment: &MemoryFragment,
     similarity: Option<f32>,
@@ -118,10 +79,7 @@ pub fn relevance_score(
     SIMILARITY_WEIGHT * sim + IMPORTANCE_WEIGHT * importance + RECENCY_WEIGHT * recency
 }
 
-/// Sort injection candidates best-first by [`relevance_score`].
-///
-/// Ties break on fragment id so the ordering (and therefore the prompt, and
-/// therefore the KV prefix beyond it) is reproducible for identical inputs.
+/// Sort best-first by [`relevance_score`]; ties break on id so the prompt's KV prefix is stable.
 pub fn rank_by_relevance(candidates: &mut [(MemoryFragment, Option<f32>)], now: DateTime<Utc>) {
     candidates.sort_by(|a, b| {
         let sa = relevance_score(&a.0, a.1, now);
@@ -134,48 +92,28 @@ pub fn rank_by_relevance(candidates: &mut [(MemoryFragment, Option<f32>)], now: 
 
 // ── Semantic dedup ───────────────────────────────────────────────────────────
 
-/// Cosine floor above which a new fact is treated as a paraphrase of an
-/// existing memory and dropped. Tuned high: a false skip silently loses a fact,
-/// while a false keep is only a redundant row that consolidation can merge.
+/// Cosine paraphrase floor. High: a false skip loses a fact; a false keep is only a redundant row.
 pub const SEMANTIC_DEDUP_THRESHOLD: f32 = 0.92;
 
 /// How many nearest neighbours to inspect when checking for a paraphrase.
 pub const SEMANTIC_DEDUP_NEIGHBOURS: usize = 5;
 
 // ── Lexical dedup (the no-embeddings path) ──────────────────────────────────
-//
-// With `embedding_provider = "none"` the semantic pass above is inert: nothing
-// is embedded, so nothing is ever compared. Everything below has to hold the
-// line on its own, which is why it is a token measure rather than the substring
-// containment it replaces — "The user's mother's name is Florence." and "My
-// mom's name is Florence …" share no substring at all.
+// Sole dedup with `embedding_provider = "none"`, so it must catch rewordings, not just substrings.
 
-/// How many recent memories a new fact is compared against.
-///
-/// These strings never reach an LLM prompt (the extractor uses them only for
-/// its own parse-time dedup), so the window is sized for recall, not tokens.
+/// Recent memories compared against a new fact; never sent to the LLM, so sized for recall.
 pub const DEDUP_RECENT_WINDOW: usize = 50;
 
 /// Jaccard floor (shared content words over all content words).
 pub const LEXICAL_DEDUP_JACCARD: f32 = 0.45;
 
-/// Containment floor (shared content words over the *shorter* side).
-///
-/// Both floors must be cleared. Jaccard alone misses a short restatement of a
-/// long fact; containment alone fires on "prefers dark mode" vs "prefers dark
-/// roast coffee". Together they caught every duplicate pair seen in a real
-/// store without merging a genuinely distinct one.
+/// Containment floor (shared content words over the *shorter* side); both floors must be cleared.
 pub const LEXICAL_DEDUP_CONTAINMENT: f32 = 0.8;
 
-/// Fewest content words either side must have before the token measure is
-/// trusted. Below this a single shared word swings the ratios wildly, and
-/// negation ("is happy" / "is not happy") reduces to the same token set.
+/// Min content words per side to trust the token measure; fewer and one word swings the ratios.
 const MIN_DEDUP_TOKENS: usize = 3;
 
-/// Words carrying no *discriminative* signal between two memories. Distinct
-/// from [`STOPWORDS`]: "user" is dropped here because every third-person fact
-/// contains it, and negations are deliberately kept because dropping them would
-/// make a fact and its contradiction look identical.
+/// Dedup stopwords; unlike [`STOPWORDS`] drops "user" (in every fact) and keeps negations.
 const DEDUP_STOPWORDS: &[&str] = &[
     "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "am", "in", "on", "at",
     "of", "to", "for", "and", "or", "but", "with", "that", "this", "these", "those", "it", "its",
@@ -185,9 +123,7 @@ const DEDUP_STOPWORDS: &[&str] = &[
     "could", "should", "also", "very", "some", "into", "about", "one", "so", "if", "up", "out",
 ];
 
-/// Kinship synonyms folded to one form. Without this the single most common
-/// duplicate in a personal store — "mother" written once as "mom" — reads as
-/// two unrelated facts.
+/// Kinship synonyms folded to one form so "mom" and "mother" facts dedup.
 const TOKEN_ALIASES: &[(&str, &str)] = &[
     ("mom", "mother"),
     ("mum", "mother"),
@@ -208,13 +144,10 @@ const TOKEN_ALIASES: &[(&str, &str)] = &[
     ("children", "child"),
 ];
 
-/// Shortest token kept. Two characters, not [`MIN_KEYWORD_LEN`]: dedup wants
-/// every scrap of signal ("pm", "ai"), and it never runs a SQL `LIKE`.
+/// Shorter than [`MIN_KEYWORD_LEN`]: dedup keeps "pm"/"ai" and never runs a SQL `LIKE`.
 const MIN_DEDUP_TOKEN_LEN: usize = 2;
 
-/// Normalise one raw word the way [`content_tokens`] does, but without the
-/// stopword and length filters — [`ORDER_SENSITIVE_MARKERS`] are themselves
-/// stopwords, so the order check needs the unfiltered sequence.
+/// Normalise like [`content_tokens`] but unfiltered, since the order markers are stopwords.
 fn normalise_word(raw: &str) -> String {
     let word = raw
         .trim_matches(|c: char| !c.is_alphanumeric())
@@ -227,8 +160,7 @@ fn normalise_word(raw: &str) -> String {
         .unwrap_or(word)
 }
 
-/// Content words of a memory: lowercased, de-punctuated, possessive-stripped,
-/// crudely singularised, alias-folded, stopword-filtered, order-independent.
+/// A memory's content words: normalised, singularised, alias-folded, stopword-filtered, deduped.
 pub fn content_tokens(text: &str) -> Vec<String> {
     let mut seen: Vec<String> = Vec::new();
     for raw in text.split_whitespace() {
@@ -249,8 +181,7 @@ fn strip_possessive(word: &str) -> &str {
         .unwrap_or(word)
 }
 
-/// Drop a plural "s". Skips endings where the "s" is part of the stem
-/// ("status", "class", "analysis") rather than a suffix.
+/// Drop a plural "s", except where it is part of the stem ("status", "class", "analysis").
 fn singularise(word: &str) -> String {
     let keep = word.len() <= 3
         || !word.ends_with('s')
@@ -265,9 +196,7 @@ fn singularise(word: &str) -> String {
     }
 }
 
-/// Words that flip a fact's polarity. A token measure is order- and
-/// polarity-blind, so "is happy" and "is not happy" reduce to nearly the same
-/// set — these are checked separately and never dropped as stopwords.
+/// Polarity-flipping words; checked separately because the token measure is blind to them.
 const NEGATIONS: &[&str] = &[
     "not",
     "no",
@@ -287,25 +216,14 @@ const NEGATIONS: &[&str] = &[
     "wouldn't",
 ];
 
-/// Connectives whose two arguments are not interchangeable. "X over Y" and
-/// "Y over X" are opposite claims that reduce to one token set, so a set
-/// measure scores the reversal a perfect duplicate — the failure that silently
-/// dropped a correction and kept the stale row it was fixing.
-///
-/// Read as *normalised words*, not content tokens: most of these are dedup
-/// stopwords ("to", "than") and would otherwise be filtered away before the
-/// comparison. Copulas are deliberately absent — "Florence is the user's
-/// mother" and "The user's mother is Florence" are the same fact.
+/// Connectives whose arguments can't be swapped ("X over Y" vs "Y over X"); matched on
+/// normalised words since most are dedup stopwords. No copulas: "A is B" equals "B is A".
 const ORDER_SENSITIVE_MARKERS: &[&str] = &[
     "over", "than", "instead", "rather", "versus", "vs", "before", "after", "above", "below", "to",
     "from",
 ];
 
-/// Jaccard and containment of two memories' content words, in that order.
-///
-/// A raw measure: it does not consider polarity, and returns `(0.0, 0.0)` when
-/// either side has fewer than three content words. Use [`is_duplicate_content`]
-/// to decide anything.
+/// Raw `(jaccard, containment)` of content words; use [`is_duplicate_content`] to decide.
 pub fn lexical_overlap(a: &str, b: &str) -> (f32, f32) {
     token_overlap(&content_tokens(a), &content_tokens(b))
 }
@@ -341,13 +259,8 @@ fn content_of(words: &[String]) -> Vec<&str> {
         .collect()
 }
 
-/// True when the two texts share an [`ORDER_SENSITIVE_MARKERS`] connective and
-/// have exchanged its arguments — "prefers dark mode over light mode" against
-/// "prefers light mode over dark mode".
-///
-/// Both directions of the crossing are required, and a word present on both
-/// sides in the other text ("mode") is ignored, so this only fires on a genuine
-/// reversal. Firing wrongly costs one redundant row; not firing costs a fact.
+/// True when a shared [`ORDER_SENSITIVE_MARKERS`] connective has its arguments swapped.
+/// Needs both crossings and ignores words on both sides, so it fires only on a real reversal.
 fn is_argument_swap(a: &str, b: &str) -> bool {
     let (wa, wb) = (normalised_words(a), normalised_words(b));
     for marker in ORDER_SENSITIVE_MARKERS {
@@ -372,12 +285,8 @@ fn is_argument_swap(a: &str, b: &str) -> bool {
     false
 }
 
-/// True when two memories say the same thing, judged without embeddings.
-///
-/// Opposite polarity is never a duplicate, nor is an argument reversal — both
-/// checked first because the token measure is blind to polarity *and* to order.
-/// Then case-insensitive substring containment (the cheap exact-restatement
-/// case), then the token measure for reworded duplicates.
+/// True when two memories say the same thing, judged without embeddings. The polarity and
+/// argument-swap gates run first because the token measure is blind to both.
 pub fn is_duplicate_content(a: &str, b: &str) -> bool {
     let (la, lb) = (a.trim().to_lowercase(), b.trim().to_lowercase());
     if la.is_empty() || lb.is_empty() {
@@ -399,25 +308,13 @@ pub fn is_duplicate_content(a: &str, b: &str) -> bool {
 
 // ── Embedding backfill ───────────────────────────────────────────────────────
 
-/// Rows embedded per backfill batch.
-///
-/// Also bounds how long a concurrent per-turn retrieval embed can queue behind
-/// the backfill: the fastembed adapter serialises on one model mutex, so a turn
-/// arriving mid-batch waits for at most this many short embeds.
+/// Rows per backfill batch; also caps how long a turn's embed waits on fastembed's model mutex.
 pub const BACKFILL_BATCH_SIZE: usize = 32;
 
-/// Pause between backfill batches. The backfill competes with inference for CPU
-/// on a Jetson, so it yields between batches rather than running flat out.
+/// Pause between backfill batches, yielding CPU to inference on a Jetson.
 pub const BACKFILL_BATCH_PAUSE_MS: u64 = 250;
 
-/// Embed every active memory that has no stored embedding yet, in batches.
-///
-/// Extraction historically stored `embedding: None`, so without this pass
-/// `search_similar` sees only the handful of rows written by the `save_memory`
-/// MCP tool and silently ignores the rest of the store.
-///
-/// Best-effort throughout: a row that fails to embed is left for the next run.
-/// Returns the number of rows embedded.
+/// Embed active memories with no embedding; returns rows embedded. Failed rows wait for next run.
 pub async fn run_backfill(
     repo: &dyn MemoryRepository,
     embedder: &dyn EmbeddingProvider,
@@ -435,17 +332,8 @@ pub async fn run_backfill(
     .await
 }
 
-/// Re-embed every active memory whose stored vector is the WRONG WIDTH — i.e.
-/// produced by a different embedding model.
-///
-/// [`run_backfill`] cannot reach these, because it selects `embedding IS NULL`
-/// and a stale vector is not null. Without this pass, a pond that switched
-/// `embedding_provider` keeps rows that semantic search correctly EXCLUDES (they
-/// are not comparable) and that nothing ever repairs — retrieval quietly and
-/// permanently worse, with the store looking fully embedded.
-///
-/// Same batching and pause as the backfill, and for the same reason: on a Jetson
-/// this competes with inference for CPU. Best-effort; returns rows re-embedded.
+/// Re-embed active memories whose vector width is from another model; returns rows re-embedded.
+/// Needed because [`run_backfill`] only selects `embedding IS NULL`.
 pub async fn run_dimension_repair(
     repo: &dyn MemoryRepository,
     embedder: &dyn EmbeddingProvider,
@@ -468,8 +356,7 @@ pub async fn run_dimension_repair(
     .await
 }
 
-/// The shared batching loop. `stale_dims` selects which rows are fetched: `None`
-/// means "never embedded", `Some(d)` means "embedded at some width other than d".
+/// Shared batching loop; `stale_dims`: `None` = never embedded, `Some(d)` = width other than `d`.
 async fn embed_in_batches(
     repo: &dyn MemoryRepository,
     embedder: &dyn EmbeddingProvider,
@@ -509,8 +396,7 @@ async fn embed_in_batches(
             }
         }
 
-        // Every row in the batch failed, so the same rows would come back
-        // forever — stop instead of spinning.
+        // All rows failed, so the same rows would come back forever; stop.
         if !progressed {
             tracing::warn!("[{label}] no progress in a batch — stopping");
             break;
@@ -585,13 +471,6 @@ mod tests {
         assert!((recency_score(&two_weeks, now) - 0.5).abs() < 0.02);
     }
 
-    /// Being injected must NOT make a memory look recent.
-    ///
-    /// Injection refreshes `last_accessed_at`, so ranking on it made the act of
-    /// being chosen the reason to be chosen again — an incumbency ratchet worth
-    /// 0.100 of head start, which on the device kept "I am a computer program"
-    /// in the prompt while two real preferences never surfaced. Recency is now
-    /// measured from when the memory was written, full stop.
     #[test]
     fn being_accessed_does_not_refresh_recency() {
         let now = Utc::now();
@@ -608,8 +487,7 @@ mod tests {
     #[test]
     fn topical_similarity_outranks_standing_identity_memory() {
         let now = Utc::now();
-        // The standing identity block: maximum importance, recent, but no
-        // semantic relationship to this turn.
+        // Standing identity block: max importance, recent, but unrelated to this turn.
         let mut identity = fragment("identity", 1.0, 0);
         identity.segment = Some(MemorySegment::Identity);
         // An old, middling-importance memory that is actually about the topic.
@@ -676,8 +554,7 @@ mod tests {
 
     #[test]
     fn the_three_florence_memories_collapse_without_embeddings() {
-        // Two rows that shipped side by side in a real store: reworded copies
-        // of one fact, sharing no substring, so only the token measure sees it.
+        // Reworded copies sharing no substring, so only the token measure can catch them.
         let stored = "The user's mother's name is Florence.";
         let reworded = "My mom's name is Florence and she lives in the latter city";
         assert!(is_duplicate_content(reworded, stored));
@@ -694,8 +571,7 @@ mod tests {
 
     #[test]
     fn distinct_facts_are_not_deduplicated() {
-        // Each pair shares wording but states something different. Losing the
-        // second one is the failure mode this threshold pair guards against.
+        // Each pair shares wording but states something different.
         let distinct: &[(&str, &str)] = &[
             (
                 "The user prefers dark mode",
@@ -726,9 +602,7 @@ mod tests {
 
     #[test]
     fn a_negation_is_not_a_duplicate_of_what_it_negates() {
-        // The token measure does run here and scores these a duplicate
-        // (Jaccard 0.75, containment 1.00) — "not" is the only token that
-        // differs. The polarity gate is the only thing keeping them apart.
+        // The token measure alone calls these duplicates; only the polarity gate separates them.
         let (jaccard, containment) = lexical_overlap(
             "The user is not happy with the new voice",
             "The user is happy with the new voice",
@@ -742,9 +616,6 @@ mod tests {
 
     #[test]
     fn an_argument_reversal_is_not_a_duplicate() {
-        // The regression this guard exists for: the reversal reduces to the
-        // *identical* token set, so Jaccard and containment both read 1.00 and
-        // the correction was dropped in favour of the stale row it fixed.
         let stale = "The user prefers dark mode over light mode";
         let fixed = "The user prefers light mode over dark mode";
         assert_eq!(lexical_overlap(stale, fixed), (1.0, 1.0));
@@ -757,8 +628,7 @@ mod tests {
             "The user prefers coffee to tea"
         ));
 
-        // A reversed journey. "to" alone cannot see it — both sentences put the
-        // same city after "to" — so "from" has to be a marker as well.
+        // A reversed journey: both cities follow "to" in each, so only "from" catches it.
         let there = "The user moved to Nairobi from Kisumu";
         let back = "The user moved to Kisumu from Nairobi";
         assert_eq!(lexical_overlap(there, back), (1.0, 1.0));
@@ -768,8 +638,6 @@ mod tests {
 
     #[test]
     fn a_same_order_restatement_is_still_caught() {
-        // The order guard must not blunt the measure: same claim, same order,
-        // marker present in both.
         assert!(is_duplicate_content(
             "The user prefers dark mode over light mode",
             "The user prefers dark mode over light mode in every app",
@@ -800,8 +668,7 @@ mod tests {
 
     // ── backfill ────────────────────────────────────────────────────────
 
-    /// Embedding provider returning a fixed non-zero vector, so backfilled rows
-    /// are distinguishable from the all-zero mock.
+    /// Fixed non-zero vector, so backfilled rows differ from the all-zero mock.
     struct FixedEmbedder(Vec<f32>);
 
     #[async_trait::async_trait]

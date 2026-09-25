@@ -1,10 +1,4 @@
-//! Native tool-calling support: prompt construction and output parsing.
-//!
-//! Handles three tool-call output formats emitted by different model families:
-//!
-//! 1. **Standard JSON**: `{"tool_calls": [{"type": "function", "function": {...}}]}`
-//! 2. **XML / Qwen-style**: `<tool_call><function=NAME><parameter=K>V</parameter></function></tool_call>`
-//! 3. **Llama3 / Gemma4**: `<|tool_call|>call:NAME{...}<tool_call|>` or `<|tool_call>call:NAME{...}<tool_call|>`
+//! Native tool calling: prompt tool JSON, and parsing JSON, Qwen-XML and Llama3/Gemma4 calls.
 
 use pond_core::models::ports::inference::ToolDefinition;
 use serde_json::Value;
@@ -18,9 +12,7 @@ pub(crate) struct ParsedToolCall {
 
 // ── Prompt construction ──────────────────────────────────────────────────────
 
-/// Convert GIAP [`ToolDefinition`]s to OpenAI-compatible JSON for chat templates.
-///
-/// Returns the JSON string suitable for `OpenAIChatTemplateParams::tools_json`.
+/// [`ToolDefinition`]s as OpenAI-style JSON for `OpenAIChatTemplateParams::tools_json`.
 pub(crate) fn tools_to_json(tools: &[ToolDefinition]) -> Option<String> {
     if tools.is_empty() {
         return None;
@@ -43,9 +35,7 @@ pub(crate) fn tools_to_json(tools: &[ToolDefinition]) -> Option<String> {
     serde_json::to_string(&specs).ok()
 }
 
-/// Build a compact tools JSON (name + description only, no parameter schemas).
-///
-/// Used as a fallback when the full schema exceeds the token budget.
+/// Tools JSON without parameter schemas, for when the full one exceeds the token budget.
 pub(crate) fn compact_tools_json(tools: &[ToolDefinition]) -> Option<String> {
     if tools.is_empty() {
         return None;
@@ -69,16 +59,8 @@ pub(crate) fn compact_tools_json(tools: &[ToolDefinition]) -> Option<String> {
 
 // ── Output parsing ───────────────────────────────────────────────────────────
 
-/// Parse tool calls from the model's generated text.
-///
-/// Tries each format in order:
-/// 1. Llama3/Gemma4 XML (`<|tool_call|>` or `<|tool_call>`)
-/// 2. Qwen/generic XML (`<tool_call>`)
-/// 3. Standard JSON (`{"tool_calls": [...]}`)
-///
-/// Returns an empty vec if no tool calls are found.
+/// Parse tool calls, trying Llama3/Gemma4, then Qwen XML, then JSON; empty if none.
 pub(crate) fn parse_tool_calls(output: &str) -> Vec<ParsedToolCall> {
-    // 1. Llama3 / Gemma4 format
     if let Some((_content, calls)) = split_llama3_tool_calls(output) {
         return calls
             .into_iter()
@@ -89,7 +71,6 @@ pub(crate) fn parse_tool_calls(output: &str) -> Vec<ParsedToolCall> {
             .collect();
     }
 
-    // 2. Qwen / generic XML format
     if let Some((_content, calls)) = split_xml_tool_calls(output) {
         return calls
             .into_iter()
@@ -100,7 +81,6 @@ pub(crate) fn parse_tool_calls(output: &str) -> Vec<ParsedToolCall> {
             .collect();
     }
 
-    // 3. Standard JSON format
     if let Some(json_str) = extract_json_tool_calls(output) {
         return parse_json_tool_calls(&json_str);
     }
@@ -108,11 +88,7 @@ pub(crate) fn parse_tool_calls(output: &str) -> Vec<ParsedToolCall> {
     Vec::new()
 }
 
-/// Return the byte offset up to which the generated text is safe to stream.
-///
-/// Everything before the last unmatched top-level `{` or any incomplete
-/// tool-call tag is safe. This prevents streaming partial tool-call JSON
-/// or XML to the client.
+/// Byte offset safe to stream: before any unmatched `{` or (partial) tool-call tag.
 pub(crate) fn safe_stream_end(text: &str) -> usize {
     // Hold back from the start of any tool_call tag.
     let xml_hold = text.find("<tool_call>").unwrap_or(text.len());
@@ -197,14 +173,12 @@ fn extract_json_tool_calls(text: &str) -> Option<String> {
     let start = json_start?;
     let json_str = &trimmed[start..];
 
-    // Validate it contains tool_calls.
     let parsed: Value = serde_json::from_str(json_str).ok()?;
     parsed.get("tool_calls")?.as_array()?;
 
     Some(json_str.to_string())
 }
 
-/// Split text into (content, tool_calls_json).
 #[allow(clippy::string_slice)]
 
 /// Parse tool calls from a JSON string containing `"tool_calls"` array.
@@ -220,8 +194,7 @@ fn parse_json_tool_calls(json_str: &str) -> Vec<ParsedToolCall> {
 
     let mut results = Vec::new();
     for tc in tool_calls {
-        // Try OpenAI format: {"function": {"name": ..., "arguments": ...}}
-        // Then native format: {"name": ..., "arguments": {...}}
+        // OpenAI {"function": {"name", "arguments"}} first, then native {"name", "arguments"}.
         let (name, arguments) = if let Some(func) = tc.get("function") {
             let n = func
                 .get("name")
@@ -369,13 +342,7 @@ fn parse_xml_arg_key_value_format(block: &str) -> Option<(String, serde_json::Ma
 
 // ── Format 3: Llama3 / Gemma4 ───────────────────────────────────────────────
 
-/// Convert Gemma 4's native tool-call argument format to valid JSON.
-///
-/// Gemma 4 emits: `{key:<|"|>value<|"|>,key2:<|"|>value2<|"|>}`
-/// This needs to become: `{"key":"value","key2":"value2"}`
-///
-/// The format uses `<|"|>` as string delimiters (instead of `"`) and
-/// keys are unquoted identifiers.
+/// Gemma 4 args to JSON: `{key:<|"|>value<|"|>}` becomes `{"key":"value"}`.
 fn gemma4_args_to_json(raw: &str) -> String {
     // If it already looks like valid JSON (starts with {"), try as-is first.
     let trimmed = raw.trim();
@@ -386,8 +353,7 @@ fn gemma4_args_to_json(raw: &str) -> String {
     // Replace <|"|> with " (Gemma 4's string delimiter escape)
     let with_quotes = trimmed.replace("<|\"", "\"").replace("\"|>", "\"");
 
-    // Now we have: {key:"value",key2:"value2"}
-    // Need to quote the keys: {"key":"value","key2":"value2"}
+    // Now quote the bare keys.
     let mut result = String::with_capacity(with_quotes.len() + 20);
     let mut chars = with_quotes.chars().peekable();
 
@@ -458,7 +424,6 @@ fn split_llama3_tool_calls(
                 #[allow(clippy::string_slice)]
                 let raw_args = &after_call[brace_idx..];
 
-                // Convert Gemma 4 native format to JSON, then parse.
                 let json_str = gemma4_args_to_json(raw_args);
                 let args: serde_json::Map<String, Value> = serde_json::from_str(&json_str)
                     .unwrap_or_else(|e| {
@@ -684,15 +649,13 @@ mod tests {
 
     #[test]
     fn malformed_json_tool_call_returns_empty_vec() {
-        // Completely broken JSON — must not panic, must return nothing.
         let calls = parse_tool_calls("{not valid json at all!!!");
         assert!(calls.is_empty());
     }
 
     #[test]
     fn malformed_arguments_string_in_openai_format_returns_empty_args() {
-        // Valid wrapper but arguments field is not parseable JSON (no braces — avoids
-        // confusing the depth scanner in extract_json_tool_calls).
+        // No braces in the bad arguments, which would confuse the depth scanner.
         let text = r#"{"tool_calls": [{"function": {"name": "shell", "arguments": "not valid json at all"}}]}"#;
         let calls = parse_tool_calls(text);
         assert_eq!(calls.len(), 1);
@@ -703,8 +666,6 @@ mod tests {
 
     #[test]
     fn brace_heavy_malformed_arguments_does_not_panic() {
-        // Arguments containing extra `{` confuse the depth scanner so extraction
-        // may fail entirely — the important thing is no panic and no crash.
         let text =
             r#"{"tool_calls": [{"function": {"name": "shell", "arguments": "{{bad json"}}]}"#;
         let calls = parse_tool_calls(text);
@@ -717,7 +678,6 @@ mod tests {
 
     #[test]
     fn malformed_llama3_args_returns_empty_args() {
-        // Llama3 format with unparseable arg JSON — must log + return empty map.
         let text = "<|tool_call|>call:giap__get_weather{NOT VALID JSON}<tool_call|>";
         let calls = parse_tool_calls(text);
         assert_eq!(calls.len(), 1);
@@ -728,7 +688,6 @@ mod tests {
 
     #[test]
     fn missing_tool_calls_key_returns_empty_vec() {
-        // JSON object present but no tool_calls field — must return nothing.
         let calls = parse_tool_calls(r#"{"result": "ok"}"#);
         assert!(calls.is_empty());
     }
@@ -746,9 +705,7 @@ mod tests {
         assert!(parsed[0]["function"].get("parameters").is_none());
     }
 
-    /// Diagnostic test: prints the full tools JSON as it would be passed to the
-    /// Jinja chat template. Run with `cargo test -p pond-inference -- --nocapture render_tools_json`
-    /// to see the exact JSON the model receives for tool definitions.
+    /// Run with `--nocapture` to print the exact tools JSON the chat template receives.
     #[test]
     fn render_tools_json_for_inspection() {
         let tools = vec![

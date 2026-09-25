@@ -1,17 +1,4 @@
-//! Fastembed adapter for the `EmbeddingProvider` port.
-//!
-//! Wraps [`fastembed::TextEmbedding`] to generate dense vectors from text using
-//! ONNX-based models (default: `all-MiniLM-L6-v2`, 384 dimensions).
-//!
-//! The model is auto-downloaded from HuggingFace on first use and cached under
-//! the provided `cache_dir` (typically `$DATA_DIR/models/embedding/`).
-//!
-//! # Thread Safety
-//!
-//! `TextEmbedding` is not `Send`/`Sync`, so inference is dispatched to a
-//! blocking thread via `tokio::task::spawn_blocking`. The inner model is
-//! wrapped in a `Mutex` to serialize access — acceptable for GIAP's workload
-//! (1-3 embeddings per chat turn during memory extraction).
+//! Fastembed (ONNX) `EmbeddingProvider`; downloads its model from HuggingFace on first use.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -20,12 +7,9 @@ use pond_core::models::ports::embedding::EmbeddingProvider;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-/// Known embedding models and their dimension counts.
 const MINILM_L6_V2_DIMS: usize = 384;
 const BGE_SMALL_EN_DIMS: usize = 384;
 
-/// Resolves a model name string to a fastembed `EmbeddingModel` enum variant
-/// and its output dimensionality.
 fn resolve_model(name: &str) -> Result<(EmbeddingModel, usize)> {
     match name {
         "all-MiniLM-L6-v2" | "" => Ok((EmbeddingModel::AllMiniLML6V2, MINILM_L6_V2_DIMS)),
@@ -37,11 +21,7 @@ fn resolve_model(name: &str) -> Result<(EmbeddingModel, usize)> {
     }
 }
 
-/// `EmbeddingProvider` implementation backed by fastembed (ONNX Runtime).
-///
-/// Construction is blocking (loads ONNX model into memory). Callers should
-/// construct on a blocking thread or during startup before the async runtime
-/// needs the provider.
+/// Fastembed-backed provider. Construction blocks (loads, maybe downloads, the ONNX model).
 pub struct FastembedEmbeddingProvider {
     model: Arc<Mutex<TextEmbedding>>,
     dims: usize,
@@ -49,21 +29,13 @@ pub struct FastembedEmbeddingProvider {
 }
 
 impl FastembedEmbeddingProvider {
-    /// Create a new provider for `model_name`.
-    ///
-    /// `cache_dir` is where fastembed stores downloaded ONNX artefacts.
-    /// Pass `None` to use fastembed's default cache location.
-    ///
-    /// Supported models:
-    /// - `"all-MiniLM-L6-v2"` (default, 384-dim, ~23 MB)
-    /// - `"bge-small-en-v1.5"` (384-dim, ~33 MB)
+    /// Provider for `model_name`; `cache_dir: None` uses fastembed's default cache location.
     pub fn new(model_name: &str, cache_dir: Option<PathBuf>) -> Result<Self> {
         let (variant, dims) = resolve_model(model_name)?;
 
         let mut opts = InitOptions::new(variant).with_show_download_progress(true);
 
         if let Some(dir) = cache_dir {
-            // Ensure the cache directory exists before handing it to fastembed.
             std::fs::create_dir_all(&dir)?;
             opts = opts.with_cache_dir(dir);
         }
@@ -101,8 +73,6 @@ impl EmbeddingProvider for FastembedEmbeddingProvider {
         let model = Arc::clone(&self.model);
         let owned = text.to_string();
 
-        // Dispatch to a blocking thread — ONNX inference is CPU-bound and must
-        // not block the tokio runtime.
         let result = tokio::task::spawn_blocking(move || {
             let mut guard = model
                 .lock()
