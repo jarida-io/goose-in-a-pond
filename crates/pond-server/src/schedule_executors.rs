@@ -1,9 +1,4 @@
-//! Schedule executors — bridge between the scheduler infrastructure and the
-//! agent / webhook execution targets.
-//!
-//! `AgentScheduleExecutor` sends prompts to the LLM agent and collects the
-//! response.  `DeferredExecutor` wraps a `OnceCell` so the scheduler can be
-//! constructed before the agent exists (breaking the circular init dependency).
+//! Scheduler executors; `DeferredExecutor` lets the scheduler exist before the agent does.
 
 use anyhow::{bail, Result};
 use async_trait::async_trait;
@@ -21,9 +16,7 @@ use tokio::sync::{OnceCell, Semaphore};
 
 // ── AgentScheduleExecutor ────────────────────────────────────────────────────
 
-/// Executes scheduled tasks by dispatching to the LLM agent, an HTTP webhook,
-/// or — for sensor-triggered rules (#92) — a list of actions (agent prompt,
-/// device control, notification).
+/// Runs scheduled tasks: an agent prompt, a webhook, or a sensor rule's list of actions.
 pub struct AgentScheduleExecutor {
     agent: Arc<dyn Agent>,
     session_storage: Arc<dyn SessionStorage>,
@@ -32,10 +25,7 @@ pub struct AgentScheduleExecutor {
     device_control: Option<Arc<dyn DeviceControlPort>>,
     /// Limit concurrent scheduled runs to avoid starving interactive chat.
     semaphore: Semaphore,
-    /// Speaks a completed `AgentPrompt` task's response out loud, gated by
-    /// `speakable_now` below. `None` when no TTS engine is available (see
-    /// `speakable_now`'s doc comment for why this does NOT reuse
-    /// `ChatService::speak_unprompted`).
+    /// Speaks a finished `AgentPrompt` response, gated by `speakable_now`; `None` without TTS.
     voice_output: Option<Arc<dyn VoiceOutput>>,
     settings_repo: Option<Arc<dyn SettingsRepository>>,
 }
@@ -60,20 +50,8 @@ impl AgentScheduleExecutor {
         }
     }
 
-    /// Whether a scheduled `AgentPrompt`'s response may be spoken aloud right
-    /// now.
-    ///
-    /// This is NOT `ChatService::speak_unprompted` — that gate requires an
-    /// [`ProfileScope::Owner`] audience with recent presence evidence, and a
-    /// schedule has neither: schedules are not owned by a household member
-    /// (see the comment on `profile_scope` in `run_agent_prompt`), so there
-    /// is nobody to check presence for. What DOES still apply, because it
-    /// isn't about who's in the room: quiet hours (never interrupt sleep for
-    /// something nobody asked to hear right now) and the household's
-    /// `unprompted_speech_enabled` consent toggle (the same switch that
-    /// governs every other proactive utterance). Member-presence gating for
-    /// scheduled reminders needs schedules to carry an owner, which they
-    /// don't today — a real gap, not one this function papers over.
+    /// Checks quiet hours and `unprompted_speech_enabled` only; not `speak_unprompted`'s
+    /// presence gate, as schedules have no owner. Member-level gating is a known gap.
     fn speakable_now(settings: &pond_core::user_data::domain::settings::Settings) -> bool {
         if !settings.unprompted_speech_enabled {
             return false;
@@ -87,9 +65,7 @@ impl AgentScheduleExecutor {
         )
     }
 
-    /// Send `prompt` to the agent in an ephemeral session. Shared by the
-    /// `AgentPrompt` kind and the rule `AgentPrompt` action (no recursion —
-    /// the semaphore is held once by `execute`).
+    /// Prompt the agent in an ephemeral session; the caller (`execute`) holds the semaphore.
     async fn run_agent_prompt(&self, task_id: &str, prompt: &str) -> Result<String> {
         let session_id = format!("sched-{}-{}", task_id, chrono::Utc::now().timestamp());
         let _ = self
@@ -104,12 +80,7 @@ impl AgentScheduleExecutor {
             images: vec![],
             voice_mode: false,
             canvas_mode: false,
-            // A scheduled task has no speaker to identify -- nobody is in the
-            // room. It inherits nothing: an explicit Household scope, because
-            // a reminder the household set up is household context. Per-member
-            // schedules would need an owner on the schedule itself, which does
-            // not exist (there is no schedules table at all; the scheduler is
-            // in-process).
+            // Schedules have no owner, so a reminder is household context.
             profile_scope: ProfileScope::Household,
             // Nobody is in the room for a scheduled task.
             profile_context: None,
@@ -159,9 +130,7 @@ impl AgentScheduleExecutor {
                 None => bail!("device control not available"),
             },
             TriggerAction::Notify { title, body } => {
-                // Resolved at fire time via the process-global (set during
-                // startup, long before any rule can fire) — same pattern as
-                // the `send_notification` MCP tool.
+                // Process-global, set at startup before any rule can fire.
                 match pond_mcp_server::notification_sender() {
                     Some(sender) => {
                         let n = pond_core::mcp::ports::notification::Notification {
@@ -192,15 +161,8 @@ impl ScheduleExecutor for AgentScheduleExecutor {
             TaskKind::AgentPrompt { prompt } => self.run_agent_prompt(task_id, prompt).await,
             TaskKind::Webhook { webhook_url } => {
                 tracing::info!("[scheduler] firing webhook for task {task_id}: {webhook_url}");
-                // PAI-2 P5. A scheduled webhook POSTs to a URL the user typed
-                // in: the most direct exfiltration path in the tree. `begin`
-                // gates and starts the clock, `finish` records the outcome
-                // either way, so a webhook that times out is still in the feed.
-                //
-                // There used to be a second, never-constructed executor in
-                // pond-infra-scheduler carrying a copy of this gating. It was
-                // deleted rather than kept in sync: two paths to gate is how
-                // one of them ends up ungated.
+                // A user-typed URL is the most direct exfiltration path: `begin` gates it and
+                // `finish` records every outcome, timeouts included.
                 let call = pond_core::shared::services::egress::begin(webhook_url, "POST")
                     .map_err(|e| anyhow::anyhow!("task {task_id}: {e}"))?;
 
@@ -217,8 +179,7 @@ impl ScheduleExecutor for AgentScheduleExecutor {
                 Ok(format!("Webhook returned {status}"))
             }
             TaskKind::SensorTrigger(spec) => {
-                // Run every action; report per-action outcomes. The run only
-                // counts as failed when *no* action succeeded.
+                // Fails only when no action succeeded.
                 let mut summaries = Vec::with_capacity(spec.actions.len());
                 let mut any_ok = false;
                 for action in &spec.actions {
@@ -248,13 +209,8 @@ impl ScheduleExecutor for AgentScheduleExecutor {
     }
 }
 
-/// `true` when `(hour, minute)` falls inside the `[start, end)` quiet window.
-/// Wraps midnight when `start > end` (the normal case, e.g. `22:00`/`07:00`).
-/// An unparseable bound is treated as "quiet all day" — same "on unreadable
-/// input, do less" rule as `ChatService::quiet_hours_cover`, which this
-/// mirrors but does not call (that one is private to `pond-core` and typed
-/// around `UnpromptedUtterance`'s member-audience shape, which schedules
-/// don't have — see `AgentScheduleExecutor::speakable_now`).
+/// Whether `(hour, minute)` is inside `[start, end)`, wrapping midnight when `start > end`.
+/// An unparseable bound means quiet all day, like `ChatService::quiet_hours_cover`.
 fn quiet_hours_cover_now(start: &str, end: &str, hour: u32, minute: u32) -> bool {
     let parse = |s: &str| chrono::NaiveTime::parse_from_str(s.trim(), "%H:%M").ok();
     let (Some(start), Some(end)) = (parse(start), parse(end)) else {
@@ -298,7 +254,7 @@ impl DeferredExecutor {
         }
     }
 
-    /// Fill the executor.  May only be called once; subsequent calls are no-ops.
+    /// First call wins; later calls are no-ops.
     pub async fn init(&self, executor: Arc<dyn ScheduleExecutor>) {
         let _ = self.inner.set(executor);
     }

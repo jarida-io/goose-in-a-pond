@@ -1,30 +1,5 @@
-//! The one place that turns `Settings` into concrete voice model paths.
-//!
-//! Three different encodings have reached `active_whisper_model` /
-//! `voice_tts_voice` / `active_tts_model` over the life of the project, written
-//! by four different code paths:
-//!
-//! | Shape | Written by | Example |
-//! |---|---|---|
-//! | catalog name | `sync_assignments_to_settings` | `base`, `en-lessac-medium` |
-//! | filename | the Settings and hub Voice UIs | `ggml-base.bin`, `en_US-lessac-medium.onnx` |
-//! | nonexistent id | onboarding | `amy`, `kathleen`, `libritts` |
-//!
-//! Before this module each call site invented its own resolution, and they
-//! disagreed. The worst case compounded: `main.rs` looked up
-//! `whisper/ggml-base.bin`, missed, then built the fallback filename
-//! `format!("ggml-{}.en.bin", "ggml-base.bin")` — `ggml-ggml-base.bin.en.bin`,
-//! a file that cannot exist — and the mic went deaf with only a "not in
-//! catalog" line to show for it.
-//!
-//! Resolution accepts all three shapes and is deliberately total: an
-//! unresolvable value yields `None`, never a synthesised path that cannot
-//! exist. Callers are then obliged to say so out loud rather than degrading
-//! into silence.
-//!
-//! The matching logic is pure and takes the catalog as a slice so it can be
-//! tested without a database; [`resolve_voice_models`] is the thin async
-//! wrapper that fetches the catalog and calls it.
+//! Turns `Settings` into voice model paths, accepting a catalog name, a filename, or a
+//! hand-placed file; an unresolvable value is `None`, never a synthesised path.
 
 use std::path::{Path, PathBuf};
 
@@ -39,9 +14,7 @@ pub struct WhisperDownload {
     pub size_mb: u64,
 }
 
-/// Both halves of a piper voice. Piper needs the `.onnx` weights AND the
-/// `.onnx.json` config; an install with only the weights fails at load, which
-/// is why they travel together rather than being re-derived per call site.
+/// A piper voice's `.onnx` weights and `.onnx.json` config; it can't load without both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PiperDownload {
     pub onnx_filename: String,
@@ -51,16 +24,13 @@ pub struct PiperDownload {
     pub size_mb: u64,
 }
 
-/// A resolved whisper model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WhisperModel {
     pub path: PathBuf,
-    /// `None` when the file was matched on disk but the catalog does not
-    /// describe it — usable, but not re-downloadable.
+    /// `None` for a file on disk the catalog doesn't describe (usable, not re-downloadable).
     pub download: Option<WhisperDownload>,
 }
 
-/// A resolved piper voice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PiperVoice {
     pub onnx: PathBuf,
@@ -69,12 +39,6 @@ pub struct PiperVoice {
 }
 
 impl PiperVoice {
-    /// True when both halves are present on disk.
-    ///
-    /// Test-only: nothing in the running server asks this, because every caller
-    /// already holds the resolved paths. Gated rather than deleted because the
-    /// resolution tests assert through it, and rather than left ungated because
-    /// a production build should not carry a method production never calls.
     #[cfg(test)]
     pub fn is_installed(&self) -> bool {
         self.onnx.exists() && self.config.exists()
@@ -89,21 +53,14 @@ pub struct VoiceModels {
 }
 
 impl VoiceModels {
-    /// Whether TTS should use piper.
-    ///
-    /// Replaces `active_tts_model.starts_with("piper")`, which was never true:
-    /// catalog names are `en-lessac-medium`, so every install fell through to
-    /// text-only output. The question is not what the setting is spelled like,
-    /// it is whether a voice actually resolved.
+    /// Piper iff a voice resolved, not by how `active_tts_model` is spelled.
     #[cfg(test)]
     pub fn tts_is_piper(&self) -> bool {
         self.piper.is_some()
     }
 }
 
-/// Match a whisper setting value against the catalog, then the filesystem.
-///
-/// Order: exact catalog id → catalog filename → literal file in `models/`.
+/// Resolve by catalog name/id, then catalog filename, then a literal file in `models/`.
 pub fn resolve_whisper(
     value: &str,
     catalog: &[ModelRecord],
@@ -135,8 +92,7 @@ pub fn resolve_whisper(
         });
     }
 
-    // 3. A file that is genuinely there but the catalog has never heard of —
-    //    a hand-placed model. Usable, just not re-downloadable.
+    // 3. A hand-placed file the catalog doesn't know: usable, not re-downloadable.
     let literal = models_dir.join(value);
     if literal.is_file() {
         return Some(WhisperModel {
@@ -145,16 +101,11 @@ pub fn resolve_whisper(
         });
     }
 
-    // Unresolvable. Deliberately not a synthesised path: `amy` and
-    // `ggml-ggml-base.bin.en.bin` were both produced by guessing here.
+    // Deliberately not a synthesised path.
     None
 }
 
-/// Match a piper voice setting value against the catalog, then the filesystem.
-///
-/// Order: catalog filename → catalog name/id → literal file in `models/tts/`.
-/// Filename comes first because it is what both settings UIs write and what
-/// the previous per-call-site lookups keyed on.
+/// Resolve by catalog filename (the UIs' shape), then name/id, then a file in `models/tts/`.
 pub fn resolve_piper(value: &str, catalog: &[ModelRecord], tts_dir: &Path) -> Option<PiperVoice> {
     let value = value.trim();
     if value.is_empty() {
@@ -180,8 +131,7 @@ pub fn resolve_piper(value: &str, catalog: &[ModelRecord], tts_dir: &Path) -> Op
         }
     }
 
-    // Hand-placed voice: accept it only if the weights are actually there, and
-    // only alongside a config, since piper cannot load one without the other.
+    // Hand-placed voice: the weights must exist; the config is assumed at `<onnx>.json`.
     let literal = tts_dir.join(value);
     if literal.is_file() {
         return Some(PiperVoice {
@@ -194,17 +144,7 @@ pub fn resolve_piper(value: &str, catalog: &[ModelRecord], tts_dir: &Path) -> Op
     None
 }
 
-/// A complete voice already sitting in `tts_dir`, if there is exactly one.
-///
-/// Last resort for the install onboarding broke: `voice_tts_voice` says `amy`,
-/// which has never existed, but a real voice was downloaded at some point and
-/// is on disk. Refusing to speak because a *setting* is wrong — while the
-/// weights are right there — is the failure mode this whole module exists to
-/// end.
-///
-/// Deliberately only fires when the choice is unambiguous. With two or more
-/// installed voices, picking one silently would be guessing at the user's
-/// intent; the caller reports the problem instead.
+/// The sole complete voice in `tts_dir`, if unambiguous; fallback for a setting like `amy`.
 pub fn any_installed_piper_voice(tts_dir: &Path) -> Option<PiperVoice> {
     let mut found: Vec<PathBuf> = std::fs::read_dir(tts_dir)
         .ok()?
@@ -258,10 +198,7 @@ fn piper_download_of(
     })
 }
 
-/// Resolve both voice models from settings, fetching the catalog once.
-///
-/// `data_dir` is the GIAP data directory; whisper `.bin` files live flat in
-/// `models/` while piper voices live in `models/tts/`.
+/// Resolve both voice models with one catalog fetch (whisper: `models/`, piper: `models/tts/`).
 pub async fn resolve_voice_models(
     settings: &Settings,
     repo: &dyn ModelRepository,
@@ -279,9 +216,7 @@ pub async fn resolve_voice_models(
         .await
         .unwrap_or_default();
 
-    // Fall back to a lone installed voice when the setting does not resolve,
-    // and say so — an install can be audible and misconfigured at the same
-    // time, and the user should learn about the second without losing the first.
+    // Fall back to a lone installed voice, but warn: the setting is still wrong.
     let piper = resolve_piper(&settings.voice_tts_voice, &piper_catalog, &tts_dir).or_else(|| {
         let fallback = any_installed_piper_voice(&tts_dir)?;
         tracing::warn!(
@@ -306,8 +241,7 @@ pub async fn resolve_voice_models(
 mod tests {
     use super::*;
 
-    /// `ModelRecord` has no `Default`, so build one bare and let each test
-    /// override only the fields resolution actually reads.
+    /// `ModelRecord` has no `Default`; tests override only the fields resolution reads.
     fn bare(id: &str, category: ModelCategory, name: &str) -> ModelRecord {
         ModelRecord {
             id: id.to_string(),
@@ -377,7 +311,6 @@ mod tests {
         assert!(got.download.is_some(), "catalog hit must stay downloadable");
     }
 
-    /// `base.en` used to become `ggml-base.en.en.bin` via the fallback format!.
     #[test]
     fn whisper_dotted_catalog_name_does_not_double_the_suffix() {
         let got = resolve_whisper("base.en", &whisper_catalog(), Path::new("/d/models")).unwrap();
@@ -386,9 +319,6 @@ mod tests {
 
     // ── shape 2: filename ────────────────────────────────────────────────
 
-    /// The regression this module exists for. Both settings UIs write a
-    /// filename; the old code looked up `whisper/ggml-base.bin`, missed, and
-    /// synthesised `ggml-ggml-base.bin.en.bin`.
     #[test]
     fn whisper_resolves_a_filename_without_double_prefixing() {
         let got =
@@ -433,9 +363,6 @@ mod tests {
 
     // ── shape 3: the onboarding values that never existed ────────────────
 
-    /// Onboarding writes `amy`/`kathleen`/`libritts`; none are in the catalog.
-    /// They must resolve to None so the caller reports it, NOT to a plausible
-    /// path that silently fails to load.
     #[test]
     fn onboarding_voices_resolve_to_none_not_a_bogus_path() {
         for bogus in ["amy", "kathleen", "libritts"] {
@@ -478,9 +405,6 @@ mod tests {
 
     // ── the piper gate ───────────────────────────────────────────────────
 
-    /// `active_tts_model.starts_with("piper")` was never true for a real
-    /// catalog name, which is why voice mode was mute. The gate is now
-    /// "did a voice resolve".
     #[test]
     fn tts_is_piper_follows_resolution_not_the_setting_spelling() {
         let resolved = VoiceModels {
@@ -519,8 +443,6 @@ mod tests {
         assert_eq!(got.download, None, "half a voice is not a fetchable voice");
     }
 
-    /// A catalog entry with no config_filename still gets the conventional
-    /// `<onnx>.json` sibling rather than losing the config half entirely.
     #[test]
     fn piper_config_filename_defaults_to_the_onnx_sibling() {
         let mut rec = piper_rec("en-lessac-medium", "en_US-lessac-medium.onnx");
@@ -570,10 +492,6 @@ mod tests {
         }
     }
 
-    /// The install onboarding breaks: the setting says `amy`, which never
-    /// existed, but a real voice is on disk. Refusing to speak because a
-    /// setting is wrong while the weights sit right there is the failure this
-    /// fallback ends.
     #[test]
     fn a_lone_installed_voice_is_used_when_the_setting_is_bogus() {
         let v = Voices::new("lone", &["en_US-lessac-medium"]);
@@ -585,14 +503,12 @@ mod tests {
         assert!(got.is_installed());
     }
 
-    /// Two voices means picking one is guessing at intent. Report instead.
     #[test]
     fn the_fallback_declines_when_the_choice_is_ambiguous() {
         let v = Voices::new("two", &["en_US-lessac-medium", "en_US-ryan-medium"]);
         assert_eq!(any_installed_piper_voice(&v.0), None);
     }
 
-    /// Weights without a config cannot load, so they are not a usable voice.
     #[test]
     fn the_fallback_ignores_a_voice_missing_its_config() {
         let v = Voices::new("halfvoice", &[]);

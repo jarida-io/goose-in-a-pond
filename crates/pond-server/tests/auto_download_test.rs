@@ -1,9 +1,4 @@
-//! Integration tests for `auto_download_assigned_models`.
-//!
-//! Run: `cargo test -p pond-server --test auto_download_test`
-//!
-//! Each test uses a real SQLite database in a temp directory, the shared
-//! `MockModelDownloader` (spy), and configurable `MockModelStorage`.
+//! `auto_download_assigned_models` against real SQLite with mock storage and downloader.
 
 use std::sync::Arc;
 
@@ -71,8 +66,6 @@ fn whisper_record(downloaded: bool) -> ModelRecord {
     }
 }
 
-// ── Test 1: Assigned model not on disk → triggers download, flips DB flag ─────
-
 #[tokio::test]
 async fn assigned_model_not_on_disk_triggers_download() {
     let db_tmp = tempfile::tempdir().unwrap();
@@ -80,12 +73,11 @@ async fn assigned_model_not_on_disk_triggers_download() {
     let db = Database::init(db_tmp.path()).await.unwrap();
     let repo = Arc::new(SqliteModelRepository::new(db.system.clone()));
 
-    // Insert model with downloaded=false, assign to "chat"
     let model = gguf_record("llama-3b", false);
     repo.upsert(&model).await.unwrap();
     repo.set_assignment("chat", "gguf/llama-3b").await.unwrap();
 
-    // FileSystemBacked: no files pre-created → is_present() returns false
+    // Empty dir, so is_present() is false.
     let storage = Arc::new(MockModelStorage::FileSystemBacked {
         base: fs_tmp.path().to_path_buf(),
     });
@@ -107,15 +99,12 @@ async fn assigned_model_not_on_disk_triggers_download() {
         "downloader should have been called with the model URL"
     );
 
-    // DB flag should be flipped
     let updated = repo.get_by_id("gguf/llama-3b").await.unwrap().unwrap();
     assert!(
         updated.downloaded,
         "is_downloaded should be true after successful download"
     );
 }
-
-// ── Test 2: Model already on disk → no download ───────────────────────────────
 
 #[tokio::test]
 async fn model_already_on_disk_skips_download() {
@@ -127,7 +116,7 @@ async fn model_already_on_disk_skips_download() {
     repo.upsert(&model).await.unwrap();
     repo.set_assignment("chat", "gguf/llama-3b").await.unwrap();
 
-    let storage = Arc::new(MockModelStorage::AlwaysPresent); // file exists
+    let storage = Arc::new(MockModelStorage::AlwaysPresent);
     let downloader = Arc::new(MockModelDownloader::new(false));
 
     let triggered = auto_download_assigned_models(
@@ -147,8 +136,6 @@ async fn model_already_on_disk_skips_download() {
         "downloader should NOT have been called"
     );
 }
-
-// ── Test 3: DB drift (flag=false, file present) → flag fixed, no download ─────
 
 #[tokio::test]
 async fn db_drift_fixed_when_file_present_but_flag_false() {
@@ -171,7 +158,6 @@ async fn db_drift_fixed_when_file_present_but_flag_false() {
     )
     .await;
 
-    // DB should now reflect the true state
     let updated = repo.get_by_id("gguf/llama-3b").await.unwrap().unwrap();
     assert!(updated.downloaded, "DB flag should be corrected to true");
     assert!(
@@ -179,8 +165,6 @@ async fn db_drift_fixed_when_file_present_but_flag_false() {
         "no download should occur when file already exists on disk"
     );
 }
-
-// ── Test 4: Ollama model → never triggers a local download ────────────────────
 
 #[tokio::test]
 async fn ollama_model_skips_local_download() {
@@ -235,8 +219,6 @@ async fn ollama_model_skips_local_download() {
     assert!(!downloader.was_downloaded_any().await);
 }
 
-// ── Test 5: Multiple roles, partial downloads ─────────────────────────────────
-
 #[tokio::test]
 async fn multiple_roles_partial_download() {
     let db_tmp = tempfile::tempdir().unwrap();
@@ -244,19 +226,17 @@ async fn multiple_roles_partial_download() {
     let db = Database::init(db_tmp.path()).await.unwrap();
     let repo = Arc::new(SqliteModelRepository::new(db.system.clone()));
 
-    // Chat model: absent from disk (should download)
     let chat_model = gguf_record("chat-model", false);
     repo.upsert(&chat_model).await.unwrap();
     repo.set_assignment("chat", "gguf/chat-model")
         .await
         .unwrap();
 
-    // ASR model: absent from disk (should download)
     let asr_model = whisper_record(false);
     repo.upsert(&asr_model).await.unwrap();
     repo.set_assignment("asr", "whisper/base").await.unwrap();
 
-    // FileSystemBacked with empty dir → is_present() returns false for both
+    // Empty dir, so is_present() is false for both.
     let storage = Arc::new(MockModelStorage::FileSystemBacked {
         base: fs_tmp.path().to_path_buf(),
     });
@@ -285,14 +265,11 @@ async fn multiple_roles_partial_download() {
             .await
     );
 
-    // Both DB flags should be flipped
     let chat = repo.get_by_id("gguf/chat-model").await.unwrap().unwrap();
     let asr = repo.get_by_id("whisper/base").await.unwrap().unwrap();
     assert!(chat.downloaded);
     assert!(asr.downloaded);
 }
-
-// ── Test 6: Model with no URL → skipped gracefully ───────────────────────────
 
 #[tokio::test]
 async fn model_with_no_url_is_skipped_gracefully() {
@@ -301,7 +278,7 @@ async fn model_with_no_url_is_skipped_gracefully() {
     let repo = Arc::new(SqliteModelRepository::new(db.system.clone()));
 
     let mut model = gguf_record("no-url-model", false);
-    model.url = None; // no download URL
+    model.url = None;
     repo.upsert(&model).await.unwrap();
     repo.set_assignment("chat", "gguf/no-url-model")
         .await

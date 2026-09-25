@@ -1,7 +1,4 @@
-//! Server startup helpers that are also reachable from integration tests.
-//!
-//! Exposing these through the crate's library target (lib.rs) lets integration
-//! tests in `tests/` import them without duplicating code.
+//! Startup helpers, exposed via lib.rs so integration tests can call them.
 
 use std::sync::Arc;
 
@@ -10,19 +7,8 @@ use pond_core::models::ports::model_downloader::ModelDownloader;
 use pond_core::models::ports::model_repository::ModelRepository;
 use pond_core::models::ports::model_storage::ModelStorage;
 
-/// Background task: download any role-assigned model whose file is missing from disk.
-///
-/// Called once at server startup (via `tokio::spawn`) after `sync_assignments_to_settings`.
-/// Runs non-blocking so the HTTP server is available immediately while models download.
-///
-/// # Logic
-/// 1. Read all current role → model_id assignments from the repository.
-/// 2. For each assignment fetch the `ModelRecord`.
-/// 3. Skip models with no local file (`Ollama`, `TtsHttp`).
-/// 4. If the file is present on disk but `downloaded` flag is false → fix the DB flag.
-/// 5. If the file is absent → download it; on success flip `downloaded = true`.
-///
-/// Returns the number of downloads triggered (useful for tests and status logs).
+/// Downloads each role-assigned model missing from disk and fixes stale `downloaded` flags;
+/// returns how many downloads it started. Spawned after `sync_assignments_to_settings`.
 pub async fn auto_download_assigned_models(
     repo: Arc<dyn ModelRepository + Send + Sync>,
     storage: Arc<dyn ModelStorage + Send + Sync>,
@@ -64,7 +50,6 @@ pub async fn auto_download_assigned_models(
 
         let on_disk = storage.is_present(&record);
 
-        // DB drift: file on disk but flag is false — correct without re-downloading.
         if on_disk && !record.downloaded {
             if let Err(e) = repo.set_downloaded(&record.id, true).await {
                 tracing::warn!(
@@ -80,17 +65,11 @@ pub async fn auto_download_assigned_models(
             continue;
         }
 
-        // File present and flag correct — nothing to do.
         if on_disk {
             continue;
         }
 
-        // Sibling-quantisation detection: the catalog row points at e.g.
-        // `gemma-4-E4B-it-Q4_K_S.gguf` but the user already downloaded
-        // `gemma-4-E4B-it-Q4_K_M.gguf` (same model, different quant).
-        // Treat that as "good enough" — flip the DB flag and skip the
-        // download so we don't trip the gated-HF 401 over a cosmetic
-        // quantisation difference.
+        // A same-model sibling quant on disk counts: fetching this one may hit a gated-HF 401.
         if let Some(target) = storage.path_for(&record) {
             if let Some(sibling) = find_sibling_quantisation(&target).await {
                 tracing::info!(
@@ -109,7 +88,6 @@ pub async fn auto_download_assigned_models(
             }
         }
 
-        // File absent — need to download.
         let url = match record.url.as_deref() {
             Some(u) if !u.is_empty() => u.to_string(),
             _ => {
@@ -138,7 +116,6 @@ pub async fn auto_download_assigned_models(
             a.role
         );
 
-        // Ensure parent directory exists.
         if let Some(parent) = path.parent() {
             if let Err(e) = tokio::fs::create_dir_all(parent).await {
                 tracing::warn!(
@@ -170,25 +147,11 @@ pub async fn auto_download_assigned_models(
     triggered
 }
 
-/// Look in `target`'s parent directory for a file that's the same model as
-/// `target` but with a different quantisation suffix. Returns `Some(path)`
-/// when exactly one such sibling exists.
-///
-/// "Same model" is detected by stripping the trailing `-Qxxxx` token (e.g.
-/// `-Q4_K_S`, `-Q4_K_M`, `-Q5_0`) from the basename and looking for any
-/// other GGUF file in the directory whose basename starts with that prefix.
-///
-/// Why: HF gates the Gemma-4 GGUF repo behind a license + auth token. A
-/// user who already manually downloaded one quantisation (Q4_K_M) and
-/// pointed the catalog at another (Q4_K_S) would otherwise hit a noisy
-/// `401 Unauthorized` warning on every server boot — even though they have
-/// a perfectly usable copy of the model on disk.
+/// The unique `<prefix>-Q*.gguf` sibling of `target`: same model, different quantisation.
 async fn find_sibling_quantisation(target: &std::path::Path) -> Option<std::path::PathBuf> {
     let parent = target.parent()?;
     let target_stem = target.file_stem()?.to_str()?;
 
-    // Strip a trailing `-Q...` quantisation suffix to get the model prefix.
-    // If no such suffix exists we don't have a useful prefix to match on.
     let prefix = match target_stem.rfind("-Q") {
         Some(idx) => &target_stem[..idx],
         None => return None,
@@ -212,9 +175,7 @@ async fn find_sibling_quantisation(target: &std::path::Path) -> Option<std::path
             Some(n) => n,
             None => continue,
         };
-        // Match: starts with `<prefix>-Q` and ends with `.gguf`. The `-Q`
-        // requirement avoids accidentally matching unrelated files that
-        // happen to share a common name fragment.
+        // Requiring `-Q` keeps unrelated files sharing the prefix from matching.
         if name.starts_with(&format!("{prefix}-Q")) && name.ends_with(".gguf") {
             hits.push(path);
         }
@@ -223,9 +184,7 @@ async fn find_sibling_quantisation(target: &std::path::Path) -> Option<std::path
     if hits.len() == 1 {
         Some(hits.into_iter().next().unwrap())
     } else {
-        // Zero hits: nothing to do; let auto-download try the URL.
-        // Multiple hits: ambiguous — let the user resolve it manually
-        // rather than silently picking the wrong quantisation.
+        // Several hits are ambiguous; don't guess which quant the user wants.
         None
     }
 }

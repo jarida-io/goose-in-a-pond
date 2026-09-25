@@ -31,7 +31,6 @@ impl Fixture {
     }
 }
 
-/// True if `path` is a symlink (does not follow).
 async fn is_symlink(path: &Path) -> bool {
     tokio::fs::symlink_metadata(path)
         .await
@@ -41,7 +40,6 @@ async fn is_symlink(path: &Path) -> bool {
 
 #[tokio::test]
 async fn migration_handles_missing_dir() {
-    // No `models/` dir at all — migration should succeed with an empty report.
     let fx = Fixture::new().await;
     let report = migrate_flat_files_to_blobs(&fx.data_dir).await.expect("ok");
     assert_eq!(report.scanned, 0);
@@ -77,7 +75,6 @@ async fn migration_idempotent() {
 #[tokio::test]
 async fn migration_skips_symlinks() {
     let fx = Fixture::new().await;
-    // Pre-create a real target and a symlink pointing at it under models/gguf.
     let real = fx
         .write_file("models/elsewhere/target.gguf", b"real bytes")
         .await;
@@ -110,14 +107,12 @@ async fn migration_moves_flat_file_to_blob_and_symlinks() {
     assert_eq!(report.scanned, 1);
     assert_eq!(report.migrated, 1);
 
-    // Original path should now be a symlink.
     assert!(
         is_symlink(&flat).await,
         "{} should now be a symlink",
         flat.display()
     );
 
-    // The symlink target should resolve to a path under hf_cache/.../blobs/.
     let target = tokio::fs::read_link(&flat).await.unwrap();
     let target_str = target.to_string_lossy();
     assert!(
@@ -125,7 +120,6 @@ async fn migration_moves_flat_file_to_blob_and_symlinks() {
         "symlink should point into hf_cache/.../blobs/, got: {target_str}"
     );
 
-    // The blob itself should exist and have the original bytes.
     let resolved = tokio::fs::canonicalize(&flat).await.unwrap();
     let bytes = tokio::fs::read(&resolved).await.unwrap();
     assert_eq!(bytes, b"hello world contents");

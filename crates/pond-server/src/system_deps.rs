@@ -1,24 +1,4 @@
-//! System dependency checker and auto-installer.
-//!
-//! Goose In A Pond uses `cpal` for audio I/O (microphone capture and TTS playback).
-//! On Linux, `cpal` links against ALSA — `libasound2-dev` and `pkg-config` must be
-//! present at **build time** and at **runtime**.  On macOS and Windows these are
-//! handled by the OS SDK and are always available.
-//!
-//! This module runs at `setup` time (and as a soft-check on `serve`) to:
-//!   1. Detect missing system libraries.
-//!   2. Print clear instructions.
-//!   3. Attempt automatic installation when a supported package manager is found.
-//!
-//! Supported package managers (Linux):
-//!   - `apt-get`  — Debian / Ubuntu / Raspberry Pi OS / Linux Mint
-//!   - `dnf`      — Fedora / RHEL 8+ / CentOS Stream
-//!   - `pacman`   — Arch Linux / Manjaro
-//!
-//! Supported package managers (macOS):
-//!   - `brew`     — Homebrew
-//!
-//! Windows: no-op — all required DLLs ship with Windows.
+//! Detects and installs native deps (ALSA + pkg-config for `cpal` on Linux); no-op on Windows.
 
 #[cfg(not(windows))]
 use std::process::Stdio;
@@ -52,7 +32,6 @@ enum PackageManager {
 
 #[cfg(not(windows))]
 fn detect_package_manager() -> Option<PackageManager> {
-    // Linux managers first, then macOS
     for (bin, pm) in &[
         ("apt-get", PackageManager::Apt),
         ("dnf", PackageManager::Dnf),
@@ -79,13 +58,11 @@ fn which_bin(name: &str) -> bool {
 
 // ── Dependency checks ─────────────────────────────────────────────────────────
 
-/// True if `pkg-config` tool is present.
 #[cfg(not(windows))]
 fn has_pkg_config() -> bool {
     which_bin("pkg-config")
 }
 
-/// True if the named library is detectable by pkg-config.
 #[cfg(not(windows))]
 fn pkg_config_exists(lib: &str) -> bool {
     std::process::Command::new("pkg-config")
@@ -98,14 +75,12 @@ fn pkg_config_exists(lib: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// True if a C compiler is present (required to link native crates).
 #[cfg(not(windows))]
 fn has_c_compiler() -> bool {
     which_bin("cc") || which_bin("gcc") || which_bin("clang")
 }
 
-/// Collect which system packages appear to be missing.
-/// Returns a list of human-readable labels (not package names — those vary by distro).
+/// Human-readable labels of missing deps (not package names, which vary by distro).
 #[cfg(not(windows))]
 fn missing_deps() -> Vec<&'static str> {
     let mut missing = Vec::new();
@@ -174,15 +149,8 @@ async fn install_packages(pm: PackageManager) -> bool {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Check system dependencies and attempt auto-install if possible.
-///
-/// Returns `true` when all required dependencies are present (or after a
-/// successful auto-install).  Returns `false` when something is missing and
-/// could not be installed — the caller should warn but continue.
-///
-/// No-op on Windows (always returns `true`).
+/// Checks and auto-installs deps; `false` means still missing (warn, don't abort).
 pub async fn ensure_system_deps() -> bool {
-    // Windows: nothing to do.
     #[cfg(windows)]
     return true;
 
@@ -203,7 +171,6 @@ pub async fn ensure_system_deps() -> bool {
                 println!("  🔧 Attempting automatic installation...");
                 let ok = install_packages(pm).await;
                 if ok {
-                    // Re-check after install
                     let still_missing = missing_deps();
                     if still_missing.is_empty() {
                         return true;
@@ -220,8 +187,7 @@ pub async fn ensure_system_deps() -> bool {
     }
 }
 
-/// Soft check: print a warning if deps are missing but do not attempt install.
-/// Used by `serve` at startup (we don't want to require sudo just to run).
+/// Warn about missing deps without installing, so `serve` never needs sudo.
 pub fn warn_if_missing() {
     #[cfg(windows)]
     return;

@@ -55,11 +55,8 @@ fn llamafile_bin() -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
-// ═══════════════════════════════════════════════════════════════════
-//  Llamafile live tests
-// ═══════════════════════════════════════════════════════════════════
+// ── Llamafile live tests ───────────────────────────────────────────
 
-/// Verify llamafile can accept a simple chat message and stream tokens back.
 #[tokio::test]
 #[ignore = "requires GIAP_LLAMAFILE_URL pointing to a running llamafile server"]
 async fn llamafile_live_chat_streams_tokens() {
@@ -95,8 +92,6 @@ async fn llamafile_live_chat_streams_tokens() {
     );
 }
 
-/// Verify that a reasoning-type prompt produces a model_role = "think" response.
-/// (We test via the provider adapter directly — the routing is in ModelRouter.)
 #[tokio::test]
 #[ignore = "requires GIAP_LLAMAFILE_URL pointing to a running llamafile server"]
 async fn llamafile_live_streaming_yields_incremental_tokens() {
@@ -120,7 +115,6 @@ async fn llamafile_live_streaming_yields_incremental_tokens() {
         }
     }
 
-    // A count-to-5 response should generate multiple tokens
     assert!(
         token_count >= 2,
         "expected multiple incremental tokens, got {token_count}"
@@ -128,7 +122,6 @@ async fn llamafile_live_streaming_yields_incremental_tokens() {
     println!("llamafile streamed {token_count} tokens");
 }
 
-/// Verify the done event includes usage when llamafile reports it.
 #[tokio::test]
 #[ignore = "requires GIAP_LLAMAFILE_URL pointing to a running llamafile server"]
 async fn llamafile_live_done_event_includes_usage() {
@@ -152,7 +145,7 @@ async fn llamafile_live_done_event_includes_usage() {
         }
     }
 
-    // Note: not all llamafile builds report usage — log but don't hard-fail.
+    // Not all llamafile builds report usage, so log rather than fail.
     match usage_opt {
         Some(u) => {
             println!(
@@ -165,7 +158,6 @@ async fn llamafile_live_done_event_includes_usage() {
     }
 }
 
-/// Verify multi-turn conversation: second reply references the first message.
 #[tokio::test]
 #[ignore = "requires GIAP_LLAMAFILE_URL pointing to a running llamafile server"]
 async fn llamafile_live_multi_turn_conversation() {
@@ -175,7 +167,6 @@ async fn llamafile_live_multi_turn_conversation() {
     };
     let provider = pond_adapters_llamafile::LlamafileProvider::new(Some(&url));
 
-    // Turn 1: establish context
     let turn1 = provider
         .complete(
             "You are a helpful assistant. Keep replies to one sentence.",
@@ -185,7 +176,6 @@ async fn llamafile_live_multi_turn_conversation() {
         .expect("turn 1 failed");
     println!("turn 1: {}", turn1.content);
 
-    // Turn 2: ask about established context
     let turn2 = provider
         .complete(
             "You are a helpful assistant. Keep replies to one sentence.",
@@ -206,11 +196,8 @@ async fn llamafile_live_multi_turn_conversation() {
     );
 }
 
-// ═══════════════════════════════════════════════════════════════════
-//  Ollama live tests
-// ═══════════════════════════════════════════════════════════════════
+// ── Ollama live tests ──────────────────────────────────────────────
 
-/// Verify Ollama can accept a simple chat message and return a response.
 #[tokio::test]
 #[ignore = "requires GIAP_OLLAMA_URL pointing to a running Ollama server with a pulled model"]
 async fn ollama_live_chat_completes() {
@@ -241,7 +228,6 @@ async fn ollama_live_chat_completes() {
     );
 }
 
-/// Verify Ollama stream_complete yields text + usage stats.
 #[tokio::test]
 #[ignore = "requires GIAP_OLLAMA_URL pointing to a running Ollama server with a pulled model"]
 async fn ollama_live_usage_reported_in_stream() {
@@ -286,7 +272,6 @@ async fn ollama_live_usage_reported_in_stream() {
     );
 }
 
-/// Verify multi-turn conversation with Ollama preserves context.
 #[tokio::test]
 #[ignore = "requires GIAP_OLLAMA_URL pointing to a running Ollama server with a pulled model"]
 async fn ollama_live_multi_turn_conversation() {
@@ -326,22 +311,9 @@ async fn ollama_live_multi_turn_conversation() {
     );
 }
 
-// ═══════════════════════════════════════════════════════════════════
-//  GGUF in-process live tests
-//
-//  Gate: GIAP_GGUF_MODEL_PATH=/absolute/path/to/model.gguf
-//
-//  Known-good model: gemma-4-E2B-it-Q4_K_M.gguf (at $DATA_DIR/models/gguf/)
-//
-//  Run:
-//    GIAP_GGUF_MODEL_PATH=/path/to/model.gguf \
-//      cargo test -p pond-server --test live_provider_test -- --ignored gguf
-// ═══════════════════════════════════════════════════════════════════
+// ── GGUF in-process live tests ─────────────────────────────────────
 
-/// Verify in-process GGUF inference completes a simple request.
-///
-/// `new_with_data_dir` with an absolute `.gguf` path registers the file
-/// directly as `local_path` in Goose's model registry — `data_dir` is unused.
+/// `new_with_data_dir` ignores `data_dir` for an absolute `.gguf` path (Goose registers it).
 #[cfg(feature = "local-inference")]
 #[tokio::test]
 #[ignore = "requires GIAP_GGUF_MODEL_PATH pointing to a .gguf file on disk"]
@@ -374,7 +346,6 @@ async fn gguf_live_chat_completes() {
     );
 }
 
-/// Verify GGUF stream_complete yields at least one text token.
 #[cfg(feature = "local-inference")]
 #[tokio::test]
 #[ignore = "requires GIAP_GGUF_MODEL_PATH pointing to a .gguf file on disk"]
@@ -417,7 +388,6 @@ async fn gguf_live_stream_yields_tokens() {
     );
 }
 
-/// Verify GGUF multi-turn conversation preserves context.
 #[cfg(feature = "local-inference")]
 #[tokio::test]
 #[ignore = "requires GIAP_GGUF_MODEL_PATH pointing to a .gguf file on disk"]
@@ -464,18 +434,8 @@ async fn gguf_live_multi_turn_conversation() {
     );
 }
 
-// ═══════════════════════════════════════════════════════════════════
-//  Llamafile auto-start live tests
-//
-//  Gate: GIAP_LLAMAFILE_BIN=/absolute/path/to/model.llamafile
-//
-//  These tests self-contain the spawn logic so they do NOT depend on
-//  pond-server internals (`llamafile_process` is declared in main.rs).
-//
-//  Run:
-//    GIAP_LLAMAFILE_BIN=/path/to/gemma-2-2b-it.Q4_K_M.llamafile \
-//      cargo test -p pond-server --test live_provider_test -- --ignored llamafile_autostart
-// ═══════════════════════════════════════════════════════════════════
+// ── Llamafile auto-start live tests ────────────────────────────────
+// Spawn logic is duplicated here: `llamafile_process` is in main.rs, out of a test's reach.
 
 /// RAII guard — kills the llamafile child process on drop.
 struct LlamafileGuard(tokio::process::Child);
@@ -486,8 +446,7 @@ impl Drop for LlamafileGuard {
     }
 }
 
-/// Spawn the given llamafile binary on `port` and poll until ready (60 s max).
-/// Uses a port other than 8080 so it does not collide with a running prod instance.
+/// Spawn `bin` on `port` (not 8080, which prod may hold) and wait up to 60 s for it.
 async fn spawn_llamafile_for_test(bin: &std::path::Path, port: u16) -> Option<LlamafileGuard> {
     let child = tokio::process::Command::new(bin)
         .arg("--server")
@@ -517,7 +476,6 @@ async fn spawn_llamafile_for_test(bin: &std::path::Path, port: u16) -> Option<Ll
     None // did not become ready within 60 s
 }
 
-/// Verify that auto-starting a llamafile binary and running a streaming chat works.
 #[tokio::test]
 #[ignore = "requires GIAP_LLAMAFILE_BIN pointing to a .llamafile binary"]
 async fn llamafile_autostart_chat_streams_tokens() {
@@ -553,10 +511,8 @@ async fn llamafile_autostart_chat_streams_tokens() {
         "expected tokens from auto-started llamafile"
     );
     println!("auto-started llamafile replied: {}", tokens.join(""));
-    // _guard drops here → process killed
 }
 
-/// Verify the guard kills the llamafile process on drop (port stops responding).
 #[tokio::test]
 #[ignore = "requires GIAP_LLAMAFILE_BIN pointing to a .llamafile binary"]
 async fn llamafile_autostart_guard_kills_on_drop() {
@@ -572,7 +528,6 @@ async fn llamafile_autostart_guard_kills_on_drop() {
             .await
             .expect("llamafile did not start");
 
-        // Confirm it is up while the guard is alive
         assert!(
             client
                 .get(format!("http://127.0.0.1:{}", test_port))
@@ -597,29 +552,15 @@ async fn llamafile_autostart_guard_kills_on_drop() {
     assert!(!still_up, "expected llamafile to be down after guard drop");
 }
 
-// ═══════════════════════════════════════════════════════════════════
-//  GGUF Diagnostic — Thinking Token Detection
-//
-//  These tests capture raw model output at multiple pipeline stages
-//  to identify exactly which tokens leak through the filters.
-//
-//  Run:
-//    GIAP_GGUF_MODEL_PATH="$HOME/Library/Application Support/goose-in-a-pond/models/gguf/gemma-4-E2B-it-Q4_K_M.gguf" \
-//      cargo test -p pond-server --test live_provider_test -- --ignored gguf_live_diagnose --nocapture
-// ═══════════════════════════════════════════════════════════════════
+// ── GGUF diagnostic: thinking-token detection ──────────────────────
+// Prints only: run with `--ignored gguf_live_diagnose --nocapture` to see the output.
 
 /// Highlight every `<` in a string so tag boundaries are visible in test output.
 fn highlight_tags(s: &str) -> String {
     s.replace('<', "\n  «<").replace('>', ">»")
 }
 
-/// Diagnose what tokens a GGUF model emits and what passes through each filter layer.
-///
-/// Prints:
-///   1. Raw `complete()` output with all `<` highlighted
-///   2. Output after `strip_thinking_tokens()` (non-streaming path)
-///   3. Each streaming `stream_complete()` chunk with markers
-///   4. Output after ThoughtFilter (simulating SSE pipeline)
+/// Prints output raw, after `strip_thinking_tokens()`, per stream chunk, and after ThoughtFilter.
 #[cfg(feature = "local-inference")]
 #[tokio::test]
 #[ignore = "requires GIAP_GGUF_MODEL_PATH pointing to a .gguf file on disk"]
@@ -644,7 +585,6 @@ async fn gguf_live_diagnose_thinking_tokens() {
     .expect("GGUF adapter init failed — check model path");
 
     // ── 1. Non-streaming: RAW complete() (bypass strip_thinking_tokens) ──
-    // Use the inner GooseProviderAdapter to get RAW output before stripping.
     println!("─── 1. RAW complete() — BEFORE strip_thinking_tokens ───");
     let raw_reply = adapter.raw_complete(
         "You are a helpful, thoughtful assistant. Think step by step before answering.",
@@ -678,7 +618,6 @@ async fn gguf_live_diagnose_thinking_tokens() {
         }
     }
 
-    // Also run normal complete() to see what stripping does
     println!("─── 1b. complete() — AFTER strip_thinking_tokens ───");
     let reply = adapter
         .complete(
@@ -692,13 +631,10 @@ async fn gguf_live_diagnose_thinking_tokens() {
     println!("  {}", highlight_tags(&reply.content));
     println!();
 
-    // NOTE: complete() already applies strip_thinking_tokens() internally.
-    // The content we see here is ALREADY STRIPPED. If it still contains tags,
-    // strip_thinking_tokens() is not catching them.
+    // complete() has already stripped; any tags left are ones strip_thinking_tokens() misses.
     let has_tags = reply.content.contains('<') && reply.content.contains('>');
     if has_tags {
         println!("  ⚠️  TAGS STILL PRESENT after strip_thinking_tokens()!");
-        // Print each <...> segment
         for (i, part) in reply.content.split('<').enumerate() {
             if i == 0 {
                 continue;
@@ -724,7 +660,6 @@ async fn gguf_live_diagnose_thinking_tokens() {
     while let Some(result) = stream.next().await {
         match result {
             Ok(StreamToken::Text(t)) => {
-                // Print each chunk with visible markers
                 let display = t.replace('\n', "\\n");
                 let has_angle = t.contains('<');
                 let marker = if has_angle { " ⚠️" } else { "" };

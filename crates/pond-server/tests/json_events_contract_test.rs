@@ -1,26 +1,12 @@
-//! Spawn-binary contract test for `pond-server chat --json-events`.
-//!
-//! This is the process-boundary test for the terminal-voice-in-desktop
-//! (Architecture A) NDJSON contract: it actually spawns the built
-//! `pond-server` binary and asserts that its stdout is a valid NDJSON event
-//! stream matching the contract, with a clean `exit` on stdin EOF.
-//!
-//! pond-server is `cargo check`-only in CI, so this test runs locally
-//! (`SQLX_OFFLINE=true cargo test -p pond-server --test json_events_contract_test`).
-//! It depends on the InstantActivation race fix — in stdin mode the turn must
-//! complete before the loop reaches EOF.
-//!
-//! The child runs `--provider mock`, which routes to the in-process MockAgent
-//! (echo), so the test is fully offline and deterministic — no llamafile,
-//! network, models, or GPU.
+//! Spawns `pond-server chat --json-events --provider mock` (offline echo agent) and checks its
+//! stdout is contract NDJSON ending in `exit` on stdin EOF. Not run in CI (`cargo check` only).
 
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Read NDJSON lines from the child's stdout until the `exit` event, or until
-/// the overall deadline elapses. Returns the parsed JSON objects in order.
+/// Parsed stdout events up to `exit`, or until `deadline` elapses.
 fn read_events_until_exit(stdout: std::process::ChildStdout, deadline: Duration) -> Vec<Value> {
     let start = Instant::now();
     let mut reader = BufReader::new(stdout);
@@ -32,7 +18,7 @@ fn read_events_until_exit(stdout: std::process::ChildStdout, deadline: Duration)
         }
         line.clear();
         match reader.read_line(&mut line) {
-            Ok(0) => break, // stdout EOF — child closed the pipe
+            Ok(0) => break,
             Ok(_) => {
                 let trimmed = line.trim_end_matches(['\n', '\r']);
                 if trimmed.is_empty() {
@@ -56,7 +42,6 @@ fn read_events_until_exit(stdout: std::process::ChildStdout, deadline: Duration)
 
 #[test]
 fn json_events_stdin_turn_emits_contract_ndjson() {
-    // Isolate all DB/model state in a throwaway data dir.
     let tmp = std::env::temp_dir().join(format!(
         "giap-json-events-contract-{}-{}",
         std::process::id(),
@@ -82,9 +67,7 @@ fn json_events_stdin_turn_emits_contract_ndjson() {
         .spawn()
         .expect("failed to spawn pond-server binary");
 
-    // Write exactly one user utterance. Closing stdin afterwards drives the
-    // clean stdin-EOF exit: the first listen() reads this line and completes
-    // the turn; the second listen() sees EOF and the loop exits.
+    // One utterance then EOF: the first listen() runs the turn, the second sees EOF and exits.
     {
         let mut stdin = child.stdin.take().expect("child stdin");
         writeln!(stdin, "what is the capital of france").expect("write to child stdin");
@@ -104,7 +87,6 @@ fn json_events_stdin_turn_emits_contract_ndjson() {
         .map(|e| e.get("event").and_then(Value::as_str).unwrap_or("<none>"))
         .collect();
 
-    // 1) The very first line is `ready`, carrying our session id.
     assert_eq!(
         events
             .first()
@@ -119,8 +101,6 @@ fn json_events_stdin_turn_emits_contract_ndjson() {
         "ready must carry the --session-id"
     );
 
-    // 2) The turn sequence: at least one transcript, the state progression, at
-    //    least one token, and exactly one turn_complete.
     assert!(
         names.contains(&"transcript"),
         "a transcript event must appear; got: {names:?}"
@@ -130,7 +110,6 @@ fn json_events_stdin_turn_emits_contract_ndjson() {
         "at least one token event must appear; got: {names:?}"
     );
 
-    // State progression wait → listen → thinking → speak must occur in order.
     let state_values: Vec<&str> = events
         .iter()
         .filter(|e| e.get("event").and_then(Value::as_str) == Some("state"))
@@ -155,7 +134,6 @@ fn json_events_stdin_turn_emits_contract_ndjson() {
         turn_complete_count, 1,
         "exactly one turn_complete on completion; got: {names:?}"
     );
-    // turn_complete carries the session id.
     let tc = events
         .iter()
         .find(|e| e.get("event").and_then(Value::as_str) == Some("turn_complete"))
@@ -165,7 +143,6 @@ fn json_events_stdin_turn_emits_contract_ndjson() {
         Some("test-contract")
     );
 
-    // 3) Clean exit on stdin EOF is the last line.
     let last = events.last().expect("at least one event");
     assert_eq!(
         last.get("event").and_then(Value::as_str),
