@@ -199,6 +199,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/usage/summary", get(usage_summary))
         .route("/devices", get(list_devices).post(register_device))
         .route("/devices/commission", post(commission_device))
+        .route("/devices/self", get(device_self))
         .route("/matter/status", get(matter_status))
         .route(
             "/devices/{id}",
@@ -4763,6 +4764,71 @@ async fn unregister_device(
         )
     })?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/v1/devices/self` -- the caller's own device, and the household member it is
+/// attributed to if anyone has claimed it.
+///
+/// For display: the name in a greeting, the header of a profile screen. It proves nothing and
+/// grants nothing. `Principal::profile_id` stays `None` -- its own doc explains why populating it
+/// is a separate phase -- and nothing here feeds `ProfileScope`. The attribution is read in this
+/// one handler, not on the auth path.
+///
+/// Scoped to the caller rather than adding `profile_id` to every row of `GET /devices`: a phone
+/// needs only its own, and the list would hand every paired client the whole device-to-member
+/// map, the shared tablet in the kitchen included. The device comes from [`proven_device`], so it
+/// is the one the token was issued to and never anything the client says about itself.
+///
+/// Every [`DeviceRung`] is answered by name. `Unavailable` is the one that matters: a failed read
+/// reported as "no member" would look exactly like an unclaimed phone.
+async fn device_self(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+) -> (StatusCode, Json<Value>) {
+    let device = proven_device(principal.as_ref());
+    let Some(device_id) = device.id().map(str::to_owned) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "this request did not come from a paired device"})),
+        );
+    };
+    let unreadable = |why: String| {
+        tracing::warn!(device = %device_id, error = %why, "devices/self: could not read the device's member");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "could not read which household member this device belongs to"})),
+        )
+    };
+    match device.rung(device_attribution(&state).device_profile(&device_id).await) {
+        DeviceRung::Member(profile_id) => match state.profile_repo.get(&profile_id).await {
+            Ok(Some(member)) => (
+                StatusCode::OK,
+                Json(json!({
+                    "device_id": device_id,
+                    "profile": {"id": member.id, "display_name": member.display_name},
+                })),
+            ),
+            // Removing a member sets their devices' `profile_id` to NULL (migration 0043's ON
+            // DELETE SET NULL), so an attribution naming nobody is a race with that delete. The
+            // device is, as of now, unclaimed.
+            Ok(None) => (
+                StatusCode::OK,
+                Json(json!({"device_id": device_id, "profile": null})),
+            ),
+            Err(e) => unreadable(format!("{e:#}")),
+        },
+        DeviceRung::Unattributed => (
+            StatusCode::OK,
+            Json(json!({"device_id": device_id, "profile": null})),
+        ),
+        // `rung` answers this only for a device with no id, which returned above. Named because
+        // the match is wildcard-free on purpose.
+        DeviceRung::NoDevice => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "this request did not come from a paired device"})),
+        ),
+        DeviceRung::Unavailable(why) => unreadable(why),
+    }
 }
 
 async fn device_heartbeat(

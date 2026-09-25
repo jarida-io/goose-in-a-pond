@@ -11430,6 +11430,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "futures",
+ "hmac 0.12.1",
  "hostname",
  "image 0.25.10",
  "include_dir",

@@ -72,3 +72,6 @@ uuid = { workspace = true }
 # Tests only: seed sensor_readings at chosen timestamps, which `record` cannot
 # do because it always stamps datetime('now').
 sqlx = { workspace = true }
+# Tests only: complete a real handshake the way a phone does, so `/devices/self`
+# is exercised with a token the pond issued rather than a hand-built principal.
+hmac = { workspace = true }
