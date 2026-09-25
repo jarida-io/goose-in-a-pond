@@ -1,7 +1,5 @@
-//! The ingest pipeline (PAI-8 P1): source adapter, RawItem, redact, classify, persist, embed.
-//! [`IngestPipeline::ingest`] refuses any kind that is not [`SourceAvailability::Landed`], which
-//! is what keeps P1 to on-pond sources. Redaction is not a step here: it happens inside the only
-//! constructor, [`ContextItem::from_parts`], so no other caller can bypass it.
+//! The ingest pipeline: raw item, redact, classify, persist, embed.
+//! Redaction lives in [`ContextItem::from_parts`], the only constructor, so nothing bypasses it.
 
 use std::sync::Arc;
 
@@ -18,9 +16,6 @@ use crate::security::domain::redaction::RedactionKind;
 use crate::security::ports::redactor::Redactor;
 
 /// One thing a source produced, before this pond has touched it.
-///
-/// `PartialEq` so a producer's answer can be asserted whole: per-field `assert_eq!`s silently
-/// stop covering a field the moment one is added.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawItem {
     /// The upstream's own id. What makes a re-sync idempotent.
@@ -61,8 +56,7 @@ pub struct IngestPipeline {
 }
 
 impl IngestPipeline {
-    /// The redactor is not optional: an `Option` with a "no redactor wired" fallback would lose
-    /// invariant 3 entirely on any pond whose wiring order changed.
+    /// Not an `Option`: a "no redactor wired" fallback would silently skip redaction.
     pub fn new(repo: Arc<dyn ContextRepository>, redactor: Arc<dyn Redactor>) -> Self {
         Self {
             repo,
@@ -71,9 +65,7 @@ impl IngestPipeline {
         }
     }
 
-    /// Attach an embedding provider. Optional, unlike the redactor: without one
-    /// the corpus is still stored and still searchable by keyword, which is
-    /// exactly what the memory corpus does when no embedder is wired.
+    /// Attach an embedding provider; without one items stay keyword-searchable.
     pub fn with_embedder(
         mut self,
         embedder: Option<Arc<dyn EmbeddingProvider + Send + Sync>>,
@@ -82,18 +74,12 @@ impl IngestPipeline {
         self
     }
 
-    /// The id an item is stored under, derived from the pair that identifies it.
-    ///
-    /// Deterministic so re-ingesting the same upstream item addresses the same row by primary
-    /// key, rather than resting idempotency entirely on `UNIQUE (source_id, external_id)`.
+    /// Deterministic row id, so a re-ingest hits the same primary key, not just the UNIQUE pair.
     pub fn item_id(source_id: &str, external_id: &str) -> String {
         format!("{source_id}:{external_id}")
     }
 
-    /// Ingest one item.
-    ///
-    /// The owner is taken from the SOURCE, never from the caller (invariant 1): a payload
-    /// carrying its own `profile_id` would let whatever pushed it decide whose data this is.
+    /// Ingest one item. The owner comes from `source`, never from the payload.
     pub async fn ingest(
         &self,
         source: &ContextSource,
@@ -138,18 +124,15 @@ impl IngestPipeline {
             );
         }
 
-        // Embedded from the REDACTED text; the raw body is unreachable here. Only text that fits
-        // one chunk is embedded inline, because chunking a long body would put dozens of embeds
-        // on the path an ingest waits for. Longer text is left UNEMBEDDED on purpose: an item
-        // carrying a vector looks indexed and the maintenance sweep would never pick it up.
+        // Only one-chunk text is embedded inline; a long body is left unembedded for the sweep to
+        // chunk, since an item with a vector looks indexed and would never be picked up.
         let text = item.embedding_text();
         let one_chunk = text.len() <= crate::context::chunking::DEFAULT_CHUNK_BYTES;
         let item = match (&self.embedder, one_chunk) {
             (Some(embedder), true) => match embedder.embed(&text).await {
                 Ok(vector) => item.with_embedding(vector),
                 Err(e) => {
-                    // Not fatal. `search_unembedded` + `update_embedding` are the
-                    // backfill, exactly as they are for memory.
+                    // Not fatal: `search_unembedded` + `update_embedding` backfill it.
                     tracing::warn!(error = %e, item_id = %item.id(), "context item stored unembedded");
                     item
                 }
@@ -168,10 +151,7 @@ impl IngestPipeline {
         })
     }
 
-    /// Ingest a batch, reporting per-item outcomes in order.
-    ///
-    /// One bad item does not abandon the rest: stopping at the first malformed message would
-    /// leave the cursor stuck on it forever.
+    /// Ingest a batch, per-item outcomes in order; one bad item must not stick the cursor on it.
     pub async fn ingest_all(
         &self,
         source: &ContextSource,
@@ -187,9 +167,6 @@ impl IngestPipeline {
 }
 
 /// Every source kind this pipeline will accept today.
-///
-/// Exposed so a caller can say what it supports without duplicating the
-/// availability table.
 pub fn ingestable_kinds() -> Vec<SourceKind> {
     SourceKind::ALL
         .into_iter()
@@ -207,9 +184,7 @@ mod tests {
 
     const KEY: &str = "sk-abcdefghijklmnopqrstuvwxyz123456";
 
-    /// One source per kind, with an id that differs per kind: a single shared id
-    /// would make three ingests from three kinds overwrite each other in the
-    /// store, and the sweep below counts rows.
+    /// One source per kind, with a per-kind id so ingests don't overwrite each other.
     fn source(kind: SourceKind) -> ContextSource {
         ContextSource::from_parts(SourceParts {
             id: format!("src-{}", kind.as_str()),
@@ -269,8 +244,7 @@ mod tests {
         assert!(stored[0].body().contains("[redacted:api-key]"));
     }
 
-    /// An embedder that keeps the text it was handed, so a test can assert on
-    /// what was actually embedded rather than on what the code says it embeds.
+    /// An embedder that records the text it was handed.
     struct RecordingEmbedder {
         seen: std::sync::Mutex<Vec<String>>,
     }
@@ -286,10 +260,7 @@ mod tests {
         }
     }
 
-    /// The vector must be computed from the REDACTED text.
-    ///
-    /// `the_stored_row_is_the_redacted_one` checks only the stored body, so it stays green if the
-    /// embed moves above the redaction. This pins the ORDER by recording what the embedder got.
+    /// Pins the order: the stored-body check stays green if the embed moves above redaction.
     #[tokio::test]
     async fn the_vector_is_computed_from_the_redacted_text() {
         let repo = Arc::new(MockContextRepository::new());
@@ -323,7 +294,7 @@ mod tests {
             seen[0]
         );
 
-        // And the vector actually reached the row -- 0b's other half.
+        // And the vector actually reached the row.
         let stored = repo
             .recent_items(&ProfileScope::Household, 10)
             .await
@@ -336,8 +307,6 @@ mod tests {
         );
     }
 
-    /// The connector deadlock, asserted. Every kind that is not on-pond is
-    /// refused, and the refusal names what has to land.
     #[tokio::test]
     async fn a_connector_source_is_refused_until_its_gate_lands() {
         let (repo, pipeline) = wire();
@@ -361,10 +330,6 @@ mod tests {
                         message.contains(kind.as_str()),
                         "the refusal does not say which kind: {message}"
                     );
-                    // See the sibling guard in `producer.rs`: this asserts the
-                    // mechanism that is missing, not the phase that was going to
-                    // supply it, because the phase citation for the connector
-                    // kinds expired while the refusal stayed correct.
                     assert!(
                         message.contains("ingest route") || message.contains("connector"),
                         "the refusal does not name what has to land first: {message}"
@@ -387,8 +352,7 @@ mod tests {
         );
     }
 
-    /// Vacuity control for the sweep above: if `availability()` ever said
-    /// `Landed` for everything, the loop would still pass its per-kind branch.
+    /// Vacuity control for the refusal sweep above.
     #[tokio::test]
     async fn the_refusal_sweep_has_something_to_refuse_and_something_to_accept() {
         assert!(
@@ -401,9 +365,7 @@ mod tests {
         );
     }
 
-    /// The owner comes from the source. Nothing in `RawItem` can say whose it is
-    /// — check the type as well as the value, because a field added there would
-    /// be the way this stops holding.
+    /// Checks the type too: a field added to `RawItem` is how this would stop holding.
     #[tokio::test]
     async fn the_owner_comes_from_the_source_and_the_payload_cannot_say() {
         let (repo, pipeline) = wire();

@@ -1,7 +1,4 @@
-//! E2E: "remember X" in one voice turn, a later turn recalls X, on both paths:
-//! `ChatService::chat_stream_once()` (CLI) and `POST /api/v1/chat/stream` (desktop).
-//! Both use `MemoryAwareAgent`, a deterministic mock, so no real LLM is required.
-//! Run: cargo test -p pond-api --test voice_memory_test
+//! E2E: "remember X" in one voice turn is recalled in a later one, on the CLI and desktop paths.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -40,10 +37,6 @@ impl OnboardingRepository for CompletedOnboarding {
     async fn reset(&self) -> anyhow::Result<()> {
         Ok(())
     }
-    // PAI-2 P7 made this a required trait method rather than a defaulted one:
-    // a default would have to answer from `get_current_step`, and a stub that
-    // answers "not onboarded" makes every onboarding write route public
-    // wherever it is used. The name of this stub is the answer.
     async fn is_complete(&self) -> anyhow::Result<bool> {
         Ok(true)
     }
@@ -83,8 +76,6 @@ impl DeviceRegistry for NoDevices {
 
 // ── Desktop path helpers ──────────────────────────────────────────────────────
 
-/// Build an app wired with `MemoryAwareAgent` and a shared `MockMemoryRepository`.
-/// Returns `(router, memory_repo, tmp)` so the test can inspect memory directly.
 async fn make_memory_app() -> (axum::Router, Arc<MockMemoryRepository>, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let db = pond_infra::db::Database::init(tmp.path()).await.unwrap();
@@ -231,7 +222,6 @@ async fn collect_text_from_sse(body: axum::body::Body) -> String {
 
 // ── Tests: CLI path ───────────────────────────────────────────────────────────
 
-/// CLI path: "remember X" in turn 1 → turn 2 recalls X.
 #[tokio::test]
 async fn cli_voice_path_cross_turn_memory_recall() {
     let memory_repo = Arc::new(MockMemoryRepository::new());
@@ -242,7 +232,6 @@ async fn cli_voice_path_cross_turn_memory_recall() {
 
     let service = ChatService::new(agent, session_id.clone(), storage.clone());
 
-    // Turn 1: ask the agent to remember a fact
     let turn1 = service
         .chat_stream_once("remember my favourite colour is vermillion".to_string())
         .await
@@ -253,7 +242,6 @@ async fn cli_voice_path_cross_turn_memory_recall() {
         turn1
     );
 
-    // Turn 2: a new utterance should recall the stored fact
     let turn2 = service
         .chat_stream_once("what do you remember about me?".to_string())
         .await
@@ -267,13 +255,11 @@ async fn cli_voice_path_cross_turn_memory_recall() {
 
 // ── Tests: Desktop path ───────────────────────────────────────────────────────
 
-/// Desktop path: "remember X" in turn 1 → turn 2 recalls X via SSE endpoint.
 #[tokio::test]
 async fn desktop_voice_path_cross_turn_memory_recall() {
     let (app, _memory_repo, _tmp) = make_memory_app().await;
     let session_id = uuid::Uuid::new_v4().to_string();
 
-    // Turn 1: store a fact
     let resp1 = app
         .clone()
         .oneshot(stream_request_with_session(
@@ -290,7 +276,6 @@ async fn desktop_voice_path_cross_turn_memory_recall() {
         turn1_text
     );
 
-    // Turn 2: recall the fact
     let resp2 = app
         .oneshot(stream_request_with_session(
             "what do you remember about me?",
@@ -308,15 +293,11 @@ async fn desktop_voice_path_cross_turn_memory_recall() {
 }
 
 // ── Live tests (real LLM) ─────────────────────────────────────────────────────
-// Full stack against a real model, to verify it calls the `save_memory` and
-// `recall_memories` MCP tools. Run with GIAP_OLLAMA_URL=http://127.0.0.1:11434
-// GIAP_OLLAMA_MODEL=gemma3:4b cargo test -p pond-api --test voice_memory_test -- --ignored
+// Placeholders for checking that a real model calls `save_memory` and `recall_memories`.
 
 #[tokio::test]
 #[ignore = "requires GIAP_OLLAMA_URL or GIAP_LLAMAFILE_URL"]
 async fn live_cli_voice_path_cross_turn_memory_recall() {
-    // Placeholder: wire a real GooseAdapter + real MCP memory server and assert recall.
-    // Skipped until live test infrastructure is wired to this crate.
     todo!("wire real LLM + MCP memory tools");
 }
 

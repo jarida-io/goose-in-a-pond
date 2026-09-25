@@ -1,7 +1,4 @@
 //! The single microphone owner for GIAP: one process, one input device, many subscribers.
-//! [`ring`] is the shared rolling buffer and format normalisation, [`owner`] the thread actor
-//! with its command protocol and privacy gate, [`cpal_device`] the real device, and [`testing`]
-//! a scripted device so subscribers in other crates stay testable in CI.
 
 pub mod cpal_device;
 pub mod energy;

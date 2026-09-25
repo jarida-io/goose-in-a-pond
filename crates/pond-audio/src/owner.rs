@@ -1,7 +1,5 @@
-//! The single microphone owner: one component opens the device, everything else subscribes,
-//! because a second concurrent `build_input_stream` fails (ALSA without dmix). `cpal::Stream`
-//! is `!Send` on CoreAudio, so the owner is an OS thread with an mpsc channel, not a task.
-//! `mic_enabled = false` closes the device, so the OS microphone indicator goes out.
+//! Sole microphone owner: a second concurrent `build_input_stream` fails (ALSA without dmix).
+//! An OS thread (`cpal::Stream` is `!Send`); mic off closes the device so the OS light goes out.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
@@ -14,11 +12,8 @@ use crate::ring::Ring;
 pub enum MicState {
     /// No device open. The resting state.
     Closed,
-    /// Capturing.
     Open,
-    /// Refused because the user turned the microphone off. Distinct from
-    /// `Failed` so the UI can say "mic off by your setting" rather than
-    /// reporting a fault.
+    /// Refused because the user turned the mic off; not a fault, unlike `Failed`.
     Denied,
     /// The device could not be opened or was lost mid-capture.
     Failed(String),
@@ -37,18 +32,14 @@ pub enum MicCommand {
     Open,
     /// Stop capturing and release the device, unconditionally.
     Close,
-    /// Stop capturing, but only if `generation` is still the current one. Users run on detached
-    /// threads that outlive their cancellation, so an unconditional `Close` from one closes the
-    /// device under whoever opened next: the conversation hears nothing after the wake word,
-    /// and the component responsible is already gone.
+    /// Stop capturing only if `generation` is still current.
+    /// Detached users outlive cancellation; a late `Close` would deafen whoever opened next.
     CloseIfGeneration(u64),
     /// Apply the privacy setting. `false` closes an open device immediately.
     SetEnabled(bool),
-    /// Drop buffered audio without closing — used at turn boundaries so stale
-    /// audio does not leak into the next capture.
+    /// Drop buffered audio without closing, so stale audio doesn't leak into the next turn.
     Clear,
-    /// Stop the thread. The owner is joinable, unlike `AudioKeeper`, because a
-    /// device handoff needs to know the device is actually released.
+    /// Stop the thread. Joinable, so a device handoff can know the device is really released.
     Shutdown,
 }
 
@@ -57,13 +48,10 @@ pub enum MicCommand {
 pub struct MicShared {
     pub ring: Mutex<Ring>,
     state: Mutex<MicState>,
-    /// Bumped on every state change and every ring write, so a subscriber can
-    /// cheaply tell whether anything happened since it last looked.
+    /// Bumped on every state change and ring write, for cheap change detection.
     tick: Mutex<u64>,
     enabled: AtomicBool,
-    /// Which capture "owns" the device right now. Users run on detached threads that outlive
-    /// their cancellation; without a generation, a `Close` from a component that already gave
-    /// up lands on whoever opened next. See `close_session`.
+    /// Which capture owns the device, so a stale `Close` can't land on whoever opened next.
     generation: AtomicU64,
 }
 
@@ -122,8 +110,7 @@ impl MicShared {
             .recent(n)
     }
 
-    /// RMS of the most recent `n` samples — the cheap primitive barge-in and
-    /// the energy gate both need, without copying the whole window.
+    /// RMS of the most recent `n` samples, for barge-in and the energy gate.
     pub fn recent_rms(&self, n: usize) -> f32 {
         pond_voice::dsp::rms(&self.recent(n))
     }
@@ -137,10 +124,7 @@ impl MicShared {
     }
 }
 
-/// A cursor into the shared ring. `recent(n)` suits an energy gate but cannot answer
-/// "everything since I started listening", which is what both capture paths ask for utterances
-/// up to 30 s against a much smaller ring. A reader tracks its own position and counts what it
-/// lost, rather than silently returning a short clip that still sounds plausible.
+/// A cursor into the shared ring; counts samples lost rather than returning a short clip.
 pub struct MicReader {
     shared: Arc<MicShared>,
     cursor: u64,
@@ -148,8 +132,7 @@ pub struct MicReader {
 }
 
 impl MicReader {
-    /// Begin reading from *now*. Audio already buffered is not delivered, so a
-    /// new capture never opens with the tail of the previous turn.
+    /// Begin reading from now, so a new capture never opens with the previous turn's tail.
     pub fn new(shared: Arc<MicShared>) -> Self {
         let cursor = shared.written();
         Self {
@@ -164,8 +147,7 @@ impl MicReader {
         let ring = self.shared.ring.lock().unwrap_or_else(|e| e.into_inner());
         let written = ring.written();
         let pending = written.saturating_sub(self.cursor);
-        // Cannot return more than the ring still holds: if this reader fell
-        // more than a window behind, that audio is genuinely gone.
+        // A reader more than a window behind has lost that audio for good.
         let take = pending.min(ring.len() as u64);
         let out = ring.recent(take as usize);
         drop(ring);
@@ -174,15 +156,13 @@ impl MicReader {
         out
     }
 
-    /// Samples lost to falling behind, or to the ring being cleared underneath.
-    /// Non-zero means the capture has a hole and the caller should say so.
+    /// Samples lost to falling behind or a clear; non-zero means the capture has a hole.
     pub fn dropped(&self) -> u64 {
         self.dropped
     }
 }
 
-/// Handle to the owner. Cloneable; dropping every clone does not stop the
-/// thread — call [`MicHandle::shutdown`] for that.
+/// Cloneable handle to the owner; dropping the last clone ends the thread and frees the device.
 #[derive(Clone)]
 pub struct MicHandle {
     tx: Sender<MicCommand>,
@@ -197,10 +177,7 @@ impl MicHandle {
         let _ = self.tx.send(MicCommand::Close);
     }
 
-    /// Claim the device and get a token identifying this capture.
-    ///
-    /// Pair with [`close_session`](Self::close_session) so a component that is
-    /// cancelled cannot release a device somebody else has since claimed.
+    /// Claim the device; pass the returned token to [`close_session`](Self::close_session).
     pub fn open_session(&self) -> u64 {
         let generation = self.shared.generation.fetch_add(1, Ordering::Relaxed) + 1;
         let _ = self.tx.send(MicCommand::Open);
@@ -208,9 +185,6 @@ impl MicHandle {
     }
 
     /// Release the device only if `generation` still owns it.
-    ///
-    /// A no-op when somebody else has claimed it since, which is exactly the
-    /// case an unconditional `close()` gets wrong.
     pub fn close_session(&self, generation: u64) {
         let _ = self.tx.send(MicCommand::CloseIfGeneration(generation));
     }
@@ -233,10 +207,7 @@ impl MicHandle {
         self.shared.state()
     }
 
-    /// Block until the state satisfies `pred`, or the timeout elapses.
-    ///
-    /// Exists for the device handoff, where "asked it to stop" is not "the device is free"
-    /// (see `wait_for_wake_thread_exit` in `voice_cmd.rs`).
+    /// Block until `pred` holds or the timeout elapses; "asked to stop" is not "device free".
     pub fn wait_for(&self, pred: impl Fn(&MicState) -> bool, timeout: std::time::Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;
         loop {
@@ -251,9 +222,7 @@ impl MicHandle {
     }
 }
 
-/// How the owner obtains audio. Abstracted so the command protocol, the privacy
-/// gate and the state machine are testable without a sound card — the previous
-/// capture code had zero tests for exactly this reason.
+/// How the owner obtains audio; abstracted so the owner is testable without a sound card.
 pub trait CaptureDevice: Send {
     /// Begin delivering normalised 16 kHz mono f32 into `shared`.
     fn start(&mut self, shared: Arc<MicShared>) -> Result<(), String>;
@@ -290,9 +259,7 @@ pub fn run(mut device: Box<dyn CaptureDevice>, shared: Arc<MicShared>, rx: Recei
     while let Ok(cmd) = rx.recv() {
         match cmd {
             MicCommand::Open => {
-                // Idempotent: `CpalCapture::start` opens with a `self.stop()`, so re-applying
-                // for a second subscriber would drop and rebuild a stream the first is
-                // mid-read of.
+                // Idempotent: `CpalCapture::start` stops first, cutting off a reader mid-read.
                 if want_open && shared.state().is_open() {
                     continue;
                 }
@@ -349,10 +316,7 @@ pub fn run(mut device: Box<dyn CaptureDevice>, shared: Arc<MicShared>, rx: Recei
     shared.set_state(MicState::Closed);
 }
 
-/// Spawn an owner on its own thread.
-///
-/// `window_ms` sizes the shared ring — it must cover the longest window any
-/// subscriber needs (the wake-word detector's is the largest).
+/// Spawn an owner thread; `window_ms` must cover the longest window any subscriber needs.
 pub fn spawn(
     device: Box<dyn CaptureDevice>,
     sample_rate: u32,
@@ -465,8 +429,7 @@ mod tests {
         assert!(!h.open.load(Ordering::SeqCst), "device must be released");
     }
 
-    /// The privacy contract: refuse to OPEN, not capture-and-discard. A device
-    /// that is open leaves the OS indicator lit.
+    /// Refuse to open, not capture-and-discard: an open device keeps the OS indicator lit.
     #[test]
     fn a_disabled_mic_is_never_opened() {
         let h = Harness::new(false, None);
@@ -480,8 +443,6 @@ mod tests {
         assert!(!h.open.load(Ordering::SeqCst));
     }
 
-    /// Revoking permission must take effect now, not at the next open — a
-    /// privacy control you have to restart to apply is not one.
     #[test]
     fn revoking_permission_closes_an_already_open_device() {
         let h = Harness::new(true, None);
@@ -505,7 +466,6 @@ mod tests {
         assert_eq!(h.settle(|s| s.is_open()), MicState::Open);
     }
 
-    /// Re-granting while nothing wanted capture must NOT open the device.
     #[test]
     fn re_granting_permission_does_not_open_a_device_nobody_asked_for() {
         let h = Harness::new(false, None);
@@ -579,7 +539,6 @@ mod tests {
         assert_eq!(handle.state(), MicState::Closed);
     }
 
-    /// Dropping every handle must not strand the device open.
     #[test]
     fn a_dropped_channel_releases_the_device() {
         let open = Arc::new(AtomicBool::new(false));
@@ -603,8 +562,7 @@ mod tests {
         h.settle(|s| s.is_open());
         h.handle.open();
         h.settle(|s| s.is_open());
-        // Each Open re-applies; the invariant that matters is that a Close
-        // still fully releases rather than leaving a second stream live.
+        // A Close must still fully release, leaving no second stream live.
         h.handle.close();
         h.settle(|s| *s == MicState::Closed);
         assert!(!h.open.load(Ordering::SeqCst));
@@ -623,24 +581,17 @@ mod tests {
         assert!(t0.elapsed() < std::time::Duration::from_secs(1));
     }
 
-    /// A capture that has lost the device cannot release it. Detached users outlive their own
-    /// cancellation, so an unconditional `close()` from one shuts the device under whoever
-    /// opened next: a conversation that hears nothing after the wake word.
     #[test]
     fn a_stale_owner_cannot_close_a_device_somebody_else_claimed() {
         let h = Harness::new(true, None);
 
-        // The detector claims the device...
         let detector = h.handle.open_session();
         h.settle(|s| matches!(s, MicState::Open));
 
-        // ...is cancelled, and the follow-up capture claims it before the
-        // detector's thread gets around to releasing.
         let capture = h.handle.open_session();
         assert_ne!(detector, capture, "each claim needs its own generation");
         h.settle(|s| matches!(s, MicState::Open));
 
-        // The detector's late release must do nothing.
         h.handle.close_session(detector);
         std::thread::sleep(std::time::Duration::from_millis(150));
         assert!(
@@ -648,8 +599,7 @@ mod tests {
             "a cancelled capture closed the device out from under its successor"
         );
 
-        // ...while the current owner's release still works, so the guard is not
-        // simply ignoring every close.
+        // Vacuity control: the current owner's release still works.
         h.handle.close_session(capture);
         h.settle(|s| matches!(s, MicState::Closed));
     }

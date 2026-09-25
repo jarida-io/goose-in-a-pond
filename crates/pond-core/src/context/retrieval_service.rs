@@ -1,7 +1,5 @@
-//! Unified personal-context retrieval (phase C): one answer over what a member said (`memory`),
-//! what the pond observed (`context`) and what was compressed to a `summary`. Scope and liveness
-//! SQL belongs to [`VectorIndex`]; policy is here: queries embed as queries, ties go to the more
-//! precise corpus, and each hit carries its corpus because a summary is lossy, not a said fact.
+//! One retrieval over `memory`, `context` and `summary`, scoped in [`VectorIndex`]'s SQL.
+//! Each hit carries its corpus: a summary is lossy, not a said fact.
 
 use std::sync::Arc;
 
@@ -11,10 +9,7 @@ use crate::context::vector_index::{Corpus, ResolvedHit, VectorIndex};
 use crate::models::ports::embedding::EmbeddingProvider;
 use crate::user_data::domain::profile::ProfileScope;
 
-/// How a hit should be introduced to the model, and to the member.
-///
-/// Deliberately prose rather than the enum's name: this string is written for
-/// whoever reads the answer, not for a log.
+/// How a hit is introduced to the model and member: prose, not the enum's name.
 pub fn provenance(corpus: Corpus) -> &'static str {
     match corpus {
         Corpus::Memory => "you told me",
@@ -50,9 +45,8 @@ impl PersonalContextRetrieval {
         Self { index, embedder }
     }
 
-    /// Recall up to `limit` things relevant to `query`, within `scope`. Returns an empty vec rather
-    /// than an error: a failed recall must never fail the turn that asked, so a retrieval error is
-    /// logged and answered as "nothing found" and the caller falls back to keyword search.
+    /// Recall up to `limit` things relevant to `query`, within `scope`.
+    /// Errors log and return empty, never failing the turn; the caller falls back to keywords.
     pub async fn recall(
         &self,
         query: &str,
@@ -77,17 +71,11 @@ impl PersonalContextRetrieval {
         scope: &ProfileScope,
         limit: usize,
     ) -> Result<Vec<Recollection>> {
-        // `embed_query`, not `embed`: an asymmetric retriever wants the question
-        // in the query manifold, and using the document form costs ranking
-        // quality on exactly the short-question-against-long-passage case this
-        // is for.
+        // `embed_query`, not `embed`: asymmetric retrievers rank worse with the document form.
         let vector = self.embedder.embed_query(query).await?;
         let model_id = self.embedder.model_id();
 
-        // Scope and liveness are applied in the SQL, never to the results
-        // afterwards: post-filtering lets rows the caller may not see occupy
-        // top-K slots, so one member's private rows would quietly degrade
-        // another's retrieval instead of simply being absent.
+        // Scope is applied in SQL, not after: post-filtering lets invisible rows take top-K slots.
         let hits: Vec<ResolvedHit> = self
             .index
             .search_resolved(&vector, &model_id, scope, limit)
@@ -112,10 +100,7 @@ mod tests {
     use crate::context::vector_index::{CorpusHealth, IndexHealth, VectorEntry, VectorHit};
     use async_trait::async_trait;
 
-    /// The tie-break IS the declaration order of `Corpus`, so this pins the
-    /// policy at the place it actually lives. Reordering those variants changes
-    /// what the assistant prefers to tell a member; that must not happen by
-    /// accident.
+    /// The tie-break is `Corpus`'s declaration order; reordering variants changes it.
     #[test]
     fn memory_wins_ties_over_context_and_summary() {
         assert!(Corpus::Memory < Corpus::Context);
@@ -134,7 +119,6 @@ mod tests {
         for c in Corpus::ALL {
             let p = provenance(c);
             assert!(!p.is_empty());
-            // Not the enum name: this is written for a reader of the answer.
             assert_ne!(p, c.as_str());
         }
         let r = Recollection {
@@ -178,8 +162,7 @@ mod tests {
             scope: &ProfileScope,
             _l: usize,
         ) -> Result<Vec<ResolvedHit>> {
-            // A real index refuses a guest in SQL; the stub mirrors that so the
-            // service test is about the service, not about the stub.
+            // Mirrors the real index refusing a guest in SQL.
             if scope.excludes_everything() {
                 return Ok(vec![]);
             }
@@ -203,10 +186,7 @@ mod tests {
             Ok(0)
         }
         async fn health(&self, _m: &str) -> Result<IndexHealth> {
-            // An empty index, but still one row per corpus: the port requires
-            // every corpus to be represented so that a dead one is visible, and
-            // a stub that quietly skips a contract is how the contract stops
-            // being true everywhere else.
+            // Empty, but one row per corpus: the port requires every corpus, so a dead one shows.
             Ok(IndexHealth {
                 per_corpus: Corpus::ALL
                     .into_iter()
@@ -274,9 +254,7 @@ mod tests {
             .is_empty());
     }
 
-    /// A row whose live text is empty is not an answer. It can happen: the index
-    /// entry is written from one query and the text read in another, and a
-    /// summary can be blanked in between.
+    /// The index row and live text are separate reads; a summary can be blanked in between.
     #[tokio::test]
     async fn a_hit_with_no_live_text_is_dropped() {
         let svc = service(vec![

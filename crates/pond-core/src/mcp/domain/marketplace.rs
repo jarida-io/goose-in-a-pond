@@ -9,7 +9,6 @@ pub struct MarketplaceExtension {
     pub id: String,
     /// Display name.
     pub name: String,
-    /// Short description of what the extension does.
     pub description: String,
     /// Transport kind: `"stdio"` or `"streamable_http"`.
     pub kind: String,
@@ -24,12 +23,9 @@ pub struct MarketplaceExtension {
     pub uri: Option<String>,
     /// Category for filtering (e.g. "productivity", "development", "data").
     pub category: String,
-    /// Author/publisher name.
     pub author: String,
-    /// List of tool names this extension provides.
     #[serde(default)]
     pub tools: Vec<String>,
-    /// Whether to feature this extension prominently.
     #[serde(default)]
     pub featured: bool,
     /// Secrets (API keys, tokens) this extension needs to function.

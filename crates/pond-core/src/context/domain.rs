@@ -1,7 +1,5 @@
-//! Personal context streaming — the domain (PAI-8 P1). Invariants are section 5 of
-//! `docs/architecture/pai/08-personal-context-streaming.md`, held by the types: `profile_id` is a
-//! non-blank `String`, sensitivity is derived rather than supplied, and [`ContextItem::from_parts`]
-//! is the only constructor and takes a [`Redactor`], so nothing reaches storage un-redacted.
+//! Personal context streaming: the domain.
+//! [`ContextItem::from_parts`] is the only constructor and redacts via a [`Redactor`].
 
 use chrono::{DateTime, Utc};
 use thiserror::Error;
@@ -10,10 +8,8 @@ use crate::security::domain::event::{EventCategory, PrivacySensitivity};
 use crate::security::domain::redaction::{RedactionKind, RedactionLevel};
 use crate::security::ports::redactor::Redactor;
 
-/// How much the ingest chokepoint removes. `Secrets`, not `Full`: a context item is read back
-/// into the model's context, and PAI-2 section 3.3's non-goal — the model is not blindfolded —
-/// dies if names go too. Must stay equal to `RedactingMemoryRepository::LEVEL`; redacting at one
-/// chokepoint and not the other spends the cost and buys nothing.
+/// `Secrets`, not `Full`: items are read back to the model, which must still see names.
+/// Must equal `RedactingMemoryRepository::LEVEL`, or one chokepoint's redaction buys nothing.
 pub const INGEST_REDACTION_LEVEL: RedactionLevel = RedactionLevel::Secrets;
 
 // ── Source kind ─────────────────────────────────────────────────────────────
@@ -39,22 +35,15 @@ pub enum SourceKind {
     Chat,
 }
 
-/// Whether P1's pipeline will accept items from a kind, and if not, what has to land first.
-///
-/// [`IngestPipeline`](crate::context::ingest::IngestPipeline) refuses every kind that is not
-/// [`Landed`](SourceAvailability::Landed), which is how PAI-8 section 3's phasing is enforced.
+/// Whether ingest accepts items from a kind, and if not, what has to land first.
+/// [`IngestPipeline`](crate::context::ingest::IngestPipeline) refuses every non-`Landed` kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceAvailability {
-    /// Ingest works today. Data this pond already holds; nothing leaves.
+    /// Ingest works today.
     Landed,
-    /// Waiting on `POST /api/v1/context/ingest` (PAI-8 P3). The pond never
-    /// reaches out for these — a paired client pushes them — so no egress gate
-    /// is involved, only an authenticated route that does not exist yet.
+    /// Waiting on `POST /api/v1/context/ingest`; a paired client pushes these, so no egress gate.
     AwaitingIngestRoute,
-    /// Waiting on a connector that signs in to the account and only READS. Not a security gate:
-    /// chokepoint 3 is discharged and PAI-8 §0 puts write-back out of scope. Kept because
-    /// accepting a kind nothing can produce would let `upsert_source` mint a source that stays
-    /// empty forever, and it lifts one kind at a time as each protocol's connector lands.
+    /// Waiting on a read-only connector; otherwise `upsert_source` mints never-filled sources.
     AwaitingReadConnector,
 }
 
@@ -76,8 +65,7 @@ impl SourceAvailability {
 }
 
 impl SourceKind {
-    /// Every variant. Adding one breaks this array's length and forces the
-    /// availability, sensitivity and retention mappings below to be updated.
+    /// Every variant. Update with the enum: `parse` only recognises kinds listed here.
     pub const ALL: [SourceKind; 8] = [
         SourceKind::Sensor,
         SourceKind::Camera,
@@ -89,8 +77,7 @@ impl SourceKind {
         SourceKind::Chat,
     ];
 
-    /// Stable name. This string is written to SQLite and read back, so it is
-    /// part of the schema, not a display detail.
+    /// Stable name, written to SQLite: part of the schema, not a display detail.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Sensor => "sensor",
@@ -104,31 +91,24 @@ impl SourceKind {
         }
     }
 
-    /// Parse a stored kind. `None` for anything unrecognised — the storage
-    /// adapter turns that into "no item", which narrows.
+    /// Parse a stored kind; the storage adapter reads `None` as "no item", which narrows.
     pub fn parse(raw: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|k| k.as_str() == raw)
     }
 
-    /// What must land before P1's pipeline will accept this kind.
+    /// What must land before ingest accepts this kind.
     pub fn availability(&self) -> SourceAvailability {
         match self {
             // Data the pond already holds. Ingesting it adds no egress.
             Self::Sensor | Self::Camera | Self::Voice => SourceAvailability::Landed,
             Self::Mobile => SourceAvailability::AwaitingIngestRoute,
-            // The CalDAV adapter reads it, the connect route stores its
-            // credentials and `calendar_sync` pulls it on a schedule. All three
-            // had to exist before this line could move: a `Landed` kind with no
-            // sync is a source that looks connected and stays empty.
+            // Adapter, credentials and sync all exist; without them a `Landed` source stays empty.
             Self::Calendar | Self::Mail => SourceAvailability::Landed,
             Self::Files | Self::Chat => SourceAvailability::AwaitingReadConnector,
         }
     }
 
-    /// Whether connecting this kind means signing in to an account.
-    ///
-    /// Stated on the kind rather than checked at the route, because the connect surface and the
-    /// sync sweep both have to agree and a second copy is how they stop agreeing.
+    /// Whether connecting this kind means signing in; the connect route and sync sweep share it.
     pub fn needs_credentials(&self) -> bool {
         match self {
             Self::Sensor | Self::Camera | Self::Voice | Self::Mobile => false,
@@ -136,24 +116,17 @@ impl SourceKind {
         }
     }
 
-    /// The least sensitive an item from this kind may be classified.
-    ///
-    /// A floor, not a value: the redactor's findings can only push it up. Nothing here is
-    /// `Public`, which on the events log means safe to surface anywhere.
+    /// Sensitivity floor for this kind's items; redactor findings only raise it. Never `Public`.
     pub fn min_sensitivity(&self) -> PrivacySensitivity {
         match self {
-            // A reading is a measurement until it is about a person; "the hall
-            // sensor saw motion at 03:12" is about a person.
+            // "The hall sensor saw motion at 03:12" is about a person.
             Self::Sensor => PrivacySensitivity::Internal,
             Self::Camera | Self::Voice | Self::Mobile => PrivacySensitivity::Sensitive,
             Self::Mail | Self::Calendar | Self::Files | Self::Chat => PrivacySensitivity::Sensitive,
         }
     }
 
-    /// Which [`EventCategory`]'s retention setting governs items from this kind.
-    ///
-    /// Reusing the events-log categories is deliberate: `retention_events_by_category` is the map
-    /// the user already edits, so no second retention vocabulary appears.
+    /// Which [`EventCategory`]'s retention setting (the user's existing map) governs this kind.
     pub fn retention_category(&self) -> EventCategory {
         match self {
             Self::Sensor => EventCategory::Sensor,
@@ -211,9 +184,7 @@ pub enum SourceStatus {
     Connected,
     NeedsReauth,
     Error,
-    /// Deliberately distinct from `Error`. PAI-8 invariant 5: in
-    /// `network_mode = offline` a connector reports `Paused`, because an
-    /// operator who turned the network off does not want an error badge for it.
+    /// Reported in `network_mode = offline`; not `Error`, since that was the operator's choice.
     Paused,
 }
 
@@ -234,9 +205,7 @@ impl SourceStatus {
         }
     }
 
-    /// Parse a stored status. Anything unrecognised reads as [`Error`](Self::Error)
-    /// rather than [`Connected`](Self::Connected): an unreadable status must not
-    /// be the one that says "carry on syncing".
+    /// Parse a stored status; anything unrecognised is [`Error`](Self::Error), so syncing stops.
     pub fn parse(raw: &str) -> Self {
         Self::ALL
             .into_iter()
@@ -272,9 +241,7 @@ pub enum ContextError {
 // ── ContextSource ───────────────────────────────────────────────────────────
 
 /// An account, sensor or device that produces context for one household member.
-///
-/// No token: PAI-8 invariant 4 puts connector credentials in the encrypted secret store, so this
-/// type carries at most a `secret_ref` and the table has no column a token could be written to.
+/// No token: credentials live in the encrypted secret store; this holds at most a `secret_ref`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextSource {
     id: String,
@@ -289,16 +256,12 @@ pub struct ContextSource {
     created_at: DateTime<Utc>,
 }
 
-/// Where a source's sign-in details live in the secret store.
-///
-/// Derived from the source id, not stored beside it, so the two cannot drift. The connect route
-/// and the sync sweep must both call this; a second copy of the format string strands a secret.
+/// Secret-store key for a source's sign-in; the connect route and sync sweep must both use it.
 pub fn secret_key_for(source_id: &str) -> String {
     format!("caldav:{source_id}")
 }
 
-/// The parts a [`ContextSource`] is built from, on both the connect path and the
-/// storage read path.
+/// What a [`ContextSource`] is built from, on the connect and storage-read paths.
 #[derive(Debug, Clone)]
 pub struct SourceParts {
     pub id: String,
@@ -370,10 +333,7 @@ impl ContextSource {
         self.created_at
     }
 
-    /// Advance the incremental sync position. The only mutation a source has,
-    /// and it deliberately cannot touch `kind` or `profile_id`: migration 0044
-    /// refuses to change either, because a source whose owner moved would
-    /// misattribute every item already stored under it.
+    /// Advance the sync position only; changing the owner would misattribute stored items.
     pub fn advance(&mut self, cursor: Option<String>, at: DateTime<Utc>, status: SourceStatus) {
         self.cursor = cursor;
         self.last_sync = Some(at);
@@ -383,10 +343,7 @@ impl ContextSource {
 
 // ── ContextItem ─────────────────────────────────────────────────────────────
 
-/// The raw parts of an item, before redaction.
-///
-/// `title`, `body` and `participants` all go through the redactor: a bridge puts whatever the
-/// upstream account called the sender into `participants`, which is where credentials land too.
+/// An item's raw parts; `participants` is redacted too, as bridges put anything there.
 #[derive(Debug, Clone)]
 pub struct ItemParts {
     pub id: String,
@@ -400,9 +357,7 @@ pub struct ItemParts {
     pub title: String,
     pub body: String,
     pub participants: Vec<String>,
-    /// What the row already claimed, when this is a storage read. `None` on the
-    /// ingest path. See [`ContextItem::from_parts`] for why it can only make the
-    /// classification stricter.
+    /// A stored row's classification on read, `None` on ingest; it can only tighten.
     pub stored_sensitivity: Option<PrivacySensitivity>,
     pub embedding: Option<Vec<f32>>,
 }
@@ -427,10 +382,8 @@ pub struct ContextItem {
 }
 
 impl ContextItem {
-    /// The only constructor, and it takes the redactor: every `ContextItem` has been through
-    /// [`INGEST_REDACTION_LEVEL`]. Sensitivity is derived, never a parameter — the strictest of
-    /// the source kind's floor, `Sensitive` if the redactor found anything, and any
-    /// `stored_sensitivity`. `Secret` is unreachable: this level replaces credentials.
+    /// The only constructor; redacts at [`INGEST_REDACTION_LEVEL`].
+    /// Sensitivity is derived: the strictest of kind floor, findings and `stored_sensitivity`.
     pub fn from_parts(
         redactor: &dyn Redactor,
         parts: ItemParts,
@@ -516,8 +469,7 @@ impl ContextItem {
     pub fn ingested_at(&self) -> DateTime<Utc> {
         self.ingested_at
     }
-    /// The redacted title. There is no accessor for the raw one because the raw
-    /// one was never stored.
+    /// The redacted title; the raw one is never stored.
     pub fn title(&self) -> &str {
         &self.title
     }
@@ -531,8 +483,7 @@ impl ContextItem {
     pub fn sensitivity(&self) -> PrivacySensitivity {
         self.sensitivity
     }
-    /// What the redactor found, whether or not it replaced it. For logging and
-    /// for the audit trail; never the matched text.
+    /// What the redactor found (kinds only, never the matched text), replaced or not.
     pub fn findings(&self) -> &[RedactionKind] {
         &self.findings
     }
@@ -540,10 +491,7 @@ impl ContextItem {
         self.embedding.as_deref()
     }
 
-    /// The text an embedding is computed over.
-    ///
-    /// Built from the REDACTED fields: a vector computed over a secret is a durable derivative of
-    /// it, and this type never holds the raw text (compare PAI-2 P3, which had to drop vectors).
+    /// Redacted text to embed; a vector over a secret would be a durable derivative of it.
     pub fn embedding_text(&self) -> String {
         if self.title.trim().is_empty() {
             self.body.clone()
@@ -622,8 +570,6 @@ mod tests {
         assert!(item.findings().contains(&RedactionKind::ApiKey));
     }
 
-    /// The level is pinned here, not passed in: a caller that could choose
-    /// `Detect` would get an unredacted item out of the same constructor.
     #[test]
     fn the_level_is_secrets_and_the_caller_cannot_choose_it() {
         let r = redactor();
@@ -703,9 +649,6 @@ mod tests {
         );
     }
 
-    /// A row whose `sensitivity` column was lowered out of band must not come
-    /// back at the lowered level. Sensitivity is a restriction; the stricter of
-    /// the two wins, in both directions.
     #[test]
     fn a_stored_classification_can_only_make_it_stricter() {
         let mut p = parts("t", "b");
@@ -725,9 +668,7 @@ mod tests {
         assert_eq!(raised.sensitivity(), PrivacySensitivity::Secret);
     }
 
-    /// Reading a stored row re-runs redaction. `Redactor::redact` is
-    /// contractually idempotent, so this costs nothing for a row written
-    /// properly and repairs one that arrived some other way.
+    /// Relies on `Redactor::redact` being idempotent, so re-redacting a proper row is free.
     #[test]
     fn the_read_path_repairs_a_row_written_out_of_band() {
         let smuggled = ItemParts {
@@ -753,17 +694,13 @@ mod tests {
         assert_eq!(ItemKind::parse("email"), None);
     }
 
-    /// An unreadable status must not read as "carry on syncing".
     #[test]
     fn an_unknown_status_is_an_error_not_connected() {
         assert_eq!(SourceStatus::parse("whatever"), SourceStatus::Error);
         assert_ne!(SourceStatus::parse("whatever"), SourceStatus::Connected);
     }
 
-    /// Exactly the three on-pond kinds are landed. The count is pinned because
-    /// the failure direction is silent: a kind quietly promoted to `Landed`
-    /// would let the pipeline accept a connector's data before the gate that is
-    /// supposed to govern it exists.
+    /// Pinned because a wrong promotion to `Landed` is silent.
     #[test]
     fn only_kinds_with_a_working_path_are_landed() {
         let landed: Vec<&str> = SourceKind::ALL
@@ -771,9 +708,6 @@ mod tests {
             .filter(|k| k.availability() == SourceAvailability::Landed)
             .map(|k| k.as_str())
             .collect();
-        // A kind may only be `Landed` when something can actually produce items for it. Adding a
-        // name here before the adapter, the credential path and the sync all exist mints sources
-        // that look connected and stay empty.
         assert_eq!(
             landed,
             vec!["sensor", "camera", "voice", "mail", "calendar"],
@@ -790,9 +724,6 @@ mod tests {
         }
     }
 
-    /// Nothing personal is classified `Public`, and `Public` really is a value
-    /// the ordering admits — so this is a claim about the mapping, not about the
-    /// enum having only one option.
     #[test]
     fn no_source_kind_floors_at_public() {
         assert!(PrivacySensitivity::Public < PrivacySensitivity::Internal);

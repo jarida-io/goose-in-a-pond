@@ -1,7 +1,5 @@
-//! Keeping the personal-context index honest (phase D). One sweep repairs every way derived data
-//! drifts: never-indexed rows, vectors from a different `embedding_provider`, rewritten summaries,
-//! and orphans left by a cross-file delete that WAL cannot make atomic. A `LEFT JOIN` against the
-//! live stores makes it restartable; batches pause and cancel so a member's turn beats the embed.
+//! One restartable sweep repairs every way the personal-context index drifts from its stores.
+//! Orphans come from cross-file deletes WAL can't make atomic; batches cancel so a turn wins.
 
 use std::sync::Arc;
 
@@ -12,8 +10,7 @@ use crate::context::vector_index::{Corpus, VectorIndex};
 use crate::models::ports::embedding::EmbeddingProvider;
 use crate::user_data::ports::session_storage::SessionStorage;
 
-/// What one maintenance pass did. Reported so "the index is quietly incomplete"
-/// is a number somebody can read rather than something inferred from bad answers.
+/// What one maintenance pass did.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MaintenanceReport {
     /// Existing vectors taught to the index without re-embedding.
@@ -30,10 +27,8 @@ pub struct MaintenanceReport {
     pub mismatched: u64,
 }
 
-/// How much of the backlog one pass is allowed to work through. A pass never fails: every step is
-/// best-effort and logged, because aborting the process is worse than leaving work for next time.
-/// A scheduled pass takes one bite, so a household's next turn never queues behind the whole
-/// mailbox; a pass somebody ASKED for runs to completion, or the reindex button reports a lie.
+/// How much backlog one pass may work through.
+/// Scheduled passes take one bite so turns don't queue; requested ones finish, or Reindex lies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexBudget {
     /// One batch, then stop.
@@ -46,18 +41,14 @@ pub enum IndexBudget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SweepTick {
     /// Whether this tick may run on a pond that has served no turn since boot.
-    ///
-    /// This job's own exemption, ORed by the lane with the household-wide activity flag, and
-    /// deliberately not that flag: relaxing it would qualify every other job on the lane.
+    /// This job's own exemption; relaxing the lane-wide activity flag would qualify every job.
     pub exempt_from_activity_gate: bool,
     /// How much of the backlog this tick may work through.
     pub budget: IndexBudget,
 }
 
 /// Decide whether a sweep tick may run, and how much it may do.
-///
-/// The lane gates background jobs on activity since boot, which deadlocks the index: mail arrives
-/// from a connector, not a conversation. So the first pass after boot is exempt and exhaustive.
+/// The first pass after boot is exempt and exhaustive, since connector mail isn't activity.
 pub fn plan_sweep(asked: bool, indexed_since_boot: bool) -> SweepTick {
     let first_post_boot = !indexed_since_boot;
     SweepTick {
@@ -70,12 +61,10 @@ pub fn plan_sweep(asked: bool, indexed_since_boot: bool) -> SweepTick {
     }
 }
 
-/// How many items one batch embeds. Also the step size of an exhaustive pass,
-/// which stays batched so cancellation is honoured promptly.
+/// Items per embed batch; exhaustive passes stay batched so cancellation lands promptly.
 const CONTEXT_BATCH: usize = 64;
 
-/// A bound on an exhaustive pass, so a corpus that never drains -- an item that
-/// fails to embed every time and stays "missing" -- cannot spin forever.
+/// Bounds an exhaustive pass, since an item that always fails to embed never drains.
 const MAX_BATCHES: usize = 500;
 
 pub async fn run_index_maintenance(
@@ -89,9 +78,7 @@ pub async fn run_index_maintenance(
     let model_id = embedder.model_id();
     let dims = embedder.dimensions();
 
-    // 1. Adoption first, because it is free. Any vector that already exists in a
-    //    source table is copied in pure SQL, with no inference at all -- so the
-    //    expensive steps below have less to do.
+    // 1. Adoption first: copying existing vectors in pure SQL is free and shrinks later steps.
     for corpus in [Corpus::Memory, Corpus::Context] {
         if cancel.is_cancelled() {
             return report;
@@ -102,8 +89,7 @@ pub async fn run_index_maintenance(
         }
     }
 
-    // 2. Summaries: the only corpus with no vector of its own, so the only step
-    //    that spends the device's scarce resource.
+    // 2. Summaries, the only corpus with no stored vector of its own.
     if !cancel.is_cancelled() {
         report.summaries_indexed = run_summary_indexing(
             storage,
@@ -116,15 +102,11 @@ pub async fn run_index_maintenance(
         .await;
     }
 
-    // 2b. Context items that arrived WITHOUT a vector. Adoption only copies vectors that already
-    //     exist, so without this step the corpus stays silently unsearchable and the assistant
-    //     answers "no recorded activity" -- a wrong answer rather than an absent one.
+    // 2b. Context items that arrived without a vector; adoption can't reach them.
     let mut batches = 0usize;
     while !cancel.is_cancelled() && batches < MAX_BATCHES {
         batches += 1;
-        // `needs_embedding_with_text` is re-asked each time rather than paged:
-        // a row just embedded stops being returned, so the next call is the
-        // next batch. Paging by offset over a shrinking set would skip rows.
+        // Re-ask, don't page: embedded rows drop out, so offsets over the shrinking set skip rows.
         let batch = match index
             .needs_embedding_with_text(Corpus::Context, &model_id, CONTEXT_BATCH)
             .await
@@ -146,16 +128,12 @@ pub async fn run_index_maintenance(
             if text.trim().is_empty() {
                 continue;
             }
-            // Chunked because a mail body's single vector would describe the signature block as
-            // much as the point. A short item is one chunk, so nothing changes for a sensor event.
             let spans = crate::context::chunking::chunk(
                 &text,
                 crate::context::chunking::DEFAULT_CHUNK_BYTES,
                 crate::context::chunking::DEFAULT_OVERLAP_BYTES,
             );
-            // Stale chunks first: a re-chunked item has a different
-            // number of passages, and leaving the old ones would keep
-            // scoring spans that no longer describe anything.
+            // Clear old chunks first: a re-chunked item may have fewer passages.
             if let Err(e) = index.remove(Corpus::Context, &row_id).await {
                 tracing::warn!("[context-index] could not clear old chunks: {e}");
             }
@@ -173,9 +151,7 @@ pub async fn run_index_maintenance(
                             chunk_span: Some((span.start as i64, span.len as i64)),
                             model_id: model_id.clone(),
                             vector,
-                            // Left None: the adapter's own write-through
-                            // stamps the ingest time, and a rev invented here
-                            // could disagree with it and re-stale forever.
+                            // The adapter stamps this; a value set here could re-stale forever.
                             source_rev: None,
                         };
                         if let Err(e) = index.upsert(&entry).await {
@@ -188,10 +164,7 @@ pub async fn run_index_maintenance(
                 }
             }
             if stored > 0 {
-                // Counted per ITEM, not per chunk: the report answers
-                // "how much of the corpus is reachable", and a reader
-                // comparing it against the item count would otherwise
-                // see more indexed than exist.
+                // Per item, not per chunk, so it compares against the item count.
                 report.context_indexed += 1;
             }
         }
@@ -200,9 +173,7 @@ pub async fn run_index_maintenance(
         }
     }
 
-    // 3. Orphans. Deliberately AFTER the writes: pruning first would delete rows
-    //    that step 1 is about to legitimately re-create, doing the same work
-    //    twice on every pass.
+    // 3. Orphans, after the writes: pruning first deletes rows step 1 would re-create.
     if !cancel.is_cancelled() {
         match index.prune_orphans().await {
             Ok(n) => report.orphans_pruned = n,
@@ -210,10 +181,7 @@ pub async fn run_index_maintenance(
         }
     }
 
-    // 4. Report what is still wrong. A model change must be LOUD: every stored
-    //    vector from the old model is meaningless while still scoring plausibly,
-    //    and re-embedding a household can take hours on a Jetson. "Retrieval
-    //    quietly got worse" is undiagnosable, so it gets a WARN with the count.
+    // 4. Report what is still wrong. WARN on a model change: old vectors still score plausibly.
     match index.health(&model_id).await {
         Ok(h) => {
             report.still_missing = h.missing;
@@ -263,9 +231,7 @@ mod tests {
     #[derive(Default)]
     struct SpyIndex {
         calls: Mutex<Vec<String>>,
-        /// Rows still wanting a vector. Drained by each `needs_embedding_with_text`
-        /// so the spy behaves like the real index: an embedded row stops being
-        /// returned, which is what makes re-asking a valid way to page.
+        /// Rows still wanting a vector; drained per call like the real index, so re-asking pages.
         backlog: Mutex<usize>,
     }
 
@@ -327,9 +293,7 @@ mod tests {
         }
         async fn health(&self, _m: &str) -> Result<IndexHealth> {
             self.calls.lock().unwrap().push("health".into());
-            // Totals are the per-corpus sums, as a real index reports them, with Summary as the
-            // wholly-dead corpus. A stub whose numbers did not add up would let a caller that
-            // quietly stopped reading one of them still pass.
+            // Totals are the per-corpus sums, as a real index reports them.
             Ok(IndexHealth {
                 matching: 5,
                 mismatched: 3,
@@ -353,9 +317,7 @@ mod tests {
                     },
                     CorpusHealth {
                         corpus: Corpus::Summary,
-                        // Zero qualifying against a non-empty table: the
-                        // structurally-dead shape this whole surface exists to
-                        // make legible.
+                        // Zero qualifying rows in a non-empty table: the structurally-dead shape.
                         rows: 0,
                         source_rows: 11,
                         indexed_rows: 0,
@@ -383,8 +345,6 @@ mod tests {
 
     use crate::user_data::mocks::mock_session::InMemorySessionStorage;
 
-    /// Adoption must come BEFORE the prune, or the prune deletes rows adoption
-    /// is about to re-create and every pass does the same work twice.
     #[tokio::test]
     async fn a_pass_adopts_before_it_prunes_and_reports_health_last() {
         let spy = Arc::new(SpyIndex::default());
@@ -413,9 +373,6 @@ mod tests {
         assert_eq!(report.still_missing, 1);
     }
 
-    /// Measured on a real pond: 986 items wanting a vector, a batch of 64, and
-    /// scheduled passes that refuse until somebody chats. Pressing Reindex
-    /// cleared 480 vectors and put 64 back.
     #[tokio::test]
     async fn a_requested_pass_drains_a_backlog_bigger_than_one_batch() {
         let spy = Arc::new(SpyIndex {
@@ -439,8 +396,6 @@ mod tests {
         assert_eq!(*spy.backlog.lock().unwrap(), 0);
     }
 
-    /// The background pass stays small, or a household's next turn queues
-    /// behind the whole mailbox.
     #[tokio::test]
     async fn a_scheduled_pass_takes_one_bite() {
         let spy = Arc::new(SpyIndex {
@@ -459,9 +414,6 @@ mod tests {
         assert_eq!(report.context_indexed, CONTEXT_BATCH);
     }
 
-    /// The deadlock this exemption exists for: mail arrives from a connector,
-    /// not a conversation, so a pond that is synced and browsed but never
-    /// chatted with never satisfies the lane's activity gate.
     #[test]
     fn an_idle_pond_indexes_itself_once_after_boot() {
         let tick = plan_sweep(false, false);
@@ -476,7 +428,6 @@ mod tests {
         );
     }
 
-    /// Once, not every tick. After the first pass the gate applies again.
     #[test]
     fn a_later_scheduled_pass_is_gated_again_and_takes_one_bite() {
         let tick = plan_sweep(false, true);
@@ -489,8 +440,7 @@ mod tests {
 
     #[test]
     fn a_busy_pond_still_takes_one_bite_per_scheduled_pass() {
-        // A used pond satisfies the lane's own gate; the sweep needs no
-        // exemption and must not claim one.
+        // A used pond passes the lane's own gate, so the sweep must not claim an exemption.
         let tick = plan_sweep(false, true);
         assert!(!tick.exempt_from_activity_gate);
         assert_eq!(
@@ -500,7 +450,6 @@ mod tests {
         );
     }
 
-    /// Somebody watching an empty panel gets the whole corpus, always.
     #[test]
     fn a_requested_pass_is_always_exhaustive() {
         for indexed in [false, true] {

@@ -1,7 +1,5 @@
-//! Splitting a long text into passages worth embedding on their own: one vector over a whole mail
-//! describes its signature block as much as its point. A [`Chunk`] is a SPAN, never a copy — an
-//! orphaned index row carrying a snippet is deleted data that outlived its deletion. Cuts prefer,
-//! in order, a blank line, a line break, a sentence end, a space; mid-word is the last resort.
+//! Splits long text into passages worth embedding on their own.
+//! A [`Chunk`] is a span, never a copy: an orphaned index row must not carry deleted text.
 
 /// A passage of a source text, addressed by where it is rather than by content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,36 +11,22 @@ pub struct Chunk {
 }
 
 impl Chunk {
-    /// The passage itself, for a caller that has the source text in hand.
-    ///
-    /// `None` when the span misses a character boundary, which means the text changed since the
-    /// chunk was computed: a stale span is better refused than sliced into invalid UTF-8.
+    /// The passage in `text`; `None` if off a char boundary, i.e. the text changed since.
     pub fn slice<'a>(&self, text: &'a str) -> Option<&'a str> {
         text.get(self.start..self.start.checked_add(self.len)?)
     }
 }
 
-/// Target passage size in bytes.
-///
-/// 500 is chosen for short-form mail: long enough to carry an argument rather than a fragment,
-/// short enough that one message yields several passages.
+/// Target passage size in bytes: an argument, not a fragment, yet several per short mail.
 pub const DEFAULT_CHUNK_BYTES: usize = 500;
 
-/// How much of the previous passage each one repeats.
-///
-/// Without overlap a sentence straddling a cut is findable from neither passage. 50 bytes is
-/// about a sentence: enough to keep a straddler whole, small enough not to double the corpus.
+/// Bytes repeated from the previous passage: about a sentence, so a straddler stays findable.
 pub const DEFAULT_OVERLAP_BYTES: usize = 50;
 
-/// Split `text` into overlapping passages.
-///
-/// Text shorter than one chunk yields one chunk covering all of it, so callers need no special
-/// case. Empty or whitespace-only text yields nothing.
+/// Split `text` into overlapping passages; empty or whitespace-only text yields none.
 pub fn chunk(text: &str, size: usize, overlap: usize) -> Vec<Chunk> {
     let size = size.max(1);
-    // Overlap is capped at HALF the chunk, which bounds the output at roughly `2 * len / size`
-    // passages. A cap of `size - 1` also terminates but advances one byte per step: a 5 KB body
-    // yields 4,901 chunks instead of about 100, useless without ever failing.
+    // Half bounds output near `2 * len / size`; `size - 1` would advance a byte per step.
     let overlap = overlap.min(size / 2);
 
     if text.trim().is_empty() {
@@ -75,8 +59,6 @@ pub fn chunk(text: &str, size: usize, overlap: usize) -> Vec<Chunk> {
             len: end - start,
         });
 
-        // Step back by the overlap, then forward to a character boundary so the
-        // next span is sliceable.
         let next = end.saturating_sub(overlap).max(start + 1);
         start = ceil_char_boundary(text, next);
     }
@@ -88,8 +70,7 @@ pub fn chunk(text: &str, size: usize, overlap: usize) -> Vec<Chunk> {
 fn boundary_at_or_before(text: &str, start: usize, hard_end: usize) -> usize {
     let hard_end = floor_char_boundary(text, hard_end.min(text.len()));
     let window = &text[start..hard_end];
-    // Only look back a quarter of the chunk: a cut that gives up too much text
-    // to find a prettier boundary produces short, thin passages.
+    // Look back at most a quarter of the chunk, or passages come out short and thin.
     let floor = window.len().saturating_sub(window.len() / 4);
 
     for pattern in ["\n\n", "\n", ". ", " "] {
@@ -149,8 +130,6 @@ mod tests {
         assert!(chunk("   \n\n  ", 500, 50).is_empty());
     }
 
-    /// The property that matters most: no byte of the source is unreachable.
-    /// A gap is a passage nothing can ever find.
     #[test]
     fn chunks_cover_the_whole_text() {
         let t = "word ".repeat(600);
@@ -205,8 +184,6 @@ mod tests {
         assert!(cover(&t, &c));
     }
 
-    /// A span computed against different text must refuse rather than slice
-    /// blindly — the body may have been re-synced since.
     #[test]
     fn a_stale_span_refuses_rather_than_slicing_garbage() {
         let c = Chunk {

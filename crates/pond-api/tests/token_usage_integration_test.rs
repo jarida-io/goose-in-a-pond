@@ -1,7 +1,4 @@
-//! Integration tests for per-session token tracking: accumulation through
-//! `increment_usage`, the counts `list_sessions` reports, and the aggregation in
-//! /api/v1/usage/summary. Uses a real SQLite database in a temp dir with all
-//! migrations. Run: cargo test -p pond-api --test token_usage_integration_test
+//! Per-session token tracking on real SQLite: accumulation, session listing and usage summary.
 
 use pond_core::user_data::domain::onboarding::OnboardingStep;
 use pond_core::user_data::ports::device_registry::{Device, DeviceRegistry, RegisterDeviceRequest};
@@ -25,10 +22,6 @@ impl OnboardingRepository for CompletedOnboarding {
     async fn reset(&self) -> anyhow::Result<()> {
         Ok(())
     }
-    // PAI-2 P7 made this a required trait method rather than a defaulted one:
-    // a default would have to answer from `get_current_step`, and a stub that
-    // answers "not onboarded" makes every onboarding write route public
-    // wherever it is used. The name of this stub is the answer.
     async fn is_complete(&self) -> anyhow::Result<bool> {
         Ok(true)
     }
@@ -75,13 +68,11 @@ async fn increment_usage_accumulates_tokens() {
 
     storage.create_session("sess-1".into()).await.unwrap();
 
-    // First response: 100 prompt, 50 completion
     storage
         .increment_usage("sess-1", 100, 50, Some("gemma-4"))
         .await
         .unwrap();
 
-    // Second response: 120 prompt, 80 completion
     storage
         .increment_usage("sess-1", 120, 80, Some("gemma-4"))
         .await
@@ -298,7 +289,6 @@ async fn json_body(resp: axum::response::Response) -> serde_json::Value {
 async fn api_usage_summary_aggregates_sessions() {
     let (app, storage, _tmp) = make_app().await;
 
-    // Create sessions and add tokens directly
     storage.create_session("s1".into()).await.unwrap();
     storage.create_session("s2".into()).await.unwrap();
     storage

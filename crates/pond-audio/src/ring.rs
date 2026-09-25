@@ -1,7 +1,5 @@
-//! The authoritative capture buffer: one rolling window of normalised audio that every
-//! subscriber reads a snapshot of. Frames live in one place rather than a per-subscriber
-//! broadcast, which allocates per frame and drops silently for slow receivers. Normalisation
-//! happens only here: callers get 16 kHz mono f32, whatever format the device offers.
+//! The one shared rolling window of 16 kHz mono f32 that every subscriber snapshots.
+//! Not a per-subscriber broadcast, which allocates per frame and drops silently for slow readers.
 
 use std::collections::VecDeque;
 
@@ -64,17 +62,13 @@ impl Ring {
         self.written
     }
 
-    /// Drop everything buffered, keeping the write counter. Used when a turn ends: the buffer
-    /// is shared, so stale audio would otherwise leak into the next capture.
+    /// Drop everything buffered, keeping the write counter. Called at turn end.
     pub fn clear(&mut self) {
         self.samples.clear();
     }
 }
 
-/// Interleaved device samples to normalised mono f32.
-///
-/// One implementation for every format, replacing three partial ones. Each
-/// converter maps its native range onto `[-1.0, 1.0]`.
+/// Interleaved device samples to mono f32; `convert` must map onto `[-1.0, 1.0]`.
 pub fn to_mono_f32<T: Copy>(interleaved: &[T], channels: usize, convert: fn(T) -> f32) -> Vec<f32> {
     if channels == 0 {
         return Vec::new();
@@ -160,9 +154,6 @@ mod tests {
         assert_eq!(to_mono_f32(&s, 1, |s| s), vec![0.1, -0.2, 0.3]);
     }
 
-    /// The bug this replaces: the wake-word detector handled F32 and I16 but
-    /// not U16, so on a U16-only device it errored while ordinary capture
-    /// worked. One converter set, all formats.
     #[test]
     fn every_device_format_lands_in_the_same_range() {
         assert!((i16_to_f32(i16::MAX) - 1.0).abs() < 1e-4);

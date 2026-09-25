@@ -1,7 +1,4 @@
-//! Personal context streaming (PAI-8): a corpus of [`ContextItem`](domain::ContextItem)s, each
-//! owned by one household member, classified, and governed by a retention window. P1 and P2 only:
-//! no connector, no OAuth, no webhook receiver, no outbound request of any kind. That boundary is
-//! written in `domain::SourceKind::availability` and enforced in `ingest::IngestPipeline::ingest`.
+//! Personal context streaming: per-member, classified items governed by a retention window.
 
 pub mod bus_ingest;
 pub mod chunking;
