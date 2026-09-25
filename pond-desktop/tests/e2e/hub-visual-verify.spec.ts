@@ -1,8 +1,4 @@
-/**
- * One-off visual verification spec for Hub Phase 1.
- * Run: npx playwright test tests/e2e/hub-visual-verify.spec.ts
- * Generates screenshots at /tmp/hub-phase1-home.png and /tmp/hub-design-reference.png.
- */
+/** One-off Hub visual check; saves screenshots under /tmp. */
 import { test, expect } from "@playwright/test";
 import { existsSync } from "node:fs";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
@@ -11,7 +7,6 @@ test("Hub visual screenshot", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await mockAllApiRoutes(page);
 
-  // Land directly in hub by pre-setting localStorage
   await page.addInitScript(() => {
     localStorage.setItem("giap-section", "hub");
     localStorage.setItem("giap-force-hub", "1");
@@ -23,27 +18,21 @@ test("Hub visual screenshot", async ({ page }) => {
   // Let animations settle
   await page.waitForTimeout(800);
 
-  // The AskGoose bar, room pills and category dock are not checked here any
-  // more: the Home redesign removed them, and their components have been
-  // deleted. The `.askgoose` check was an unguarded `locator.evaluate`, so it
-  // hung for the full 30s timeout rather than failing fast.
   await page.screenshot({ path: "/tmp/hub-phase1-home.png", fullPage: false });
   console.log("Hub screenshot saved: /tmp/hub-phase1-home.png");
 
-  // Check IconRail width (spec: 86px)
   const railWidth = await page.locator(".irail").evaluate((el) => el.getBoundingClientRect().width);
   console.log(`IconRail width: ${railWidth}px (expected 86)`);
 
 
-  // Check favourites grid (device tiles)
   const tileCount = await page.locator(".dtile").count();
   console.log(`Device tile count: ${tileCount}`);
 
-  // Check camera grid (.cam is the CameraFeed root class)
+  // .cam is the CameraFeed root class.
   const camCount = await page.locator(".cam").count();
   console.log(`Camera tile count: ${camCount}`);
 
-  // Check ambient sidebar weather widget (.wx is the WeatherWidget root class)
+  // .wx is the WeatherWidget root class.
   const hasWeather = await page.locator(".wx").isVisible();
   console.log(`Weather widget visible: ${hasWeather}`);
 
@@ -77,8 +66,7 @@ test("Design reference screenshot", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const designPath =
     "/Users/jerry/Documents/Jarida/goose-in-a-pond/.ai/giap-design-bundle/project/Goose Hub.html";
-  // Dev-only visual reference: the design bundle lives under .ai/ (gitignored), so
-  // it's absent in CI / fresh clones. Skip rather than fail.
+  // The design bundle lives under gitignored .ai/, so it's absent in CI and fresh clones.
   test.skip(!existsSync(designPath), "design reference bundle (.ai/) not present");
   await page.goto(`file://${designPath}`);
   // Wait for React to render (loaded via unpkg CDN)
@@ -111,7 +99,6 @@ test("State: device tile toggles and route persists", async ({ page }) => {
   await page.waitForSelector(".ghub", { timeout: 15000 });
   await page.waitForTimeout(500);
 
-  // Toggle a device tile
   const firstTile = page.locator(".dtile").first();
   await firstTile.waitFor({ timeout: 8000 });
   const statusBefore = await firstTile.locator(".dtile__status").textContent();
@@ -123,7 +110,6 @@ test("State: device tile toggles and route persists", async ({ page }) => {
   const toggled = statusBefore !== statusAfter;
   console.log(`Tile toggled: ${toggled}`);
 
-  // Navigate through all rail items and check route persists
   for (const label of ["Routines", "Canvas", "Settings", "Goose", "Home"]) {
     await page.getByRole("button", { name: label }).click();
     await page.waitForTimeout(200);
@@ -131,7 +117,6 @@ test("State: device tile toggles and route persists", async ({ page }) => {
     console.log(`After clicking "${label}": goosehub_route="${route}"`);
   }
 
-  // Reload and check route restores
   const routeBeforeReload = await page.evaluate(() => localStorage.getItem("goosehub_route"));
   await page.reload();
   await page.waitForSelector(".ghub", { timeout: 15000 });
@@ -142,11 +127,7 @@ test("State: device tile toggles and route persists", async ({ page }) => {
   console.log(`\nConsole errors (${consoleErrors.length}):`);
   consoleErrors.forEach((e) => console.log("  ERROR:", e));
 
-  // Fail on real app errors; filter test-environment noise:
-  // - HeroUI startContent prop warning
-  // - localstorage-file warning
-  // - Vite HMR websocket (test env port conflict)
-  // - EventSource MIME mismatch from mocked chat/stream endpoint
+  // Test-env noise: HeroUI startContent, localstorage-file, Vite HMR socket, mocked-SSE MIME.
   const realErrors = consoleErrors.filter(
     (e) =>
       !e.includes("startContent") &&
@@ -166,24 +147,20 @@ test("Old shell sections still work (no hub regression)", async ({ page }) => {
   await page.goto("/");
   await page.waitForSelector(".app-shell", { timeout: 15000 });
 
-  // Hub shell must NOT be visible when in the classic shell
   const hubVisible = await page.locator(".ghub").isVisible();
   console.log(`Hub shell visible on non-hub start: ${hubVisible} (expected: false)`);
   expect(hubVisible).toBe(false);
 
-  // Settings section should still render without the Hub
   await page.getByRole("button", { name: /settings/i }).first().click();
   await page.waitForTimeout(400);
   const hubAfterSettings = await page.locator(".ghub").isVisible();
   console.log(`Hub shell visible after clicking Settings: ${hubAfterSettings} (expected: false)`);
   expect(hubAfterSettings).toBe(false);
 
-  // Preview button should be present in Settings
   const previewBtn = page.getByRole("button", { name: /preview goose hub redesign/i });
   await expect(previewBtn).toBeVisible();
   console.log("Preview button visible in Settings: true");
 
-  // Clicking Preview should transition to Hub
   await previewBtn.click();
   await page.waitForSelector(".ghub", { timeout: 8000 });
   console.log("Hub renders after clicking Preview: true");

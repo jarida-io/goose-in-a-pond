@@ -1,17 +1,6 @@
 /**
- * kiosk-viewport.spec.ts
- *
- * Verifies that the GIAP desktop UI renders correctly on 7-inch kiosk panels:
- *   - 1024×600 (primary target)
- *   - 800×480  (secondary / smaller kiosk)
- *
- * Checks:
- *   1. No horizontal overflow (body.scrollWidth === viewport width).
- *   2. Sidebar is in icon-only mode, at the width the design token names.
- *   3. Content area fills the remaining width without clipping.
- *   4. Key interactive targets meet the 40px minimum height.
- *   5. Both classic sections UI (app-shell) and hub UI (ghub/.irail) are
- *      visually verified via screenshot.
+ * Kiosk panels, 1024×600 (primary) and 800×480: no horizontal overflow, icon-only rail,
+ * content fills the rest, 40px touch targets; classic and hub UIs screenshotted.
  */
 
 import { test, expect, Page } from "@playwright/test";
@@ -28,14 +17,7 @@ async function checkNoHorizOverflow(page: Page): Promise<void> {
 const RAIL_CEILING_PX = 72;
 
 async function checkSidebarCompact(page: Page): Promise<void> {
-  // Measured against the token rather than a literal. This assertion was
-  // pinned at ≤52px, which is a pixel count standing in for "the rail is
-  // icon-only" — so a 4px design change to the rail failed a kiosk test that
-  // was not about rail width, and the number in docs/design-system.md drifted
-  // out of date at the same time with nothing to catch it. The property this
-  // file actually cares about is asserted directly by "sidebar is icon-only
-  // (no text labels visible)" below, which checks the brand name and group
-  // labels are display:none.
+  // Against the token, not a literal; icon-only-ness is asserted by the display:none test below.
   const measured = await page.evaluate(() => {
     const s = document.querySelector(".sidebar");
     if (!s) return null;
@@ -52,12 +34,7 @@ async function checkSidebarCompact(page: Page): Promise<void> {
     `--sidebar-width-collapsed should be a px length, got "${measured.token}"`,
   ).toBe(true);
 
-  // No WIDER than the token. Equality would be wrong: the 1024x600 rule sets
-  // .sidebar { width: var(--sidebar-width-collapsed) }, but the very-short-panel
-  // rule (@media max-height:500px, the 800x480 target) narrows it further to a
-  // hardcoded 44px. So the token is the ceiling, and anything above it means
-  // something is overriding the rail wider than intended — the regression this
-  // is for.
+  // A ceiling, not equality: the max-height:500px rule (800×480) narrows the rail to 44px.
   expect(
     measured.width,
     `Collapsed rail (${measured.width}px) should be no wider than ` +
@@ -82,7 +59,6 @@ async function checkIrailCompact(page: Page): Promise<void> {
 }
 
 async function checkTouchTargets(page: Page): Promise<void> {
-  // Sidebar nav items should be ≥40px tall
   const minHeight = await page.evaluate(() => {
     const items = document.querySelectorAll(".sidebar__item");
     if (!items.length) return 99; // no sidebar — pass
@@ -127,7 +103,6 @@ test.describe("Classic sections UI — 1024×600", () => {
     });
     expect(brandNameVisible, "Brand name should be hidden in kiosk mode").toBe(false);
 
-    // Group labels should not be visible
     const groupLabelVisible = await page.evaluate(() => {
       const els = document.querySelectorAll(".sidebar__group-label");
       return Array.from(els).some((el) => {
@@ -153,9 +128,7 @@ test.describe("Classic sections UI — 1024×600", () => {
       };
     });
 
-    // Content should start right where sidebar ends
     expect(contentLeft, "Content starts after sidebar").toBeCloseTo(sidebarW, 1);
-    // Content should fill the rest of the viewport
     expect(contentW + sidebarW, "Content + sidebar = viewport width").toBeCloseTo(viewportW, 1);
   });
 
@@ -222,14 +195,12 @@ test.describe("Hub UI — 1024×600", () => {
 
   test("hub home renders without horizontal overflow", async ({ page }) => {
     await page.goto("/");
-    // Hub may or may not load depending on localStorage section flag
-    // — just check that the page renders and no overflow
+    // The hub may not load, so only rendering and overflow are required.
     await page.waitForLoadState("networkidle");
     await checkNoHorizOverflow(page);
     const hasHub = await page.evaluate(
       () => !!document.querySelector(".ghub") || !!document.querySelector(".irail") || !!document.querySelector(".dash"),
     );
-    // If hub loaded, verify its icon rail
     if (hasHub) {
       await checkIrailCompact(page);
     }

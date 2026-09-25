@@ -2,11 +2,7 @@ import { test, expect } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
 
-/**
- * WCAG 2 A/AA baseline scan for the core flows called out in the a11y pass:
- * Home dashboard, Canvas, the sidebar/IconRail nav, and an open modal
- * (routine builder, via HubModal + useDialogFocusTrap).
- */
+/** WCAG 2 A/AA scan of the core flows: Home, Canvas, sidebar/IconRail nav and an open modal. */
 
 async function scanAndAssert(page: import("@playwright/test").Page, label: string) {
   const results = await new AxeBuilder({ page })
@@ -61,8 +57,7 @@ test.describe("a11y baseline (WCAG 2 A/AA)", () => {
     const dialog = page.getByRole("dialog");
     await expect(dialog).toBeVisible({ timeout: 5_000 });
 
-    // Focus management: opening the dialog must move focus inside it, not
-    // leave it on whatever was focused in the page behind it.
+    // Opening the dialog must move focus inside it.
     const focusInsideDialog = await page.evaluate(() => {
       const dialogEl = document.querySelector('[role="dialog"]');
       return !!dialogEl && dialogEl.contains(document.activeElement);

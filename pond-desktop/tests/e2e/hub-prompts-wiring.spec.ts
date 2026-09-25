@@ -1,11 +1,4 @@
-/**
- * Phase 8 wave 2 — Prompts sub-screen real-data wiring
- *
- * Verifies:
- * 1. Prompts screen loads from Settings > Prompts and renders preset chips
- * 2. Clicking a preset chip fetches the prompt body and populates the textarea
- * 3. Save button calls api.updatePrompt; Reset button calls api.resetPrompt
- */
+/** Prompts sub-screen (Settings > Prompts) wired to getPrompt, updatePrompt and resetPrompt. */
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
@@ -86,7 +79,6 @@ async function setupPromptsRoutes(
   await page.route("**/api/v1/models/**", (r) => r.fulfill({ json: {} }));
 
   // ── Prompts routes — registered last for LIFO priority ───
-  // Reset endpoint
   await page.route("**/api/v1/prompts/*/reset", async (r) => {
     const url = r.request().url();
     const name = url.split("/prompts/")[1]?.split("/reset")[0] ?? "balanced";
@@ -95,7 +87,6 @@ async function setupPromptsRoutes(
     return r.fulfill({ json: { ...original, content: original.content + " (reset)" } });
   });
 
-  // Update endpoint (PUT)
   await page.route("**/api/v1/prompts/*", async (r) => {
     if (r.request().method() === "PUT") {
       const url = r.request().url();
@@ -105,14 +96,12 @@ async function setupPromptsRoutes(
       opts.onUpdate?.(name, body.content ?? "");
       return r.fulfill({ json: { name, content: body.content ?? "", is_system: true } });
     }
-    // GET single prompt
     const url = r.request().url();
     const name = url.split("/prompts/")[1] ?? "balanced";
     const found = promptList.find((p) => p.name === name) ?? promptList[0];
     return r.fulfill({ json: found });
   });
 
-  // List prompts
   await page.route("**/api/v1/prompts", (r) => r.fulfill({ json: promptList }));
 }
 
@@ -136,13 +125,12 @@ test.describe("Hub — Prompts sub-screen wiring", () => {
     await setupPromptsRoutes(page, { promptStyle: "balanced" });
     await goToPromptsScreen(page);
 
-    // Preset chips should be visible — use role=button to avoid matching textarea body
+    // role=button, so chip names don't match the textarea body.
     await expect(page.getByRole("button", { name: "Balanced" })).toBeVisible({ timeout: 5_000 });
     await expect(page.getByRole("button", { name: "Concise" })).toBeVisible({ timeout: 3_000 });
     await expect(page.getByRole("button", { name: "Warm" })).toBeVisible({ timeout: 3_000 });
     await expect(page.getByRole("button", { name: "Technical" })).toBeVisible({ timeout: 3_000 });
 
-    // Textarea should show the balanced body
     const ta = page.locator("textarea.prompt-ta");
     await expect(ta).toBeVisible({ timeout: 3_000 });
     await expect(ta).toHaveValue(/Balanced prompt body\./);
@@ -155,7 +143,6 @@ test.describe("Hub — Prompts sub-screen wiring", () => {
       promptStyle: "balanced",
     });
 
-    // Override GET single prompt to track which name was requested
     await page.route("**/api/v1/prompts/*", async (r) => {
       if (r.request().method() === "GET") {
         const url = r.request().url();
@@ -172,14 +159,11 @@ test.describe("Hub — Prompts sub-screen wiring", () => {
 
     await goToPromptsScreen(page);
 
-    // Wait for chips to appear
     await expect(page.getByRole("button", { name: "Warm" })).toBeVisible({ timeout: 5_000 });
 
-    // Click the "Warm" chip
     await page.getByRole("button", { name: "Warm" }).click();
     await page.waitForTimeout(500);
 
-    // The textarea should now show warm content
     const ta = page.locator("textarea.prompt-ta");
     await expect(ta).toHaveValue(/Warm prompt body\./, { timeout: 3_000 });
   });
@@ -196,7 +180,6 @@ test.describe("Hub — Prompts sub-screen wiring", () => {
 
     await goToPromptsScreen(page);
 
-    // Wait for textarea
     const ta = page.locator("textarea.prompt-ta");
     await expect(ta).toBeVisible({ timeout: 5_000 });
 
@@ -206,7 +189,6 @@ test.describe("Hub — Prompts sub-screen wiring", () => {
     await ta.type(" edited");
     await page.waitForTimeout(200);
 
-    // Save should now be enabled; click it
     const saveBtn = page.getByRole("button", { name: /save prompt/i });
     await expect(saveBtn).toBeEnabled({ timeout: 2_000 });
     await saveBtn.click();
@@ -214,7 +196,6 @@ test.describe("Hub — Prompts sub-screen wiring", () => {
 
     expect(updateCalled).toBe(true);
 
-    // Now click Reset
     const resetBtn = page.getByRole("button", { name: /reset prompt to default/i });
     await expect(resetBtn).toBeEnabled({ timeout: 2_000 });
     await resetBtn.click();

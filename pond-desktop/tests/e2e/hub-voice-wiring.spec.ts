@@ -1,11 +1,4 @@
-/**
- * Phase 8 wave 3 — Voice sub-screen real-data wiring
- *
- * Verifies:
- * 1. Voice screen loads and populates wake word + STT/TTS pickers from settings
- * 2. Speaking rate slider updates the local ttsSpeed value (debounced — no API call yet)
- * 3. TTS voice select triggers api.updateSettings({ voice_tts_voice })
- */
+/** Voice sub-screen wired to settings: pickers, speaking-rate slider, voice_tts_voice updates. */
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
@@ -22,7 +15,6 @@ const MOCK_SETTINGS = {
   voice_tts_voice: "en_US-lessac-medium.onnx",
 };
 
-/** Set up all routes needed for the Voice screen tests. */
 async function setupVoiceRoutes(
   page: Page,
   opts: {
@@ -90,12 +82,10 @@ async function setupVoiceRoutes(
   await page.route("**/api/v1/models", (r) => r.fulfill({ json: { gguf: [], llamafile: [], whisper: [], tts: [], ollama: [], embedding: [] } }));
   await page.route("**/api/v1/voice/calibrate", (r) => r.fulfill({ status: 204, body: "" }));
 
-  // Settings — PUT handler (tracks updates) registered FIRST so it can intercept PATCH/PUT
   await page.route("**/api/v1/settings", async (r) => {
     if (r.request().method() === "GET") {
       return r.fulfill({ json: settings });
     }
-    // PATCH / PUT
     const body = r.request().postDataJSON();
     opts.onUpdateSettings?.(body);
     return r.fulfill({ json: { ...settings, ...body } });
@@ -122,25 +112,21 @@ test.describe("Hub — Voice sub-screen wiring", () => {
     await setupVoiceRoutes(page);
     await goToVoiceScreen(page);
 
-    // Card titles should be visible (use .setcard__title selector to avoid sub-text collisions)
+    // .setcard__title, so sub-text with the same words doesn't collide.
     await expect(page.locator(".setcard__title", { hasText: "Listening" }).first()).toBeVisible({ timeout: 5_000 });
     await expect(page.locator(".setcard__title", { hasText: "Speech-to-text" }).first()).toBeVisible({ timeout: 3_000 });
     await expect(page.locator(".setcard__title", { hasText: "Goose's voice" }).first()).toBeVisible({ timeout: 3_000 });
 
-    // Wake word from settings is shown
     await expect(page.getByText(/hey goose/i)).toBeVisible({ timeout: 5_000 });
 
-    // STT picker set to the mock value (Whisper base)
     const sttSelect = page.getByRole("combobox", { name: /STT model/i });
     await expect(sttSelect).toBeVisible({ timeout: 3_000 });
     await expect(sttSelect).toHaveValue("ggml-base.bin");
 
-    // TTS voice picker set to the mock value
     const ttsSelect = page.getByRole("combobox", { name: /TTS voice/i });
     await expect(ttsSelect).toBeVisible({ timeout: 3_000 });
     await expect(ttsSelect).toHaveValue("en_US-lessac-medium.onnx");
 
-    // Speaking rate slider is present
     await expect(page.getByText(/Speaking rate/i)).toBeVisible({ timeout: 3_000 });
     const slider = page.locator(".hrange input[type='range']");
     await expect(slider).toBeVisible({ timeout: 3_000 });
@@ -154,15 +140,12 @@ test.describe("Hub — Voice sub-screen wiring", () => {
     });
     await goToVoiceScreen(page);
 
-    // Wait for TTS voice picker
     const ttsSelect = page.getByRole("combobox", { name: /TTS voice/i });
     await expect(ttsSelect).toBeVisible({ timeout: 5_000 });
 
-    // Change to Ryan
     await ttsSelect.selectOption("en_US-ryan-medium.onnx");
     await page.waitForTimeout(500);
 
-    // Verify updateSettings was called with the correct voice
     expect(updatePayload).toBeTruthy();
     expect((updatePayload as Record<string, unknown>).voice_tts_voice).toBe("en_US-ryan-medium.onnx");
   });
@@ -171,20 +154,16 @@ test.describe("Hub — Voice sub-screen wiring", () => {
     await setupVoiceRoutes(page);
     await goToVoiceScreen(page);
 
-    // Wait for slider
     const slider = page.locator(".hrange input[type='range']").first();
     await expect(slider).toBeVisible({ timeout: 5_000 });
 
-    // Current value display (default 100%)
     const valDisplay = page.locator(".hrange__val").first();
     await expect(valDisplay).toContainText("100%");
 
-    // Move slider to 120
     await slider.fill("120");
     await slider.dispatchEvent("input");
     await page.waitForTimeout(200);
 
-    // Value display should update
     await expect(valDisplay).toContainText("120%");
   });
 });

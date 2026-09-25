@@ -23,14 +23,12 @@ test.describe("Settings section", () => {
 
   test("Settings section renders without crashing", async ({ page }) => {
     await expect(page.getByText(/something went wrong/i)).not.toBeVisible();
-    // At least one tab or form row should be visible
     await expect(
       page.getByText(/identity|voice|models|prompts|location|agent|data/i).first()
     ).toBeVisible({ timeout: 10_000 });
   });
 
   test("renders all expected settings rows", async ({ page }) => {
-    // Settings is now a list/detail panel — check for row labels visible in the list view
     const expectedRows = ["Account", "Voice", "Models", "Prompts"];
     for (const row of expectedRows) {
       await expect(
@@ -40,7 +38,6 @@ test.describe("Settings section", () => {
   });
 
   test("Account panel shows assistant name and user name fields", async ({ page }) => {
-    // Navigate into the Account detail panel
     await page.getByRole("button", { name: "Account" }).click({ timeout: 5_000 });
 
     await expect(
@@ -52,7 +49,6 @@ test.describe("Settings section", () => {
   });
 
   test("settings data is loaded from the API on mount", async ({ page }) => {
-    // Navigate into Account panel where user_name and assistant_name inputs live
     await page.getByRole("button", { name: "Account" }).click({ timeout: 5_000 });
     // The mock returns assistant_name: "Pond" and user_name: "Jerry"
     await expect(
@@ -84,10 +80,8 @@ test.describe("Settings section", () => {
       return route.continue();
     });
 
-    // Wait for settings to load
     await page.waitForTimeout(500);
 
-    // Find and click Save button
     const saveBtn = page.getByRole("button", { name: /save/i }).first();
     if (await saveBtn.isVisible({ timeout: 3_000 })) {
       await saveBtn.click();
@@ -117,7 +111,6 @@ test.describe("Settings section", () => {
     await voiceTab.click();
 
     await expect(page.getByText(/something went wrong/i)).not.toBeVisible();
-    // Some form content should be present
     await expect(page.locator("body")).toBeVisible();
   });
 });

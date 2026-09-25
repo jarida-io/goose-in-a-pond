@@ -1,11 +1,4 @@
-/**
- * Phase 8 wave 4 — Cameras sub-screen real-data wiring
- *
- * Verifies:
- * 1. Camera cards render from api.listDevices() filtered by device_type === "camera"
- * 2. Offline fallback: when api.listDevices() fails, mock cameras are shown with error banner
- * 3. Empty state: when no camera devices are registered, empty-state card renders
- */
+/** Cameras sub-screen wired to api.listDevices() (camera devices only). */
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
@@ -16,7 +9,7 @@ const MOCK_CAMERA_DEVICES = [
     device_type: "camera",
     room: "Outdoor",
     is_online: true,
-    last_seen: new Date(Date.now() - 2 * 60_000).toISOString(), // 2 min ago
+    last_seen: new Date(Date.now() - 2 * 60_000).toISOString(),
     metadata: {},
   },
   {
@@ -25,7 +18,7 @@ const MOCK_CAMERA_DEVICES = [
     device_type: "camera",
     room: "Outdoor",
     is_online: true,
-    last_seen: new Date(Date.now() - 5 * 60_000).toISOString(), // 5 min ago
+    last_seen: new Date(Date.now() - 5 * 60_000).toISOString(),
     metadata: {},
   },
   {
@@ -34,7 +27,7 @@ const MOCK_CAMERA_DEVICES = [
     device_type: "camera",
     room: "Outdoor",
     is_online: false,
-    last_seen: new Date(Date.now() - 2 * 3600_000).toISOString(), // 2h ago
+    last_seen: new Date(Date.now() - 2 * 3600_000).toISOString(),
     metadata: {},
   },
 ];
@@ -45,7 +38,6 @@ const MOCK_OTHER_DEVICES = [
   { id: "lock-1",  name: "Front Door Lock",   device_type: "lock",  is_online: true },
 ];
 
-/** Register all routes needed for the Cameras screen tests. */
 async function setupCamerasRoutes(
   page: Page,
   opts: {
@@ -125,7 +117,6 @@ async function setupCamerasRoutes(
 
   // ── Devices route — registered last (LIFO priority) ──────────
   if (opts.devicesResponse === null) {
-    // Simulate a server error
     await page.route("**/api/v1/devices", (r) =>
       r.fulfill({ status: 500, json: { error: "internal server error" } }),
     );
@@ -157,24 +148,19 @@ test.describe("Hub — Cameras sub-screen wiring", () => {
     await setupCamerasRoutes(page);
     await goToCamerasScreen(page);
 
-    // All three camera names should appear in the card body titles
-    // Use .camset__name to avoid strict-mode ambiguity with .cam__name inside CameraFeed
+    // .camset__name, not .cam__name: CameraFeed also renders the names (strict mode).
     await expect(page.locator(".camset__name", { hasText: "Front Door" }).first()).toBeVisible({ timeout: 5_000 });
     await expect(page.locator(".camset__name", { hasText: "Driveway" }).first()).toBeVisible({ timeout: 3_000 });
     await expect(page.locator(".camset__name", { hasText: "Backyard" }).first()).toBeVisible({ timeout: 3_000 });
 
-    // Non-camera devices should NOT appear
     await expect(page.locator(".camset__name", { hasText: "Living Room Light" })).not.toBeVisible();
     await expect(page.locator(".camset__name", { hasText: "Front Door Lock" })).not.toBeVisible();
 
-    // Each online camera shows "Online" in its status line
     const onlineLabels = page.locator(".camset__sub", { hasText: "Online" });
     await expect(onlineLabels).toHaveCount(2, { timeout: 3_000 });
 
-    // Offline camera shows "Offline" badge
     await expect(page.getByText("Offline")).toBeVisible({ timeout: 3_000 });
 
-    // Subtitle reflects live count (2 live feeds)
     await expect(page.locator(".view-sub", { hasText: /2 live feed/ })).toBeVisible({ timeout: 3_000 });
   });
 
@@ -182,27 +168,22 @@ test.describe("Hub — Cameras sub-screen wiring", () => {
     await setupCamerasRoutes(page, { devicesResponse: null });
     await goToCamerasScreen(page);
 
-    // Error banner should appear
     await expect(page.locator("div", { hasText: /could not reach the server/i }).first()).toBeVisible({ timeout: 5_000 });
 
-    // Fallback mock cameras are shown
     await expect(page.locator(".camset__name", { hasText: "Front Door" }).first()).toBeVisible({ timeout: 3_000 });
     await expect(page.locator(".camset__name", { hasText: "Driveway" }).first()).toBeVisible({ timeout: 3_000 });
     await expect(page.locator(".camset__name", { hasText: "Backyard" }).first()).toBeVisible({ timeout: 3_000 });
   });
 
   test("empty state renders when no camera devices are registered", async ({ page }) => {
-    // Return only non-camera devices — camera filter yields empty list
     await setupCamerasRoutes(page, {
       devicesResponse: { devices: MOCK_OTHER_DEVICES },
     });
     await goToCamerasScreen(page);
 
-    // Falls back to MOCK_CAMERA_STATES (no cameras registered → offline fallback)
-    // The fallback renders the mock cameras to avoid a blank screen
+    // No cameras falls back to MOCK_CAMERA_STATES rather than a blank screen.
     await expect(page.locator(".camset__name", { hasText: "Front Door" }).first()).toBeVisible({ timeout: 5_000 });
 
-    // Subtitle should say "3 live feeds" from mock fallback
     await expect(page.locator(".view-sub")).toBeVisible({ timeout: 3_000 });
   });
 });

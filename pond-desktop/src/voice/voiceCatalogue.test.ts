@@ -47,8 +47,6 @@ describe("describeVoice", () => {
     expect(describeVoice("am_van_dyke").name).toBe("Van Dyke");
   });
 
-  /// A voice the model repo adds tomorrow must still be selectable today,
-  /// rather than vanishing from the picker because this file is out of date.
   it("keeps an unrecognised id usable instead of dropping it", () => {
     const v = describeVoice("weird-new-voice");
     expect(v.id).toBe("weird-new-voice");
@@ -136,8 +134,7 @@ describe("voiceTitle", () => {
     expect(voiceTitle("am_michael")).toBe("Am_Michael");
   });
 
-  // The id stays lowercase because the engine resolves `<name>.bin` from it —
-  // titling must never round-trip back into the id.
+  // The engine resolves `<name>.bin` from the lowercase id, so titling must not touch it.
   it("does not alter the id it was given", () => {
     const id = "af_heart";
     voiceTitle(id);
@@ -152,8 +149,7 @@ describe("voiceTitle", () => {
 });
 
 describe("grades", () => {
-  // Straight from Kokoro's VOICES.md — a wrong grade here is worse than none,
-  // because it changes which voice a household picks.
+  // A wrong grade is worse than none: it changes which voice a household picks.
   it("matches the published table", () => {
     expect(gradeFor("af_heart")).toBe("A");
     expect(gradeFor("af_bella")).toBe("A-");
@@ -184,8 +180,7 @@ describe("preview statements", () => {
   it("cycles rather than repeating or randomising", () => {
     const n = PREVIEW_STATEMENTS.length;
     expect(statementAt(0)).not.toBe(statementAt(1));
-    // Comparing two voices is only fair if they say the same thing, so the
-    // sequence must be deterministic and wrap.
+    // Deterministic and wrapping, so two voices can be compared on the same line.
     expect(statementAt(n)).toBe(statementAt(0));
     expect(statementAt(n + 3)).toBe(statementAt(3));
   });
@@ -204,8 +199,6 @@ describe("preview statements", () => {
 });
 
 describe("quality advice", () => {
-  // The sentence that decides whether someone spends 326 MB, so it has to be
-  // right about the device rather than generically encouraging.
   it("recommends the best tier that actually fits", () => {
     expect(recommendedQuality(200)).toBe("q8");        // nothing fits; fall back
     expect(recommendedQuality(6000)).toBe("fp32");     // plenty of room
@@ -241,8 +234,6 @@ describe("quality advice", () => {
 });
 
 describe("onboarding tier", () => {
-  // Setup is the worst moment to spend 92 MB — the household is waiting to
-  // hear the thing speak for the first time.
   it("is the smallest tier, and smaller than the everyday default", () => {
     expect(ONBOARDING_QUALITY).toBe("q8f16");
     const setup = describeQuality(ONBOARDING_QUALITY);

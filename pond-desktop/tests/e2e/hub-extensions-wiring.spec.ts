@@ -1,11 +1,4 @@
-/**
- * Phase 8 wave 2 — Extensions sub-screen real-data wiring
- *
- * Verifies:
- * 1. Extensions screen loads and shows populated rows from mocked api.listExtensions()
- * 2. Toggle switch calls api.toggleExtension (PATCH) and shows flash feedback
- * 3. Browse button opens marketplace modal with cards from api.listMarketplace()
- */
+/** Extensions sub-screen wired to listExtensions, toggleExtension (PATCH) and listMarketplace. */
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
@@ -67,7 +60,6 @@ const MOCK_MARKETPLACE = [
   },
 ];
 
-/** Set up all routes needed for the Extensions screen tests. */
 async function setupExtensionsRoutes(
   page: Page,
   opts: {
@@ -77,7 +69,6 @@ async function setupExtensionsRoutes(
 ) {
   const extensionsList = opts.extensions ?? MOCK_EXTENSIONS;
 
-  // Health + handshake
   await page.route("**/api/v1/health", (r) =>
     r.fulfill({ json: { status: "ok", version: "test" } }),
   );
@@ -177,16 +168,13 @@ test.describe("Hub — Extensions sub-screen wiring", () => {
     await setupExtensionsRoutes(page);
     await goToExtensionsScreen(page);
 
-    // Wait for loading to finish and rows to render
     await expect(page.getByText("giap-weather")).toBeVisible({ timeout: 5_000 });
     await expect(page.getByText("giap-news")).toBeVisible({ timeout: 3_000 });
     await expect(page.getByText("my-stdio-ext")).toBeVisible({ timeout: 3_000 });
 
-    // Kind badges present
     await expect(page.locator(".ext2__kind--builtin").first()).toBeVisible({ timeout: 3_000 });
     await expect(page.locator(".ext2__kind--stdio").first()).toBeVisible({ timeout: 3_000 });
 
-    // Status dots rendered
     await expect(page.locator(".ext2__status--ok").first()).toBeVisible({ timeout: 3_000 });
   });
 
@@ -202,20 +190,17 @@ test.describe("Hub — Extensions sub-screen wiring", () => {
     });
     await goToExtensionsScreen(page);
 
-    // Wait for giap-news row (disabled) to appear
     await expect(page.getByText("giap-news")).toBeVisible({ timeout: 5_000 });
 
-    // Find the toggle button for giap-news (aria-pressed=false = disabled)
+    // giap-news starts disabled (aria-pressed=false).
     const newsToggle = page.locator(".ext2").filter({ hasText: "giap-news" }).locator("[aria-pressed]").first();
     await expect(newsToggle).toBeVisible({ timeout: 3_000 });
     await newsToggle.click();
     await page.waitForTimeout(600);
 
-    // Verify PATCH was called
     expect(toggledName).toBe("giap-news");
     expect(toggledEnabled).toBe(true);
 
-    // Flash message should appear
     await expect(page.locator("[role='status']")).toBeVisible({ timeout: 3_000 });
   });
 
@@ -223,24 +208,18 @@ test.describe("Hub — Extensions sub-screen wiring", () => {
     await setupExtensionsRoutes(page);
     await goToExtensionsScreen(page);
 
-    // Wait for screen to load
     await expect(page.getByText("giap-weather")).toBeVisible({ timeout: 5_000 });
 
-    // Click Browse
     await page.getByRole("button", { name: /browse/i }).first().click();
 
-    // Marketplace modal should open
     await expect(page.getByRole("dialog", { name: /marketplace/i })).toBeVisible({ timeout: 5_000 });
 
-    // Marketplace items should load
     await expect(page.getByText("Weather Tools")).toBeVisible({ timeout: 5_000 });
     await expect(page.getByText("Git Helper")).toBeVisible({ timeout: 3_000 });
 
-    // Install button on non-installed item
     const installBtn = page.getByRole("button", { name: /install weather tools/i });
     await expect(installBtn).toBeVisible({ timeout: 3_000 });
 
-    // Close modal with Escape
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog", { name: /marketplace/i })).not.toBeVisible({ timeout: 3_000 });
   });

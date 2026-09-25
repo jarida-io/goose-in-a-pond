@@ -1,11 +1,4 @@
-/**
- * Phase 8 wave 2 — Memory sub-screen real-data wiring
- *
- * Verifies:
- * 1. Memory screen loads and populates list from mocked api.listMemories()
- * 2. Delete button calls deleteMemory and removes the row
- * 3. App stays stable (no crash) when API returns an error (offline fallback)
- */
+/** Memory sub-screen wired to listMemories/deleteMemory, with an offline fallback. */
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
@@ -37,8 +30,7 @@ const MOCK_MEMORIES = [
 
 // ─── Route setup ──────────────────────────────────────────────
 
-/** Register all routes needed for the Memory screen.
- *  Call BEFORE navigating so routes are in place. */
+/** Call before navigating, so the routes are in place. */
 async function setupMemoryRoutes(
   page: Page,
   opts: {
@@ -123,19 +115,15 @@ async function setupMemoryRoutes(
   );
 
   // ── Memory-specific routes (registered last — LIFO priority) ──
-  // List must be registered BEFORE delete so that the more-specific
-  // /memories/* pattern (registered after) wins for delete calls.
 
-  // List endpoint
   await page.route("**/api/v1/memories**", (r) => {
     // Only match GET-style list requests (no path segment after memories)
     const url = r.request().url();
     const path = new URL(url).pathname;
-    // If path ends with /memories or /memories?... → list response
     if (/\/memories\/?$/.test(path) || /\/memories\?/.test(url)) {
       return r.fulfill({ status: memoriesStatus, json: memoriesStatus === 200 ? memories : { error: "server error" } });
     }
-    // Otherwise it's a delete (or other per-id request) — pass through to next route
+    // Anything else goes to the network; deletes are caught by the later /memories/* route.
     return r.continue();
   });
 
@@ -170,10 +158,8 @@ test.describe("Hub — Memory sub-screen wiring", () => {
     await setupMemoryRoutes(page);
     await goToMemoryScreen(page);
 
-    // "Remembered" card should appear
     await expect(page.getByText("Remembered")).toBeVisible({ timeout: 5_000 });
 
-    // All three mock memories should render
     await expect(
       page.getByText("Prefers the house at 70° morning, 66° overnight."),
     ).toBeVisible({ timeout: 5_000 });
@@ -195,38 +181,31 @@ test.describe("Hub — Memory sub-screen wiring", () => {
     });
     await goToMemoryScreen(page);
 
-    // Wait for list to populate
     await expect(
       page.getByText("Prefers the house at 70° morning, 66° overnight."),
     ).toBeVisible({ timeout: 5_000 });
 
-    // Click the trash button for the first memory
     const firstForget = page.getByRole("button", {
       name: /forget: prefers the house/i,
     }).first();
     await expect(firstForget).toBeVisible({ timeout: 3_000 });
     await firstForget.click();
 
-    // Row should be removed from the DOM
     await expect(
       page.getByText("Prefers the house at 70° morning, 66° overnight."),
     ).not.toBeVisible({ timeout: 3_000 });
 
-    // API was called with the correct id
     expect(deletedId).toBe("mem-1");
   });
 
   test("shows offline banner and mock fallback when API is unavailable", async ({ page }) => {
-    // Override just the memories route to 500 — everything else responds normally
     await setupMemoryRoutes(page, { memoriesStatus: 500 });
     await goToMemoryScreen(page);
 
-    // Offline warning banner visible
     await expect(
       page.getByText(/could not reach the server/i),
     ).toBeVisible({ timeout: 5_000 });
 
-    // Mock fallback memories still render (no crash / blank screen)
     await expect(page.getByText("Remembered")).toBeVisible({ timeout: 3_000 });
   });
 });

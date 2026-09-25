@@ -1,11 +1,4 @@
-/**
- * Playwright E2E tests for the Chat section.
- *
- * All tests use mocked API routes — no running pond-server required.
- * The chat stream mock is overridden per-test to simulate different provider responses.
- *
- * Run: cd pond-desktop && npx playwright test tests/e2e/chat.spec.ts
- */
+/** Chat section E2E against mocked API routes; the stream mock is overridden per test. */
 import { test, expect } from "@playwright/test";
 import { mockAllApiRoutes, mockSseStream } from "./helpers/api-mocks";
 
@@ -45,7 +38,6 @@ function sseStream(
 
 async function goToChat(page: Parameters<typeof mockAllApiRoutes>[0]) {
   await page.goto("/");
-  // Click the Chat nav button
   const chatBtn = page
     .getByRole("button", { name: /chat/i })
     .or(page.locator('[title="Chat"]'))
@@ -53,7 +45,7 @@ async function goToChat(page: Parameters<typeof mockAllApiRoutes>[0]) {
   await chatBtn.click({ timeout: 10_000 });
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────��────
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 test.describe("Chat section — response rendering", () => {
   test.beforeEach(async ({ page }) => {
@@ -71,12 +63,10 @@ test.describe("Chat section — response rendering", () => {
 
     await goToChat(page);
 
-    // Type and send a message
     const textarea = page.locator("textarea").first();
     await textarea.fill("Hello");
     await textarea.press("Meta+Enter");
 
-    // Agent bubble should appear with the response text
     await expect(page.getByText("Hello from Pond, I am your assistant.")).toBeVisible({
       timeout: 10_000,
     });
@@ -157,7 +147,6 @@ test.describe("Chat section — response rendering", () => {
     await textarea.fill("hello");
     await textarea.press("Meta+Enter");
 
-    // Badge should show "chat · 47 tokens"
     await expect(page.getByText(/47 tokens/i)).toBeVisible({ timeout: 10_000 });
   });
 
@@ -175,7 +164,6 @@ test.describe("Chat section — response rendering", () => {
     await textarea.fill("hello");
     await textarea.press("Meta+Enter");
 
-    // Error message should appear
     await expect(
       page.getByText(/error|llamafile|connection refused/i).first()
     ).toBeVisible({ timeout: 10_000 });
@@ -193,25 +181,18 @@ test.describe("Chat section — response rendering", () => {
     await goToChat(page);
     const textarea = page.locator("textarea").first();
 
-    // First message
     await textarea.fill("First message");
     await textarea.press("Meta+Enter");
     await page.waitForTimeout(500);
 
-    // Second message
     await textarea.fill("Second message");
     await textarea.press("Meta+Enter");
 
-    // Both user messages should be visible
     await expect(page.getByText("First message")).toBeVisible({ timeout: 10_000 });
     await expect(page.getByText("Second message")).toBeVisible({ timeout: 10_000 });
   });
 
-  // PAI-4 P7b-fix. The Chat section is the surface round 1 could not reach, and
-  // this spec is the one that drives it. `mockAllApiRoutes` already registers a
-  // `**/api/v1/sessions/*/compact` route returning a `not_under_pressure`
-  // refusal, so the click below cannot reach a real network — verified in
-  // `helpers/api-mocks.ts`, not assumed.
+  // mockAllApiRoutes answers `sessions/*/compact` with a `not_under_pressure` refusal.
   test("context_warning renders the pressure note and its refusal", async ({ page }) => {
     await page.route("**/api/v1/chat/stream", (route) =>
       route.fulfill({
@@ -239,8 +220,7 @@ test.describe("Chat section — response rendering", () => {
     await expect(page.locator(".ctx-pressure")).toBeVisible({ timeout: 10_000 });
     await expect(page.getByText(/82% full/)).toBeVisible({ timeout: 10_000 });
 
-    // A refusal is the ordinary answer and it must read as information, not as
-    // a failure — this is the path a user actually hits most.
+    // The refusal is the common answer and must read as information, not failure.
     await page.getByRole("button", { name: /compact now/i }).click();
     await expect(page.locator(".ctx-pressure__result")).toHaveText(
       /still room in this window/i,
@@ -251,14 +231,7 @@ test.describe("Chat section — response rendering", () => {
 
 // ── Leaving the section mid-turn ──────────────────────────────────────────────
 
-/**
- * The one test that exercises the REAL unmount.
- *
- * `GuiMode` renders sections through a `switch`, so pressing Devices in the
- * sidebar destroys `<Chat />` and everything it holds. Every other test of this
- * behaviour mounts the component directly; only here is the section swap the
- * thing actually being driven.
- */
+/** The one test driving the real unmount: `GuiMode` destroys `<Chat />` on a section switch. */
 test.describe("Chat section — a turn survives leaving the section", () => {
   test.beforeEach(async ({ page }) => {
     await mockAllApiRoutes(page);
@@ -269,8 +242,7 @@ test.describe("Chat section — a turn survives leaving the section", () => {
   }
 
   test("the answer that lands while you are on another section is there when you return", async ({ page }) => {
-    // Held open until the test lets it go, so "still answering" is a real state
-    // rather than a race against an instant mock.
+    // Held open until released, so "still answering" is a real state, not a race.
     let release: () => void = () => {};
     const held = new Promise<void>((r) => { release = r; });
     await page.route("**/api/v1/chat/stream", async (route) => {
@@ -323,8 +295,7 @@ test.describe("Chat section — a turn survives leaving the section", () => {
     await goToSection(page, /devices/i);
     await goToSection(page, /chat/i);
 
-    // Back in the thread with the question still showing, and the composer
-    // still saying the model has not stopped.
+    // Back in the thread, question showing, composer still in queue mode.
     await expect(page.getByText("take your time")).toBeVisible({ timeout: 10_000 });
     await expect(page.locator("textarea").first()).toHaveAttribute(
       "placeholder",
@@ -351,7 +322,6 @@ test.describe("Chat — live provider tests", () => {
     await textarea.fill("Hello! What is 2 + 2?");
     await textarea.press("Meta+Enter");
 
-    // Wait for agent bubble with non-empty response
     await expect(
       page.locator("text=/four|4/i").first()
     ).toBeVisible({ timeout: 30_000 });

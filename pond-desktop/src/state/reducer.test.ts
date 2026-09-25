@@ -170,9 +170,6 @@ describe("reducer — voice state", () => {
     expect(next.voiceError).toBeNull();
   });
 
-  // Regression: every producer dispatches SET_VOICE_ERROR then
-  // SET_VOICE_STATE("error"), so an unconditional reset here erased the reason
-  // and the UI could only ever render the generic "Error" label.
   it("SET_VOICE_STATE('error') preserves the reason set just before it", () => {
     let s = reducer(BASE, {
       type: "SET_VOICE_ERROR",
@@ -233,7 +230,6 @@ describe("reducer — transcript", () => {
   });
 
   it("APPEND_TRANSCRIPT caps at 50 messages (trims oldest)", () => {
-    // Build state with 50 messages
     let s = BASE;
     for (let i = 0; i < 50; i++) {
       s = reducer(s, {
@@ -243,7 +239,6 @@ describe("reducer — transcript", () => {
     }
     expect(s.transcript).toHaveLength(50);
 
-    // Adding one more should trim the oldest
     const next = reducer(s, {
       type: "APPEND_TRANSCRIPT",
       payload: msg({ id: 99, text: "new" }),
@@ -313,7 +308,6 @@ describe("reducer — context cards", () => {
       id: "call-1",
       result: "22C",
     });
-    // c2 is unchanged
     expect(next.contextCards[1].data).toEqual({ id: "call-2" });
   });
 
@@ -324,7 +318,7 @@ describe("reducer — context cards", () => {
       type: "UPDATE_CONTEXT_CARD",
       payload: { callId: "nonexistent", data: { result: "x" } },
     });
-    expect(next).toBe(s); // same reference = no change
+    expect(next).toBe(s);
   });
 
   it("UPDATE_CONTEXT_CARD upserts an orphan result as a new card when a tool is provided", () => {
@@ -338,14 +332,12 @@ describe("reducer — context cards", () => {
         data: { result: "headline" },
       },
     });
-    // The orphan result surfaces as its own card rather than being dropped.
     expect(next.contextCards).toHaveLength(2);
     expect(next.contextCards[1]).toMatchObject({
       tool: "giap__news",
       callId: "orphan",
       data: { result: "headline" },
     });
-    // The pre-existing card is untouched.
     expect(next.contextCards[0]).toBe(c);
   });
 
@@ -373,10 +365,7 @@ describe("reducer — immutability", () => {
   });
 });
 
-// The shell knows which port its own sidecar bound; a persisted URL is at best
-// stale. This matters for the upgrade path: anyone who hit the double-spawn bug
-// has http://127.0.0.1:4001 saved here, and honouring it would keep the fixed
-// build pointed at a port nothing is listening on.
+// The shell knows which port its sidecar bound; a persisted URL is at best stale.
 describe("buildInitialState server URL precedence", () => {
   it("prefers the shell's injected URL over a stored one in the desktop app", () => {
     vi.mocked(isDesktopShell).mockReturnValue(true);

@@ -1,11 +1,6 @@
 /**
- * Q2-26 verification — confirms the browser fallback's recordWithVad()
- * fires the transcribe request the moment silence starts, overlapping it
- * with the rest of the silence-confirmation wait, instead of waiting for
- * confirmation (silenceTimeoutMs) before starting it. Also confirms:
- *   - exactly one transcribe call (speculative result reused by runPipeline)
- *   - chat/stream fires before silence confirmation (speculative LLM overlap)
- *   - TTFT console log emitted with "speculative" marker
+ * Browser fallback's recordWithVad(): transcribe fires when silence starts, overlapping the
+ * confirmation wait; its result and the speculative chat/stream are reused, not refetched.
  */
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
@@ -42,7 +37,7 @@ async function setupRoutes(
   await page.route("**/api/v1/settings", (r) => r.fulfill({ json: MOCK_SETTINGS }));
   await page.route("**/api/v1/tts", (r) => r.fulfill({ status: 503, json: { error: "off" } }));
 
-  // Chat stream mock — returns one text token so TTFT console.info fires
+  // One text token, so the TTFT console.info fires.
   await page.route("**/api/v1/chat/stream", (r) => {
     onChatStream();
     return r.fulfill({
@@ -116,10 +111,7 @@ test.describe("Q2-26 — browser fallback speculative overlap", () => {
     const silenceStart = Date.now();
     await page.evaluate(() => (window as unknown as { __setMicGain: (v: number) => void }).__setMicGain(0));
 
-    // Give the pipeline time to fully resolve (silence confirmation + mocked
-    // chat/TTS), then check what happened. The transcript renders in both the
-    // live-transcript line and the chat bubble — strict mode resolves 2
-    // elements, and we only care that it appeared.
+    // .first(): the transcript shows in both the live line and the chat bubble (strict mode).
     await expect(page.getByText("hello goose").first()).toBeVisible({ timeout: 5_000 });
 
     // ── ASR speculation assertions ─────────────────────────────────────────
@@ -130,9 +122,7 @@ test.describe("Q2-26 — browser fallback speculative overlap", () => {
     expect(asrFireDelay, "transcribe must fire near silence onset, not after the confirmation wait").toBeLessThan(SILENCE_TIMEOUT_MS - 150);
 
     // ── LLM speculation assertions ─────────────────────────────────────────
-    // The speculative LLM fires in the browser when ASR resolves (mid-window).
-    // The chat/stream mock captures the timestamp, which should be well before
-    // the full silence-confirmation window closes.
+    // The speculative LLM fires when ASR resolves, well inside the confirmation window.
     expect(chatStreamTimestamps, "exactly one chat/stream call").toHaveLength(1);
 
     const llmFireDelay = chatStreamTimestamps[0] - silenceStart;

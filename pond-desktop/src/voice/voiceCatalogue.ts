@@ -1,13 +1,6 @@
 /**
- * Display metadata for Kokoro voices, derived from the voice id.
- *
- * Kokoro names every voice `<lang><gender>_<name>` — `af_heart` is American
- * Female "Heart", `bm_george` is British Male "George". That means the picker
- * does not need a hand-maintained table of 50-odd voices that drifts every time
- * the model repo adds one: the id already says everything the UI shows.
- *
- * An unrecognised prefix degrades to the raw id rather than being hidden, so a
- * newly shipped voice is still selectable before anyone updates this file.
+ * Kokoro voice display metadata, derived from the `<lang><gender>_<name>` id (`af_heart`).
+ * An unknown prefix degrades to the raw id, so a new voice stays selectable.
  */
 
 /** Quality tiers, in the order the UI should offer them. */
@@ -46,18 +39,9 @@ export const VOICE_QUALITY_TIERS = [
 
 export type VoiceQuality = (typeof VOICE_QUALITY_TIERS)[number]["value"];
 
-/** The tier shipped by default. */
 export const DEFAULT_QUALITY: VoiceQuality = "q8";
 
-/**
- * The tier first-run setup picks: the smallest one.
- *
- * Onboarding is the worst moment to spend 92 MB — the household is waiting to
- * hear the thing speak for the first time, on whatever connection they have.
- * Compact is 86 MB and sounds close enough to judge a voice by; the Models
- * page then says plainly whether a bigger tier fits this device, which is a
- * decision worth making once the pond is actually running.
- */
+/** First-run tier: the smallest (Compact); the Models page can suggest a bigger one later. */
 export const ONBOARDING_QUALITY: VoiceQuality = "q8f16";
 /** The voice shipped by default — Kokoro's own reference voice. */
 export const DEFAULT_VOICE = "af_heart";
@@ -119,11 +103,7 @@ export function describeVoice(id: string): VoiceInfo {
   return { id, name: titleCase(rest), language, gender, group: `${language} · ${gender}` };
 }
 
-/**
- * Group voices for a `<select>`, preserving a sensible order: English first
- * (the pond speaks English), then everything else alphabetically, with "Other"
- * last so unrecognised ids never bury the real choices.
- */
+/** Group voices for a `<select>`: English first, then alphabetical, "Other" last. */
 export function groupVoices(ids: string[]): { group: string; voices: VoiceInfo[] }[] {
   const groups = new Map<string, VoiceInfo[]>();
   for (const info of ids.map(describeVoice)) {
@@ -148,16 +128,8 @@ export function groupVoices(ids: string[]): { group: string; voices: VoiceInfo[]
 }
 
 /**
- * The catalogue title for a voice: `af_heart` → `Af_Heart`.
- *
- * Keeps the accent/gender prefix visible — which is information, not noise, in
- * a list of fifty voices — while reading as a name rather than a filename. The
- * picker uses the shorter `describeVoice().name` ("Heart") because it groups by
- * accent already, so the prefix would be said twice.
- *
- * Derived rather than stored: `ModelRecord.name` is the id the engine resolves
- * `<name>.bin` from and must stay lowercase, so the title cannot simply be the
- * name field.
+ * Catalogue title, `af_heart` → `Af_Heart`, keeping the prefix the picker drops. Derived, since
+ * `ModelRecord.name` must stay the lowercase id the engine loads `<name>.bin` from.
  */
 export function voiceTitle(id: string): string {
   return id
@@ -168,18 +140,8 @@ export function voiceTitle(id: string): string {
 
 
 /**
- * Overall grades, verbatim from Kokoro's own `VOICES.md`.
- *
- * The grade estimates the quality *and quantity* of a voice's training data,
- * and it is the single most useful thing the model page knows that a name and
- * an accent cannot tell you — `af_heart` at **A** and `am_adam` at **F+** are
- * the same size download and sound nothing alike in fidelity.
- *
- * Most pickers hide this. Showing it is the difference between choosing a
- * voice and guessing at one.
- *
- * English only: those are the voices the catalogue seeds. An unlisted voice
- * simply has no grade shown rather than a fabricated one.
+ * Overall grades, verbatim from Kokoro's `VOICES.md` (training-data quality and quantity).
+ * English only, the voices the catalogue seeds; an unlisted voice shows no grade.
  */
 const VOICE_GRADES: Record<string, string> = {
   // American English — female
@@ -212,11 +174,7 @@ export function noteFor(id: string): string | null {
   return VOICE_NOTES[id] ?? null;
 }
 
-/**
- * Rank a grade for sorting: A before F, so the picker leads with the voices
- * worth hearing first. Ungraded voices sort last rather than pretending to a
- * middle position they were never given.
- */
+/** Sort key: A before F, ungraded voices last. */
 export function gradeRank(id: string): number {
   const g = VOICE_GRADES[id];
   if (!g) return 99;
@@ -225,15 +183,7 @@ export function gradeRank(id: string): number {
   return letter + modifier;
 }
 
-/**
- * What the pond says while you are choosing how it sounds.
- *
- * A voice is a thing you live with, and one sentence on repeat tells you very
- * little about it — you stop hearing it by the third play. These are ordinary
- * lines this assistant actually says, varied in length, rhythm and ending, so
- * a few plays cover statement, number, time and a soft close. Every one is
- * true to what the product does; none of them is a pangram or a demo phrase.
- */
+/** Preview lines, varied so a few plays cover statement, number, time and a soft close. */
 export const PREVIEW_STATEMENTS: string[] = [
   "Your four o'clock moved to Thursday. I've left the morning open.",
   "It's sixty-eight inside, and clear until about four.",
@@ -244,12 +194,7 @@ export const PREVIEW_STATEMENTS: string[] = [
   "I live here on your shelf, I think on my own, and nothing you say to me leaves this room.",
 ];
 
-/**
- * The next statement to speak, given how many have already played.
- *
- * Cycles rather than randomising: comparing two voices is only fair if they
- * say the same thing, and a random line makes every comparison a new one.
- */
+/** Cycles, not random: comparing two voices is only fair if they say the same line. */
 export function statementAt(playCount: number): string {
   return PREVIEW_STATEMENTS[playCount % PREVIEW_STATEMENTS.length];
 }
@@ -269,24 +214,12 @@ export function clampPace(pace: number): number {
   return Math.min(MAX_PACE, Math.max(MIN_PACE, pace));
 }
 
-/**
- * Roughly what a tier costs resident: the weights plus ONNX Runtime's arena.
- *
- * The arena is not a fixed number, so this is deliberately generous — the
- * point is to stop the UI recommending a tier that will fight the language
- * model for memory, and being optimistic there is the expensive mistake.
- */
+/** Weights plus ONNX Runtime's arena; overestimates on purpose so the LLM isn't starved. */
 export function tierCostMb(value: string): number {
   return Math.round(describeQuality(value).sizeMb * 1.6);
 }
 
-/**
- * The best tier that fits in `availableMb`, or the default when nothing is
- * known about the device.
- *
- * Tiers are declared smallest-benefit-first, so this walks them by size rather
- * than by list order.
- */
+/** Largest tier that fits `availableMb` (by size, not list order); the default when unknown. */
 export function recommendedQuality(availableMb: number | null): VoiceQuality {
   if (availableMb == null || availableMb <= 0) return DEFAULT_QUALITY;
   const affordable = [...VOICE_QUALITY_TIERS]
@@ -295,15 +228,7 @@ export function recommendedQuality(availableMb: number | null): VoiceQuality {
   return (affordable?.value ?? DEFAULT_QUALITY) as VoiceQuality;
 }
 
-/**
- * One honest sentence about whether to move off the default.
- *
- * A tier is not a quality slider you should max out: precision mainly shows up
- * as fewer artefacts on long sentences, and it is paid for in memory the
- * language model also wants. So the advice names the trade rather than
- * recommending "higher is better", and it says nothing at all when the current
- * tier is already the right one.
- */
+/** One sentence on whether to change tier, naming the memory trade, never "higher is better". */
 export function qualityAdvice(current: string, availableMb: number | null): string {
   const now = describeQuality(current);
   const best = describeQuality(recommendedQuality(availableMb));

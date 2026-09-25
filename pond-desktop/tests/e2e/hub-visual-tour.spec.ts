@@ -1,8 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
 
-/** Tour by clicking the IconRail then drilling into Settings sub-rows.
- *  Reload is avoided because addInitScript would reset the route. */
+/** Toured by clicking, not reloading: addInitScript would reset the route on reload. */
 const TOP_TOUR: Array<{ rail: string; label: string; check: string }> = [
   { rail: "Home",     label: "Home",          check: ".dash" },
   { rail: "Goose",    label: "Chat",          check: ".chat2" },
@@ -63,7 +62,6 @@ test("Hub visual tour — light theme", async ({ page }) => {
     results.push({ label: "Notifications", ok: false, note: String(e).slice(0, 200) });
   }
 
-  // Settings sub-tour: navigate to Settings then click each row
   await page.getByRole("button", { name: "Settings", exact: true }).first().click();
   await expect(page.locator(".set")).toBeVisible({ timeout: 4_000 });
   for (const { row, label } of SETTINGS_TOUR) {
@@ -85,7 +83,6 @@ test("Hub visual tour — light theme", async ({ page }) => {
   // eslint-disable-next-line no-console
   console.log("TOUR_RESULTS=" + JSON.stringify(results));
 
-  // Console-error capture
   const errs: string[] = [];
   page.on("console", (msg) => {
     if (msg.type() === "error") errs.push(msg.text());
@@ -197,7 +194,6 @@ test("Hub interaction smoke — tile toggle + routine run + bell shortcut", asyn
   await page.goto("/");
   await expect(page.locator(".dash")).toBeVisible({ timeout: 10_000 });
 
-  // First favourite light tile — capture state before/after click
   const firstTile = page.locator(".dtile").first();
   const beforeStatus = await firstTile.locator(".dtile__status, .dtile__bottom").innerText().catch(() => "n/a");
   await firstTile.click();
@@ -215,8 +211,6 @@ test("Hub interaction smoke — tile toggle + routine run + bell shortcut", asyn
     await page.screenshot({ path: "/tmp/hub-tour/interact_notifications.png" });
   }
 
-  // Routine run button — navigate via rail click (addInitScript would reset
-  // a localStorage-set route on reload)
   await page.getByRole("button", { name: "Routines", exact: true }).first().click();
   await expect(page.locator(".rt")).toBeVisible();
   const runBtn = page.locator(".rt-card__run").first();

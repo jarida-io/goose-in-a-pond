@@ -1,12 +1,4 @@
-/**
- * Phase 8 wave 3 — Privacy + Account sub-screen real-data wiring
- *
- * Tests:
- * 1. Privacy screen loads toggles from api.getSettings() and shows session count
- * 2. Toggling a privacy switch calls api.updateSettings() with the correct field
- * 3. Account screen loads user name + home name from api.getSettings()
- * 4. Sign-out button clears the session token
- */
+/** Privacy and Account sub-screens wired to getSettings/updateSettings, plus sign-out. */
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
@@ -76,7 +68,6 @@ async function setupRoutes(
     r.fulfill({ json: { onboarded: false, current_step: "Welcome", steps_completed: 1, total_steps: 10 } }),
   );
 
-  // Settings — GET and PUT
   await page.route("**/api/v1/settings", async (r) => {
     if (r.request().method() === "PUT") {
       const body = r.request().postDataJSON() as Record<string, unknown>;
@@ -175,19 +166,15 @@ test.describe("Hub — Privacy sub-screen wiring", () => {
     await setupRoutes(page);
     await goToPrivacyScreen(page);
 
-    // Hero card is visible
     await expect(page.getByText("Everything runs on-device")).toBeVisible({ timeout: 5_000 });
 
-    // Sensor toggles are rendered
     await expect(page.getByText("Microphone")).toBeVisible({ timeout: 3_000 });
     await expect(page.getByText("Cameras")).toBeVisible({ timeout: 3_000 });
     await expect(page.getByText("Cloud fallback")).toBeVisible({ timeout: 3_000 });
     await expect(page.getByText("Anonymous diagnostics")).toBeVisible({ timeout: 3_000 });
 
-    // Session count from MOCK_SESSIONS_3 (3 sessions)
     await expect(page.getByText(/3 sessions?/i)).toBeVisible({ timeout: 5_000 });
 
-    // Clear button is present and enabled (3 sessions exist)
     const clearBtn = page.getByRole("button", { name: /clear all conversation history/i });
     await expect(clearBtn).toBeVisible({ timeout: 3_000 });
     await expect(clearBtn).toBeEnabled();
@@ -201,15 +188,13 @@ test.describe("Hub — Privacy sub-screen wiring", () => {
     });
     await goToPrivacyScreen(page);
 
-    // Wait for toggles to mount
     await expect(page.getByText("Cloud fallback")).toBeVisible({ timeout: 5_000 });
 
-    // Find the Cloud fallback toggle (data-on=false in MOCK_SETTINGS)
+    // Third toggle: Cloud fallback, off in MOCK_SETTINGS.
     const cloudToggle = page.locator(".htoggle").nth(2);
     await cloudToggle.click();
     await page.waitForTimeout(500);
 
-    // The PUT body should include cloud_fallback_enabled: true
     expect(lastUpdate).toMatchObject({ cloud_fallback_enabled: true });
   });
 });
@@ -222,15 +207,12 @@ test.describe("Hub — Account sub-screen wiring", () => {
     // Hero name populated from user_name
     await expect(page.getByTestId("acct-hero-name")).toContainText("Jerry", { timeout: 5_000 });
 
-    // Profile rows visible — use exact label text to avoid substring matches
     await expect(page.getByText("Name", { exact: true }).first()).toBeVisible({ timeout: 3_000 });
     await expect(page.getByText("Home name", { exact: true })).toBeVisible({ timeout: 3_000 });
     await expect(page.getByText("Time zone", { exact: true })).toBeVisible({ timeout: 3_000 });
 
-    // About section
     await expect(page.getByText("Goose In A Pond")).toBeVisible({ timeout: 3_000 });
 
-    // Sign out button
     await expect(page.getByTestId("signout-btn")).toBeVisible({ timeout: 3_000 });
   });
 
@@ -238,13 +220,10 @@ test.describe("Hub — Account sub-screen wiring", () => {
     await setupRoutes(page);
     await goToAccountScreen(page);
 
-    // Confirm sign-out button is present
     const signOutBtn = page.getByTestId("signout-btn");
     await expect(signOutBtn).toBeVisible({ timeout: 5_000 });
 
-    // Intercept reload — page.reload() would cause navigation; in Playwright we
-    // verify the click does not throw and the button is not stuck in an error state.
-    // The actual dispatch is tested by confirming no flash-error appears.
+    // Sign-out reloads the page; the check is only that no error flash appears.
     let reloadFired = false;
     await page.exposeFunction("__onReload", () => { reloadFired = true; });
     await page.addInitScript(() => {
@@ -257,10 +236,7 @@ test.describe("Hub — Account sub-screen wiring", () => {
 
     await signOutBtn.click();
 
-    // Either the page reloads (navigation away) or the button shows "Signing out..."
-    // Either outcome is correct — just confirm no error flash appeared.
     const errorFlash = page.locator('[role="status"]').filter({ hasText: /failed/i });
-    // Wait briefly then check
     await page.waitForTimeout(400);
     await expect(errorFlash).not.toBeVisible();
   });
@@ -268,8 +244,7 @@ test.describe("Hub — Account sub-screen wiring", () => {
   test("Start over calls resetOnboarding and returns to the wizard", async ({ page }) => {
     await setupRoutes(page);
 
-    // Observe the reset call. Registered AFTER setupRoutes so it takes
-    // precedence over the default reset mock (last-registered wins).
+    // Registered after setupRoutes, so it overrides the default reset mock.
     let resetHit = false;
     await page.route("**/api/v1/onboard/reset", (r) => {
       resetHit = true;
@@ -282,10 +257,9 @@ test.describe("Hub — Account sub-screen wiring", () => {
     await expect(restartBtn).toBeVisible({ timeout: 5_000 });
     await restartBtn.click();
 
-    // The reset endpoint was called…
     await expect.poll(() => resetHit, { timeout: 5_000 }).toBe(true);
 
-    // …and the onboarding wizard is shown (SET_NEEDS_ONBOARDING → OnboardingWizard).
+    // SET_NEEDS_ONBOARDING shows the OnboardingWizard.
     await expect(page.getByText("First-time setup")).toBeVisible({ timeout: 5_000 });
   });
 });
