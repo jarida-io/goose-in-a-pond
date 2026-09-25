@@ -1,7 +1,5 @@
-//! Live synthesis against real Kokoro weights; `#[ignore]` like every hardware-dependent test.
-//! Run `KOKORO_DIR=<dir> cargo test -p pond-adapters-kokoro -- --ignored --nocapture`, where
-//! `<dir>` holds `model_quantized.onnx`, `tokenizer.json` and `voices/af_heart.bin`. This is
-//! also the Stage 0 bench: it prints the native `ort` real-time factor the browser lab cannot.
+//! Live Kokoro synthesis, `#[ignore]`d; also benches native `ort` RTF. `KOKORO_DIR` must hold
+//! the model, `tokenizer.json` and `voices/af_heart.bin`; run with `-- --ignored --nocapture`.
 
 use pond_adapters_kokoro::{engine::duration_secs, tokenizer, Engine, StyleTable, Vocab};
 use std::path::{Path, PathBuf};
@@ -12,9 +10,8 @@ fn model_dir() -> Option<PathBuf> {
     dir.join("tokenizer.json").exists().then_some(dir)
 }
 
-/// Intra-op threads for the session under test. Defaults to what `pond-server` actually uses,
-/// never a literal: a bench measuring a configuration the pond never runs answers the wrong
-/// question. `KOKORO_THREADS` overrides it so the choice can still be swept.
+/// Intra-op threads: `pond-server`'s own default, so the bench measures what ships;
+/// `KOKORO_THREADS` overrides it for sweeps.
 fn intra_threads() -> Option<usize> {
     match std::env::var("KOKORO_THREADS") {
         Ok(s) => s.parse().ok(),
@@ -22,10 +19,8 @@ fn intra_threads() -> Option<usize> {
     }
 }
 
-/// Weights file to load from `KOKORO_DIR`. Defaults to the tier this host would actually start
-/// on, so the printed RTF is the household's number. `KOKORO_MODEL` overrides it: file size does
-/// not predict speed (q4f16 is larger than q8 yet far faster on aarch64), so tiers must be
-/// comparable on one board.
+/// Weights file: this host's default tier unless `KOKORO_MODEL` overrides it, since file size
+/// doesn't predict speed (q4f16 is larger than q8 yet far faster on aarch64).
 fn model_file() -> String {
     std::env::var("KOKORO_MODEL").unwrap_or_else(|_| {
         pond_adapters_kokoro::model_filename(pond_adapters_kokoro::host_default_quality())
@@ -33,9 +28,7 @@ fn model_file() -> String {
     })
 }
 
-/// Any installed voice that is not the default. Never name a second voice outright:
-/// `voices_to_fetch` guarantees only `DEFAULT_VOICE`, and which others exist depends on what
-/// the household has picked.
+/// Any installed non-default voice; only `DEFAULT_VOICE` is guaranteed to be installed.
 fn second_voice(voices: &Path) -> Option<String> {
     let mut names: Vec<String> = std::fs::read_dir(voices)
         .ok()?
@@ -50,7 +43,6 @@ fn second_voice(voices: &Path) -> Option<String> {
     names.into_iter().next()
 }
 
-/// End-to-end: text in, non-trivial 24 kHz audio out.
 #[test]
 #[ignore = "needs Kokoro weights; set KOKORO_DIR"]
 fn synthesizes_real_audio() {
@@ -100,8 +92,6 @@ fn synthesizes_real_audio() {
     );
 }
 
-/// Pace has to change the duration in the obvious direction, or the settings
-/// slider is decorative.
 #[test]
 #[ignore = "needs Kokoro weights; set KOKORO_DIR"]
 fn pace_changes_duration() {
@@ -125,8 +115,6 @@ fn pace_changes_duration() {
     assert!(fast < normal, "1.5x should be shorter than 1.0x");
 }
 
-/// Two voices must actually differ — a style table that silently fails to
-/// apply would still produce valid-sounding audio in one voice.
 #[test]
 #[ignore = "needs Kokoro weights + a second voice; set KOKORO_DIR"]
 fn different_voices_produce_different_audio() {
@@ -135,8 +123,7 @@ fn different_voices_produce_different_audio() {
     };
     let voices = dir.join("voices");
     let Some(other) = second_voice(&voices) else {
-        // One voice installed is a legitimate state — it is what a fresh pond
-        // has. Nothing to compare, so there is nothing to assert.
+        // A fresh pond has only one voice; nothing to compare.
         println!(
             "only {} installed; skipping",
             pond_adapters_kokoro::DEFAULT_VOICE
@@ -173,8 +160,6 @@ fn different_voices_produce_different_audio() {
     );
 }
 
-/// The phonemizer over the corpus that matters: what the pond actually says.
-/// This is the R2 canary and needs no model, only espeak.
 #[test]
 #[ignore = "needs KOKORO_DIR for the real vocab"]
 fn ordinary_text_loses_no_phonemes() {
@@ -207,15 +192,7 @@ fn ordinary_text_loses_no_phonemes() {
     );
 }
 
-/// Every mark this crate preserves has to be in the model's alphabet.
-///
-/// `PROSODY_PUNCT` is asserted to be a subset of `tokenizer.json`, and this is
-/// the only place that claim can be checked: the unit tests build their vocab
-/// by adding `PROSODY_PUNCT` to it, so asking them the question answers itself.
-///
-/// If a mark is not in the table, `encode` drops it silently and the drop-count
-/// canary — which exists to mean "espeak emitted something this model was never
-/// trained to read" — starts firing on ordinary punctuated English instead.
+/// Checked here because the unit tests' vocab includes `PROSODY_PUNCT` by construction.
 #[test]
 #[ignore = "needs Kokoro weights; set KOKORO_DIR"]
 fn every_preserved_mark_is_in_the_real_vocab() {
@@ -224,9 +201,7 @@ fn every_preserved_mark_is_in_the_real_vocab() {
     };
     let vocab = Vocab::load(&dir.join("tokenizer.json")).expect("vocab");
 
-    // Deliberately spelled out rather than read from `PROSODY_PUNCT`. The point
-    // is to pin the nine marks against the real table; importing the list would
-    // make a future edit to it silently redefine what is being checked.
+    // Spelled out, not imported, so editing `PROSODY_PUNCT` can't redefine what is checked.
     for c in ['.', ',', '!', '?', ';', ':', '"', '(', ')'] {
         assert!(
             vocab.contains(c),
@@ -234,20 +209,11 @@ fn every_preserved_mark_is_in_the_real_vocab() {
         );
     }
 
-    // And the one deliberately left out: currency is spelled to words by
-    // `normalize_for_speech` long before this point, so `$` being in the vocab
-    // is not a reason to preserve it. If this ever fails, that reasoning moved.
     let (_, _, dropped) = vocab.encode(",.!?;:\"()");
     assert_eq!(dropped, 0, "a preserved mark was dropped by the real vocab");
 }
 
-/// Punctuation has to reach the model and change the sound, or the marks are
-/// decorative and the fix that kept them did nothing.
-///
-/// The measurable claim is duration. Kokoro's vocab carries `,`, `.`, `?` and
-/// the rest because it was trained to read them as prosody, and prosody is
-/// mostly pause: the same words with punctuation should take *longer* to say
-/// than without. If they take the same time, the marks never arrived.
+/// Measured as duration: prosody is mostly pause, so the marked text must take longer to say.
 #[test]
 #[ignore = "needs Kokoro weights; set KOKORO_DIR"]
 fn punctuation_changes_the_audio() {
@@ -259,7 +225,6 @@ fn punctuation_changes_the_audio() {
     let style = StyleTable::load(&dir.join("voices"), "af_heart").expect("voice");
     let mut engine = Engine::load(&dir.join(model_file()), intra_threads()).expect("engine");
 
-    // Same words, same order. Only the marks differ.
     const BARE: &str = "Hello world Are you sure Yes really";
     const MARKED: &str = "Hello, world! Are you sure? Yes; really.";
 

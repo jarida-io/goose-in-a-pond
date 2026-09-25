@@ -1,7 +1,5 @@
-//! [`MatterDeviceControl`] — the [`DeviceControlPort`] over a live controller connection. Every
-//! verb is one `control` op; cluster, endpoint and unit are the controller's business. The outcome
-//! is built from the controller's `applied` patch, never from the request: a device that rejected
-//! a write must not be reported to the user as having taken it.
+//! [`MatterDeviceControl`], the [`DeviceControlPort`] over the controller. Outcomes come from
+//! the controller's `applied` patch, never the request: a rejected write must not look taken.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -17,10 +15,7 @@ use tokio::sync::RwLock;
 use crate::client::{code_of, MatterClient};
 use crate::protocol::{describe, ControlResult, DescribeResult, StateResult};
 
-/// A swappable handle to the live client. The reconnect supervisor replaces the
-/// inner `Arc<MatterClient>` after re-establishing the WebSocket, so the control
-/// port keeps working across a controller restart without being rebuilt.
-/// Reads clone the current `Arc` and drop the lock immediately.
+/// Live client, swapped in place on reconnect; readers clone the `Arc` and drop the lock at once.
 pub type SharedMatterClient = Arc<RwLock<Arc<MatterClient>>>;
 
 pub struct MatterDeviceControl {
@@ -34,16 +29,12 @@ impl MatterDeviceControl {
         }
     }
 
-    /// The swappable client handle, so the reconnect supervisor can replace the
-    /// underlying connection in place after a drop.
+    /// The handle the reconnect supervisor swaps a new connection into.
     pub fn client_handle(&self) -> SharedMatterClient {
         self.client.clone()
     }
 
-    /// Drive one verb and report what the device became.
-    ///
-    /// The only place a device command is logged, and it is logged whichever way it goes: silence
-    /// on success leaves no way to tell "never sent" from "the device ignored it".
+    /// Drive one verb; logged on success too, or "never sent" and "ignored" look the same.
     async fn control(
         &self,
         device_id: &str,

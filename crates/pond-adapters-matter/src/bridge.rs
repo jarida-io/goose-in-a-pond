@@ -1,7 +1,5 @@
-//! The Matter bridge task: keeps GIAP's view of the fabric current. On start it sends `subscribe`,
-//! syncs every commissioned device into the [`DeviceRegistry`] under `matter-<node_id>` ids, and
-//! turns each `reading` event into a [`BusEvent::Sensor`]. [`run_matter_supervisor`] wraps it in a
-//! reconnect loop that re-runs local controller setup after [`RESPAWN_AFTER`] consecutive failures.
+//! Matter bridge: syncs the fabric into the [`DeviceRegistry`] as `matter-<node_id>` devices and
+//! turns `reading` events into [`BusEvent::Sensor`]s; [`run_matter_supervisor`] reconnects it.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -22,56 +20,38 @@ use crate::protocol::{
 };
 use crate::server_setup::{revive_local_controller, Revival, SharedServerChild};
 
-/// Reconnect backoff bounds. Exponential from `RECONNECT_BASE` doubling to
-/// `RECONNECT_MAX`, with equal jitter so several Ponds pointed at one restarted
-/// controller don't reconnect in lockstep.
+/// Reconnect backoff bounds; equal jitter keeps Ponds sharing a controller out of lockstep.
 const RECONNECT_BASE: Duration = Duration::from_secs(1);
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
 
-/// Consecutive reconnect failures before the supervisor stops assuming the
-/// controller is merely unreachable and tries to restart it. Three is past the
-/// blip a restarting controller causes (~3.5s of backoff) while still well
-/// inside the time a user would wait before reaching for the toggle themselves.
+/// Failures before restarting the controller: past a normal restart's blip (~3.5 s of backoff).
 const RESPAWN_AFTER: u32 = 3;
 
-/// How long a revived controller gets to start listening. Shorter than the
-/// startup budget: by the time the supervisor runs, the dependencies are already
-/// installed, so this waits on a process start rather than on an `npm ci`.
+/// Time for a revived controller to listen; shorter than startup's, as `npm ci` is already done.
 const RESPAWN_READY_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The last value published per `(device, sensor)`.
-///
-/// The bridge re-subscribes on every reconnect and the rules engine (#92) is level-based, so
-/// republishing a steady "motion = true" would re-fire every automation attached to it.
+/// Last value published per `(device, sensor)`, so a resubscribe can't re-fire level rules.
 pub(crate) type ReadingCache = HashMap<(String, String), f64>;
 
-/// Where the supervisor reconnects to, and what it needs to bring the controller
-/// back when reconnecting is not enough.
+/// Where to reconnect, and what reviving the controller needs.
 pub struct SupervisorConfig {
-    /// The controller's WebSocket URL. Also decides whether the controller is
-    /// GIAP's to restart: only a loopback URL is.
+    /// Controller WebSocket URL; only a loopback one is GIAP's to restart.
     pub url: String,
     /// GIAP's data dir — where the controller and its fabric live.
     pub data_dir: PathBuf,
-    /// The controller GIAP started, if any. A respawn replaces the dead handle
-    /// here, so the reconciler's teardown still kills the live process.
+    /// Controller GIAP started, if any; respawns replace it here so teardown kills the live one.
     pub child: SharedServerChild,
-    /// Whether the respawned controller should be asked for BLE again.
-    ///
-    /// Carried rather than re-read: a respawn that dropped the transport would leave a Pond that
-    /// pairs new devices until the first reconnect and then silently stops.
+    /// Re-request BLE on respawn, or pairing silently stops after the first reconnect.
     pub ble: bool,
 }
 
-/// Should the reconnect about to be made (1-based `attempt`) re-run controller setup first? True
-/// on the attempt following every [`RESPAWN_AFTER`] failures, so a controller that stays dead
-/// keeps being retried for the length of the outage. Pure, so the schedule tests without sleeping.
+/// Whether to re-run controller setup before 1-based `attempt`: after every [`RESPAWN_AFTER`]
+/// failures, so a controller that stays dead keeps being retried.
 fn should_respawn_controller(attempt: u32) -> bool {
     attempt > 1 && (attempt - 1).is_multiple_of(RESPAWN_AFTER)
 }
 
-/// Backoff delay for reconnect attempt `attempt` (1-based), with equal jitter.
-/// Pure so the schedule is unit-testable without sleeping.
+/// Backoff before 1-based `attempt`, with equal jitter from `rand_unit` in [0, 1].
 fn reconnect_backoff(attempt: u32, rand_unit: f64) -> Duration {
     let base = RECONNECT_BASE.as_millis() as u64;
     let cap = RECONNECT_MAX.as_millis() as u64;
@@ -97,10 +77,7 @@ fn publish_reading(reading: &WireReading, cache: &mut ReadingCache, bus: &Arc<dy
     bus.publish(BusEvent::Sensor(reading.to_reading()));
 }
 
-/// How often a device the controller can still see is touched in the registry.
-///
-/// `is_online` means `last_seen` fresher than five minutes, so an idle Matter device that sends no
-/// events reads offline unless touched. A fifth of that threshold: four ticks may be missed.
+/// Heartbeat for visible devices; `is_online` means seen within 5 min, so 4 ticks may be missed.
 const LIVENESS_TICK: Duration = Duration::from_secs(60);
 
 /// Sync one device into the registry (register if new, heartbeat if known).
@@ -113,18 +90,13 @@ async fn sync_device(
 
     match registry.get_device(&device.id).await {
         Ok(Some(existing)) => {
-            // Only for a device the controller can actually see: this runs for every device in
-            // the snapshot, offline ones included, and an unconditional heartbeat would hand
-            // each of those a fresh five minutes of looking present at every reconnect.
+            // The snapshot includes offline devices; a heartbeat would fake 5 min of presence.
             if device.is_online {
                 if let Err(e) = registry.heartbeat(&device.id).await {
                     tracing::warn!(device = %device.id, error = %e, "matter: heartbeat failed");
                 }
             }
-            // Re-derived typing has to reach devices that already exist, or it only ever applies
-            // to ones commissioned later. Guarded on a real difference because this runs on the
-            // initial sync and on every reconnect: an unconditional UPDATE would be a write per
-            // device per reconnect for a value that almost never changes.
+            // Update existing devices' typing, but only on a change: this runs every reconnect.
             if existing.device_type != device.device_type
                 || existing.capabilities != device.capabilities
             {
@@ -177,19 +149,15 @@ async fn sync_device(
     }
 }
 
-/// Run until the connection drops. `client` must be freshly connected; `events` is its stream.
-///
-/// Starts a fresh [`ReadingCache`], so the whole first `subscribe` snapshot is published. The
-/// supervisor calls [`run_matter_bridge_with_cache`] instead, to keep the cache across reconnects.
+/// Run until the connection drops; `client` must be freshly connected, `events` its stream.
+/// Starts with an empty [`ReadingCache`], unlike [`run_matter_bridge_with_cache`].
 pub async fn run_matter_bridge(
     client: Arc<MatterClient>,
     events: mpsc::Receiver<MatterEvent>,
     registry: Arc<dyn DeviceRegistry + Send + Sync>,
     bus: Arc<dyn EventBus>,
     notifier: MatterNotifier,
-    // How often to vouch for the devices the controller can still see. A parameter
-    // so the behaviour can be tested without waiting a minute for it; production
-    // passes LIVENESS_TICK.
+    // Production passes LIVENESS_TICK; a parameter so tests needn't wait a minute.
     liveness_tick: Duration,
 ) -> Result<()> {
     let mut cache = ReadingCache::new();
@@ -205,10 +173,7 @@ pub async fn run_matter_bridge(
     .await
 }
 
-/// As [`run_matter_bridge`], but the caller owns the dedupe cache.
-///
-/// The cache must outlive a single bridge run: the bridge re-subscribes on every reconnect and the
-/// rules engine is level-based, so a per-run cache is inert precisely when it matters.
+/// As [`run_matter_bridge`], with a caller-owned dedupe cache that must outlive reconnects.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_matter_bridge_with_cache(
     client: Arc<MatterClient>,
@@ -219,8 +184,7 @@ pub(crate) async fn run_matter_bridge_with_cache(
     liveness_tick: Duration,
     cache: &mut ReadingCache,
 ) -> Result<()> {
-    // Initial sync: `subscribe` returns the whole fabric AND subscribes this
-    // connection to subsequent events.
+    // `subscribe` returns the whole fabric and also streams later events here.
     let snapshot: Snapshot = serde_json::from_value(
         client
             .send("subscribe", json!({}))
@@ -237,9 +201,7 @@ pub(crate) async fn run_matter_bridge_with_cache(
         "matter: fabric synced"
     );
 
-    // Who the controller currently believes is on the fabric. Held here rather than
-    // read back from the registry because the controller is the authority on it:
-    // the registry only knows when someone last said so.
+    // Devices the controller sees; it, not the registry, is the authority on presence.
     let mut present: HashSet<String> = HashSet::new();
     for device in &snapshot.devices {
         sync_device(device, &registry, &notifier).await;
@@ -252,9 +214,7 @@ pub(crate) async fn run_matter_bridge_with_cache(
     }
 
     let mut liveness = tokio::time::interval(liveness_tick);
-    // The first tick fires immediately and everything above has just been synced;
-    // skipping a late tick rather than firing a burst of them keeps a bridge that
-    // was starved from writing one UPDATE per device per missed minute.
+    // Consume the immediate first tick (all just synced); `Delay` avoids a burst after a stall.
     liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     liveness.tick().await;
 
@@ -307,9 +267,7 @@ pub(crate) async fn run_matter_bridge_with_cache(
                         device = %device_id,
                         "matter: device removed from the fabric"
                     );
-                    // Only news if GIAP still thinks it has this device: a user deleting one
-                    // goes through the same removal, and telling them what they just did is
-                    // noise. The alert takes the name from the lookup, not the id.
+                    // Alert only if GIAP still has it: a user's own delete takes this path too.
                     present.remove(&device_id);
                     if let Ok(Some(device)) = registry.get_device(&device_id).await {
                         notifier.device_dropped(&device_id, &device.name).await;
@@ -320,9 +278,8 @@ pub(crate) async fn run_matter_bridge_with_cache(
                 if let Ok(AvailabilityEvent { device_id, online }) =
                     serde_json::from_value::<AvailabilityEvent>(payload)
                 {
-                    // A level report, repeated on the controller's tick, so most of these say
-                    // what the last one said. Log the changes, and at info: the tracing filter
-                    // admits debug only from `pond_server`, so a debug line here reaches no log.
+                    // Repeated every controller tick, so log only changes; at info, because
+                    // the tracing filter drops debug outside `pond_server`.
                     if online != present.contains(&device_id) {
                         tracing::info!(
                             target: "giap::trace",
@@ -338,9 +295,7 @@ pub(crate) async fn run_matter_bridge_with_cache(
                             tracing::warn!(device = %device_id, error = %e, "matter: heartbeat failed");
                         }
                     } else {
-                        // Stop vouching for it. Its `last_seen` then ages out on its
-                        // own, so the card turns offline without a second mechanism
-                        // that could disagree with this one.
+                        // Stop vouching; `last_seen` ages out, so no second offline mechanism.
                         present.remove(&device_id);
                     }
                 }
@@ -348,13 +303,11 @@ pub(crate) async fn run_matter_bridge_with_cache(
             _ => {}
         }
     }
-    Ok(()) // event channel closed = connection gone; caller reconnects
+    Ok(())
 }
 
-/// Run the bridge forever, reconnecting transparently when the controller connection drops.
-///
-/// Re-establishes the WebSocket with jittered backoff and swaps the fresh client into `client_cell`
-/// so the control port keeps working; see [`should_respawn_controller`]. Never returns; spawn it.
+/// Run the bridge forever, reconnecting with backoff and swapping each new client into
+/// `client_cell` so the control port keeps working. Never returns; spawn it.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_matter_supervisor(
     config: SupervisorConfig,
@@ -372,8 +325,7 @@ pub async fn run_matter_supervisor(
         ble,
     } = config;
 
-    // Owned out here, not inside the bridge: a reconnect must not re-publish a
-    // reading that has not changed. See `run_matter_bridge_with_cache`.
+    // Outlives each bridge run so a reconnect can't republish unchanged readings.
     let mut cache = ReadingCache::new();
 
     loop {
@@ -401,16 +353,11 @@ pub async fn run_matter_supervisor(
             ),
         }
 
-        // Reconnect with backoff until it succeeds; the fabric is resynced when
-        // the next run_matter_bridge subscribes.
+        // The next bridge run's `subscribe` resyncs the fabric.
         let mut attempt: u32 = 1;
         let (new_client, new_events) = loop {
-            // Enough failures in a row means the controller is probably gone
-            // rather than busy — reconnecting cannot fix that, restarting can.
             if should_respawn_controller(attempt) {
-                // The first revival attempt is also the point at which this stops
-                // looking like a blip to a person: told any earlier, a user would
-                // be notified every time the controller restarted normally.
+                // Only now is it more than a normal restart's blip, so only now tell the user.
                 notifier.controller_unreachable(&url).await;
 
                 match revive_local_controller(&data_dir, &url, &child, RESPAWN_READY_TIMEOUT, ble)
@@ -423,9 +370,7 @@ pub async fn run_matter_supervisor(
                         outcome = "restarted",
                         "matter: controller was not running; restarted it"
                     ),
-                    // Reused: the controller is up, so the fault is in the
-                    // connection and the backoff below is the right answer.
-                    // NotLocal: another host's controller, not ours to restart.
+                    // Reused: it is up, so keep backing off. NotLocal: not ours to restart.
                     Ok(Revival::Reused | Revival::NotLocal) => {}
                     Err(e) => tracing::warn!(
                         target: "giap::trace",
@@ -474,9 +419,7 @@ mod backoff_tests {
     use super::*;
     use futures::StreamExt;
 
-    /// The next event on the bus, or `None` if nothing arrives promptly. The bus
-    /// hands back a stream, so "nothing was published" is a short wait rather
-    /// than an immediate answer.
+    /// The next bus event, or `None` if nothing arrives within 100 ms.
     async fn next_event(
         stream: &mut pond_core::shared::ports::event_bus::BusStream,
     ) -> Option<BusEvent> {
@@ -493,22 +436,17 @@ mod backoff_tests {
         assert_eq!(reconnect_backoff(2, 0.0), Duration::from_secs(1)); // 2s/2
         assert_eq!(reconnect_backoff(3, 0.0), Duration::from_secs(2)); // 4s/2
 
-        // Caps at RECONNECT_MAX (30s): half = 15s regardless of attempt, and a
-        // huge attempt must not overflow.
+        // Capped at 30 s, so half is 15 s, even for an attempt that would overflow.
         assert_eq!(reconnect_backoff(20, 0.0), Duration::from_secs(15));
         assert_eq!(reconnect_backoff(u32::MAX, 0.0), Duration::from_secs(15));
 
-        // Full jitter adds up to another half; a capped attempt lands in
-        // [15s, 30s].
+        // Full jitter adds up to another half: [15 s, 30 s] once capped.
         let full = reconnect_backoff(20, 1.0);
         assert!(full >= Duration::from_secs(15) && full <= Duration::from_secs(30));
     }
 
     #[test]
     fn controller_revival_waits_for_repeated_failures_then_keeps_retrying() {
-        // A controller merely restarting is back within a couple of attempts.
-        // Reviving on those would race its own startup and, worse, treat every
-        // ordinary blip as a dead process.
         assert!(!should_respawn_controller(1));
         assert!(!should_respawn_controller(2));
         assert!(!should_respawn_controller(3));
@@ -516,8 +454,7 @@ mod backoff_tests {
         // Three failures in a row: try reviving before the fourth attempt.
         assert!(should_respawn_controller(4));
 
-        // Still dead: keep trying on the same cadence rather than giving up
-        // after one go, which would leave Matter down for the whole outage.
+        // Still dead: keep reviving on the same cadence.
         assert!(!should_respawn_controller(5));
         assert!(!should_respawn_controller(6));
         assert!(should_respawn_controller(7));
@@ -526,9 +463,6 @@ mod backoff_tests {
 
     #[tokio::test]
     async fn a_steady_reading_is_published_once_however_often_the_bridge_resubscribes() {
-        // The regression this guards: the rules engine is LEVEL-based, so a
-        // republished "motion = true" fires every automation attached to it. A
-        // reconnecting controller would do that on every reconnect.
         let bus: Arc<dyn EventBus> =
             Arc::new(pond_core::shared::services::in_process_event_bus::InProcessEventBus::new());
         let mut received = bus.subscribe();
@@ -569,9 +503,6 @@ mod backoff_tests {
 
     #[tokio::test]
     async fn two_sensors_on_one_device_do_not_shadow_each_other() {
-        // Keyed by (device, sensor) rather than device: an air purifier reports
-        // several, and a device-keyed cache would let the first one seen
-        // suppress all the rest.
         let bus: Arc<dyn EventBus> =
             Arc::new(pond_core::shared::services::in_process_event_bus::InProcessEventBus::new());
         let mut received = bus.subscribe();

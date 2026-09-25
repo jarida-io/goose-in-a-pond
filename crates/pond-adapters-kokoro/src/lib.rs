@@ -1,7 +1,5 @@
-//! Kokoro-82M TTS adapter, GIAP's voice: [`VoiceOutput`] over `ort`, text to espeak IPA to
-//! vocab ids to f32 at 24 kHz. Nothing is loaded at construction: the ~92 MB session is paid
-//! for on first `speak` and returned by [`KokoroOutput::unload`], which is why `new()` cannot
-//! fail on a bad model path and `speak()` can. Voice (522 KB table) and pace never reload it.
+//! Kokoro-82M TTS as a [`VoiceOutput`]: text -> espeak IPA -> vocab ids -> 24 kHz f32 via `ort`.
+//! The ~92 MB session loads on first `speak`, so a bad model path fails there, not in `new()`.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -22,12 +20,10 @@ pub use engine::{Engine, SAMPLE_RATE};
 pub use tokenizer::Vocab;
 pub use voices::StyleTable;
 
-/// Default voice. `af_heart` is the model's reference voice and the one its
-/// published samples use.
+/// The model's reference voice, used in its published samples.
 pub const DEFAULT_VOICE: &str = "af_heart";
-/// Default pace multiplier.
 pub const DEFAULT_SPEED: f32 = 1.0;
-/// Pace bounds. Below 0.5 the prosody smears; above 2.0 it clips words.
+/// Below 0.5 the prosody smears; above 2.0 it clips words.
 pub const MIN_SPEED: f32 = 0.5;
 pub const MAX_SPEED: f32 = 2.0;
 
@@ -49,17 +45,12 @@ pub struct KokoroConfig {
 /// Env var that espeak-rs consults to find the bundled `espeak-ng-data` dir.
 const ESPEAKNG_DATA_DIRECTORY: &str = "PIPER_ESPEAKNG_DATA_DIRECTORY";
 
-/// How long to wait for the ONNX session before calling it broken.
-///
-/// Generous — a cold 92 MB load off slow storage is seconds, not instant — but
-/// finite, because the failure mode being guarded is an infinite block.
+/// ONNX session load deadline: a cold load takes seconds, but a broken ORT blocks forever.
 const LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Kokoro as a `VoiceOutput`.
 pub struct KokoroOutput {
     config: KokoroConfig,
-    /// The active `.onnx`. Separate from `config` because the quality tier is
-    /// changeable at runtime and must move in lockstep with `engine`.
+    /// The active `.onnx`, which changes at runtime in lockstep with `engine`.
     model_path: RwLock<PathBuf>,
     vocab: Vocab,
     /// Loaded lazily on first synthesis; `None` means "not paying for it yet".
@@ -82,10 +73,7 @@ pub struct KokoroOutput {
 }
 
 impl KokoroOutput {
-    /// Prepare the adapter. Reads the vocab; does **not** load the model.
-    ///
-    /// Fails only on things that would make every later utterance fail anyway
-    /// — a missing or malformed `tokenizer.json`, or no audio device.
+    /// Reads the vocab but not the model; fails only on a bad `tokenizer.json` or no audio device.
     pub fn new(config: KokoroConfig) -> Result<Self> {
         if let Some(dir) = &config.espeak_data {
             std::env::set_var(ESPEAKNG_DATA_DIRECTORY, dir);
@@ -113,8 +101,7 @@ impl KokoroOutput {
         })
     }
 
-    /// Attach a live playback-amplitude reporter (the `speaking` state's
-    /// analog of mic RMS during `wait`/`recording`).
+    /// Attach a live playback-amplitude reporter, the `speaking` analog of mic RMS.
     pub fn with_audio_level_sink(mut self, sink: Arc<ThrottledAudioLevelSink>) -> Self {
         self.audio_level_sink = Some(sink);
         self
@@ -122,8 +109,7 @@ impl KokoroOutput {
 
     /// Select the voice. Swaps a 522 KB table; the session is untouched.
     pub async fn set_voice(&self, name: &str) -> Result<()> {
-        // Validate before committing, so a bad name leaves the current voice
-        // in place rather than muting the pond.
+        // Load first so a bad name keeps the current voice instead of muting the pond.
         let table = StyleTable::load(&self.config.voices_dir, name)?;
         *self.style.write().await = Some(Arc::new(table));
         *self.voice_name.write().await = name.to_string();
@@ -131,13 +117,11 @@ impl KokoroOutput {
         Ok(())
     }
 
-    /// The currently selected voice name.
     pub async fn voice(&self) -> String {
         self.voice_name.read().await.clone()
     }
 
-    /// Set the pace multiplier, clamped to [`MIN_SPEED`]..=[`MAX_SPEED`].
-    /// Returns the value actually applied.
+    /// Clamps to [`MIN_SPEED`]..=[`MAX_SPEED`] and returns the value applied.
     pub fn set_speed(&self, speed: f32) -> f32 {
         let clamped = speed.clamp(MIN_SPEED, MAX_SPEED);
         self.speed_bits
@@ -149,27 +133,23 @@ impl KokoroOutput {
         f32::from_bits(self.speed_bits.load(Ordering::Relaxed) as u32)
     }
 
-    /// Voices installed on disk.
     pub fn installed_voices(&self) -> Vec<String> {
         voices::installed(&self.config.voices_dir)
     }
 
-    /// Whether the ONNX session is currently resident.
     pub async fn is_loaded(&self) -> bool {
         self.engine.read().await.is_some()
     }
 
-    /// Drop the ONNX session, returning its memory. The next utterance
-    /// reloads it.
+    /// Drop the ONNX session to free its memory; the next utterance reloads it.
     pub async fn unload(&self) {
         if self.engine.write().await.take().is_some() {
             tracing::info!("Kokoro session unloaded");
         }
     }
 
-    /// Swap in a different quality tier (a different `.onnx` file). Drops the current session
-    /// so the next utterance loads the new weights. Holding the engine lock for the whole swap
-    /// is what makes it atomic: no synthesis can observe a path that disagrees with the session.
+    /// Switch quality tier (`.onnx` file). Holds the engine lock for the whole swap so no synthesis
+    /// sees a path that disagrees with the session.
     pub async fn set_model(&self, path: PathBuf) -> Result<()> {
         if !path.exists() {
             return Err(anyhow::anyhow!(
@@ -184,20 +164,15 @@ impl KokoroOutput {
         Ok(())
     }
 
-    /// The `.onnx` currently selected.
     pub async fn model_path(&self) -> PathBuf {
         self.model_path.read().await.clone()
     }
 
-    /// Synthesize `text` to mono f32 samples at [`SAMPLE_RATE`].
-    ///
-    /// Loads the session on first call. Returns an empty buffer for text that
-    /// phonemizes to nothing.
+    /// Mono f32 at [`SAMPLE_RATE`]; empty for text that phonemizes to nothing.
     pub async fn synth_samples(&self, text: &str) -> Result<Vec<f32>> {
         let (chunks, dropped) = tokenizer::chunk(text, &self.vocab)?;
         if dropped > 0 {
-            // Not fatal, but it means espeak emitted a phoneme this model was
-            // never trained to read, and the word will sound wrong.
+            // Not fatal, but the word will sound wrong: the model never learned that phoneme.
             tracing::warn!(
                 dropped,
                 text = %text.chars().take(80).collect::<String>(),
@@ -215,9 +190,7 @@ impl KokoroOutput {
         if engine_guard.is_none() {
             let path = self.model_path.read().await.clone();
             let threads = self.config.intra_threads;
-            // Bounded because a broken ONNX Runtime does not fail, it hangs: `load-dynamic`
-            // with no dylib to open blocks forever inside ort's init, and an unbounded await
-            // there is a permanently silent pond with nothing in the log.
+            // Bounded: with `load-dynamic` and no dylib, ort's init hangs rather than failing.
             let loaded = tokio::time::timeout(
                 LOAD_TIMEOUT,
                 tokio::task::spawn_blocking(move || Engine::load(&path, threads)),
@@ -253,7 +226,6 @@ impl KokoroOutput {
         Ok(encode_wav_pcm16(&f32_to_pcm16(&samples), SAMPLE_RATE))
     }
 
-    /// Load the selected voice's style table if it isn't resident.
     async fn ensure_style(&self) -> Result<Arc<StyleTable>> {
         if let Some(s) = self.style.read().await.as_ref() {
             return Ok(s.clone());
@@ -300,9 +272,7 @@ impl VoiceOutput for KokoroOutput {
     }
 
     fn begin_utterance(&self) {
-        // Advance the generation FIRST, then clear the interrupt: audio from
-        // the superseded turn must never see a cleared flag under its own
-        // generation. See `play_wav`'s comments.
+        // Generation first, then clear the interrupt, so stale audio never sees a cleared flag.
         self.utterance.fetch_add(1, Ordering::SeqCst);
         self.speech_interrupted.store(false, Ordering::SeqCst);
     }
@@ -325,24 +295,18 @@ impl VoiceOutput for KokoroOutput {
     }
 }
 
-/// The sentence the onboarding and settings previews speak. It names the product, runs long
-/// enough to hear prosody, and carries the phonetic range that makes voices distinguishable:
-/// a fricative cluster, a diphthong, and a soft ending.
+/// Voice-preview line: long enough for prosody, varied enough to tell voices apart.
 pub const PREVIEW_SENTENCE: &str =
     "Hello, I'm Jarida. I live here on your shelf, I think on my own, \
      and nothing you say to me leaves this room.";
 
-/// Whether this build targets the boards where the int8 tiers misbehave. Compile-time, and
-/// correct for both Jetson build paths: `deploy.sh` builds natively on the board and
-/// `build-docker.sh` cross-builds for aarch64.
+/// Whether this build targets the Jetson boards, where the int8 tiers misbehave.
 const fn aarch64_linux() -> bool {
     cfg!(all(target_arch = "aarch64", target_os = "linux"))
 }
 
-/// Bound on ONNX Runtime's per-op pool, derived from the machine. Speech has a hard deadline:
-/// over RTF 1.0 the pond falls behind playback. Measured on a Jetson Orin Nano at q4f16 against
-/// [`PREVIEW_SENTENCE`], RTF is 1.35 / 0.99 / 0.78 / 0.62 at 2 / 3 / 4 / 6 threads, so leaving
-/// two cores free puts it on 4. The bound matters: ORT threads hold resident memory per session.
+/// Leaves two cores free: speech must beat RTF 1.0 (Orin Nano q4f16: 0.78 at 4 threads), and
+/// each ORT thread holds resident memory per session.
 pub fn default_intra_threads() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
@@ -351,10 +315,8 @@ pub fn default_intra_threads() -> usize {
         .clamp(2, 6)
 }
 
-/// The quality tier to start a fresh install on. A capability question, measured on a Jetson
-/// Orin Nano: `q8` runs at RTF 1.23 on all six cores and cannot keep ahead of playback, and
-/// `q8f16` returns a full-length buffer of digital silence (fine on macOS). `q4f16` is the
-/// only tier there that both produces audio and clears real time, at 154 MB against q8's 92.
+/// Tier for a fresh install. On a Jetson Orin Nano only `q4f16` both makes sound and beats real
+/// time: `q8` runs at RTF 1.23 and `q8f16` outputs silence.
 pub fn host_default_quality() -> &'static str {
     if aarch64_linux() {
         "q4f16"
@@ -363,27 +325,21 @@ pub fn host_default_quality() -> &'static str {
     }
 }
 
-/// The tier this host should adopt, or `None` to leave the stored one alone. Adopt only when
-/// the household has not chosen: `stored` empty is a pond that never had a tier, and
-/// `stored == untouched` is a pond still carrying the struct default. Anything else is
-/// somebody's choice and is left exactly as it is, even a tier this host must substitute.
+/// Host tier to adopt only while the household hasn't chosen (`stored` empty or `untouched`, the
+/// struct default); any real choice is left alone, even one this host must substitute.
 pub fn tier_to_adopt(stored: &str, untouched: &str) -> Option<&'static str> {
     tier_to_adopt_for(host_default_quality(), stored, untouched)
 }
 
-/// The rule itself, with the host's tier passed in. Split out because on an arm64 Mac
-/// `host_default_quality()` returns the struct default `q8`, which makes the
-/// `stored == untouched` clause unreachable through [`tier_to_adopt`]; the Jetson case has to
-/// be testable without a Jetson or the guard is decoration on every machine that runs CI.
+/// [`tier_to_adopt`] with the host tier injected, so the Jetson case is testable off-Jetson.
 pub fn tier_to_adopt_for<'a>(host: &'a str, stored: &str, untouched: &str) -> Option<&'a str> {
     let stored = stored.trim();
     let unchosen = stored.is_empty() || stored == untouched;
     (unchosen && host != stored).then_some(host)
 }
 
-/// Swap out a tier that cannot work on this host, leaving every other choice alone. Callers
-/// persist and display the result, so a household sees the substitution: [`KokoroOutput::speak`]
-/// cannot tell a silent buffer from a quiet one, so nothing downstream would report it.
+/// Swap out a tier this host can't run. Callers persist and display the result, since
+/// [`KokoroOutput::speak`] can't tell a silent buffer from a quiet one.
 pub fn usable_quality(requested: &str) -> &str {
     if aarch64_linux() && requested == "q8f16" {
         return "q4f16";
@@ -398,14 +354,12 @@ pub fn model_filename(quality: &str) -> &'static str {
         "q4" => "model_q4.onnx",
         "q4f16" => "model_q4f16.onnx",
         "q8f16" => "model_q8f16.onnx",
-        // q8 is the default: 92 MB, the only tier that comfortably fits
-        // alongside an LLM on an 8 GB Jetson.
+        // q8 (the default) and anything unknown.
         _ => "model_quantized.onnx",
     }
 }
 
-/// Approximate on-disk size of a quality tier, in MB — for the UI to show what
-/// a download will cost before it starts.
+/// Approximate download size of a quality tier, in MB, for the UI.
 pub fn model_size_mb(quality: &str) -> u64 {
     match quality {
         "fp32" => 326,
@@ -428,8 +382,6 @@ mod tests {
         assert_eq!(model_filename("q4f16"), "model_q4f16.onnx");
     }
 
-    /// An unknown tier must fall back to the shipping default, never to a
-    /// filename that does not exist in the repo.
     #[test]
     fn unknown_quality_falls_back_to_the_default_tier() {
         for junk in ["", "best", "int8", "🙂"] {
@@ -454,8 +406,6 @@ mod tests {
         );
     }
 
-    /// The preview sentence is the one string every user hears before deciding
-    /// on a voice — it must survive phonemization with nothing dropped.
     #[test]
     fn preview_sentence_is_fully_covered_by_the_shipped_vocab() {
         let vocab_json = std::fs::read_to_string(
@@ -489,9 +439,6 @@ mod tests {
 
     #[test]
     fn intra_threads_stays_bounded_on_any_machine() {
-        // The lower bound keeps a one- or two-core box from asking for zero;
-        // the upper bound is the whole point of setting this at all, since an
-        // unbounded ONNX pool holds resident memory per session.
         let n = default_intra_threads();
         assert!((2..=6).contains(&n), "derived {n} threads");
     }
@@ -519,9 +466,6 @@ mod tests {
         }
     }
 
-    /// q8f16 returns a full-length buffer of zeros on aarch64 Linux, and
-    /// `speak()` cannot distinguish that from quiet audio — so the guarantee
-    /// has to be that the tier is never the one in force there.
     #[test]
     fn the_silent_tier_is_never_selected_on_aarch64() {
         assert_ne!(host_default_quality(), "q8f16");
@@ -532,9 +476,6 @@ mod tests {
         }
     }
 
-    /// The case this exists for, written so it runs on any machine: a pond still carrying the
-    /// struct default has not chosen, so a host whose tier differs is an upgrade rather than
-    /// an override. On the Orin Nano that is `q8` stored against a `q4f16` host.
     #[test]
     fn a_default_tier_is_replaced_by_a_host_that_needs_a_different_one() {
         assert_eq!(tier_to_adopt_for("q4f16", "q8", "q8"), Some("q4f16"));
@@ -542,10 +483,6 @@ mod tests {
         assert_eq!(tier_to_adopt_for("q4f16", "  ", "q8"), Some("q4f16"));
     }
 
-    /// The other half, and the reason this cannot simply always write: a tier
-    /// somebody picked is a decision, and a pond that overwrites it every boot
-    /// is a settings screen that does not work. Asserted against a host tier
-    /// that differs from all of them, so "left alone" means something.
     #[test]
     fn a_chosen_tier_is_never_overwritten() {
         for chosen in ["fp32", "fp16", "q4", "q8f16"] {
@@ -557,17 +494,13 @@ mod tests {
         }
     }
 
-    /// Nothing to do when the stored value already is the host default —
-    /// otherwise every boot writes a row for no reason, and `updated_at` starts
-    /// lying about when the household last changed anything.
+    /// A redundant write every boot would make `updated_at` stop meaning a household change.
     #[test]
     fn adopting_is_a_no_op_once_it_has_happened() {
         assert_eq!(tier_to_adopt_for("q4f16", "q4f16", "q8"), None);
         assert_eq!(tier_to_adopt(host_default_quality(), "q8"), None);
     }
 
-    /// The host-reading wrapper still agrees with the rule it delegates to, so
-    /// the split cannot drift into two different answers.
     #[test]
     fn the_wrapper_passes_this_hosts_tier_through() {
         for stored in ["", "q8", "fp32", "q4f16"] {

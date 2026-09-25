@@ -1,7 +1,5 @@
-//! Matter device backend (#195): [`DeviceControlPort`] over a local controller GIAP installs and
-//! runs, `matter-server/` (Node, [matter.js](https://github.com/matter-js/matter.js)), on the
-//! loopback `giap-matter` WebSocket. The protocol is domain-level — devices, readings and control
-//! verbs only; clusters, endpoints, units and commissioning stay there; `docs/matter-protocol.md`.
+//! Matter backend: [`DeviceControlPort`] over GIAP's own `matter-server/` (matter.js) on the
+//! loopback `giap-matter` WebSocket. The domain-level protocol is in `docs/matter-protocol.md`.
 
 mod bridge;
 mod client;

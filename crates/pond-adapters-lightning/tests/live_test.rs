@@ -1,7 +1,5 @@
-//! Real connection to the Breez/Spark network; #[ignore]d like the other live tests. Needs a
-//! real BREEZ_API_KEY (breez.technology/request-api-key), then run
-//! `BREEZ_API_KEY=<key> cargo test -p pond-adapters-lightning --test live_test -- --ignored`.
-//! Defaults to Network::Regtest (no real funds) unless LIGHTNING_NETWORK=mainnet is set.
+//! Live Breez/Spark test, `#[ignore]`d; Regtest unless `LIGHTNING_NETWORK=mainnet`. Run with
+//! `BREEZ_API_KEY=<key> ... -- --ignored` (key: breez.technology/request-api-key).
 
 use pond_adapters_lightning::{LightningConfig, LightningPaymentRail};
 use pond_core::mesh::domain::millisats::Millisats;
@@ -16,8 +14,7 @@ async fn issuing_a_real_invoice_round_trips_through_list_payments() {
         .await
         .expect("failed to connect to Spark network");
     if let Some(mnemonic) = generated_mnemonic {
-        // Write to a file instead of logging it — a real wallet seed
-        // must never land in a terminal/CI log via --nocapture.
+        // File, not log: a real wallet seed must never reach a terminal or CI log.
         let path = "/tmp/pond-lightning-live-test/generated-mnemonic.txt";
         std::fs::write(path, &mnemonic).expect("failed to save generated mnemonic to disk");
         eprintln!(
@@ -36,10 +33,7 @@ async fn issuing_a_real_invoice_round_trips_through_list_payments() {
         "expected a bolt11 invoice string, got: {invoice}"
     );
 
-    // Without actually paying the invoice from a second wallet, no HTLC
-    // preimage exists yet — verify_preimage should report false /
-    // "not found", never a panic or a false-positive success.
-    // Err ("no received payment found yet") is also an acceptable outcome.
+    // Unpaid, so no preimage exists: false or Err are both fine; true is a false positive.
     if let Ok(matched) = rail.verify_preimage(&invoice, "0000").await {
         assert!(!matched, "an unpaid invoice must never verify as paid");
     }

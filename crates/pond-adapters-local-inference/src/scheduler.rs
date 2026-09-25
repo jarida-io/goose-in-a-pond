@@ -1,7 +1,5 @@
-//! Memory-aware model scheduler: only one LLM is resident at a time (Jetson Orin Nano, 8 GB
-//! unified). Goose's `InferenceRuntime` already evicts the other model slots on a switch; this
-//! adds live memory reporting from `/proc/meminfo` and a `watch` channel so wake-word detection
-//! can pre-load the chat model. llamafile and Ollama self-manage memory, so use `NoopScheduler`.
+//! Memory-aware scheduler for one resident LLM (Goose evicts the others on a switch): adds
+//! `/proc/meminfo` reporting and a wake-word `watch` channel so the chat model can pre-load.
 
 use std::sync::Mutex;
 
@@ -12,10 +10,8 @@ use pond_core::models::ports::model_scheduler::{MemoryStatus, ModelScheduler};
 
 // ── Jetson / Linux memory constants ──────────────────────────────────────────
 
-/// Total device RAM on a Jetson Orin Nano 8 GB (MB), as the KERNEL reports it: `free -m` on the
-/// Orin says 7620, not the marketed 8192, because carveouts are taken before Linux sees the
-/// memory. Any phantom MB here is spent silently, since an over-large context does not fail to
-/// allocate, it swaps: the symptom is slowness, not an out-of-memory error.
+/// Orin Nano RAM as the kernel sees it (`free -m`), not the marketed 8192: carveouts come first.
+/// Overstating it fails silently, as an over-large context swaps rather than failing to allocate.
 pub const JETSON_TOTAL_RAM_MB: u64 = 7620;
 /// Approximate headroom used by OS + GIAP server + UI at idle (MB).
 const SYSTEM_OVERHEAD_MB: u64 = 1500;
@@ -27,47 +23,33 @@ const TTS_RESERVED_MB: u64 = 100;
 pub const LLM_BUDGET_MB: u64 =
     JETSON_TOTAL_RAM_MB - SYSTEM_OVERHEAD_MB - STT_RESERVED_MB - TTS_RESERVED_MB;
 
-/// Everything the LLM slot does not get: OS, GIAP server, UI, STT, TTS.
-///
-/// Named separately from [`LLM_BUDGET_MB`] because the budget is derived twice, once as a
-/// constant and once at runtime from the device profile; both subtract the same reservation.
+/// Everything but the LLM slot, shared by [`LLM_BUDGET_MB`] and the runtime `llm_budget_mb`.
 const RESERVED_MB: u64 = SYSTEM_OVERHEAD_MB + STT_RESERVED_MB + TTS_RESERVED_MB;
 
-/// Total RAM of the device this process should believe it is.
-///
-/// [`JETSON_TOTAL_RAM_MB`] unless a device profile overrides it, deliberately not a host probe:
-/// reading a developer Mac's real 64 GB makes every derivation downstream trivially satisfiable.
+/// The believed device's RAM, never a host probe: a dev Mac's 64 GB would satisfy everything.
 pub fn total_ram_mb() -> u64 {
     pond_core::models::domain::device_profile::active()
         .map(|p| p.total_ram_mb)
         .unwrap_or(JETSON_TOTAL_RAM_MB)
 }
 
-/// MB available for a single LLM slot on the device we believe we are.
-///
-/// The runtime twin of [`LLM_BUDGET_MB`]; identical to it when no profile is
-/// active, which is the case in production, in `deploy.sh` and in CI.
+/// Runtime twin of [`LLM_BUDGET_MB`], equal to it unless a device profile is emulating a board.
 pub fn llm_budget_mb() -> u64 {
     total_ram_mb().saturating_sub(RESERVED_MB)
 }
 
 // ── ResourceAwareModelScheduler ──────────────────────────────────────────────
 
-/// Scheduler for devices running local GGUF models (in-process llama.cpp).
-///
-/// Reads `/proc/meminfo` on Linux to report live memory. On other platforms
-/// (macOS dev machines, CI) it falls back to the budget constants.
+/// Scheduler for in-process GGUF; live memory from `/proc/meminfo`, else the budget constants.
 pub struct ResourceAwareModelScheduler {
     /// Name of the model currently loaded in the llama.cpp slot.
     currently_hot: Mutex<Option<String>>,
-    /// Sending half — `notify_wake_word()` sends `true` on this channel.
-    /// The server spawns a background task that receives and pre-loads.
+    /// `notify_wake_word()` sends `true` here; the server's pre-loader task receives it.
     wake_tx: watch::Sender<bool>,
 }
 
 impl ResourceAwareModelScheduler {
-    /// Create a new scheduler, also returning the receiving end of the
-    /// wake-word channel so the server can spawn a pre-loader task.
+    /// Also returns the wake-word receiver for the server's pre-loader task.
     pub fn new() -> (Self, watch::Receiver<bool>) {
         let (wake_tx, wake_rx) = watch::channel(false);
         (
@@ -79,16 +61,14 @@ impl ResourceAwareModelScheduler {
         )
     }
 
-    /// Update the currently-hot model name. Called by the server after a
-    /// successful model load (optional — used for accurate reporting).
+    /// Record the loaded model; optional, for accurate reporting.
     pub fn set_hot_model(&self, name: Option<String>) {
         if let Ok(mut guard) = self.currently_hot.lock() {
             *guard = name;
         }
     }
 
-    /// Read free RAM in MB from `/proc/meminfo` (Linux / Jetson).
-    /// Returns `None` on non-Linux platforms or if the file cannot be read.
+    /// `MemAvailable` from `/proc/meminfo` in MB; `None` off Linux or if unreadable.
     fn read_free_ram_mb() -> Option<u64> {
         #[cfg(target_os = "linux")]
         {
@@ -110,8 +90,7 @@ impl ResourceAwareModelScheduler {
 #[async_trait]
 impl ModelScheduler for ResourceAwareModelScheduler {
     async fn notify_wake_word(&self) {
-        // Signal receivers — the server's pre-loader task will start loading
-        // the chat model. We ignore send errors (no receivers = no task running).
+        // No receiver just means no pre-loader is running.
         let _ = self.wake_tx.send(true);
     }
 
@@ -143,10 +122,7 @@ impl ModelScheduler for ResourceAwareModelScheduler {
 
 // ── NoopScheduler ────────────────────────────────────────────────────────────
 
-/// Pass-through scheduler for llamafile and Ollama backends.
-///
-/// Those providers manage their own memory externally; GIAP does not evict
-/// them. Memory status returns zeros so the UI shows "managed externally".
+/// For self-managing llamafile/Ollama; zeroed status makes the UI show "managed externally".
 pub struct NoopScheduler;
 
 #[async_trait]
@@ -187,12 +163,10 @@ mod tests {
     async fn wake_word_sends_signal() {
         let (sched, mut rx) = ResourceAwareModelScheduler::new();
 
-        // Initial value is false
         assert!(!*rx.borrow());
 
         sched.notify_wake_word().await;
 
-        // After notification the channel has the new value
         rx.changed().await.unwrap();
         assert!(*rx.borrow());
     }
@@ -207,9 +181,7 @@ mod tests {
     fn memory_status_total_matches_jetson_constant() {
         let (sched, _rx) = ResourceAwareModelScheduler::new();
         let status = sched.memory_status();
-        // total_mb is the device we BELIEVE we are: the constant unless a device
-        // profile is emulating another board. Asserted against the profile so
-        // this test still means something under `scripts/jetson-emu.sh test`.
+        // Checked against the profile so this still holds under `scripts/jetson-emu.sh test`.
         assert_eq!(status.total_mb, total_ram_mb());
         match pond_core::models::domain::device_profile::active() {
             None => assert_eq!(status.total_mb, JETSON_TOTAL_RAM_MB),
@@ -221,8 +193,6 @@ mod tests {
         }
     }
 
-    /// The runtime budget and the compile-time one agree when nothing is being
-    /// emulated. This is the safety property of the device-profile mechanism.
     #[test]
     fn the_runtime_budget_equals_the_constant_when_nothing_is_emulated() {
         if pond_core::models::domain::device_profile::active().is_none() {
@@ -233,13 +203,10 @@ mod tests {
 
     #[test]
     fn memory_status_fallback_available_is_full_budget_when_no_model_loaded() {
-        // On non-Linux (or when /proc/meminfo is absent) the fallback uses 0 used
-        // when no model is hot — available should equal LLM_BUDGET_MB.
+        // Only `<=`: on Linux the value is live `/proc/meminfo`, not the fallback.
         let (sched, _rx) = ResourceAwareModelScheduler::new();
         let status = sched.memory_status();
 
-        // On Linux (CI) /proc/meminfo is available and the value varies —
-        // just check it's within the sane range.
         assert!(
             status.available_for_llm_mb <= llm_budget_mb(),
             "available should not exceed budget: {} > {}",
@@ -250,19 +217,13 @@ mod tests {
 
     #[test]
     fn memory_status_available_decreases_when_model_is_hot() {
-        // On non-Linux the fallback estimates `LLM_BUDGET_MB / 2` used when a
-        // model is hot.  On Linux /proc/meminfo is used and the fallback branch
-        // is skipped — skip the assertion in that case.
         let (sched, _rx) = ResourceAwareModelScheduler::new();
         let free_before = sched.memory_status().available_for_llm_mb;
 
         sched.set_hot_model(Some("my-model".to_string()));
         let free_after = sched.memory_status().available_for_llm_mb;
 
-        // On Linux available_for_llm_mb comes from /proc/meminfo and won't
-        // change based on set_hot_model — that path is already tested above.
-        // On macOS / Windows (no /proc/meminfo) the fallback branch IS taken
-        // and available should drop.
+        // Only the non-Linux fallback reacts to `set_hot_model`.
         if cfg!(not(target_os = "linux")) {
             assert!(
                 free_after < free_before,
@@ -284,7 +245,6 @@ mod tests {
     #[tokio::test]
     async fn noop_scheduler_notify_wake_word_does_not_panic() {
         let s = NoopScheduler;
-        // NoopScheduler::notify_wake_word is a no-op; this must not panic
         s.notify_wake_word().await;
     }
 
@@ -302,10 +262,8 @@ mod tests {
         rx.changed().await.unwrap();
         assert!(*rx.borrow());
 
-        // Mark as seen and signal again — rx should become changed once more
         let _ = rx.borrow_and_update();
         sched.notify_wake_word().await;
-        // The channel is already true so sending true again may not mark changed;
-        // just verify no panic.
+        // Only checks that re-signalling doesn't panic.
     }
 }

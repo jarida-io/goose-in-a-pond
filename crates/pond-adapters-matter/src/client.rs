@@ -1,7 +1,5 @@
-//! Thin WebSocket client for the Matter controller. One connection carries request/response pairs
-//! (matched by `id`) and unsolicited events; a background read task routes responses to their
-//! callers and fans events out on an mpsc channel the bridge consumes. It relays the controller's
-//! own `log` events into `tracing`, the only visibility into a controller GIAP did not spawn.
+//! WebSocket client for the Matter controller: `id`-matched request/response pairs plus
+//! unsolicited events, which a reader task fans out on an mpsc channel for the bridge.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,8 +18,7 @@ use crate::protocol::{
     WireError, WireLog,
 };
 
-/// How long an op may wait for its response. Device commands round-trip in tens
-/// of milliseconds; this bounds a wedged controller.
+/// Op response deadline; commands take tens of ms, so this only bounds a wedged controller.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// An unsolicited event from the controller.
@@ -37,24 +34,18 @@ pub struct MatterClient {
     tx: mpsc::Sender<Message>,
     pending: Pending,
     next_id: AtomicU64,
-    /// Whether this controller has a BLE transport, as its greeting said.
-    ///
-    /// The commissioning pre-flight is an mDNS browse, and a device out of its box advertises over
-    /// BLE and not on mDNS at all. See `refuse_when_nothing_is_pairable`.
+    /// BLE transport per the greeting; unboxed devices advertise only over BLE, not mDNS.
     ble: bool,
 }
 
 impl MatterClient {
-    /// Connect, check the greeting, and start the read/write tasks. Returns the client plus the
-    /// stream of unsolicited events, and relays the controller's `log` events into `tracing`. Use
-    /// [`connect_to_managed`] instead when GIAP spawned the controller and already relays its
-    /// stderr.
+    /// Connect, relaying the controller's `log` events into `tracing`; use [`connect_to_managed`]
+    /// when GIAP spawned it and already relays its stderr.
     pub async fn connect(url: &str) -> Result<(Arc<Self>, mpsc::Receiver<MatterEvent>)> {
         Self::open(url, true).await
     }
 
-    /// Connect to a controller whose stderr GIAP is already relaying, so its
-    /// `log` events are dropped rather than logged a second time.
+    /// Connect, dropping `log` events because GIAP already relays this controller's stderr.
     pub async fn connect_to_managed(url: &str) -> Result<(Arc<Self>, mpsc::Receiver<MatterEvent>)> {
         Self::open(url, false).await
     }
@@ -65,8 +56,7 @@ impl MatterClient {
             .with_context(|| format!("connecting to the Matter controller at {url}"))?;
         let (mut sink, mut stream) = socket.split();
 
-        // Handshake: the controller greets immediately, and the greeting says
-        // whether it is one this version can talk to at all.
+        // The controller greets first; the greeting says whether we can talk to it.
         let frame = tokio::time::timeout(COMMAND_TIMEOUT, stream.next())
             .await
             .context("timed out waiting for the controller's greeting")?
@@ -121,10 +111,7 @@ impl MatterClient {
                     }
                     ServerMessage::Event { event, payload } => {
                         if event == "log" {
-                            // Only when nothing else is: for a controller GIAP
-                            // spawned, its stderr is already piped and relayed,
-                            // and doing both put every controller line in the
-                            // log twice.
+                            // Not for a spawned controller, whose stderr is already relayed.
                             if relay_logs {
                                 if let Ok(record) = serde_json::from_value::<WireLog>(payload) {
                                     record.relay();
@@ -132,8 +119,7 @@ impl MatterClient {
                             }
                             continue;
                         }
-                        // Full channel = slow bridge; dropping is fine for state
-                        // updates, where the last write wins downstream.
+                        // Full channel = slow bridge; dropping is fine, the last state wins.
                         let _ = event_tx.try_send(MatterEvent { event, payload });
                     }
                     ServerMessage::Other => {}
@@ -162,10 +148,7 @@ impl MatterClient {
         ))
     }
 
-    /// Does this controller pair over Bluetooth as well as over IP?
-    ///
-    /// What the controller actually loaded, not what was asked for: a BLE request it could not
-    /// honour reads as `false` here.
+    /// Whether the controller actually loaded BLE; an unhonoured BLE request reads `false`.
     pub fn has_ble(&self) -> bool {
         self.ble
     }
@@ -175,9 +158,7 @@ impl MatterClient {
         self.send_with_timeout(op, params, COMMAND_TIMEOUT).await
     }
 
-    /// Send `op` with an explicit timeout. Commissioning needs this: pairing a
-    /// device onto the fabric routinely outlasts [`COMMAND_TIMEOUT`], and cutting
-    /// it short would abandon a half-commissioned node.
+    /// Send with an explicit timeout; commissioning routinely outlasts [`COMMAND_TIMEOUT`].
     pub async fn send_with_timeout(
         &self,
         op: &str,
@@ -218,14 +199,10 @@ impl MatterClient {
     }
 }
 
-/// Carry the controller's error code alongside its message.
-///
-/// Callers key user-facing advice off the code, so it stays in the chain rather than flattened
-/// into prose. Redacted here: the last point before a log, an API response or the model.
+/// Keep the controller's code in the chain (callers branch on it) and redact the message: this
+/// is the last stop before a log, an API response or the model.
 fn controller_error(error: WireError) -> anyhow::Error {
-    // The code is the source and the message the context, not the reverse: `Display` must be the
-    // controller's prose for the user and the model, while the code stays reachable via
-    // `downcast_ref` for callers that branch on it.
+    // Code as source, message as context, so `Display` is the prose and the code downcasts.
     anyhow::Error::new(ControllerCode(error.code)).context(redact_setup_code(&error.message))
 }
 
@@ -241,10 +218,8 @@ impl std::fmt::Display for ControllerCode {
 
 impl std::error::Error for ControllerCode {}
 
-/// The controller's error code for `error`, if it carries one.
-///
-/// Must be `downcast_ref` on the error itself, not a walk over `chain()`: anyhow wraps a context
-/// frame in its own type, so the chain yields that wrapper and never the `ControllerCode` inside.
+/// The controller's code, via `downcast_ref` on the error itself: `chain()` yields anyhow's
+/// context wrapper, never the `ControllerCode` inside.
 pub fn code_of(error: &anyhow::Error) -> Option<&str> {
     error
         .downcast_ref::<ControllerCode>()
@@ -258,9 +233,6 @@ mod tests {
 
     #[test]
     fn the_controllers_error_code_survives_into_the_error_chain() {
-        // The code is what commissioning keys its "put the device into pairing
-        // mode" advice off, so flattening it into prose would put that advice
-        // back onto substring-matching against controller wording.
         let error = controller_error(WireError {
             code: CODE_NOTHING_PAIRABLE.to_string(),
             message: "nothing is advertising".to_string(),
@@ -272,8 +244,7 @@ mod tests {
 
     #[test]
     fn a_controller_error_is_redacted_before_it_becomes_an_error() {
-        // matter.js and CHIP echo what they were given, so a failed commission is
-        // the most likely way a setup code would ever reach a log.
+        // matter.js and CHIP echo their input, so failed commissions leak setup codes.
         let error = controller_error(WireError {
             code: "commission_failed".to_string(),
             message: "PASE failed for MT:Y.K9042C00KA0648G00".to_string(),

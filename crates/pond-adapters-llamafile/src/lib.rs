@@ -1,6 +1,5 @@
-//! llamafile LLM provider adapter. Implements the GIAP `LlmProvider` port over llamafile's
-//! OpenAI-compatible `POST /v1/chat/completions` at `http://127.0.0.1:8080` using plain
-//! `reqwest`: no Goose dependency, no linker conflicts with Goose's v8/llama-cpp-2 on Windows.
+//! `LlmProvider` over llamafile's OpenAI-compatible `/v1/chat/completions`, via plain `reqwest`
+//! to avoid linking Goose (its v8/llama-cpp-2 conflict on Windows).
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -10,11 +9,9 @@ use pond_core::models::ports::provider::{LlmProvider, StreamToken, TokenStream, 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-/// Default llamafile server URL.
 pub const DEFAULT_HOST: &str = "http://127.0.0.1:8080";
 
-/// Stop tokens that some models (e.g. Gemma) append to their output.
-/// Strip these before returning to callers so they never appear in responses.
+/// Stop tokens some models (e.g. Gemma) leave in their output.
 const STOP_TOKENS: &[&str] = &["<end_of_turn>", "<|eot_id|>", "<|im_end|>"];
 
 fn strip_stop_tokens(mut s: String) -> String {
@@ -79,8 +76,7 @@ pub struct LlamafileProvider {
 }
 
 impl LlamafileProvider {
-    /// Create a provider targeting the given host (e.g. `http://127.0.0.1:8080`).
-    /// Defaults to `DEFAULT_HOST` when `host` is `None`.
+    /// `host` is a base URL without the API path; `None` means `DEFAULT_HOST`.
     pub fn new(host: Option<&str>) -> Self {
         let base = host.unwrap_or(DEFAULT_HOST);
         Self {
@@ -104,7 +100,6 @@ impl LlamafileProvider {
         self
     }
 
-    /// Build the OpenAI-format messages array from a system prompt + history.
     fn build_oai_messages(system_prompt: &str, messages: &[ChatMessage]) -> Vec<serde_json::Value> {
         let mut oai = vec![serde_json::json!({ "role": "system", "content": system_prompt })];
         for m in messages {
@@ -129,7 +124,6 @@ impl LlmProvider for LlamafileProvider {
         system_prompt: &str,
         messages: Vec<ChatMessage>,
     ) -> Result<ChatMessage> {
-        // Build OpenAI-format message array: system first, then conversation
         let mut oai: Vec<OaiMessage> = vec![OaiMessage {
             role: "system",
             content: system_prompt,
@@ -186,16 +180,12 @@ impl LlmProvider for LlamafileProvider {
         self.model.clone()
     }
 
-    /// Override with native OpenAI streaming (`stream: true`).
-    ///
-    /// Sends `"stream": true` in the request body and parses `data: {...}` SSE lines
-    /// from the response, yielding each token as it arrives.
+    /// Overrides the default with native SSE streaming (`"stream": true`).
     fn stream_complete<'a>(
         &'a self,
         system_prompt: &'a str,
         messages: Vec<ChatMessage>,
     ) -> TokenStream<'a> {
-        // Clone everything needed into owned values so the stream is self-contained.
         let client = self.client.clone();
         let endpoint = self.endpoint.clone();
         let model = self.model.clone();
@@ -235,7 +225,6 @@ impl LlmProvider for LlamafileProvider {
 
                 line_buf.push_str(&String::from_utf8_lossy(&chunk));
 
-                // Process all complete lines in the buffer.
                 while let Some(pos) = line_buf.find('\n') {
                     let line = line_buf[..pos].trim_end_matches('\r').to_string();
                     line_buf = line_buf[pos + 1..].to_string();
@@ -246,14 +235,12 @@ impl LlmProvider for LlamafileProvider {
                             return;
                         }
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
-                            // Emit text token if present
                             if let Some(token) = v["choices"][0]["delta"]["content"].as_str() {
                                 let token = strip_stop_tokens(token.to_string());
                                 if !token.is_empty() {
                                     yield Ok(StreamToken::Text(token));
                                 }
                             }
-                            // Emit usage stats if the final chunk includes them
                             if let Some(usage) = v.get("usage") {
                                 let prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0) as u32;
                                 let completion_tokens = usage["completion_tokens"].as_u64().unwrap_or(0) as u32;

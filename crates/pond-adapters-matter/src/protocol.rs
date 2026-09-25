@@ -1,7 +1,5 @@
-//! The `giap-matter` wire protocol — types and pure functions, so every mapping is unit-testable
-//! without a WebSocket. `docs/matter-protocol.md` is the specification and
-//! `matter-server/src/protocol.ts` the other implementation. Domain-level on purpose: devices,
-//! readings and control verbs only, never endpoints, clusters or attribute paths.
+//! `giap-matter` wire types and pure mappings (spec: `docs/matter-protocol.md`; other side:
+//! `matter-server/src/protocol.ts`). Domain-level: never endpoints, clusters or attribute paths.
 
 use crate::client::ControllerCode;
 use chrono::{DateTime, Utc};
@@ -13,12 +11,10 @@ use pond_core::user_data::ports::device_registry::Device;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-/// Identifies the protocol in the greeting. A controller that does not say this
-/// is not one this crate can talk to.
+/// Protocol name the greeting must carry.
 pub const PROTOCOL_NAME: &str = "giap-matter";
 
-/// Bumped when a change would break a controller that has not been updated with
-/// it. The client refuses a mismatch rather than guessing.
+/// Bump only for changes that break an un-updated controller; the client refuses a mismatch.
 pub const PROTOCOL_VERSION: u32 = 1;
 
 // ── Greeting ─────────────────────────────────────────────────────────────────
@@ -34,18 +30,12 @@ pub struct Greeting {
     pub fabric_id: Option<u64>,
     #[serde(default)]
     pub matter_js: String,
-    /// Whether the controller loaded a BLE transport, so a device never on the network can pair.
-    ///
-    /// `default` means a controller predating the field reads as "no BLE", which is what it has,
-    /// so no `PROTOCOL_VERSION` bump is owed.
+    /// BLE transport loaded; an older controller without the field has none, so no version bump.
     #[serde(default)]
     pub ble: bool,
 }
 
-/// Check a greeting frame, naming what was found when it is not ours.
-///
-/// Guards an address pointing at some other server: without it the first `subscribe` fails inside
-/// serde with an unexpected-field message the user cannot act on.
+/// Check a greeting, naming what was found instead, so a wrong address gets an actionable error.
 pub fn check_greeting(raw: &str) -> Result<Greeting, String> {
     let greeting: Greeting = serde_json::from_str(raw).map_err(|_| {
         "the controller's greeting was not JSON this version understands".to_string()
@@ -113,8 +103,7 @@ impl std::fmt::Display for WireError {
     }
 }
 
-/// The controller could not find anything advertising itself for pairing. Named
-/// because the user-facing advice for it is specific and actionable.
+/// Nothing is advertising for pairing; named because it gets specific user advice.
 pub const CODE_NOTHING_PAIRABLE: &str = "no_device_in_pairing_mode";
 
 /// Parse one raw frame.
@@ -131,9 +120,7 @@ pub fn parse_server_message(raw: &str) -> ServerMessage {
     }
 
     if let Some(id) = v.get("id").and_then(Value::as_str) {
-        // `ok` is the discriminant rather than the presence of a `result` key: a
-        // successful op with no result is `{"ok": true, "result": {}}`, and
-        // keying off `result` would read a failure with a null result as one.
+        // `ok`, not the `result` key, decides: a failure can carry a null `result`.
         let outcome = if v.get("ok").and_then(Value::as_bool) == Some(true) {
             Ok(v.get("result").cloned().unwrap_or(Value::Null))
         } else {
@@ -161,10 +148,7 @@ pub fn request_frame(id: &str, op: &str, params: Value) -> String {
 
 // ── Domain projections ───────────────────────────────────────────────────────
 
-/// A device as the controller reports it. Deliberately smaller than GIAP's own
-/// [`Device`]: the controller knows nothing about rooms, hostnames or when a
-/// device was first registered, and inventing values for those here is what
-/// would make a Matter device look different from every other kind.
+/// A controller-reported device, deliberately without [`Device`]'s rooms or hostnames.
 #[derive(Debug, Clone, Deserialize)]
 pub struct WireDevice {
     pub id: String,
@@ -172,8 +156,7 @@ pub struct WireDevice {
     pub device_type: String,
     #[serde(default)]
     pub capabilities: Vec<String>,
-    /// Required, unlike `capabilities`: `bool::default()` is `false`, so a field the controller
-    /// renamed or stopped sending would silently mark every device on the fabric unreachable.
+    /// Required: a missing field defaulting to `false` would mark every device unreachable.
     pub online: bool,
 }
 
@@ -219,8 +202,7 @@ impl WireReading {
     }
 }
 
-/// The `subscribe` result: the whole fabric, so a fresh connection knows it
-/// without waiting for anything to change.
+/// The `subscribe` result: the whole fabric.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Snapshot {
     #[serde(default)]
@@ -236,8 +218,7 @@ pub struct ControlResult {
     pub applied: DeviceStatePatch,
 }
 
-/// The `describe` result. The description's own shape is GIAP's, so it
-/// deserialises straight into the domain type with no mapping step.
+/// The `describe` result, already in GIAP's domain shape.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DescribeResult {
     pub description: DeviceDescription,
@@ -271,19 +252,13 @@ pub struct WireLog {
     pub kind: String,
     #[serde(default)]
     pub message: String,
-    /// The record's typed fields. Relayed as one rendered string rather than as
-    /// `tracing` fields, which have to be known at compile time — dropping them
-    /// entirely turned "a request failed" into the whole account of a failure
-    /// whose op, error code and reason the controller had all supplied.
+    /// Typed fields, relayed as one string because `tracing` fields must be known at compile time.
     #[serde(default)]
     pub fields: Option<Value>,
 }
 
 impl WireLog {
-    /// Re-emit this record into `tracing` at the level it names.
-    ///
-    /// The reason the controller logs NDJSON rather than prose: a relay that cannot tell an error
-    /// from a debug line flattens everything to one level, and failures at `debug` are silence.
+    /// Re-emit into `tracing` at the record's own level, which is why the controller logs NDJSON.
     pub fn relay(&self) {
         let fields = self.rendered_fields();
         let message = if fields.is_empty() {
@@ -327,9 +302,7 @@ impl WireLog {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AvailabilityEvent {
     pub device_id: String,
-    /// Required, for the reason on [`WireDevice::online`]: the whole payload of
-    /// this event is one boolean, and defaulting it to `false` turns a malformed
-    /// frame into a confident claim that the device is gone.
+    /// Required, like [`WireDevice::online`]: a default `false` would claim the device is gone.
     pub online: bool,
 }
 
@@ -347,30 +320,25 @@ pub struct DeviceRemovedEvent {
 
 // ── Ids ──────────────────────────────────────────────────────────────────────
 
-// One grammar, one definition for `matter-<node_id>` ids. `pond-core` keeps it because the generic
-// delete path in `pond-api` needs it and must not depend on this adapter; this crate re-exports.
+// Defined in `pond-core` so `pond-api`'s delete path needn't depend on this adapter.
 pub use pond_core::user_data::ports::device_commissioning::{
     is_matter_device_id, matter_bridged_endpoint, matter_device_id, matter_node_id,
 };
 
 // ── Redaction ────────────────────────────────────────────────────────────────
 
-/// What a setup code is replaced with. Matches the controller's own placeholder,
-/// so a redacted string looks the same whichever side redacted it.
+/// Matches the controller's own placeholder, so both sides' redactions look the same.
 const REDACTED: &str = "[redacted:setup-code]";
 
-/// Strip Matter setup codes from anything on its way to a log line, an error message, or the API.
-///
-/// A pairing code is a fabric credential and there is no `Redactor` on the `tracing` pipeline, so
-/// this is applied at the call site. Deliberately over-eager on digit forms, and idempotent.
+/// Strip setup codes (fabric credentials) before a log, error or API response; no `tracing`
+/// redactor exists, so call sites apply it. Deliberately over-eager on digits, and idempotent.
 pub fn redact_setup_code(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
 
     while i < chars.len() {
-        // QR payloads first, so a digit run inside one cannot be redacted
-        // piecemeal leaving the rest of the payload readable.
+        // QR payloads first, so one isn't redacted piecemeal via its digit runs.
         if chars[i..].starts_with(&['M', 'T', ':']) || chars[i..].starts_with(&['m', 't', ':']) {
             let mut end = i + 3;
             while end < chars.len() && is_qr_char(chars[end]) {
@@ -386,8 +354,7 @@ pub fn redact_setup_code(text: &str) -> String {
             while end < chars.len() && chars[end].is_ascii_digit() {
                 end += 1;
             }
-            // 8 is a passcode, 11 and 21 the manual pairing code forms. Bounded
-            // on both sides so a node id, a port or a timestamp is left alone.
+            // 8 = passcode, 11/21 = manual pairing codes; exact lengths spare node ids and ports.
             if matches!(end - i, 8 | 11 | 21) {
                 out.push_str(REDACTED);
                 i = end;
@@ -408,10 +375,8 @@ fn is_qr_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '.' | '$' | '%' | '*' | '+' | '-' | '/' | ':')
 }
 
-/// Render an error for a human: the whole cause chain, redacted, prose only.
-///
-/// `anyhow::Error`'s plain `Display` prints only the outermost context, so only the walked chain
-/// carries the reason. The [`ControllerCode`] frame is skipped as bookkeeping, not prose.
+/// Render the whole cause chain, redacted and minus [`ControllerCode`]; `Display` alone shows
+/// only the outermost context.
 pub fn describe(error: &anyhow::Error) -> String {
     let prose: Vec<String> = error
         .chain()
@@ -419,8 +384,7 @@ pub fn describe(error: &anyhow::Error) -> String {
         .map(ToString::to_string)
         .collect();
 
-    // A code with no message at all: say which code rather than saying nothing.
-    // `WireError`'s own `Display` makes the same choice for the same reason.
+    // No prose at all: name the code rather than saying nothing.
     if prose.is_empty() {
         return format!("{error:#}");
     }
@@ -450,19 +414,14 @@ mod tests {
 
     #[test]
     fn device_ids_round_trip() {
-        // The grammar itself is tested where it is defined, in `pond-core`. This
-        // asserts the re-export reaches this crate, since every call site here
-        // imports it from `protocol`.
+        // The grammar is tested in `pond-core`; this checks the re-export.
         assert_eq!(matter_device_id(18, None), "matter-18");
         assert_eq!(matter_node_id("matter-18"), Some(18));
         assert_eq!(matter_node_id("mqtt-lamp"), None);
         assert_eq!(matter_node_id("matter-not-a-number"), None);
     }
 
-    /// The one wire contract nothing checked. `DescribeResult` deserialises straight
-    /// into the domain type with no mapping step, so a field the controller adds and
-    /// the domain type has not got fails the whole call — the device is then reported
-    /// as one that cannot describe itself, naming nothing that would lead to the cause.
+    /// `DescribeResult` maps straight to the domain type, so any field mismatch fails `describe`.
     #[test]
     fn a_description_carries_the_controller_s_vendor_clusters() {
         let result: DescribeResult = serde_json::from_value(serde_json::json!({
@@ -492,8 +451,7 @@ mod tests {
         assert_eq!(result.description.states[0].name, "door");
     }
 
-    /// The controller lives in the data dir and can be older than the binary reading
-    /// it, so an absent field has to mean "none" rather than failing the description.
+    /// The controller in the data dir can be older than this binary.
     #[test]
     fn a_description_without_vendor_clusters_still_reads() {
         let result: DescribeResult = serde_json::from_value(serde_json::json!({
@@ -513,8 +471,6 @@ mod tests {
 
     #[test]
     fn responses_are_discriminated_by_ok_not_by_the_result_key() {
-        // A successful op with an empty result must not read as a failure, and a
-        // failure whose result is null must not read as a success.
         let ok = parse_server_message(r#"{"id":"giap-1","ok":true,"result":{}}"#);
         assert!(matches!(ok, ServerMessage::Response { outcome: Ok(_), .. }));
 
@@ -564,8 +520,7 @@ mod tests {
         );
         assert!(ours.is_ok());
 
-        // Some other WebSocket server on the configured address, greeting with
-        // a frame of its own shape.
+        // Another WebSocket server on the configured address.
         let stranger = check_greeting(r#"{"fabric_id":1,"schema_version":11}"#).unwrap_err();
         assert!(
             stranger.contains("Matter controller address"),
@@ -576,9 +531,6 @@ mod tests {
         assert!(newer.contains("different releases"), "got: {newer}");
     }
 
-    /// A controller predating the field reads as "no BLE", which is what such a
-    /// controller has — so the field earns no `PROTOCOL_VERSION` bump, by that
-    /// rule's own terms, and neither side breaks against the other.
     #[test]
     fn ble_is_read_when_stated_and_absent_means_no() {
         let with_ble = check_greeting(
@@ -616,8 +568,6 @@ mod tests {
 
     #[test]
     fn redaction_leaves_ordinary_numbers_alone() {
-        // Over-eager on length would blank node ids, ports and durations, and a
-        // log that redacts everything is as useless as one that redacts nothing.
         assert_eq!(
             redact_setup_code("node 18 on port 5580"),
             "node 18 on port 5580"
@@ -646,9 +596,6 @@ mod tests {
 
     #[test]
     fn a_relayed_record_carries_its_fields() {
-        // The bug this exists for: the relay read level, kind and message and
-        // dropped `fields`, so a controller that had reported the op, the error
-        // code and the reason arrived in the log as "a request failed".
         let record: WireLog = serde_json::from_value(json!({
             "level": "warn",
             "kind": "op_failed",
@@ -673,8 +620,6 @@ mod tests {
 
     #[test]
     fn relayed_fields_are_redacted_too() {
-        // Fields are the likeliest place for a code to travel, since that is
-        // where structured values go.
         let record: WireLog = serde_json::from_value(json!({
             "level": "warn",
             "kind": "op_failed",
@@ -687,10 +632,6 @@ mod tests {
 
     #[test]
     fn an_error_is_described_by_its_whole_chain() {
-        // The bug this exists for: the adapter reported "connecting to the
-        // Matter controller at ws://127.0.0.1:5580/giap" and nothing else, so a
-        // controller answering 404 to the handshake and one refusing the
-        // connection outright were the same sentence.
         let error = anyhow::anyhow!("HTTP error: 404 Not Found")
             .context("connecting to the Matter controller at ws://127.0.0.1:5580/giap");
 
@@ -739,9 +680,6 @@ mod tests {
 
     #[test]
     fn the_applied_patch_deserialises_straight_into_the_core_type() {
-        // The wire names its fields exactly as `DeviceStatePatch` does, which is
-        // what lets the control port report what the DEVICE did rather than what
-        // the caller asked for.
         let result: ControlResult =
             serde_json::from_value(json!({ "applied": { "on": true, "brightness": 40 } })).unwrap();
         assert_eq!(result.applied.on, Some(true));

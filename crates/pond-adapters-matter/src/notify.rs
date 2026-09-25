@@ -1,7 +1,4 @@
-//! Telling the user when something Matter-related actually happened. Significant
-//! occurrences push a [`Notification`], reaching phones over
-//! `GET /api/v1/notifications/stream` and the desktop poller. Everything alerting is
-//! debounced on the `routes.rs` window; `giap::trace` still records every occurrence.
+//! Debounced user-facing Matter [`Notification`]s; `giap::trace` still records every occurrence.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,49 +8,32 @@ use pond_core::mcp::ports::notification::{Notification, NotificationSender};
 use pond_core::user_data::ports::device_commissioning::matter_bridged_endpoint;
 use tokio::sync::{Mutex, RwLock};
 
-/// How long an alert of a given kind suppresses the next one of that kind.
-///
-/// Ten minutes, matching the pairing-failure window in `routes.rs`. A flapping controller
-/// reconnects far faster, so the user hears "Matter is down" once, not once per attempt.
+/// Per-kind alert suppression, matching `routes.rs`'s pairing-failure window.
 const ALERT_WINDOW: Duration = Duration::from_secs(600);
 
-/// How long after asking for a removal the resulting event still counts as ours.
-///
-/// Generous relative to the event, which follows within seconds: too tight gives a false
-/// "your device left the network" alarm about something the user just did.
+/// How long a requested removal's event counts as ours; generous, as a miss is a false alarm.
 const REMOVAL_GRACE: Duration = Duration::from_secs(120);
 
-/// Whether an unreachable alert is outstanding, so recovery is only announced to
-/// someone who was told about the outage.
+/// Debounce state shared by every clone of a `MatterNotifier`.
 #[derive(Default)]
 struct State {
     last_pairing_failure: Option<Instant>,
     last_unreachable: Option<Instant>,
-    /// Set when an unreachable alert went out; cleared when recovery is
-    /// announced. Without it, every ordinary reconnect would report a recovery
-    /// from an outage the user never heard about.
+    /// Set by an unreachable alert, so only an announced outage gets an all-clear.
     outage_announced: bool,
-    /// Set while first-run setup is in progress, so "finished" is only reported
-    /// for an install that was actually announced as starting.
+    /// Set by `setup_started`, so "finished" is only reported after an announced start.
     setup_announced: bool,
-    /// Removals GIAP asked for, so the event they cause is not reported as a
-    /// device leaving on its own.
+    /// Removals GIAP asked for, whose events aren't reported as devices leaving.
     expected_removals: HashMap<String, Instant>,
-    /// Which device ids an expectation has already answered for.
-    ///
-    /// Separate from `expected_removals` because one expectation answers for many events
-    /// (a hub and every device behind it) while answering for each of them only ONCE.
+    /// Ids already answered for: one expectation covers a hub and its children, each only once.
     satisfied_removals: HashMap<String, Instant>,
 }
 
 impl State {
-    /// Was this removal one GIAP asked for? Matches the id exactly, or as a bridged
-    /// child of an expected hub, so one expectation answers for N child events and a
-    /// prefix match is not consumed. Entries age out through the sweep in
-    /// `expect_removal`. The trailing dash matters: `matter-9-` must not match `matter-90`.
+    /// Whether GIAP asked for this removal: the exact id, or a child of an expected hub, whose
+    /// prefix match isn't consumed. The dash in `matter-9-` keeps it from matching `matter-90`.
     fn take_expected_removal(&mut self, device_id: &str) -> bool {
-        // Already answered for. A second departure of the same device is news, or the
-        // first deliberate removal would silence every genuine one after it.
+        // Already answered for: a second departure of the same device is real news.
         if let Some(at) = self.satisfied_removals.get(device_id) {
             if at.elapsed() < REMOVAL_GRACE {
                 return false;
@@ -73,16 +53,11 @@ impl State {
     }
 }
 
-/// Builds and pushes the Matter notifications, holding the debounce state.
-///
-/// Cloneable and cheap: bridge, supervisor and commissioner each hold one and share the
-/// same window, so two paths cannot both alert for the same outage.
+/// Pushes Matter notifications; clones share debounce state so no outage alerts twice.
 #[derive(Clone)]
 pub struct MatterNotifier {
-    /// `None` until a sender is attached, and on a build without the notification
-    /// stack; every method is then a no-op, so callers never branch on it. Settable
-    /// rather than fixed at construction because of startup order: the Matter runtime
-    /// is built before the notification stack exists, so the sender arrives later.
+    /// `None` until attached, making every method a no-op. Attached late: the Matter runtime is
+    /// built before the notification stack exists.
     sender: Arc<RwLock<Option<Arc<dyn NotificationSender>>>>,
     state: Arc<Mutex<State>>,
 }
@@ -102,22 +77,18 @@ impl MatterNotifier {
         }
     }
 
-    /// A notifier that will never send, for tests and for the paths that have no
-    /// user to tell (a controller revival, which is already being reported).
+    /// For tests and paths with no user to tell; never attached, so it never sends.
     pub fn disabled() -> Self {
         Self::new()
     }
 
-    /// Start sending through `sender`. Callers must do this before the first
-    /// `apply`, or a first-run install would finish unannounced.
+    /// Start sending; attach before the first `apply` or a first-run install finishes unannounced.
     pub async fn attach(&self, sender: Arc<dyn NotificationSender>) {
         *self.sender.write().await = Some(sender);
     }
 
-    /// A device joined the fabric. Silent for a device behind a bridge: a hub's dozen
-    /// children each register separately, and the hub's own alert covers them. That
-    /// alert claims no count, because the children's descriptors have not populated at
-    /// the moment the hub registers.
+    /// A device joined; bridged children are covered by the hub's alert, which gives no count
+    /// because their descriptors aren't populated yet when the hub registers.
     pub async fn device_paired(&self, device_id: &str, name: &str, device_type: &str) {
         if matter_bridged_endpoint(device_id).is_some() {
             return;
@@ -153,10 +124,7 @@ impl MatterNotifier {
         .await;
     }
 
-    /// The controller has stopped answering and a restart is being attempted.
-    ///
-    /// Raised on the first revival attempt, not the first failed reconnect: a controller
-    /// restarting normally is back within a couple of attempts.
+    /// The controller stopped answering; raised at the first revival, past a normal restart's blip.
     pub async fn controller_unreachable(&self, url: &str) {
         {
             let mut state = self.state.lock().await;
@@ -180,8 +148,7 @@ impl MatterNotifier {
         .await;
     }
 
-    /// The connection is back. Silent unless an outage was announced, so a
-    /// routine reconnect does not produce an all-clear for nothing.
+    /// The connection is back; silent unless an outage was announced.
     pub async fn controller_recovered(&self) {
         {
             let mut state = self.state.lock().await;
@@ -200,15 +167,10 @@ impl MatterNotifier {
         .await;
     }
 
-    /// GIAP is about to remove `device_id` from the fabric itself, so the resulting
-    /// `device_removed` is not alerted on. The delete path decommissions before it
-    /// unregisters, and one expectation covers a hub and every device behind it, since
-    /// removing a hub drops its children too. See `take_expected_removal`.
+    /// GIAP is removing `device_id` itself: don't alert on it, or on a hub's children.
     pub async fn expect_removal(&self, device_id: &str) {
         let mut state = self.state.lock().await;
-        // Opportunistic sweep: entries are only ever consumed by the matching
-        // event, and one that never arrives would otherwise sit here for the
-        // life of the process suppressing a real alert years later.
+        // Sweep, or an expectation whose event never came would suppress a real alert later.
         state
             .expected_removals
             .retain(|_, at| at.elapsed() < REMOVAL_GRACE);
@@ -220,10 +182,7 @@ impl MatterNotifier {
             .insert(device_id.to_string(), Instant::now());
     }
 
-    /// A device left the fabric. Silent when GIAP is the one that removed it.
-    ///
-    /// `name` is what the user calls the device. The raw id must not appear in the alert:
-    /// a bridged child reads as `matter-90-7`, which names nothing a person recognises.
+    /// A device left; silent if GIAP removed it. The alert uses `name`, never the raw id.
     pub async fn device_dropped(&self, device_id: &str, name: &str) {
         {
             let mut state = self.state.lock().await;
@@ -242,8 +201,7 @@ impl MatterNotifier {
         .await;
     }
 
-    /// First-run setup has started. It legitimately takes minutes, and the UI
-    /// otherwise shows nothing but "Starting..." for the whole of it.
+    /// First-run setup started; it takes minutes, with only "Starting..." in the UI otherwise.
     pub async fn setup_started(&self) {
         self.state.lock().await.setup_announced = true;
         self.push(
@@ -256,8 +214,7 @@ impl MatterNotifier {
         .await;
     }
 
-    /// Setup finished. Only reported when the start was, so a Pond whose
-    /// controller was already installed says nothing.
+    /// Setup finished; reported only if its start was.
     pub async fn setup_finished(&self) {
         {
             let mut state = self.state.lock().await;
@@ -349,8 +306,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_flapping_controller_alerts_once_not_once_per_attempt() {
-        // The supervisor retries for as long as an outage lasts. Without the
-        // window, a controller down for an hour would be an hour of alerts.
         let (notifier, recorder) = notifier().await;
         for _ in 0..5 {
             notifier
@@ -396,8 +351,6 @@ mod tests {
 
     #[tokio::test]
     async fn setup_finished_says_nothing_when_setup_never_started() {
-        // The common case by far: every start after the first finds the
-        // controller already installed and must be silent.
         let (notifier, recorder) = notifier().await;
         notifier.setup_finished().await;
         assert!(recorder.titles().is_empty());
@@ -412,10 +365,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_removal_giap_asked_for_is_not_reported_as_a_device_leaving() {
-        // The delete path decommissions before it removes the registry row, so
-        // the event arrives while the device still looks registered. Alerting on
-        // it would tell the user their device had vanished, moments after they
-        // deliberately removed it.
         let (notifier, recorder) = notifier().await;
 
         notifier.expect_removal("matter-18").await;
@@ -432,8 +381,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_expectation_is_consumed_not_permanent() {
-        // Otherwise the first deliberate removal of a device would silence every
-        // later, genuine departure of one that reused the id.
         let (notifier, recorder) = notifier().await;
 
         notifier.expect_removal("matter-18").await;
@@ -445,8 +392,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_hub_arriving_with_a_dozen_devices_is_one_alert() {
-        // One thing the user did. A hub arrives with everything it speaks for and
-        // each child registers separately, so this fired once per bulb.
         let (notifier, recorder) = notifier().await;
 
         notifier
@@ -457,9 +402,7 @@ mod tests {
         }
 
         assert_eq!(recorder.titles(), vec!["Matter device added"]);
-        // And it does not claim a count it cannot know: the children's descriptors
-        // have not populated when the hub registers, which is why they arrive as
-        // separate events seconds later.
+        // And it claims no count it can't know yet.
         let body = recorder.bodies().join(" ");
         assert!(body.contains("Living Room Hub"), "{body}");
         assert!(body.contains("as it reports them"), "{body}");
@@ -467,9 +410,6 @@ mod tests {
 
     #[tokio::test]
     async fn removing_a_hub_silences_its_children_too() {
-        // A hub's children leave the fabric with it, so the controller emits one
-        // `device_removed` per child. The adapter never held the child list and
-        // registers ONE expectation, which must silence all of them.
         let (notifier, recorder) = notifier().await;
 
         notifier.expect_removal("matter-90").await;
@@ -489,9 +429,7 @@ mod tests {
 
     #[tokio::test]
     async fn one_hubs_removal_does_not_silence_another() {
-        // The trailing dash in the prefix test. Without it `matter-9-` also matches
-        // `matter-90`, so deleting one hub would silence an unrelated one's children
-        // leaving for real.
+        // Guards the trailing dash in the hub-prefix match.
         let (notifier, recorder) = notifier().await;
 
         notifier.expect_removal("matter-9").await;
@@ -508,9 +446,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_departure_names_the_device_not_its_id() {
-        // The alert interpolated the raw device id, so it read `"matter-18" is no
-        // longer on this Pond's Matter network`. A bridged child would have made
-        // that `"matter-90-7"` — an id names nothing a person recognises.
         let (notifier, recorder) = notifier().await;
 
         notifier.device_dropped("matter-18", "Porch Light").await;
@@ -525,8 +460,6 @@ mod tests {
 
     #[tokio::test]
     async fn pairing_success_is_not_debounced() {
-        // Adding several devices in one sitting is a normal thing to do, and each
-        // one is a distinct fact the user wants confirmed.
         let (notifier, recorder) = notifier().await;
         notifier
             .device_paired("matter-2", "Hall light", "light")
@@ -539,8 +472,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_notifier_without_a_sender_is_inert() {
-        // Every notifier starts this way, and stays this way on a build without
-        // the notification stack, so no caller may have to branch on it.
         let notifier = MatterNotifier::disabled();
         notifier
             .device_paired("matter-2", "Hall light", "light")
