@@ -1,5 +1,4 @@
-//! Mock for `DeviceControlPort` — records the last call and echoes the
-//! requested state back. Used by port tests and downstream `pond-api` tests.
+//! Mock `DeviceControlPort`, shared with downstream `pond-api` tests.
 
 use crate::user_data::ports::device_control::{
     DeviceControlOutcome, DeviceControlPort, DeviceStatePatch,
@@ -8,8 +7,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Mutex;
 
-/// Records the last control call as a string (for assertions) and echoes the
-/// requested state. Always succeeds.
+/// Records the last call as a string and echoes the requested state; always succeeds.
 #[derive(Default)]
 pub struct RecordingDeviceControl {
     last: Mutex<Option<String>>,

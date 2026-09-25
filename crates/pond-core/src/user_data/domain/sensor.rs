@@ -3,7 +3,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// A single reading from a physical sensor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SensorReading {
     pub device_id: String,
@@ -15,25 +14,17 @@ pub struct SensorReading {
     pub recorded_at: DateTime<Utc>,
 }
 
-/// Summary statistics over a window of readings, computed by the store rather
-/// than by folding every row into memory.
-///
-/// `min`, `max`, `avg` and `unit` are `None` exactly when `count == 0`: an empty
-/// window has no extremum, which is what SQL `MIN`/`MAX` over zero rows yields.
-/// Modelling it as `Option` rather than a sentinel keeps an empty range from
-/// being reported as a real measurement.
+/// Window stats computed by the store; the `Option` fields are `None` exactly when `count == 0`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SensorAggregate {
     pub count: u64,
     pub min: Option<f64>,
     pub max: Option<f64>,
     pub avg: Option<f64>,
-    /// Unit of the readings in the window. Invariant for a given
-    /// (device_id, sensor_type) pair, so any row in the window answers it.
+    /// Fixed per (device_id, sensor_type), so any row in the window gives it.
     pub unit: Option<String>,
 }
 
-/// An event detected by a camera or vision system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CameraEvent {
     /// Set by the DB on insert; `None` before persisting

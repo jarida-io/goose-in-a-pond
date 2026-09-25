@@ -1,32 +1,18 @@
 use serde::{Deserialize, Serialize};
 
-/// A user-defined skill injected into the agent's system prompt.
-///
-/// Skills follow the agentskills.io shape: a short `description` sits in the
-/// prompt at all times so the model can judge relevance, while the full
-/// `content` (instructions) is loaded on demand via the `load_skill` tool
-/// rather than injected on every turn.
+/// A user skill; only `description` is always in the prompt, `content` loads via `load_skill`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserSkill {
     /// UUID primary key.
     pub id: String,
-    /// Human-readable name, must be unique (e.g. "Light Control", "Morning
-    /// Briefing"). Unlike goose's filesystem-backed Agent Skills — where the
-    /// name doubles as a directory/slug — this is a DB row addressed by
-    /// exact-string lookup (`load_skill`), so it stays free-form rather than
-    /// forced into slug shape. See `validate_skill_name`.
+    /// Unique and free-form (not a slug): `load_skill` looks it up by exact string.
     pub name: String,
-    /// Short natural-language description of what the skill is for and when it
-    /// applies. Always visible to the model, so it must stay small.
+    /// What the skill is for and when it applies; always visible to the model, so keep it small.
     pub description: String,
-    /// Icon key from the frontend's curated skill-icon set (e.g. "bell",
-    /// "clock"). Purely cosmetic — the model never sees it. Unrecognised
-    /// values fall back to a default icon client-side, so this is never
-    /// validated against a fixed list here.
+    /// Frontend icon key ("bell"); unvalidated, since the client falls back to a default.
     pub icon: String,
     /// Markdown instruction content, loaded into context on demand.
     pub content: String,
-    /// Whether this skill is currently active.
     pub active: bool,
     /// ISO datetime when this skill was created.
     pub created_at: String,
@@ -35,11 +21,7 @@ pub struct UserSkill {
 /// Maximum allowed name length (bytes).
 pub const MAX_NAME_LEN: usize = 100;
 
-/// Validate a skill name: non-empty (after trimming), at most
-/// `MAX_NAME_LEN` bytes, and a single line — no newlines, since it is
-/// rendered inline in the skill list the model sees. No charset
-/// restriction beyond that: "Task Reminder" is exactly as valid as
-/// "task-reminder".
+/// Names must be non-blank, ≤ `MAX_NAME_LEN` bytes and single-line (shown inline to the model).
 pub fn validate_skill_name(name: &str) -> Result<(), String> {
     if name.trim().is_empty() {
         return Err("Skill name must not be empty".to_string());
@@ -60,17 +42,12 @@ pub fn validate_skill_name(name: &str) -> Result<(), String> {
 }
 
 impl UserSkill {
-    /// Maximum allowed content length (bytes). Loaded on demand via
-    /// `load_skill`, but still bounded so one skill can't blow the context
-    /// budget of whatever turn loads it.
+    /// Max content bytes, so one loaded skill can't blow the turn's context budget.
     pub const MAX_CONTENT_LEN: usize = 5000;
 
-    /// Maximum allowed description length (bytes). Descriptions are injected
-    /// into the system prompt on every turn for every active skill, so this
-    /// stays small on purpose.
+    /// Max description bytes; small because every active skill's description is in every prompt.
     pub const MAX_DESCRIPTION_LEN: usize = 280;
 
-    /// Validate name format and content/description length.
     pub fn validate(&self) -> Result<(), String> {
         validate_skill_name(&self.name)?;
         if self.description.len() > Self::MAX_DESCRIPTION_LEN {

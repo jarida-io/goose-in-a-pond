@@ -1,47 +1,31 @@
-//! Face recognition domain types.
-//!
-//! `FaceEmbedding` is the stored representation of a household member's facial
-//! identity. Raw images are never retained — only the compact float vector
-//! produced by the embedding model is persisted.
+//! Face recognition types. Only embedding vectors are persisted, never raw images.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// A stored face embedding for a household member profile.
-///
-/// Embeddings are model-specific opaque vectors.  The `model_dims` field
-/// records the dimensionality so callers can verify they are comparing
-/// embeddings from the same model family (ArcFace-512 vs MobileFaceNet-128).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FaceEmbedding {
     /// Unique row ID (UUID v4).
     pub id: String,
-    /// The household member profile this embedding belongs to.
     pub profile_id: String,
-    /// Compact float representation of the face — never reconstructable
-    /// back to the original image.
+    /// Face vector; not reconstructable into the original image.
     pub embedding: Vec<f32>,
-    /// Dimensionality of the embedding vector (e.g. 512 for ArcFace,
-    /// 128 for MobileFaceNet).  Used as a sanity-check when comparing.
+    /// Vector length (512 ArcFace, 128 MobileFaceNet); only compare embeddings of equal dims.
     pub model_dims: u32,
-    /// When this embedding was enrolled.
     pub created_at: DateTime<Utc>,
 }
 
-/// Result of a face identification attempt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FaceIdentification {
     /// The identified profile, if confidence exceeded the threshold.
     pub profile_id: Option<String>,
-    /// Cosine similarity score in \[0.0, 1.0\].
-    /// `None` if the image contained no detectable face.
+    /// Cosine similarity in \[0.0, 1.0\]; `None` if no face was detected.
     pub confidence: Option<f32>,
     /// Whether the identification was conclusive (confidence ≥ threshold).
     pub identified: bool,
 }
 
 impl FaceIdentification {
-    /// Build a positive identification result.
     pub fn found(profile_id: String, confidence: f32) -> Self {
         Self {
             profile_id: Some(profile_id),
@@ -59,7 +43,6 @@ impl FaceIdentification {
         }
     }
 
-    /// Build a result where no face was detectable in the image.
     pub fn no_face() -> Self {
         Self {
             profile_id: None,
@@ -69,11 +52,7 @@ impl FaceIdentification {
     }
 }
 
-/// Integer pixel bounding box around a face within a source image.
-///
-/// Coordinates are in the source image's pixel space (origin top-left).
-/// Supplied by the client (UI crop), a face detector (mtCNN follow-up),
-/// or synthesised by the adapter's center-square fallback when absent.
+/// Face bounding box in source-image pixels (origin top-left).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoundingBox {
     pub x: u32,
@@ -98,16 +77,8 @@ impl BoundingBox {
     }
 }
 
-/// Five canonical facial landmarks in source-image pixel coordinates.
-///
-/// Order matches the ArcFace/SCRFD convention: left eye, right eye, nose tip,
-/// left mouth corner, right mouth corner.  These drive the similarity-transform
-/// alignment that warps every face into the canonical 112×112 pose ArcFace was
-/// trained on — the single biggest lever for real-world identification
-/// accuracy.  Without alignment, identical faces photographed at different
-/// head poses land in different regions of the embedding space and ArcFace
-/// produces ~0.5 similarity for truly-different people, which is why the
-/// "anyone passes the threshold" failure mode emerges.
+/// Five facial landmarks in source-image pixels, used to warp faces to ArcFace's 112×112 pose.
+/// Without that alignment, unrelated faces score ~0.5 similarity.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct FaceLandmarks {
     pub left_eye: (f32, f32),
@@ -118,8 +89,7 @@ pub struct FaceLandmarks {
 }
 
 impl FaceLandmarks {
-    /// Flat `[lx, ly, rx, ry, nx, ny, mlx, mly, mrx, mry]` — handy for
-    /// iterating when computing the similarity transform.
+    /// Points in the ArcFace/SCRFD reference order the similarity transform expects.
     pub fn as_array(&self) -> [(f32, f32); 5] {
         [
             self.left_eye,
@@ -131,10 +101,7 @@ impl FaceLandmarks {
     }
 }
 
-/// Detector output: a localised face, a confidence score, and optional
-/// landmarks.  Bbox-only detectors (UltraFace) leave `landmarks = None`;
-/// alignment-capable detectors (SCRFD, RetinaFace) populate them so the
-/// embedder can warp the crop to the canonical 112×112 pose.
+/// Detector output; bbox-only detectors (UltraFace) leave `landmarks` as `None`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetectedFace {
     pub bbox: BoundingBox,

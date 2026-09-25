@@ -1,9 +1,4 @@
-//! Memory fragment domain type — stores snippets of conversation or facts
-//! with optional embedding vectors for semantic search.
-//!
-//! Memories are categorised by [`MemorySegment`] (identity, preference, etc.),
-//! assigned a [`MemoryTier`] that controls decay, and tracked with importance
-//! scoring and access counts for intelligent cleanup.
+//! Memory fragments, their classification and decay tiers, and the fact quality gate.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -11,7 +6,7 @@ use std::borrow::Cow;
 
 // ── Memory classification ────────────────────────────────────────────────────
 
-/// Semantic category of a memory (inspired by boop-agent segments).
+/// Semantic category of a memory.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MemorySegment {
@@ -25,7 +20,6 @@ pub enum MemorySegment {
     Relationship,
     /// Ongoing tasks, goals, work projects.
     Project,
-    /// Factual knowledge worth remembering.
     Knowledge,
     /// Transient context (current situation, ongoing state).
     Context,
@@ -45,7 +39,6 @@ impl MemorySegment {
         }
     }
 
-    /// Default tier for this segment.
     pub fn default_tier(&self) -> MemoryTier {
         match self {
             Self::Identity => MemoryTier::Permanent,
@@ -79,7 +72,6 @@ impl MemoryTier {
     }
 }
 
-/// Lifecycle status for memory management.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryLifecycle {
@@ -93,10 +85,6 @@ pub enum MemoryLifecycle {
 
 // ── Memory fragment ──────────────────────────────────────────────────────────
 
-/// A persisted memory fragment.
-///
-/// `embedding` is stored as a raw f32 BLOB in SQLite and is `#[serde(skip)]`
-/// so it never appears in JSON responses (it's binary data, not user-facing).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryFragment {
     pub id: String,
@@ -104,25 +92,21 @@ pub struct MemoryFragment {
     pub profile_id: Option<String>,
     /// Session this memory was extracted from (None = manual/external)
     pub session_id: Option<String>,
-    /// The text content of the memory
     pub content: String,
     /// Raw embedding vector (None until an EmbeddingProvider generates it)
     #[serde(skip)]
     pub embedding: Option<Vec<f32>>,
     /// Source of this fragment: "chat", "note", "sensor_summary", "extraction", "mcp_tool"
     pub source: String,
-    /// Optional tags for categorization
     pub tags: Vec<String>,
     pub created_at: DateTime<Utc>,
 
     // ── Segment-aware fields (all optional for backward compat) ───────────
-    /// Semantic category of this memory.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub segment: Option<MemorySegment>,
     /// Importance score (0.0–1.0). Higher = more worth retaining.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub importance: Option<f32>,
-    /// Decay tier.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tier: Option<MemoryTier>,
     /// Decay rate (lambda). Defaults from tier if absent.
@@ -131,23 +115,19 @@ pub struct MemoryFragment {
     /// Number of times this memory has been accessed (recalled or injected).
     #[serde(default)]
     pub access_count: u32,
-    /// When the memory was last accessed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_accessed_at: Option<DateTime<Utc>>,
-    /// Lifecycle status.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<MemoryLifecycle>,
     /// ID of the memory that superseded this one (via consolidation).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<String>,
-    /// For correction memories: describes what wrong claim this corrects,
-    /// so consolidation never accidentally reverts the fix.
+    /// For corrections: the wrong claim this fixes, so consolidation never reverts it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub corrects: Option<String>,
 }
 
 impl MemoryFragment {
-    /// Create a fragment sourced from a chat exchange.
     pub fn from_chat(
         id: String,
         profile_id: Option<String>,
@@ -175,20 +155,12 @@ impl MemoryFragment {
         }
     }
 
-    /// True if this memory represents a user correction — either by segment
-    /// classification or by having a `corrects` field set.
-    ///
-    /// Correction memories must never be pruned or merged away during
-    /// consolidation, as they represent explicit user fixes.
+    /// True for user corrections, which consolidation must never prune or merge away.
     pub fn is_correction(&self) -> bool {
         self.segment.as_ref() == Some(&MemorySegment::Correction) || self.corrects.is_some()
     }
 
-    /// Create a fragment from background memory extraction.
-    ///
-    /// `corrects` should be set for `Correction` segments to record
-    /// what wrong claim this memory fixes, preventing consolidation
-    /// from accidentally reverting the correction.
+    /// Pass `corrects` for `Correction` segments so consolidation cannot revert the fix.
     pub fn from_extraction(
         id: String,
         session_id: Option<String>,
@@ -226,39 +198,17 @@ impl MemoryFragment {
 /// Shortest trimmed content, in characters, that can carry a fact.
 pub const MIN_FACT_CONTENT_LEN: usize = 8;
 
-/// Why a candidate memory was refused at write time.
-///
-/// A stored memory is injected into the assistant's context on later turns,
-/// long after the conversation that produced it is gone. Anything that only
-/// made sense inside that conversation is not merely useless — it actively
-/// misleads — so it is cheaper to lose the fact than to keep it.
+/// Why a candidate memory was refused at write time: out of context it would mislead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FactDefect {
     /// Nothing left after normalisation, or too short to carry a fact.
     TooShort,
-    /// Contains a deictic with no antecedent inside the sentence — "the latter
-    /// city", a trailing "there", a leading bare pronoun.
+    /// A deictic or leading pronoun with no antecedent in the sentence ("the latter city").
     UnresolvedReference,
-    /// Written from the user's point of view ("my mother"). Injected into the
-    /// assistant's context, "my" reads as the *assistant's* mother.
+    /// First person ("my mother"): injected into context, "my" reads as the assistant's.
     FirstPerson,
-    /// A verbatim copy of the extraction prompt's own worked example.
-    ///
-    /// `EXTRACTION_PROMPT` teaches the JSON shape with a demonstration — "my
-    /// mom florence lives in kisumu" mapping to two facts about Florence and
-    /// Kisumu. A model at this size copies worked examples: the answer
-    /// contract's Nairobi example was emitted verbatim as a real answer by a 4B
-    /// model on 2026-08-25, and the same class of failure here writes invented
-    /// family facts into the user's memory store, permanently and silently.
-    ///
-    /// Nothing else catches it. The example's facts are third person,
-    /// well-formed, self-contained and long enough — they pass every other
-    /// check in `fact_defect`, because they were written to.
-    ///
-    /// So the demonstration stays (it is what carries format compliance at this
-    /// size) and its own output is refused deterministically. A guard the model
-    /// cannot argue with is the only kind worth having against a model copying
-    /// text.
+    /// A verbatim copy of the extraction prompt's worked example. Small models copy examples,
+    /// and these facts pass every other check, so they are refused outright.
     EchoedExample,
 }
 
@@ -279,9 +229,7 @@ impl std::fmt::Display for FactDefect {
     }
 }
 
-/// Label prefixes a small model likes to bolt onto fact content
-/// ("Active Project: …"). Matched case-insensitively against the text before
-/// an early colon.
+/// Labels a small model prepends ("Active Project: …"); matched case-insensitively.
 const LABEL_PREFIXES: &[&str] = &[
     "active project",
     "current project",
@@ -301,11 +249,7 @@ const LABEL_PREFIXES: &[&str] = &[
 /// How far into the string a colon may sit and still be a label separator.
 const LABEL_SCAN_CHARS: usize = 24;
 
-/// Verbs that can open a *captured request* — a copy of what the user asked
-/// for this turn rather than a statement about the user. A bare imperative
-/// opener is necessary but nowhere near sufficient: "Build a treehouse for the
-/// children this summer" and "Run the Nairobi marathon in October" open the
-/// same way and are durable undertakings. See [`is_captured_request`].
+/// Verbs that can open a captured request; not sufficient alone, see [`is_captured_request`].
 const TASK_VERBS: &[&str] = &[
     "add",
     "build",
@@ -348,9 +292,7 @@ const TASK_VERBS: &[&str] = &[
     "write",
 ];
 
-/// Objects that mark an imperative as work the assistant does and finishes.
-/// Deliberately concrete: a "reminder" or a "function" is produced and done
-/// with, a "treehouse", "novel", "marathon" or "logo" is not.
+/// Objects of finished assistant work; deliberately concrete ("reminder", not "novel").
 const ASSISTANT_ARTIFACT_NOUNS: &[&str] = &[
     "alarm",
     "appointment",
@@ -382,33 +324,23 @@ const ASSISTANT_ARTIFACT_NOUNS: &[&str] = &[
     "translation",
 ];
 
-/// First-person markers that are unambiguous wherever they appear.
-///
-/// "i" and "us" are handled separately — each collides with a real word.
-/// "mine" is deliberately absent: it is a common noun ("a coal mine") far more
-/// often than a predicate pronoun ("that laptop is mine"), and every rule that
-/// tried to tell the two apart produced new false positives in one direction or
-/// the other. Storing "That laptop is mine now." is the cheaper error.
+/// Unambiguous first-person markers ("i"/"us" handled separately). "mine" is left out on
+/// purpose: it is usually a noun ("coal mine"); missing the pronoun is the cheaper error.
 const FIRST_PERSON: &[&str] = &["my", "myself", "our", "ours", "ourselves", "we", "me"];
 
-/// Contracted first-person forms. [`split_tokens`] keeps internal apostrophes
-/// so "I'm" stays one token and never reaches the bare-pronoun arms below —
-/// "I'm allergic to peanuts." was being stored verbatim.
+/// Contracted first-person forms, listed since [`split_tokens`] keeps "I'm" as one token.
 const FIRST_PERSON_CONTRACTIONS: &[&str] = &[
     "i'm", "i've", "i'll", "i'd", "we're", "we've", "we'll", "we'd", "let's",
 ];
 
-/// Tokens that make a preceding "I" a pronoun subject rather than a numeral or
-/// an initial ("Type I diabetes" must survive).
+/// Tokens after "I" that make it a pronoun, not a numeral ("Type I diabetes" must survive).
 const I_PREDICATES: &[&str] = &[
     "am", "was", "have", "had", "will", "would", "can", "could", "should", "do", "did", "like",
     "prefer", "want", "need", "think", "live", "work", "use", "enjoy", "hate", "love", "also",
     "just", "usually", "always", "never", "often",
 ];
 
-/// How many in-sentence antecedents "the latter" / "the former" need. They
-/// *select between two* candidates, so one proper noun is not enough — "The
-/// user's mother Florence lives in the latter city" still names no city.
+/// "the latter"/"the former" select between two candidates, so they need two antecedents.
 const CONTRASTIVE_ANTECEDENTS: usize = 2;
 
 /// Pronouns that cannot resolve when they open a sentence.
@@ -428,16 +360,12 @@ const DEICTIC_BIGRAMS: &[(&str, &str)] = &[
     ("that", "one"),
 ];
 
-/// Verbs that make a leading "there" the expletive subject ("there is a leak")
-/// rather than a place the reader cannot find.
+/// Verbs after "there" that make it the expletive subject ("there is a leak"), not a place.
 const EXPLETIVE_FOLLOWERS: &[&str] = &[
     "is", "are", "was", "were", "will", "would", "has", "have", "had", "seems", "appears",
 ];
 
-/// Split into (raw, lowercased) tokens with edge punctuation removed.
-///
-/// Edge-only trimming keeps internal apostrophes and hyphens, so "user's" stays
-/// one token and "U.S." never collapses onto the pronoun "us".
+/// Splits into (raw, lowercase) tokens, trimming only edge punctuation so "user's" stays whole.
 fn split_tokens(content: &str) -> Vec<(&str, String)> {
     content
         .split_whitespace()
@@ -447,8 +375,7 @@ fn split_tokens(content: &str) -> Vec<(&str, String)> {
         .collect()
 }
 
-/// Clean up fact content before it is validated or stored: collapse whitespace
-/// and drop a leading segment label the model invented.
+/// Collapse whitespace and drop a leading label the model invented ("Project: …").
 pub fn normalise_fact_content(raw: &str) -> String {
     let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
     let Some(colon) = collapsed
@@ -467,11 +394,8 @@ pub fn normalise_fact_content(raw: &str) -> String {
     }
 }
 
-/// Inspect fact content and return the first defect that makes it unstorable.
-///
-/// Deliberately conservative: every rule here permanently discards a fact, so
-/// each one is anchored to a token pattern that a well-formed third-person
-/// sentence cannot produce.
+/// First defect that makes content unstorable. Every rule discards facts for good, so each
+/// matches only patterns a well-formed third-person sentence cannot produce.
 pub fn fact_defect(content: &str) -> Option<FactDefect> {
     let trimmed = content.trim();
     if trimmed.chars().count() < MIN_FACT_CONTENT_LEN {
@@ -493,17 +417,8 @@ pub fn fact_defect(content: &str) -> Option<FactDefect> {
     None
 }
 
-/// The facts the extraction prompt's own worked example produces.
-///
-/// Compared case-insensitively and ignoring surrounding whitespace, not by
-/// fuzzy similarity: a real user really might have a mother called Florence,
-/// and refusing every fact that merely resembles the example would silently
-/// lose true memories. Only a VERBATIM echo is refused, which is what a copying
-/// model produces.
-///
-/// Kept next to `fact_defect` rather than in the extractor because it is a
-/// property of a fact, and both the LLM extractor and any future one have to
-/// answer to it.
+/// Facts from the extraction prompt's worked example. Only exact, case-insensitive echoes are
+/// refused: a real user may well have a mother called Florence.
 const EXTRACTION_EXAMPLE_FACTS: &[&str] = &[
     "The user's mother Florence lives in Kisumu.",
     "The user moved to Kisumu in 2019.",
@@ -523,49 +438,16 @@ fn singular(word: &str) -> &str {
     }
 }
 
-/// True when the content is a copy of a one-off request the assistant already
-/// carried out ("Set a reminder to water the plants") rather than a durable
-/// undertaking of the user's.
-///
-/// A bare imperative opener is *grammar*, not transience: "Build a treehouse
-/// for the children this summer" and "Design the new logo for Jarida" open the
-/// same way and are exactly the long-lived projects this must not demote. So
-/// two signals are required — an imperative opener **and** a named assistant
-/// artifact in the object.
-///
-/// The verb alone is never enough, however assistant-ish it sounds: "Convert
-/// the garage into a workshop this year" and "Install the solar panels on the
-/// roof before the rains" are year-long undertakings that open on "convert" and
-/// "install". The object is what separates work that gets produced and finished
-/// from work the user lives with.
-///
-/// The rule is calibrated to under-demote. Missing a captured request leaves a
-/// stale `Project` row that consolidation can retire; demoting a real project
-/// drops it to `Short` tier and it decays away in about a week.
-/// Whether a fact actually names the user.
-///
-/// The write gate tests the FORM of a sentence — length, no first person, no
-/// dangling anaphor — and never its subject, so a well-formed sentence about
-/// somebody else passes cleanly. On the device that let five William Ruto
-/// biography facts land in the `identity` segment, where identity means "the
-/// user's own name, role, home city", and one in `relationship`. 14 of 24
-/// stored rows contained no reference to the user at all.
-///
-/// Deliberately a cheap token test rather than anything clever: the extraction
-/// prompt teaches the wording ("The user's mother Florence lives in Kisumu"),
-/// so facts written the way the prompt asks for them pass. Callers should use
-/// this to DEMOTE rather than reject — a demotion is reversible by
-/// consolidation, a rejection loses the fact forever.
+/// Whether a fact mentions the user. Use it to demote, not reject: rejection loses the fact.
 pub fn names_user(content: &str) -> bool {
     split_tokens(content).iter().any(|(_, normalised)| {
-        // "user's" survives split_tokens as one token (internal apostrophes
-        // are kept on purpose), and the prompt's own canonical example is
-        // "The user's mother Florence lives in Kisumu." — so the possessive
-        // has to match or the example the model is taught would fail.
+        // split_tokens keeps "user's" whole, and the prompt teaches the possessive form.
         matches!(normalised.as_str(), "user" | "users" | "user's" | "users'")
     })
 }
 
+/// True for a copied one-off request: a task-verb opener AND an assistant-artifact object.
+/// Errs toward false, as a demoted real project decays away within a week.
 pub fn is_captured_request(content: &str) -> bool {
     let tokens = split_tokens(content);
     if tokens.len() < 3 || !TASK_VERBS.contains(&tokens[0].1.as_str()) {
@@ -603,21 +485,8 @@ fn has_first_person(tokens: &[(&str, String)]) -> bool {
     })
 }
 
-/// How many proper nouns sit *before* `idx` and could be the antecedent.
-///
-/// A capitalised word is the only antecedent signal available without a parser.
-/// Position 0 does not count (every sentence starts capitalised) and "I" names
-/// nothing. Counting only what precedes matters: an anaphor cannot be resolved
-/// by a name that comes after it, and the old "any capital anywhere" test
-/// forgave the dangling phrase whenever the sentence happened to mention a
-/// person, city, month or weekday — which is most real facts.
-///
-/// Position is the *only* thing counted. Asking additionally what kind of
-/// antecedent it is — a proper noun in a locative phrase, for "there" and place
-/// deictics — destroyed facts whose place is introduced by a copula rather than
-/// a preposition ("The user's home town is Kisumu and his parents still live
-/// there."). Resolving a deictic to the wrong earlier name costs one vague row;
-/// the kind test cost whole correct facts.
+/// Proper nouns before `idx`, the only antecedents an anaphor can have. Their kind (place vs
+/// person) is deliberately not checked: requiring a place dropped correct facts.
 fn antecedents_before(tokens: &[(&str, String)], idx: usize) -> usize {
     (1..idx).filter(|i| is_proper_noun(tokens, *i)).count()
 }
@@ -637,11 +506,7 @@ fn has_unresolved_reference(tokens: &[(&str, String)]) -> bool {
         let next = tokens.get(idx + 1);
         match lower.as_str() {
             "latter" | "former" if prev == Some("the") => {
-                // "the former Yugoslavia" names its referent. Otherwise the
-                // word selects between two earlier candidates, so it needs two:
-                // "moved from Nairobi to Kisumu and prefers the latter" reads
-                // on its own, "mother Florence lives in the latter city" does
-                // not, however many other capitals the sentence carries.
+                // A capitalised next word ("the former Yugoslavia") names the referent itself.
                 let names_referent = next
                     .and_then(|(raw, _)| raw.chars().next())
                     .is_some_and(|c| c.is_uppercase());
@@ -659,8 +524,6 @@ fn has_unresolved_reference(tokens: &[(&str, String)]) -> bool {
             _ => {}
         }
         if let Some((_, following)) = next {
-            // Any earlier proper noun resolves it. See [`antecedents_before`]
-            // for why the kind of noun is deliberately not inspected.
             if DEICTIC_BIGRAMS.contains(&(lower.as_str(), following.as_str()))
                 && antecedents_before(tokens, idx) == 0
             {
@@ -671,11 +534,7 @@ fn has_unresolved_reference(tokens: &[(&str, String)]) -> bool {
     false
 }
 
-/// Cosine similarity between two embedding vectors.
-///
-/// Returns `0.0` for mismatched dimensions, empty inputs, or a zero vector —
-/// callers treat "no usable embedding" and "unrelated" identically, and the
-/// mock embedding provider legitimately returns all-zero vectors.
+/// Cosine similarity, `0.0` (never NaN) for mismatched, empty or all-zero vectors.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
@@ -692,7 +551,6 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 
 // ── Memory graph (causal DAG) ───────────────────────────────────────────────
 
-/// The kind of causal or structural relationship between two memories.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeRelation {
@@ -704,31 +562,24 @@ pub enum EdgeRelation {
     Superseded,
 }
 
-/// A directed edge between two [`MemoryFragment`]s in the causal graph.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemoryEdge {
-    /// Source memory ID (the *from* end of the directed edge).
     pub from_id: String,
-    /// Target memory ID (the *to* end of the directed edge).
     pub to_id: String,
-    /// Semantic type of the relationship.
     pub relation: EdgeRelation,
     /// ISO-8601 timestamp when this edge was created.
     pub created_at: String,
 }
 
-/// A subgraph of the memory DAG — a set of nodes and the edges that connect them.
+/// A subgraph of the memory DAG.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryGraph {
-    /// The memory fragments in this subgraph.
     pub nodes: Vec<MemoryFragment>,
-    /// The edges connecting nodes in this subgraph.
     pub edges: Vec<MemoryEdge>,
 }
 
 // ── Memory audit log ────────────────────────────────────────────────────────
 
-/// Tracks memory lifecycle events for audit and debugging.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryEventKind {
@@ -757,7 +608,6 @@ impl std::fmt::Display for MemoryEventKind {
     }
 }
 
-/// A single audit log entry for a memory lifecycle event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryEvent {
     pub id: i64,
@@ -772,19 +622,7 @@ pub struct MemoryEvent {
 mod tests {
     use super::*;
 
-    /// The extraction prompt's own example must never become a memory.
-    ///
-    /// `EXTRACTION_PROMPT` demonstrates the JSON shape with "my mom florence
-    /// lives in kisumu, i moved there in 2019" mapping to two facts. A model at
-    /// this size copies worked examples — a 4B model emitted the answer
-    /// contract's Nairobi example as a real answer on 2026-08-25 — and here the
-    /// consequence is invented family facts written to the user's memory store,
-    /// permanently, with no conversation around them to reveal the mistake.
-    ///
-    /// These two strings pass every other check in `fact_defect`: third person,
-    /// self-contained, no bare pronoun, well over the length floor. They were
-    /// written to be exemplary, which is exactly what makes them undetectable
-    /// by the ordinary rules.
+    /// These pass every other `fact_defect` check, so only the echo guard stops them.
     #[test]
     fn the_extraction_examples_own_facts_are_refused() {
         for content in [
@@ -802,12 +640,6 @@ mod tests {
         }
     }
 
-    /// The guard must be an EXACT match, not a resemblance.
-    ///
-    /// Someone really can have a mother called Florence, or move to Kisumu.
-    /// Refusing anything that merely looks like the example would quietly lose
-    /// true memories — a worse failure than the one being prevented, because it
-    /// is invisible to the user and to us.
     #[test]
     fn a_real_fact_that_resembles_the_example_still_passes() {
         for content in [
@@ -824,9 +656,6 @@ mod tests {
         }
     }
 
-    /// The subject test that the write gate never had. Every one of these
-    /// strings was in the device store, filed in a segment that means "about
-    /// the user".
     #[test]
     fn names_user_separates_facts_about_the_user_from_everything_else() {
         // Real user facts — the wording the extraction prompt teaches.
@@ -835,7 +664,7 @@ mod tests {
         assert!(names_user("The user's mother Florence lives in Kisumu."));
         assert!(names_user("The users' shared calendar is on Google."));
 
-        // What was landing in `identity` and `relationship` instead.
+        // Facts about someone else.
         assert!(!names_user("William Ruto is a Kenyan politician."));
         assert!(!names_user("William Ruto is the leader of Kenya."));
         assert!(!names_user("AI assistant"));
@@ -843,8 +672,6 @@ mod tests {
         assert!(!names_user("Kirk Lazarus is an Armenian Australian artist"));
     }
 
-    /// "user's" must match: split_tokens keeps internal apostrophes on purpose,
-    /// and the prompt's own canonical example is possessive.
     #[test]
     fn names_user_matches_the_possessive() {
         assert!(names_user("The user's home city is Nairobi."));
@@ -858,8 +685,7 @@ mod tests {
 
     #[test]
     fn cosine_similarity_degrades_to_zero_instead_of_nan() {
-        // Dimension mismatch, empty input, and the mock provider's zero vector
-        // must all be "unrelated", never NaN — NaN would poison every sort.
+        // NaN would poison every similarity sort.
         assert_eq!(cosine_similarity(&[1.0, 0.0], &[1.0]), 0.0);
         assert_eq!(cosine_similarity(&[], &[]), 0.0);
         assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
@@ -894,7 +720,6 @@ mod tests {
 
     #[test]
     fn fragment_backward_compat_deser() {
-        // Old fragments without new fields should deserialize fine.
         let json = r#"{
             "id": "old-1",
             "profile_id": null,
@@ -1038,7 +863,6 @@ mod tests {
             0.7,
             Some("Likes coffee".to_string()),
         );
-        // Segment is Preference but corrects is set
         assert_eq!(frag.segment, Some(MemorySegment::Preference));
         assert!(frag.is_correction());
     }
@@ -1058,16 +882,14 @@ mod tests {
 
     // ── fact quality gate ───────────────────────────────────────────────
 
-    /// Content a real conversation produces that must survive the gate. The
-    /// expensive failure mode here is over-eagerness: a rejected fact is gone.
+    /// Real content that must survive the gate; a wrongly rejected fact is gone for good.
     const KEEPERS: &[&str] = &[
         "The user's mother lives in Kisumu.",
         "The user's mother's name is Florence.",
         // "therapist" contains "there"; token matching must not see it.
         "The user's therapist is Dr. Amina.",
         "The user thereafter switched to decaf coffee.",
-        // "mine" as a noun, "us" as a country, "I" as a numeral. "mine" is not
-        // a first-person marker at all any more, so every reading survives.
+        // "mine" as a noun, "us" as a country, "I" as a numeral.
         "The user works in a mine near Kakamega.",
         "The user works in a coal mine near Kakamega.",
         "The user explored an abandoned mine last year.",
@@ -1077,13 +899,11 @@ mod tests {
         // Expletive "there", not a place.
         "There is a spare key under the doormat.",
         "The user says there are two dogs in the compound.",
-        // "the former" naming its referent, and a resolvable "the latter" —
-        // two candidates in the sentence, of any kind.
+        // "the former" naming its referent; "the latter" with two candidates of any kind.
         "The user grew up in the former Yugoslavia.",
         "The user moved from Nairobi to Kisumu and prefers the latter.",
         "The user compared Rust and Go and prefers the latter.",
-        // A "there" whose place is named in the same sentence — introduced by a
-        // preposition in the first, by a copula in the second and third.
+        // "there" with its place named earlier, via a preposition or a copula.
         "The user moved to Kisumu in 2019 and still works there.",
         "The user's home town is Kisumu and his parents still live there.",
         "The user's employer is Jarida and the user works there full time.",
@@ -1093,21 +913,16 @@ mod tests {
         "The user's houseplants are watered every evening at 6 PM.",
     ];
 
-    /// Content pulled from (or modelled on) the junk rows the extractor wrote
-    /// into a real memory store.
     const REJECTS: &[(&str, FactDefect)] = &[
         (
             "The user's mother lives in the latter city.",
             FactDefect::UnresolvedReference,
         ),
-        // One capitalised token elsewhere in the sentence used to forgive the
-        // dangling phrase; it names a person, not the city.
+        // One earlier name is not enough for "the latter".
         (
             "The user's mother Florence lives in the latter city.",
             FactDefect::UnresolvedReference,
         ),
-        // First-person contractions: one token each, so the bare-pronoun
-        // matcher never saw them.
         ("I'm allergic to peanuts.", FactDefect::FirstPerson),
         (
             "I've been learning Swahili for two years.",
@@ -1171,7 +986,6 @@ mod tests {
 
     #[test]
     fn resolvable_and_dangling_latter_are_told_apart() {
-        // Same trailing clause; only the presence of an antecedent differs.
         assert!(fact_defect("The user's mother lives in the latter city.").is_some());
         assert!(fact_defect(
             "The user's mother moved from Nairobi to Kisumu and lives in the latter city."
@@ -1224,17 +1038,13 @@ mod tests {
 
     #[test]
     fn an_imperative_opener_alone_does_not_demote_a_project() {
-        // All four are durable undertakings that happen to be phrased as
-        // imperatives. Demoting them files them as Context, Short tier, and
-        // they decay out of the store inside a week.
         for durable in [
             "Build a treehouse for the children this summer",
             "Write a novel about beekeeping",
             "Run the Nairobi marathon in October",
             "Design the new logo for Jarida",
             "Learn Swahili before the trip to Mombasa",
-            // Verbs that sound like assistant work and are not: keying on the
-            // verb alone demoted both of these to Context, Short tier.
+            // Assistant-sounding verbs that open durable projects.
             "Convert the garage into a workshop this year",
             "Install the solar panels on the roof before the rains",
         ] {
@@ -1244,9 +1054,7 @@ mod tests {
 
     #[test]
     fn assistant_work_is_still_demoted() {
-        // An imperative opener plus a named artifact in the object. The artifact
-        // is the only signal now: the verb on its own could not tell "Install
-        // the solar panels" from "Install the dependencies".
+        // An imperative opener plus a named artifact in the object.
         for request in [
             "Create a short Python function to check if a number is prime.",
             "Set a reminder to water the plants every evening at 6 PM",
@@ -1261,10 +1069,7 @@ mod tests {
 
     #[test]
     fn an_assistant_verb_without_an_artifact_is_left_alone() {
-        // The cost of requiring the artifact noun: these three are captured
-        // requests and are no longer demoted, so they sit in Project until
-        // consolidation retires them. A stale Project row is the cheaper error —
-        // the alternative demoted real year-long undertakings.
+        // Accepted misses: they stay in Project until consolidation retires them.
         for missed in [
             "Translate the poem into Swahili.",
             "Explain how the decay formula works.",
@@ -1276,17 +1081,11 @@ mod tests {
 
     #[test]
     fn mine_is_no_longer_a_first_person_marker() {
-        // Deliberate, and the whole point of dropping the disambiguation: every
-        // rule that tried to separate the noun from the pronoun leaked in one
-        // direction or the other (a premodifier stack hid "a coal mine"; a
-        // backward walk past "of" let "a friend of mine" through). Keeping the
-        // noun reading is worth storing the handful of pronoun sentences,
-        // because the pronoun case costs one imprecise row and the noun case
-        // destroyed a correct fact outright.
+        // Deliberate: a missed pronoun costs a vague row; a misread noun loses a true fact.
         for kept in [
             "The user works in a coal mine near Kakamega.",
             "The user explored a very old abandoned mine.",
-            // Genuinely first person, and now stored anyway.
+            // Genuinely first person, stored anyway.
             "That laptop is mine now.",
             "A friend of mine works at Jarida.",
         ] {
@@ -1301,10 +1100,6 @@ mod tests {
 
     #[test]
     fn a_deictic_resolves_to_any_earlier_proper_noun() {
-        // Positional counting only. "Peter" is a person, not a place, so this
-        // row is vaguer than we would like — but demanding a *place* antecedent
-        // (a proper noun after a locative preposition) threw away every fact
-        // whose place arrives through a copula, which is most of them.
         assert!(fact_defect("The user's brother Peter enjoyed that place in March.").is_none());
         assert!(
             fact_defect("The user's home town is Kisumu and his parents still live there.")
