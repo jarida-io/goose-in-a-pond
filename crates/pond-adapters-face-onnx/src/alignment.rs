@@ -1,13 +1,10 @@
-//! Face alignment: Umeyama similarity transform of five landmarks onto the canonical 112×112
-//! ArcFace template ([`CANONICAL_112`]), then a backward warp with bilinear sampling.
-//! Skipping this step collapses embeddings of different people toward each other, the
-//! "everyone scores 0.5 to 0.7" failure mode. Output is exactly 112×112.
+//! Face alignment: Umeyama-fit five landmarks to the ArcFace 112×112 template, then warp.
+//! Without it, different people's embeddings collapse together (everyone scores 0.5-0.7).
 
 use image::{DynamicImage, GenericImageView, Rgb, RgbImage};
 use pond_core::user_data::domain::face_recognition::FaceLandmarks;
 
-/// Canonical 5-point template on a 112×112 output.  Do not edit unless you
-/// are also retraining the embedding model.
+/// ArcFace 5-point template for 112×112 output; fixed by the embedding model's training.
 pub const CANONICAL_112: [(f32, f32); 5] = [
     (38.2946, 51.6963), // left eye
     (73.5318, 51.5014), // right eye
@@ -16,9 +13,7 @@ pub const CANONICAL_112: [(f32, f32); 5] = [
     (70.7299, 92.2041), // right mouth
 ];
 
-/// 2-D similarity transform:   [x' y' 1]ᵀ  =  M · [x y 1]ᵀ
-/// Represented as a 2×3 row-major array: `[[a, b, tx], [c, d, ty]]`
-/// where the 2×2 block encodes rotation+scale and `(tx, ty)` is translation.
+/// Row-major 2×3 matrix `[[a, b, tx], [c, d, ty]]`: rotation+scale block plus translation.
 #[derive(Debug, Clone, Copy)]
 pub struct Similarity2D {
     pub m: [[f32; 3]; 2],
@@ -58,14 +53,10 @@ impl Similarity2D {
     }
 }
 
-/// Fit the least-squares similarity transform (rotation, uniform scale, translation) mapping
-/// `src` points onto `dst` points.
-///
-/// Closed-form Umeyama (1991), the same solver InsightFace uses via `skimage.transform`.
+/// Least-squares similarity fit of `src` onto `dst` (Umeyama 1991, as InsightFace uses).
 pub fn umeyama_similarity(src: &[(f32, f32); 5], dst: &[(f32, f32); 5]) -> Similarity2D {
     let n = src.len() as f32;
 
-    // Centroids.
     let (mut sx, mut sy, mut dx, mut dy) = (0.0_f32, 0.0, 0.0, 0.0);
     for i in 0..src.len() {
         sx += src[i].0;
@@ -101,17 +92,14 @@ pub fn umeyama_similarity(src: &[(f32, f32); 5], dst: &[(f32, f32); 5]) -> Simil
     sig_yy /= n;
     var_s /= n;
 
-    // 2×2 SVD closed form.  For a 2×2 matrix A = [[a b] [c d]]:
-    //   A = U · S · Vᵀ  with  S = diag(σ1, σ2)
-    // We only need the sign of det(A) for Umeyama's reflection correction.
+    // A = [[a b] [c d]] is the cross-covariance; det(A)'s sign drives the reflection fix.
     let a = sig_xx;
     let b = sig_xy;
     let c = sig_yx;
     let d = sig_yy;
     let det_sigma = a * d - b * c;
 
-    // Umeyama rotation: R = U · diag(1, sign(det)) · Vᵀ. The sign flip is a no-op for
-    // well-posed landmarks but still matters if a detector returns mirrored ones.
+    // R = U · diag(1, sign(det)) · Vᵀ; the flip only matters for mirrored landmarks.
     let s_diag_2 = if det_sigma < 0.0 { -1.0_f32 } else { 1.0 };
 
     // 2×2 SVD via eigendecomposition of AᵀA.
@@ -137,7 +125,6 @@ pub fn umeyama_similarity(src: &[(f32, f32); 5], dst: &[(f32, f32); 5]) -> Simil
     } else {
         (0.0, 1.0)
     };
-    // v2 is perpendicular to v1.
     let (v2x, v2y) = (-v1y, v1x);
 
     // Left singular vectors: U·σ = A·V → Uₖ = (A·Vₖ) / σₖ  (if σₖ > 0)
@@ -152,16 +139,13 @@ pub fn umeyama_similarity(src: &[(f32, f32); 5], dst: &[(f32, f32); 5]) -> Simil
         (-u1y, u1x)
     };
 
-    // R = U · diag(1, s_diag_2) · Vᵀ
-    // Expanded for 2-D:
-    //   R = [u1 u2·s] · [v1 v2]ᵀ
+    // R = [u1 u2·s] · [v1 v2]ᵀ
     let r00 = u1x * v1x + s_diag_2 * u2x * v2x;
     let r01 = u1x * v1y + s_diag_2 * u2x * v2y;
     let r10 = u1y * v1x + s_diag_2 * u2y * v2x;
     let r11 = u1y * v1y + s_diag_2 * u2y * v2y;
 
-    // Uniform scale: c = (σ1 + s·σ2) / var_s.  Guard against degenerate
-    // collinear landmarks (var_s ≈ 0 ⇒ no informative transform).
+    // Scale c = (σ1 + s·σ2) / var_s; var_s ≈ 0 means collinear landmarks, so fall back to 1.
     let scale = if var_s > 1e-8 {
         (sigma1 + s_diag_2 * sigma2) / var_s
     } else {
@@ -208,10 +192,7 @@ fn sample_bilinear(img: &DynamicImage, x: f32, y: f32) -> Rgb<u8> {
     Rgb(out)
 }
 
-/// Warp the source image to a `side`×`side` canonical pose using a similarity transform
-/// fitted from the five landmarks to the 112-pixel template.
-///
-/// The template scales linearly for other `side` values; the embedder is fixed at 112 anyway.
+/// Warp to a `side`×`side` canonical pose; the 112 template scales linearly with `side`.
 pub fn align_to_canonical_112(
     img: &DynamicImage,
     landmarks: &FaceLandmarks,
@@ -227,7 +208,7 @@ pub fn align_to_canonical_112(
     ];
     let src = landmarks.as_array();
 
-    // Forward transform: src → dst.  We need its inverse for backward warp.
+    // Backward warp needs the inverse of the src → dst fit.
     let forward = umeyama_similarity(&src, &dst);
     let inverse = forward.inverse().unwrap_or(Similarity2D {
         m: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
@@ -317,7 +298,6 @@ mod tests {
         ];
         let t = umeyama_similarity(&src, &dst);
         let inv = t.inverse().expect("inverse should exist");
-        // fwd then inv should return to original.
         for &(x, y) in src.iter() {
             let (u, v) = t.apply(x, y);
             let (x2, y2) = inv.apply(u, v);

@@ -1,7 +1,4 @@
-//! Model management routes. DELETE /api/v1/models/{category}/{name}: 404 when
-//! uncatalogued, 409 when a role still holds it, 204 deletes and clears the flag.
-//! POST the same path plus /activate: 400 on a category/role mismatch, 200 persists.
-//! Run: cargo test -p pond-api --test model_integration_test
+//! Model management routes (`/api/v1/models/{category}/{name}`) over a tempdir SQLite.
 
 use std::sync::Arc;
 
@@ -40,10 +37,7 @@ impl OnboardingRepository for CompletedOnboarding {
     async fn reset(&self) -> anyhow::Result<()> {
         Ok(())
     }
-    // PAI-2 P7 made this a required trait method rather than a defaulted one:
-    // a default would have to answer from `get_current_step`, and a stub that
-    // answers "not onboarded" makes every onboarding write route public
-    // wherever it is used. The name of this stub is the answer.
+    // Answering "not onboarded" would make every onboarding write route public.
     async fn is_complete(&self) -> anyhow::Result<bool> {
         Ok(true)
     }
@@ -319,10 +313,8 @@ async fn delete_model_204_clears_downloaded_flag() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
-    // File should be gone
     assert!(!model_file.exists(), "model file should have been deleted");
 
-    // downloaded flag should be false
     let updated = repo.get_by_id("gguf/removable").await.unwrap().unwrap();
     assert!(!updated.downloaded, "downloaded flag should be cleared");
 }
@@ -439,10 +431,7 @@ fn kokoro_voice_record(name: &str) -> ModelRecord {
     }
 }
 
-/// The models list buckets every TTS engine under one `tts` group key, which is
-/// not the record's own category. A lookup that uses the group key builds
-/// `tts_piper/af_heart` and fails, so no Kokoro voice activates; Piper escapes
-/// only because its group key and its category happen to be the same word.
+/// The models list groups every TTS engine under `tts`, which is not a record's own category.
 #[tokio::test]
 async fn activate_kokoro_voice_via_the_tts_group_key() {
     let (app, repo, _tmp) = make_app().await;
@@ -461,7 +450,6 @@ async fn activate_kokoro_voice_via_the_tts_group_key() {
     );
 }
 
-/// The precise category must of course still work.
 #[tokio::test]
 async fn activate_kokoro_voice_via_its_own_category() {
     let (app, repo, _tmp) = make_app().await;
@@ -478,8 +466,7 @@ async fn activate_kokoro_voice_via_its_own_category() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
-/// Forgiveness is scoped to TTS. A GGUF lookup must never resolve to some other
-/// category's record that happens to share a name.
+/// The group-key fallback is TTS-only; a GGUF lookup must never match another category.
 #[tokio::test]
 async fn a_missing_non_tts_model_is_still_a_404() {
     let (app, repo, _tmp) = make_app().await;
@@ -494,10 +481,7 @@ async fn a_missing_non_tts_model_is_still_a_404() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-/// Activating a Kokoro voice must set the key the engine actually reads.
-/// `active_tts_model` names the catalogue row; `voice_tts_voice` is what
-/// `KokoroOutput` resolves `<voice>.bin` from and what the Voice screen shows.
-/// Writing only the former leaves the picker and the spoken voice disagreeing.
+/// `KokoroOutput` and the Voice screen read `voice_tts_voice`, not `active_tts_model`.
 #[tokio::test]
 async fn activating_a_kokoro_voice_sets_voice_tts_voice() {
     let (app, repo, settings, _tmp) = make_app_with_settings_repo().await;
@@ -516,9 +500,7 @@ async fn activating_a_kokoro_voice_sets_voice_tts_voice() {
     );
     assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
 
-    // Only `voice_tts_voice` is asserted: `MockSettingsRepository` does not
-    // project `active_tts_model` back out of its store, and that key was never
-    // the broken one — it was already being written.
+    // Only this key: `MockSettingsRepository` does not project `active_tts_model` back out.
     let s = settings.get().await.unwrap();
     assert_eq!(s.voice_tts_voice, "bf_emma");
 }

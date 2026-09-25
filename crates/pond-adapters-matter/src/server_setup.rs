@@ -1,7 +1,5 @@
-//! Local controller lifecycle — GIAP installs and runs the controller itself: a Node
-//! process (matter.js) shipped beside the binary. It adopts an existing controller on the
-//! port, else copies the sources to a writable `<data_dir>/matter-server/app/` so `npm ci`
-//! works, and spawns them with storage in the data dir. Only loopback URLs are auto-started.
+//! Local matter.js controller: adopt one on the port, else copy the shipped sources to a
+//! writable `<data_dir>/matter-server/app/` (so `npm ci` works) and spawn it. Loopback only.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -19,29 +17,20 @@ use tokio_tungstenite::connect_async;
 use crate::notify::MatterNotifier;
 use crate::protocol::{check_greeting, PROTOCOL_NAME};
 
-/// The controller GIAP started, if any. Shared rather than owned outright because two
-/// places must agree on which process is current: the reconciler kills it on teardown, and
-/// the reconnect supervisor replaces it when it finds the process dead. `None` means GIAP
-/// started none — the user runs their own controller, or Matter is off.
+/// The controller GIAP started (`None`: user-run, or Matter off). Shared: the reconciler kills
+/// it on teardown and the reconnect supervisor replaces it when it dies.
 pub type SharedServerChild = Arc<AsyncMutex<Option<Child>>>;
 
-/// matter.js 0.17's own engine range, verbatim: `>=20.19.0 <22.0.0 || >=22.13.0`.
-///
-/// A range with a HOLE in it, not a floor: Node 22.0 through 22.12 satisfies "20.19 or
-/// newer" and does NOT satisfy matter.js. `MIN_NODE` is the number the guidance quotes.
+/// Floor of matter.js 0.17's engine range `>=20.19.0 <22.0.0 || >=22.13.0`, which has a hole.
 pub const MIN_NODE: (u32, u32) = (20, 19);
 
 /// The excluded range: 22.0 up to, but not including, 22.13.
 const EXCLUDED_NODE: ((u32, u32), (u32, u32)) = ((22, 0), (22, 13));
 
-/// How many lines of the controller's stderr to keep.
-///
-/// A child that dies before it is ready writes its reason only to stderr, so the tail is
-/// attached to the readiness-timeout error. Twenty lines fits a Node stack trace.
+/// Stderr lines kept for the readiness-timeout error; 20 fits a Node stack trace.
 const STDERR_TAIL_LINES: usize = 20;
 
-/// Parse `"v20.19.4"` into `(20, 19)`. Pure so the version gate is testable
-/// without an interpreter.
+/// Parse `"v20.19.4"` into `(20, 19)`.
 pub fn parse_node_version(output: &str) -> Option<(u32, u32)> {
     let version = output.trim().trim_start_matches(['v', 'V']);
     let mut parts = version.split('.');
@@ -50,10 +39,7 @@ pub fn parse_node_version(output: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
-/// Does this Node satisfy matter.js's engine range?
-///
-/// Not `version >= MIN_NODE`: see [`MIN_NODE`] for the hole that comparison
-/// misses. Tuple ordering still does the work, twice.
+/// Does this Node satisfy matter.js's engine range, hole included (see [`MIN_NODE`])?
 pub fn meets_min_node(version: (u32, u32)) -> bool {
     if version < MIN_NODE {
         return false;
@@ -62,10 +48,7 @@ pub fn meets_min_node(version: (u32, u32)) -> bool {
     !(version >= excluded_from && version < excluded_until)
 }
 
-/// Why this Node will not do, in a sentence a person can act on.
-///
-/// The excluded range needs its own wording: "Node 22.5 is on PATH but the controller needs
-/// 20.19+" reads as a contradiction, and a user checking against it concludes GIAP is broken.
+/// Why this Node won't do. The hole gets its own wording: "needs 20.19+" contradicts 22.5.
 fn node_version_objection(version: (u32, u32)) -> String {
     let (from, until) = EXCLUDED_NODE;
     if version >= from && version < until {
@@ -81,8 +64,7 @@ fn node_version_objection(version: (u32, u32)) -> String {
     }
 }
 
-/// The loopback port to auto-start for, or `None` when the URL points at another
-/// host — GIAP only manages a controller it runs itself.
+/// The loopback port to auto-start for; `None` for any other host.
 pub fn local_port_from_ws_url(url: &str) -> Option<u16> {
     let rest = url
         .strip_prefix("ws://")
@@ -106,14 +88,12 @@ pub fn app_dir(data_dir: &Path) -> PathBuf {
 pub fn entrypoint(data_dir: &Path) -> PathBuf {
     app_dir(data_dir).join("src").join("server.ts")
 }
-/// Where the running controller's pid is recorded, so a controller that outlived
-/// its Pond can be found and reaped on the next start.
+/// Records the controller pid so one that outlived its Pond is reaped on the next start.
 fn pidfile(data_dir: &Path) -> PathBuf {
     controller_dir(data_dir).join("controller.pid")
 }
 
-/// Records the lockfile the installed tree was built from, so an upgrade that
-/// changes dependencies reinstalls and one that does not is a no-op.
+/// Records the fingerprint the installed tree was built from.
 fn install_marker(data_dir: &Path) -> PathBuf {
     app_dir(data_dir).join(".giap-install")
 }
@@ -122,10 +102,7 @@ pub fn storage_dir(data_dir: &Path) -> PathBuf {
     controller_dir(data_dir).join("storage-js")
 }
 
-/// Is something accepting connections on the controller port?
-///
-/// A bare TCP probe, used only to wait for a controller GIAP just spawned. Deciding whether
-/// to ADOPT a listener is [`probe_controller`]'s job; the two questions are different.
+/// Bare TCP probe, for waiting on a just-spawned controller; adoption uses [`probe_controller`].
 pub async fn is_running(port: u16) -> bool {
     tokio::net::TcpStream::connect(("127.0.0.1", port))
         .await
@@ -143,15 +120,10 @@ pub enum Occupant {
     Foreign(String),
 }
 
-/// How long the adoption probe waits. Loopback, so a controller that is up
-/// answers in milliseconds; the bound only stops a wedged listener from stalling
-/// startup.
+/// Adoption probe timeout: loopback answers in ms, so this only guards a wedged listener.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Find out what is on `port` by speaking to it.
-///
-/// A TCP probe alone cannot decide whether to reuse a listener: a different server holding
-/// the port answers TCP, is adopted, does not serve `/giap`, and every connection fails.
+/// Find out what is on `port` by speaking to it; a foreign server answers bare TCP too.
 pub async fn probe_controller(port: u16, url: &str) -> Occupant {
     if !is_running(port).await {
         return Occupant::Free;
@@ -180,9 +152,6 @@ pub async fn probe_controller(port: u16, url: &str) -> Occupant {
 }
 
 /// What to tell the user when the port belongs to something else.
-///
-/// Named and specific because the fix is specific, and because the situation is
-/// one an upgrade creates rather than anything the user did wrong.
 fn port_is_taken(port: u16, why: &str) -> anyhow::Error {
     anyhow!(
         "port {port} is already in use by something that is not a {PROTOCOL_NAME} controller: \
@@ -192,8 +161,7 @@ fn port_is_taken(port: u16, why: &str) -> anyhow::Error {
     )
 }
 
-/// Where the controller sources are shipped. `GIAP_ASSET_ROOT` and the exe's
-/// neighbours, matching how `extensions/` is found.
+/// Find the shipped controller sources: `GIAP_ASSET_ROOT`, the repo, then beside the exe.
 fn source_dir() -> Result<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(root) = std::env::var("GIAP_ASSET_ROOT") {
@@ -255,16 +223,10 @@ async fn find_node() -> Result<PathBuf> {
     ))
 }
 
-/// Directories never worth copying into the install.
-///
-/// `node_modules` is the one that matters: `npm ci` deletes and rebuilds it anyway, so
-/// copying a dev checkout's tree is a hundred megabytes of immediately discarded work.
+/// Not copied into the install; `npm ci` rebuilds `node_modules` anyway.
 const NOT_COPIED: &[&str] = &["node_modules", "test", ".git"];
 
-/// Replace the installed sources while leaving `node_modules` where it is.
-///
-/// `copy_tree` clears the destination first, which would take the dependency
-/// tree with it — the whole point of this path is not to pay for that again.
+/// Replace the installed sources but keep `node_modules` (`copy_tree` would clear it).
 fn refresh_sources(src: &Path, dst: &Path) -> Result<()> {
     for entry in std::fs::read_dir(dst).with_context(|| format!("reading {}", dst.display()))? {
         let entry = entry?;
@@ -321,10 +283,8 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-/// What the installed tree was built from: its dependencies, and its sources. TWO
-/// fingerprints, because they answer different questions at different costs: dependencies
-/// change rarely and cost minutes (`npm ci`); sources change every release. A lockfile-only
-/// marker makes every source-only change a silent no-op.
+/// What the installed tree was built from; deps apart from sources so only a deps change
+/// pays for `npm ci`.
 #[derive(PartialEq, Eq)]
 struct Fingerprint {
     deps: String,
@@ -345,10 +305,7 @@ impl Fingerprint {
     }
 }
 
-/// Hash `bytes` into a short hex string.
-///
-/// `DefaultHasher` rather than a cryptographic digest: this detects change, it does not
-/// defend against a forged one.
+/// Short hex hash of `bytes`; detects change, not forgery, so `DefaultHasher` suffices.
 fn digest(bytes: &[u8]) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -356,8 +313,7 @@ fn digest(bytes: &[u8]) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-/// Every file under `dir`, hashed with its relative path so a rename counts as
-/// a change. Sorted, so the result does not depend on directory order.
+/// Hash every file under `dir` with its relative path (so renames count), in sorted order.
 fn hash_tree(root: &Path, dir: &Path, into: &mut Vec<(String, String)>) -> Result<()> {
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
         .with_context(|| format!("reading {}", dir.display()))?
@@ -410,14 +366,10 @@ fn fingerprint(dir: &Path) -> Result<Fingerprint> {
     })
 }
 
-/// Turn what node printed into something a person can act on.
-///
-/// The failures worth naming are the ones with a specific remedy; anything else keeps
-/// node's own words, because an unrecognised fault said plainly beats a confident guess.
+/// Turn node's stderr into an actionable message; unrecognised faults keep node's own words.
 fn explain_startup_failure(stderr: &str, app: &Path) -> String {
     if stderr.contains("ERR_MODULE_NOT_FOUND") {
-        // Which module is missing decides whether the dependencies or the sources
-        // are the incomplete half, and the remedy is the same either way.
+        // Only the wording depends on which module is missing; the remedy is the same.
         let what = if stderr.contains("'tsx'") {
             "its dependencies are missing"
         } else {
@@ -448,23 +400,16 @@ fn explain_startup_failure(stderr: &str, app: &Path) -> String {
     format!("The Matter controller said:\n{stderr}")
 }
 
-/// Is this install actually runnable? The marker records what was *asked* for, not what
-/// survived: a cancelled or raced `npm ci` leaves a current marker and a tree that still
-/// cannot start, because the loader needs `tsx` and the entry file. Check the two things
-/// node will actually reach for.
+/// Can node start this install? The marker records what was asked for, not what survived.
 fn install_is_runnable(app: &Path) -> bool {
     app.join("src/server.ts").is_file() && app.join("node_modules/tsx").is_dir()
 }
 
-/// Serialises installs. `ensure_installed` is reached from the reconciler, the revive path
-/// and a plain start, and two at once race destructively: one clears the tree while the
-/// other is halfway through `npm ci`, and the survivor writes the "installed" marker over a
-/// half-built tree. Held across the whole install, so the second caller finds it current.
+/// Serialises installs, held across the whole install: concurrent callers (reconciler,
+/// revive, start) would clear each other's tree mid-`npm ci`.
 static INSTALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn ensure_installed(data_dir: &Path, notifier: &MatterNotifier) -> Result<()> {
-    // Waiting here is the point: whoever holds this may be about to make the very
-    // install this call would otherwise start in parallel with it.
     let _installing = INSTALL_LOCK.lock().await;
 
     let source = source_dir()?;
@@ -480,9 +425,7 @@ async fn ensure_installed(data_dir: &Path, notifier: &MatterNotifier) -> Result<
         return Ok(());
     }
 
-    // Sources changed but dependencies did not — by far the common case for an
-    // upgrade. Refreshing the code is a file copy; reinstalling `node_modules`
-    // for it would be minutes of work to arrive at the same tree.
+    // Sources changed, deps did not: refresh by copying instead of a minutes-long `npm ci`.
     if has_modules
         && install_is_runnable(&app)
         && installed.as_ref().is_some_and(|i| i.deps == wanted.deps)
@@ -515,10 +458,8 @@ async fn ensure_installed(data_dir: &Path, notifier: &MatterNotifier) -> Result<
         .with_context(|| format!("creating {}", controller_dir(data_dir).display()))?;
     copy_tree(&source, &app)?;
 
-    // `kill_on_drop` because this future is cancellable: the reconciler races `connect()`
-    // against a settings change, so toggling Matter off mid-install drops us here. Without
-    // it the child keeps writing into the tree and survives process exit, and re-enabling
-    // finds a half-written tree. `npm ci` is where a cancellation almost always lands.
+    // `kill_on_drop`: this future is dropped when Matter is toggled off mid-install, and an
+    // orphaned `npm ci` would keep writing into the tree.
     let output = Command::new("npm")
         .args(["ci", "--omit=dev", "--no-audit", "--no-fund"])
         .current_dir(&app)
@@ -528,9 +469,6 @@ async fn ensure_installed(data_dir: &Path, notifier: &MatterNotifier) -> Result<
         .context("running npm ci — is npm on PATH?")?;
 
     if !output.status.success() {
-        // npm's own diagnosis, rather than a status code. This used to go
-        // nowhere at all: the install inherited stdio, so a failure on a
-        // headless Pond left "the port never opened" as the only symptom.
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow!(
             "installing the Matter controller failed ({}). npm said:\n{}",
@@ -539,8 +477,7 @@ async fn ensure_installed(data_dir: &Path, notifier: &MatterNotifier) -> Result<
         ));
     }
 
-    // Before the marker, not after: a marker written over an install that cannot
-    // run is the thing that made this survive restarts.
+    // Before the marker: a marker over an unrunnable install would persist across restarts.
     if !install_is_runnable(&app) {
         return Err(anyhow!(
             "the Matter controller was installed into {} but cannot run from it: \
@@ -568,9 +505,6 @@ async fn ensure_installed(data_dir: &Path, notifier: &MatterNotifier) -> Result<
 mod startup_message_tests {
     use super::*;
 
-    /// What this actually looked like: node's loader backtrace, surfaced verbatim,
-    /// asking the reader to work out from `package_json_reader:301` that a directory
-    /// needed reinstalling.
     #[test]
     fn a_missing_dependency_reads_as_something_to_do() {
         let stderr = "node:internal/modules/package_json_reader:301\n  \
@@ -585,7 +519,6 @@ mod startup_message_tests {
         assert!(explained.contains("/x/app"), "{explained}");
         // The one thing a user is most likely to fear about deleting it.
         assert!(explained.contains("no commissioned devices"), "{explained}");
-        // And none of node's plumbing.
         assert!(!explained.contains("package_json_reader"), "{explained}");
     }
 
@@ -596,8 +529,6 @@ mod startup_message_tests {
         assert!(explained.contains("port is already taken"), "{explained}");
     }
 
-    /// An unrecognised fault is passed through rather than guessed at: node's own
-    /// words are worth more than a confident wrong explanation.
     #[test]
     fn anything_unrecognised_keeps_the_controllers_own_words() {
         let explained = explain_startup_failure("TypeError: x is not a function", Path::new("/x"));
@@ -613,12 +544,8 @@ mod startup_message_tests {
         assert!(explained.contains("printed nothing"), "{explained}");
     }
 
-    /// The check that would have caught the half-built install at setup instead of
-    /// on every boot from then on.
     #[test]
     fn an_install_missing_its_loader_is_not_runnable() {
-        // Same shape as the other filesystem tests here: a named directory under
-        // the process id, cleaned up at the end.
         let app = std::env::temp_dir().join(format!("giap-runnable-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&app);
         let app = app.as_path();
@@ -637,7 +564,6 @@ mod startup_message_tests {
     }
 }
 
-/// The last `lines` lines of `text`.
 fn tail(text: &str, lines: usize) -> String {
     let all: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     all[all.len().saturating_sub(lines)..].join("\n")
@@ -646,8 +572,7 @@ fn tail(text: &str, lines: usize) -> String {
 /// A bounded ring of the controller's most recent stderr lines.
 type StderrTail = Arc<Mutex<VecDeque<String>>>;
 
-/// Spawn the controller. The child is `kill_on_drop`, so holding the handle ties
-/// its lifetime to pond-server: drop it and the controller goes away too.
+/// Spawn the controller; it is `kill_on_drop`, so dropping the handle stops it.
 fn spawn_server(data_dir: &Path, port: u16, ble: bool) -> Result<(Child, StderrTail)> {
     let storage = storage_dir(data_dir);
     std::fs::create_dir_all(&storage).with_context(|| format!("creating {}", storage.display()))?;
@@ -665,9 +590,7 @@ fn spawn_server(data_dir: &Path, port: u16, ble: bool) -> Result<(Child, StderrT
     }
     let mut child = command
         .current_dir(app_dir(data_dir))
-        // Piped rather than sent to a file nobody reads. The controller writes
-        // structured NDJSON here, so the relay below can re-emit each record at
-        // the level it names instead of flattening everything to one.
+        // Piped: the controller writes NDJSON logs, relayed below at each record's level.
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -696,8 +619,7 @@ fn spawn_server(data_dir: &Path, port: u16, ble: bool) -> Result<(Child, StderrT
         });
     }
 
-    // Nothing should reach stdout — the controller keeps it clean deliberately —
-    // so anything that does is unexpected and worth seeing rather than dropping.
+    // The controller keeps stdout clean, so anything here is unexpected; surface it.
     if let Some(stdout) = child.stdout.take() {
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
@@ -710,9 +632,7 @@ fn spawn_server(data_dir: &Path, port: u16, ble: bool) -> Result<(Child, StderrT
     Ok((child, tail))
 }
 
-/// Re-emit one controller stderr line into `tracing`. Structured records keep their level
-/// and fields; anything else (a Node stack trace, matter.js's own output) goes at debug, so
-/// it is there when someone looks without filling the log by default.
+/// Re-emit a controller stderr line into `tracing`: records at their level, other text at debug.
 fn relay(line: &str) {
     match serde_json::from_str::<crate::protocol::WireLog>(line) {
         Ok(record) if !record.level.is_empty() => record.relay(),
@@ -725,10 +645,8 @@ pub(crate) fn clear_pidfile(data_dir: &Path) {
     let _ = std::fs::remove_file(pidfile(data_dir));
 }
 
-/// Classify the pid in the pidfile, reading its command line via `ps` (portable across
-/// macOS and Linux). `Some(true)` is alive and ours, so safe to kill; `Some(false)` is gone
-/// or a live UNRELATED pid, so never kill and clear the file; `None` means `ps` could not
-/// run, and the caller must not treat that as dead or a real orphan loses its only record.
+/// Via `ps`: `Some(true)` = alive and ours (kill); `Some(false)` = gone or an unrelated pid
+/// (clear, never kill); `None` = `ps` failed, so keep the pidfile.
 async fn pid_is_our_controller(pid: u32, data_dir: &Path) -> Option<bool> {
     let output = Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "command="])
@@ -739,8 +657,7 @@ async fn pid_is_our_controller(pid: u32, data_dir: &Path) -> Option<bool> {
         Ok(out) if out.status.success() => {
             let cmdline = String::from_utf8_lossy(&out.stdout);
             let cmdline = cmdline.trim();
-            // The entrypoint path is unique to this data dir, so two Ponds on
-            // one machine cannot reap each other's controllers.
+            // The entrypoint path is per data dir, so two Ponds never reap each other's.
             let ours = entrypoint(data_dir).display().to_string();
             Some(!cmdline.is_empty() && cmdline.contains(&ours))
         }
@@ -753,10 +670,8 @@ async fn pid_is_our_controller(pid: u32, data_dir: &Path) -> Option<bool> {
     }
 }
 
-/// Kill a controller left behind by a Pond that did not exit cleanly. `stop_controller` and
-/// `kill_on_drop` cover the graceful and unwinding exits; neither fires on `SIGKILL`, a
-/// panic under `panic = "abort"`, or an OOM kill. An idle orphan stays reachable and would
-/// be ADOPTED by the next start and owned by no one, so it is reaped instead.
+/// Kill a controller orphaned by a hard exit (SIGKILL, abort, OOM), which `kill_on_drop`
+/// misses; the next start would otherwise adopt it unowned.
 async fn reap_orphan(data_dir: &Path) {
     let path = pidfile(data_dir);
     let Some(pid) = std::fs::read_to_string(&path)
@@ -788,8 +703,6 @@ async fn reap_orphan(data_dir: &Path) {
             let _ = std::fs::remove_file(&path);
         }
         None => {
-            // Keep the file: it is the only record of a controller that may
-            // still be holding the port, and a later start can retry.
             tracing::warn!(
                 pid,
                 "matter: could not determine whether the recorded controller is alive; \
@@ -799,9 +712,7 @@ async fn reap_orphan(data_dir: &Path) {
     }
 }
 
-/// Ensure a controller is reachable on `port`, installing and starting one if
-/// needed. Returns the child handle when GIAP started it (the caller must keep
-/// it alive), or `None` when an existing controller was reused.
+/// Ensure a controller is on `port`; returns the child if GIAP started it (keep it alive).
 pub async fn ensure_running(
     data_dir: &Path,
     port: u16,
@@ -823,8 +734,7 @@ pub async fn ensure_running(
             );
             return Ok(None);
         }
-        // Not ours, so it must not be adopted — and spawning onto the port would
-        // only fail to bind, with a worse message than this one.
+        // Neither adopt nor spawn: binding would fail with a worse message than this.
         Occupant::Foreign(why) => {
             tracing::warn!(
                 target: "giap::trace",
@@ -843,10 +753,8 @@ pub async fn ensure_running(
 
     match start_and_wait(data_dir, port, ready_timeout, ble).await {
         Ok(child) => Ok(Some(child)),
-        // BLE is optional, and asking for it must never cost the controller. On macOS
-        // TCC SIGKILLs a process that touches CoreBluetooth without an
-        // `NSBluetoothAlwaysUsageDescription` in its bundle's Info.plist, which no
-        // try/catch can see, so the second attempt drops BLE and runs IP-only.
+        // Retry without BLE: macOS TCC SIGKILLs a process touching CoreBluetooth without
+        // `NSBluetoothAlwaysUsageDescription` in its Info.plist, uncatchably.
         Err(first) if ble => {
             tracing::warn!(
                 target: "giap::trace",
@@ -872,9 +780,6 @@ pub async fn ensure_running(
 }
 
 /// Spawn a controller and wait for it to accept connections.
-///
-/// Split out of [`ensure_running`] so the BLE fallback can run it twice without
-/// repeating the readiness loop or the stderr reporting.
 async fn start_and_wait(
     data_dir: &Path,
     port: u16,
@@ -906,9 +811,7 @@ async fn start_and_wait(
         }
     }
 
-    // The reason, not a pointer to where the reason might be. A controller that
-    // dies during startup writes why to stderr and nowhere else, and "see the
-    // log file" was as far as this could go when that file went unread.
+    // A controller that dies during startup says why only on stderr.
     let reason = {
         let ring = stderr_tail.lock().unwrap_or_else(|e| e.into_inner());
         ring.iter().cloned().collect::<Vec<_>>().join("\n")
@@ -928,9 +831,7 @@ async fn start_and_wait(
     ))
 }
 
-/// Both attempts failed, so BLE was not the problem. Carries both reasons: the
-/// second is the real fault, and the first is what a reader would otherwise be
-/// left blaming.
+/// Both attempts failed, so BLE was not the cause; the IP-only error leads.
 fn ble_and_ip_both_failed(with_ble: &anyhow::Error, without: &anyhow::Error) -> anyhow::Error {
     anyhow!(
         "{without} (it also failed with BLE enabled, which is therefore not the cause: \
@@ -938,12 +839,10 @@ fn ble_and_ip_both_failed(with_ble: &anyhow::Error, without: &anyhow::Error) -> 
     )
 }
 
-/// What a revival attempt actually did, so the caller can tell "the controller
-/// was dead and is back" from "the controller is fine, the fault is elsewhere".
+/// What a revival did: tells "dead and now back" from "fine, the fault is elsewhere".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Revival {
-    /// The URL points at another host: someone else's controller, which GIAP
-    /// must never install for or spawn.
+    /// The URL is another host's controller; GIAP never installs or spawns for it.
     NotLocal,
     /// A controller was already listening; nothing was installed or spawned.
     Reused,
@@ -951,10 +850,8 @@ pub enum Revival {
     Restarted,
 }
 
-/// Re-run [`ensure_running`] for a controller GIAP manages itself, parking any freshly
-/// spawned child in `child` so teardown still kills the process actually running. The
-/// supervisor calls it once reconnecting alone has stopped working. Idempotent, because
-/// [`ensure_running`] reuses a live port, so it never puts a second controller on a fabric.
+/// Re-run [`ensure_running`] for a local controller, storing any new child in `child` so
+/// teardown kills the live one. Idempotent: a live port is reused, never doubled.
 pub async fn revive_local_controller(
     data_dir: &Path,
     url: &str,
@@ -966,8 +863,7 @@ pub async fn revive_local_controller(
         return Ok(Revival::NotLocal);
     };
 
-    // A revival is not a first run, so it never announces setup: the user is
-    // already being told the controller is unreachable.
+    // No setup announcement: the user is already told the controller is unreachable.
     match ensure_running(
         data_dir,
         port,
@@ -978,15 +874,12 @@ pub async fn revive_local_controller(
     )
     .await?
     {
-        // Storing the new handle drops the dead one, which is harmless:
-        // `kill_on_drop` against an already-exited process is a no-op, and
-        // teardown now kills the controller that is really running.
+        // Dropping the dead handle is harmless: `kill_on_drop` on an exited process is a no-op.
         Some(fresh) => {
             *child.lock().await = Some(fresh);
             Ok(Revival::Restarted)
         }
-        // Something is serving the port — leave the stored handle alone rather
-        // than claiming ownership of a process GIAP did not start.
+        // Leave the stored handle: GIAP did not start whatever is serving the port.
         None => Ok(Revival::Reused),
     }
 }
@@ -996,9 +889,6 @@ mod tests {
     use super::*;
     use futures::SinkExt;
 
-    /// A remote controller is another machine's process. Revival runs on every
-    /// failing URL, so this is the guard that stops GIAP installing a runtime
-    /// and spawning a controller for a server it does not own.
     #[tokio::test]
     async fn revival_never_touches_a_remote_controller() {
         let child: SharedServerChild = Arc::new(AsyncMutex::new(None));
@@ -1018,14 +908,9 @@ mod tests {
         assert!(child.lock().await.is_none(), "no child for a remote server");
     }
 
-    /// A controller that is still listening is reused, never restarted. The
-    /// supervisor retries revival for as long as reconnects keep failing, and a
-    /// second controller on a live fabric would be worse than the outage it was
-    /// trying to fix.
     #[tokio::test]
     async fn revival_reuses_a_controller_that_is_still_listening() {
-        // Speaks the greeting, which is what "a controller of ours" now means:
-        // a bare listener would (correctly) be refused instead.
+        // Must speak the greeting: a bare listener is refused as foreign.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -1078,29 +963,21 @@ mod tests {
         assert!(meets_min_node((20, 19)));
         assert!(meets_min_node((22, 13)));
         assert!(meets_min_node((24, 0)));
-        // The floor is a MINOR one, which is the whole reason this is a tuple:
-        // Node 20.18 satisfies "20+" and does not satisfy matter.js.
         assert!(!meets_min_node((20, 18)));
         assert!(!meets_min_node((18, 20)));
     }
 
-    /// matter.js's engine range has a HOLE in it and must not be read as a floor:
-    /// `>=20.19.0 <22.0.0 || >=22.13.0` excludes 22.0 through 22.12. Node 22 is what
-    /// NodeSource's `setup_22.x` installs, so an early 22 is not a contrived case.
+    /// Early Node 22 is not contrived: NodeSource's `setup_22.x` installs it.
     #[test]
     fn the_hole_in_matter_js_engine_range_is_not_a_floor() {
         assert!(!meets_min_node((22, 0)), "22.0 is excluded");
         assert!(!meets_min_node((22, 5)), "22.5 is excluded");
         assert!(!meets_min_node((22, 12)), "22.12 is the last excluded");
         assert!(meets_min_node((22, 13)), "22.13 is where support resumes");
-        // And the two ends of the range are untouched.
         assert!(meets_min_node((21, 7)), "21.x is inside >=20.19 <22.0");
         assert!(meets_min_node((24, 14)));
     }
 
-    /// A refusal a person can act on. "Needs 20.19+" against a Node 22.5 that
-    /// IS 20.19-or-newer reads as a contradiction, and a user checking their
-    /// version against that sentence concludes GIAP is broken.
     #[test]
     fn an_excluded_node_is_refused_in_its_own_words() {
         let excluded = node_version_objection((22, 5));
@@ -1145,8 +1022,7 @@ mod tests {
             storage_dir(data),
             Path::new("/var/lib/giap/matter-server/storage-js")
         );
-        // Storage must live under the data dir so the commissioned fabric
-        // survives restarts.
+        // Under the data dir so the commissioned fabric survives restarts.
         assert!(storage_dir(data).starts_with(data));
     }
 
@@ -1158,10 +1034,6 @@ mod tests {
 
         drop(listener);
 
-        // A port with nothing on it must not read as running: a false "running" leaves a
-        // pond waiting forever for a controller nobody started. Asking about a port just
-        // released races sibling tests, so a positive answer is retried with a fresh port;
-        // exhausting every attempt is the regression worth catching.
         assert!(
             a_port_that_reads_as_free().await.is_some(),
             "no unbound port read as free in {PORT_ATTEMPTS} attempts, so is_running \
@@ -1169,14 +1041,10 @@ mod tests {
         );
     }
 
-    /// How many fresh ports to try before concluding `is_running` is broken
-    /// rather than merely unlucky.
+    /// Fresh ports to try before concluding `is_running` is broken, not unlucky.
     const PORT_ATTEMPTS: usize = 8;
 
-    /// A port that is bound to nothing and that `is_running` agrees is free. Asking about
-    /// a just-released port is a race: sibling tests bind ephemeral ports and the OS may
-    /// hand ours to one of them. A positive answer is retried rather than trusted, and
-    /// `None` after every attempt is a real finding the caller asserts on, not a shrug.
+    /// An unbound port `is_running` calls free; retried because sibling tests may take it.
     async fn a_port_that_reads_as_free() -> Option<u16> {
         for _ in 0..PORT_ATTEMPTS {
             let free = {
@@ -1194,7 +1062,6 @@ mod tests {
 
     #[test]
     fn the_stderr_tail_keeps_the_end_not_the_beginning() {
-        // The reason a process died is its last words, not its first.
         let text = (1..=50)
             .map(|n| format!("line {n}"))
             .collect::<Vec<_>>()
@@ -1206,13 +1073,9 @@ mod tests {
         assert_eq!(tail("", 5), "");
     }
 
-    /// The regression this whole probe exists for. Another server holding the port
-    /// answers TCP, so a bare check adopts it; it does not serve `/giap`, so every
-    /// connection then fails, and GIAP never starts a controller of its own.
     #[tokio::test]
     async fn a_listener_that_is_not_ours_is_named_rather_than_adopted() {
-        // A plain TCP listener that never speaks: the shape of anything on the
-        // port that is not a giap-matter controller.
+        // A silent TCP listener: anything on the port that is not a giap-matter controller.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move { while listener.accept().await.is_ok() {} });
@@ -1236,18 +1099,13 @@ mod tests {
 
         let message = error.to_string();
         assert!(message.contains("already in use"), "got: {message}");
-        // The fix has to be in the message: nothing the user did caused this,
-        // so nothing they know tells them how to clear it.
+        // The fix must be in the message; the user did nothing to cause this.
         assert!(message.contains("lsof"), "got: {message}");
         assert!(message.contains("different port"), "got: {message}");
     }
 
     #[tokio::test]
     async fn a_free_port_reads_as_free() {
-        // Was `if is_running(free) { return; }`, which stopped the flake by
-        // skipping the assertion — so a broken `is_running` made this test pass
-        // rather than fail. `a_port_that_reads_as_free` retries instead, and
-        // exhausting it is a failure.
         let free = a_port_that_reads_as_free()
             .await
             .unwrap_or_else(|| panic!("no unbound port read as free in {PORT_ATTEMPTS} attempts"));
@@ -1257,10 +1115,6 @@ mod tests {
         );
     }
 
-    /// A pid that is alive but is NOT our controller must never be killed. The
-    /// pidfile can outlive the process it names, and the OS reuses pids — so
-    /// without the command-line check, a start-up could kill an unrelated
-    /// process belonging to the user.
     #[tokio::test]
     async fn a_reused_pid_belonging_to_something_else_is_not_killed() {
         // This test process is certainly alive and certainly not a controller.
@@ -1272,20 +1126,15 @@ mod tests {
         );
     }
 
-    /// A pid nothing is using reads as gone, so the stale record is cleared
-    /// rather than kept forever.
     #[tokio::test]
     async fn a_dead_pid_reads_as_gone() {
-        // PID 1 exists, so pick something implausible instead: a pid above the
-        // system maximum can never be live.
+        // Above any system's pid maximum, so never live.
         assert_eq!(
             pid_is_our_controller(4_294_967_294, Path::new("/var/lib/giap")).await,
             Some(false)
         );
     }
 
-    /// Reaping is keyed on the entrypoint path, which contains the data dir, so
-    /// two Ponds on one machine cannot stop each other's controllers.
     #[test]
     fn the_pid_record_and_entrypoint_are_per_data_dir() {
         let a = Path::new("/var/lib/giap-a");
@@ -1295,8 +1144,6 @@ mod tests {
         assert!(pidfile(a).starts_with(a));
     }
 
-    /// An absent or unparseable record is simply nothing to do, not an error:
-    /// this runs on every single start.
     #[tokio::test]
     async fn a_missing_or_junk_pidfile_is_harmless() {
         let dir = std::env::temp_dir().join(format!("giap-pid-{}", std::process::id()));
@@ -1314,9 +1161,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The marker was once the lockfile alone, so a change to the controller's SOURCES
-    /// left the installed copy untouched: the fix shipped in the binary while the data
-    /// dir kept running the old code, and nothing said so.
     #[test]
     fn a_source_change_changes_the_fingerprint() {
         let dir = std::env::temp_dir().join(format!("giap-fp-{}", std::process::id()));
@@ -1336,8 +1180,7 @@ mod tests {
         );
         assert_eq!(before.deps, after.deps, "dependencies did not change");
 
-        // And a dependency change is distinguishable from a source change, so a
-        // source edit does not pay for a reinstall.
+        // Deps are fingerprinted apart, so a source edit does not force a reinstall.
         std::fs::write(dir.join("package-lock.json"), r#"{"x":1}"#).unwrap();
         assert_ne!(fingerprint(&dir).unwrap().deps, after.deps);
 
@@ -1361,8 +1204,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The refresh path exists to avoid a multi-minute reinstall, so it must not
-    /// take `node_modules` with it.
     #[test]
     fn refreshing_sources_keeps_node_modules() {
         let base = std::env::temp_dir().join(format!("giap-refresh-{}", std::process::id()));
@@ -1394,9 +1235,6 @@ mod tests {
 
     #[test]
     fn the_install_copy_leaves_node_modules_behind() {
-        // A dev checkout's matter-server/ has a node_modules of its own, and
-        // `npm ci` deletes and rebuilds one regardless — so copying it is a lot
-        // of work to produce something immediately discarded.
         let tmp = std::env::temp_dir().join(format!("giap-copy-{}", std::process::id()));
         let src = tmp.join("src");
         let dst = tmp.join("dst");
@@ -1427,9 +1265,7 @@ mod tests {
 
     #[test]
     fn the_shipped_controller_is_findable_from_the_source_tree() {
-        // Guards the packaging contract from the dev side: `cargo test` runs
-        // with CARGO_MANIFEST_DIR set, so this proves the repo-relative fallback
-        // still points at the real directory after a move.
+        // Checks the CARGO_MANIFEST_DIR-relative fallback still finds the real directory.
         let found = source_dir().expect("matter-server/ must be findable in the repo");
         assert!(found.join("package.json").is_file());
         assert!(found.join("src/server.ts").is_file());

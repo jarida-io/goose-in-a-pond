@@ -1,11 +1,4 @@
-/**
- * GIAP control verbs resolved onto Matter cluster actions.
- *
- * Pure: `planControl` decides the endpoint, the cluster, whether the change is a
- * command or an attribute write, and what the device state becomes — and returns that
- * as data. `controller.ts` is the only thing that touches the network, so every
- * decision below is unit-testable against a recorded device.
- */
+/** GIAP control verbs as pure Matter action plans; only `controller.ts` touches the network. */
 
 import { OpError, type DeviceStatePatch, type Verb } from "../protocol.js";
 import {
@@ -25,21 +18,9 @@ import { operationsOf, settingNamed, settingsOf } from "./settings.js";
 import { endpointWith, hasCluster, type NodeSnapshot } from "./snapshot.js";
 import { applianceSetpoint, targetSetpoint } from "./thermostat.js";
 
-// `Verb` is protocol vocabulary — it names what a `control` op may ask for — so it
-// lives in protocol.ts and is re-exported here, where every caller already looks.
 export type { Verb };
 
-/**
- * Every verb, as a record rather than a list — so the COMPILER enforces coverage.
- *
- * `new Set<Verb>([...])` type-checks happily while missing an entry, and it did: adding
- * `color_temp` to the union left it out of this set, and `server.ts` rejects any verb the
- * set does not hold. The control was unreachable at the wire boundary while every unit
- * test passed, because the tests call `planControl` directly and never cross it.
- *
- * A `Record<Verb, true>` cannot be missing a key. Add a verb to the union without adding
- * it here and the build fails, which is the only guard that survives someone in a hurry.
- */
+/** Every verb, as a `Record` so the build fails if one is missing; `server.ts` rejects the rest. */
 const ALL_VERBS: Record<Verb, true> = {
   power: true,
   brightness: true,
@@ -71,22 +52,8 @@ export interface Plan {
 }
 
 /**
- * What the device NOW reports for a verb, in the verb's own units.
- *
- * `applied` is supposed to be what the device did rather than what it was asked for —
- * the protocol doc says so, and it is the reason the field exists at all. Until now only
- * `operation` honoured it: every other verb echoed the request back, so a fan told to run
- * at 85% reported 85% while the device had quantised it to its High mode and was sitting
- * at 90. The number the user reads was the number they typed, which makes it worthless
- * for noticing that anything happened at all.
- *
- * These are the verbs whose result can differ from the request: a value quantised onto a
- * cluster's own scale, clamped to a device's stated limits, or still travelling. Power
- * and lock are absent deliberately — a boolean cannot land somewhere else, so making
- * them wait for a report would be latency bought for nothing.
- *
- * Read through the same inverses `state` reads with, so the number reported here is the
- * number that would put the device back where it is.
+ * What the device now reports for a verb whose result can differ from the request (quantised,
+ * clamped, in transit), read via `state`'s inverses. Booleans are skipped: they can't land elsewhere.
  */
 export function observedFor(node: NodeSnapshot, verb: Verb): DeviceStatePatch {
   const at = (cluster: string, attribute: string): number | undefined => {
@@ -96,16 +63,12 @@ export function observedFor(node: NodeSnapshot, verb: Verb): DeviceStatePatch {
 
   switch (verb) {
     case "fan_speed": {
-      // percentCURRENT, not percentSetting: the setting is what was written, the current
-      // is what the fan is doing. Reading the setting back would echo the request with
-      // extra steps.
+      // percentCurrent, not percentSetting: the setting only echoes what was written.
       const pct = at(CLUSTER_FAN_CONTROL, "percentCurrent");
       return pct === undefined ? {} : { fan_speed: clampPercent(pct) };
     }
     case "brightness": {
-      // Mirrors the split in `describe`: a television's Level Control belongs to its
-      // speaker, and reading it back as a brightness would report the volume under the
-      // wrong name -- the same confusion at the other end of the same command.
+      // A television's Level Control is its volume, not a brightness (as in `describe`).
       if (!levelIsBrightness(node)) return {};
       const level = at(CLUSTER_LEVEL_CONTROL, "currentLevel");
       return level === undefined ? {} : { brightness: levelToBrightness(level) };
@@ -128,8 +91,7 @@ export function observedFor(node: NodeSnapshot, verb: Verb): DeviceStatePatch {
       return kelvin > 0 ? { color_temp: kelvin } : {};
     }
     case "target_temp": {
-      // Whichever setpoint is live, by the same rule `target_temp` writes with: an
-      // appliance's own, or the thermostat setpoint its mode has running.
+      // The live setpoint, by the rule `target_temp` writes with: appliance's own, else the mode's.
       if (applianceSetpoint(node) !== undefined) {
         const set = at("temperatureControl", "temperatureSetpoint");
         return set === undefined ? {} : { target_temp: setpointToCelsius(set) };
@@ -147,8 +109,7 @@ export function observedFor(node: NodeSnapshot, verb: Verb): DeviceStatePatch {
     }
     case "valve": {
       const state = at(CLUSTER_VALVE, "currentState");
-      // Transitioning is not an answer to "is it open" -- it is the device saying it
-      // does not know yet -- so nothing is reported rather than guessing a direction.
+      // Transitioning: report nothing rather than guess a direction.
       if (state === VALVE_OPEN) return { valve: true };
       if (state === VALVE_CLOSED) return { valve: false };
       return {};
@@ -158,19 +119,12 @@ export function observedFor(node: NodeSnapshot, verb: Verb): DeviceStatePatch {
       return tilt === undefined ? {} : { tilt: lift100thsToPositionOpen(tilt) };
     }
     default:
-      // power, locked, fan_mode, mode, operation. `operation` has its own settle path
-      // in the controller; the rest cannot land on a value other than the one asked for.
+      // power, locked, fan_mode, mode land as asked; `operation` settles in the controller.
       return {};
   }
 }
 
-/**
- * Valve Configuration and Control's `currentState`: shut, open, or on its way.
- *
- * Transitioning is a real third answer -- a motorised ball valve takes seconds --
- * and reading it as either of the other two reports a valve as settled when it is
- * not, which is the failure the settle loop exists to avoid.
- */
+/** Valve `currentState`: shut or open; the third value, Transitioning, must not read as settled. */
 const VALVE_CLOSED = 0;
 const VALVE_OPEN = 1;
 
@@ -187,18 +141,7 @@ export function levelToBrightness(level: number): number {
   return clampPercent((level * 100) / 254);
 }
 
-/**
- * Kelvin onto ColorControl's mireds, and back.
- *
- * Mireds are reciprocal megakelvin — 1e6/K — so the mapping is its own inverse and the
- * ORDER INVERTS: fewer mireds is a hotter, bluer white. Kelvin is what a person says
- * ("2700K", "warm white") and mireds is what the cluster takes, which is the whole
- * reason this conversion exists rather than the wire carrying mireds.
- *
- * Clamped to the cluster's own field range (1..0xfeff). Zero mireds is not a colour and
- * would divide to infinity; the spec's own defaults include it, so it has to be handled
- * rather than assumed away.
- */
+/** Kelvin to ColorControl mireds (1e6/K; the order inverts), clamped to the field's 1..0xfeff. */
 export function kelvinToMireds(kelvin: number): number {
   if (!Number.isFinite(kelvin) || kelvin <= 0) return 0xfeff;
   return Math.min(0xfeff, Math.max(1, Math.round(1_000_000 / kelvin)));
@@ -220,8 +163,7 @@ export function setpointToCelsius(setpoint: number): number {
   return Math.round(setpoint) / 100;
 }
 
-/** A 0-360 degree hue onto ColorControl's 0-254 scale (360 wraps to 0, matching the
- *  circular hue space). */
+/** A 0-360 degree hue onto ColorControl's 0-254 scale; 360 wraps to 0. */
 export function hueToMatter(degrees: number): number {
   const wrapped = ((Math.round(degrees) % 360) + 360) % 360;
   return Math.floor((wrapped * 254 + 180) / 360);
@@ -244,12 +186,7 @@ export function matterToSaturation(raw: number): number {
   return clampPercent((Math.min(254, Math.max(0, raw)) * 100) / 254);
 }
 
-/**
- * A GIAP covering position (0-100 percent OPEN) onto WindowCovering's lift value in
- * hundredths-of-a-percent CLOSED, which is what `GoToLiftPercentage` takes: 0 is fully
- * open, 10000 fully closed. GIAP speaks in percent open because that is how users
- * phrase it ("open the blinds 50%").
- */
+/** GIAP percent OPEN onto WindowCovering lift in hundredths of a percent CLOSED (0 = fully open). */
 export function positionOpenToLift100ths(percentOpen: number): number {
   return (100 - clampPercent(percentOpen)) * 100;
 }
@@ -271,27 +208,12 @@ const CLUSTER_TEMPERATURE_CONTROL = "temperatureControl";
 export const FAN_MODE_OFF = 0;
 
 /**
- * "Turn the fan on" writes **High**, not `FanMode.On`.
- *
- * `On` is 4, and it is the obvious choice until you read `FanModeSequence`: it was
- * deprecated in Matter 1.2 and appears in none of the sequences a current device
- * advertises (`OffLowMedHigh`, `OffLowHigh`, `OffLowMedHighAuto`, `OffLowHighAuto`,
- * `OffHighAuto`, `OffHigh`). Writing an unsupported mode is a write a conforming fan
- * may reject — so the fix for "turn on the fan does nothing" would have shipped still
- * not turning on the fan.
- *
- * High is the only non-Off value present in EVERY sequence, which is what makes it the
- * safe universal choice without reading `FanModeSequence` first. Reading that attribute
- * and picking the gentlest supported mode is the better behaviour and a bigger change;
- * it belongs with the `fan_mode` validation follow-up, which has the same gap.
+ * High (3), not the deprecated `FanMode.On` (4): High is the only non-Off mode in every sequence.
+ * TODO: pick the gentlest mode from `FanModeSequence`; `fan_mode` validation has the same gap.
  */
 export const FAN_MODE_ON = 3;
 
-/**
- * `FanMode` by the name a user says it. Auto and Smart are not points on the
- * percentage scale — they hand the choice back to the device — which is why a fan
- * needs modes as well as a speed.
- */
+/** `FanMode` by the name a user says; Auto and Smart aren't speeds, so fans need modes too. */
 export function fanModeFromName(name: string): number | undefined {
   switch (name.trim().toLowerCase()) {
     case "off":
@@ -364,10 +286,8 @@ function asBoolean(value: unknown, verb: string): boolean {
 }
 
 /**
- * Resolve `verb` against what `node` actually exposes.
- *
- * @throws {OpError} `capability_unsupported` when the node has no cluster for the
- * verb, `bad_request` when the value is the wrong shape.
+ * Resolves `verb` against what `node` exposes.
+ * @throws {OpError} `capability_unsupported` (no cluster for the verb) or `bad_request` (bad value).
  */
 export function planControl(
   node: NodeSnapshot,
@@ -387,9 +307,7 @@ export function planControl(
           applied: { on },
         };
       }
-      // A fan's power is FanMode, written rather than commanded. Most fans (the
-      // Matter Virtual Device's included) implement no On/Off cluster at all, so
-      // without this branch "turn on the fan" could only fail.
+      // A fan's power is a FanMode write: most fans (MVD's too) have no On/Off cluster.
       const fan = endpointWith(node, CLUSTER_FAN_CONTROL);
       if (fan !== undefined) {
         return {
@@ -414,13 +332,7 @@ export function planControl(
           `Matter device '${deviceId}' has no speaker to set a volume on`,
         );
       }
-      // A COMMAND, not an attribute write. `currentLevel` is read-only in Matter -- the
-      // device answers a write to it with "Unsupported write" -- and `moveToLevel` is how
-      // the level is actually set. Brightness three cases below has always done this; the
-      // volume case was written as a write and the device refused every one.
-      //
-      // `moveToLevel`, not `moveToLevelWithOnOff`: a light asked for 0% means off, but a
-      // television asked for silence still wants to be on.
+      // `moveToLevel`, since `currentLevel` is read-only; not `...WithOnOff`, as a muted TV stays on.
       return {
         actions: [
           {
@@ -461,11 +373,7 @@ export function planControl(
       if (typeof value !== "number" || !Number.isFinite(value)) {
         throw new OpError("bad_request", "target_temp needs a temperature in Celsius");
       }
-      // Which setpoint depends on what the thermostat is doing: writing the
-      // heating one to a device that is cooling moves a number nobody asked about
-      // and leaves the cooling unchanged.
-      // An appliance keeps its target in Temperature Control and takes it by
-      // command, not by writing an attribute.
+      // Appliances take it by command; a thermostat needs the setpoint its mode is running.
       const appliance = applianceSetpoint(node);
       if (appliance !== undefined) {
         return {
@@ -489,7 +397,6 @@ export function planControl(
           `Matter device '${deviceId}' does not support this capability`,
         );
       }
-      // Setpoints are attribute writes, not commands.
       return {
         actions: [
           { kind: "write", endpoint: setpoint.endpoint, cluster: CLUSTER_THERMOSTAT, attribute: setpoint.attribute, value: celsiusToSetpoint(value) },
@@ -499,13 +406,7 @@ export function planControl(
     }
 
     case "tilt": {
-      // A covering's second axis: how far the slats are turned, independent of how
-      // far the blind is raised. A venetian blind is routinely down with its slats
-      // open, which `position` alone cannot ask for.
-      //
-      // Same convention as lift, and the spec is explicit about it: zero is treated
-      // as UpOrOpen. So GIAP speaks percent OPEN here too, and the same conversion
-      // serves both.
+      // Slat angle, independent of lift; percent OPEN as for lift, since the spec treats 0 as open.
       const pct = asPercent(value, "tilt");
       const endpoint = endpointFor(node, CLUSTER_WINDOW_COVERING, deviceId);
       return {
@@ -527,10 +428,7 @@ export function planControl(
       const endpoint = endpointFor(node, CLUSTER_VALVE, deviceId);
       return {
         actions: [
-          // No payload on `open`: its two fields are an auto-close duration and a
-          // target level, and neither was asked for. Sending a level here would set
-          // one on a valve that may not have the feature at all -- `position` is the
-          // verb for that, and it is offered only where the device claims a level.
+          // No payload: nobody asked for an auto-close or a level, which the valve may not support.
           { kind: "command", endpoint, cluster: CLUSTER_VALVE, command: open ? "open" : "close", payload: {} },
         ],
         applied: { valve: open },
@@ -572,10 +470,7 @@ export function planControl(
             },
           },
         ],
-        // Reported as the kelvin the device will actually sit at, not the kelvin that
-        // was asked for: the round trip through mireds is lossy at whole-mired
-        // granularity, and echoing the request would overstate the precision by a few
-        // degrees at the warm end and rather more at the cool one.
+        // The kelvin the device will sit at: whole mireds make the round trip lossy.
         applied: { color_temp: miredsToKelvin(kelvinToMireds(kelvin)) },
       };
     }
@@ -638,10 +533,7 @@ export function planControl(
 
     case "position": {
       const pct = asPercent(value, "position");
-      // A valve's level is the same axis by a different route: percentage OPEN, sent
-      // as `open`'s target level rather than as a covering's lift. Checked second so
-      // a device with both -- which does not exist today -- keeps the behaviour it
-      // has rather than silently changing which cluster it drives.
+      // A valve takes percent OPEN as `open`'s targetLevel; coverings win if a device has both.
       if (!hasCluster(node, CLUSTER_WINDOW_COVERING) && hasCluster(node, CLUSTER_VALVE)) {
         if (!valveHasLevel(node)) {
           throw new OpError(
@@ -655,9 +547,7 @@ export function planControl(
               kind: "command",
               endpoint: endpointFor(node, CLUSTER_VALVE, deviceId),
               cluster: CLUSTER_VALVE,
-              // Asking for 0% is asking for it shut, and `open` with a target level
-              // of zero is not that -- the spec's own constraint on targetLevel is
-              // 1 to 100.
+              // 0% means close: the spec limits `open`'s targetLevel to 1..100.
               command: pct === 0 ? "close" : "open",
               payload: pct === 0 ? {} : { targetLevel: pct },
             },
@@ -693,8 +583,7 @@ export function planControl(
         );
       }
 
-      // The device published these labels; anything else was never on offer, and
-      // guessing at the nearest one is how a wash ends up on the wrong cycle.
+      // Only the device's own labels; guessing the nearest could pick the wrong wash cycle.
       const encoded = setting.valueFor(choice);
       if (encoded === undefined) {
         throw new OpError(

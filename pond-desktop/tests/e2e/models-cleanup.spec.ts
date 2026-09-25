@@ -1,10 +1,4 @@
-/**
- * Playwright E2E test for the Models "Free up space" cleanup action.
- *
- * Mocks `POST /api/v1/models/cleanup` and `GET /api/v1/models/disk-usage`.
- * Asserts the button posts to the endpoint, surfaces reclaimed bytes in a flash
- * toast, and refreshes the disk-usage line.
- */
+/** Models "Free up space": posts cleanup, toasts the reclaimed bytes, refreshes disk usage. */
 import { test, expect } from "@playwright/test";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
 
@@ -15,8 +9,6 @@ async function goToModels(page: import("@playwright/test").Page) {
     .or(page.locator('[title="Models"]'))
     .first();
   await modelsBtn.click({ timeout: 10_000 });
-  // No tab hop any more — the "Manage" tab was removed with the Models
-  // redesign; the cleanup controls sit on the section itself.
 }
 
 test.describe("Models cleanup", () => {
@@ -56,7 +48,6 @@ test.describe("Models cleanup", () => {
 
     await btn.click();
 
-    // Toast / flash message surfaces reclaimed bytes (12 MB formatted).
     await expect(
       page.getByText(/reclaimed\s+12(\.\d+)?\s*mb/i).first(),
     ).toBeVisible({ timeout: 10_000 });

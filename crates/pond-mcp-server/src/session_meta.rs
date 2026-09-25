@@ -1,38 +1,13 @@
-//! Reading the calling session out of an MCP request.
-//!
-//! Goose stamps every `CallToolRequest` with the session it is serving:
-//! `mcp_client.rs::inject_session_context_into_extensions` inserts
-//! `agent-session-id` into the request's `Meta`, rmcp serialises extension-level
-//! `Meta` out as the wire `_meta`, and rmcp's serve loop swaps it into the
-//! `RequestContext.meta` handed to the tool handler.
-//!
-//! This is the only trustworthy per-call session channel a GIAP builtin has.
-//! The alternatives, and why not:
-//!
-//! - **The tool's own `session_id` parameter** -- filled in by the MODEL. It is
-//!   how `save_draft` and `list_drafts` used to scope, and it defaulted to the
-//!   literal "default", so every draft on the pond shared one bucket.
-//! - **`crate::current_session_id()`** -- a process-global `RwLock<String>`
-//!   with `Semaphore::new(4)` chat streams racing it. Correct authorisation on
-//!   a misattributed session is not correct.
-//! - **A per-session server instance** -- impossible: `SpawnServerFn` is
-//!   `fn(DuplexStream, DuplexStream)`, and Goose's extension manager
-//!   early-returns for an unchanged config, so one instance serves the process.
-//!
-//! The key is Goose's `SESSION_ID_HEADER`, duplicated here as a const rather
-//! than imported: `pond-mcp-server` must not depend on the goose submodule.
+//! The calling session from the `_meta` Goose stamps on each call: the only trustworthy
+//! per-call channel (a `session_id` param is model-filled; `current_session_id()` races).
 
 use rmcp::model::Meta;
 
-/// The `_meta` key the engine stamps the session id under.
+/// Goose's `SESSION_ID_HEADER`, duplicated: this crate must not depend on the goose submodule.
 pub const SESSION_ID_META_KEY: &str = "agent-session-id";
 
-/// The engine session id behind this tool call, if the engine supplied one.
-///
-/// Matched case-insensitively because the value travels as a header-shaped key
-/// and goose's own removal pass uses `eq_ignore_ascii_case`. Blank is `None`:
-/// an empty string is not a session, and letting it through would make every
-/// unbound caller look like one shared session.
+/// The engine session id behind this call. Key matched case-insensitively, as Goose does;
+/// blank is `None`, or every unbound caller would share one session.
 pub fn session_from_meta(meta: &Meta) -> Option<String> {
     meta.0
         .iter()

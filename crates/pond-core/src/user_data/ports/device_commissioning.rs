@@ -1,22 +1,10 @@
-//! Driven Port: Device Commissioning
-//!
-//! Adding a Matter device is not "fill in a form" — the device is not GIAP's to
-//! name until it has been *commissioned* onto the local fabric, after which the
-//! controller reports it and the bridge registers it automatically. So the
-//! enrollment input is a **setup code**, not a device description, and this port
-//! is the seam for it. Non-Matter devices keep using the plain registry
-//! (`DeviceRegistry::register`), which is a catalogue entry and nothing more.
+//! Driven port: commission Matter devices onto the local fabric from their setup code.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-/// What a device printed on its label (or an app shows) resolves to.
-///
-/// Real Matter products ship an 11-digit manual pairing code and/or a `MT:` QR
-/// payload. Development devices — notably Google's Matter Virtual Device — show
-/// only the 8-digit setup passcode, which is commissioned by on-network
-/// discovery instead. Both are legitimate ways in, so both are accepted.
+/// A device's label code. Dev devices (e.g. Matter Virtual Device) show only a passcode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SetupCode {
     /// `MT:` QR payload, or an 11/21-digit manual pairing code.
@@ -25,9 +13,7 @@ pub enum SetupCode {
     Passcode(u32),
 }
 
-/// A device that has just joined the fabric. Carries enough to register the
-/// device deterministically from the commission response, without waiting for
-/// the bridge's asynchronous discovery.
+/// A just-commissioned device; enough to register it without waiting for bridge discovery.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommissionedDevice {
     /// GIAP device id (`matter-<node_id>`) — the same id the bridge registers.
@@ -38,23 +24,15 @@ pub struct CommissionedDevice {
     pub capabilities: Vec<String>,
 }
 
-/// Parse and validate what the user typed.
-///
-/// Validation is not cosmetic: the value is forwarded to the controller, so
-/// anything that is not a recognised code shape is rejected here rather than
-/// passed through. Spaces and dashes are stripped so a code copied off a label
-/// works as printed.
+/// Parse what the user typed; strictly, since the value is forwarded to the controller.
 pub fn parse_setup_code(raw: &str) -> Result<SetupCode> {
-    // Whitespace is never meaningful; dashes are, inside a QR payload (the
-    // base-38 alphabet includes '-'), so they are only stripped from the
-    // numeric forms below.
+    // Dashes are base-38 QR characters, so only numeric forms (below) strip them.
     let unspaced: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
     if unspaced.is_empty() {
         return Err(anyhow!("enter the device's setup code"));
     }
 
-    // QR payload. Accept the base-38 character set and let the controller do
-    // the final decode.
+    // QR payload: check the base-38 charset only; the controller does the decode.
     if let Some(payload) = unspaced.strip_prefix("MT:") {
         if payload.is_empty()
             || !payload
@@ -92,38 +70,20 @@ pub fn parse_setup_code(raw: &str) -> Result<SetupCode> {
 /// The `matter-` prefix. The one place the grammar's shape is written down.
 const MATTER_PREFIX: &str = "matter-";
 
-/// Is this a Matter device id at all?
-///
-/// A PREFIX test, deliberately, and not "does it parse". The difference matters
-/// because callers use this to decide whether a device belongs to the Matter
-/// adapter, and a parse-based answer fails OPEN: an id this grammar cannot read
-/// would be routed to whatever handles non-Matter devices, which for
-/// `SwitchableDeviceControl` is a stub that reports success for every verb. That
-/// is how "the fan is on" gets said about a fan nothing was ever sent to. A
-/// prefix test fails closed — a malformed Matter id gets a Matter error.
+/// Is this a Matter device id? A prefix test, not a parse, so a malformed id still routes to
+/// Matter and errors, instead of reaching a non-Matter stub that reports success.
 pub fn is_matter_device_id(device_id: &str) -> bool {
     device_id.starts_with(MATTER_PREFIX)
 }
 
-/// The FABRIC node behind a device id, or `None` for any other id.
-///
-/// `matter-90-2` yields 90. A bridged device — one endpoint of a hub that speaks
-/// for several — is not separately commissioned, so every fabric operation acts on
-/// its hub. Callers that need to tell a hub from one of its children ask
-/// [`matter_bridged_endpoint`]; this answers "which node do I talk to".
-///
-/// Canonical form only. `matter-01` is refused rather than read as node 1, because
-/// `"01".parse::<u64>()` succeeds and two ids that differ as strings but agree as
-/// nodes would give the registry two rows for one device.
+/// The fabric node behind a device id; bridged `matter-90-2` acts through its hub, node 90.
+/// Canonical form only: `matter-01` would otherwise be a second registry row for node 1.
 pub fn matter_node_id(device_id: &str) -> Option<u64> {
     let (node, _) = matter_parts(device_id)?;
     Some(node)
 }
 
-/// The bridged endpoint a device id names, if it names one.
-///
-/// `None` both for a non-Matter id and for a whole node — the caller that cares
-/// about the difference has already established the id is Matter's.
+/// The bridged endpoint a device id names; `None` for a whole node or a non-Matter id.
 pub fn matter_bridged_endpoint(device_id: &str) -> Option<u16> {
     matter_parts(device_id)?.1
 }
@@ -144,8 +104,7 @@ fn matter_parts(device_id: &str) -> Option<(u64, Option<u16>)> {
     Some((node, endpoint))
 }
 
-/// Parse a decimal component, refusing any spelling but the canonical one — so no
-/// leading zeroes, no sign, no trailing text.
+/// Parse a decimal component in canonical form only: no leading zeroes, sign or trailing text.
 fn canonical<T>(text: &str) -> Option<T>
 where
     T: std::str::FromStr + std::fmt::Display,
@@ -165,18 +124,12 @@ pub fn matter_device_id(node_id: u64, bridged_endpoint: Option<u16>) -> String {
 /// Driven Port: bring a device onto — and off — the local fabric.
 #[async_trait]
 pub trait DeviceCommissioningPort: Send + Sync {
-    /// Commission a device using its setup code. Slow by nature — pairing
-    /// involves discovery, attestation, and fabric join.
-    ///
-    /// When `name` is `Some`, it is written to the device's NodeLabel attribute
-    /// so the name lives on the device itself (durable across re-registration
-    /// and visible to any controller), and the returned device carries it.
+    /// Commission a device by setup code; slow (discovery, attestation, fabric join).
+    /// A `name` is written to the device's NodeLabel, so it outlives re-registration.
     async fn commission(&self, code: SetupCode, name: Option<String>)
         -> Result<CommissionedDevice>;
 
-    /// Remove a node from the fabric. Deleting a Matter device must go through
-    /// here first: without it the controller keeps the node and re-announces it
-    /// on the next `start_listening`, so a "deleted" device reappears.
+    /// Remove a node from the fabric; call before deleting, or `start_listening` revives it.
     async fn decommission(&self, node_id: u64) -> Result<()>;
 }
 
@@ -229,23 +182,16 @@ mod tests {
 
     #[test]
     fn a_bridged_id_names_the_hub_for_fabric_operations() {
-        // A bridged device is one endpoint of a hub that speaks for several. It is
-        // not separately commissioned, so `decommission` can only ever act on the
-        // hub — which is why this returns the hub and not `None`.
+        // Not separately commissioned, so `decommission` can only act on the hub.
         assert_eq!(matter_node_id("matter-90-2"), Some(90));
         assert_eq!(matter_bridged_endpoint("matter-90-2"), Some(2));
 
-        // A whole node names no endpoint.
         assert_eq!(matter_bridged_endpoint("matter-90"), None);
-        // Neither does something that is not Matter's at all.
         assert_eq!(matter_bridged_endpoint("pond-desktop"), None);
     }
 
     #[test]
     fn only_the_canonical_spelling_of_an_id_is_accepted() {
-        // `"01".parse::<u64>()` is Some(1), so without this `matter-01` and
-        // `matter-1` would be two ids for one device — and the registry keys rows
-        // on the string.
         assert_eq!(matter_node_id("matter-01"), None);
         assert_eq!(matter_node_id("matter-1-02"), None);
         assert_eq!(matter_node_id("matter-+1"), None);
@@ -257,11 +203,6 @@ mod tests {
 
     #[test]
     fn a_matter_id_is_recognised_however_malformed() {
-        // The property that matters, and the reason this is a prefix test rather
-        // than a parse. Callers route on it, and the non-Matter route ends at a stub
-        // that answers every verb with success — so an id this grammar cannot read
-        // must still be recognised as Matter's, or a device nothing was sent to gets
-        // reported as switched on.
         assert!(is_matter_device_id("matter-1"));
         assert!(is_matter_device_id("matter-90-2"));
         assert!(is_matter_device_id("matter-01"));
@@ -285,10 +226,8 @@ mod tests {
 
     #[test]
     fn rejects_anything_that_is_not_a_code() {
-        // Empty / whitespace.
         assert!(parse_setup_code("").is_err());
         assert!(parse_setup_code("   ").is_err());
-        // Wrong digit counts.
         assert!(parse_setup_code("123").is_err());
         assert!(parse_setup_code("202020210").is_err());
         // Not digits, and not a QR payload — must not reach the controller.

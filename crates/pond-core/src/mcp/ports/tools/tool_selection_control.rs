@@ -1,7 +1,4 @@
-//! Port for the tool-relevance escape hatch (Phase D2). Phase D narrows which extension tool
-//! schemas reach the model per session, to fit an 8K-class on-device prompt budget; that is only
-//! safe if the model can still reach a capability that was not preloaded. Driven by the
-//! `giap-toolkit` extension (always core), implemented by the adapter owning per-session selection.
+//! Escape hatch that keeps tool narrowing safe: `giap-toolkit` lets the model load any group.
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -14,10 +11,8 @@ pub enum ToolSelectionError {
     GroupNotRegistered(String),
     #[error("tool selection is not active for this session")]
     NotActive,
-    /// The group was recorded but its tools cannot reach the model this turn, because the live
-    /// tool cache was cold when the widen happened. Its own variant rather than a silent `Ok`: a
-    /// model told the tools are available now calls one, is suppressed by the tool-call guard, and
-    /// spends a turn of a small budget on a sentence that was not true.
+    /// Recorded, but the tool cache was cold, so the tools arrive next turn. Not a silent `Ok`: a
+    /// model told they are available calls one now and wastes a turn on the guard's refusal.
     #[error("tool group '{0}' is loaded but its tools arrive on the next turn")]
     NotReady(String),
     #[error("tool selection failed: {0}")]
@@ -37,19 +32,15 @@ pub struct ToolGroupStatus {
     pub tool_count: usize,
 }
 
-/// Driven port: inspect and widen a session's loaded tool groups. `engine_session_id` is the AGENT
-/// ENGINE's session id, not GIAP's: the only trustworthy fact about a caller is goose's
-/// `agent-session-id` in the request `_meta` (see `pond-mcp-server/src/session_meta.rs`). The
-/// process-global `current_session_id()` races concurrent streams and widens the wrong allow-set.
+/// Inspect and widen a session's tool groups. `engine_session_id` is goose's `agent-session-id`
+/// from the request `_meta`, not GIAP's: `current_session_id()` races concurrent streams.
 #[async_trait]
 pub trait ToolSelectionControl: Send + Sync {
-    /// Every registered group with its current loaded/dormant status for this
-    /// session.
+    /// Every registered group with its loaded/dormant status for this session.
     async fn group_status(&self, engine_session_id: &str) -> Vec<ToolGroupStatus>;
 
-    /// Load `group` for this session. Idempotent; returns the session's full group list. Takes
-    /// effect for the next provider call, including the next call of the turn that invoked it, so
-    /// the model can enable a capability and then use it. Costs one prompt-prefix rebuild.
+    /// Load `group` for this session (idempotent); returns all its groups. Takes effect from the
+    /// next provider call, even mid-turn, and costs one prompt-prefix rebuild.
     async fn enable_group(
         &self,
         engine_session_id: &str,

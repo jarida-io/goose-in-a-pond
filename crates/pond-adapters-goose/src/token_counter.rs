@@ -1,20 +1,15 @@
-//! Driven Adapter: token counting over Goose's tiktoken counter (`o200k_base`, GPT-4o's vocab).
-//! Not exact for the Gemma/Qwen/Llama GGUFs GIAP runs (`is_exact` is false), but a real BPE beats
-//! `chars/4` on JSON tool results and multi-byte scripts. Exact counts need a fork patch exposing
-//! `LlamaModel::str_to_token`; deferred because `turn_trimmer`'s overshoot feedback bounds it.
+//! Token counting via Goose's tiktoken (`o200k_base`): inexact for GIAP's GGUFs, but a real BPE
+//! beats `chars/4` on JSON and multi-byte text.
 
 use pond_core::models::ports::token_counter::TokenCounter;
 
-/// Wraps Goose's tiktoken-backed counter, which carries its own LRU cache
-/// keyed by a blake3 hash of the text — so re-counting an unchanged history
-/// every turn is cheap.
+/// Goose's tiktoken counter; its own LRU cache makes re-counting unchanged history cheap.
 pub struct TiktokenCounter {
     inner: goose::token_counter::TokenCounter,
 }
 
 impl TiktokenCounter {
-    /// Builds the counter. `o200k_base` is embedded in `tiktoken_rs`, so this
-    /// touches no network and works offline.
+    /// Offline-safe: `o200k_base` is embedded in `tiktoken_rs`.
     pub async fn new() -> Result<Self, String> {
         Ok(Self {
             inner: goose::token_counter::TokenCounter::new().await?,
@@ -27,9 +22,7 @@ impl TokenCounter for TiktokenCounter {
         self.inner.count_tokens(text)
     }
 
-    /// Always false: see the module docs. A real tokenizer over the wrong
-    /// vocabulary is not an exact count, and budget code relies on this being
-    /// honest to decide how much margin to keep.
+    /// False: the vocabulary is not the model's, and budget code sizes its margin on this.
     fn is_exact(&self) -> bool {
         false
     }
@@ -53,8 +46,7 @@ mod tests {
         let tk = counter.count(text);
         let heuristic = HeuristicTokenCounter.count(text);
         assert!(tk > 0);
-        // English prose is where chars/4 is at its best; they should not
-        // diverge wildly, or one of them is broken.
+        // On English prose chars/4 is at its best, so the two must roughly agree.
         assert!(
             tk * 4 > heuristic && tk < heuristic * 4,
             "tiktoken={tk} heuristic={heuristic}"

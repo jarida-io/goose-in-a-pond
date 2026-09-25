@@ -1,24 +1,6 @@
-//! Idle rolling-summary refresh — the soft-quality half of hybrid compaction.
-//!
-//! A background loop (pond-server) calls [`SessionSummaryService::refresh`]
-//! when the system has been idle past `summary_idle_secs`, never at startup,
-//! and cancels it the moment a new turn starts — the same contract as memory
-//! consolidation. The refreshed summary lives on the session row
-//! (`sessions.rolling_summary`); the deterministic turn trimmer splices it
-//! into the model's history as a `<conversation-summary>` block. Turns only
-//! ever READ the summary; they never wait for one.
-//!
-//! # Two ways to produce that column, and one owner
-//!
-//! [`SessionSummaryService::refresh`] is the incremental one, and it runs on
-//! every tier: previous summary plus the messages it does not cover, folded into
-//! 3-5 sentences. [`SessionSummaryService::resummarise`] is PAI-4 P2's, and it
-//! runs only on [`ModelClass::Large`]: it throws the chain away and rebuilds
-//! from the source messages with a budget the window can afford. Both live here
-//! because both write `sessions.rolling_summary`, and a second file writing that
-//! column is exactly the drift this programme keeps paying for. The *decision*
-//! to rebuild is not here — it is a pure gate in
-//! [`models::services::context::resummarisation`](crate::models::services::context::resummarisation).
+//! Idle rolling-summary refresh, the sole writer of `sessions.rolling_summary`.
+//! Run only after `summary_idle_secs` idle (never at startup) and cancelled by the next
+//! turn; turns only read the summary, never wait for one.
 
 use std::sync::Arc;
 
@@ -29,8 +11,7 @@ use crate::models::domain::message::{ChatMessage, Role};
 use crate::models::ports::provider::LlmProvider;
 use crate::user_data::ports::session_storage::SessionStorage;
 
-/// Keep this many of the newest messages OUT of the summary — they stay
-/// verbatim in the model's history, so summarizing them would duplicate.
+/// Newest messages left out of the summary: they stay verbatim in the model's history.
 const KEEP_RECENT_MESSAGES: usize = 6;
 
 /// Don't bother refreshing for fewer than this many new messages.
@@ -46,11 +27,6 @@ pub enum RefreshOutcome {
     Cancelled,
 }
 
-/// How a role is spelled in a summarisation transcript.
-///
-/// Shared by both producers below so the two prompts describe a conversation the
-/// same way — the model is being asked to merge one into the other, and two
-/// spellings of "Assistant" would be a difference it has to reconcile.
 fn role_label(role: &Role) -> &'static str {
     match role {
         Role::User => "User",
@@ -70,12 +46,8 @@ impl SessionSummaryService {
         Self { provider, storage }
     }
 
-    /// Merge the existing summary with the messages it does not yet cover
-    /// (excluding the newest [`KEEP_RECENT_MESSAGES`]) into a refreshed 3-5
-    /// sentence summary, and persist it with an advanced through-pointer.
-    ///
-    /// Checks `cancel` before and after the model call; a cancelled refresh
-    /// persists nothing.
+    /// Folds messages past the through-pointer into the summary and advances the pointer.
+    /// Skips the newest [`KEEP_RECENT_MESSAGES`]; a cancelled refresh persists nothing.
     pub async fn refresh(
         &self,
         session_id: &str,
@@ -136,8 +108,7 @@ impl SessionSummaryService {
         let system =
             "You summarise conversations accurately and concisely for use as model context.";
 
-        // The model call is the long pole; race it against cancellation so a
-        // new turn reclaims the (serial, on-device) engine immediately.
+        // Race cancellation so a new turn reclaims the serial on-device engine at once.
         let response = tokio::select! {
             r = self.provider.complete(system, prompt) => r?,
             _ = cancel.cancelled() => return Ok(RefreshOutcome::Cancelled),
@@ -278,33 +249,18 @@ mod tests {
         assert!(provider.calls.lock().unwrap().is_empty());
     }
 
-    // -- PAI-4 P2: large-tier re-summarisation -------------------------------
-    //
-    // "And add the first test that actually executes it" is the clause the P2
-    // respec kept verbatim, because 277 lines of `ContextCompactor` passed every
-    // gate this repository has for as long as it existed and had no caller. So
-    // these drive the real method against a real storage adapter and a stub
-    // provider, and every one of them asserts what reached the provider or what
-    // reached the store — never merely that a function returned.
+    // -- Large-tier fixtures and cancellation --------------------------------
 
     use crate::models::services::context::context_budget::CompactionProfile;
     use crate::models::services::context::model_class::ModelClass;
     use crate::models::services::context::token_counting::HeuristicTokenCounter;
 
-    /// The large tier's floor, so the budgets under test are the smallest ones
-    /// this mechanism is ever handed rather than the roomiest.
+    /// The large tier's smallest window, so budgets under test are the tightest it gets.
     fn large_profile() -> CompactionProfile {
         CompactionProfile::from_context_window(65_536)
     }
 
-    /// Seed `n` messages of roughly `chars` characters each. The default `seed`
-    /// helper produces messages of a dozen characters, which cannot get a
-    /// session over a 20,000-token history budget in any realistic number of
-    /// rows — and the gate under test is entirely about crossing that budget.
-    ///
-    /// The body is padded to a known length rather than left to `format!` so the
-    /// fixture's token count is a property of the test rather than of how many
-    /// digits the loop index happens to have.
+    /// Seeds `n` messages of about `chars` chars each, enough to cross the history budget.
     async fn seed_bulky(storage: &InMemorySessionStorage, session: &str, n: usize, chars: usize) {
         storage.create_session(session.to_string()).await.unwrap();
         for i in 0..n {

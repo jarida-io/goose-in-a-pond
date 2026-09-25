@@ -1,35 +1,5 @@
-// Finding, starting and watching pond-server.
-//
-// A port of src-tauri/src/process.rs. Three things here are load-bearing and
-// each has cost someone a debugging session before:
-//
-//   * Parent-managed mode. `pond-server serve --native` launches this shell
-//     and pins the port via GIAP_SERVER_PORT. The parent has already bound the
-//     socket, so spawning our own would either fail or fight for it, and the
-//     window comes up blank -- "the app launches but it shows nothing".
-//
-//   * One patience budget, two ways to stop waiting. Both paths time the same
-//     binary doing the same cold start -- loading face recognition, Whisper
-//     and TTS routinely takes over a minute -- so both get the same wall
-//     clock. What differs is how the wait can END: a server we spawned
-//     ourselves can fail fast, because we hold its ChildProcess and can watch
-//     it die, where a parent-managed one can only ever time out. Do not give
-//     the self-spawned path a shorter clock -- that is what produced the
-//     two-server bug the next bullet exists to prevent.
-//
-//   * At most one live child, ever. `this.child` is never overwritten while
-//     the process it names is alive. A spawn that times out leaves a RUNNING
-//     child behind, and before this was enforced the next recovery reassigned
-//     the field and orphaned it: one launch, two servers, and the first one
-//     surviving the quit because shutdown() could only see the second. The
-//     assignment goes through adoptChild(), which throws rather than let that
-//     happen again.
-//
-//   * Recovery is serialised. The startup probe and the periodic health check
-//     both call ensureRunning, and without the lock they race into two
-//     children fighting for one port. The lock is also why a live child seen
-//     at the top of ensureRunningInner has ALREADY spent its full budget --
-//     there is no "wait a bit longer" case to write.
+// Finding, starting and watching pond-server. Invariants: never spawn when a parent owns the
+// server, at most one live child, and recovery is serialised.
 
 import { join } from "node:path";
 import { existsSync } from "node:fs";
@@ -48,11 +18,8 @@ const HEALTH_TIMEOUT_MS = 2_000;
 const POLL_MS = 500;
 
 /**
- * Attempts when we spawned the server ourselves: 120 seconds.
- *
- * The same budget a parent-managed server gets, because it is the same binary
- * doing the same cold start. This wait can still end early -- see
- * `ensureRunningInner`, which gives up the moment the child exits.
+ * 120 s, the parent-managed budget too: same binary, same cold start (often over a minute).
+ * Don't shorten it; a timed-out spawn leaves a running child. It still ends early on exit.
  */
 export const SPAWNED_POLL_ATTEMPTS = 240;
 
@@ -60,19 +27,12 @@ export const SPAWNED_POLL_ATTEMPTS = 240;
 export const PARENT_MANAGED_POLL_ATTEMPTS = 240;
 
 /**
- * How long a wedged child gets to honour SIGTERM before it is SIGKILLed.
- *
- * Matches the voice driver's GRACEFUL_STOP_MS. SIGTERM first, deliberately:
+ * SIGTERM grace before SIGKILL, as the voice driver's GRACEFUL_STOP_MS. SIGTERM first:
  * pond-server flushes the SQLite WAL on the way out.
  */
 export const KILL_GRACE_MS = 3_000;
 
-/**
- * Decide the server URL and whether a parent owns it.
- *
- * An empty string counts as unset, matching the Rust: an exported-but-blank
- * variable must not put us into parent-managed mode with a malformed URL.
- */
+/** The server URL, and whether a parent owns it; a blank port counts as unset, as in the Rust. */
 export function resolveServerUrl(port: string | undefined): {
   url: string;
   parentManaged: boolean;
@@ -95,15 +55,7 @@ export interface BinaryLookup {
   exists?: (path: string) => boolean;
 }
 
-/**
- * Locate the pond-server binary.
- *
- * Three branches, two of which are KNOWN rather than probed. The Rust had to
- * guess -- it walked the running executable's siblings first specifically so a
- * packaged app could not fall back to a stray `binaries/` folder in the cwd --
- * because it had no reliable way to ask whether it was packaged. `app.isPackaged`
- * is a hard boolean, so that whole heuristic goes.
- */
+/** Locate pond-server: the override, else the bundle when packaged, else a repo build. */
 export function resolveServerBinary(opts: BinaryLookup): string | null {
   const exists = opts.exists ?? existsSync;
   const name = opts.platform === "win32" ? "pond-server.exe" : "pond-server";
@@ -128,12 +80,7 @@ export function resolveServerBinary(opts: BinaryLookup): string | null {
   return null;
 }
 
-/**
- * How long to wait before the next recovery attempt, in seconds.
- *
- * Exponential from 5 seconds, capped at 5 minutes, so a server that cannot
- * start does not get hammered forever.
- */
+/** Recovery delay in seconds: exponential from 5, capped at 5 minutes. */
 export function recoveryBackoffSeconds(consecutiveFailures: number): number {
   const BASE = 5;
   const MAX = 300;
@@ -149,11 +96,7 @@ export interface ServerDeps {
   spawnFn?: typeof spawn;
   sleep?: (ms: number) => Promise<void>;
   log?: { info(m: string): void; warn(m: string): void };
-  /**
-   * The runtime port file, with the time it was written.
-   *
-   * Seam rather than a path so tests never touch the real data directory.
-   */
+  /** The runtime port file and its mtime; a seam so tests never touch the real data dir. */
   readPortFile?: () => { port: number; mtimeMs: number } | null;
   /** Called when the bound port turns out not to be the one we assumed. */
   onUrlChanged?: (url: string) => void;
@@ -182,13 +125,7 @@ export class ServerProcess {
     this.parentManaged = resolved.parentManaged;
   }
 
-  /**
-   * Where the server is, as far as we know.
-   *
-   * Not readonly: `--port` is a START port for the Rust's bind_with_fallback,
-   * so a server that finds 4000 taken binds 4001 and says nothing. Assuming
-   * 4000 in that case points the UI at a server that is not there.
-   */
+  /** Where the server is, as far as we know; `--port` is only a start port (bind_with_fallback). */
   get url(): string {
     return this.currentUrl;
   }
@@ -216,12 +153,7 @@ export class ServerProcess {
     }
   }
 
-  /**
-   * Make sure pond-server is reachable, spawning it if this shell owns it.
-   *
-   * Serialised, so the startup probe and the periodic health check cannot race
-   * into two children fighting for one port.
-   */
+  /** Ensure pond-server is reachable, spawning it if we own it. Serialised: no racing spawns. */
   ensureRunning(): Promise<string> {
     const run = this.recovery.then(
       () => this.ensureRunningInner(),
@@ -239,9 +171,7 @@ export class ServerProcess {
       throw new Error("the shell is quitting; not starting pond-server");
     }
 
-    // BEFORE the health check, and this ordering is the second half of the
-    // bug: an orphan from a previous run is healthy on 4000, so checking first
-    // means adopting it and never reaping it at all.
+    // Before the health check: a healthy orphan on 4000 would otherwise be adopted, never reaped.
     this.cleanupOrphans();
 
     if (await this.healthCheck()) {
@@ -267,10 +197,7 @@ export class ServerProcess {
     }
 
     this.reapExitedChild();
-    // A child still here after the reap is one whose entire budget was spent
-    // by the call that spawned it -- the recovery lock guarantees that. It is
-    // wedged, not slow, so it is replaced rather than waited on again. Not
-    // killing it here is what put two servers on this machine.
+    // Any child still here spent its whole budget (the lock ensures it): wedged, so kill it.
     if (this.child) await this.killWedgedChild();
 
     const binary = resolveServerBinary({
@@ -286,10 +213,7 @@ export class ServerProcess {
 
     this.log.info(`spawning pond-server from ${binary}`);
     const spawnFn = this.deps.spawnFn ?? spawn;
-    // Grounding the child's cwd at the repo root in dev is what lets the
-    // GooseAdapter inside it resolve extension paths like
-    // extensions/music/src/server.ts regardless of where the shell was
-    // started. A no-op in a packaged app, where those paths are absolute.
+    // In dev, cwd = repo root so Goose resolves relative extension paths (extensions/music/...).
     const spawnedAt = Date.now();
     const child = spawnFn(binary, ["serve", "--port", String(DEFAULT_PORT)], {
       stdio: "inherit",
@@ -298,8 +222,7 @@ export class ServerProcess {
         : { cwd: this.deps.lookup.repoRoot }),
     });
     this.adoptChild(child);
-    // Recorded so the NEXT launch can reap this process if we are killed
-    // hard enough that no quit path runs.
+    // So the next launch can reap it if we die without running any quit path.
     if (typeof child.pid === "number") this.writePid(child.pid);
 
     for (let i = 0; i < SPAWNED_POLL_ATTEMPTS; i++) {
@@ -312,9 +235,7 @@ export class ServerProcess {
         this.log.info(`spawned pond-server is ready at ${this.url}`);
         return this.url;
       }
-      // Fail fast on a child that died rather than serving out the budget.
-      // A bad argument or a port it cannot bind should surface in seconds,
-      // naming the exit status, not two minutes later as "not healthy".
+      // Fail fast, naming the exit status, if the child died instead of serving out the budget.
       const gone = this.exitDescription();
       if (gone !== null) {
         this.child = null;
@@ -332,13 +253,8 @@ export class ServerProcess {
   }
 
   /**
-   * Reap a sidecar orphaned by a hard kill of a previous run.
-   *
-   * Once per run, deliberately: a later recovery must not kill a server we
-   * legitimately adopted minutes ago. Never in parent-managed mode -- the
-   * parent there is `pond-server serve --native`, whose command line matches
-   * the sidecar predicate exactly, so a stale pidfile plus a reused pid could
-   * have us kill our own parent.
+   * Reap a sidecar orphaned by a hard kill; once per run, so an adopted server survives. Never
+   * when parent-managed: `pond-server serve --native` matches the sidecar predicate too.
    */
   private cleanupOrphans(): void {
     if (this.reapedOrphans || this.parentManaged) return;
@@ -347,11 +263,8 @@ export class ServerProcess {
   }
 
   /**
-   * Adopt the port the server actually bound, if it is not the one we assumed.
-   *
-   * Only ever consulted while OUR child is starting, and only for a file
-   * written after we spawned it -- a port file left by yesterday's run must
-   * never outrank today's spawn. The port still has to answer before we move.
+   * Adopt the port our starting child actually bound. Only a port file written after the spawn
+   * counts (never a stale one), and the port must answer first.
    */
   private adoptBoundPort(spawnedAt: number): boolean {
     const read = this.deps.readPortFile;
@@ -384,13 +297,7 @@ export class ServerProcess {
     return (SPAWNED_POLL_ATTEMPTS * POLL_MS) / 1_000;
   }
 
-  /**
-   * How the child ended, or null while it is still running.
-   *
-   * Both halves matter: a child killed by a signal leaves `exitCode` null and
-   * sets `signalCode`, so testing the exit code alone reports a SIGKILLed
-   * server as live forever.
-   */
+  /** How the child ended, or null if running; a signalled child has a null `exitCode`. */
   private exitDescription(): string | null {
     const child = this.child;
     if (!child) return null;
@@ -404,12 +311,8 @@ export class ServerProcess {
   }
 
   /**
-   * Take ownership of a freshly spawned child.
-   *
-   * The single assignment point for `this.child`, and it refuses to overwrite a
-   * live one. That is the whole invariant: an orphaned sidecar is invisible to
-   * shutdown() and gets adopted by the NEXT launch's health check, so it can
-   * outlive several runs of the app.
+   * The only assignment of `this.child`; refuses to overwrite a live one, whose orphan
+   * shutdown() couldn't see and later launches would adopt.
    */
   private adoptChild(proc: ChildProcess): void {
     if (this.child !== null) {
@@ -427,13 +330,7 @@ export class ServerProcess {
     }
   }
 
-  /**
-   * Terminate a child that is alive but never became healthy.
-   *
-   * SIGTERM, a grace period, then SIGKILL. Clears `this.child` unconditionally:
-   * a process we could not confirm dead must still not stay referenced, or it
-   * blocks every future recovery through adoptChild().
-   */
+  /** SIGTERM, grace, SIGKILL; always clears `this.child`, or adoptChild() blocks all recovery. */
   private async killWedgedChild(): Promise<void> {
     const child = this.child;
     if (!child) return;
@@ -473,13 +370,8 @@ export class ServerProcess {
   }
 
   /**
-   * Kill the server we spawned and refuse to start another.
-   *
-   * Idempotent, synchronous, and safe from a process exit hook. "Refuse to
-   * start another" is deliberate and safe only because quit is the sole
-   * caller: a health-loop tick or a renderer request that lands mid-teardown
-   * must not spawn a sidecar nobody will ever shut down. Never touches a
-   * parent-managed server.
+   * Kill our server and never spawn again (quit is the only caller). Idempotent, sync, safe
+   * from an exit hook; a parent-managed server is never touched.
    */
   shutdown(): void {
     this.stopped = true;

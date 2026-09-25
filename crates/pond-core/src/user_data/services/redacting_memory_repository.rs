@@ -1,14 +1,5 @@
-//! PAI-2 P3, chokepoint 1: redact a fragment's content before it is stored.
-//!
-//! A decorator over the port, wrapping the single `memory_repo` construction
-//! in `run_server`, so extraction, the `giap-memory` MCP tool, `POST /memories`
-//! and consolidation are all covered without any of them knowing.
-//!
-//! **Every method is forwarded explicitly.** Eighteen of the twenty-two have
-//! default bodies on the trait (`Ok(0)`, `vec![]`, `Ok(())`), so a decorator
-//! that forgets one does not fail to compile — it silently answers the default
-//! and the row never reaches SQLite. `every_memory_repository_method_is_forwarded`
-//! is the guard.
+//! Memory-repository decorator that redacts content before storage; wraps the one `memory_repo`
+//! in `run_server`. Forward every method explicitly: trait defaults would silently drop rows.
 
 use std::sync::Arc;
 
@@ -31,12 +22,8 @@ pub struct RedactingMemoryRepository {
 }
 
 impl RedactingMemoryRepository {
-    /// `Secrets`, not `Full`, and the choice is the whole product argument.
-    /// A memory is read back into the model's context, and PAI-2 section 3.3's
-    /// non-goal — the model is not blindfolded — dies if the assistant can
-    /// never recall the user's own email address. A credential is different:
-    /// it rotates, it is never worth recalling, and it is the one thing whose
-    /// presence in a durable store is pure liability.
+    /// `Secrets`, not `Full`: recalled memories must keep personal facts like the user's email,
+    /// while a stored credential is pure liability.
     pub const LEVEL: RedactionLevel = RedactionLevel::Secrets;
 
     pub fn new(
@@ -59,9 +46,7 @@ impl MemoryRepository for RedactingMemoryRepository {
                 kinds = %kinds.join(","),
                 "[redaction] removed credential-shaped material before storing a memory"
             );
-            // The embedding was computed over the unredacted text, so it is a
-            // durable derivative of the secret. Drop it; the startup backfill
-            // re-embeds from `content`, which is now the redacted string.
+            // The embedding encodes the unredacted secret; drop it and let backfill re-embed.
             if result.highest_sensitivity() == Some(PrivacySensitivity::Secret) {
                 fragment.embedding = None;
             }
@@ -128,13 +113,7 @@ impl MemoryRepository for RedactingMemoryRepository {
         self.inner.record_access(id).await
     }
 
-    /// Redacted before it is stored, exactly as `add` is.
-    ///
-    /// An edit is new text arriving from a person, so it goes through the same
-    /// chokepoint the original did — forwarding it raw would let a secret enter
-    /// by being typed into a correction, which is the one door `add` closes.
-    /// The adapter clears the embedding, so the vector is rebuilt from the
-    /// redacted words rather than describing what was removed.
+    /// Redacted like `add`: an edit is new text and must not let a secret in via a correction.
     async fn update_content(&self, id: &str, content: &str) -> Result<()> {
         let result = self.redactor.redact(content, Self::LEVEL);
         if !result.findings.is_empty() {
@@ -146,9 +125,7 @@ impl MemoryRepository for RedactingMemoryRepository {
                 "[redaction] removed credential-shaped material before storing a memory edit"
             );
         }
-        // No embedding to drop here: the adapter clears it on every content
-        // change, so the vector is always rebuilt from whatever text this call
-        // stored — which is the redacted string.
+        // No embedding to drop: the adapter clears it on every content change.
         self.inner.update_content(id, &result.text).await
     }
 

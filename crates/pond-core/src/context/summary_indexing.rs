@@ -1,7 +1,5 @@
-//! Indexing conversation summaries into the personal-context index (phase B). Memories and context
-//! items already hold a vector when stored; `sessions.rolling_summary` never has, so this is a
-//! restartable sweep rather than a write-through: its writers are already LLM calls, and the index
-//! re-detects a re-summarised session by comparing `source_rev` to `rolling_summary_updated_at`.
+//! Indexes conversation summaries as a restartable sweep: their writers are already LLM calls.
+//! A rewritten summary is detected by `source_rev` vs `rolling_summary_updated_at`.
 
 use std::sync::Arc;
 
@@ -11,18 +9,13 @@ use crate::context::vector_index::{Corpus, VectorEntry, VectorIndex};
 use crate::models::ports::embedding::EmbeddingProvider;
 use crate::user_data::ports::session_storage::SessionStorage;
 
-/// Summaries embedded per batch, then a pause. Matches the memory backfill: on a
-/// Jetson this competes with inference for CPU, so it yields rather than running
-/// flat out.
+/// Summaries embedded per batch before a pause, which yields the Jetson's CPU to inference.
 pub const SUMMARY_BATCH_SIZE: usize = 16;
 
 /// Pause between batches, in milliseconds.
 pub const SUMMARY_BATCH_PAUSE_MS: u64 = 250;
 
-/// Embed and index every session summary that has no current vector, meaning whatever
-/// [`VectorIndex::needs_embedding`] says: never embedded, embedded by a different model, or
-/// embedded before the summary was rewritten. Cancellable because it runs on the idle path and a
-/// user turn must be able to take the CPU back. Returns how many summaries were indexed.
+/// Embed and index every summary [`VectorIndex::needs_embedding`] reports; returns how many.
 pub async fn run_summary_indexing(
     storage: &dyn SessionStorage,
     embedder: &dyn EmbeddingProvider,
@@ -55,9 +48,7 @@ pub async fn run_summary_indexing(
             if cancel.is_cancelled() {
                 break;
             }
-            // Read the summary text and its revision together so the vector is stamped with the
-            // revision it was computed from. Reading them separately races the summary service
-            // and stamps a newer revision than the embedded text, so a stale vector looks current.
+            // Read together, or a racing rewrite stamps a newer revision than the text.
             let (summary, rev) = match storage.get_rolling_summary_with_revision(session_id).await {
                 Ok(pair) => pair,
                 Err(e) => {
@@ -66,15 +57,12 @@ pub async fn run_summary_indexing(
                 }
             };
             let Some(text) = summary.filter(|s| !s.trim().is_empty()) else {
-                // The row qualified when the query ran and does not now. Nothing
-                // to embed; the next sweep will agree.
+                // Blanked since the query ran; the next sweep won't return it.
                 continue;
             };
             match embedder.embed(&text).await {
                 Ok(vector) => {
-                    // A rolling summary is already a compression of a whole
-                    // conversation; chunking a compression would be splitting
-                    // the summary of a thing rather than the thing.
+                    // Whole: a summary is already a compression; chunking it gains nothing.
                     let entry = VectorEntry::whole(
                         Corpus::Summary,
                         session_id.clone(),
@@ -98,8 +86,7 @@ pub async fn run_summary_indexing(
             }
         }
 
-        // Every row in the batch failed, so the same rows would come back
-        // forever — stop rather than spin.
+        // Every row in the batch failed and would come back forever; stop rather than spin.
         if !progressed {
             tracing::warn!("[summary-index] no progress in a batch — stopping");
             break;

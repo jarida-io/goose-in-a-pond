@@ -234,8 +234,7 @@ export function MemoryDetail({ go }: MemoryDetailProps) {
   const [deleting, setDeleting] = useState<string | null>(null);
   const [showComposer, setShowComposer] = useState(false);
   const [compactionEnabled, setCompactionEnabled] = useState(false);
-  // Mirrored from the sections Settings view on purpose: both UIs ship, and a
-  // control that exists in only one of them is a setting half the app cannot see.
+  // Mirrors the sections Settings view: both UIs ship, so the control must exist in both.
   const [embeddingProvider, setEmbeddingProvider] = useState("fastembed");
   const [flash, setFlash] = useState<{ text: string; ok: boolean } | null>(null);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);

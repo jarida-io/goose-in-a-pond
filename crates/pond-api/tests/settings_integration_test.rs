@@ -1,7 +1,4 @@
 //! Integration tests for GET/PUT /api/v1/settings.
-//!
-//! PUT must return the full Settings object rather than a status stub, a partial patch must
-//! preserve unmodified fields, and a following GET must show what the PUT wrote.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -20,7 +17,7 @@ use reqwest::Client as ReqwestClient;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-// ── Stubs ──────────────────────────────────────────────────────────────���───────
+// ── Stubs ──────────────────────────────────────────────────────────────────────
 
 struct CompletedOnboarding;
 
@@ -35,10 +32,7 @@ impl OnboardingRepository for CompletedOnboarding {
     async fn reset(&self) -> anyhow::Result<()> {
         Ok(())
     }
-    // PAI-2 P7 made this a required trait method rather than a defaulted one:
-    // a default would have to answer from `get_current_step`, and a stub that
-    // answers "not onboarded" makes every onboarding write route public
-    // wherever it is used. The name of this stub is the answer.
+    // Answering "not onboarded" would make every onboarding write route public.
     async fn is_complete(&self) -> anyhow::Result<bool> {
         Ok(true)
     }
@@ -181,8 +175,7 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
-/// PUT /api/v1/settings must return the full Settings object, not {"status":"ok"}.
-/// The frontend calls updateSettings() and expects a Settings type back.
+/// The frontend's updateSettings() expects a Settings object back.
 #[tokio::test]
 async fn put_settings_returns_full_settings_object() {
     let (app, _tmp) = make_app().await;
@@ -211,19 +204,16 @@ async fn put_settings_returns_full_settings_object() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
-    // Must be a Settings object — NOT {"status":"ok"}
     assert!(
         json.get("status").and_then(|s| s.as_str()) != Some("ok"),
         "PUT /settings returned {{\"status\":\"ok\"}} — should return full Settings"
     );
 
-    // Should have known Settings fields
     assert!(
         json.get("assistant_name").is_some() || json.get("user_name").is_some(),
         "Response doesn't look like a Settings object: {json}"
     );
 
-    // The patched field should be reflected
     assert_eq!(
         json.get("assistant_name").and_then(|v| v.as_str()),
         Some("Jarvis"),
@@ -231,12 +221,10 @@ async fn put_settings_returns_full_settings_object() {
     );
 }
 
-/// Partial patch preserves other fields.
 #[tokio::test]
 async fn put_settings_partial_patch_preserves_other_fields() {
     let (app, _tmp) = make_app().await;
 
-    // First: set both fields
     let patch1 = serde_json::json!({
         "assistant_name": "Pond",
         "user_name": "Jerry"
@@ -256,7 +244,6 @@ async fn put_settings_partial_patch_preserves_other_fields() {
         .unwrap();
     assert_eq!(resp1.status(), StatusCode::OK);
 
-    // Second: patch only assistant_name
     let patch2 = serde_json::json!({ "assistant_name": "Goose" });
     let resp2 = app
         .clone()
@@ -282,7 +269,6 @@ async fn put_settings_partial_patch_preserves_other_fields() {
         json.get("assistant_name").and_then(|v| v.as_str()),
         Some("Goose"),
     );
-    // user_name from patch1 should be preserved
     assert_eq!(
         json.get("user_name").and_then(|v| v.as_str()),
         Some("Jerry"),
@@ -290,12 +276,10 @@ async fn put_settings_partial_patch_preserves_other_fields() {
     );
 }
 
-/// GET /api/v1/settings returns current settings (including previously PUT values).
 #[tokio::test]
 async fn get_settings_returns_current_settings() {
     let (app, _tmp) = make_app().await;
 
-    // Put a value
     let patch = serde_json::json!({ "assistant_name": "Ducky" });
     app.clone()
         .oneshot(
@@ -310,7 +294,6 @@ async fn get_settings_returns_current_settings() {
         .await
         .unwrap();
 
-    // Get settings
     let get_resp = app
         .oneshot(
             Request::builder()
@@ -336,9 +319,7 @@ async fn get_settings_returns_current_settings() {
     );
 }
 
-/// GET /api/v1/weather must report {"enabled": false} rather than error
-/// when no weather provider is configured (the default in tests / for
-/// users who haven't set a location).
+/// No provider (no location set) must yield `{"enabled": false}`, not an error.
 #[tokio::test]
 async fn get_weather_reports_disabled_without_provider() {
     let (app, _tmp) = make_app().await;
@@ -365,10 +346,7 @@ async fn get_weather_reports_disabled_without_provider() {
     assert_eq!(json.get("enabled").and_then(|v| v.as_bool()), Some(false));
 }
 
-/// PAI-2 P2: no credential material may come back out of `GET /settings`. The handler is
-/// `serde_json::to_value(settings)` with no DTO and no redaction, so this is a property of
-/// the struct. The pond-core guard `no_settings_field_is_secret_shaped` asserts it against
-/// the default; this asserts it over real HTTP after a write, on a configured value.
+/// `GET /settings` serialises the struct unredacted, so no field may hold credential material.
 #[tokio::test]
 async fn settings_response_never_carries_a_secret_shaped_key() {
     let (app, _tmp) = make_app().await;
@@ -418,9 +396,7 @@ async fn settings_response_never_carries_a_secret_shaped_key() {
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let obj = body.as_object().expect("settings is a JSON object");
 
-    // POSITIVE CONTROL, first: the request really reached the settings store.
-    // Without this, an error payload or an empty object satisfies both of the
-    // negative assertions below and the test reports the opposite of the truth.
+    // Positive control first: an error payload would satisfy the negative checks below.
     assert_eq!(
         obj.get("assistant_name").and_then(|v| v.as_str()),
         Some("Jarvis"),
@@ -441,9 +417,7 @@ async fn settings_response_never_carries_a_secret_shaped_key() {
         "apikey",
         "passphrase",
     ];
-    // A token BUDGET / an exchange RATE / a token COUNT ceiling, not a
-    // bearer token. Mirrors NOT_ACTUALLY_SECRET in pond-core's guard; if the
-    // two ever disagree, one of them is wrong.
+    // Token budgets, rates and ceilings, not bearer tokens; must match pond-core's list.
     const NOT_ACTUALLY_SECRET: &[&str] = &[
         "llm_max_tokens",
         "mesh_settlement_millisats_per_token",
@@ -467,10 +441,7 @@ async fn settings_response_never_carries_a_secret_shaped_key() {
     );
 }
 
-/// PAI-2 P5. `NetworkMode::parse` widens on an unrecognised value, on purpose -- a typo must
-/// not silently take a home assistant off the internet. So this 422 is the only thing between
-/// a typo and a gate that is quietly off. The status code is asserted BEFORE any body
-/// predicate: a body-shape check alone passes against an error payload.
+/// `NetworkMode::parse` widens unknown values, so only this 422 stops a typo leaving egress open.
 #[tokio::test]
 async fn put_settings_refuses_an_unrecognised_network_mode() {
     let (app, _tmp) = make_app().await;
@@ -514,9 +485,7 @@ async fn put_settings_refuses_an_unrecognised_network_mode() {
             .to_string()
     }
 
-    // Positive control first: the field exists and defaults to the open,
-    // status-quo-preserving value. Without this the assertions below could pass
-    // against a Settings struct that never grew the field.
+    // Positive control: the field exists and defaults to "open".
     assert_eq!(stored_mode(&app).await, "open");
 
     let bad = put(&app, serde_json::json!({ "network_mode": "offlien" })).await;
@@ -531,22 +500,17 @@ async fn put_settings_refuses_an_unrecognised_network_mode() {
         "the refused value must not have reached the store"
     );
 
-    // ...and a recognised value still round-trips, or the guard has locked the
-    // setting out entirely, which is a different bug wearing the same green.
+    // ...and a recognised value still round-trips.
     let good = put(&app, serde_json::json!({ "network_mode": "offline" })).await;
     assert_eq!(good.status(), StatusCode::OK);
     assert_eq!(stored_mode(&app).await, "offline");
 
-    // The handler installs the mode process-wide. Put it back, so a later test
-    // in this binary does not inherit an offline pond.
+    // The mode is process-wide: restore it so later tests don't inherit an offline pond.
     let restore = put(&app, serde_json::json!({ "network_mode": "open" })).await;
     assert_eq!(restore.status(), StatusCode::OK);
 }
 
-/// PAI-5 P4. `ReasoningEffort::parse` narrows on an unrecognised value, so the fallback is
-/// safe but silent: without this 422 a typo leaves the user on the smallest think with no
-/// way to tell why. Persistence is out of scope here — `MockSettingsRepository` carries a
-/// hand-maintained subset — and is guarded by `roundtrip_persists_every_field` in pond-infra.
+/// `ReasoningEffort::parse` silently narrows unknown values; persistence is tested in pond-infra.
 #[tokio::test]
 async fn put_settings_refuses_an_unrecognised_reasoning_effort() {
     let (app, _tmp) = make_app().await;
@@ -591,8 +555,6 @@ async fn put_settings_refuses_an_unrecognised_reasoning_effort() {
     }
 
     // Positive control: the field exists and defaults to the on-device value.
-    // Without it the assertions below would pass against a Settings struct that
-    // never grew the field, because every lookup on a missing key is None.
     assert_eq!(stored_effort(&app).await, "brief");
 
     let bad = put(&app, serde_json::json!({ "reasoning_effort": "thourough" })).await;
@@ -607,9 +569,7 @@ async fn put_settings_refuses_an_unrecognised_reasoning_effort() {
         "the refused value must not have reached the store"
     );
 
-    // ...and every recognised value is accepted and comes back in the merged
-    // object the handler returns, or the guard has locked the setting out
-    // entirely — a different bug wearing the same green.
+    // ...and every recognised value is accepted and echoed back.
     for good in ["balanced", "thorough", "brief"] {
         let resp = put(&app, serde_json::json!({ "reasoning_effort": good })).await;
         assert_eq!(resp.status(), StatusCode::OK, "PUT {good} was refused");

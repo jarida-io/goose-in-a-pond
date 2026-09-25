@@ -1,9 +1,6 @@
 import type { ReactNode } from "react";
 
-// Callers only render this once a role actually has a model assigned (see
-// Dashboard.tsx's empty-state branch), so it's always in the "set" visual
-// state — missing that modifier left the header text stuck on the
-// low-contrast placeholder color even though a real model was showing.
+/** Always `is-set`: callers render it only once the role has a model (see Dashboard.tsx). */
 export function RoleChip({ role, model, color, icon }: { role: string; model: string; color: string; icon: ReactNode }) {
   return (
     <div className={`role-chip role-chip--${color} is-set`}>

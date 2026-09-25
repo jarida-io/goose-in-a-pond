@@ -1,8 +1,4 @@
-/**
- * CardPreview — Standalone page to visually verify all MCP Server Cards.
- * Accessible at /#preview (or import directly for testing).
- * Uses only mockData from registrations — no backend required.
- */
+/** Standalone page (/#preview) rendering every MCP card from its registration's mockData; no backend. */
 import { getAllRegistrations, type McpCardProps } from "./registry";
 
 // Trigger card registrations

@@ -74,10 +74,7 @@ const FORECAST: ForecastDay[] = [
 const HUMIDITY_PATH = "M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z";
 const WIND_PATH = "M9.59 4.59A2 2 0 1 1 11 8H2m10.59 11.41A2 2 0 1 0 14 16H2m15.73-8.27A2.5 2.5 0 1 1 19.5 12H2";
 
-/**
- * Weather card — blue gradient hero + humidity/wind chips + 5-day forecast.
- * Source: giap-weather.get_current_weather (mock data for Phase 5).
- */
+/** Weather card for giap-weather.get_current_weather; mock data for now. */
 export function WeatherCard(): React.ReactElement {
   return (
     <div className="mc">

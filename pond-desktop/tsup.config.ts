@@ -1,11 +1,7 @@
 import { defineConfig } from "tsup";
 
-// The main process and preload only. The renderer stays on Vite, untouched:
-// its output is embedded into pond-server with include_dir! and served over
-// HTTP on the Jetson, so a bundler with opinions about it is a liability.
-//
-// CJS because a sandboxed preload must be CommonJS, and `electron` is external
-// because it is provided by the runtime, not bundled.
+// Main process and preload only; the renderer stays on Vite (pond-server embeds its output).
+// CJS because a sandboxed preload must be CommonJS.
 export default defineConfig({
   entry: ["electron/main/index.ts", "electron/preload/index.ts"],
   outDir: "dist-electron",
@@ -15,8 +11,6 @@ export default defineConfig({
   external: ["electron"],
   clean: true,
   sourcemap: true,
-  // package.json declares "type": "module", so a .js file here would be loaded
-  // as ESM and every `require` in the bundle would throw. The extension is
-  // what settles it, not the format flag.
+  // package.json is "type": "module", so a .js bundle would load as ESM; the extension decides.
   outExtension: () => ({ js: ".cjs" }),
 });

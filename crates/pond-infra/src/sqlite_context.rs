@@ -1,27 +1,8 @@
-//! SQLite-backed [`ContextRepository`] — PAI-8 P1.
+//! SQLite-backed [`ContextRepository`] over `context_sources` and `context_items`.
 //!
-//! Tables `context_sources` (migration 0044) and `context_items` (0045).
-//!
-//! # Why this adapter holds a redactor
-//!
-//! Because [`ContextItem`] has exactly one constructor and it takes one. That is
-//! PAI-8 invariant 3 expressed as a type rather than as a decorator: there is no
-//! way to turn a stored row into a `ContextItem` without running the redaction
-//! pass over it. For a row written by the pipeline that is a no-op —
-//! [`Redactor::redact`] is contractually idempotent — and for a row that reached
-//! the table some other way it is a repair.
-//!
-//! It also means the wiring cannot forget. `SqliteMemoryRepository::new` takes a
-//! pool, and the redaction only happens because `run_server` remembers to wrap
-//! it in `RedactingMemoryRepository`; this one does not construct at all without
-//! the thing that protects it.
-//!
-//! # Rows that will not load
-//!
-//! An unparseable timestamp, an unknown source kind, an item whose owner is
-//! blank: all become "not a row", not a partial one. There is no
-//! trust-the-database path, for the same reason `sqlite_proposal.rs` has none —
-//! on failure, access narrows.
+//! Holds a redactor because [`ContextItem`]'s only constructor takes one: no stored row becomes
+//! an item without a redaction pass (a no-op for pipeline rows, a repair otherwise). Rows that
+//! will not load (bad timestamp, unknown kind, blank owner) are dropped, never partial.
 
 use std::sync::Arc;
 
@@ -39,9 +20,7 @@ use pond_core::security::ports::redactor::Redactor;
 use pond_core::user_data::domain::profile::ProfileScope;
 use sqlx::{Pool, Sqlite};
 
-/// The columns a source is rebuilt from. Stated once so a column added to one
-/// query and not another shifts a tuple field at compile time rather than at
-/// runtime — the same reason `sqlite_draft.rs` has `DRAFT_COLUMNS`.
+/// Shared by every source query so all stay in step with `SourceRow`.
 const SOURCE_COLUMNS: &str =
     "id, kind, provider, profile_id, scopes, cursor, last_sync, status, secret_ref, created_at";
 
@@ -80,15 +59,13 @@ type ItemRow = (
 pub struct SqliteContextRepository {
     pool: Pool<Sqlite>,
     redactor: Arc<dyn Redactor>,
-    /// Shared personal-context index (phase B). Optional; without it items are
-    /// stored exactly as before and the sweep picks them up later.
+    /// Optional; without it items are still stored and the sweep indexes them later.
     index: Option<Arc<dyn VectorIndex>>,
     model_id: Option<String>,
 }
 
 impl SqliteContextRepository {
-    /// The redactor is a constructor parameter, not a setter: see the module
-    /// docs. There is deliberately no `new(pool)`.
+    /// The redactor is required; there is deliberately no `new(pool)`.
     pub fn new(pool: Pool<Sqlite>, redactor: Arc<dyn Redactor>) -> Self {
         Self {
             pool,
@@ -98,14 +75,7 @@ impl SqliteContextRepository {
         }
     }
 
-    /// Mirror stored vectors into the shared index.
-    ///
-    /// Placed at the adapter for the same reason as the memory side: this is the
-    /// terminal write and nothing else issues SQL against `context_items`. It is
-    /// simpler here than for memory, because a `ContextItem` cannot exist
-    /// un-redacted — `from_parts` is the only constructor and it takes the
-    /// redactor — so whatever vector the item carries is already of redacted
-    /// text by construction.
+    /// Mirror stored vectors into the index; nothing else writes `context_items`.
     pub fn with_vector_index(
         mut self,
         index: Arc<dyn VectorIndex>,
@@ -125,28 +95,19 @@ impl SqliteContextRepository {
                     .upsert(&VectorEntry {
                         corpus: Corpus::Context,
                         row_id: item.id().to_string(),
-                        // Chunk 0 of the whole text. The pipeline computes one
-                        // vector over `embedding_text` and mirrors it here; the
-                        // maintenance sweep is what replaces it with a full set
-                        // of passages, and it clears this one first so the two
-                        // never co-exist as rival descriptions of one row.
+                        // Whole-text vector; the sweep clears it before adding passage chunks.
                         chunk_ix: 0,
                         chunk_span: None,
                         model_id: model_id.to_string(),
                         vector: vector.to_vec(),
-                        // A re-sync REWRITES the row in place (upsert on
-                        // `source_id, external_id`), so the ingest timestamp is
-                        // what tells a sweep the stored vector is of older text.
+                        // A re-sync rewrites the row in place; ingest time flags a stale vector.
                         source_rev: Some(sql_ts(item.ingested_at())),
                     })
                     .await
             }
-            // A vector we cannot attribute: leave it to the sweep rather than
-            // strip an entry another process wrote correctly.
+            // Unattributable vector: leave it to the sweep, not strip another writer's entry.
             (Some(vector), None) if !vector.is_empty() => return,
-            // An upsert with no embedder wired NULLs a previously stored vector,
-            // so the index must follow rather than keep an entry for a row that
-            // no longer has one.
+            // An upsert without an embedder NULLs the stored vector; the index must follow.
             _ => index.remove(Corpus::Context, item.id()).await,
         };
         if let Err(e) = outcome {
@@ -157,9 +118,7 @@ impl SqliteContextRepository {
 
 // ── Encoding ────────────────────────────────────────────────────────────────
 
-/// Seconds precision, UTC, `Z`-suffixed — the format `sqlite_proposal.rs` pins
-/// for the same reason: these values are compared in SQL, and a format
-/// `datetime()` cannot parse would change what the comparison means.
+/// Seconds, UTC, `Z`-suffixed: compared in SQL, so it must stay `datetime()`-parseable.
 fn sql_ts(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
@@ -189,9 +148,7 @@ fn sensitivity_str(s: PrivacySensitivity) -> &'static str {
     }
 }
 
-/// Read a stored classification. Anything unrecognised reads as `Secret` — the
-/// most restrictive answer — because an unreadable classification must not be
-/// the permissive one.
+/// Unrecognised values read as `Secret`, the most restrictive answer.
 fn parse_sensitivity(raw: &str) -> PrivacySensitivity {
     match raw {
         "public" => PrivacySensitivity::Public,
@@ -209,22 +166,13 @@ fn parse_json_list(raw: &str) -> Vec<String> {
     serde_json::from_str(raw).unwrap_or_default()
 }
 
-/// SQL predicate and optional bind for a [`ProfileScope`].
-///
-/// **This mirrors `pond_core::context::scope::owner_is_visible` and must keep
-/// mirroring it.** Two implementations of one boundary rule is how a boundary
-/// rule drifts, so `the_sql_scope_filter_agrees_with_the_domain_predicate` runs
-/// both over the same fixture and fails on any disagreement.
-///
-/// Note what is NOT here: `sqlite_memory`'s `OR profile_id IS NULL` limb.
-/// `context_items.profile_id` is `NOT NULL`, so nothing could match it, and
-/// adding it would create a hiding place for a row that belongs to nobody.
+/// SQL predicate for a [`ProfileScope`]; must mirror `scope::owner_is_visible` (a test runs
+/// both). Unlike `sqlite_memory`, no `OR profile_id IS NULL`: the column is `NOT NULL`.
 fn scope_sql(scope: &ProfileScope) -> (&'static str, Option<&str>) {
     match scope {
         ProfileScope::Owner(id) => ("AND profile_id = ?", Some(id.as_str())),
         ProfileScope::Household => ("", None),
-        // Callers short-circuit before running the query, but the predicate is
-        // correct on its own so a missed short-circuit fails closed.
+        // Callers short-circuit first; this makes a missed short-circuit fail closed.
         ProfileScope::Guest => ("AND 1 = 0", None),
     }
 }
@@ -280,10 +228,6 @@ impl SqliteContextRepository {
         .map_err(anyhow::Error::from)
     }
 
-    /// Map rows, dropping any that will not load and saying so.
-    ///
-    /// A row that cannot be rebuilt is not returned as a partial item: every
-    /// caller here turns a broken row into "no item", which narrows.
     fn rows_to_items(&self, rows: Vec<ItemRow>) -> Vec<ContextItem> {
         rows.into_iter()
             .filter_map(|row| match self.row_to_item(row) {
@@ -300,8 +244,7 @@ impl SqliteContextRepository {
 #[async_trait]
 impl ContextRepository for SqliteContextRepository {
     async fn upsert_source(&self, source: &ContextSource) -> Result<()> {
-        // `kind` and `profile_id` are absent from the DO UPDATE list on purpose:
-        // they are the source's identity and 0044 refuses to change either.
+        // `kind`/`profile_id` are identity, left out of DO UPDATE; 0044 refuses to change them.
         sqlx::query(
             "INSERT INTO context_sources \
              (id, kind, provider, profile_id, scopes, cursor, last_sync, status, secret_ref, created_at) \
@@ -372,11 +315,8 @@ impl ContextRepository for SqliteContextRepository {
     }
 
     async fn disconnect_source(&self, id: &str, scope: &ProfileScope) -> Result<u64> {
-        // Reported before the delete, because after it there is nothing to
-        // count and PAI-8 invariant 6 is "deletes its items **and says how
-        // many**". Counted through the scoped read so a caller who may not see
-        // the source is told about zero items rather than about somebody
-        // else's.
+        // Count before deleting (the count is reported), via the scoped read so a caller who
+        // cannot see the source hears zero, not about somebody else's items.
         if self.get_source(id, scope).await?.is_none() {
             return Ok(0);
         }
@@ -386,15 +326,8 @@ impl ContextRepository for SqliteContextRepository {
                 .fetch_one(&self.pool)
                 .await?;
 
-        // The items go with an explicit DELETE rather than by relying on the
-        // foreign key's ON DELETE CASCADE: `PRAGMA foreign_keys` is per
-        // connection, and a cascade that silently does not happen would leave
-        // orphaned personal data behind while reporting that it was deleted.
-        // Collect the ids BEFORE deleting, so their vectors can follow. An
-        // orphaned vector is harmless -- the index holds no text and the JOIN
-        // drops it -- and the maintenance sweep would prune it eventually. But a
-        // member who disconnects a source is asking for their data to be gone,
-        // and "eventually, at the next restart" is a poor answer to that.
+        // Explicit DELETE, not ON DELETE CASCADE: `PRAGMA foreign_keys` is per connection.
+        // Ids are collected first so their vectors go now, not at the next sweep.
         let doomed: Vec<(String,)> =
             sqlx::query_as("SELECT id FROM context_items WHERE source_id = ?")
                 .bind(id)
@@ -410,8 +343,7 @@ impl ContextRepository for SqliteContextRepository {
         if let Some(index) = &self.index {
             for (item_id,) in &doomed {
                 if let Err(e) = index.remove(Corpus::Context, item_id).await {
-                    // Best effort: the sweep is the backstop, and failing the
-                    // disconnect would leave the member with neither.
+                    // Best effort: the sweep is the backstop.
                     tracing::warn!(item_id = %item_id, "index cleanup on disconnect failed: {e:#}");
                 }
             }
@@ -454,9 +386,7 @@ impl ContextRepository for SqliteContextRepository {
         .bind(item.embedding().map(vec_to_blob))
         .execute(&self.pool)
         .await?;
-        // Write-through, after the row is durable. Safe by construction here:
-        // `ContextItem` has one constructor and it redacts, so the vector this
-        // mirrors is already of redacted text.
+        // Write-through after the row is durable; `ContextItem` vectors are of redacted text.
         self.mirror(item).await;
         Ok(())
     }
@@ -534,10 +464,8 @@ impl ContextRepository for SqliteContextRepository {
             .into_iter()
             .filter_map(|item| {
                 let emb = item.embedding()?;
-                // Different width means a different embedding model, and `cosine`
-                // answers 0.0 for that — a valid score. Scoring such an item would
-                // fill the result with incomparable rows ranked as if judged, and
-                // leave the caller's `is_empty()` keyword fallback unable to fire.
+                // Other width = other model: `cosine` yields a valid-looking 0.0, and scored
+                // rows would stop the caller's `is_empty()` keyword fallback from firing.
                 if emb.len() != query_embedding.len() {
                     return None;
                 }
@@ -593,9 +521,6 @@ impl ContextRepository for SqliteContextRepository {
     }
 
     async fn item_stats_by_source(&self) -> Result<Vec<SourceItemStats>> {
-        // GROUP BY, not a query per source. The screen that reads this already
-        // has the source list, so the alternative is N+1 round trips to answer
-        // one sentence -- a cost that only bites the pond with the most data.
         let rows: Vec<(String, i64, i64)> = sqlx::query_as(
             "SELECT source_id, \
                     COUNT(*), \
@@ -622,9 +547,7 @@ impl ContextRepository for SqliteContextRepository {
             let Some(cutoff) = bucket.cutoff else {
                 continue;
             };
-            // The sensitivity class is spelled out as a set rather than as an
-            // ordering, because these are strings in SQLite and 'internal' <
-            // 'sensitive' < 'secret' is true only by accident of the alphabet.
+            // A set, not a comparison: as strings, 'secret' sorts before 'sensitive'.
             let sensitivities: &[&str] = if bucket.sensitive {
                 &["sensitive", "secret"]
             } else {
@@ -681,8 +604,7 @@ mod tests {
         (repo, db.system, tmp)
     }
 
-    /// The FK on `context_sources.profile_id` is real and `PRAGMA foreign_keys`
-    /// is on, so a member has to exist before a source can point at them.
+    /// Sources FK-reference `profiles`, so a member must exist first.
     async fn add_member(pool: &Pool<Sqlite>, id: &str) {
         sqlx::query("INSERT INTO profiles (id, display_name) VALUES (?, ?)")
             .bind(id)
@@ -752,9 +674,7 @@ mod tests {
         .await
         .unwrap();
 
-        // Read the raw column, not the mapped value: the mapper re-redacts, so
-        // asserting on it would pass even if the write path had stored the
-        // secret.
+        // Raw column: the mapper re-redacts, so the mapped value would hide a stored secret.
         let stored: String = sqlx::query_scalar("SELECT body FROM context_items")
             .fetch_one(&pool)
             .await
@@ -763,8 +683,6 @@ mod tests {
         assert!(stored.contains("[redacted:api-key]"));
     }
 
-    /// The read-path repair, driven through the database. A row written by hand
-    /// with a credential in it does not come back out with the credential.
     #[tokio::test]
     async fn a_row_written_around_the_pipeline_is_repaired_on_read() {
         let (repo, pool, _tmp) = make_repo().await;
@@ -833,9 +751,7 @@ mod tests {
             .unwrap()
             .is_none());
 
-        // Vacuity control: the same reads under Household return the rows, so
-        // the assertions above are about the scope and not about an empty
-        // store.
+        // Vacuity control: Household sees the rows, so the store is not simply empty.
         assert_eq!(
             repo.recent_items(&ProfileScope::Household, 10)
                 .await
@@ -895,8 +811,6 @@ mod tests {
         );
     }
 
-    /// The SQL filter and the domain predicate are two implementations of one
-    /// rule. Run both over the same fixture and fail on any disagreement.
     #[tokio::test]
     async fn the_sql_scope_filter_agrees_with_the_domain_predicate() {
         let (repo, pool, _tmp) = make_repo().await;
@@ -938,9 +852,6 @@ mod tests {
                  {from_domain:?}"
             );
         }
-        // Vacuity control: `every_shape` includes an Owner whose id matches no
-        // fixture row, so without the second owner pushed above this loop would
-        // compare four empty lists with four empty lists.
         assert_eq!(
             visible_total, 4,
             "the fixture stopped exercising the rule: 2 for Household, 1 for each real Owner, \
@@ -992,8 +903,6 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        // A second disconnect reports zero rather than failing, and deletes
-        // nothing that is not there.
         assert_eq!(
             repo.disconnect_source("s1", &ProfileScope::Household)
                 .await
@@ -1002,8 +911,6 @@ mod tests {
         );
     }
 
-    /// A member who may not see the source may not delete its items either, and
-    /// is told about zero rather than about somebody else's data.
     #[tokio::test]
     async fn a_stranger_cannot_disconnect_someone_elses_source() {
         let (repo, pool, _tmp) = make_repo().await;
@@ -1029,7 +936,6 @@ mod tests {
         );
     }
 
-    /// Deleting a household member takes their sources and items with them.
     #[tokio::test]
     async fn removing_a_member_removes_their_context() {
         let (repo, pool, _tmp) = make_repo().await;
@@ -1164,9 +1070,6 @@ mod tests {
         let _ = pool;
     }
 
-    /// PAI-8 invariant 4, asserted against the live schema rather than against
-    /// the migration's comment. A column a token could be written to is a column
-    /// a token eventually is written to.
     #[tokio::test]
     async fn the_schema_has_nowhere_to_put_a_token() {
         let (_repo, pool, _tmp) = make_repo().await;
@@ -1232,8 +1135,6 @@ mod tests {
         );
     }
 
-    /// Every install after the first is an upgrade: applying the migrations to a
-    /// database that already has rows must work, and must not disturb them.
     #[tokio::test]
     async fn the_migrations_apply_to_a_database_that_already_has_rows() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1248,8 +1149,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        // Second init over the same directory: sqlx re-runs its migrator against
-        // a populated file.
+        // Second init: sqlx re-runs its migrator against a populated file.
         let db = Database::init(tmp.path()).await.unwrap();
         let repo = SqliteContextRepository::new(db.system.clone(), Arc::new(RuleRedactor::new()));
         assert_eq!(

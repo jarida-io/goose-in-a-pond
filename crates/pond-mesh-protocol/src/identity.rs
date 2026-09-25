@@ -1,7 +1,4 @@
-//! Peer identity and message authentication for the mesh (#132).
-//!
-//! A peer's [`PeerId`] *is* its ed25519 public key (both are 32 bytes) —
-//! there is no separate identity layer to keep in sync.
+//! Mesh peer identity and signatures; a [`PeerId`] *is* its ed25519 public key.
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use pond_core::mesh::domain::peer_id::PeerId;
@@ -15,8 +12,7 @@ pub enum IdentityError {
     MalformedPeerId,
 }
 
-/// This Pond's mesh signing key. The corresponding [`PeerId`] is what gets
-/// announced to and pinned by other peers.
+/// This Pond's mesh signing key; its [`PeerId`] is what other peers pin.
 pub struct MeshKeypair(SigningKey);
 
 impl MeshKeypair {
@@ -32,9 +28,7 @@ impl MeshKeypair {
         PeerId::from(self.0.verifying_key().to_bytes())
     }
 
-    /// The raw 32-byte secret seed, for adapters that need to reconstruct an
-    /// equivalent keypair in a different library's type (e.g. libp2p's own
-    /// `identity::Keypair`) so both speak as the same [`PeerId`].
+    /// Raw 32-byte secret seed, to rebuild the same identity in another library (e.g. libp2p).
     pub fn secret_bytes(&self) -> [u8; 32] {
         self.0.to_bytes()
     }
@@ -44,9 +38,7 @@ impl MeshKeypair {
     }
 }
 
-/// Verify that `signature` over `message` was produced by the keypair whose
-/// public key is `peer`. Never panics on malformed input — a peer sending a
-/// garbage signature is a routing-refusal case, not a crash.
+/// Whether `peer`'s key signed `message`; malformed input is an error, never a panic.
 pub fn verify(peer: PeerId, message: &[u8], signature: &[u8; 64]) -> Result<bool, IdentityError> {
     let verifying_key =
         VerifyingKey::from_bytes(peer.as_bytes()).map_err(|_| IdentityError::MalformedPeerId)?;

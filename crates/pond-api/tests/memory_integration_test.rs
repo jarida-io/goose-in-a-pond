@@ -1,7 +1,4 @@
-//! Integration tests for the enhanced memory system: segment, importance, tier
-//! and lifecycle round-trips, the REST API's segment metadata, decay scoring,
-//! archive and prune cleanup, access tracking, and segment-filtered search. Uses
-//! a real SQLite database in a temp dir with all migrations; no server or LLM.
+//! Memory segments, tiers, decay and cleanup against a migrated tempdir SQLite; no LLM.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -44,10 +41,7 @@ impl OnboardingRepository for CompletedOnboarding {
     async fn reset(&self) -> anyhow::Result<()> {
         Ok(())
     }
-    // PAI-2 P7 made this a required trait method rather than a defaulted one:
-    // a default would have to answer from `get_current_step`, and a stub that
-    // answers "not onboarded" makes every onboarding write route public
-    // wherever it is used. The name of this stub is the answer.
+    // Answering "not onboarded" would make every onboarding write route public.
     async fn is_complete(&self) -> anyhow::Result<bool> {
         Ok(true)
     }
@@ -442,7 +436,6 @@ fn effective_score_decays_over_time() {
         0.3,
         None,
     );
-    // Make it 30 days old
     frag.created_at = chrono::Utc::now() - chrono::Duration::days(30);
     frag.tier = Some(MemoryTier::Short);
     frag.decay_rate = Some(0.1);
@@ -562,7 +555,6 @@ async fn api_save_memory_with_segment() {
         resp.status()
     );
 
-    // Verify in DB — memory should be stored
     let memories = repo
         .search_recent(&ProfileScope::Household, 10)
         .await
@@ -575,7 +567,6 @@ async fn api_save_memory_with_segment() {
 async fn api_list_memories_returns_recent() {
     let (app, repo, _tmp) = make_app_with_real_memory().await;
 
-    // Insert directly via repo
     repo.add(MemoryFragment::from_extraction(
         "m1".into(),
         None,

@@ -1,40 +1,8 @@
-//! Yielding the engine the moment somebody comes back.
+//! Cancels a background pass once human activity appears after its admission baseline.
 //!
-//! Six background passes each hand-rolled this: memory consolidation,
-//! conversation re-titling, the rolling-summary refresh, the personal-context
-//! index sweep, the compaction pass, and the proactive reviewer. They agreed on
-//! the intent and disagreed on nearly everything else — three read both
-//! activity sources and three only the in-process clock; two compared against a
-//! baseline while two asked whether activity was merely RECENT; tick periods
-//! ranged from 500 ms to 5 s.
-//!
-//! The consequence was not academic. A voice turn arrives in a separate process
-//! and only reaches the in-process clock once its turn is persisted, so the
-//! passes reading one source could not be interrupted by it — and those were
-//! exactly the passes the voice turn then had to queue behind on the serial
-//! engine.
-//!
-//! # Baseline, not recency
-//!
-//! The predicate is "has activity happened since this pass was admitted", never
-//! "was there activity recently". Recency was already ruled on by the gate that
-//! let the pass start; asking again mid-pass makes the watcher overrule the
-//! gate. That is not hypothetical — the index sweep's watcher used a recency
-//! test and cancelled passes the gate had deliberately admitted, so pressing
-//! Reindex within fifteen minutes of any turn cleared the index and refilled a
-//! fraction of it (fixed in c0ae56c3, and this module is that fix generalised).
-//!
-//! # Two sources, OR, sampled differently
-//!
-//! The in-process clock is a lock read, so it is sampled every tick. The
-//! database is a query, so it is sampled every Nth — hammering SQLite for the
-//! length of a pass costs more than the pass saves. A read failure is `None`,
-//! and `None` is *no evidence*, never *activity*: a transient error must not
-//! abort a run that was going fine.
-//!
-//! The database source is filtered through [`human_activity`], never raw
-//! sessions: the pond mints its own `sched-` sessions for background work, and
-//! a pass that counted those would cancel itself.
+//! Baseline, not recency: the admitting gate already judged recency. The in-process clock is
+//! read every tick, the DB (where a voice turn lands) every Nth; a failed read is no activity.
+//! Only [`human_activity`] counts, so the pond's own `sched-` sessions never cancel a pass.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -51,14 +19,11 @@ use crate::user_data::ports::session_storage::SessionStorage;
 pub struct ActivityBaseline {
     /// `last_user_activity` as it stood when this pass was admitted.
     pub in_process_at: Instant,
-    /// Newest human `sessions.updated_at` as it stood then. `None` when the
-    /// pond held no human conversation yet.
+    /// Newest human `sessions.updated_at` then; `None` if there was no human conversation yet.
     pub db_activity: Option<DateTime<Utc>>,
 }
 
 /// Whether activity has happened since `baseline`.
-///
-/// Pure, so the decision can be tested without a clock or a database.
 pub fn resumed_since(
     baseline: ActivityBaseline,
     in_process_now: Instant,
@@ -66,8 +31,7 @@ pub fn resumed_since(
 ) -> bool {
     let in_process = in_process_now > baseline.in_process_at;
     let in_db = match db_now {
-        // No baseline row means the pond held no human conversation when the
-        // pass began, so any human row now is somebody arriving.
+        // No baseline row: any human row now is somebody arriving.
         Some(latest) => baseline.db_activity.is_none_or(|seen| latest > seen),
         // A failed or empty read is no evidence, not activity.
         None => false,
@@ -75,9 +39,7 @@ pub fn resumed_since(
     in_process || in_db
 }
 
-/// Newest human session activity, or `None` when there is none to read.
-///
-/// A storage error reads as `None` for the reason above: no evidence.
+/// Newest human session activity; `None` if there is none or storage errors.
 pub async fn newest_human_activity(storage: &dyn SessionStorage) -> Option<DateTime<Utc>> {
     let sessions = storage.list_sessions().await.ok()?;
     human_activity(&sessions).newest_activity
@@ -94,32 +56,24 @@ pub async fn baseline_now(
     }
 }
 
-/// Which sources a watcher consults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivitySources {
-    /// The in-process clock only.
-    ///
-    /// A legitimate configuration, not an unfinished one: `sessions.updated_at`
-    /// lags a turn by however long that turn takes to persist, so a pass that
-    /// must react the instant somebody starts typing reads the clock alone.
+    /// The in-process clock only, for passes that must react before a turn reaches the DB.
     InProcessOnly,
-    /// Both, with the database sampled every `db_every_n_ticks` ticks.
-    InProcessAndDatabase { db_every_n_ticks: u32 },
+    InProcessAndDatabase {
+        db_every_n_ticks: u32,
+    },
 }
 
-/// How one watcher runs.
 #[derive(Debug, Clone, Copy)]
 pub struct WatchConfig {
     pub tick: Duration,
     pub sources: ActivitySources,
-    /// Named in the one INFO line a cancellation emits. A chore that yields
-    /// silently is indistinguishable from one that is broken.
+    /// Named in the INFO line a cancellation logs.
     pub what_is_cancelled: &'static str,
 }
 
 impl WatchConfig {
-    /// The shape four of the six sites already used: 500 ms in-process,
-    /// database every fourth tick.
     pub fn chore(what_is_cancelled: &'static str) -> Self {
         Self {
             tick: Duration::from_millis(500),
@@ -130,7 +84,6 @@ impl WatchConfig {
         }
     }
 
-    /// In-process only, at a caller-chosen tick.
     pub fn in_process_only(tick: Duration, what_is_cancelled: &'static str) -> Self {
         Self {
             tick,
@@ -140,12 +93,7 @@ impl WatchConfig {
     }
 }
 
-/// A running watcher. Dropping it stops the task.
-///
-/// The guard shape is deliberate and copied from `LaneSlot`: six call sites
-/// each aborted their watcher by hand, some of them twice per loop iteration,
-/// and any future early return would have leaked one. A guard cannot be
-/// forgotten by a `break`, a `?`, or a panic.
+/// A running watcher; dropping it stops the task.
 pub struct ActivityWatcher {
     handle: tokio::task::JoinHandle<()>,
 }
@@ -156,11 +104,8 @@ impl Drop for ActivityWatcher {
     }
 }
 
-/// Cancel `pass` as soon as activity appears after `baseline`.
-///
-/// The baseline is passed in rather than read here on purpose: a caller takes
-/// it at the moment its gate admitted the pass, and re-reading it inside would
-/// move it past whatever happened while the lane slot was being acquired.
+/// Cancel `pass` once activity appears after `baseline`, taken by the caller at admission:
+/// re-reading it here would skip activity during lane-slot acquisition.
 pub fn watch_for_return(
     baseline: ActivityBaseline,
     in_process: Arc<RwLock<Instant>>,
@@ -230,23 +175,19 @@ mod tests {
         assert!(resumed_since(b, later, Some(at(10))));
     }
 
-    /// The reason the single-source copies were wrong: a voice turn arrives in
-    /// another process and reaches only the database.
+    /// Voice turns run in another process and reach only the database.
     #[test]
     fn a_turn_visible_only_in_the_database_stops_the_pass() {
         let b = baseline(Some(at(10)));
         assert!(resumed_since(b, b.in_process_at, Some(at(11))));
     }
 
-    /// A transient read failure must not abort a run that was going fine.
     #[test]
     fn an_unreadable_database_is_no_evidence_rather_than_activity() {
         let b = baseline(Some(at(10)));
         assert!(!resumed_since(b, b.in_process_at, None));
     }
 
-    /// A pond that held no human conversation when the pass began, and holds
-    /// one now, has somebody in it.
     #[test]
     fn a_first_ever_conversation_counts_against_an_empty_baseline() {
         let b = baseline(None);
@@ -254,19 +195,15 @@ mod tests {
         assert!(!resumed_since(b, b.in_process_at, None));
     }
 
-    /// Older rows are not activity — clocks and replicas move backwards.
+    /// Clocks and replicas can move backwards.
     #[test]
     fn an_older_database_row_does_not_stop_the_pass() {
         let b = baseline(Some(at(10)));
         assert!(!resumed_since(b, b.in_process_at, Some(at(9))));
     }
 
-    /// The distinction this module exists to enforce: the gate already ruled on
-    /// recency when it admitted the pass, so only what happens AFTER counts.
     #[test]
     fn recent_activity_before_the_baseline_is_not_a_return() {
-        // A pass admitted now, against a database row from ten seconds ago —
-        // recent by any measure, and not a reason to stop.
         let b = baseline(Some(at(10)));
         assert!(!resumed_since(b, b.in_process_at, Some(at(10))));
     }
@@ -293,7 +230,6 @@ mod tests {
             .expect("the watcher never noticed the clock move");
     }
 
-    /// Dropping the guard must stop the task, so no early return can leak one.
     #[tokio::test]
     async fn dropping_the_guard_stops_the_watcher() {
         let clock = Arc::new(RwLock::new(Instant::now()));

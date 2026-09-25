@@ -1,5 +1,3 @@
-//! Stub implementation of `ModelCatalogProvider` for tests.
-
 use anyhow::Result;
 use async_trait::async_trait;
 
@@ -23,7 +21,6 @@ impl MockModelCatalogProvider {
         }
     }
 
-    /// Provider that always returns an error.
     pub fn failing() -> Self {
         Self {
             models: vec![],

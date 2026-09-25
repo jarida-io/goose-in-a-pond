@@ -1,28 +1,6 @@
-//! Publish-side [`EventBus`] decorator that persists sensor readings on their
-//! way through the bus (#90).
-//!
-//! Adapters that produce readings — the Matter bridge today — hold only a bus
-//! handle, not a [`SensorStorage`]. They publish `BusEvent::Sensor` so the rules
-//! engine and the activity feed react, but nothing wrote those readings to the
-//! sensor store, so `giap-sensors` could never answer "what is the temperature
-//! in the bedroom?" for a real device. This decorator attaches the write to the
-//! handle: whoever is given it gets persistence, whoever holds their own
-//! `SensorStorage` does not need it.
-//!
-//! Two properties a reader needs:
-//!
-//! - It decorates **publishing only**. `subscribe` delegates straight through,
-//!   so subscribers attach to the inner bus and fan-out is unchanged.
-//! - It must only be handed to publishers that do *not* persist themselves. The
-//!   HTTP `record_sensor` handler writes through `AppState.sensor_storage` and
-//!   then publishes, deliberately keeping the plain bus — giving it this one
-//!   would write every POSTed reading twice.
-//!
-//! Ordering matches an undecorated bus: every event, sensor or not, goes through
-//! one queue drained by a single task, so nothing is reordered relative to
-//! anything else. For a sensor event the record completes before the event is
-//! forwarded, which is the same persist-before-publish ordering `record_sensor`
-//! gets by writing inline (#91).
+//! [`EventBus`] decorator that records sensor readings to a [`SensorStorage`] before forwarding.
+//! Only for publishers that don't persist themselves: `record_sensor` keeps the plain bus,
+//! or every POSTed reading would be written twice.
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -34,17 +12,13 @@ use tokio::sync::mpsc;
 use crate::shared::ports::event_bus::{BusEvent, BusStream, EventBus};
 use crate::user_data::ports::sensor_storage::SensorStorage;
 
-/// Queue depth. The drain does one local SQLite insert per sensor event, which
-/// outruns realistic Matter attribute traffic by orders of magnitude, so this
-/// only fills while the database is stalled — deep enough to ride out a stall
-/// of several seconds without ever holding meaningful memory.
+/// Only fills while the database stalls; deep enough to ride out a stall of several seconds.
 const DEFAULT_QUEUE_CAPACITY: usize = 1024;
 
 pub struct SensorPersistingEventBus {
     tx: mpsc::Sender<BusEvent>,
     inner: Arc<dyn EventBus>,
-    /// Latches while the queue is full, so a sustained stall logs once rather
-    /// than once per event.
+    /// Latched while the queue is full, so a sustained stall logs once.
     overloaded: AtomicBool,
 }
 
@@ -53,10 +27,7 @@ impl SensorPersistingEventBus {
         Self::with_capacity(inner, storage, DEFAULT_QUEUE_CAPACITY)
     }
 
-    /// Requires a Tokio runtime: the drain task is spawned here rather than
-    /// handed back for the caller to spawn, because a forgotten spawn would
-    /// silently disable persistence while still delivering every event — the
-    /// exact failure this type exists to prevent.
+    /// Requires a Tokio runtime: spawns the drain itself so no caller can forget to.
     pub fn with_capacity(
         inner: Arc<dyn EventBus>,
         storage: Arc<dyn SensorStorage + Send + Sync>,
@@ -66,9 +37,7 @@ impl SensorPersistingEventBus {
 
         let drain_inner = inner.clone();
         tokio::spawn(async move {
-            // Sequential by construction: one consumer, one await at a time,
-            // so publish order is preserved and each record lands before its
-            // event is forwarded. Ends when the last sender drops.
+            // One sequential consumer: order is kept and each record lands before its event.
             while let Some(event) = rx.recv().await {
                 if let BusEvent::Sensor(reading) = &event {
                     if let Err(e) = storage.record(reading.clone()).await {
@@ -98,10 +67,7 @@ impl EventBus for SensorPersistingEventBus {
             Ok(()) => {
                 self.overloaded.store(false, Ordering::Relaxed);
             }
-            // Queue full or drain gone. Forward directly rather than drop: a
-            // reading that misses the store is a gap in history, but an event
-            // that never reaches the bus is a rule that never fires, which
-            // would be a regression against the undecorated bus.
+            // Full or closed: forward unrecorded; a history gap beats a rule that never fires.
             Err(mpsc::error::TrySendError::Full(event))
             | Err(mpsc::error::TrySendError::Closed(event)) => {
                 if !self.overloaded.swap(true, Ordering::Relaxed) {
@@ -144,8 +110,6 @@ mod tests {
         }
     }
 
-    /// Wire a decorator over a real in-process bus, returning it alongside the
-    /// store so a test can assert on both sides of the seam.
     fn make_bus(
         storage: Arc<dyn SensorStorage + Send + Sync>,
         capacity: usize,
@@ -190,9 +154,7 @@ mod tests {
             .expect("event within timeout")
             .expect("a bus event");
 
-        // The #91 invariant: by the time an event is observable, its write is
-        // already durable. Deterministic here because the drain awaits the
-        // record before forwarding.
+        // Deterministic: the drain awaits the record before forwarding.
         assert!(storage
             .get_latest("bedroom", "temperature")
             .await
@@ -243,8 +205,7 @@ mod tests {
         }
     }
 
-    /// Blocks in `record` until released, so a test can wedge the drain and
-    /// fill the queue deterministically.
+    /// Blocks in `record` until released, to wedge the drain and fill the queue.
     struct StallingStorage {
         release: Arc<Notify>,
     }
@@ -284,14 +245,12 @@ mod tests {
         let (bus, inner) = make_bus(storage, 1);
         let mut sub = inner.subscribe();
 
-        // First is taken by the wedged drain, second fills the queue, third
-        // must overflow onto the direct path.
+        // The wedged drain takes the first, the second fills the queue, the third overflows.
         for i in 0..3 {
             bus.publish(BusEvent::Sensor(reading(f64::from(i))));
         }
 
-        // Delivery is what the overflow path guarantees; ordering is not, since
-        // the overflowed event deliberately jumps the stalled queue.
+        // Overflow guarantees delivery, not order: it jumps the stalled queue.
         let event = tokio::time::timeout(Duration::from_secs(2), sub.next())
             .await
             .expect("the overflowed event to be delivered while the drain is stalled")

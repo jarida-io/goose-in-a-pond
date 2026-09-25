@@ -1,7 +1,4 @@
-//! OAuth 2.1 PKCE session management.
-//!
-//! Sessions live in memory only: created when the user starts a sign-in and consumed when the
-//! provider redirects back with an authorization code, so nothing survives a restart by design.
+//! OAuth 2.1 PKCE session management; in-memory only, so nothing survives a restart by design.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::Rng;
@@ -10,14 +7,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// An in-flight PKCE authorization session.
-///
-/// Created by `POST /oauth/authorize`, consumed by `GET /oauth/callback`.
+/// In-flight PKCE session, from `POST /oauth/authorize` until `GET /oauth/callback`.
 pub struct PkceSession {
     /// Which provider this session targets (e.g. "spotify").
     pub provider_id: String,
-    /// The PKCE `code_verifier` — sent to the token endpoint, never to the
-    /// authorization endpoint.
+    /// Sent to the token endpoint only, never the authorization endpoint.
     pub code_verifier: String,
     /// Optional marketplace extension to auto-install after successful auth.
     pub extension_id: Option<String>,
@@ -25,13 +19,9 @@ pub struct PkceSession {
     pub created_at: std::time::Instant,
 }
 
-/// Shared state for all in-flight OAuth PKCE sessions.
-///
-/// Keyed by the random `state` nonce returned to the client and sent to
-/// the authorization endpoint.
+/// In-flight PKCE sessions, keyed by the random `state` nonce.
 pub type OAuthState = Arc<RwLock<HashMap<String, PkceSession>>>;
 
-/// Create a fresh (empty) OAuth session store.
 pub fn new_oauth_state() -> OAuthState {
     Arc::new(RwLock::new(HashMap::new()))
 }
@@ -45,26 +35,21 @@ pub enum FlowOutcome {
     Failed(String),
 }
 
-/// A finished flow's outcome, retained briefly so the UI that started it can
-/// ask how it ended.
+/// A finished flow's outcome, kept briefly so the UI that started it can ask how it ended.
 pub struct FlowRecord {
     pub outcome: FlowOutcome,
     recorded_at: std::time::Instant,
 }
 
-/// Outcomes of finished OAuth flows, keyed by the same `state` nonce the in-flight session used.
-///
-/// The callback consumes the [`PkceSession`], so an absent nonce cannot tell a finished flow from
-/// one that never existed, and token presence in the secret store lies during re-authorisation.
+/// Finished-flow outcomes, keyed by the in-flight session's `state` nonce.
+/// Needed since the callback consumes the [`PkceSession`] and stored tokens lie on re-auth.
 pub type OAuthOutcomes = Arc<RwLock<HashMap<String, FlowRecord>>>;
 
-/// Create a fresh (empty) OAuth outcome store.
 pub fn new_oauth_outcomes() -> OAuthOutcomes {
     Arc::new(RwLock::new(HashMap::new()))
 }
 
-/// How long a finished flow's outcome stays queryable. Long enough for a slow
-/// browser hand-off, short enough that abandoned flows do not accumulate.
+/// How long an outcome stays queryable: covers a slow browser hand-off.
 pub const OUTCOME_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Record how a flow ended, evicting anything past [`OUTCOME_TTL`] on the way.
@@ -88,9 +73,7 @@ pub async fn peek_outcome(outcomes: &OAuthOutcomes, state_nonce: &str) -> Option
         .map(|r| r.outcome.clone())
 }
 
-/// Generate a PKCE code verifier and its S256 challenge.
-///
-/// Returns `(code_verifier, code_challenge)`.
+/// Generate a PKCE `(code_verifier, code_challenge)` pair (S256).
 pub fn generate_pkce() -> (String, String) {
     let mut rng = rand::thread_rng();
     let verifier_bytes: Vec<u8> = (0..32).map(|_| rng.gen()).collect();
@@ -109,22 +92,17 @@ pub fn generate_state() -> String {
     URL_SAFE_NO_PAD.encode(&bytes)
 }
 
-/// Env var name spawned extension subprocesses read to auth to
-/// server-to-server routes (e.g. `/oauth/refresh`) without a handshake token.
+/// Env var carrying the token extensions use for server-to-server routes (e.g. `/oauth/refresh`).
 pub const INTERNAL_TOKEN_ENV_KEY: &str = "GIAP_INTERNAL_TOKEN";
 
-/// Shared with spawned extension subprocesses via [`INTERNAL_TOKEN_ENV_KEY`].
-/// Generated once per process run, never persisted.
+/// Per-process, never persisted; handed to extensions via [`INTERNAL_TOKEN_ENV_KEY`].
 static INTERNAL_EXTENSION_TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 pub fn internal_extension_token() -> &'static str {
     INTERNAL_EXTENSION_TOKEN.get_or_init(|| uuid::Uuid::new_v4().to_string())
 }
 
-/// Env var naming the local API base URL, read by extension subprocesses that call back into GIAP.
-///
-/// Extensions cannot assume a port: `serve` binds the first free of 80 / 8080 / 4000 / 5000, so the
-/// value has to be handed down at spawn time.
+/// Env var giving extensions the API URL; `serve` binds the first free of 80/8080/4000/5000.
 pub const GIAP_SERVER_URL_ENV_KEY: &str = "GIAP_SERVER_URL";
 
 /// The loopback base URL for this server, for [`GIAP_SERVER_URL_ENV_KEY`].
@@ -201,9 +179,7 @@ mod tests {
     fn an_unstarted_flow_has_no_outcome() {
         rt().block_on(async {
             let outcomes = new_oauth_outcomes();
-            // The whole point: absence must be reported as absence. If this
-            // ever answered "completed", the UI would report a sign-in that
-            // never happened — the bug this store exists to prevent.
+            // Absence must read as absence, or the UI reports a sign-in that never happened.
             assert_eq!(peek_outcome(&outcomes, "never-issued").await, None);
         });
     }
@@ -266,8 +242,7 @@ mod tests {
 
             assert_eq!(peek_outcome(&outcomes, "stale").await, None);
 
-            // Recording anything sweeps expired entries rather than letting
-            // abandoned flows accumulate for the life of the process.
+            // Any record sweeps expired entries.
             record_outcome(&outcomes, "fresh", FlowOutcome::Completed).await;
             let map = outcomes.read().await;
             assert!(!map.contains_key("stale"));

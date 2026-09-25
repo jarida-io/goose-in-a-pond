@@ -16,17 +16,10 @@ function rustSource(path: string): string {
 }
 
 describe("provider list", () => {
-  /**
-   * The ids are written to `context_sources.provider` and read back to rebuild
-   * the adapter, so a value this UI offers that the backend cannot parse
-   * produces a source that stores fine and can never sync.
-   */
+  /** Ids are stored in `context_sources.provider`; one the backend can't parse would never sync. */
   it("offers only calendar providers the CalDAV adapter can rebuild", () => {
     const rust = rustSource("crates/pond-adapters-caldav/src/provider.rs");
-    // `"name" =>` matches only the from_stored arms: as_str is the other way
-    // round (`Self::Google => "google"`), and the self-hosted arms return
-    // `base_url.map(...)` rather than `Some(Self::...)`, so matching on the
-    // literal is the shape that catches all five.
+    // `"name" =>` matches only from_stored's arms (as_str is `Self::X => "x"`), all five of them.
     const known = [...rust.matchAll(/"([a-z]+)" =>/g)].map((m) => m[1]);
     expect(known.length).toBeGreaterThan(2);
     for (const p of PROVIDERS.filter((p) => p.kind === "calendar")) {
@@ -52,12 +45,7 @@ describe("provider list", () => {
     }
   });
 
-  /**
-   * The reverse of the drift check above. `from_stored` still knows `google`
-   * so a stored row stays readable, which means "the backend parses it" is no
-   * longer enough to justify offering it — the UI must not list a provider the
-   * connect route refuses.
-   */
+  /** `from_stored` still parses `google` for old rows; parsing alone can't justify listing it. */
   it("does not offer a calendar provider the backend refuses to connect", () => {
     const rust = rustSource("crates/pond-adapters-caldav/src/provider.rs");
     const unconnectable = rust.includes("!matches!(self, Self::Google)");
@@ -95,10 +83,7 @@ describe("status wording", () => {
 });
 
 describe("last sync wording", () => {
-  /**
-   * "Never checked" and "checked, found nothing" look identical in a list and
-   * are completely different problems.
-   */
+  /** "Never checked" and "checked, found nothing" are different problems. */
   it("says so when the pond has never reached the account", () => {
     expect(describeLastSync(null)).toMatch(/not checked yet/i);
     expect(describeLastSync("not-a-date")).toMatch(/not checked yet/i);
@@ -114,11 +99,7 @@ describe("last sync wording", () => {
 });
 
 describe("what a source has brought in", () => {
-  /**
-   * Two numbers, not a percentage. "142 things" is the account working;
-   * "8 not searchable yet" is why a search for one of them just came up empty.
-   * A single figure hides the second, which is the one somebody is confused by.
-   */
+  /** Two numbers, not a percentage: the unsearchable count explains an empty search. */
   it("separates what was read from what can be found", () => {
     expect(describeHaul(142, 0)).toBe("142 things read, all searchable");
     expect(describeHaul(142, 8)).toBe("142 things read, 8 not searchable yet");

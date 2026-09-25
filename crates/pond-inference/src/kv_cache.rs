@@ -50,8 +50,7 @@ pub fn common_prefix_len(cached_tokens: &[LlamaToken], new_tokens: &[LlamaToken]
 pub enum CacheAction {
     /// No usable cache — full prefill required (cold start or prompt completely changed).
     FullPrefill,
-    /// Cache partially reusable — trim stale tokens from position `trim_from`,
-    /// then decode `new_tokens[decode_from..]`.
+    /// Trim KV entries from `trim_from`, then decode `new_tokens[decode_from..]`.
     IncrementalDecode {
         /// Position from which to clear stale KV entries (inclusive).
         trim_from: usize,
@@ -65,8 +64,6 @@ pub enum CacheAction {
 }
 
 /// Determine the cache action given cached tokens and the new prompt tokens.
-///
-/// Returns a `CacheAction` describing the minimum work needed.
 pub fn plan_cache_reuse(cached_tokens: &[LlamaToken], new_tokens: &[LlamaToken]) -> CacheAction {
     if cached_tokens.is_empty() || new_tokens.is_empty() {
         return CacheAction::FullPrefill;

@@ -30,13 +30,10 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, undefined, buildInitialState);
   const scheduleEsRef = useRef<EventSource | null>(null);
 
-  // Global SSE listener for schedule result events.
-  // Opens once when the server comes online and stays open regardless of which
-  // section is active, so toasts work on any page.
+  // Schedule-result SSE lives here, not in a section, so toasts show on every page.
   useEffect(() => {
     if (!state.serverOnline) return;
 
-    // Close any existing connection before opening a new one.
     if (scheduleEsRef.current) {
       scheduleEsRef.current.close();
       scheduleEsRef.current = null;
@@ -75,7 +72,6 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
         };
         dispatch({ type: "SCHEDULE_RESULT", payload: toast });
 
-        // Also feed the persistent notifications list
         const notification: ScheduleRunNotification = {
           id: toast.id,
           scheduleId: toast.schedule_id,
@@ -92,15 +88,13 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
           recipe: inferRecipe(toast.schedule_label),
         };
 
-        // ADD_SCHEDULE_RUN deduplicates by id (filter + prepend), so it handles
-        // both the normal "running → completed" update and the "missed running event" case.
+        // ADD_SCHEDULE_RUN dedupes by id, so this also covers a missed "running" event.
         dispatch({ type: "ADD_SCHEDULE_RUN", payload: notification });
       } catch {
         // ignore parse errors
       }
     };
 
-    // Fetch existing schedule run history on connect
     api
       .getAllRecentRuns(5)
       .then((runs) => {
@@ -114,7 +108,7 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
           startedAt: r.started_at,
           finishedAt: r.finished_at ?? null,
           durationMs: r.duration_ms ?? null,
-          read: true, // historical runs start as read
+          read: true,
           excerpt: (r.result ?? r.error ?? "").slice(0, 80),
           recipe: inferRecipe(r.schedule_name),
         }));
@@ -130,22 +124,14 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
     };
   }, [state.serverOnline, state.serverUrl]);
 
-  // Hub data (weather, now-playing, devices, ...) is loaded once at module
-  // import time, which races the server's boot — cold start with models can
-  // take well over a minute. Re-trigger once the server actually reports
-  // online so the dashboard doesn't stay stuck on mock data indefinitely.
+  // hubDataStore fetches at import, racing a cold server boot; refetch once online.
   useEffect(() => {
     if (!state.serverOnline) return;
     void refreshHomeData();
   }, [state.serverOnline]);
 
-  // The chat turn driver is a module singleton, so a turn keeps streaming when
-  // you leave the Chat section -- see `chatRunStore`. Being at module scope, it
-  // has no way to read app state or to dispatch, so this provider hands it
-  // both. Installed here rather than in Chat for the same reason the schedule
-  // listener above is: a turn started in Chat is still arriving while you are
-  // looking at Devices, and its `done` frame still has to reach the reducer.
-  // `dispatch` from `useReducer` is stable, hence its absence below.
+  // The module-scope chat driver (`chatRunStore`) outlives the Chat section, so it gets state
+  // and dispatch from here. `dispatch` is stable, hence absent from the deps.
   useEffect(
     () =>
       setChatRunBridge({
@@ -160,31 +146,23 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
     [state.sessionToken, state.serverOnline],
   );
 
-  // A turn started before this window existed.
-  //
-  // Asked once, as soon as the server is reachable and the bridge below is
-  // installed above, because the answer needs a token. Nothing happens unless the
-  // last window left a run pointer behind AND the server is still driving that
-  // run, so the ordinary cold start pays one 404 and stops.
+  // Resume a turn started by a previous window. Asked once, after the bridge above has a token;
+  // an ordinary cold start costs one 404.
   const resumeAskedRef = useRef(false);
   useEffect(() => {
     if (!state.serverOnline || resumeAskedRef.current) return;
     resumeAskedRef.current = true;
     void resumeActiveRun().catch(() => {
-      // Non-fatal by construction: the conversation is readable from its
-      // persisted messages either way, and `resumeActiveRun` already warns.
+      // Non-fatal: the persisted messages still show the conversation, and resumeActiveRun warns.
     });
   }, [state.serverOnline]);
 
   useEffect(() => {
     const unlisten: Array<() => void> = [];
 
-    // There is no bridge in the browser dev surface or under test.
     if (!isDesktopShell()) {
-      // Browser dev / Playwright mode: mark server online immediately so
-      // all sections can load. Auth token not needed (loopback bypass).
+      // Browser dev / Playwright: no shell, so go online at once; loopback needs no auth token.
       dispatch({ type: "SERVER_ONLINE" });
-      // Still check onboarding status so the wizard shows for new setups.
       api
         .getOnboardingStatus()
         .then((status) => {
@@ -193,16 +171,12 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
           }
         })
         .catch(() => {});
-      // hubDataStore fires its own fetch on module import, which can race
-      // ahead of this readiness check and lose (silently falling back to
-      // mock data with nothing to retry it). Re-fetch now that we know a
-      // round-trip to the server actually works.
+      // The import-time hubDataStore fetch may have lost the race and cached mock data; refetch.
       void refreshHomeData();
       return;
     }
 
-    // Check onboarding status — if not yet onboarded, show the wizard UI
-    // instead of auto-completing silently.
+    // Only flags the wizard; never completes onboarding itself.
     const ensureOnboarded = async () => {
       try {
         const status = await api.getOnboardingStatus();
@@ -214,17 +188,13 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
       }
     };
 
-    // Centralised "server is up — handshake + ensure onboarded" so both the
-    // initial-probe path AND the event-listener path share one code body.
-    // Re-entrant: dedupe via a flag so a fast Rust emit + a slow polling
-    // probe don't double-handshake.
+    // Shared by the probe and the server-status event; the flag stops a double handshake.
     let onlineHandled = false;
     const handleServerOnline = () => {
       if (onlineHandled) return;
       onlineHandled = true;
       dispatch({ type: "SERVER_ONLINE" });
-      // connect() reuses a persisted token / refresh across restarts and only
-      // falls back to a fresh pairing-code pair when neither is usable.
+      // Reuses a persisted token or refresh token; pairs afresh only when neither works.
       api
         .connect()
         .then(async (token) => {
@@ -234,19 +204,13 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
             console.warn("Could not establish a session (pairing rejected).");
           }
           await ensureOnboarded();
-          // hubDataStore fires its own fetch on module import, which almost
-          // always races ahead of the session token being set above — that
-          // first fetch runs unauthenticated, fails, and permanently caches
-          // mock fallback data with nothing to retry it afterward. Re-fetch
-          // now that the token is actually in place.
+          // The import-time hubDataStore fetch ran without a token and cached mock data; refetch.
           void refreshHomeData();
         })
         .catch((err) => console.warn("Connect failed (non-fatal):", err));
     };
 
-    // The sidecar bound a port we did not assume. Redirect the client before
-    // anything else reacts: every request builder reads the base at call time,
-    // so this fixes in-flight and future requests alike without a reload.
+    // The sidecar bound another port; request builders read the base per call, so no reload.
     unlisten.push(
       listen("server-url", (url) => {
         api.setBase(url);
@@ -267,18 +231,10 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
       }),
     );
 
-    // Active probe path. Tauri events are NOT buffered: if the Rust side
-    // emits `server-status: true` before our `listen()` registration above
-    // resolves (which is async), the React side never learns the server is
-    // up — the dashboard sits blank until the periodic 10-second health
-    // tick fires. The user reported this as "first launch shows nothing,
-    // close-and-reopen fixes it". Polling `server_health` here on mount
-    // closes the race regardless of event-arrival order.
+    // Active probe: shell events aren't buffered, so a server-status sent before mount is lost.
     let probeCancelled = false;
     (async () => {
-      // Short, dense polling (every 250 ms for up to 60 s) so the dashboard
-      // appears within a quarter-second of the server actually accepting
-      // connections — much snappier than waiting for the 10 s tick.
+      // Every 250 ms for up to 60 s, so the dashboard appears as soon as the server accepts.
       for (let i = 0; i < 240; i++) {
         if (probeCancelled || onlineHandled) return;
         try {
@@ -310,10 +266,7 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
       }),
     );
 
-    // Recording lifecycle — voice state is now managed explicitly by
-    // VoiceMode so calibration recordings don't corrupt it.
-    // recording-started: no-op (callers set their own state)
-    // recording-aborted: VoiceMode handles state transition itself
+    // recording-started/-aborted are deliberately unhandled: VoiceMode owns voice state.
 
     // macOS menu bar — View menu items
     unlisten.push(

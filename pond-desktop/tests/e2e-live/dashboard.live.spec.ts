@@ -1,16 +1,9 @@
 import { expect, test } from "@playwright/test";
 
 /**
- * Live dashboard checks -- no mocks.
- *
- * Everything in `tests/e2e/` mocks its API with `page.route()`. That catches
- * component regressions and can never catch an API contract change: the mock
- * keeps returning the old shape long after the server stopped producing it.
- * These tests talk to the server that actually served the page.
- *
- * Started by `scripts/live-test.sh --ui`. Run alone with:
- *   POND_LIVE_URL=http://127.0.0.1:4000 \
- *     npx playwright test --config=playwright.live.config.ts
+ * Live dashboard checks, no mocks (`tests/e2e/` mocks can't catch an API contract change).
+ * Run by `scripts/live-test.sh --ui`, or: POND_LIVE_URL=http://127.0.0.1:4000 \
+ *   npx playwright test --config=playwright.live.config.ts
  */
 
 test.describe("live dashboard", () => {
@@ -18,9 +11,7 @@ test.describe("live dashboard", () => {
     const response = await page.goto("/");
     expect(response?.status()).toBe(200);
 
-    // `crates/pond-api/build.rs` emits a stub carrying this attribute when the
-    // UI was never built. A release binary shipping it is a broken install,
-    // and it looks like a working server until somebody opens a browser.
+    // crates/pond-api/build.rs emits a stub with this attribute when the UI was never built.
     const placeholder = await page.locator("html[data-giap-placeholder]").count();
     expect(
       placeholder,
@@ -38,8 +29,7 @@ test.describe("live dashboard", () => {
       if (m.type() === "error") consoleErrors.push(m.text());
     });
     page.on("response", (r) => {
-      // 401 is not a failure here: the dashboard is expected to probe routes
-      // it may not be authorised for. A 5xx always is.
+      // Only 5xx fails: the dashboard may probe routes it isn't authorised for (401).
       if (r.status() >= 500) failed.push(`${r.status()} ${r.url()}`);
     });
 
@@ -53,10 +43,7 @@ test.describe("live dashboard", () => {
   test("the API the dashboard actually calls answers in the shape it expects", async ({
     request,
   }) => {
-    // PondApiClient.listProfiles() reads `.profiles`. This is the ONLY
-    // profile-related call the shipped UI makes -- verified by grepping
-    // pond-desktop/src for the identity routes and finding nothing. If that
-    // changes, this assertion is the cheapest place to notice.
+    // PondApiClient.listProfiles() reads `.profiles`; it is the UI's only profile call.
     const res = await request.get("/api/v1/profiles");
     expect(res.status()).toBe(200);
     const body = await res.json();
@@ -67,9 +54,7 @@ test.describe("live dashboard", () => {
   });
 
   test("health is reachable from the browser context, same-origin", async ({ page }) => {
-    // In a plain browser the app defaults its API base to window.location.origin
-    // (defaultServerUrl() in PondApiClient.ts). This asserts that assumption
-    // holds against the single-executable dashboard, not just in Tauri.
+    // In a plain browser the API base defaults to window.location.origin (defaultServerUrl()).
     await page.goto("/");
     const status = await page.evaluate(async () => {
       const r = await fetch("/api/v1/health");
@@ -79,16 +64,4 @@ test.describe("live dashboard", () => {
   });
 });
 
-/**
- * PAI-1 identity has NO UI surface.
- *
- * Verified by grep: pond-desktop/src calls exactly one profile route,
- * `GET /api/v1/profiles` (PondApiClient.listProfiles). There is no household
- * member removal, no session-identity binding, and no wake-on-face control
- * anywhere in the shipped app -- so the whole identity feature is reachable
- * only over the REST API.
- *
- * There is deliberately no test here pretending otherwise. When a UI lands,
- * this comment is the place to start, and `scripts/live_checks.py` already
- * covers the API side.
- */
+// Identity has no UI beyond GET /api/v1/profiles; scripts/live_checks.py covers its API.

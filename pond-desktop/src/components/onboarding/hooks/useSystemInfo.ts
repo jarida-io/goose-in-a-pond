@@ -1,6 +1,4 @@
-// ────────────────────────────────────────────────────────────
-// useSystemInfo — Fetches real system info for the Welcome step
-// ────────────────────────────────────────────────────────────
+// useSystemInfo: real system info for the Welcome step.
 
 import { useState, useEffect } from "react";
 import { api } from "../../../api/PondApiClient";

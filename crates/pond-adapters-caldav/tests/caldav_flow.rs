@@ -1,7 +1,4 @@
-//! The whole connector against a server that behaves like a real one.
-//!
-//! Unit tests cover the parsers; this covers the flow they are parts of: discovery walking
-//! three hops, a `calendar-query` returning expanded VEVENTs, and those becoming ingest items.
+//! End-to-end flow against a mock CalDAV server: discovery, `calendar-query`, ingest items.
 
 use chrono::{TimeZone, Utc};
 use pond_adapters_caldav::{CalDavAdapter, CalDavConfig, CalDavProvider};
@@ -48,8 +45,7 @@ async fn server() -> MockServer {
         .mount(&server)
         .await;
 
-    // Hop 3: which of them are calendars? The home collection itself comes back
-    // in this list and is NOT one.
+    // Hop 3: which are calendars? The home collection is listed too and is NOT one.
     Mock::given(method("PROPFIND"))
         .and(path("/calendars/jerry/"))
         .respond_with(xml(
@@ -167,16 +163,11 @@ async fn a_query_becomes_items_the_pipeline_could_ingest() {
         dentist.body
     );
 
-    // Two occurrences of one recurring meeting must remain two rows, or a
-    // weekly standup is a single item that keeps being overwritten.
     let standups: Vec<_> = items.iter().filter(|i| i.title == "Standup").collect();
     assert_eq!(standups.len(), 2);
     assert_ne!(standups[0].external_id, standups[1].external_id);
 }
 
-/// The one failure a household can actually fix, and the one the scheduler must
-/// not retry into a rate limit. It has to be distinguishable from "the server
-/// is down", which is why it gets its own message.
 #[tokio::test]
 async fn a_refused_password_says_what_to_do_about_it() {
     let server = MockServer::start().await;

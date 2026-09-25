@@ -1,16 +1,9 @@
-//! Context Growth Monitor — tracks context window fill rate per session.
-//!
-//! Monitors how fast the context window fills up during a conversation,
-//! emitting warnings before the "context cliff" where quality degrades.
-//! Designed for small-context models (3K-8K tokens) on Jetson Orin Nano.
-//!
-//! Pure Rust, no external dependencies — lives in `pond-core/src/services/`.
+//! Per-session context fill rate, to warn before the "context cliff" on small (3K-8K) windows.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// Maximum number of growth rate samples to retain per session.
-/// Used to compute a rolling average of tokens-per-turn.
+/// Growth samples kept per session for the rolling tokens-per-turn average.
 const MAX_GROWTH_SAMPLES: usize = 10;
 
 /// Utilization percentage above which a warning message is emitted.
@@ -19,84 +12,51 @@ const WARNING_THRESHOLD_PCT: f32 = 60.0;
 /// Utilization percentage above which compaction should be triggered.
 const COMPACT_THRESHOLD_PCT: f32 = 75.0;
 
-/// If the estimated remaining turns falls below this, trigger compaction
-/// regardless of utilization percentage.
+/// Compact when fewer turns than this remain, whatever the utilization.
 const MIN_TURNS_REMAINING: u32 = 3;
 
-/// Recorded turns that must pass between two compaction passes on one session.
-///
-/// PAI-4 P6. Before this phase `should_compact` only decided whether to emit an
-/// SSE frame, so firing it on every turn past 75% cost nothing. The moment it
-/// drives a summarisation it is a *rate*, and the utilisation limb is monotone:
-/// a session that crosses 75% stays above it, so an ungated rule would spend a
-/// model call between every pair of turns on the device least able to afford
-/// one — the same failure PAI-4 P4 guarded against on the time axis with
-/// `MIN_RESUME_IDLE_SECS`. Three is the smallest number that leaves the pass
-/// visibly cheaper than the turns around it, and it is deliberately the same
-/// number as [`MIN_TURNS_REMAINING`]: a session with fewer turns left than the
-/// cooldown gets exactly one pass before the trimmer takes over, which is what
-/// the trimmer is for.
+/// Recorded turns between compaction passes; deliberately equal to [`MIN_TURNS_REMAINING`].
+/// `should_compact` stays true past 75%, so ungated it would summarise every turn.
 const COMPACTION_COOLDOWN_TURNS: u32 = 3;
 
-/// Per-session context tracking state.
 #[derive(Debug, Clone)]
 pub struct ContextState {
-    /// Current estimated total tokens consumed in this session's context.
     pub estimated_tokens: u32,
-    /// Number of conversation turns completed in this session.
     pub turns: u32,
-    /// The context window limit (in tokens) for the active model.
     pub context_limit: u32,
-    /// Rolling window of per-turn token growth (tokens added each turn).
-    /// Capped at [`MAX_GROWTH_SAMPLES`] entries; oldest are evicted.
+    /// Per-turn token growth, newest last; at most [`MAX_GROWTH_SAMPLES`] entries.
     pub growth_rates: Vec<u32>,
-    /// `turns` as it stood when a compaction pass was last claimed for this
-    /// session, or `None` if none ever was. Drives the cooldown in
-    /// [`ContextMonitor::claim_compaction`].
+    /// `turns` at the last claimed compaction pass; drives the cooldown.
     pub turns_at_last_compaction: Option<u32>,
 }
 
-/// Snapshot of a session's context health, returned by
-/// [`ContextMonitor::check_context_health`].
 #[derive(Debug, Clone)]
 pub struct ContextHealth {
     /// Percentage of the context window currently consumed (0.0 - 100.0).
     pub utilization_pct: f32,
     /// Average tokens added per turn (rolling window).
     pub avg_growth_rate: u32,
-    /// Estimated number of turns remaining before the context window is full,
-    /// based on the rolling average growth rate. `u32::MAX` when growth is zero.
+    /// At the rolling-average growth rate; `u32::MAX` when growth is zero.
     pub estimated_turns_remaining: u32,
-    /// Whether the caller should trigger context compaction.
-    /// `true` when `utilization_pct > 75%` OR `estimated_turns_remaining < 3`.
+    /// True when utilization > 75% or fewer than 3 turns remain.
     pub should_compact: bool,
     /// Human-readable warning message, present when `utilization_pct > 60%`.
     pub warning: Option<String>,
 }
 
-/// Thread-safe monitor that tracks context window growth across sessions.
-///
-/// Designed for zero-overhead when disabled — the caller checks the
-/// `context_monitor_enabled` setting before invoking any methods.
+/// The caller gates every call on `context_monitor_enabled`; the monitor never checks it.
 pub struct ContextMonitor {
     session_contexts: Mutex<HashMap<String, ContextState>>,
 }
 
 impl ContextMonitor {
-    /// Create a new, empty context monitor.
     pub fn new() -> Self {
         Self {
             session_contexts: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Record a completed conversation turn for the given session.
-    ///
-    /// - `session_id`: the session to update
-    /// - `estimated_tokens`: total tokens now consumed in this session's context
-    /// - `context_limit`: the model's context window size (tokens)
-    ///
-    /// Calculates the per-turn growth delta and stores it in the rolling window.
+    /// Record a completed turn; `estimated_tokens` is the session's running total, not a delta.
     pub fn record_turn(&self, session_id: &str, estimated_tokens: u32, context_limit: u32) {
         let mut sessions = self
             .session_contexts
@@ -113,26 +73,19 @@ impl ContextMonitor {
                 turns_at_last_compaction: None,
             });
 
-        // Calculate growth delta (tokens added this turn)
         let growth = estimated_tokens.saturating_sub(state.estimated_tokens);
 
-        // Update state
         state.estimated_tokens = estimated_tokens;
         state.context_limit = context_limit;
         state.turns += 1;
 
-        // Maintain rolling window of growth rates
         if state.growth_rates.len() >= MAX_GROWTH_SAMPLES {
             state.growth_rates.remove(0);
         }
         state.growth_rates.push(growth);
     }
 
-    /// Check the context health for the given session.
-    ///
-    /// Returns a [`ContextHealth`] snapshot with utilization, growth metrics,
-    /// and compaction/warning flags. Returns a zero-state health check if the
-    /// session has no recorded turns.
+    /// A zero-state snapshot when the session has no recorded turns.
     pub fn check_context_health(&self, session_id: &str) -> ContextHealth {
         let sessions = self
             .session_contexts
@@ -151,10 +104,8 @@ impl ContextMonitor {
         }
     }
 
-    /// Claim the right to run one compaction pass for this session, or decline (PAI-4 P6). All
-    /// three conditions hold under one lock: `should_compact` recomputed here rather than passed
-    /// in, [`COMPACTION_COOLDOWN_TURNS`] recorded turns since the last claim, and no concurrent
-    /// claim. The cooldown is stamped on the claim, not on completion; no turns means false.
+    /// Claim one compaction pass, or decline. Pressure, cooldown and exclusivity are checked
+    /// under one lock; the cooldown is stamped on the claim, not on completion.
     pub fn claim_compaction(&self, session_id: &str) -> bool {
         let mut sessions = self
             .session_contexts
@@ -179,10 +130,8 @@ impl ContextMonitor {
         true
     }
 
-    /// Claim a compaction pass for a person who asked (PAI-4 P7b-fix). One thing differs from
-    /// [`claim_compaction`](Self::claim_compaction): [`COMPACTION_COOLDOWN_TURNS`] is skipped,
-    /// though a press still stamps it so the axes cannot double-spend. `should_compact` is still
-    /// recomputed under this lock; repeated presses stop at the summary's through-pointer.
+    /// Claim a pass the user asked for. Skips the cooldown check but still stamps it, so the
+    /// manual and automatic axes can't double-spend; pressure is still required.
     pub fn claim_manual_compaction(&self, session_id: &str) -> bool {
         let mut sessions = self
             .session_contexts
@@ -201,10 +150,8 @@ impl ContextMonitor {
         true
     }
 
-    /// Record that a compaction pass changed the shape of this session's history, without
-    /// pretending its context window went back to zero. NOT `reset_session`: a full reset would
-    /// clear the cooldown stamp and let the pass fire again immediately. Only the growth window
-    /// is stale, so dropping it quiets `estimated_turns_remaining` and leaves utilisation alone.
+    /// Record a finished pass: drops only the stale growth window. Not `reset_session`, which
+    /// would clear the cooldown stamp and let the pass fire again at once.
     pub fn note_compacted(&self, session_id: &str) {
         let mut sessions = self
             .session_contexts
@@ -215,10 +162,7 @@ impl ContextMonitor {
         }
     }
 
-    /// Clear all tracking state for the given session.
-    ///
-    /// Call this when the session itself goes away, or the map grows for the life of the process
-    /// and a session reusing a deleted id inherits the growth history of its predecessor.
+    /// Call when the session is deleted, or a reused id inherits its predecessor's history.
     pub fn reset_session(&self, session_id: &str) {
         let mut sessions = self
             .session_contexts
@@ -228,10 +172,7 @@ impl ContextMonitor {
     }
 }
 
-/// Derive a health snapshot from one session's recorded state.
-///
-/// Shared by [`ContextMonitor::check_context_health`] and [`ContextMonitor::claim_compaction`]
-/// so the predicate that reports pressure and the one that acts on it cannot drift apart.
+/// Shared by reporting and claiming, so the pressure they see cannot drift apart.
 fn health_of(state: &ContextState) -> ContextHealth {
     let utilization_pct = if state.context_limit == 0 {
         0.0
@@ -306,7 +247,6 @@ mod tests {
     fn utilization_increases_after_turns() {
         let monitor = ContextMonitor::new();
 
-        // Context limit: 4096 tokens
         monitor.record_turn("s1", 500, 4096);
         let h1 = monitor.check_context_health("s1");
         assert!(h1.utilization_pct > 12.0 && h1.utilization_pct < 13.0);
@@ -315,7 +255,6 @@ mod tests {
         monitor.record_turn("s1", 1000, 4096);
         let h2 = monitor.check_context_health("s1");
         assert!(h2.utilization_pct > 24.0 && h2.utilization_pct < 25.0);
-        // Average of [500, 500] = 500
         assert_eq!(h2.avg_growth_rate, 500);
 
         monitor.record_turn("s1", 1800, 4096);
@@ -327,13 +266,11 @@ mod tests {
     fn warning_fires_above_sixty_percent() {
         let monitor = ContextMonitor::new();
 
-        // Below 60%: no warning
         monitor.record_turn("s1", 2400, 4096);
         let h1 = monitor.check_context_health("s1");
         assert!(h1.utilization_pct < 60.0);
         assert!(h1.warning.is_none());
 
-        // Above 60%: warning present
         monitor.record_turn("s1", 2600, 4096);
         let h2 = monitor.check_context_health("s1");
         assert!(h2.utilization_pct > 60.0);
@@ -345,9 +282,7 @@ mod tests {
     fn should_compact_fires_above_seventy_five_percent() {
         let monitor = ContextMonitor::new();
 
-        // Gradually fill the context to stay below 75% AND keep enough
-        // remaining turns so the <3 turns heuristic doesn't fire early.
-        // Use 8192 context with moderate growth (~400/turn).
+        // Moderate growth, so the <3-turns-remaining rule doesn't fire first.
         monitor.record_turn("s1", 400, 8192);
         monitor.record_turn("s1", 800, 8192);
         monitor.record_turn("s1", 1200, 8192);
@@ -355,8 +290,6 @@ mod tests {
         monitor.record_turn("s1", 2000, 8192);
 
         let h1 = monitor.check_context_health("s1");
-        // 2000/8192 = ~24.4% — well below 75%
-        // avg growth = 400, remaining = (8192-2000)/400 = 15 turns — well above 3
         assert!(h1.utilization_pct < 75.0, "util={}", h1.utilization_pct);
         assert!(
             !h1.should_compact,
@@ -364,10 +297,8 @@ mod tests {
             h1.utilization_pct
         );
 
-        // Jump to above 75%
         monitor.record_turn("s1", 6200, 8192);
         let h2 = monitor.check_context_health("s1");
-        // 6200/8192 = ~75.7%
         assert!(h2.utilization_pct > 75.0, "util={}", h2.utilization_pct);
         assert!(
             h2.should_compact,
@@ -380,8 +311,7 @@ mod tests {
     fn should_compact_fires_when_few_turns_remaining() {
         let monitor = ContextMonitor::new();
 
-        // Small context window with high growth: 3072 tokens, 1000/turn
-        // After turn 1: 1000/3072 = ~32%, but remaining = 2072/1000 = 2 turns
+        // ~32% used, but only 2 turns remain at 1000/turn.
         monitor.record_turn("s1", 1000, 3072);
         let h1 = monitor.check_context_health("s1");
         assert!(h1.utilization_pct < 75.0, "Utilization should be below 75%");
@@ -402,15 +332,12 @@ mod tests {
     fn estimated_turns_remaining_calculates_correctly() {
         let monitor = ContextMonitor::new();
 
-        // 4096 context, 400 tokens per turn
         monitor.record_turn("s1", 400, 4096);
         monitor.record_turn("s1", 800, 4096);
         monitor.record_turn("s1", 1200, 4096);
 
         let h = monitor.check_context_health("s1");
-        // avg growth = (400 + 400 + 400) / 3 = 400
         assert_eq!(h.avg_growth_rate, 400);
-        // remaining = (4096 - 1200) / 400 = 7
         assert_eq!(h.estimated_turns_remaining, 7);
     }
 
@@ -436,7 +363,6 @@ mod tests {
     fn growth_rates_capped_at_max_samples() {
         let monitor = ContextMonitor::new();
 
-        // Record 15 turns — growth_rates should only keep the last 10
         for i in 1..=15u32 {
             monitor.record_turn("s1", i * 100, 8192);
         }
@@ -470,7 +396,7 @@ mod tests {
         assert_eq!(h.utilization_pct, 0.0);
     }
 
-    // ── PAI-4 P6: acting on should_compact ──────────────────────────────
+    // ── Acting on should_compact ────────────────────────────────────────
 
     /// Drive one session above the 75% utilisation threshold.
     fn saturate(monitor: &ContextMonitor, session: &str) {
@@ -494,9 +420,6 @@ mod tests {
         assert!(!monitor.claim_compaction("never-seen"));
     }
 
-    /// The guard this phase turns on. `should_compact` is monotone once
-    /// utilisation crosses the threshold, so without the cooldown every turn
-    /// past 75% would queue its own summarisation.
     #[test]
     fn a_saturated_session_claims_once_and_then_waits_out_the_cooldown() {
         let monitor = ContextMonitor::new();
@@ -545,8 +468,6 @@ mod tests {
         );
     }
 
-    /// `note_compacted` must NOT behave like `reset_session`: the window did not
-    /// shrink, so utilisation stays honest and the cooldown stays stamped.
     #[test]
     fn note_compacted_clears_growth_history_but_not_the_cooldown() {
         let monitor = ContextMonitor::new();
@@ -578,8 +499,6 @@ mod tests {
         assert!(!monitor.claim_compaction("never-seen"));
     }
 
-    /// The "on clear" half of the phase: a deleted session must not hand its
-    /// cooldown or its growth history to whatever reuses the id.
     #[test]
     fn reset_session_clears_the_cooldown_too() {
         let monitor = ContextMonitor::new();
@@ -595,11 +514,9 @@ mod tests {
         );
     }
 
-    // ── PAI-4 P7b-fix: the manual claim ────────────────────────────────────
+    // ── The manual claim ───────────────────────────────────────────────────
 
-    /// THE UNIT GUARD. Reproduces the production ordering exactly: the pressure
-    /// axis takes the claim one statement after the frame that renders the
-    /// button, so every human press arrives at a spent quota.
+    /// In production the automatic claim always beats the press (it follows the button's frame).
     #[test]
     fn a_manual_claim_succeeds_after_the_pressure_axis_took_the_quota() {
         let monitor = ContextMonitor::new();
@@ -617,9 +534,6 @@ mod tests {
         );
     }
 
-    /// The non-widening half, and the reason a manual claim is not simply
-    /// "return true". A press consumes the quota without checking it, so the two
-    /// axes cannot between them buy two summarisations for one turn.
     #[test]
     fn a_manual_claim_rations_the_automatic_axis_afterwards() {
         let monitor = ContextMonitor::new();
@@ -638,8 +552,6 @@ mod tests {
         }
     }
 
-    /// Pressure is still required. This is the limb that was never the problem,
-    /// and relaxing it would be the scope widening.
     #[test]
     fn a_manual_claim_is_still_refused_on_a_session_under_no_pressure() {
         let monitor = ContextMonitor::new();

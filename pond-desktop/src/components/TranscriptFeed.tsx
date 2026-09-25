@@ -24,24 +24,8 @@ export function TranscriptFeed({
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to bottom when new messages arrive. Scrolls this container's
-  // own scrollTop directly rather than scrollIntoView() on a bottom marker —
-  // scrollIntoView walks up the ancestor chain looking for a scroll
-  // container that can satisfy visibility, and when this feed sits inside a
-  // collapsed drawer (0px tall, e.g. Voice Mode's closed transcript panel)
-  // it can never do that locally, so it escalates to the next real scroll
-  // container up the tree (.vm-root) and scrolls the whole screen instead.
-  // ...but this feed is not always the element that scrolls. With `fillHeight`
-  // it renders at `maxHeight: none` inside Voice Mode's open drawer, and the
-  // DRAWER is the one carrying `overflow-y: auto` and the 38vh cap — so the
-  // feed never overflows, `scrollTo` on it is a no-op, and auto-scroll silently
-  // stopped working in the panel this component was changed for.
-  //
-  // So: scroll whichever of this element or its ancestors can actually scroll,
-  // stopping at the first `overflow-y: hidden`. That stop is what keeps the
-  // original bug fixed rather than trading one for the other — a CLOSED drawer
-  // is `max-height: 0; overflow: hidden`, so the walk halts there and nothing
-  // moves, instead of escalating to `.vm-root` and scrolling the whole screen.
+  // Scroll whichever of this feed or its ancestors scrolls (with `fillHeight`, the drawer),
+  // stopping at `overflow-y: hidden` so a closed drawer never scrolls `.vm-root` instead.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;

@@ -1,7 +1,4 @@
-//! The background task that owns the `Swarm` exclusively, driven by a command
-//! channel and emitting inbound frames to an event channel. `Swarm` is not
-//! shareable behind `Arc<dyn MeshTransport>`, so this is the standard libp2p
-//! integration pattern; see the `pond_adapters_mesh_libp2p` crate-level notes.
+//! Sole owner of the `Swarm`, which can't be shared: commands in, inbound frames out.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -46,14 +43,11 @@ pub enum Command {
     ConnectedPeers {
         reply: oneshot::Sender<Vec<DomainPeerId>>,
     },
-    /// Test/setup helper — not part of the `MeshTransport` port. Multiaddrs
-    /// are libp2p-specific, so this stays adapter-only.
+    /// Adapter-only test/setup helper: multiaddrs are libp2p-specific.
     ListenAddrs {
         reply: oneshot::Sender<Vec<Multiaddr>>,
     },
-    /// Reserve a relay slot on an already-reachable peer so this node can be
-    /// dialed via `.../p2p-circuit/p2p/<self>` even when it can't accept
-    /// direct inbound connections. Adapter-only, same reasoning as above.
+    /// Reserve a relay slot on a reachable peer, to be dialable via `.../p2p-circuit/p2p/<self>`.
     ReserveRelay {
         relay_peer: DomainPeerId,
         relay_address: String,
@@ -109,10 +103,8 @@ fn build_local_handshake(
     Handshake::new(keypair.peer_id(), harness, model, signature)
 }
 
-/// The port a WebSocket listener binds to, alongside the plain-TCP one. Free
-/// HTTP/TLS tunnels only proxy HTTP/WS, so raw TCP cannot cross them. Offset from
-/// the TCP port to keep the "stable per identity" property; `0` stays `0`
-/// (OS-assigned, what the tests need) since `0 + 1 = 1` is a privileged port.
+/// WebSocket listener port (free HTTP/TLS tunnels can't carry raw TCP): offset from the TCP port
+/// to stay stable per identity; `0` (OS-assigned) stays `0`.
 fn ws_port_for(tcp_port: u16) -> u16 {
     if tcp_port == 0 {
         0
@@ -175,9 +167,7 @@ async fn build_swarm(
             })
         })?
         .with_swarm_config(|cfg| {
-            // Comfortably above the ping interval, so the ping heartbeat —
-            // not a race against this timeout — is what decides whether an
-            // idle-but-reachable connection stays open.
+            // Well above the ping interval, so ping, not this timeout, keeps idle links open.
             cfg.with_idle_connection_timeout(Duration::from_secs(60))
         })
         .build();
@@ -194,14 +184,11 @@ struct EventLoop {
     inbound_tx: mpsc::UnboundedSender<InboundFrame>,
     harness_hash: HarnessHash,
     model_hash: ModelHash,
-    /// Who this Pond trusts. Consulted on every handshake, in both
-    /// directions — see `is_trusted`.
+    /// Who this Pond trusts; consulted on every handshake, both directions.
     peer_directory: Arc<dyn PeerDirectory>,
-    /// Precomputed once — our own identity/hashes never change across
-    /// connections, so there's no reason to re-sign per dial.
+    /// Signed once: our identity and hashes never change.
     local_handshake_bytes: Vec<u8>,
-    /// Outbound dial in flight: who asked, and how to reply once the
-    /// handshake (not just the raw connection) completes.
+    /// Dials in flight, answered once the handshake (not just the connection) completes.
     pending_connect: HashMap<
         Libp2pPeerId,
         (
@@ -209,32 +196,24 @@ struct EventLoop {
             oneshot::Sender<Result<(), MeshTransportError>>,
         ),
     >,
-    /// Our outbound `Handshake` request, so the eventual response can be
-    /// matched back to the peer that sent it.
+    /// Outbound `Handshake` requests, to match each response to its peer.
     pending_handshake: HashMap<OutboundRequestId, Libp2pPeerId>,
     /// Peers whose handshake has been verified in either direction.
     connected: HashMap<Libp2pPeerId, DomainPeerId>,
-    /// The last address we were given for each peer we've ever been asked to
-    /// dial, so the background retry loop (`retry_disconnected_known_peers`)
-    /// has something to redial with — it never learns addresses on its own.
-    /// In-memory only: a restart forgets these, same as `connected`.
+    /// Last address given for each peer, for the retry loop to redial; seeded from the directory.
     known_addresses: HashMap<Libp2pPeerId, (DomainPeerId, Multiaddr)>,
-    /// Every address we're confirmed listening on, including relay-circuit
-    /// addresses once a reservation is accepted.
+    /// Confirmed listen addresses, relay circuits included once a reservation is accepted.
     listen_addrs: Vec<Multiaddr>,
 }
 
-/// How often the background loop checks for trusted-but-disconnected peers
-/// and redials them. Not configurable — this is a low-cost background
-/// safety net, not a latency-sensitive path.
+/// How often trusted-but-disconnected peers are redialed; a cheap safety net, not a hot path.
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(30);
 
 impl EventLoop {
     async fn run(mut self) {
         self.load_known_addresses().await;
         let mut reconnect_tick = tokio::time::interval(RECONNECT_INTERVAL);
-        // The first tick fires immediately; nothing is disconnected yet at
-        // startup, so that tick is a harmless no-op rather than useful work.
+        // The first tick fires at once, redialing the peers loaded above.
         reconnect_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
@@ -248,10 +227,7 @@ impl EventLoop {
         }
     }
 
-    /// Seeds `known_addresses` from `PeerDirectory` at startup so the reconnect
-    /// loop can redial peers trusted before a restart. Otherwise the map is only
-    /// populated by a fresh `Command::Connect`, and a restart silently forgets
-    /// every peer until the user re-shares an invite.
+    /// Seed `known_addresses` from `PeerDirectory`, so peers trusted before a restart are redialed.
     async fn load_known_addresses(&mut self) {
         let rows = match self.peer_directory.known_addresses().await {
             Ok(rows) => rows,
@@ -271,10 +247,7 @@ impl EventLoop {
         }
     }
 
-    /// Background half of the force-reconnect path. `Command::Connect` covers an
-    /// explicit request; without this, a peer dropping out from under an idle
-    /// connection leaves the mesh disconnected until something calls `connect()`.
-    /// Every trusted peer with a known address and no live dial is retried.
+    /// Redial every trusted, known, disconnected peer, so a dropped link heals without `connect()`.
     async fn retry_disconnected_known_peers(&mut self) {
         let candidates: Vec<(Libp2pPeerId, DomainPeerId, Multiaddr)> = self
             .known_addresses
@@ -287,15 +260,11 @@ impl EventLoop {
             .collect();
 
         for (libp2p_peer, peer, addr) in candidates {
-            // Trust may have been revoked since the address was learned —
-            // don't keep hammering a peer that was removed from the circle.
+            // Trust may have been revoked since the address was learned.
             if !Self::is_trusted(self.peer_directory.clone(), peer).await {
                 continue;
             }
-            // Fire-and-forget: nothing awaits this attempt, so the reply goes to
-            // a receiver we drop. `dial_peer` still needs a sender to satisfy
-            // `pending_connect`'s shape; the outcome surfaces through the normal
-            // `ConnectionEstablished`/`OutgoingConnectionError` handling.
+            // Fire-and-forget: nobody awaits the reply; the outcome surfaces via swarm events.
             let (reply, _ignored) = oneshot::channel();
             self.dial_peer(libp2p_peer, peer, addr, reply);
         }
@@ -325,10 +294,8 @@ impl EventLoop {
                 };
                 self.known_addresses
                     .insert(libp2p_peer, (peer, addr.clone()));
-                // Best-effort: the peer is already trusted (routes.rs adds trust
-                // before calling `connect()`), so a row exists to update. If the
-                // write fails, the retry loop falls back to the in-memory copy
-                // above for the rest of this process's life.
+                // Best-effort: routes.rs adds trust before `connect()`, so the row exists; on
+                // failure the in-memory copy above still serves this process.
                 if let Err(err) = self
                     .peer_directory
                     .record_peer_address(peer, addr.to_string())
@@ -399,9 +366,6 @@ impl EventLoop {
         }
     }
 
-    /// Shared by `Command::Connect` (a caller explicitly asking to connect)
-    /// and `retry_disconnected_known_peers` (the background reconnect loop) —
-    /// same dial, the only difference is who's waiting on `reply`.
     fn dial_peer(
         &mut self,
         libp2p_peer: Libp2pPeerId,
@@ -413,10 +377,8 @@ impl EventLoop {
             .behaviour_mut()
             .kad
             .add_address(&libp2p_peer, addr.clone());
-        // `PortUse::Reuse` (the default) is required for DCUtR hole-punching but
-        // collides on one machine; POND_DEV_SAME_MACHINE_MESH=1 takes a fresh port.
-        // `condition(Always)` is needed because a rejected handshake leaves the
-        // connection open, so the default `DisconnectedAndNotDialing` never redials.
+        // `PortUse::Reuse` (default) is needed for DCUtR but collides on one machine, hence
+        // POND_DEV_SAME_MACHINE_MESH. `Always`: a rejected handshake leaves the connection open.
         let mut opts = DialOpts::peer_id(libp2p_peer)
             .condition(PeerCondition::Always)
             .addresses(vec![addr.clone()]);
@@ -427,10 +389,8 @@ impl EventLoop {
         }
         match self.swarm.dial(opts.build()) {
             Ok(()) => {
-                // `Always` above lets a retry start while an earlier dial
-                // to the same peer is outstanding. `pending_connect` is
-                // keyed by peer, so overwriting silently would leave the
-                // earlier caller reporting "mesh swarm task has stopped".
+                // `Always` allows a second dial to a peer; fail the earlier caller's reply
+                // rather than drop it (it would read as "mesh swarm task has stopped").
                 if let Some((_, stale_reply)) =
                     self.pending_connect.insert(libp2p_peer, (peer, reply))
                 {
@@ -468,9 +428,7 @@ impl EventLoop {
                 info: identify::Info { observed_addr, .. },
                 ..
             })) => {
-                // A relay reservation is rejected without at least one known
-                // external address to advertise — this is how we learn one
-                // on a network with no manual external-address config.
+                // Relay reservations need a known external address; this is how we learn one.
                 self.swarm.add_external_address(observed_addr);
             }
             SwarmEvent::OutgoingConnectionError {
@@ -490,10 +448,7 @@ impl EventLoop {
                     request_id, error, ..
                 },
             )) => {
-                // Safety net so a dropped/reset connection (e.g. the peer
-                // disconnecting right after a handshake rejection) always
-                // resolves the caller's `connect()`/`send()` reply instead
-                // of leaving it waiting forever.
+                // A dropped connection must still resolve the caller's reply, not leave it hanging.
                 if let Some(libp2p_peer) = self.pending_handshake.remove(&request_id) {
                     if let Some((_, reply)) = self.pending_connect.remove(&libp2p_peer) {
                         let _ = reply.send(Err(MeshTransportError::Transport(error.to_string())));
@@ -523,8 +478,7 @@ impl EventLoop {
                         _ => None,
                     };
                     let response = if verified.is_some() {
-                        // Answer with our OWN handshake so the dialer can hold
-                        // us to the same standard it was just held to.
+                        // Our own handshake, so the dialer can verify us in turn.
                         MeshResponse::HandshakeAccepted(self.local_handshake_bytes.clone())
                     } else {
                         MeshResponse::HandshakeRejected
@@ -534,10 +488,8 @@ impl EventLoop {
                         .behaviour_mut()
                         .mesh_rr
                         .send_response(channel, response);
-                    // Don't force-disconnect on rejection: it races the outbound
-                    // `send_response` and can drop the response, leaving the
-                    // dialer's `connect()` waiting forever. Never promoting the
-                    // peer into `connected` keeps it out of `recv()` anyway.
+                    // No disconnect on rejection: it races `send_response` and can strand the
+                    // dialer; staying out of `connected` already keeps it out of `recv()`.
                     if let Some(domain_peer) = verified {
                         self.connected.insert(peer, domain_peer);
                     }
@@ -559,10 +511,7 @@ impl EventLoop {
             } => {
                 if let Some(libp2p_peer) = self.pending_handshake.remove(&request_id) {
                     match response {
-                        // Verify THEIR handshake before trusting the peer we
-                        // dialled. Accepting a bare "yes" lets a peer running a
-                        // different model, or none of this software, into
-                        // `connected`, from where its frames reach `recv()`.
+                        // Verify theirs too: a bare "yes" would let any peer reach `recv()`.
                         MeshResponse::HandshakeAccepted(their_handshake) => {
                             let ok = match self.verify_handshake(&their_handshake, libp2p_peer) {
                                 Some(claimed) => {
@@ -595,29 +544,23 @@ impl EventLoop {
                         }
                     }
                 }
-                // Frame responses (FrameAck) need no handling — `send()`
-                // reports dispatch, not delivery confirmation.
+                // FrameAck needs no handling: `send()` reports dispatch, not delivery.
             }
         }
     }
 
-    /// Decode and verify a `Handshake` from the connection with `conn_peer`:
-    /// signature, harness/model pin, and that the claimed identity authenticated
-    /// the connection. That binding is the security here — `signed_payload()` has
-    /// no nonce, so it replays. Domain and libp2p ids are one key (`identity.rs`).
+    /// Verify a `Handshake`: signature, harness/model pin, and that the claimed identity is
+    /// `conn_peer`. That binding is the security: `signed_payload()` has no nonce, so it replays.
     fn verify_handshake(&self, bytes: &[u8], conn_peer: Libp2pPeerId) -> Option<DomainPeerId> {
         verify_handshake_bytes(bytes, conn_peer, self.harness_hash, self.model_hash)
     }
 
-    /// Whether this Pond trusts `peer` at all. `PeerDirectory` is the trust
-    /// circle; the handshake only proves the far side runs the same build and
-    /// model. Costs one indexed SQLite read per handshake, not per frame. Takes
-    /// the directory by `Arc` because `Swarm` is `Send` but not `Sync`.
+    /// Is `peer` in the trust circle (the handshake only proves same build and model)? Takes an
+    /// `Arc` because `Swarm` is `Send` but not `Sync`.
     async fn is_trusted(directory: Arc<dyn PeerDirectory>, peer: DomainPeerId) -> bool {
         match directory.trust_scope_of(peer).await {
             Ok(scope) => scope.is_some(),
-            // Fail CLOSED. A directory that cannot be read is not evidence of
-            // trust, and this is the door to the household's compute.
+            // Fail closed: an unreadable directory is not evidence of trust.
             Err(err) => {
                 tracing::warn!("mesh: peer directory unreadable, refusing {peer}: {err}");
                 false
@@ -626,10 +569,7 @@ impl EventLoop {
     }
 }
 
-/// The handshake check, as a free function so it can be tested without a
-/// `Swarm`. Inside `EventLoop` the identity binding could be deleted with every
-/// integration test still green: honest nodes always claim the identity that
-/// authenticated the connection, so only a dishonest peer can catch its absence.
+/// A free function so the identity binding can be tested: honest peers never exercise it.
 fn verify_handshake_bytes(
     bytes: &[u8],
     conn_peer: Libp2pPeerId,
@@ -661,8 +601,7 @@ fn verify_handshake_bytes(
     verified.then_some(claimed_peer)
 }
 
-/// Truthiness check for `POND_DEV_SAME_MACHINE_MESH`, separated from the
-/// env read so it's unit-testable.
+/// Truthiness of `POND_DEV_SAME_MACHINE_MESH`, apart from the env read for testing.
 fn same_machine_dev_mesh_enabled(value: Option<&str>) -> bool {
     matches!(value, Some("1") | Some("true") | Some("TRUE"))
 }
@@ -678,9 +617,7 @@ mod tests {
         ModelHash::from([8u8; 32])
     }
 
-    /// An honest peer's own handshake, on its own connection, is accepted.
-    /// Without this the impersonation test below could pass because the
-    /// function rejects everything.
+    /// Guards the impersonation test below against a function that rejects everything.
     #[test]
     fn a_peer_presenting_its_own_handshake_on_its_own_connection_is_accepted() {
         let keypair = MeshKeypair::generate();
@@ -693,10 +630,7 @@ mod tests {
         );
     }
 
-    /// A REPLAYED handshake is refused, the attack the connection binding exists
-    /// for. `signed_payload()` is `peer_id ‖ harness_hash ‖ model_hash` with no
-    /// nonce, so every peer the victim dialled holds a valid copy. Only the
-    /// connection identity cannot be forged without the victim's private key.
+    /// No nonce in `signed_payload()`, so every peer the victim dialled holds a valid copy.
     #[test]
     fn a_replayed_handshake_cannot_impersonate_the_peer_that_signed_it() {
         let victim = MeshKeypair::generate();
@@ -714,8 +648,6 @@ mod tests {
         );
     }
 
-    /// The hash pin still does its own job, in both fields, so the binding
-    /// above did not quietly become the only check.
     #[test]
     fn a_mismatched_harness_or_model_is_refused_on_an_otherwise_honest_connection() {
         let keypair = MeshKeypair::generate();
@@ -738,8 +670,7 @@ mod tests {
         );
     }
 
-    /// A forged signature is refused even when the claimed identity matches
-    /// the connection — i.e. by the peer itself, tampering with its own blob.
+    /// Even when the claimed identity matches the connection (a peer tampering with its own).
     #[test]
     fn a_signature_that_does_not_verify_is_refused() {
         let keypair = MeshKeypair::generate();

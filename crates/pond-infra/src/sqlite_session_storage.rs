@@ -1,7 +1,4 @@
-//! SQLite-backed implementation of the SessionStorage port.
-//!
-//! Wraps `Pool<Sqlite>` pointing at `pond_system.db`.
-//! Tables are created by `migrations/system/0001_initial.sql`.
+//! SQLite-backed `SessionStorage` over `pond_system.db`.
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -94,8 +91,7 @@ impl TryFrom<SessionRow> for Session {
 impl TryFrom<MessageRow> for SessionMessage {
     type Error = SessionStorageError;
     fn try_from(r: MessageRow) -> Result<Self, Self::Error> {
-        // Tool-call metadata is stored as JSON. Malformed JSON degrades gracefully:
-        // we drop the tool_calls but keep the message rather than failing the read.
+        // Malformed tool-call JSON drops the tool calls but keeps the message.
         let tool_calls: Vec<ToolCallRecord> = r
             .tool_calls_json
             .as_deref()
@@ -149,14 +145,7 @@ impl From<AttachmentRow> for MessageAttachment {
     }
 }
 
-/// Directory holding image attachment bytes.
-///
-/// Resolved here rather than threaded down from `pond-server` for the same
-/// reason `model_download.rs` duplicates `default_data_dir()`: the storage
-/// adapter is constructed from a pool alone in several places, and an extra
-/// constructor argument would have to be plumbed through all of them. Honours
-/// `POND_DATA_DIR` so an isolated test/measurement run never writes into the
-/// real profile.
+/// Resolved here, not injected: the adapter is built from a bare pool in several places.
 fn default_attachment_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("POND_DATA_DIR") {
         return PathBuf::from(dir).join("attachments");
@@ -167,12 +156,7 @@ fn default_attachment_dir() -> PathBuf {
         .join("attachments")
 }
 
-/// Reduce an untrusted id to something that cannot escape its parent directory.
-///
-/// Session and message ids are UUIDs today, but they arrive from the network on
-/// several paths (`session_id` is caller-supplied on `/chat/stream`), so a
-/// `../../` in one must not become a path. Mirrors `sanitize_camera_id` in
-/// `pond-adapters-vision`.
+/// Makes an untrusted id path-safe: `session_id` is caller-supplied on `/chat/stream`.
 fn sanitize_path_component(raw: &str) -> String {
     let cleaned: String = raw
         .chars()
@@ -206,21 +190,13 @@ impl SqliteSessionStorage {
         }
     }
 
-    /// Point attachment storage at a specific directory (tests, and any future
-    /// caller that already knows the data dir).
     #[must_use]
     pub fn with_attachment_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.attachment_dir = dir.into();
         self
     }
 
-    /// Persist one message's images: bytes to disk, one index row each.
-    ///
-    /// Best-effort per attachment. A full disk or an undecodable payload must
-    /// not fail the turn — the message itself is already committed by the time
-    /// this runs, and losing a picture is strictly better than losing the
-    /// conversation. Every failure is logged with the message id so it is
-    /// diagnosable.
+    /// Best-effort per image: the message is already committed, so a failure only logs.
     async fn persist_attachments(&self, message: &SessionMessage) {
         if message.message.images.is_empty() {
             return;
@@ -292,8 +268,7 @@ impl SqliteSessionStorage {
             .execute(&self.pool)
             .await
             {
-                // The row is the index; without it the file is unreachable, so
-                // do not leave it behind.
+                // Without its index row the file is unreachable, so remove it.
                 let _ = tokio::fs::remove_file(&path).await;
                 tracing::warn!(
                     message_id = %message.id,
@@ -305,9 +280,7 @@ impl SqliteSessionStorage {
         }
     }
 
-    /// Remove a session's attachment directory. Called on session delete, where
-    /// the rows disappear via `ON DELETE CASCADE` and would otherwise orphan
-    /// their files.
+    /// Called on session delete: the CASCADE removes the rows but not the files.
     async fn remove_session_attachment_files(&self, session_id: &str) {
         let dir = self
             .attachment_dir
@@ -325,13 +298,7 @@ impl SqliteSessionStorage {
         }
     }
 
-    /// Read one attachment file, refusing anything that resolved outside the
-    /// attachment root.
-    ///
-    /// `file_path` comes from our own DB, but a stored row is still a value that
-    /// travels (backup restores, hand edits), and this function is reachable from
-    /// an HTTP handler — so the containment check is cheap insurance rather than
-    /// paranoia.
+    /// Refuses paths outside the attachment root: stored rows travel and this is HTTP-reachable.
     async fn read_attachment_file(&self, file_path: &str) -> Option<Vec<u8>> {
         let path = Path::new(file_path);
         let root = self.attachment_dir.canonicalize().ok()?;
@@ -381,9 +348,7 @@ impl SessionStorage for SqliteSessionStorage {
         &self,
         session_id: &str,
     ) -> Result<(Option<String>, Option<String>), SessionStorageError> {
-        // One SELECT, so the text and the stamp cannot disagree. See the port
-        // doc: reading them separately races `set_rolling_summary` and lets a
-        // stale vector be stamped as current.
+        // One SELECT so text and stamp can't disagree; separate reads race `set_rolling_summary`.
         let row = sqlx::query(
             "SELECT rolling_summary, rolling_summary_updated_at FROM sessions WHERE id = ?",
         )
@@ -445,10 +410,7 @@ impl SessionStorage for SqliteSessionStorage {
         &self,
         engine_session_id: &str,
     ) -> Result<Option<String>, SessionStorageError> {
-        // Newest pairing wins. engine_session_id is not declared UNIQUE and the
-        // table is written from paths that run before a sessions row exists, so
-        // a stale duplicate is possible; taking the most recent is the only
-        // answer that stays right after a re-pair.
+        // Newest wins: `engine_session_id` isn't UNIQUE, so stale duplicates can exist.
         let row = sqlx::query(
             "SELECT session_id FROM engine_session_map WHERE engine_session_id = ? \
              ORDER BY updated_at DESC LIMIT 1",
@@ -478,8 +440,7 @@ impl SessionStorage for SqliteSessionStorage {
         session_id: &str,
         engine_session_id: &str,
     ) -> Result<(), SessionStorageError> {
-        // No `sessions` existence guard on purpose — see the port doc-comment:
-        // the pairing can be established before a GIAP session row exists.
+        // No `sessions` existence guard: pairing can precede the session row.
         sqlx::query(
             "INSERT INTO engine_session_map (session_id, engine_session_id, updated_at) \
              VALUES (?, ?, datetime('now')) \
@@ -531,11 +492,7 @@ impl SessionStorage for SqliteSessionStorage {
         session_id: &str,
         identity: &SessionIdentity,
     ) -> Result<(), SessionStorageError> {
-        // Deliberately does NOT touch `updated_at`. `list_sessions` orders by it,
-        // so bumping it here would push a conversation to the top of the user's
-        // history because a camera recognised somebody -- reordering what they
-        // see without a message having been sent. Attribution is metadata about
-        // the session, not activity in it.
+        // Leaves `updated_at` alone: `list_sessions` orders by it, and attribution isn't activity.
         let result = sqlx::query(
             "UPDATE sessions SET \
                profile_id                = ?, \
@@ -562,19 +519,14 @@ impl SessionStorage for SqliteSessionStorage {
         session_id: &str,
         identity: &SessionIdentity,
     ) -> Result<bool, SessionStorageError> {
-        // The rank comparison happens INSIDE the update, so two concurrent
-        // identifications cannot both win off the same stale read. The ranking
-        // itself is policy and lives in the domain -- this builds the CASE from
-        // `IdentificationSource::ALL_RANKED` rather than restating the order,
-        // and a test pins the two together.
+        // The rank check runs inside the UPDATE, so racing writers can't both win a stale read.
         let cases: String = IdentificationSource::ALL_RANKED
             .iter()
             .map(|(name, rank)| format!("WHEN '{name}' THEN {rank}"))
             .collect::<Vec<_>>()
             .join(" ");
 
-        // A NULL source is a legacy row: unattributed, so anything beats it.
-        // The literal must be >= the weakest real rank, hence ALL_RANKED's len.
+        // A NULL (legacy) source must lose to everything, hence `ALL_RANKED.len()`.
         let unattributed = IdentificationSource::ALL_RANKED.len();
 
         let sql = format!(
@@ -600,9 +552,7 @@ impl SessionStorage for SqliteSessionStorage {
             return Ok(true);
         }
 
-        // Zero rows is ambiguous: either the session does not exist, or a
-        // stronger identification holds it. The caller needs those apart --
-        // one is a 404 and the other is a normal refusal.
+        // Zero rows: missing session (404) or a stronger identity holds it (refusal).
         let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE id = ?")
             .bind(session_id)
             .fetch_one(&self.pool)
@@ -661,8 +611,6 @@ impl SessionStorage for SqliteSessionStorage {
     ) -> Result<SessionMessage, SessionStorageError> {
         self.get_session(&session_id).await?; // guard: session must exist
 
-        // Serialize tool_calls only when present — keeps storage compact for
-        // the common user/system path.
         let tool_calls_json = if message.message.tool_calls.is_empty() {
             None
         } else {
@@ -694,8 +642,7 @@ impl SessionStorage for SqliteSessionStorage {
             .await
             .map_err(|e| SessionStorageError::StorageError(e.to_string()))?;
 
-        // Phase F2. After the message row commits, so an attachment can never
-        // reference a message that does not exist.
+        // After the message row commits, so an attachment never references a missing message.
         self.persist_attachments(&message).await;
 
         Ok(message)
@@ -722,12 +669,7 @@ impl SessionStorage for SqliteSessionStorage {
         rows.into_iter().map(SessionMessage::try_from).collect()
     }
 
-    /// Rename a session on a person's behalf.
-    ///
-    /// Stamps `title_source = 'user'`, which puts the session permanently out
-    /// of the re-titling job's reach. Its only production caller is the rename
-    /// endpoint; the two machine writers have their own methods precisely so
-    /// this one can mean "somebody typed this" without ambiguity.
+    /// A human rename: stamps `title_source = 'user'`, putting it out of the re-titler's reach.
     async fn update_title(
         &self,
         session_id: &str,
@@ -748,14 +690,8 @@ impl SessionStorage for SqliteSessionStorage {
         Ok(())
     }
 
-    /// Two indexed queries rather than a history load: find the anchor's sort
-    /// position, then count what sorts after it. The ordering pair matches
-    /// `get_messages` (`created_at ASC, rowid ASC`) so "after" means the same
-    /// thing here as it does when the conversation is read.
-    ///
-    /// The anchor is fetched separately rather than as a subquery because a
-    /// missing anchor must be distinguishable from an anchor with nothing
-    /// after it — as a subquery both answer `0`.
+    /// Orders like `get_messages`. The anchor is fetched separately: as a subquery, a missing
+    /// anchor and one with nothing after it would both answer `0`.
     async fn messages_after(
         &self,
         session_id: &str,
@@ -804,13 +740,7 @@ impl SessionStorage for SqliteSessionStorage {
         Ok(row.unwrap_or((None, None)))
     }
 
-    /// Write the deterministic fallback title, marked as such so the
-    /// re-titling job knows it may improve on it.
-    ///
-    /// Does NOT touch `updated_at`: this runs on the first turn of a session,
-    /// and the activity clock that gates every background job reads that
-    /// column. Bumping it here would be the pond reporting its own
-    /// bookkeeping as user activity.
+    /// Leaves `updated_at` alone: background jobs read it as the user-activity clock.
     async fn set_derived_title(
         &self,
         session_id: &str,
@@ -831,11 +761,7 @@ impl SessionStorage for SqliteSessionStorage {
         Ok(())
     }
 
-    /// Write a model-generated title and record how far it reaches.
-    ///
-    /// Same reasoning on `updated_at` as [`set_derived_title`]: a background
-    /// rename is not activity, and treating it as such would let the job
-    /// reset the very idle clock that permitted it to run.
+    /// Leaves `updated_at` alone: a background rename is not user activity.
     async fn set_generated_title(
         &self,
         session_id: &str,
@@ -859,8 +785,7 @@ impl SessionStorage for SqliteSessionStorage {
     }
 
     async fn delete_session(&self, session_id: &str) -> Result<(), SessionStorageError> {
-        // Files first: the CASCADE below erases the index rows, and without them
-        // the bytes on disk are unreachable garbage.
+        // Files first: the CASCADE below erases the rows that index them.
         self.remove_session_attachment_files(session_id).await;
         // ON DELETE CASCADE handles session_messages automatically
         sqlx::query("DELETE FROM sessions WHERE id = ?")
@@ -964,10 +889,7 @@ impl SessionStorage for SqliteSessionStorage {
     }
 
     async fn count_messages(&self, session_id: &str) -> Result<u64, SessionStorageError> {
-        // Indexed COUNT(*) — cheap even for long conversations. Unlike the
-        // read methods, this deliberately does NOT guard on session existence:
-        // a missing session simply has zero messages, which is the answer the
-        // sidebar badge wants.
+        // No existence guard, unlike the reads: a missing session has zero messages.
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM session_messages WHERE session_id = ?")
                 .bind(session_id)
@@ -982,14 +904,8 @@ impl SessionStorage for SqliteSessionStorage {
         &self,
         scan_limit: usize,
     ) -> Result<Vec<u32>, SessionStorageError> {
-        // Walks `idx_session_messages_created_at` backwards and stops after
-        // `scan_limit` ROWS -- not after that many samples. See the port docs:
-        // bounding by result count would make a pond with thinking switched off
-        // scan its whole history every turn to find nothing.
-        //
-        // `IS NOT NULL` is applied in SQL rather than in Rust so a row nobody
-        // counted cannot arrive here as a zero. The distinction is migration
-        // 0039's entire reason for having no DEFAULT on that column.
+        // Bounded by rows scanned, not samples: else a pond with thinking off scans all history.
+        // NULL is filtered in SQL so an uncounted row can never arrive as a zero.
         let rows: Vec<(i64,)> = sqlx::query_as(
             "SELECT reasoning_tokens FROM ( \
                  SELECT reasoning_tokens FROM session_messages \
@@ -1011,8 +927,7 @@ impl SessionStorage for SqliteSessionStorage {
         &self,
         session_id: &str,
     ) -> Result<Option<String>, SessionStorageError> {
-        // Earliest user-authored message, used only as a read-time title
-        // fallback. Ordered identically to get_messages so "first" is stable.
+        // Read-time title fallback; ordered like `get_messages` so "first" is stable.
         let content: Option<String> = sqlx::query_scalar(
             "SELECT content FROM session_messages \
              WHERE session_id = ? AND role = 'user' \
@@ -1031,11 +946,7 @@ impl SessionStorage for SqliteSessionStorage {
         &self,
         session_id: &str,
     ) -> Result<Option<String>, SessionStorageError> {
-        // Earliest assistant-authored message — the history card's preview.
-        // Ordered identically to get_messages so "first" is stable, and
-        // filtered to non-empty content because a turn that produced only tool
-        // calls stores an empty assistant row, which would render as a card
-        // with a blank body rather than no body.
+        // The card preview. Skips tool-only turns, which store an empty assistant row.
         let content: Option<String> = sqlx::query_scalar(
             "SELECT content FROM session_messages \
              WHERE session_id = ? AND role = 'assistant' AND TRIM(content) <> '' \
@@ -1050,7 +961,7 @@ impl SessionStorage for SqliteSessionStorage {
         Ok(content)
     }
 
-    // ── Image attachments (phase F2) ────────────────────────────────────────
+    // ── Image attachments ───────────────────────────────────────────────────
 
     async fn list_session_attachments(
         &self,
@@ -1078,8 +989,7 @@ impl SessionStorage for SqliteSessionStorage {
             return Ok(HashMap::new());
         }
 
-        // Runtime sqlx has no array binding for SQLite, so the IN list is built
-        // from placeholders — never from the ids themselves.
+        // sqlx can't bind arrays for SQLite, so the IN list is placeholders, never the ids.
         let placeholders = std::iter::repeat_n("?", message_ids.len())
             .collect::<Vec<_>>()
             .join(",");
@@ -1102,9 +1012,7 @@ impl SessionStorage for SqliteSessionStorage {
             let message_id: String = row.get("message_id");
             let mime_type: String = row.get("mime_type");
             let file_path: String = row.get("file_path");
-            // A missing file degrades to "this image is gone" rather than an
-            // error: the caller's fallback is a text placeholder, which is a
-            // better outcome than failing the whole turn.
+            // A missing file is skipped, not an error: the caller falls back to a text placeholder.
             let Some(bytes) = self.read_attachment_file(&file_path).await else {
                 tracing::debug!(
                     message_id = %message_id,
@@ -1140,7 +1048,7 @@ impl SessionStorage for SqliteSessionStorage {
             .map(|bytes| (mime_type, bytes)))
     }
 
-    // ── Reasoning text (PAI-5 P6) ───────────────────────────────────────────
+    // ── Reasoning text ──────────────────────────────────────────────────────
 
     async fn add_thinking(
         &self,
@@ -1194,9 +1102,7 @@ impl SessionStorage for SqliteSessionStorage {
         &self,
         session_id: &str,
     ) -> Result<HashMap<String, Vec<String>>, SessionStorageError> {
-        // `block_index` and not `created_at`: every block of one turn is
-        // written inside the same `datetime('now')` second, so ordering by time
-        // would shuffle the passages of a fast turn into an arbitrary order.
+        // `block_index`, not `created_at`: a turn's blocks share one `datetime('now')` second.
         let rows = sqlx::query(
             "SELECT message_id, content FROM session_thinking \
              WHERE session_id = ? \
@@ -1221,14 +1127,7 @@ impl SessionStorage for SqliteSessionStorage {
         session_id: &str,
         message_id: &str,
     ) -> Result<(), SessionStorageError> {
-        // The attachments of the messages about to go, gathered BEFORE the
-        // delete because afterwards there is no way to find them: the rows are
-        // keyed to `message_id`, and nothing cascades. Without this an edited
-        // turn leaves its `message_attachments` rows pointing at files that
-        // belong to no message, and the files themselves on disk forever —
-        // `remove_session_attachment_files` only runs when the whole session is
-        // deleted, and it removes the entire directory, which is far too broad
-        // here.
+        // Collected first: nothing cascades to `message_attachments`, so afterwards they're lost.
         let orphaned: Vec<String> = sqlx::query_scalar(
             "SELECT a.file_path FROM message_attachments a \
              JOIN session_messages m ON m.id = a.message_id \
@@ -1255,11 +1154,7 @@ impl SessionStorage for SqliteSessionStorage {
         .await
         .map_err(|e| SessionStorageError::StorageError(e.to_string()))?;
 
-        // rowid, not created_at: two messages in the same turn can share a
-        // second-resolution timestamp, and `>=` on created_at alone could
-        // sweep up an earlier sibling row. rowid is SQLite's own insertion
-        // order, so it is a stable tiebreaker — the same one get_messages()
-        // and friends already use as `ORDER BY created_at ASC, rowid ASC`.
+        // rowid, not created_at: same-second siblings would match `>=` on created_at.
         let result = sqlx::query(
             "DELETE FROM session_messages \
              WHERE session_id = ?1 \
@@ -1271,9 +1166,7 @@ impl SessionStorage for SqliteSessionStorage {
         .await
         .map_err(|e| SessionStorageError::StorageError(e.to_string()))?;
 
-        // Files last, and best-effort: a file that fails to unlink is wasted
-        // disk, whereas a row that outlives its message is a broken reference
-        // the attachment route can still be asked for.
+        // Files last, best-effort: a stray file wastes disk, a stray row is a broken reference.
         for path in orphaned {
             if let Err(e) = tokio::fs::remove_file(&path).await {
                 tracing::warn!(
@@ -1310,8 +1203,7 @@ mod tests {
     async fn make_storage() -> (SqliteSessionStorage, tempfile::TempDir) {
         let tmp = tempdir().unwrap();
         let db = Database::init(tmp.path()).await.unwrap();
-        // Attachment bytes must land in the temp dir, never in the developer's
-        // real profile (the production default resolves the OS data dir).
+        // Keep attachment bytes out of the developer's real profile.
         let storage = SqliteSessionStorage::new(db.system)
             .with_attachment_dir(tmp.path().join("attachments"));
         (storage, tmp)
@@ -1326,8 +1218,6 @@ mod tests {
         assert_eq!(fetched.id, "sess-1");
     }
 
-    /// C1: the engine-session pairing must survive a process restart, which is
-    /// what a fresh storage handle over the same file simulates.
     #[tokio::test]
     async fn engine_session_pairing_persists_and_upserts() {
         let tmp = tempdir().unwrap();
@@ -1366,8 +1256,7 @@ mod tests {
         assert_eq!(reopened.get_engine_session_id("other").await.unwrap(), None);
     }
 
-    /// PAI-2 P1: a builtin MCP tool call carries the ENGINE's session id, so a
-    /// draft decision has to walk this map backwards to find a speaker.
+    /// Builtin MCP tool calls carry the engine's session id; drafts map it back to a speaker.
     #[tokio::test]
     async fn the_engine_session_reverse_lookup_finds_the_giap_session() {
         let (s, _tmp) = make_storage().await;
@@ -1547,10 +1436,6 @@ mod tests {
         assert_eq!(msgs[0].id, "m1");
     }
 
-    /// "Refresh" keeps the user's message and only drops the reply after it —
-    /// this is what makes that possible: truncating from the assistant
-    /// message's id leaves every earlier message, including its own user
-    /// prompt, untouched.
     #[tokio::test]
     async fn delete_messages_from_the_assistant_reply_keeps_the_user_prompt() {
         let (s, _tmp) = make_storage().await;
@@ -1627,7 +1512,6 @@ mod tests {
 
         let sessions = s.list_sessions().await.unwrap();
         assert_eq!(sessions.len(), 2);
-        // sess-a was updated more recently, so it should be first
         assert_eq!(sessions[0].id, "sess-a");
         assert_eq!(sessions[1].id, "sess-b");
     }
@@ -1713,8 +1597,7 @@ mod tests {
             Some("Wake word fires twice")
         );
 
-        // A human rename outranks everything, and clears the reach marker so a
-        // stale one can never be read as covering the new name.
+        // A human rename outranks all, and clears the reach marker so it can't cover the new name.
         s.update_title("sess-1", "Jetson deploy notes".to_string())
             .await
             .unwrap();
@@ -1724,22 +1607,14 @@ mod tests {
         );
     }
 
-    /// The invariant that keeps the background job from sabotaging itself.
-    ///
-    /// `sessions.updated_at` is one of the two activity sources the idle gate
-    /// reads. If a background rename stamped it, the job would look exactly
-    /// like a person coming back: its own watcher would cancel the sweep
-    /// partway through, and every pass would shove the idle clock forward.
-    /// A human rename is real activity and *should* bump it.
+    /// A human rename should bump `updated_at`; background ones must not (idle gate reads it).
     #[tokio::test]
     async fn background_title_writes_are_not_mistaken_for_user_activity() {
         let (s, _tmp) = make_storage().await;
         s.create_session("sess-1".to_string()).await.unwrap();
         let before = s.get_session("sess-1").await.unwrap().updated_at;
 
-        // SQLite's datetime('now') has one-second resolution, so without this
-        // a bump inside the same second would be invisible and the test would
-        // pass against code that does bump.
+        // `datetime('now')` has one-second resolution; a same-second bump would be invisible.
         tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
 
         s.set_derived_title("sess-1", "so i was wondering whether")
@@ -1769,10 +1644,6 @@ mod tests {
         );
     }
 
-    /// The cheap answer must agree with the expensive one, because the idle
-    /// re-titling pass trusts it to decide whether a conversation has outgrown
-    /// its name — and a wrong answer either freezes a stale title forever or
-    /// burns the inference slot renaming something that has not changed.
     #[tokio::test]
     async fn messages_after_agrees_with_walking_the_history() {
         let (s, _tmp) = make_storage().await;
@@ -1799,8 +1670,6 @@ mod tests {
                 "disagreed at index {i}"
             );
         }
-        // The newest message has nothing after it — which is NOT the same
-        // answer as an anchor that no longer exists.
         assert_eq!(s.messages_after("sess-1", "m9").await.unwrap(), Some(0));
         assert_eq!(s.messages_after("sess-1", "gone").await.unwrap(), None);
         // An anchor belonging to a different conversation is not this one's.
@@ -1808,9 +1677,6 @@ mod tests {
         assert_eq!(s.messages_after("sess-2", "m0").await.unwrap(), None);
     }
 
-    /// The card preview is the pond's answer, so an assistant row that carries
-    /// no words — a turn that only called tools — must not win the slot and
-    /// render a card with a blank body.
     #[tokio::test]
     async fn first_assistant_message_skips_a_wordless_turn() {
         let (s, _tmp) = make_storage().await;
@@ -1871,8 +1737,6 @@ mod tests {
             s.set_generated_title("missing", "x", "msg-1").await,
             Err(SessionStorageError::SessionNotFound(_))
         ));
-        // Reading provenance for a session that is not there is a question with
-        // a sensible answer, not an error.
         assert_eq!(
             s.get_title_provenance("missing").await.unwrap(),
             (None, None)
@@ -1906,7 +1770,6 @@ mod tests {
             .unwrap();
         }
 
-        // Ask for 3 most recent → should get Msg 7, 8, 9 in chronological order
         let recent = s.get_recent_messages("sess-1", 3).await.unwrap();
         assert_eq!(recent.len(), 3);
         assert_eq!(recent[0].message.content, "Msg 7");
@@ -2076,10 +1939,9 @@ mod tests {
         }
     }
 
-    // ── Image attachments (phase F2) ────────────────────────────────────────
+    // ── Image attachments ───────────────────────────────────────────────────
 
-    /// A 1x1 red PNG, base64. Small enough to inline, real enough that a decode
-    /// failure would show up.
+    /// A 1x1 red PNG, base64.
     const TINY_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
 
     async fn seed_image_message(
@@ -2100,14 +1962,6 @@ mod tests {
         .unwrap();
     }
 
-    /// Truncating a turn takes its attachments with it -- rows AND files.
-    ///
-    /// Nothing cascades from `session_messages` to `message_attachments`, and
-    /// the only file cleanup in this module removes the whole session
-    /// directory, which runs only on a full session delete. So an edited turn
-    /// used to leave rows pointing at a message that no longer exists, and the
-    /// image bytes on disk forever -- on a Jetson, where the disk is the thing
-    /// that runs out.
     #[tokio::test]
     async fn truncating_a_message_removes_its_attachments_and_their_files() {
         let (s, _tmp) = make_storage().await;
@@ -2187,8 +2041,6 @@ mod tests {
         assert_eq!(bytes.len() as u64, meta[0].byte_size);
     }
 
-    /// Ordinal order is the user's pick order, and must survive the round trip —
-    /// "the first picture" has to mean the same thing on a follow-up turn.
     #[tokio::test]
     async fn attachment_order_is_preserved() {
         let (s, _tmp) = make_storage().await;
@@ -2244,9 +2096,6 @@ mod tests {
         }
     }
 
-    /// Loading images must never fail a turn just because a file went missing —
-    /// the caller's fallback is a text placeholder, which is strictly better than
-    /// erroring out the whole conversation.
     #[tokio::test]
     async fn a_missing_attachment_file_degrades_instead_of_erroring() {
         let (s, tmp) = make_storage().await;
@@ -2326,7 +2175,6 @@ mod tests {
         assert!(!dir.exists(), "orphaned bytes must not survive the session");
     }
 
-    /// A caller-supplied session id must never become a path.
     #[tokio::test]
     async fn a_traversal_session_id_cannot_escape_the_attachment_root() {
         let (s, tmp) = make_storage().await;
@@ -2414,20 +2262,7 @@ mod tests {
         assert_eq!(msgs[1].completion_tokens, Some(87));
     }
 
-    /// PAI-5 P2, migration 0039. Two claims in one, and the second is the one
-    /// that would rot silently: reasoning is stored ALONGSIDE the provider's
-    /// completion count and does not disturb it, and a row written without a
-    /// reasoning count reads back `None` rather than `Some(0)`. PAI-5 P5 sizes
-    /// an output reserve from this column, and "nobody counted" read as "no
-    /// thinking happened" would bias every reserve downwards.
-    /// PAI-5 P5's read, and the guard on the defaulted port method.
-    ///
-    /// The port defaults `recent_reasoning_samples` to an empty vec so mocks
-    /// keep compiling, and a defaulted trait method is a recorded vacuity shape
-    /// in this programme: deleting a real override leaves the tree green while
-    /// the feature quietly stops working. Here it would stop by keeping the
-    /// anchor forever, which is silent by construction. So the real adapter is
-    /// asserted to answer with real numbers.
+    /// `recent_reasoning_samples` has an empty default on the port; this pins the override.
     #[tokio::test]
     async fn sqlite_reads_real_reasoning_samples_rather_than_the_default() {
         let tmp = tempdir().unwrap();
@@ -2466,9 +2301,6 @@ mod tests {
              smaller output reserve cast by a turn that never reasoned"
         );
 
-        // `scan_limit` bounds ROWS READ, not samples returned. Reading one row
-        // can therefore yield no samples at all -- which is the point: a pond
-        // with thinking off must not walk its whole history every turn.
         let scanned_one = s.recent_reasoning_samples(1).await.unwrap();
         assert!(
             scanned_one.len() <= 1,
@@ -2477,6 +2309,7 @@ mod tests {
         );
     }
 
+    /// An uncounted row must read back `None`, not `Some(0)`: the output reserve is sized from it.
     #[tokio::test]
     async fn reasoning_tokens_round_trip_beside_the_provider_counts() {
         let tmp = tempdir().unwrap();
@@ -2510,11 +2343,7 @@ mod tests {
         .await
         .unwrap();
 
-        // The row shape every pre-0039 message has: written by an INSERT that
-        // never mentions the column at all. This is the case the column's
-        // absent DEFAULT is FOR, and the only way to reach it from a unit test
-        // — the adapter always binds the column, so binding NULL through it
-        // would pass just as happily against `DEFAULT 0`.
+        // A pre-0039 row, via raw INSERT: the adapter always binds the column, hiding any DEFAULT.
         sqlx::query(
             "INSERT INTO session_messages (id, session_id, role, content, created_at) \
              VALUES ('a3', 'reason', 'assistant', 'written before 0039', datetime('now'))",
@@ -2542,10 +2371,8 @@ mod tests {
         );
     }
 
-    // ── Session identity (PAI-1 P2) ───────────────────────────────────────
+    // ── Session identity ──────────────────────────────────────────────────
 
-    /// `sessions.profile_id` has existed since migration 0003 and nothing ever
-    /// wrote it. This is the test that stops it being a dead column again.
     #[tokio::test]
     async fn a_new_session_is_unattributed_and_reads_back_that_way() {
         let (s, _tmp) = make_storage().await;
@@ -2586,8 +2413,7 @@ mod tests {
         assert_eq!(read.source, IdentificationSource::Face);
         assert!((read.confidence.unwrap() - 0.62).abs() < 1e-6);
 
-        // and the same fact is visible on the session itself, which is what
-        // the sessions list and every later scope decision will read.
+        // Also visible on the session itself, which the sessions list and scope checks read.
         assert_eq!(
             s.get_session("sess-1").await.unwrap().profile_id.as_deref(),
             Some("jerry")
@@ -2598,9 +2424,6 @@ mod tests {
         );
     }
 
-    /// An attribution that is accepted and then quietly dropped is exactly the
-    /// bug this phase exists to end, so a write against a session that does not
-    /// exist has to fail loudly.
     #[tokio::test]
     async fn identifying_a_session_that_does_not_exist_is_an_error() {
         let (s, _tmp) = make_storage().await;
@@ -2621,8 +2444,6 @@ mod tests {
         );
     }
 
-    /// Reading identity for an unknown session is NOT an error -- "nobody" is a
-    /// correct answer to "whose session is this".
     #[tokio::test]
     async fn reading_identity_for_an_unknown_session_says_nobody() {
         let (s, _tmp) = make_storage().await;
@@ -2632,12 +2453,7 @@ mod tests {
         );
     }
 
-    /// Migration 0003 declared `profile_id REFERENCES profiles(id)` with no ON
-    /// DELETE action, and `Database::init` turns foreign keys on. That was
-    /// harmless only while the column stayed NULL. Now that it is written,
-    /// deleting a member who has ever spoken to the pond would fail the FK
-    /// check -- so 0037 carries a BEFORE DELETE trigger standing in for the ON
-    /// DELETE SET NULL that SQLite will not let us add in place.
+    /// 0037's BEFORE DELETE trigger stands in for the ON DELETE SET NULL SQLite can't add later.
     #[tokio::test]
     async fn deleting_a_profile_releases_their_sessions_instead_of_failing() {
         let (s, _tmp) = make_storage().await;
@@ -2660,8 +2476,7 @@ mod tests {
             .await
             .expect("deleting a member must not be blocked by their sessions");
 
-        // The conversation survives; only the attribution is gone. Erasing the
-        // content is a separate, deliberate cascade (PAI-1 P7).
+        // The conversation survives; only the attribution is gone.
         let session = s.get_session("sess-1").await.unwrap();
         assert_eq!(session.id, "sess-1");
         assert_eq!(session.profile_id, None);
@@ -2672,9 +2487,6 @@ mod tests {
         );
     }
 
-    /// `profile_id` is a real foreign key, so identity cannot name a member who
-    /// does not exist. Worth pinning: it is the cheapest guard against a typo'd
-    /// or stale id becoming a permanent, unmatchable attribution.
     #[tokio::test]
     async fn identity_cannot_name_a_profile_that_does_not_exist() {
         let (s, _tmp) = make_storage().await;
@@ -2708,12 +2520,8 @@ mod tests {
         .expect("profiles row is required by the sessions.profile_id foreign key");
     }
 
-    // ── Race-free identity writes (PAI-1 P4) ─────────────────────────────
+    // ── Race-free identity writes ────────────────────────────────────────
 
-    /// The read-compare-write this replaced could lose: two requests both read
-    /// `Unknown`, both passed `supersedes`, and the later write won whatever
-    /// its rank. Here the comparison is inside the UPDATE, so the stale caller
-    /// simply does not match.
     #[tokio::test]
     async fn a_weaker_source_cannot_win_even_from_a_stale_read() {
         let (s, _tmp) = make_storage().await;
@@ -2734,8 +2542,7 @@ mod tests {
             .await
             .unwrap());
 
-        // A camera frame, decided against the state BEFORE that write, tries
-        // to bind a different person on weaker evidence.
+        // A camera frame, decided on the pre-write state, tries a weaker binding.
         assert!(
             !s.set_session_identity_if_stronger(
                 "sess-1",
@@ -2791,7 +2598,6 @@ mod tests {
         }
     }
 
-    /// A legacy row has a NULL source and is unattributed, so anything binds it.
     #[tokio::test]
     async fn anything_binds_a_legacy_row_with_no_source() {
         let (s, _tmp) = make_storage().await;
@@ -2810,9 +2616,6 @@ mod tests {
             .unwrap());
     }
 
-    /// Zero rows updated is ambiguous between "no such session" and "not
-    /// superseded". The caller needs them apart -- one is a 404, the other a
-    /// normal refusal -- so the adapter disambiguates rather than guessing.
     #[tokio::test]
     async fn a_conditional_write_to_a_missing_session_is_still_not_found() {
         let (s, _tmp) = make_storage().await;
@@ -2830,14 +2633,8 @@ mod tests {
         assert!(matches!(err, SessionStorageError::SessionNotFound(id) if id == "no-such-session"));
     }
 
-    // ── Reasoning text (PAI-5 P6) ───────────────────────────────────────────
-    //
-    // `add_thinking` / `get_thinking_for_session` are DEFAULTED on the port so
-    // the four non-SQLite implementors need no change. The cost of a default is
-    // that deleting the override below leaves the whole workspace green while
-    // the feature silently stops working -- the exact vacuity shape this
-    // programme keeps recording. These tests are the counterweight: they run
-    // against the real adapter, and `pond-infra` is in ci.yml's test list.
+    // ── Reasoning text ──────────────────────────────────────────────────────
+    // The port defaults these methods, so only these tests catch a deleted override.
 
     async fn seed_assistant_row(s: &SqliteSessionStorage, session: &str, msg: &str) {
         s.add_message(
@@ -2872,10 +2669,6 @@ mod tests {
 
         let out = s.get_thinking_for_session("sess-think").await.unwrap();
 
-        // Order within a turn is the whole readability of the panel, and both
-        // blocks of turn one are written inside the same `datetime('now')`
-        // second -- so an adapter that ordered by created_at would shuffle them
-        // and this assertion is what notices.
         assert_eq!(
             out.get("assistant-1").map(Vec::as_slice),
             Some(["first".to_string(), "second".to_string()].as_slice()),
@@ -2906,9 +2699,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Invariant 6. A session's scope is `sessions.profile_id`, and the read
-        // is per-session; a Guest session must not be able to reach a household
-        // member's reasoning simply because both rows live in one table.
+        // A Guest session must not reach another session's reasoning via the shared table.
         let a = s.get_thinking_for_session("sess-a").await.unwrap();
         assert_eq!(a.len(), 1, "session A sees only its own reasoning: {a:?}");
         assert!(
@@ -2924,11 +2715,7 @@ mod tests {
         s.create_session("sess-quiet".to_string()).await.unwrap();
         seed_assistant_row(&s, "sess-quiet", "q-1").await;
 
-        // Every session recorded before `persist_thinking` was turned on is in
-        // this state, which is the overwhelming majority of them. Reading one
-        // must be an empty map, never an error -- `get_session_messages`
-        // swallows the error, so an adapter that failed here would turn every
-        // historical page load into a page with no thinking AND no signal.
+        // `get_session_messages` swallows errors, so failing here would hide thinking silently.
         let out = s.get_thinking_for_session("sess-quiet").await.unwrap();
         assert!(out.is_empty(), "expected no reasoning rows, got {out:?}");
     }
@@ -2946,9 +2733,6 @@ mod tests {
 
         s.delete_session("sess-gone-think").await.unwrap();
 
-        // The erasure path that exists today. Reasoning text is the least
-        // reviewed thing the model produces; it must not be the one artefact
-        // that outlives the conversation a user asked to forget.
         let left: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM session_thinking WHERE session_id = ?")
                 .bind("sess-gone-think")

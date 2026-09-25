@@ -1,38 +1,5 @@
-//! What a settings value is allowed to be — in one table, on the server.
-//!
-//! The real rules lived in the desktop: `settings/validation.ts` and the
-//! `validate:` entries in `settings/catalogue.ts`. Its own header said as much
-//! — that for several fields it was "the ONLY place a bad value is ever
-//! reported". The server checked four, by hand, inside the settings route.
-//!
-//! So the two sides answered "is this valid?" differently, and the backend
-//! stored what the browser rejected. Anything that is not the catalogue — a
-//! `curl`, the CLI, a future mobile client — met no rule at all, and the
-//! consumers downstream do not error on a bad value, they take an undisclosed
-//! fallback:
-//!
-//! - `quiet_hours_start = "10pm"` does not parse, `quiet_hours_cover` fails
-//!   CLOSED, and the pond goes silent for the whole day with nothing anywhere
-//!   saying why.
-//! - `agent_backend = "gosse"` passes the old denylist (which refused only the
-//!   literal `pond`), survives the startup heal (which repairs only that same
-//!   literal), and then fails the `!= "goose"` test that picks the real agent —
-//!   so every request is answered by `MockAgent`, which presents as a model
-//!   failure and gets debugged as one.
-//! - `weather_latitude = 999` is stored and asked of the forecast API.
-//!
-//! # Refuse at the edge, because the edge is the only place anybody finds out
-//!
-//! This mirrors the argument the `network_mode` and `reasoning_effort` arms
-//! already made in the route: both parse with a permissive fallback, so a typo
-//! that reached the store would silently be the wrong setting. Refusing when it
-//! arrives is the narrowing half of that bargain.
-//!
-//! # Canonicalise, don't only refuse
-//!
-//! `africa/nairobi` and `AUTO` are reasonable things to type and unreasonable
-//! things to reject. A [`Check`] may rewrite the value; the STORED form is
-//! always the canonical one, so everything downstream parses a single shape.
+//! Server-side rules for settings values. Bad values are refused on write, since consumers
+//! fall back silently; a [`Check`] may canonicalise, and the canonical form is what is stored.
 
 use std::collections::HashSet;
 
@@ -76,12 +43,10 @@ pub enum Check {
     },
 }
 
-/// A field and the rule it answers to.
 pub struct FieldRule {
     pub key: &'static str,
     pub check: Check,
-    /// Whether an empty value is accepted without running `check`. An optional
-    /// URL is blank when unset; a time zone never is.
+    /// Accept an empty value without running `check` (e.g. an unset optional URL).
     pub blank_ok: bool,
 }
 
@@ -108,12 +73,7 @@ const fn real(min: f64, max: f64, unit: &'static str) -> Check {
 const HTTP: &[&str] = &["http://", "https://"];
 const WS: &[&str] = &["ws://", "wss://"];
 
-/// Every rule the pond has.
-///
-/// A field absent from this table is accepted as sent — which is the right
-/// default for free text, but is a decision rather than an oversight: the
-/// completeness guard in this module's tests fails the build when a new field
-/// is neither ruled nor explicitly listed as needing no rule.
+/// Every rule the pond has; a field absent from this table is accepted as sent.
 pub const FIELD_RULES: &[FieldRule] = &[
     // ── Closed vocabularies ────────────────────────────────────────────────
     FieldRule {
@@ -238,10 +198,7 @@ pub const FIELD_RULES: &[FieldRule] = &[
     },
 ];
 
-/// Validate and canonicalise one field.
-///
-/// `Ok(None)` accepts the value as sent; `Ok(Some(v))` accepts it and asks the
-/// caller to store `v` instead. A key with no rule is accepted unchanged.
+/// Validates one field: `Ok(None)` stores it as sent, `Ok(Some(v))` stores canonical `v` instead.
 pub fn check_field(key: &str, value: &Value) -> Result<Option<Value>, FieldError> {
     let Some(rule) = FIELD_RULES.iter().find(|r| r.key == key) else {
         return Ok(None);
@@ -260,10 +217,7 @@ pub fn check_field(key: &str, value: &Value) -> Result<Option<Value>, FieldError
     } = rule.check
     {
         let Some(n) = value.as_f64() else {
-            // `null` on a numeric field is an emptied box, not a value: no
-            // numeric setting is optional server-side, and sending null earns
-            // a deserialise failure that names the whole body instead of the
-            // field.
+            // No numeric setting is optional; refusing null here names the field.
             return Err(fail(format!("{key} needs a number.")));
         };
         if !n.is_finite() {
@@ -280,10 +234,7 @@ pub fn check_field(key: &str, value: &Value) -> Result<Option<Value>, FieldError
         return Ok(None);
     }
 
-    // `null` is how an `Option<String>` field says "unset" — the same state as
-    // an empty string, and it must be judged the same way. Reading it as a type
-    // error would make a pond's own shipped defaults invalid, which is how this
-    // was caught.
+    // `null` is an unset `Option<String>`, so it is judged like an empty string.
     if value.is_null() {
         return if rule.blank_ok {
             Ok(None)
@@ -349,10 +300,7 @@ fn canonical(raw: &str, canonical: &str) -> Option<Value> {
     (raw != canonical).then(|| Value::String(canonical.to_string()))
 }
 
-/// `HH:MM` on a 24-hour clock, zero-padded.
-///
-/// Accepts `9:05` and returns `09:05`. Rejects `10pm`, which is the value that
-/// silenced a pond for a day.
+/// Parses a 24-hour time into zero-padded `HH:MM` (`9:05` → `09:05`; `10pm` is refused).
 fn parse_clock_time(s: &str) -> Option<String> {
     let (h, m) = s.split_once(':')?;
     let h: u32 = h.trim().parse().ok()?;
@@ -360,11 +308,7 @@ fn parse_clock_time(s: &str) -> Option<String> {
     (h < 24 && m < 60).then(|| format!("{h:02}:{m:02}"))
 }
 
-/// Whether anything follows the scheme.
-///
-/// The old route arm checked the prefix alone, so `ws://` and `ws:// ` passed
-/// and then failed at connect time — which presents as "Devices stuck on
-/// unreachable" rather than as a bad setting.
+/// Whether a host follows the scheme; a bare `ws://` would only fail later, at connect time.
 fn has_host(url: &str, schemes: &[&str]) -> bool {
     schemes.iter().any(|s| {
         url.strip_prefix(s)
@@ -372,11 +316,7 @@ fn has_host(url: &str, schemes: &[&str]) -> bool {
     })
 }
 
-/// Validate and canonicalise a JSON patch in place.
-///
-/// Only the keys the object carries are checked, so a partial save is not
-/// judged on fields it did not touch. Every failing field is reported: fixing
-/// one error at a time is a worse experience than seeing all of them.
+/// Validates and canonicalises a patch in place; checks only its keys, reports every failure.
 pub fn validate_patch(patch: &mut Value) -> Result<(), Vec<FieldError>> {
     let Some(object) = patch.as_object_mut() else {
         // Not an object: the caller's own deserialise will say so better.
@@ -401,13 +341,9 @@ pub fn validate_patch(patch: &mut Value) -> Result<(), Vec<FieldError>> {
     Ok(())
 }
 
-/// Validate one `set_key`-style write, returning the canonical string to store.
-///
-/// The CLI and any other key/value writer go through here; without it they
-/// bypass even the route's checks.
+/// Validates a `set_key`-style write (CLI and other key/value writers), returning what to store.
 pub fn check_raw_key(key: &str, raw: &str) -> Result<String, FieldError> {
-    // A raw write is always textual, even for numeric fields, so a numeric rule
-    // is given the parsed number rather than the string.
+    // Raw writes are text, so numeric rules get the parsed number.
     let value = match FIELD_RULES.iter().find(|r| r.key == key).map(|r| r.check) {
         Some(Check::Number { .. }) => raw
             .trim()
@@ -432,8 +368,7 @@ pub fn render_errors(errors: &[FieldError]) -> String {
         .join(" ")
 }
 
-/// Validate the fields of a whole `Settings`, optionally restricted to the
-/// keys a caller touched.
+/// Validates a whole `Settings`, optionally only the keys in `only`.
 pub fn validate_settings(
     settings: &Settings,
     only: Option<&HashSet<String>>,
@@ -453,7 +388,6 @@ pub fn validate_settings(
     }
 }
 
-/// Every key the table covers.
 pub fn ruled_keys() -> Vec<&'static str> {
     FIELD_RULES.iter().map(|r| r.key).collect()
 }
@@ -466,9 +400,7 @@ mod tests {
         Value::String(v.to_string())
     }
 
-    /// The defect this module exists for, in the field that caused it: a stored
-    /// `"10pm"` fails to parse, quiet hours fail CLOSED, and the pond is silent
-    /// all day with nothing saying why.
+    /// A stored "10pm" would make quiet hours fail closed and silence the pond all day.
     #[test]
     fn a_clock_time_that_does_not_parse_is_refused_not_stored() {
         assert!(check_field("quiet_hours_start", &s("10pm")).is_err());
@@ -487,8 +419,7 @@ mod tests {
         );
     }
 
-    /// The old check was a denylist of one string, so every OTHER typo was
-    /// stored and then answered by MockAgent.
+    /// Any unknown backend would otherwise be answered by `MockAgent`.
     #[test]
     fn an_agent_backend_typo_is_refused_not_only_the_quarantined_one() {
         assert!(check_field("agent_backend", &s("goose")).unwrap().is_none());
@@ -496,7 +427,6 @@ mod tests {
         assert!(check_field("agent_backend", &s("ollama")).is_err());
     }
 
-    /// A quarantined value gets its reason, not just the list of alternatives.
     #[test]
     fn the_quarantined_backend_is_refused_by_name() {
         let err = check_field("agent_backend", &s("pond")).unwrap_err();
@@ -528,8 +458,6 @@ mod tests {
         );
     }
 
-    /// The old arm checked the scheme prefix alone, so these passed and then
-    /// failed at connect time — which reads as a broken device, not a setting.
     #[test]
     fn a_url_needs_a_host_and_not_only_a_scheme() {
         assert!(check_field("matter_ws_url", &s("ws://")).is_err());
@@ -577,7 +505,6 @@ mod tests {
             .is_none());
     }
 
-    /// A partial save must be judged only on what it carries.
     #[test]
     fn a_patch_is_checked_only_on_the_keys_it_carries() {
         let mut patch = serde_json::json!({ "user_name": "Jerry" });
@@ -595,7 +522,6 @@ mod tests {
         assert_eq!(patch["quiet_hours_start"], "09:05");
     }
 
-    /// Fixing one error per round-trip is a worse experience than seeing all.
     #[test]
     fn every_failing_field_is_reported_not_just_the_first() {
         let mut patch = serde_json::json!({
@@ -609,7 +535,6 @@ mod tests {
         assert!(fields.contains("timezone") && fields.contains("agent_max_turns"));
     }
 
-    /// A refused patch must not be half-rewritten.
     #[test]
     fn a_refused_patch_is_left_exactly_as_it_arrived() {
         let mut patch = serde_json::json!({
@@ -623,7 +548,6 @@ mod tests {
         );
     }
 
-    /// The CLI and every other key/value writer go through this.
     #[test]
     fn a_raw_key_write_is_validated_and_canonicalised_too() {
         assert_eq!(
@@ -636,7 +560,6 @@ mod tests {
         assert_eq!(check_raw_key("user_name", "Jerry").unwrap(), "Jerry");
     }
 
-    /// The defaults must satisfy their own rules, or a fresh pond is invalid.
     #[test]
     fn the_shipped_defaults_pass_every_rule() {
         let defaults = Settings::default();
@@ -645,9 +568,6 @@ mod tests {
         }
     }
 
-    /// Completeness guard, in the shape `every_settings_field_is_dispositioned`
-    /// already established: a new field must be given a rule or explicitly
-    /// recorded as needing none, so an unvalidated field cannot arrive quietly.
     #[test]
     fn every_ruled_key_is_a_real_settings_field() {
         let Ok(Value::Object(map)) = serde_json::to_value(Settings::default()) else {

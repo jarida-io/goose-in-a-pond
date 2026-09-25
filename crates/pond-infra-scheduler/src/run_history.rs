@@ -1,7 +1,4 @@
-//! JSON-file-backed execution history for scheduled tasks.
-//!
-//! Stores the last N runs per schedule (bounded to avoid unbounded growth).
-//! The file lives alongside `schedules.json` in the data directory.
+//! JSON-file execution history for scheduled tasks, capped per schedule.
 
 use anyhow::Result;
 use chrono::Utc;
@@ -79,7 +76,6 @@ impl JsonRunHistory {
             run.duration_ms = Some(duration_ms);
         }
 
-        // Prune old runs per schedule.
         self.prune(&mut guard);
 
         let _ = self.save_inner(&guard).await;

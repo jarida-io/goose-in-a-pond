@@ -17,10 +17,7 @@ pub enum CreditLedgerError {
     General(String),
 }
 
-/// Driven Port: CreditLedger
-///
-/// The prepaid-credit balance held with each trusted peer. `debit` is the hot-path check
-/// and must never go negative: past the balance it is a typed error, never a wrap or panic.
+/// Prepaid credit per trusted peer; overdrawing in `debit` is a typed error, never wrap or panic.
 #[async_trait]
 pub trait CreditLedger: Send + Sync {
     async fn balance(&self, peer: PeerId) -> Result<Millisats, CreditLedgerError>;

@@ -1,34 +1,6 @@
-//! `MistralRsAgent` — the whole serving path for one turn, in one file.
-//!
-//! # What it is, and what it is for
-//!
-//! GIAP's live path is `GooseAdapter → goose::Agent::reply → GiapProviderShim →
-//! provider`. That is a lot of machinery to reach a model, and most of what it
-//! does is undo itself: the shim exists to veto goose's own system prompt,
-//! strip its turn-context injection, and re-attach GIAP's. This agent asks what
-//! is left if you start from the other end — the model — and add only what a
-//! turn actually needs.
-//!
-//! # The one thing carried over
-//!
-//! The system prompt. Not goose's: `pond_core::prompts` and
-//! `models::services::prompt_builder` are GIAP's own, they have no goose
-//! dependency, and they are the accumulated result of the prompt work — the v2
-//! tag skeleton, the compact/full tiering, the static/dynamic partition that
-//! keeps a KV prefix stable. Rewriting that would have thrown away the part
-//! worth keeping.
-//!
-//! Everything else here is local: history from [`SessionStorage`], tools from
-//! the [`ToolDispatcher`] port (whose live implementation, `McpToolDispatcher`,
-//! is itself goose-free), and a tool loop of about fifty lines.
-//!
-//! # What it deliberately does not do
-//!
-//! No answer review, no delegation, no hybrid compaction, no memory
-//! extraction, no vision, no recipes. Those live on the goose path and are not
-//! reimplemented here; a turn that needs them belongs on that path. This is a
-//! measurement instrument, not a replacement — see
-//! `docs/developer/mistralrs-direct-agent.md`.
+//! `MistralRsAgent`: a turn served straight on mistral.rs, reusing only GIAP's (goose-free)
+//! system prompt. No review, delegation, compaction, memory, vision or recipes: a measurement
+//! instrument, not a replacement; see `docs/developer/mistralrs-direct-agent.md`.
 
 use crate::provider::{MistralRsProvider, MrEvent};
 use anyhow::Result;
@@ -58,19 +30,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Tool rounds before the loop gives up. Matches `PondAgent`'s guard: the point
-/// is not the exact number but that an unbounded loop on-device is a hang.
+/// Tool rounds before the loop gives up (as in `PondAgent`); unbounded would hang on-device.
 const MAX_TOOL_ROUNDS: u32 = 10;
 
 /// Messages fetched before budgeting trims them.
 const HISTORY_LIMIT: usize = 60;
 
-/// Shortest decode window worth turning into a rate.
-///
-/// A turn that ends in a tool call emits its whole `tool_calls` delta at once,
-/// so the window between first and last token is near zero and the quotient
-/// came out at 230,000 tok/s in the bake-off harness. A number that cannot be
-/// true is worse than no number.
+/// Shortest decode window worth a rate: a tool-call delta arrives at once, giving absurd rates.
 const MIN_DECODE_WINDOW_MS: u64 = 100;
 
 pub struct MistralRsAgent {
@@ -105,14 +71,8 @@ impl MistralRsAgent {
         }
     }
 
-    /// Assemble GIAP's system prompt.
-    ///
-    /// This is the borrowed half, and it is borrowed whole: template resolution
-    /// (DB row first, built-in second), the static/dynamic partition, prompt
-    /// extras, and skills-by-name-and-description. The one adaptation is
-    /// `native_tools_json = true` — tools travel structurally in the request
-    /// body, so the template must not also render a list of them. Feeding both
-    /// is how a model ends up describing tools instead of calling them.
+    /// Assemble GIAP's system prompt, with `native_tools_json`: tools travel in the request body,
+    /// and also listing them in prose makes a model describe tools instead of calling them.
     async fn build_system_prompt(
         &self,
         settings: &Settings,
@@ -193,14 +153,9 @@ impl MistralRsAgent {
         prompt
     }
 
-    /// Tool schemas for this turn, straight from the dispatcher.
-    ///
-    /// `tools_json` is already the OpenAI shape, so it is passed through as a
-    /// string rather than round-tripped via `ToolDefinition` — the same reason
-    /// `PondAgent` does it: a conversion is a place for the schema to change.
+    /// This turn's tools; `tools_json` passes through as-is, since a conversion could alter it.
     async fn turn_tools(&self) -> (Vec<ToolDefinition>, Option<String>) {
-        // The same switch the goose path honours, so it means one thing on both
-        // backends rather than "no tools, unless you picked the other one".
+        // Same switch as the goose path, so it means one thing on both backends.
         if pond_core::mcp::domain::tool_group::no_tools_env_set() {
             tracing::warn!("GIAP_NO_TOOLS is set — this turn is offered no tools");
             return (Vec::new(), None);
@@ -226,20 +181,8 @@ impl MistralRsAgent {
 /// Environment variable that turns on payload capture.
 const DUMP_DIR_ENV: &str = "GIAP_MISTRALRS_DUMP_DIR";
 
-/// Write this turn's first request to `$GIAP_MISTRALRS_DUMP_DIR`, for replay in
-/// the bake-off lab.
-///
-/// Three files, because a harness wants different slices of the same request:
-/// `system.txt` (the assembled system prompt, as text), `tools.json` (the tool
-/// specs, as an array) and `body.json` (the whole thing, ready to POST).
-///
-/// This exists because a lab that invents its own prompt measures its own
-/// prompt. GIAP's real turn-1 payload is a few thousand tokens of preamble and
-/// tool schema, and prefill is most of TTFT on-device, so a toy prompt does not
-/// just understate the number -- it changes which engine wins.
-///
-/// Failures are logged and swallowed: a diagnostic that can break a turn is a
-/// worse trade than a diagnostic that sometimes does not appear.
+/// Write this turn's first request to `$GIAP_MISTRALRS_DUMP_DIR` as `system.txt`, `tools.json`
+/// and `body.json`, for bake-off replay. Failures are logged, never fatal to the turn.
 async fn dump_payload(
     provider: &MistralRsProvider,
     system_prompt: &str,
@@ -330,9 +273,7 @@ impl Agent for MistralRsAgent {
         request: AgentRequest,
     ) -> Result<BoxStream<'static, Result<AgentStreamEvent>>> {
         let settings = self.settings_repo.get().await?;
-        // Tools first: the prompt's tool-usage guidance is conditional on there
-        // being any, and telling a model with none how to call one is how a
-        // turn ends up describing a tool instead of answering.
+        // Tools first: the prompt's tool guidance is only included when there are tools.
         let (tool_defs, tools_json) = self.turn_tools().await;
         let system_prompt = self
             .build_system_prompt(&settings, &request, !tool_defs.is_empty())
@@ -362,12 +303,8 @@ impl Agent for MistralRsAgent {
             .await
             .unwrap_or_default();
         let mut messages = HistoryManager::new(history_budget).build_history(&stored);
-        // `ChatService::persist_user_message` runs BEFORE the agent, so this
-        // turn's message is already the newest row. Appending it again shows the
-        // model the same question twice, which reads as a user repeating
-        // themselves — the answer to "what did I just ask you?" came back as "I
-        // just asked you what you had just asked me." The goose path never hits
-        // this: it reads history from goose's own store, which has no such row.
+        // `ChatService::persist_user_message` runs before the agent, so this turn's message may
+        // already be the newest row; don't show the model the question twice.
         if messages
             .last()
             .is_some_and(|m| m.role == Role::User && m.content == request.message)
@@ -397,10 +334,7 @@ impl Agent for MistralRsAgent {
             compact_tools_json_override: None,
         };
 
-        // Turn 1's payload is the one a replay harness wants: later rounds
-        // carry tool results that only make sense with the tools that produced
-        // them. Written before the first request, so a turn that fails still
-        // leaves the payload that failed.
+        // Before the first request, so a failing turn still leaves its payload.
         dump_payload(
             &self.provider,
             &system_prompt,
@@ -418,9 +352,7 @@ impl Agent for MistralRsAgent {
         let context_limit = caps.context_window_tokens;
 
         Ok(Box::pin(async_stream::stream! {
-            // Tool egress is attributed by session, and nothing else in this
-            // path sets it — an unset id makes every tool call this agent runs
-            // anonymous in the audit log.
+            // Nothing else on this path sets it; unset, tool egress is anonymous in the audit log.
             pond_core::shared::services::egress::set_current_session_id(&session_id);
 
             let mut stats = TurnStats {
@@ -469,24 +401,21 @@ impl Agent for MistralRsAgent {
                             });
                         }
                         Ok(MrEvent::Usage(u)) => {
-                            // The FINAL inference's prompt is the turn's real
-                            // context load, so this overwrites rather than sums.
+                            // The final prompt is the real context load: overwrite, don't sum.
                             stats.prompt_tokens = u.prompt_tokens;
                             stats.context_used_tokens = Some(u.prompt_tokens);
                             stats.completion_tokens += u.completion_tokens;
                         }
                         Err(e) => {
-                            // Includes the 200-with-an-error-body case, which
-                            // is invisible at the HTTP layer.
+                            // Includes a 200 with an error body, invisible at the HTTP layer.
                             yield Ok(AgentStreamEvent::Error { content: e.to_string() });
                             return;
                         }
                     }
                 }
 
-                // Wall-clock, not engine-reported: mistral.rs's OpenAI surface
-                // publishes no prefill timing, so `prefill_ms` stays None rather
-                // than being filled with a number of a different provenance.
+                // Wall-clock: mistral.rs's OpenAI surface reports no prefill timing, so
+                // `prefill_ms` stays None.
                 if let Some(first) = first_token_at {
                     if stats.ttft_ms.is_none() {
                         stats.ttft_ms = Some(first.duration_since(sent_at).as_millis() as u64);
@@ -525,8 +454,7 @@ impl Agent for MistralRsAgent {
                     pond_core::shared::services::egress::set_current_tool(&call.name);
                     let content = match disp.dispatch(&call.name, args).await {
                         Ok(r) => r.content,
-                        // A failed tool is a result the model can react to, not
-                        // a dead turn: it can apologise, or try another tool.
+                        // A failed tool is a result the model can react to, not a dead turn.
                         Err(e) => format!("Tool '{}' failed: {}", call.name, e),
                     };
                     pond_core::shared::services::egress::set_current_tool("");
@@ -610,16 +538,12 @@ mod tests {
         assert!(!thinking_enabled(&settings_with_mode("off"), &caps(true)));
     }
 
-    /// "auto" is the default, and it is the only mode that asks the model.
     #[test]
     fn thinking_mode_auto_defers_to_the_model() {
         assert!(thinking_enabled(&settings_with_mode("auto"), &caps(true)));
         assert!(!thinking_enabled(&settings_with_mode("auto"), &caps(false)));
     }
 
-    /// The de-duplication above, as a rule about the message list rather than a
-    /// claim about `ChatService`: whatever the storage returns, the model must
-    /// see this turn's question exactly once, and last.
     #[test]
     fn the_current_message_is_not_repeated_when_storage_already_holds_it() {
         let message = "what time is it?";
@@ -639,8 +563,7 @@ mod tests {
         assert_eq!(messages.iter().filter(|m| m.content == message).count(), 1);
     }
 
-    /// And it must not eat a genuine repeat from an earlier turn: only the
-    /// LAST message is a candidate, because only the last one can be this turn's.
+    /// Only the last message can be this turn's, so only it is a dedupe candidate.
     #[test]
     fn an_identical_question_from_an_earlier_turn_survives() {
         let message = "what time is it?";
@@ -656,8 +579,6 @@ mod tests {
         assert_eq!(messages.iter().filter(|m| m.content == message).count(), 2);
     }
 
-    /// A tool-call-only round produces a decode window of nearly zero. Turning
-    /// that into a rate is where 230,000 tok/s came from.
     #[test]
     fn a_decode_window_shorter_than_the_floor_yields_no_rate() {
         let mut stats = TurnStats {

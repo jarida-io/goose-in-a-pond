@@ -35,14 +35,7 @@ vi.mock("../api/PondApiClient", () => ({
   },
 }));
 
-/**
- * Mutable app state for the mock.
- *
- * `vi.hoisted` because `vi.mock` factories are lifted above the imports, so a
- * plain `let` declared here would still be in its temporal dead zone when the
- * factory is defined. Reset in `beforeEach`, so a test that opens a
- * conversation cannot leak one into the next.
- */
+// `vi.hoisted`: mock factories are lifted above the imports, where a plain `let` would be in its TDZ.
 const appState = vi.hoisted(() => ({ sessionId: null as string | null }));
 
 vi.mock("../state/AppContext", () => ({
@@ -56,7 +49,6 @@ vi.mock("../state/AppContext", () => ({
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/** Build a mock async generator that yields the given events then returns. */
 function makeStream(events: ChatEvent[]): AsyncGenerator<ChatEvent> {
   return (async function* () {
     for (const ev of events) yield ev;
@@ -68,10 +60,8 @@ beforeEach(() => {
   appState.sessionId = null;
   vi.mocked(api.listSessions).mockResolvedValue([]);
   vi.mocked(api.getSessionMessages).mockResolvedValue([]);
-  // The turn lives in a module singleton so it can outlive an unmount, which
-  // means it also outlives `cleanup()` — without this, one test's transcript is
-  // the next test's starting state. This file also mocks AppContext wholesale,
-  // so the provider that normally installs the bridge never runs here.
+  // The turn is a module singleton that outlives cleanup(), so reset it; with AppContext mocked
+  // wholesale, no provider installs the bridge, so install it here.
   __resetChatRunForTests();
   setChatRunBridge({
     sessionToken: "test-token",
@@ -92,9 +82,7 @@ describe("Chat section", () => {
   it("renders empty state when no messages", async () => {
     render(<Chat />);
     await waitFor(() => {
-      // The greeting rotates and personalises from `user_name`, so there is no
-      // fixed string to assert. The card itself is the stable signal that the
-      // thread is empty.
+      // The greeting rotates and is personalised, so assert the empty-state card instead.
       expect(document.querySelector(".chat-empty")).toBeTruthy();
     });
   });
@@ -129,10 +117,6 @@ describe("Chat section", () => {
   });
 
   it("shows a friendly status line for tool_call events instead of a raw card", async () => {
-    // The chat bubble used to render a `ContextCard` (chip + raw `{}` JSON)
-    // for every tool invocation, leaking agent plumbing into the thread.
-    // It now shows a humanised one-line status while the tool runs and
-    // clears it once the model's reply text arrives.
     vi.mocked(api.chatStream).mockReturnValue(
       makeStream([
         {
@@ -151,12 +135,10 @@ describe("Chat section", () => {
     fireEvent.change(screen.getByLabelText("Message input"), { target: { value: "Weather?" } });
     fireEvent.click(screen.getByLabelText("Send message"));
 
-    // Reply text reaches the bubble and the raw ContextCard never does.
     await waitFor(() => {
       expect(screen.getByText("It's sunny today.")).toBeTruthy();
     });
-    // ContextCards may or may not render — the key assertion is the reply text.
-    // (Our design renders inline cards; Exile10's removes them.)
+    // Only the reply text is asserted: inline cards may render by design.
   });
 
   it("shows error text when error event received", async () => {
@@ -195,12 +177,7 @@ describe("Chat section", () => {
   });
 
   it("does not run text after an error onto the end of the error sentence", async () => {
-    // The reported bug, exactly: a new chat rendered
-    //   "Error: Could not resolve model config: missing providerI could not produce…"
-    // The error arm overwrites `text` while the text arm appends to it, and the server
-    // deliberately keeps streaming after an error frame — so a following text frame ran
-    // straight onto the end of the error. The two are separate events and must render
-    // as separate messages.
+    // The server keeps streaming after an error frame, and the error arm overwrites while text appends.
     vi.mocked(api.chatStream).mockReturnValue(
       makeStream([
         { type: "error", error: "Could not resolve model config: missing provider" },
@@ -218,11 +195,8 @@ describe("Chat section", () => {
       expect(screen.getByText(/^i could not produce a response to that\.$/i)).toBeTruthy();
     });
 
-    // Anchored at both ends: the error bubble's own text must END at "provider",
-    // which is precisely what appending broke. Asserted per element rather than
-    // against `document.body.textContent` — that flattens the whole tree, so two
-    // correctly separate bubbles still read as "providerI could not" there and the
-    // assertion would fail on a working fix.
+    // Per element, not document.body.textContent: flattening reads two correct bubbles as
+    // "providerI could not", failing a working fix.
     const errorBubble = screen.getByText(
       /^error: could not resolve model config: missing provider$/i,
     );
@@ -246,13 +220,10 @@ describe("Chat section", () => {
 
     await waitFor(() => expect(screen.getByText("Hi!")).toBeTruthy());
 
-    // Click New chat
     fireEvent.click(screen.getByRole("button", { name: /new chat/i }));
 
     await waitFor(() => {
-      // The greeting rotates and personalises from `user_name`, so there is no
-      // fixed string to assert. The card itself is the stable signal that the
-      // thread is empty.
+      // The greeting rotates and is personalised, so assert the empty-state card instead.
       expect(document.querySelector(".chat-empty")).toBeTruthy();
       expect(screen.queryByText("Hi!")).toBeNull();
     });
@@ -283,24 +254,12 @@ describe("Chat section", () => {
 
     await waitFor(() => expect(screen.getByText("Sure!")).toBeTruthy());
 
-    // At minimum, chatStream was called once
     expect(vi.mocked(api.chatStream)).toHaveBeenCalledTimes(1);
   });
 });
 
-// ── PAI-4 P7b-fix: the context-pressure note has a consumer HERE ──────────────
-//
-// Round 1 landed the note in `hub/views/ChatHub.tsx` and guarded it with a
-// two-substring grep, because that component has no render test. Synthesis
-// corrected that: two semantic mutations left both substrings in place and
-// passed 261/261 — adding `showTurnStats &&` to the render guard (which ships
-// the note invisible on every default install, `show_turn_stats` being false in
-// Rust), and attaching the frame to a message id that does not exist.
-//
-// This is the render test the correction asked for, and it is written here
-// rather than against ChatHub because `sections/Chat.tsx` already has the mount
-// harness. It drives the real component with a real stream and asserts a real
-// DOM node, so both of those mutations go red.
+// ── Context-pressure note ─────────────────────────────────────────────────────
+// Must render with `show_turn_stats` off (the default) and on the message the frame belongs to.
 describe("Chat — context pressure note (PAI-4 P7b)", () => {
   async function streamAndSend(events: ChatEvent[]) {
     vi.mocked(api.chatStream).mockReturnValue(makeStream(events));
@@ -337,20 +296,13 @@ describe("Chat — context pressure note (PAI-4 P7b)", () => {
           "not exist",
       ).toBeTruthy();
     });
-    // The sentence the server sent, not a placeholder, and the control itself.
     expect(screen.getByText(/82% full/)).toBeTruthy();
     expect(screen.getByRole("button", { name: /compact now/i })).toBeTruthy();
   });
 
   it("enables the control with the session id that arrived on done", async () => {
-    // The `context_warning` frame carries no session id and on a first turn the
-    // id only arrives with `done`, which is emitted after it. A note whose
-    // button stays disabled is a dead control by another route.
-    //
-    // The text frame is part of the fixture on purpose: an agent bubble with no
-    // text, no cards and no reasoning is suppressed entirely, note and all, and
-    // the generator that emits `context_warning` is the one that emits the
-    // answer — so a warning-only turn is not a state production produces.
+    // The frame has no session id; on a first turn it comes with the later `done`. The text frame is
+    // needed: a bubble with no text, cards or reasoning is suppressed, note and all.
     await streamAndSend([
       { type: "text", content: "The greenhouse fans are on." },
       warningFrame,
@@ -365,8 +317,7 @@ describe("Chat — context pressure note (PAI-4 P7b)", () => {
   });
 
   it("renders no note for a turn that never reported pressure", async () => {
-    // The vacuity control. Without it, a component that rendered the note on
-    // every assistant message would pass the test above.
+    // Vacuity control for the tests above.
     await streamAndSend([
       { type: "text", content: "The greenhouse fans are on." },
       { done: true, session_id: "sess-ctx", type: "done" },
@@ -377,32 +328,14 @@ describe("Chat — context pressure note (PAI-4 P7b)", () => {
   });
 });
 
-// ── PAI-5 P6: reasoning survives the reload ───────────────────────────────────
-//
-// The thinking panel and its live accumulator both already existed; what did
-// not was the refill from history, so every reloaded conversation showed its
-// answers with the reasoning behind them silently gone. This drives the real
-// component against a real `getSessionMessages` payload rather than asserting
-// that `sessionMessagesToMessages` mentions `thinking` — a grep would have
-// passed against the version that dropped the field on the floor.
-//
-// `vi.resetModules()` + dynamic import because the module-level AppContext mock
-// pins `sessionId: null`. And the session id is flipped AFTER mount rather than
-// set before it, because that is the only way history actually loads: the effect
-// bails when the incoming id already equals `sessionIdRef.current`, which it
-// does on the very first render. A test that mounted with the id already set
-// would render an empty conversation and prove nothing — quietly, since the
-// assertion it makes is about what is absent.
+// ── Reasoning survives the reload ─────────────────────────────────────────────
+// Fresh modules because the top-level AppContext mock pins `sessionId: null`. The id changes after
+// mount: the effect skips an id equal to the one it first saw, so mounting with it set loads nothing.
 describe("Chat history — persisted reasoning (PAI-5 P6)", () => {
   async function renderWithHistory(messages: unknown[]) {
     vi.resetModules();
     const getSessionMessages = vi.fn().mockResolvedValue(messages);
-    // `vi.resetModules()` + `doMock` + dynamic import does not always win the
-    // race: the component occasionally resolves the TOP-LEVEL mock instead,
-    // which `beforeEach` has pinned to []. When that happened the thread
-    // rendered its empty state and the assertion failed — roughly 1 run in 5,
-    // reproducible against HEAD. Pointing both registries at the same data
-    // makes the outcome independent of which one wins.
+    // doMock doesn't always win over the top-level mock (~1 run in 5), so point both at the same data.
     vi.mocked(api.getSessionMessages).mockResolvedValue(messages as never);
     const holder = { sessionId: null as string | null };
     vi.doMock("../api/PondApiClient", () => ({
@@ -431,19 +364,13 @@ describe("Chat history — persisted reasoning (PAI-5 P6)", () => {
       }),
       useAppDispatch: () => vi.fn(),
     }));
-    // Same hazard as the api mock above, one layer down: the turn store is a
-    // module singleton, so the instance the FRESH `Chat` binds to is whichever
-    // one this reset registry hands out — not the one `beforeEach` reset. Left
-    // stale, its `sessionId` still reads "sess-1" from the previous test in
-    // this block, the external-session effect sees nothing to follow, and the
-    // thread renders empty. Importing it from the same registry, right here,
-    // is what guarantees we reset the instance `Chat` is about to use.
+    // The fresh Chat binds to this registry's chatRunStore, not the one beforeEach reset; left stale,
+    // its "sess-1" from the previous test means the session effect sees nothing to follow.
     const store = await import("../state/chatRunStore");
     store.__resetChatRunForTests();
     const { Chat: FreshChat } = await import("./Chat");
     const { rerender } = render(<FreshChat />);
-    // The sidebar-click path: the session id arrives from outside, the effect
-    // sees it differ from what it last saw, and fetches.
+    // The sidebar-click path: an outside id that differs from the last one triggers the fetch.
     holder.sessionId = "sess-1";
     await act(async () => {
       rerender(<FreshChat />);
@@ -476,29 +403,21 @@ describe("Chat history — persisted reasoning (PAI-5 P6)", () => {
 
     await waitFor(() => expect(screen.getByText("The porch light is on.")).toBeTruthy());
 
-    // Reasoning now collapses to a single line, so the disclosure has to be
-    // opened before the passages exist in the DOM. Queried by element rather
-    // than by the word "Thinking": the composer carries a thinking-mode toggle
-    // using the same word.
+    // Collapsed until opened. Queried by element: the composer's thinking-mode toggle also says "Thinking".
     const disclosure = document.querySelector(".think");
     expect(disclosure).toBeTruthy();
-    // Past tense once the turn is over — a replayed transcript is never "still
-    // thinking".
+    // Past tense: a replayed transcript is never "still thinking".
     expect(disclosure!.textContent).toMatch(/thought for/i);
 
     fireEvent.click(screen.getByRole("button", { expanded: false, name: /thought for/i }));
 
-    // BOTH passages. Asserting only the toggle would pass against a refill that
-    // kept the first block and dropped the rest.
+    // Both passages: a refill that kept only the first block would pass a toggle-only check.
     expect(screen.getByText("They said 'it' — probably the thermostat.")).toBeTruthy();
     expect(screen.getByText("No: the porch light.")).toBeTruthy();
   });
 
   it("shows no thinking panel for a turn recorded without it", async () => {
-    // The default state of every pond: `persist_thinking` is off, so the server
-    // omits the field entirely. This is the vacuity control for the test above
-    // — without it, a component that rendered a "Thinking" panel on every
-    // assistant message would pass that one.
+    // The default: `persist_thinking` is off, so the server omits the field. Vacuity control for the above.
     await renderWithHistory([userRow, assistantRow()]);
 
     await waitFor(() => expect(screen.getByText("The porch light is on.")).toBeTruthy());
@@ -515,15 +434,7 @@ describe("Chat history — persisted reasoning (PAI-5 P6)", () => {
 
 // ── Leaving the section and coming back ───────────────────────────────────────
 
-/**
- * The reported bug, driven end to end.
- *
- * `GuiMode` renders sections with a `switch`, so a sidebar press really does
- * unmount this component -- `unmount()` here is that press, not an
- * approximation of it. Before the turn was hoisted into `chatRunStore`, coming
- * back showed the "All chats" wall and the answer was nowhere, even though the
- * server had finished writing it.
- */
+// GuiMode's section `switch` really unmounts Chat, so `unmount()` here is the sidebar press itself.
 describe("navigating away mid-turn", () => {
   /** A stream held open, so "while Goose is still answering" is a real state. */
   function heldStream(events: ChatEvent[]) {
@@ -539,9 +450,7 @@ describe("navigating away mid-turn", () => {
   }
 
   async function sendAndLeave() {
-    // A pond that already has conversations, so the wall is what this section
-    // would otherwise open on -- otherwise "landed in the thread" would be
-    // satisfied by the empty-pond case and prove nothing.
+    // Existing conversations, so the section would otherwise open on the wall, not an empty pond's thread.
     vi.mocked(api.listSessions).mockResolvedValue([
       { id: "s-1", title: "an older chat", created_at: "", updated_at: "" },
     ] as never);
@@ -568,8 +477,7 @@ describe("navigating away mid-turn", () => {
     });
 
     render(<Chat />);
-    // The thread, not the wall, and the whole answer -- including the half that
-    // arrived with nothing mounted to receive it.
+    // The thread, not the wall, with the half that arrived while unmounted.
     await waitFor(() => expect(screen.getByText(/Still going and back\./)).toBeTruthy());
     expect(screen.getByLabelText("Message input")).toBeTruthy();
   });
@@ -603,12 +511,10 @@ describe("navigating away mid-turn", () => {
       await new Promise((r) => setTimeout(r, 0));
     });
 
-    // First return shows it...
     const first = render(<Chat />);
     await waitFor(() => expect(screen.getByText(/Still going and back\./)).toBeTruthy());
     first.unmount();
 
-    // ...and the visit after that is the wall again, as the section intends.
     vi.mocked(api.listSessions).mockResolvedValue([
       { id: "s-1", title: "an older chat", created_at: "", updated_at: "" },
     ] as never);
@@ -621,10 +527,7 @@ describe("navigating away mid-turn", () => {
 // ── Message queuing ───────────────────────────────────────────────────────────
 
 describe("message queuing", () => {
-  /**
-   * A stream the test can hold open, so "while Goose is still answering" is a
-   * real state rather than a race against an instant mock. `release()` ends it.
-   */
+  /** A stream held open until `release()`, so "still answering" is a real state. */
   function heldStream(events: ChatEvent[]) {
     let release!: () => void;
     const held = new Promise<void>((r) => { release = r; });
@@ -649,8 +552,6 @@ describe("message queuing", () => {
     await waitFor(() => expect(screen.getByLabelText("Message input")).toBeTruthy());
     await typeAndSend("first");
 
-    // The old composer disabled itself here, which silently swallowed anything
-    // typed during a reply.
     await waitFor(() => {
       expect((screen.getByLabelText("Message input") as HTMLTextAreaElement).disabled).toBe(false);
     });
@@ -669,7 +570,6 @@ describe("message queuing", () => {
 
     await typeAndSend("second");
 
-    // Visible in the thread, marked, and not yet sent.
     await waitFor(() => expect(screen.getByText("Queued")).toBeTruthy());
     expect(vi.mocked(api.chatStream)).toHaveBeenCalledTimes(1);
 
@@ -689,7 +589,6 @@ describe("message queuing", () => {
     await typeAndSend("third");
     await waitFor(() => expect(screen.getAllByText("Queued")).toHaveLength(2));
 
-    // Each queued message gets its own turn, in the order it was typed.
     vi.mocked(api.chatStream)
       .mockReturnValueOnce(makeStream([{ type: "text", content: "two" }, { done: true, session_id: "s", type: "done" }]))
       .mockReturnValueOnce(makeStream([{ type: "text", content: "three" }, { done: true, session_id: "s", type: "done" }]));
@@ -749,8 +648,6 @@ describe("thinking toggle", () => {
   });
 
   it("restores the previous mode rather than collapsing it to auto", async () => {
-    // Someone who chose "on" explicitly should get "on" back when they switch
-    // thinking on again — not silently downgraded to the default.
     vi.mocked(api.getSettings).mockResolvedValue({ show_turn_stats: false, thinking_mode: "on" } as never);
     const toggle = await renderChat();
     await waitFor(() => expect(screen.getByText("On")).toBeTruthy());
@@ -771,7 +668,6 @@ describe("thinking toggle", () => {
 
     fireEvent.click(toggle);
 
-    // Optimistic, but it does not lie: a failed write puts the switch back.
     await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("true"));
     expect(screen.getByText("Auto")).toBeTruthy();
   });
@@ -780,10 +676,7 @@ describe("thinking toggle", () => {
 describe("Chat — renaming this conversation", () => {
   const SESSION = { id: "sess-1", title: "so i was wondering whether", created_at: "", updated_at: "" };
 
-  /**
-   * Chat opens on the wall, so a test that wants the thread has to walk the
-   * same route a person does: find the card, press it, land in the chat.
-   */
+  /** Chat opens on the wall, so walk a person's route into the thread. */
   async function openConversation() {
     appState.sessionId = "sess-1";
     vi.mocked(api.listSessions).mockResolvedValue([SESSION] as never);
@@ -808,8 +701,7 @@ describe("Chat — renaming this conversation", () => {
 
     await screen.findByText(NEW);
     expect(vi.mocked(api.retitleSession)).toHaveBeenCalledWith("sess-1");
-    // The history list is refetched too, so the panel agrees with the header
-    // rather than the two drifting until the next reload.
+    // The history list is refetched too, so the panel agrees with the header.
     await waitFor(() => expect(vi.mocked(api.listSessions).mock.calls.length).toBeGreaterThan(1));
   });
 
@@ -837,8 +729,7 @@ describe("Chat — renaming this conversation", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Rename this conversation/ }));
 
-    // The failure is non-fatal: the conversation keeps the name it had, and the
-    // button becomes pressable again rather than sticking on "Renaming".
+    // And the button is pressable again rather than stuck on "Renaming".
     await waitFor(() =>
       expect((screen.getByRole("button", { name: /Rename this conversation/ }) as HTMLButtonElement).disabled)
         .toBe(false));
@@ -864,8 +755,6 @@ describe("Chat — the header's controls", () => {
     await screen.findByRole("button", { name: /Rename this conversation/ });
   }
 
-  /// The wall replaced it. Two routes to the same list, one of them cramped
-  /// behind a dropdown, is what the wall was built to end.
   it("no longer offers a History dropdown beside New chat", async () => {
     await openConversation();
     expect(screen.queryByRole("button", { name: /history/i })).toBeNull();
@@ -873,10 +762,7 @@ describe("Chat — the header's controls", () => {
     expect(screen.getByRole("button", { name: /All conversations/ })).toBeTruthy();
   });
 
-  /// Typing a name is the ONLY thing that marks a title as the user's, and a
-  /// user's title is the one kind no background pass will ever overwrite. With
-  /// the dropdown gone, this is the last route to it — if it breaks, that whole
-  /// protection becomes unreachable rather than merely inconvenient.
+  // The only route to a user-owned title, the one kind no background pass overwrites.
   it("renames by typing into the title", async () => {
     await openConversation();
 
@@ -903,9 +789,7 @@ describe("Chat — the header's controls", () => {
     expect(vi.mocked(api.renameSession)).not.toHaveBeenCalled();
   });
 
-  /// Clearing the box and walking away is far likelier to be a slip than an
-  /// instruction to call the conversation nothing, and there is no undo for the
-  /// name it would replace.
+  // Likelier a slip than an instruction, and nothing could undo the lost name.
   it("treats an emptied name as a change of mind, not a rename", async () => {
     await openConversation();
     fireEvent.click(screen.getByRole("button", { name: /Rename conversation:/ }));
@@ -918,13 +802,11 @@ describe("Chat — the header's controls", () => {
     expect(vi.mocked(api.renameSession)).not.toHaveBeenCalled();
   });
 
-  /// An unsaved conversation is called "New Chat", and a control with that name
-  /// sitting next to the actual New chat button is two things with one name.
+  // The placeholder title is "New Chat", right beside the real New chat button.
   it("does not make the placeholder title a control", async () => {
     render(<Chat />);
     await screen.findByRole("button", { name: "New chat" });
     expect(screen.queryByRole("button", { name: /Rename conversation:/ })).toBeNull();
-    // Exactly one thing here answers to "New chat".
     expect(screen.getAllByRole("button", { name: /new chat/i })).toHaveLength(1);
   });
 });

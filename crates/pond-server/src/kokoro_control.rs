@@ -1,27 +1,5 @@
-//! Reconfiguring the running Kokoro engine, downloads included.
-//!
-//! This is the `TtsControl` implementation, and it lives in `pond-server`
-//! rather than in the adapter for one reason: fetching is the server's job.
-//! `pond-adapters-kokoro` knows how to load a voice off disk and how to speak;
-//! it has no HTTP client and should not grow one. `pond-api` in turn only sees
-//! the port, so the route that applies a voice change does not know Kokoro
-//! exists.
-//!
-//! ## Why a live apply exists at all
-//!
-//! Everything the settings screen changes used to take effect on the next
-//! start: `ensure_kokoro_engine` ran at boot and `KokoroOutput` was built once.
-//! Choosing a voice therefore did nothing you could hear until the pond was
-//! restarted — which, for a device that lives on a shelf, means the setting
-//! looked broken.
-//!
-//! All three changes are cheap enough to do live:
-//!
-//! | change | cost |
-//! |---|---|
-//! | pace | a tensor value |
-//! | voice | a 522 KB style table, plus a download the first time |
-//! | quality | drops the session; the next utterance loads the new weights |
+//! Live `TtsControl` for Kokoro: pace, voice and quality, downloading what is missing.
+//! Here, not in the adapter, because `pond-adapters-kokoro` has no HTTP client.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -51,15 +29,7 @@ impl KokoroTtsControl {
         }
     }
 
-    /// A progress sink that writes into the shared download tracker.
-    ///
-    /// Reported there rather than through a channel of its own so the picker
-    /// reads the same feed as every other transfer on the page — one idea of
-    /// "downloading", not two that can disagree.
-    ///
-    /// Chunks arrive from a blocking-ish loop, so the write is scheduled onto
-    /// the runtime rather than awaited: a progress callback that blocks the
-    /// transfer to update a UI is a bad trade.
+    /// Progress sink into the shared download tracker; writes are spawned, never awaited.
     fn reporter(&self, category: &str) -> model_download::DlProgress {
         let tracker = self.tracker.clone();
         let category = category.to_string();
@@ -79,9 +49,7 @@ impl KokoroTtsControl {
                         status: "downloading".into(),
                         finished_at: None,
                         control: Default::default(),
-                        // Resume is handled by re-running `apply`, which
-                        // re-derives the URL from the tier and voice — so this
-                        // entry does not need to carry one.
+                        // No URL: resuming re-runs `apply`, which re-derives it.
                         url: None,
                     });
                 e.downloaded_bytes = downloaded;
@@ -105,14 +73,8 @@ impl KokoroTtsControl {
 #[async_trait]
 impl TtsControl for KokoroTtsControl {
     async fn apply(&self, voice: &str, speed: f32, quality: &str) -> Result<TtsApplied> {
-        // Resolve the tier before anything reads it. `q8f16` returns digital
-        // silence on aarch64 Linux, and `speak()` cannot tell a silent buffer
-        // from a quiet one — so a household that picked it would get a pond
-        // that appears to answer and makes no sound, with nothing in the log.
-        //
-        // Substituting here rather than at the point of use keeps the tier that
-        // is downloaded, loaded, persisted and shown back to the household one
-        // string instead of four that can disagree.
+        // Resolve the tier first: `q8f16` is digital silence on aarch64 Linux, and substituting
+        // once keeps the downloaded, loaded, persisted and shown tier the same string.
         let requested = quality;
         let quality = pond_adapters_kokoro::usable_quality(requested);
         if quality != requested {
@@ -131,10 +93,7 @@ impl TtsControl for KokoroTtsControl {
         };
 
         // ── Weights for the requested tier ──
-        //
-        // Checked before the voice: a tier change is the expensive one, and
-        // failing after a voice download would leave the household having paid
-        // for a fetch that changed nothing.
+        // Before the voice: failing after a voice download would waste the fetch.
         let kdir = model_download::kokoro_dir(&self.data_dir);
         let weights = kdir.join(pond_adapters_kokoro::model_filename(quality));
         if !weights.exists() {
@@ -152,9 +111,7 @@ impl TtsControl for KokoroTtsControl {
                 );
             }
         }
-        // Only reload when the file actually changed — `set_model` drops the
-        // session, and dropping it for a tier that is already loaded would
-        // make every save cost a reload.
+        // Reload only on a changed file: `set_model` drops the session.
         if self.engine.model_path().await != weights {
             self.engine.set_model(weights).await?;
             out.engine_reloaded = true;
@@ -170,9 +127,7 @@ impl TtsControl for KokoroTtsControl {
         let path = pond_adapters_kokoro::voices::voice_path(&self.voices_dir(), name)
             .with_context(|| format!("{name:?} is not a usable Kokoro voice id"))?;
         if !path.exists() {
-            // Selecting a voice you do not have is a download, not an error —
-            // the picker offers every voice Kokoro publishes, and the fetch is
-            // half a megabyte.
+            // A missing voice is a download (half a megabyte), not an error.
             model_download::ensure_kokoro_engine_reporting(
                 &self.data_dir,
                 quality,

@@ -15,11 +15,7 @@ afterEach(() => {
 
 const SRC_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
-/**
- * The `context_warning` frame verbatim as `routes.rs` serialises it. Keys are
- * copied from the `json!` literal in the chat-stream generator, not invented
- * here: a fixture that drifts from the wire tests a system that does not exist.
- */
+/** The `context_warning` frame exactly as `routes.rs` serialises it; keep the keys in sync. */
 function frame(overrides: Partial<ContextWarning> = {}): ContextWarning {
   return {
     type: "context_warning",
@@ -50,10 +46,7 @@ function report(overrides: Partial<CompactionReport> = {}): CompactionReport {
 
 describe("ContextPressureNote", () => {
   it("renders a utilisation line when the server sent no warning sentence", () => {
-    // `should_compact` also fires through the `estimated_turns_remaining < 3`
-    // limb, which is reachable BELOW the 60% threshold that populates
-    // `warning`. So `warning: null` on this frame is a producible state and
-    // the component must still say something useful.
+    // Producible: `should_compact` also fires below the 60% threshold that fills `warning`.
     render(
       <ContextPressureNote
         warning={frame({ warning: null, utilization_pct: 41.6, turns_remaining: 2 })}
@@ -95,8 +88,7 @@ describe("ContextPressureNote", () => {
       expect(document.querySelector(".ctx-pressure__result")).not.toBeNull();
     });
     const result = document.querySelector(".ctx-pressure__result")!;
-    // The three assertions that name the defect come first, so a mutation that
-    // turns a refusal into a failure reports the reason rather than a diff.
+    // The defect-naming assertions come first so a failure reports the reason, not a diff.
     expect(
       /error/i.test(document.body.textContent ?? ""),
       "a refusal rendered as an error: 'cooling_down' is information, not a " +
@@ -139,30 +131,8 @@ describe("ContextPressureNote", () => {
   });
 });
 
-/**
- * A CHEAP TRIPWIRE, not coverage — and the distinction is on the record.
- *
- * Round 1 called this "the assertion that would go red if PAI-4 P7b were
- * reverted". Synthesis corrected that: it goes red only for a revert done with
- * a delete key. Two semantic mutations leave both substrings in place and pass
- * — adding `showTurnStats &&` to the render guard (which ships the note
- * invisible on every default install, `show_turn_stats` being false in Rust),
- * and attaching the frame to a message id that does not exist.
- *
- * The coverage now lives in `sections/Chat.test.tsx`, which mounts the real
- * component, drives a real `context_warning` frame through it and asserts a
- * real `.ctx-pressure` node; both mutations above go red there. This stays
- * because it is free and it does catch a deletion, and because `ChatHub.tsx`
- * still has no mount harness of its own — for that surface a grep is all there
- * is, and saying so is better than implying otherwise.
- *
- * The two halves are now checked in two places, because they live in two.
- * Reading the frame moved to `state/chatRunStore.ts` when the turn was hoisted
- * out of the components so it could survive leaving the section; rendering the
- * note is still each surface's own. Asserting them together against a surface
- * file would only prove the two had been copied back into it, which is the
- * arrangement that let the surfaces drift in the first place.
- */
+/** A cheap grep tripwire, not coverage (that is `sections/Chat.test.tsx`): it catches only
+ *  deletions, but it is all `ChatHub.tsx` has, lacking a mount harness. */
 describe("context_warning has a consumer", () => {
   it("the shared turn driver reads the frame", () => {
     const src = readFileSync(join(SRC_DIR, "state/chatRunStore.ts"), "utf8");

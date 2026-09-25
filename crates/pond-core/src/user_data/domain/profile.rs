@@ -4,47 +4,19 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// A household member profile.
-///
-/// `preferences` is a flat string-to-string map (avoids `serde_json::Value`
-/// dependency in pond-core). Callers in pond-api convert to/from JSON objects
-/// when crossing the HTTP boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
     pub id: String,
     pub display_name: String,
     /// Single emoji representing this profile (default: duck emoji)
     pub avatar_emoji: String,
-    /// Arbitrary string key-value preferences
+    /// Flat string map; pond-api converts to/from JSON objects at the HTTP boundary.
     pub preferences: HashMap<String, String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 /// Whose data a read or write is scoped to.
-///
-/// This replaces the `Option<&str>` profile filter that every repository method
-/// used to take. The problem with `Option<String>` for an owner is not that it
-/// is imprecise — it is that `None` is always available, so it becomes the
-/// value every call site passes. Before this type existed, **every** production
-/// caller passed `None`, and the household shared one memory pool. A closed enum
-/// forces each call site to say which of three different things it means.
-///
-/// # Semantics
-///
-/// - [`Owner`](Self::Owner) — this person's own data, plus anything unattributed
-///   (`profile_id IS NULL`), which is shared household context.
-/// - [`Household`](Self::Household) — everything, unfiltered. This is what a
-///   single-member pond has always done, so it is the migration-safe default.
-/// - [`Guest`](Self::Guest) — nothing. An unidentified speaker gets no personal
-///   data at all, and that is the whole point of the variant.
-///
-/// # Note for PAI-1 phase P1
-///
-/// P1 introduces the type and changes signatures only: every call site passes
-/// [`Household`](Self::Household), whose SQL is byte-identical to the old
-/// `None` branch. Nothing changes behaviourally until the resolution chain lands
-/// in P3 and enforcement in P4.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProfileScope {
@@ -56,52 +28,16 @@ pub enum ProfileScope {
     Guest,
 }
 
-/// The owner id [`ProfileScope::every_shape`] puts inside its `Owner`.
-///
-/// Arbitrary — `Owner` needs a payload and a guard quantifying over shapes does
-/// not care which member. A guard that needs TWO owners takes the second from
-/// [`SECOND_EXEMPLAR_OWNER_ID`], because two members are incomparable rather
-/// than ordered (see [`ProfileScope::is_within`]).
+/// Arbitrary owner id [`ProfileScope::every_shape`] puts in its `Owner`.
 pub const EXEMPLAR_OWNER_ID: &str = "exemplar-owner";
 
-/// A second owner id, DIFFERENT from [`EXEMPLAR_OWNER_ID`], for the guards that
-/// need an incomparable pair.
-///
-/// It lives beside `every_shape`'s id rather than inside each test module for
-/// one reason: two copies of "a-different-member" can silently converge, and a
-/// fixture whose two owners are the same member turns every
-/// "two members are incomparable" assertion into a scope compared with itself.
-/// PAI-6's scope-inheritance sweep had its own copy, and rewriting that copy to
-/// [`EXEMPLAR_OWNER_ID`] left all 899 pond-core tests green (verified by
-/// mutation, 2026-08-09). One constant means one distinctness guard —
-/// `scope_lattice_tests::the_second_owner_really_is_a_different_member` — covers
-/// every fixture that uses it.
+/// A second owner id, distinct from [`EXEMPLAR_OWNER_ID`], for incomparable-pair guards.
+/// Shared so `the_second_owner_really_is_a_different_member` covers every fixture using it.
 pub const SECOND_EXEMPLAR_OWNER_ID: &str = "a-different-member";
 
 impl ProfileScope {
-    /// One value of every shape this enum has.
-    ///
-    /// A guard that quantifies over scopes builds its fixture from here rather
-    /// than writing out today's three variants. That is not tidiness: an array
-    /// literal of today's shapes cannot see a shape added tomorrow, and PAI-6's
-    /// four scope-inheritance guards each carried their own copy of one —
-    /// twenty lines after the commit that had removed exactly that defect from
-    /// `RolePersonalData`.
-    ///
-    /// `Owner` carries a `String`, so this is a function and not a `const ALL`
-    /// like [`RedactionKind::ALL`] or [`OnboardingStep::ALL`].
-    ///
-    /// **What this list is and is not.** It is coverage: it decides which
-    /// inputs the guards see. It is NOT the enforcement of PAI-6 invariant 1 —
-    /// a list cannot be, because a variant can be added without touching it.
-    /// The enforcement is `orchestration::ChildScope`, which clamps any
-    /// candidate the parent does not contain down to [`Guest`](Self::Guest),
-    /// whatever shape the candidate turned out to be, and which is a type
-    /// rather than a function so that the clamp cannot be unwired from its one
-    /// call site.
-    ///
-    /// [`RedactionKind::ALL`]: crate::security::domain::redaction::RedactionKind::ALL
-    /// [`OnboardingStep::ALL`]: crate::user_data::domain::onboarding::OnboardingStep::ALL
+    /// One value of every variant, for guards quantifying over scopes. Coverage, not enforcement:
+    /// `orchestration::ChildScope` clamps what the parent does not contain to `Guest`.
     pub fn every_shape() -> Vec<ProfileScope> {
         vec![
             ProfileScope::Owner(EXEMPLAR_OWNER_ID.to_string()),
@@ -110,20 +46,13 @@ impl ProfileScope {
         ]
     }
 
-    /// Named constructor for `serde(default)` attributes.
-    ///
-    /// Only for deserializing a payload written before a scope field existed.
-    /// Never reach for this in Rust code -- state the scope you mean.
+    /// Only for `serde(default)` on payloads predating the scope field; in code, state the scope.
     pub fn household() -> Self {
         ProfileScope::Household
     }
 
-    /// The profile id to filter on, when the scope narrows to one person.
-    ///
-    /// `Household` and `Guest` both return `None`, for opposite reasons —
-    /// `Household` because it wants everything and `Guest` because it wants
-    /// nothing — so this must never be the only thing a caller checks. Pair it
-    /// with [`excludes_everything`](Self::excludes_everything).
+    /// The id to filter on; `None` for both `Household` (all) and `Guest` (nothing), so never
+    /// check it alone — pair it with [`excludes_everything`](Self::excludes_everything).
     pub fn owner_id(&self) -> Option<&str> {
         match self {
             ProfileScope::Owner(id) => Some(id.as_str()),
@@ -141,25 +70,8 @@ impl ProfileScope {
         !self.excludes_everything()
     }
 
-    /// True when `self` can reach no row that `wider` cannot.
-    ///
-    /// The lattice, which is a PARTIAL order and is easy to get wrong:
-    ///
-    /// - [`Guest`](Self::Guest) is within everything -- it reaches nothing.
-    /// - [`Owner(x)`](Self::Owner) is within `Owner(x)` and within
-    ///   [`Household`](Self::Household).
-    /// - `Owner(x)` and `Owner(y)` are INCOMPARABLE for `x != y`. Neither is
-    ///   within the other, because each reaches rows the other cannot.
-    /// - `Household` is within only `Household`.
-    ///
-    /// Written for PAI-6 invariant 1 -- "a subagent's scope is a subset of its
-    /// parent's, never wider" -- but it belongs on the type rather than in the
-    /// orchestration module, because it is a property of the scope lattice and
-    /// PAI-6 P3 is not the only thing that will need to ask.
-    ///
-    /// Note that `Owner(x).is_within(&Owner(x))` and
-    /// `Household.is_within(&Household)` are both true: "never wider" permits
-    /// equal, which is what inheriting a scope unchanged means.
+    /// True when `self` reaches no row that `wider` cannot. Partial order: distinct owners are
+    /// incomparable; equal scopes are within each other.
     pub fn is_within(&self, wider: &ProfileScope) -> bool {
         match (self, wider) {
             // Reaches nothing, so it is within anything.
@@ -174,7 +86,6 @@ impl ProfileScope {
     }
 }
 
-/// Request body for creating a new profile.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateProfileRequest {
     pub display_name: String,
@@ -200,10 +111,7 @@ mod profile_scope_tests {
         assert_eq!(ProfileScope::Guest.owner_id(), None);
     }
 
-    /// `owner_id()` returns `None` for Household AND Guest, for opposite
-    /// reasons. Anything that branches on it alone would hand a Guest the whole
-    /// household's memory, which is the exact failure this type exists to
-    /// prevent.
+    /// Branching on `owner_id()` alone would hand a Guest the whole household's memory.
     #[test]
     fn household_and_guest_are_not_interchangeable_despite_both_lacking_an_id() {
         assert_eq!(
@@ -228,30 +136,14 @@ mod profile_scope_tests {
 mod scope_lattice_tests {
     use super::*;
 
-    /// Every shape, plus a SECOND owner.
-    ///
-    /// The second one is not decoration: `is_within` is a partial order and the
-    /// pair it is most likely to get wrong is two different members, which a
-    /// fixture holding one `Owner` cannot produce.
-    /// [`ProfileScope::every_shape`] deliberately supplies only one, so this is
-    /// where the second is added — and
-    /// `the_second_owner_really_is_a_different_member` below fails if the two
-    /// ids ever converge, which would silently delete the incomparable case
-    /// from three tests at once.
+    /// Every shape plus a second owner, since distinct owners are where `is_within` goes wrong.
     fn every_scope() -> Vec<ProfileScope> {
         let mut scopes = ProfileScope::every_shape();
         scopes.push(ProfileScope::Owner(SECOND_EXEMPLAR_OWNER_ID.to_string()));
         scopes
     }
 
-    /// The distinctness guard for BOTH fixtures that hold two owners: this
-    /// module's [`every_scope`], and PAI-6's
-    /// `orchestration::scope_inheritance_tests::candidate_scopes`. That second
-    /// one used to carry its own copy of the string, so this guard could not
-    /// see it — and rewriting that copy to [`EXEMPLAR_OWNER_ID`] left the whole
-    /// suite green while deleting the incomparable pair from the clamp's sweep.
-    /// Both now read [`SECOND_EXEMPLAR_OWNER_ID`], which is why this assertion
-    /// is worth more than it looks.
+    /// Covers [`every_scope`] and `orchestration::scope_inheritance_tests::candidate_scopes`.
     #[test]
     fn the_second_owner_really_is_a_different_member() {
         assert_ne!(
@@ -272,17 +164,7 @@ mod scope_lattice_tests {
         );
     }
 
-    /// `every_shape()` decides which inputs every scope guard in this crate
-    /// sees, so a variant missing from it is a variant nothing is quantified
-    /// over. Derive the truth from the enum rather than from a second
-    /// hand-written list: serde's `unknown variant` error names every variant
-    /// the generated `Deserialize` impl knows about.
-    ///
-    /// This net has a known hole — a variant carrying `#[serde(skip)]` is
-    /// invisible to it — and that hole is why the profile axis is not defended
-    /// by this list at all. It is defended by `orchestration::ChildScope`,
-    /// which clamps rather than enumerates. Read this as coverage breadth, not
-    /// as the boundary.
+    /// Takes the variants from serde's `unknown variant` error, so misses `#[serde(skip)]` ones.
     #[test]
     fn every_shape_lists_every_variant_the_enum_has() {
         let message = serde_json::from_str::<ProfileScope>("\"definitely_not_a_variant\"")
@@ -326,17 +208,13 @@ mod scope_lattice_tests {
         }
     }
 
-    /// The whole point. `Household` reaches every row, so nothing narrower
-    /// contains it -- if this ever returns true, a Guest turn could delegate to
-    /// a subagent that reads the household's memory.
+    /// Otherwise a Guest turn could delegate to a subagent that reads the household's memory.
     #[test]
     fn household_is_within_nothing_narrower() {
         assert!(!ProfileScope::Household.is_within(&ProfileScope::Guest));
         assert!(!ProfileScope::Household.is_within(&ProfileScope::Owner("jerry".into())));
     }
 
-    /// Two members are incomparable. This is the case a total order gets wrong:
-    /// Liz's scope is not "smaller" than Jerry's, it is elsewhere.
     #[test]
     fn two_owners_are_incomparable() {
         let jerry = ProfileScope::Owner("jerry".into());
@@ -368,10 +246,7 @@ mod scope_lattice_tests {
         assert!(ProfileScope::Owner("jerry".into()).is_within(&ProfileScope::Household));
     }
 
-    /// Vacuity control: the predicate must not be a constant. If it ever
-    /// returned `true` unconditionally -- the widening direction, and the one a
-    /// careless simplification lands on -- every other test here would still
-    /// pass except the negative ones, so pin the count of false answers too.
+    /// Vacuity control: pins how many pairs are refused, so a constant predicate fails.
     #[test]
     fn the_predicate_refuses_a_specific_number_of_pairs() {
         let scopes = every_scope();
@@ -380,8 +255,7 @@ mod scope_lattice_tests {
             .flat_map(|a| scopes.iter().map(move |b| (a, b)))
             .filter(|(a, b)| !a.is_within(b))
             .count();
-        // 16 ordered pairs. Permitted: 4 reflexive, Guest within the other 3,
-        // and 2 owners within Household = 4 + 3 + 2 = 9. So 7 are refused.
+        // 16 ordered pairs, 9 permitted (4 reflexive, Guest in 3 others, 2 owners in Household).
         assert_eq!(
             refused, 7,
             "the scope lattice changed shape; if that was deliberate, say which \
@@ -394,10 +268,7 @@ mod scope_lattice_tests {
 mod scope_gating_tests {
     use super::*;
 
-    /// The predicate the adapter's memory-injection gate is written against
-    /// (`goose_agent.rs`, `memory_limit`). Pinned here because that gate is a
-    /// boolean `&&` in a crate whose tests cannot construct a live turn, so
-    /// this is where the meaning is defended.
+    /// The memory-injection gate in `goose_agent.rs` relies on this and cannot be tested there.
     #[test]
     fn only_a_guest_is_denied_personal_data() {
         assert!(ProfileScope::Owner("jerry".into()).allows_personal_data());
@@ -405,18 +276,7 @@ mod scope_gating_tests {
         assert!(!ProfileScope::Guest.allows_personal_data());
     }
 
-    /// A scope must survive a serialization round trip unchanged, because it
-    /// rides `AgentRequest` which is `Serialize`/`Deserialize`. A variant that
-    /// silently widened across that boundary would be undetectable.
-    ///
-    /// The input set is [`ProfileScope::every_shape`] and not an array literal
-    /// of today's three, which is what it was — recorded vacuity shape 4, and
-    /// twenty lines below the commit that introduced `every_shape` to remove
-    /// exactly that shape from the guards next door. A literal cannot see a
-    /// variant added tomorrow, and the entry deleted from a literal fails
-    /// nothing; `every_shape` is itself guarded, by
-    /// `scope_lattice_tests::every_shape_lists_every_variant_the_enum_has`, so
-    /// an entry deleted from IT fails there.
+    /// Scopes ride the serialized `AgentRequest`; a variant widening across it would go unseen.
     #[test]
     fn every_scope_round_trips_through_serde() {
         for scope in ProfileScope::every_shape() {

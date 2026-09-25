@@ -37,7 +37,6 @@ describe("ModelPickerModal", () => {
 
   it("shows loading then renders model list", async () => {
     renderPicker();
-    // After models load, grouped headers appear
     await waitFor(() => {
       if (!screen.queryByText("ollama")) throw new Error("not loaded");
     });
@@ -93,7 +92,6 @@ describe("ModelPickerModal", () => {
 
     const selectBtn = screen.getByText("Select").closest("button");
     expect(selectBtn).toBeTruthy();
-    // Should be disabled (no selection made)
     expect(selectBtn?.getAttribute("aria-disabled") ?? selectBtn?.disabled?.toString()).toBeTruthy();
   });
 
@@ -101,7 +99,7 @@ describe("ModelPickerModal", () => {
     renderPicker({ currentProvider: "ollama", currentModel: "llama3.2" });
     await waitFor(() => { if (!screen.queryByText("Llama 3.2")) throw new Error(); });
 
-    // Select button should be enabled since we have a pre-selection
+    // An enabled Select button means something is pre-selected.
     const selectBtn = screen.getByText("Select").closest("button");
     expect(selectBtn?.getAttribute("aria-disabled")).not.toBe("true");
   });

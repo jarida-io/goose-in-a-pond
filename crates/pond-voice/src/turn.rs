@@ -1,59 +1,32 @@
 //! The voice turn as an explicit state machine.
 //!
-//! `ChatService::run_loop` keeps the state of a conversation in two locals —
-//! `first_turn: bool` and `pending_input: Option<String>` — plus the shape of
-//! the control flow itself. That works, but it means every interesting
-//! transition (barge-in mid-speech, a dismissal phrase, an empty transcript,
-//! an error surfacing to the UI) can only be exercised by driving the whole
-//! loop with real audio hardware. In practice none of them were tested at all.
-//!
-//! This module is the decision half of that loop, lifted out: pure, total, and
-//! `std`-only. Feed it what happened; it returns the next state and the actions
-//! to take. `run_loop` keeps the I/O — and keeps the exactly-once persistence
-//! invariant, which is deliberately NOT modelled here.
-//!
-//! ## Why the loop does not move with it
-//!
-//! `run_loop` is welded to persistence, the Q2-26 speculative gate, and
-//! `WorkflowEvent` emission that the NDJSON contract depends on. Moving it
-//! would mean making `stream_response_inner` and `persist_confirmed_turn`
-//! public — trading a real invariant for a nominal crate boundary. So the
-//! machine advises and `run_loop` still decides when to commit.
+//! The pure decision half of `ChatService::run_loop`. The loop keeps the I/O and the
+//! exactly-once persistence invariant, which is deliberately not modelled here.
 
-/// Where the conversation is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoiceState {
-    /// Idle, waiting for the wake word. The state a session opens in, and the
-    /// one it returns to after a dismissal or a turn that produced nothing.
+    /// Idle, waiting for the wake word; the initial state.
     Wait,
     /// Microphone open, capturing an utterance.
     Listen,
-    /// Model is working. Speech may already be playing — TTS is pipelined —
-    /// which is why barge-in has to be handled here and not only in Speak.
+    /// Model is working; pipelined TTS may already be speaking, so barge-in applies here too.
     Think,
-    /// Speaking the reply.
     Speak,
     /// Terminal. The loop exits.
     Closed,
 }
 
-/// What just happened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VoiceEvent {
-    /// Wake word fired, optionally carrying audio captured with it — the
-    /// wake-word detector keeps recording past the trigger so the user can say
-    /// "hey goose, what's the weather" without pausing.
+    /// Wake word fired, possibly with speech the detector kept recording past the trigger.
     Activated { has_captured_audio: bool },
-    /// The user asked to start a turn directly: a talk control, or the global
-    /// hotkey. Skips the wake word entirely.
+    /// A talk control or the global hotkey started a turn, skipping the wake word.
     PushToTalk,
     /// An utterance transcribed to something usable.
     Transcript(String),
-    /// Capture ended with nothing — silence, or a transcript that was only
-    /// whisper artifacts.
+    /// Capture produced nothing: silence, or only whisper artifacts.
     Empty,
-    /// A dismissal phrase ("goodbye", "never mind"). Ends the exchange but not
-    /// the session.
+    /// A dismissal phrase ("goodbye", "never mind"): ends the exchange, not the session.
     Dismissed,
     /// A hard exit phrase ("quit"), or stdin EOF.
     Exit,
@@ -65,33 +38,24 @@ pub enum VoiceEvent {
     Failed(String),
 }
 
-/// What the caller should do about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VoiceAction {
-    /// Arm the wake-word detector.
     ArmWakeWord,
-    /// Open the microphone.
     StartCapture,
-    /// Feed audio captured alongside the wake word straight into transcription
-    /// rather than re-recording it.
+    /// Transcribe the audio captured with the wake word instead of re-recording.
     UsePrimedAudio,
-    /// Send the transcript to the model.
     Infer(String),
-    /// Stop TTS now.
     StopSpeaking,
     /// Clear the turn's interrupt state before any speech.
     BeginUtterance,
-    /// Surface a message to the user. Never silence — a failed turn the user
-    /// cannot see is the failure mode this whole rebuild exists to end.
+    /// Surface a message to the user; a failure must never be silent.
     Report(String),
-    /// Persist and finalise the turn. Emitted exactly once per completed turn,
-    /// and never after an interruption.
+    /// Persist the turn; exactly once per completed turn, never after an interruption.
     Finalize,
     /// Release the microphone and any audio device.
     ReleaseAudio,
 }
 
-/// One transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transition {
     pub state: VoiceState,
@@ -104,11 +68,7 @@ impl Transition {
     }
 }
 
-/// Advance the machine.
-///
-/// Total by construction: every (state, event) pair has a defined result, so a
-/// surprising event can never wedge the loop. Unexpected pairs stay in place
-/// and emit nothing rather than panicking or silently resetting.
+/// Advance the machine. Total: an unexpected pair holds position and emits nothing.
 pub fn next(state: VoiceState, event: VoiceEvent) -> Transition {
     use VoiceAction as A;
     use VoiceEvent as E;
@@ -122,8 +82,6 @@ pub fn next(state: VoiceState, event: VoiceEvent) -> Transition {
         (S::Wait, E::Activated { has_captured_audio }) => Transition::to(
             S::Listen,
             if has_captured_audio {
-                // The detector already has the user's speech; re-recording
-                // would make them say it twice.
                 vec![A::UsePrimedAudio]
             } else {
                 vec![A::StartCapture]
@@ -140,16 +98,13 @@ pub fn next(state: VoiceState, event: VoiceEvent) -> Transition {
         (S::Listen, E::Dismissed) => Transition::to(S::Wait, vec![A::ArmWakeWord]),
 
         // ── Think / Speak ─────────────────────────────────────────────────
-        // TTS is pipelined, so speech can already be playing while the model
-        // is still generating. Both states therefore accept BargedIn.
+        // TTS is pipelined, so both states accept barge-in.
         (S::Think, E::Replied) | (S::Speak, E::Replied) => {
-            // Conversational turn-taking: after a reply, listen again without
-            // making the user repeat the wake word.
+            // Turn-taking: listen again without requiring the wake word.
             Transition::to(S::Listen, vec![A::Finalize, A::StartCapture])
         }
         (S::Think, E::BargedIn) | (S::Speak, E::BargedIn) => {
-            // No Finalize. An interrupted turn persists nothing — the
-            // invariant run_loop enforces and three of its tests cover.
+            // No Finalize: an interrupted turn persists nothing.
             Transition::to(S::Listen, vec![A::StopSpeaking, A::StartCapture])
         }
         (S::Think, E::Dismissed) | (S::Speak, E::Dismissed) => {
@@ -157,20 +112,17 @@ pub fn next(state: VoiceState, event: VoiceEvent) -> Transition {
         }
 
         // ── Failure ───────────────────────────────────────────────────────
-        // Always reported, never silent, and never fatal. The session drops
-        // back to the wake word so the user can simply try again.
+        // Never silent, never fatal: the user can simply try again.
         (_, E::Failed(why)) => Transition::to(
             S::Wait,
             vec![A::StopSpeaking, A::Report(why), A::ArmWakeWord],
         ),
 
-        // Push-to-talk mid-reply: treat as a barge-in, which is what the user
-        // means by reaching for the talk control while the assistant is going.
+        // Push-to-talk mid-reply means "stop and listen": a barge-in.
         (S::Think, E::PushToTalk) | (S::Speak, E::PushToTalk) => {
             Transition::to(S::Listen, vec![A::StopSpeaking, A::StartCapture])
         }
 
-        // Terminal.
         (S::Closed, _) => Transition::to(S::Closed, vec![]),
 
         // Anything else is out of order — hold position rather than guessing.
@@ -215,8 +167,6 @@ mod tests {
         assert!(t.actions.contains(&Finalize));
     }
 
-    /// The detector keeps recording past the trigger, so "hey goose, what's
-    /// the weather" must not make the user repeat themselves.
     #[test]
     fn captured_wake_audio_is_reused_rather_than_recording_again() {
         let t = step(
@@ -238,8 +188,6 @@ mod tests {
         assert_eq!(t.actions, vec![StartCapture]);
     }
 
-    /// Reaching for the talk control while the assistant is speaking means
-    /// "stop and listen to me".
     #[test]
     fn push_to_talk_during_a_reply_interrupts_it() {
         for from in [S::Think, S::Speak] {
@@ -255,8 +203,6 @@ mod tests {
 
     // ── barge-in ─────────────────────────────────────────────────────────
 
-    /// The invariant run_loop enforces and three of its tests cover: an
-    /// interrupted turn persists nothing.
     #[test]
     fn a_barge_in_never_finalizes_the_turn() {
         for from in [S::Think, S::Speak] {
@@ -270,8 +216,6 @@ mod tests {
         }
     }
 
-    /// TTS is pipelined, so the first sentence can be playing while the model
-    /// still generates. Barge-in must work in Think, not only in Speak.
     #[test]
     fn barge_in_is_accepted_while_still_thinking() {
         let t = step(S::Think, E::BargedIn);
@@ -334,8 +278,6 @@ mod tests {
 
     // ── failure is always visible ────────────────────────────────────────
 
-    /// The whole point of the rebuild: a failure the user cannot see is worse
-    /// than a crash. Every state must report and recover.
     #[test]
     fn a_failure_is_always_reported_and_never_fatal() {
         for from in [S::Wait, S::Listen, S::Think, S::Speak] {
@@ -357,8 +299,6 @@ mod tests {
 
     // ── totality ─────────────────────────────────────────────────────────
 
-    /// A surprising event must never wedge the loop or panic. Exhaustively
-    /// drives every state/event pair.
     #[test]
     fn every_state_event_pair_is_defined() {
         let states = [S::Wait, S::Listen, S::Think, S::Speak, S::Closed];
@@ -381,7 +321,6 @@ mod tests {
         for s in states {
             for e in &events {
                 let t = next(s, e.clone());
-                // Finalize is only ever legitimate on a completed reply.
                 if t.actions.contains(&Finalize) {
                     assert!(
                         matches!(e, E::Replied),
@@ -393,7 +332,6 @@ mod tests {
         }
     }
 
-    /// An out-of-order event holds position instead of resetting the session.
     #[test]
     fn an_out_of_order_event_is_ignored_rather_than_resetting() {
         let t = step(S::Wait, E::Replied);
@@ -410,7 +348,6 @@ mod tests {
         assert!(t.actions.is_empty());
     }
 
-    /// Finalize must be reachable exactly one way.
     #[test]
     fn finalize_comes_only_from_a_completed_reply() {
         let mut finalizing = Vec::new();

@@ -1,43 +1,11 @@
-//! Barge-in: deciding that the user has started talking over the assistant.
-//!
-//! ## Why this is not on the output port
-//!
-//! `VoiceOutput` used to carry `start_barge_in_listener` /
-//! `stop_barge_in_listener`, which put the *microphone* on the *output* port —
-//! and that is why the TTS adapter opened `default_input_device()` itself, a
-//! third independent claim on a device only one thing can own. Those methods
-//! are gone. Barge-in is now a property of the turn: it reads energy from
-//! whatever owns the microphone, and TTS knows nothing about it.
-//!
-//! ## Why debounced
-//!
-//! A single loud window is a door, a cough, or the assistant's own voice
-//! leaking back through the mic. Cutting the reply off for any of those is
-//! worse than missing a real interruption, so it takes
-//! [`CONSECUTIVE_WINDOWS`] windows over threshold — and one quiet window
-//! resets the count, so noise has to be sustained, not merely loud.
-//!
-//! ## Why it latches
-//!
-//! Once fired, the turn is already being torn down. Reporting again would
-//! risk a second teardown of a turn that no longer exists.
+//! Barge-in detection, fed by whatever owns the mic (never the TTS port). Debounced so a cough
+//! or echo can't cut a reply; latched so a torn-down turn isn't torn down twice.
 
-/// A source of recent microphone level.
-///
-/// `None` means there is nothing to read — the microphone is closed, or
-/// disabled by the privacy setting. Deliberately not `Some(0.0)`: "silent" and
-/// "not listening" must not be the same value, or a closed mic would read as
-/// permanent silence and barge-in would look like it was working.
+/// Recent mic level; `None` (mic closed or disabled) must stay distinct from `Some(0.0)`.
 pub trait SpeechEnergy: Send + Sync {
     fn recent_rms(&self, window_ms: u64) -> Option<f32>;
 
-    /// Whether this source can ever produce a level.
-    ///
-    /// Distinct from `recent_rms` returning `None`, which is a momentary
-    /// answer — the microphone happens to be closed right now. This is
-    /// permanent: there is no microphone behind this source and there never
-    /// will be. A turn checks it once and skips starting the barge-in poll
-    /// at all, rather than waking ten times a second to be told `None`.
+    /// Permanently no mic (unlike a momentary `None`), so a turn can skip the barge-in poll.
     fn is_inert(&self) -> bool {
         false
     }
@@ -60,12 +28,9 @@ impl SpeechEnergy for NoEnergy {
 pub const POLL_MS: u64 = 100;
 /// How much recent audio each sample covers.
 pub const WINDOW_MS: u64 = 100;
-/// Level above which a window counts as speech *while the assistant is
-/// talking*. Higher than a silence gate would be, because the assistant's own
-/// output bleeds into the microphone.
+/// Speech threshold while the assistant talks; high because its output bleeds into the mic.
 pub const THRESHOLD_WHILE_SPEAKING: f32 = 0.15;
-/// Consecutive windows required. At [`POLL_MS`] this is ~300 ms of sustained
-/// speech — long enough to reject a cough, short enough to feel immediate.
+/// Loud windows needed in a row: ~300 ms at [`POLL_MS`], enough to reject a cough.
 pub const CONSECUTIVE_WINDOWS: u32 = 3;
 
 /// Debounced, latching barge-in detector.
@@ -87,13 +52,11 @@ impl BargeIn {
         }
     }
 
-    /// The configuration used while the assistant is speaking.
     pub fn while_speaking() -> Self {
         Self::new(THRESHOLD_WHILE_SPEAKING, CONSECUTIVE_WINDOWS)
     }
 
-    /// Feed one window's level. Returns true exactly once, on the window that
-    /// confirms the interruption.
+    /// Feed one window's level; true exactly once, on the window that confirms the interruption.
     pub fn on_rms(&mut self, rms: f32) -> bool {
         if self.fired {
             return false;
@@ -110,11 +73,7 @@ impl BargeIn {
         false
     }
 
-    /// Drop the run of loud windows without clearing the latch.
-    ///
-    /// Called when the level is unreadable — a closed microphone must not let
-    /// a half-finished run persist and then complete against audio captured
-    /// much later.
+    /// Drop the loud run but keep the latch; a stale run must not finish on much later audio.
     pub fn reset(&mut self) {
         self.seen = 0;
     }
@@ -142,7 +101,6 @@ mod tests {
         assert!(b.on_rms(LOUD), "the third confirms");
     }
 
-    /// A door slam then quiet must not accumulate toward a later run.
     #[test]
     fn a_quiet_window_resets_the_run() {
         let mut b = BargeIn::while_speaking();
@@ -154,8 +112,6 @@ mod tests {
         assert!(b.on_rms(LOUD));
     }
 
-    /// The turn is torn down on the first fire; a second would tear down a
-    /// turn that no longer exists.
     #[test]
     fn it_fires_exactly_once() {
         let mut b = BargeIn::while_speaking();
@@ -175,7 +131,6 @@ mod tests {
         assert!(b.on_rms(0.1500001));
     }
 
-    /// `reset` clears the run but must not un-fire a confirmed interruption.
     #[test]
     fn reset_clears_the_run_but_not_the_latch() {
         let mut b = BargeIn::while_speaking();
@@ -197,7 +152,6 @@ mod tests {
         assert!(b.on_rms(0.2));
     }
 
-    /// Silence must never fire, however long it runs.
     #[test]
     fn silence_never_fires() {
         let mut b = BargeIn::while_speaking();
@@ -207,17 +161,11 @@ mod tests {
         assert!(!b.has_fired());
     }
 
-    /// A closed or disabled microphone reads as `None`, not `Some(0.0)` —
-    /// otherwise "not listening" would be indistinguishable from "silent" and
-    /// barge-in would appear to work while being deaf.
     #[test]
     fn no_energy_reports_absence_rather_than_silence() {
         assert_eq!(NoEnergy.recent_rms(WINDOW_MS), None);
     }
 
-    /// A turn reads this once instead of polling a source that can never
-    /// answer. A real microphone must never claim to be inert, even while
-    /// it happens to be closed.
     #[test]
     fn no_energy_declares_itself_permanently_inert() {
         assert!(NoEnergy.is_inert());
@@ -234,7 +182,6 @@ mod tests {
         );
     }
 
-    /// The published constants are what the turn's poll loop is built on.
     #[test]
     fn the_debounce_window_is_responsive_but_not_twitchy() {
         let ms = POLL_MS * CONSECUTIVE_WINDOWS as u64;

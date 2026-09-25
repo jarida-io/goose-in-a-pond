@@ -160,10 +160,8 @@ describe("hubDataStore", () => {
 
     await refreshHomeData();
     const { useRoutines: _u, getHomeData: _g } = await import("./hubDataStore");
-    // Sample directly via the module instance
     const { __resetHubDataForTests: _r } = await import("./hubDataStore");
     void _u; void _g; void _r;
-    // Read routines through the singleton snapshot
     const mod = await import("./hubDataStore");
     // routines aren't on HomeData — read via the snapshot used by useRoutines
     const snapshot = (mod as unknown as { __getRoutinesForTests?: () => unknown[] }).__getRoutinesForTests?.()
@@ -185,18 +183,15 @@ describe("hubDataStore", () => {
     const mod = await import("./hubDataStore");
     const snapshot = (mod as unknown as { __getRoutinesForTests?: () => unknown[] }).__getRoutinesForTests?.() ?? [];
     expect(snapshot.length).toBe(2);
-    // Known name should get the mock "Good Morning" template (with rich does list)
     const morning = (snapshot as { name: string; does: string[] }[]).find((r) => r.name === "Good Morning");
     expect(morning?.does.length).toBeGreaterThan(1);
-    // Unknown name should derive does from description
     const sunset = (snapshot as { name: string; does: string[] }[]).find((r) => r.name === "Sunset Bath");
     expect(sunset?.does).toEqual(["Run tub", "dim lights", "play jazz"]);
   });
 
   // ── Now Playing ──────────────────────────────────────────────
-  // Spotify refusing a call must never look like a paused player: a
-  // development-mode app serves only allowlisted accounts, and everyone else
-  // completes the whole OAuth flow before every API call 403s.
+  // Spotify dev-mode apps 403 every call for non-allowlisted accounts, even after OAuth;
+  // that must never look like a paused player.
 
   async function loadWithNowPlaying(np: unknown) {
     apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
@@ -283,11 +278,7 @@ describe("now-playing polling", () => {
     apiMock.getNowPlaying.mockReset();
   });
 
-  /// The widget polls every ten seconds and the dashboard is left open for
-  /// days, so an answer that cannot change without somebody doing something
-  /// costs ~8,600 requests a day — each one a round trip the server makes to
-  /// Spotify on our behalf. After five consecutive 4XX answers it stops
-  /// asking entirely, and only an interaction brings it back.
+  // Five consecutive 4XX stop the poll; only an interaction brings it back.
 
   const REFUSAL = { connected: true, error: "forbidden", upstream_status: 403 };
 
@@ -297,8 +288,6 @@ describe("now-playing polling", () => {
   }
 
   it("keeps polling through the first four refusals", async () => {
-    // Four is not five. Stopping early would give up on a service that was
-    // about to answer.
     await answer(REFUSAL, 4);
     expect(__tickNowPlayingPollForTests()).toBe(true);
   });
@@ -306,16 +295,13 @@ describe("now-playing polling", () => {
   it("stops asking after five consecutive 4XX answers", async () => {
     await answer(REFUSAL, 5);
     expect(__tickNowPlayingPollForTests()).toBe(false);
-    // Still stopped on later ticks: unlike the old slow-retry, no tick leaks
-    // through, because the condition cannot clear on its own.
+    // Still stopped on later ticks.
     expect(__tickNowPlayingPollForTests()).toBe(false);
     expect(__tickNowPlayingPollForTests()).toBe(false);
   });
 
   it("only counts real 4XX answers", async () => {
-    // `unavailable` covers 5xx, and a transport failure has no status at all.
-    // Counting either would let a Spotify outage — or this pond restarting
-    // mid-poll — permanently silence a widget whose recovery needs a person.
+    // `unavailable` is a 5xx and a transport failure has no status; neither may count.
     await answer({ connected: true, error: "unavailable", upstream_status: 502 }, 5);
     expect(__tickNowPlayingPollForTests()).toBe(true);
 
@@ -325,8 +311,6 @@ describe("now-playing polling", () => {
   });
 
   it("needs the five to be consecutive", async () => {
-    // Five refusals spread across a week of healthy polling are not a reason
-    // to stop; one good answer means the service is reachable.
     await answer(REFUSAL, 4);
     await answer({ connected: true, playing: true, track: "x" });
     await answer(REFUSAL, 4);
@@ -334,14 +318,10 @@ describe("now-playing polling", () => {
   });
 
   it("resumes when the widget is used", async () => {
-    // The stop rule is only safe because this exists. `refreshNowPlaying` is
-    // the widget's own Try again, and pressing it means somebody is watching.
     await answer(REFUSAL, 5);
     expect(__tickNowPlayingPollForTests()).toBe(false);
 
-    // The widget's own Try again — the `userInitiated` path. The automatic
-    // tick calls the same function and must NOT resume, or the breaker could
-    // never trip.
+    // The Try again (`userInitiated`) path; the tick calls the same function and must not resume.
     apiMock.getNowPlaying.mockResolvedValue({ connected: true, playing: true, track: "x" });
     await refreshNowPlaying(true);
     expect(__tickNowPlayingPollForTests()).toBe(true);

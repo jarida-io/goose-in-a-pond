@@ -30,8 +30,7 @@ describe("parseBounds", () => {
     expect(parseBounds('{"x":0,"y":0,"width":null,"height":860}')).toBe(null);
   });
 
-  // A file truncated mid-write, or hand-edited, must not produce a window with
-  // no area — which is a window you can neither see nor grab.
+  // A zero-area window can be neither seen nor grabbed.
   it("treats a zero or negative size as no state", () => {
     expect(parseBounds('{"x":0,"y":0,"width":0,"height":860}')).toBe(null);
     expect(parseBounds('{"x":0,"y":0,"width":1280,"height":-5}')).toBe(null);
@@ -45,8 +44,7 @@ describe("isOnSomeDisplay", () => {
     ).toBe(true);
   });
 
-  // Overlap, not containment: a window hanging off an edge is a position the
-  // user chose and can still drag back.
+  // Overlap, not containment: the user can still drag it back.
   it("accepts a window hanging off an edge", () => {
     expect(
       isOnSomeDisplay({ x: -200, y: 50, width: 800, height: 600 }, [LAPTOP]),
@@ -84,8 +82,6 @@ describe("isOnSomeDisplay", () => {
     );
   });
 
-  // Abutting is not overlapping: a window exactly beside a display has no
-  // pixel on it.
   it("rejects a window that only abuts a display", () => {
     expect(
       isOnSomeDisplay({ x: 1512, y: 0, width: 800, height: 600 }, [LAPTOP]),

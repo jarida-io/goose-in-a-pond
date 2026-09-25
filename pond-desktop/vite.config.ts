@@ -3,13 +3,10 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { resolve } from "path";
 
-// https://vitejs.dev/config/
 export default defineConfig(async () => ({
   plugins: [tailwindcss(), react()],
 
-  // React resolution: force all imports to pond-desktop's own node_modules
-  // so that web/ and pond-desktop/ never mix React instances.
-  // The @web alias is intentionally removed — pond-desktop is now standalone.
+  // Pin React to pond-desktop's own node_modules so web/ and pond-desktop/ never mix instances.
   resolve: {
     alias: [
       { find: "react/jsx-runtime",     replacement: resolve(__dirname, "node_modules/react/jsx-runtime.js") },
@@ -22,7 +19,7 @@ export default defineConfig(async () => ({
     dedupe: ["react", "react-dom"],
   },
 
-  // Vite server options for Tauri dev — don't open browser automatically
+  // Fixed port: `dev:electron` loads the renderer from localhost:1420.
   server: {
     port: 1420,
     strictPort: true,

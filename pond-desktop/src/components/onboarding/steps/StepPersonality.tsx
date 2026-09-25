@@ -1,7 +1,4 @@
-// ────────────────────────────────────────────────────────────
-// Step 3 — Personality & Identity (merged)
-// Skip allowed — sensible defaults exist
-// ────────────────────────────────────────────────────────────
+// Step 3, Personality & Identity; skippable, the defaults are sensible.
 
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { Scale, Zap, Wrench, Sun } from "lucide-react";
@@ -33,9 +30,7 @@ export function StepPersonality() {
   const [models, setModels] = useState<{ name: string; downloaded?: boolean }[]>([]);
   const [loadingVoices, setLoadingVoices] = useState(true);
   const [applying, setApplying] = useState(false);
-  // The tier actually in force. Starts as the one setup asks for and is
-  // replaced by whatever the server reports back, which is not always the same
-  // string — see the apply call below.
+  // The tier in force: the server's answer, which can differ from the request.
   const [tier, setTier] = useState<string>(ONBOARDING_QUALITY);
   const [transfers, setTransfers] = useState<
     { filename: string; downloaded: number; total: number | null }[]
@@ -43,10 +38,7 @@ export function StepPersonality() {
   const paceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Every Kokoro voice the catalogue knows. Onboarding runs before there is a
-  // device token, which is why `/voice/tts/apply` is public until onboarding
-  // completes — the alternative was a wizard that writes a voice it cannot
-  // apply or preview.
+  // All catalogued Kokoro voices; `/voice/tts/apply` is public until onboarding ends (no token).
   useEffect(() => {
     api
       .listModels()
@@ -62,15 +54,8 @@ export function StepPersonality() {
       })
       .finally(() => setLoadingVoices(false));
 
-    // Setup uses the smallest tier, settled before anything is previewed so
-    // every sample the household hears comes from the engine they will
-    // actually be running. Doing it later would let them judge a voice on one
-    // tier and then live with another.
-    //
-    // Applied first and stored second, because the server has the last word:
-    // a tier that cannot produce audio on this machine comes back substituted.
-    // Storing the request instead of the answer would leave the saved tier and
-    // the running one disagreeing — the exact thing this ordering prevents.
+    // Settle the smallest tier before any preview. Apply first, then store the server's answer:
+    // it may substitute a tier that cannot produce audio on this machine.
     api
       .applyTtsSettings({ quality: ONBOARDING_QUALITY })
       .then((r) => {
@@ -126,9 +111,7 @@ export function StepPersonality() {
         voice_tts_quality: tier,
       });
       pollTransfers();
-      // Applies to the running engine, fetching the voice first when this is
-      // the household's first time choosing it. The tier rides along so the
-      // sample is never produced by a different one.
+      // Fetches the voice if needed; sending the tier keeps the sample on the tier in force.
       await api.applyTtsSettings({ voice: id, quality: tier });
       void preview.play();
     } catch {

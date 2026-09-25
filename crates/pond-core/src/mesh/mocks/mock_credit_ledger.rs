@@ -8,8 +8,7 @@ use crate::mesh::domain::millisats::Millisats;
 use crate::mesh::domain::peer_id::PeerId;
 use crate::mesh::ports::credit_ledger::{CreditLedger, CreditLedgerError};
 
-/// In-memory credit ledger for testing. A peer with no prior activity has a
-/// zero balance rather than a missing entry.
+/// In-memory credit ledger; a peer with no activity has a zero balance, not a missing entry.
 pub struct MockCreditLedger {
     balances: Arc<RwLock<HashMap<PeerId, Millisats>>>,
 }

@@ -18,8 +18,6 @@ describe("timeOfDay", () => {
 
 describe("greeting", () => {
   it("uses whatever name it is given", () => {
-    // The point of the test: the name is an argument, never a literal in the
-    // module. Two different names must both come through.
     for (const name of ["Ada", "Kwame"]) {
       const lines = Array.from({ length: 8 }, (_, i) => greeting(name, i, at(9)));
       expect(lines.some((l) => l.includes(name))).toBe(true);

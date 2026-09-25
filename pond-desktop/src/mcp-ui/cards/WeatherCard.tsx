@@ -1,7 +1,7 @@
 import { Loader } from "lucide-react";
 import { registerMcpCard, type McpCardProps } from "../registry";
 
-// ── Inline SVG Weather Icons (pixel-perfect from design) ────────────────────
+// ── Weather icons ───────────────────────────────────────────────────────────
 
 function SunIcon({ size = 32 }: { size?: number }) {
   const scale = size / 24;
@@ -339,7 +339,6 @@ const spinKeyframes = `@keyframes weather-spin { to { transform: rotate(360deg);
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/** Format a date string into a short 3-letter day name. */
 function shortDay(dateStr: string): string {
   try {
     const d = new Date(dateStr);
@@ -361,7 +360,7 @@ function WeatherCard({ data, variant }: McpCardProps) {
   const windSpeed = (data.wind_speed ?? data.wind_speed_kmh) as number | undefined;
   const isCompact = variant === "compact";
 
-  // Forecast: array of daily forecasts (from get_weather_forecast tool result)
+  // From get_weather_forecast tool results.
   const forecast = (data.forecast ?? data.days) as ForecastDay[] | undefined;
   const hasForecast = Array.isArray(forecast) && forecast.length > 0;
 

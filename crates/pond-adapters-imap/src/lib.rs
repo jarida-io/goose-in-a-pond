@@ -1,7 +1,5 @@
-//! IMAP as a personal-context source, the read-only sibling of `pond-adapters-caldav`: no
-//! APPEND, no STORE, no flag ever set. Bodies are fetched with `BODY.PEEK[TEXT]`, never
-//! `BODY[TEXT]` (which sets `\Seen`), and chunked so a passage is what gets embedded. Implicit
-//! TLS on 993 only; STARTTLS on 143 begins in the clear and a downgrade there is invisible.
+//! Read-only IMAP context source: bodies via `BODY.PEEK[TEXT]` (plain `BODY[TEXT]` sets `\Seen`).
+//! Implicit TLS on 993 only: STARTTLS starts in the clear, so a downgrade would be invisible.
 
 mod body;
 mod header;
@@ -17,17 +15,13 @@ use pond_core::context::domain::ItemKind;
 use pond_core::context::ingest::RawItem;
 use std::sync::Arc;
 
-/// How long a whole IMAP conversation may take. Generous because a first sync over a 30-day
-/// window reads every body in it and 45 seconds killed that mid-way; later syncs resume above
-/// the stored UID and finish in seconds, so the ceiling only ever binds the first one.
+/// Whole-conversation timeout; generous because a first 30-day sync reads every body.
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
-/// How much of one message is worth reading. A marketing email can be a megabyte of inlined
-/// HTML; cutting before the MIME parse bounds both memory and the work `body_to_text` does.
+/// Per-message body cap, applied before the MIME parse (marketing mail can be a megabyte).
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
-/// Everything needed to reach one household member's mailbox. `Debug` redacts the password
-/// by hand, so a `{:?}` on a trace line cannot leak the credential.
+/// One member's mailbox account; `Debug` redacts the password.
 #[derive(Clone)]
 pub struct ImapConfig {
     pub provider: ImapProvider,
@@ -54,25 +48,18 @@ impl ImapAdapter {
         Self { config }
     }
 
-    /// The default sync window. Shorter than the calendar's because mail volume decides
-    /// whether this corpus stays in brute-force range: thirty days is a few hundred rows, a
-    /// year is thousands and answers no question the household asks.
+    /// Default sync window: 30 days, short so mail volume stays in brute-force retrieval range.
     pub fn default_window(now: DateTime<Utc>) -> DateTime<Utc> {
         now - Duration::days(30)
     }
 
-    /// Recent messages, as items the ingest pipeline can take. One connection, one search,
-    /// one fetch, then logout: a long-lived IDLE connection is deliberately absent, because a
-    /// home server holding open sockets to several providers is a reliability problem before
-    /// it is a feature (PAI-8 §3.5).
+    /// Recent messages as ingest items; connects per sync, deliberately no long-lived IDLE socket.
     pub async fn recent_messages(&self, since: DateTime<Utc>) -> Result<Vec<RawItem>> {
         Ok(self.fetch_since(since, None).await?.0)
     }
 
-    /// Recent messages, plus the cursor a later sync should resume from. The cursor is
-    /// `UIDVALIDITY:MAXUID`; passing it back asks only for messages above that UID, without
-    /// which every pass re-downloads the whole window, bodies included. A changed
-    /// `UIDVALIDITY` means the mailbox renumbered, so the window is read again from the start.
+    /// Recent messages plus a `UIDVALIDITY:MAXUID` resume cursor; a changed `UIDVALIDITY` means the
+    /// mailbox renumbered, so the whole window is read again.
     pub async fn messages_since_cursor(
         &self,
         since: DateTime<Utc>,
@@ -89,10 +76,7 @@ impl ImapAdapter {
         let host = self.config.provider.host().to_string();
         let port = self.config.provider.port();
 
-        // PAI-2: gate before a packet leaves, and record afterwards. IMAP is a
-        // raw socket rather than an HTTP call, so the URL is synthesised — what
-        // the tracker classifies and what `network_mode` refuses is the HOST,
-        // which is the part that is real either way.
+        // Gate before any packet, record after. The URL is synthetic; only its HOST is judged.
         let url = format!("imaps://{host}:{port}");
         pond_core::shared::services::egress::check_egress(&url)?;
 
@@ -125,10 +109,7 @@ impl ImapAdapter {
 
         let mut roots = rustls::RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        // The crypto provider is named, not inferred: `ClientConfig::builder()` panics when
-        // both `aws_lc_rs` (root Cargo.toml) and `ring` (hyper-rustls via reqwest) are enabled,
-        // which is this workspace's normal state, and a library must not depend on the host
-        // process having installed a default.
+        // Name the provider: `builder()` panics with both `aws_lc_rs` and `ring` enabled, as here.
         let tls_config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
             rustls::crypto::aws_lc_rs::default_provider(),
         ))
@@ -143,33 +124,27 @@ impl ImapAdapter {
             .await
             .context("the mail server's TLS handshake failed")?;
 
-        let client = // No compat shim: with `runtime-tokio` async-imap uses tokio's own
-        // AsyncRead/AsyncWrite (client.rs:16), which this stream already is.
+        let client = // No compat shim: async-imap's `runtime-tokio` takes tokio streams.
         async_imap::Client::new(tls);
         let mut session = client
             .login(&self.config.username, &self.config.password)
             .await
             .map_err(|(e, _)| {
-                // The one failure a household can fix, phrased so they can, and
-                // distinguishable so the scheduler does not retry it.
+                // Fixable by the user, and distinct so the scheduler doesn't retry it.
                 anyhow!(
                     "the mail account refused these credentials -- most providers need an \
                      app-specific password rather than the account password ({e})"
                 )
             })?;
 
-        // INBOX only, and `examine` rather than `select`: examine opens the
-        // mailbox READ-ONLY, so this connector cannot change a flag even by
-        // accident and mail does not become "read" because the pond looked.
+        // `examine`, not `select`: it opens the mailbox READ-ONLY, so no flag can change.
         let mailbox = session
             .examine("INBOX")
             .await
             .context("could not open the INBOX")?;
         let uid_validity = mailbox.uid_validity.unwrap_or(0);
 
-        // Resume above the last UID seen, but only if UIDVALIDITY is unchanged: after a
-        // renumbering the stored UID points at a different message. Re-reading the window is
-        // idempotent (Message-ID is the key); resuming from a stale number silently skips mail.
+        // Resume only if UIDVALIDITY is unchanged; a stale UID would silently skip mail.
         let resume_from = cursor.and_then(|c| c.split_once(':')).and_then(|(v, u)| {
             match (v.parse::<u32>().ok(), u.parse::<u32>().ok()) {
                 (Some(v), Some(u)) if v == uid_validity => Some(u),
@@ -188,15 +163,11 @@ impl ImapAdapter {
         let highest = uids.iter().copied().max();
 
         let mut items = Vec::new();
-        // Counted, because both ways a message can vanish below are a silent `continue`, and
-        // 21 of 1,345 returned looks identical from outside to a mailbox that holds 21. The
-        // first is a mail server throttling a client that just pulled every body twice.
+        // Counted: both ways a message can vanish below are a silent `continue`.
         let mut unreadable = 0usize;
         let mut envelopeless = 0usize;
-        // Batched, and not a tuning knob: one fetch of every body in a 1,300-message window
-        // measured 769 MB resident and stalled the health check until the desktop watchdog
-        // restarted the pond mid-sync. A batch bounds what is in flight to roughly
-        // `BATCH * message size`, and yielding between batches lets the runtime serve the rest.
+        // Batched to bound memory: one fetch of a 1,300-message window hit 769 MB and stalled the
+        // health check until the watchdog restarted the pond.
         const BATCH: usize = 50;
         for window in uids.iter().copied().collect::<Vec<_>>().chunks(BATCH) {
             let set = window
@@ -204,9 +175,7 @@ impl ImapAdapter {
                 .map(|u| u.to_string())
                 .collect::<Vec<_>>()
                 .join(",");
-            // ENVELOPE for the headers, BODY.PEEK[TEXT] for the words. PEEK is the read-only
-            // claim at the fetch level: plain `BODY[TEXT]` sets \Seen and marks the mailbox
-            // read. `EXAMINE` above is the other half; a test pins this one.
+            // PEEK: plain `BODY[TEXT]` would set \Seen and mark mail read.
             let mut stream = session
                 .uid_fetch(set, "(ENVELOPE BODY.PEEK[TEXT])")
                 .await
@@ -220,9 +189,6 @@ impl ImapAdapter {
                         continue;
                     }
                 };
-                // The body is the message's own words, cleaned of quoted replies and
-                // signatures, which would otherwise be the most repeated and findable text in
-                // the mailbox. Capped at MAX_BODY_BYTES before parsing to bound memory.
                 let body = message
                     .text()
                     .map(|raw| {
@@ -236,8 +202,7 @@ impl ImapAdapter {
                 }
             }
             drop(stream);
-            // Hand the runtime back between batches. Without this the fetch
-            // loop is one long await chain that never lets a health check in.
+            // Yield between batches so a health check can run.
             tokio::task::yield_now().await;
         }
         // Best effort: a failed logout does not invalidate what was read.
@@ -256,10 +221,7 @@ impl ImapAdapter {
             tracing::info!(asked, returned = items.len(), "mail fetched");
         }
 
-        // Only advance the cursor past what was actually READ. A batch that
-        // failed mid-way leaves the cursor where it was, so the next pass
-        // covers the same ground rather than stepping over messages nothing
-        // stored.
+        // Highest UID searched; a fetch error returns early, so the old cursor stays.
         let next_cursor = match (highest, resume_from) {
             (Some(h), _) => Some(format!("{uid_validity}:{h}")),
             // Nothing new, but the mailbox was reachable: keep the cursor.
@@ -270,9 +232,7 @@ impl ImapAdapter {
     }
 }
 
-/// Turn an IMAP `ENVELOPE` into a context item. Skipped rather than defaulted when there is
-/// no Message-ID or no date: the Message-ID is the idempotency key for re-sync, and inventing
-/// one re-creates the mail as a duplicate on every sweep forever.
+/// `ENVELOPE` to item; skipped without a Message-ID (the re-sync key) or a date.
 fn envelope_to_item(
     envelope: Option<&async_imap::imap_proto::Envelope<'_>>,
     body_text: &str,
@@ -297,8 +257,7 @@ fn envelope_to_item(
         _ => "(no subject)".to_string(),
     };
 
-    // Sender, as a person would recognise them. The display name when there is
-    // one, the address otherwise -- an address is a name a household knows.
+    // Sender: display name if any, else the address.
     let sender = envelope.from.as_ref().and_then(|addrs| {
         addrs.first().map(|a| {
             let name = a
@@ -323,9 +282,6 @@ fn envelope_to_item(
         })
     });
 
-    // Body is the sentence a person would say, because `embedding_text` is
-    // `title\nbody` and this IS the retrieval surface. No message body: PAI-8
-    // §3 keeps this to subject, sender and date.
     let (participants, from_line) = match sender {
         Some((name, address)) => {
             let line = match &address {
@@ -336,10 +292,7 @@ fn envelope_to_item(
         }
         None => (Vec::new(), String::new()),
     };
-    // Sender first so the shortest possible body still says who wrote it, then
-    // the message. `embedding_text` is `title\nbody`, and the body is now
-    // CHUNKED — the subject rides in chunk 0 with the opening lines, which is
-    // where a search for the subject should land.
+    // Sender first, so even the shortest body says who wrote it; the subject rides in chunk 0.
     let body = match (from_line.is_empty(), body_text.trim().is_empty()) {
         (_, true) => from_line,
         (true, false) => body_text.trim().to_string(),
@@ -360,9 +313,7 @@ fn envelope_to_item(
 mod tests {
     use super::*;
 
-    /// This crate's production source with whole-line comments removed, so the guards below
-    /// do not trip on prose explaining the rule. Only whole-line comments go, so a real
-    /// `session.fetch(set, "BODY[]")` with a trailing comment is still caught.
+    /// Production source minus whole-line comments (a code line with a trailing one still counts).
     fn production_code() -> String {
         include_str!("lib.rs")
             .split("#[cfg(test)]")
@@ -392,13 +343,9 @@ mod tests {
         assert!(rendered.contains("<redacted>"), "{rendered}");
     }
 
-    /// Reading a mailbox must not change it.
     #[test]
     fn the_body_fetch_never_marks_mail_as_read() {
         let production = production_code();
-        // Bodies are fetched, but only in the PEEK form: plain `BODY[TEXT]` sets \Seen and
-        // marks a household's mail read because the pond looked. One dropped atom away from
-        // the correct line, so it is pinned.
         assert!(
             production.contains("BODY.PEEK[TEXT]"),
             "the body fetch must use PEEK, or reading the mailbox marks it read"
@@ -418,9 +365,6 @@ mod tests {
         }
     }
 
-    /// `examine` opens the mailbox read-only; `select` does not. With `select`
-    /// a household's unread mail would silently become read because the pond
-    /// looked at it.
     #[test]
     fn the_mailbox_is_opened_read_only() {
         let production = production_code();

@@ -8,10 +8,7 @@ interface CardChromeProps {
   children: React.ReactNode;
 }
 
-/**
- * Shared card wrapper that renders the source-app dot + app name + kebab menu.
- * Ports `.mcp-item__chrome` from goose-hub-mcp.jsx/css.
- */
+/** Card wrapper with the source-app dot, app name and kebab menu. */
 export function CardChrome({ app, children }: CardChromeProps): React.ReactElement {
   return (
     <div className="mcp-item">

@@ -1,7 +1,4 @@
-//! Memory MCP Server — recall, save, and forget memory fragments.
-//!
-//! Provides 3 tools: `recall_memories`, `save_memory`, `forget_memory`.
-//! Depends only on [`MemoryRepository`] — no god-struct.
+//! Memory MCP server: recall, save and forget memory fragments.
 
 use pond_core::models::ports::embedding::EmbeddingProvider;
 use pond_core::user_data::domain::memory::{
@@ -69,12 +66,7 @@ pub struct MemoryMcpServer {
 
 #[tool_router]
 impl MemoryMcpServer {
-    /// Every tool this server exposes, without constructing it or its deps.
-    ///
-    /// `tool_router()` is generated private to this module, so inventory code
-    /// outside it could not reach the real definitions and resorted to scanning
-    /// source text for `#[tool(` instead. This is the enumeration that scan was
-    /// standing in for.
+    /// All tools, without constructing the server; the generated `tool_router()` is private.
     pub(crate) fn tool_defs() -> Vec<rmcp::model::Tool> {
         Self::tool_router().list_all()
     }
@@ -102,7 +94,6 @@ impl MemoryMcpServer {
         let limit = params.0.limit.unwrap_or(10) as usize;
 
         let filtered: Vec<_> = if let Some(ref query) = params.0.query {
-            // Try vector search first when embedding provider is available
             if let Some(ref emb) = self.embedding_provider {
                 // A query, not a document -- see EmbeddingProvider::embed_query.
                 match emb.embed_query(query).await {
@@ -120,7 +111,6 @@ impl MemoryMcpServer {
                                 results
                             }
                             _ => {
-                                // Vector search returned nothing — fall back to keyword
                                 tracing::debug!(
                                     "recall_memories: vector search empty, falling back to keyword"
                                 );
@@ -136,11 +126,9 @@ impl MemoryMcpServer {
                     }
                 }
             } else {
-                // No embedding provider — keyword search
                 keyword_search(&self.memory_repo, query, limit).await?
             }
         } else {
-            // No query — return recent memories
             self.memory_repo
                 .search_recent(&ProfileScope::Household, limit)
                 .await
@@ -194,7 +182,6 @@ impl MemoryMcpServer {
                 .join("\n")
         };
 
-        // Build UI hint from memory fragments
         if !filtered.is_empty() {
             let ui_memories: Vec<serde_json::Value> = filtered
                 .iter()
@@ -228,10 +215,8 @@ impl MemoryMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let id = uuid::Uuid::new_v4().to_string();
 
-        // Extract supersedes list before other fields are consumed
         let supersedes = params.0.supersedes.clone();
 
-        // Fallback: if model sent empty content, extract from user message
         let content = if !params.0.content.is_empty() {
             params.0.content.clone()
         } else {
@@ -256,7 +241,6 @@ impl MemoryMcpServer {
             .filter(|t| !t.is_empty())
             .collect();
 
-        // Resolve segment: explicit > auto-classify from content
         let segment = params
             .0
             .segment
@@ -279,7 +263,6 @@ impl MemoryMcpServer {
 
         let decay_rate = tier.default_decay_rate();
 
-        // Generate embedding if provider is available
         let embedding = if let Some(ref emb) = self.embedding_provider {
             match emb.embed(&content).await {
                 Ok(vec) => {
@@ -295,7 +278,6 @@ impl MemoryMcpServer {
             None
         };
 
-        // For correction segments, capture what wrong claim is being corrected
         let corrects = params.0.corrects.clone().filter(|s| !s.is_empty());
 
         let new_id = id.clone();
@@ -327,13 +309,11 @@ impl MemoryMcpServer {
             )
         })?;
 
-        // Audit log
         let _ = self
             .memory_repo
             .log_event(MemoryEventKind::Written, &new_id, None, None)
             .await;
 
-        // Archive any memories that this new one supersedes
         if let Some(ref superseded_ids) = supersedes {
             for old_id in superseded_ids {
                 let _ = self.memory_repo.mark_superseded(old_id, &new_id).await;
@@ -471,7 +451,6 @@ async fn keyword_search(
 
 // ── Memory helpers (public for use by other crates) ────────────────────────
 
-/// Parse a string into a [`MemorySegment`].
 pub fn parse_memory_segment(s: &str) -> Option<MemorySegment> {
     match s.to_lowercase().as_str() {
         "identity" => Some(MemorySegment::Identity),
@@ -485,7 +464,6 @@ pub fn parse_memory_segment(s: &str) -> Option<MemorySegment> {
     }
 }
 
-/// Parse a string into a [`MemoryTier`].
 pub fn parse_memory_tier(s: &str) -> Option<MemoryTier> {
     match s.to_lowercase().as_str() {
         "short" => Some(MemoryTier::Short),
@@ -495,8 +473,7 @@ pub fn parse_memory_tier(s: &str) -> Option<MemoryTier> {
     }
 }
 
-/// Auto-classify a memory's segment from its content using keyword heuristics.
-/// No LLM needed — fast and deterministic.
+/// Classify a memory's segment by keyword heuristics (no LLM: fast, deterministic).
 pub fn auto_classify_segment(content: &str) -> MemorySegment {
     let lower = content.to_lowercase();
 
@@ -511,7 +488,6 @@ pub fn auto_classify_segment(content: &str) -> MemorySegment {
         return MemorySegment::Correction;
     }
 
-    // Identity indicators
     if lower.starts_with("my name is")
         || lower.starts_with("i am a ")
         || lower.starts_with("i'm a ")
@@ -524,7 +500,6 @@ pub fn auto_classify_segment(content: &str) -> MemorySegment {
         return MemorySegment::Identity;
     }
 
-    // Relationship indicators
     if lower.contains("my wife")
         || lower.contains("my husband")
         || lower.contains("my partner")
@@ -541,7 +516,6 @@ pub fn auto_classify_segment(content: &str) -> MemorySegment {
         return MemorySegment::Relationship;
     }
 
-    // Preference indicators
     if lower.starts_with("i prefer")
         || lower.starts_with("i like")
         || lower.starts_with("i love")
@@ -553,7 +527,6 @@ pub fn auto_classify_segment(content: &str) -> MemorySegment {
         return MemorySegment::Preference;
     }
 
-    // Project indicators
     if lower.contains("working on")
         || lower.contains("my project")
         || lower.contains("my goal")
@@ -573,7 +546,6 @@ pub fn auto_classify_segment(content: &str) -> MemorySegment {
         return MemorySegment::Context;
     }
 
-    // Default
     MemorySegment::Knowledge
 }
 
@@ -589,11 +561,7 @@ struct MemoryDeps {
 
 static MEMORY_DEPS: OnceLock<MemoryDeps> = OnceLock::new();
 
-/// Initialize memory server dependencies. Call once at startup.
-///
-/// `embedding_provider` enables semantic search (vector similarity) in
-/// `recall_memories` and auto-embedding in `save_memory`. When `None`,
-/// the server falls back to keyword/substring search.
+/// Install the deps once at startup; without `embedding_provider`, recall is keyword-only.
 pub fn init_memory_deps(
     memory_repo: Arc<dyn MemoryRepository + Send + Sync>,
     embedding_provider: Option<Arc<dyn EmbeddingProvider + Send + Sync>>,
@@ -606,10 +574,7 @@ pub fn init_memory_deps(
 
 /// Spawn function compatible with Goose's `SpawnServerFn` type.
 pub fn spawn_memory_server(reader: DuplexStream, writer: DuplexStream) {
-    // Missing deps = this path never initialised this extension (the voice/CLI
-    // binary vs `serve` install different families). A skipped extension is a
-    // logged, contained failure; a panic here took down every builtin server's
-    // startup at once (2026-08-27, giap-context in the voice child).
+    // No deps = this binary didn't install this family: skip, as a panic kills every builtin.
     let Some(deps) = MEMORY_DEPS.get() else {
         tracing::error!(
             "spawn_memory_server called before init_memory_deps — extension will not start"
@@ -664,7 +629,6 @@ mod tests {
     #[async_trait]
     impl EmbeddingProvider for StubEmbedding {
         async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
-            // Return a deterministic 4-dim unit vector
             Ok(vec![1.0, 0.0, 0.0, 0.0])
         }
         fn dimensions(&self) -> usize {

@@ -1,7 +1,5 @@
-//! In-memory tool registry implementation.
-//!
-//! Holds external MCP extension tools, registered at runtime. It starts EMPTY: GIAP's
-//! builtins reach the model as native schemas, so a seed list here could only drift.
+//! In-memory tool registry for external MCP extension tools. Starts empty: builtins reach the
+//! model as native schemas, so a seed list here could only drift.
 
 use std::collections::HashMap;
 
@@ -14,19 +12,12 @@ use crate::mcp::ports::tools::tool_registry::ToolRegistryPort;
 /// Maximum description length in compact mode (characters, not bytes).
 const COMPACT_DESC_LIMIT: usize = 80;
 
-/// In-memory implementation of `ToolRegistryPort`.
-///
-/// A `RwLock<HashMap<extension_name, Vec<ExternalToolDescription>>>`. The `"giap"` key is
-/// still read on the way out for callers that register builtins, but nothing populates it.
+/// In-memory `ToolRegistryPort`. The `"giap"` key is still read, but nothing populates it.
 pub struct InMemoryToolRegistry {
     tools: RwLock<HashMap<String, Vec<ExternalToolDescription>>>,
 }
 
 impl InMemoryToolRegistry {
-    /// Create an empty registry: builtins are not listed here, because every live provider
-    /// receives them as native tool schemas generated from the real handlers, which cannot
-    /// drift. This registry holds only external MCP extension tools, registered at the
-    /// point they are added (see `routes.rs :: register_extension_tools`).
     pub fn new() -> Self {
         Self {
             tools: RwLock::new(HashMap::new()),
@@ -130,10 +121,6 @@ fn truncate_description(desc: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
 
-    /// The registry carries no hardcoded inventory of its own.
-    ///
-    /// Builtins reach the model as native tool schemas generated from the real handlers;
-    /// a second, hand-maintained copy here could only ever disagree with them.
     #[tokio::test]
     async fn a_fresh_registry_advertises_no_builtins() {
         let registry = InMemoryToolRegistry::new();
@@ -174,10 +161,8 @@ mod tests {
             )
             .await;
 
-        // Verify it's there
         assert!(registry.resolve_extension("fs_read").await.is_some());
 
-        // Deregister
         registry.deregister_extension("filesystem").await;
 
         let all = registry.all_tools().await;
@@ -201,7 +186,6 @@ mod tests {
         // Only the external tool: builtins travel as native schemas, not prose.
         assert_eq!(lines.len(), 1);
 
-        // External lines use "ext/tool_name -- desc" format
         let last = &lines[lines.len() - 1];
         assert!(
             last.starts_with("filesystem/fs_read"),
@@ -212,8 +196,6 @@ mod tests {
     #[tokio::test]
     async fn compact_mode_truncates_descriptions() {
         let registry = InMemoryToolRegistry::new();
-        // The registry no longer ships descriptions of its own, so the fixture
-        // has to supply one long enough to be worth truncating.
         registry
             .register_extension_tools(
                 "filesystem",
@@ -241,7 +223,6 @@ mod tests {
             "compact mode should truncate at least one description"
         );
 
-        // Verify truncated lines end with "..."
         for (compact, full) in compact_lines.iter().zip(full_lines.iter()) {
             if compact.len() < full.len() {
                 assert!(
@@ -262,20 +243,17 @@ mod tests {
             )
             .await;
 
-        // A builtin name resolves to nothing: the registry holds only what was
-        // explicitly registered, and builtins are never registered here.
+        // Builtins are never registered here, so a builtin name resolves to nothing.
         assert_eq!(
             registry.resolve_extension("get_current_weather").await,
             None
         );
 
-        // External tool
         assert_eq!(
             registry.resolve_extension("fs_read").await,
             Some("filesystem".to_string())
         );
 
-        // Unknown tool
         assert_eq!(registry.resolve_extension("nonexistent").await, None);
     }
 

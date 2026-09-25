@@ -29,14 +29,7 @@ function describeVoice(entry: ModelEntry): { label: string; sub: string } {
   return { label, sub: `${LOCALE_LABELS[locale] ?? locale} · ${quality}` };
 }
 
-/**
- * Quick voice-switcher popover for the voice-mode header. Lists the real
- * model catalog (real installed voices, not a hardcoded list) via
- * api.listModels(); only entries already downloaded are selectable — picking
- * one activates it exactly as Models.tsx's TTS panel does. Follows
- * SessionDropdown.tsx's convention: trigger-owned open state, outside-click
- * to close, `null` when closed.
- */
+/** Voice-mode header popover: pick a downloaded TTS voice to activate it (as Models.tsx does). */
 export function VoiceSwitcher({ isOpen, onClose }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [voices, setVoices] = useState<ModelEntry[] | null>(null);

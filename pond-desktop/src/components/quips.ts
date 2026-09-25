@@ -1,29 +1,10 @@
-/**
- * Quips — the short lines the pond greets you with, and the ones it shows
- * while it is busy.
- *
- * Shared rather than living in the chat screen, because the same voice should
- * turn up anywhere the assistant has a moment to fill: an empty conversation,
- * a working indicator, an empty list.
- *
- * Rules that keep this from ageing badly:
- *
- * - Never more than one clause. These sit next to a heading, not instead of it.
- * - No exclamation marks and no jokes about being an AI. The pond lives in
- *   someone's house; it should sound like a housemate, not a mascot.
- * - Nothing that claims capability ("Ready for anything"). It sets an
- *   expectation the model then has to meet.
- * - A name is optional everywhere. It comes from the `user_name` setting at
- *   runtime and is never written into this file; where these docs need to show
- *   one, they use the placeholder "user". A blank name falls through to the
- *   anonymous set, so every path reads without it.
- */
+/** Greetings and working-indicator lines for every surface. Rules: one clause, no "!" or AI
+ *  jokes, no capability claims, no name in this file (a blank name uses the anonymous set). */
 
 /** Morning / afternoon / evening / night, from the local clock. */
 export function timeOfDay(now: Date = new Date()): "morning" | "afternoon" | "evening" | "night" {
   const h = now.getHours();
-  // The small hours are handled FIRST. Ordering this after the morning test
-  // let 04:00 fall through to `h < 17` and greet you with "Good afternoon".
+  // Test the small hours first; the later branches assume h >= 5.
   if (h < 5) return "night";
   if (h < 12) return "morning";
   if (h < 17) return "afternoon";
@@ -82,35 +63,18 @@ export const WORKING_QUIPS: string[] = [
   "Following the thread",
 ];
 
-/**
- * Pick deterministically from `list` using `seed`.
- *
- * Deliberately not `Math.random()`: React may render a component more than
- * once for the same state, and a random pick would change the greeting on a
- * re-render while you were reading it. Passing a seed that only changes when
- * the conversation does keeps the line stable for as long as it is on screen.
- */
+/** Deterministic pick by `seed`, not `Math.random()`, so a re-render never changes the line. */
 export function pick<T>(list: readonly T[], seed: number): T {
   const i = Math.abs(Math.trunc(seed)) % list.length;
   return list[i];
 }
 
-/**
- * The greeting for an empty conversation.
- *
- * @param name  Whatever `user_name` holds — passed in, never assumed. An empty
- *              value uses the anonymous set rather than inventing a
- *              placeholder, because "Good morning, user" is worse than a line
- *              that simply does not need a name.
- * @param seed  Stable per conversation — pass something that changes when a
- *              new chat starts, not on every render.
- */
+/** Empty-conversation greeting. `name` is `user_name` (blank → anonymous set); `seed` should
+ *  change per conversation, not per render. */
 export function greeting(name: string | undefined, seed: number, now: Date = new Date()): string {
   const trimmed = (name ?? "").trim();
   if (!trimmed) return pick(GREETINGS_ANONYMOUS, seed);
-  // Whatever is stored is what the household chose to be called. Second-guessing
-  // it here — an earlier version skipped a particular default string — is not
-  // this function's business.
+  // Use the stored name as-is; it is what the household chose.
   return pick(GREETINGS_WITH_NAME[timeOfDay(now)], seed).replace("{name}", trimmed);
 }
 

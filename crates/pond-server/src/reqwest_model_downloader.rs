@@ -1,7 +1,4 @@
-//! Concrete `ModelDownloader` implementation that wraps `model_download::download_file`.
-//!
-//! This is the production downloader used in `auto_download_assigned_models` and at
-//! server startup.  Tests use `pond_core::models::mocks::mock_model_downloader::MockModelDownloader`.
+//! Production `ModelDownloader`, wrapping `model_download::download_file`.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -9,7 +6,6 @@ use std::path::Path;
 
 use pond_core::models::ports::model_downloader::ModelDownloader;
 
-/// Downloads model files via reqwest with live progress output.
 pub struct ReqwestModelDownloader;
 
 #[async_trait]

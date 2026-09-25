@@ -1,18 +1,7 @@
 /**
- * Matter measurement clusters projected onto GIAP `SensorReading`s.
- *
- * This file holds the whole vocabulary of sensor names the Pond mints for itself.
- * `crates/pond-core/tests/context_producer_tracks_the_sensor_vocabulary.rs` reads it
- * as source text and fails the build if a `sensorType` here is dispositioned neither
- * as a transition (`DISCRETE_SENSOR_TYPES`) nor as a measurement (its own
- * `KNOWN_CONTINUOUS`). That tripwire exists because the producer's rule is an
- * ALLOW-list: an unlisted signal is discarded forever, with no error anywhere, and a
- * household's new device becomes the one thing the assistant never mentions.
- *
- * So: keep the table one entry per line, each with its sensor name as a plain string
- * literal in the sensorType field, because that is the shape the tripwire scans for. A
- * mapping written some other way is invisible to it, and an invisible mapping is the
- * failure it was built to catch.
+ * Matter measurement clusters projected onto GIAP `SensorReading`s. pond-core's
+ * `context_producer_tracks_the_sensor_vocabulary.rs` scans this source text for each `sensorType`
+ * string literal (the producer silently drops unlisted types), so keep every name a plain literal.
  */
 
 import type { Reading } from "../protocol.js";
@@ -28,64 +17,26 @@ export interface SensorMapping {
   sensorType: string;
   unit: string;
   read: Read;
-  /**
-   * What the numbers mean, for a reading that is an enum rather than a quantity.
-   *
-   * The value stays the number: a rule comparing "filter change >= 2" needs one,
-   * and readings are stored as numbers. This is for the surfaces a person reads,
-   * where "2 state" says nothing. The device's own screen shows "Critical" beside
-   * the same attribute, and GIAP reporting 2 for it is GIAP knowing the answer and
-   * withholding it.
-   */
+  /** Display words for an enum reading; the value itself stays numeric for rules and storage. */
   words?: Record<number, string>;
-  /**
-   * The Matter device type this reading belongs to, for a cluster whose meaning is
-   * not in the cluster.
-   *
-   * Boolean State is one bit and says nothing about what the bit is: the same
-   * cluster, the same attribute, is a door being shut on a contact sensor, water on
-   * the floor under a leak detector, ice in a pipe on a freeze detector, and weather
-   * on a rain sensor. Only the endpoint's device type distinguishes them, and
-   * reporting all four as `contact` told a household its leak detector had a door.
-   *
-   * A mapping without one is the general case and matches any device, so the
-   * specific entry wins where it applies and nothing is lost where it does not.
-   */
+  /** Device type that gives the cluster its meaning (e.g. Boolean State's one bit); unset matches any. */
   deviceType?: number;
-  /**
-   * A featureMap flag the cluster must claim for this reading to exist at all.
-   *
-   * `describe` lists a sensor whether or not it has reported yet, which is right — a
-   * device that has not spoken still measures the thing. But that made cluster presence
-   * stand in for attribute presence, and the two differ: a CO-only alarm has the
-   * SmokeCoAlarm cluster and no smoke sensor whatsoever, and was credited with a smoke
-   * reading it can never produce. Value presence cannot tell "unsupported" from "not yet
-   * reported" — both are `undefined` — so the feature map is the only thing that can.
-   */
+  /** featureMap flag this reading needs: an unreported value cannot tell "unsupported" from "not yet". */
   feature?: string;
 }
 
 /** Does the cluster claim the feature this reading needs? Absent claim means yes. */
 export function clusterHasFeature(state: Record<string, unknown> | undefined, feature: string): boolean {
   const raw = state?.["featureMap"];
-  // matter.js decodes the bitmap to named flags; a raw number is tolerated for the same
-  // reason `colorSupport` tolerates one.
+  // matter.js decodes the bitmap to named flags; a raw number falls through as unstated.
   if (typeof raw === "object" && raw !== null) {
     return (raw as Record<string, unknown>)[feature] === true;
   }
-  // Nothing stated. Keep the reading rather than withholding one that works -- the same
-  // order used for colour capabilities and thermostat setpoints.
+  // Nothing stated: keep the reading rather than withhold one that works.
   return true;
 }
 
-/**
- * Matter's `MeasurementUnitEnum`, however matter.js hands it over.
- *
- * A concentration cluster states the unit its number is in, and substances do not
- * share one: this device reports ozone in ppm where the conventional default is
- * ppb, and pm1 in ppm where the default is ug/m3. Reading only the default gave a
- * number that was right beside a unit that was not.
- */
+/** Matter's `MeasurementUnitEnum`; a device may deviate from a substance's default (ozone in ppm). */
 const MEASUREMENT_UNITS: ReadonlyMap<number, string> = new Map([
   [0, "ppm"],
   [1, "ppb"],
@@ -128,11 +79,7 @@ const tenths: Read = v => {
 
 const asBool: Read = v => (typeof v === "boolean" ? (v ? 1 : 0) : undefined);
 
-/**
- * OccupancySensing's `occupancy` is a bitmap whose bit 0 is "occupied". matter.js
- * decodes bitmaps into objects, so this reads the flag rather than masking an integer
- * as the schema-11 adapter had to.
- */
+/** OccupancySensing's `occupancy` bitmap, bit 0 "occupied"; matter.js decodes it to an object. */
 const occupied: Read = v => {
   if (typeof v === "object" && v !== null && "occupied" in v) {
     return (v as { occupied?: unknown }).occupied === true ? 1 : 0;
@@ -143,10 +90,6 @@ const occupied: Read = v => {
 };
 
 // ── What the enum readings mean ──────────────────────────────────────────────
-//
-// Matter's own names for these values. Kept beside the sensors that use them so a
-// reading and its meaning cannot drift apart, and so adding a sensor with an enum
-// has an obvious place to say what its numbers are.
 
 /** ResourceMonitoring's ChangeIndicationEnum: does this filter need replacing. */
 const CHANGE_INDICATION: Record<number, string> = {
@@ -173,15 +116,7 @@ const AIR_QUALITY: Record<number, string> = {
   6: "Extremely poor",
 };
 
-/**
- * What one bit means, per detector.
- *
- * `stateValue` true is the thing having happened -- contact made, water found, ice
- * found, rain falling -- so the words are not interchangeable and neither is the
- * direction. Without them GIAP answered "contact = 0 bool", which is the reading
- * with the meaning removed, and for these devices the meaning is all there is: a
- * leak detector has exactly one thing to say.
- */
+/** What Boolean State's `stateValue` means per detector; true is the thing having happened. */
 const CONTACT_STATE: Record<number, string> = { 0: "open", 1: "closed" };
 const LEAK_STATE: Record<number, string> = { 0: "dry", 1: "leak detected" };
 const FREEZE_STATE: Record<number, string> = { 0: "above freezing", 1: "freezing" };
@@ -193,9 +128,7 @@ const OCCUPANCY_STATE: Record<number, string> = { 0: "clear", 1: "occupied" };
 export const SENSORS: readonly SensorMapping[] = [
   // Presence and contact. Both are transitions: a household cares when they change.
   { cluster: "occupancySensing", attribute: "occupancy", sensorType: "occupancy", unit: "bool", read: occupied, words: OCCUPANCY_STATE },
-  // Boolean State, four ways. The device type decides which, and the general
-  // `contact` entry is last so a detector GIAP has no specific name for still
-  // reports its bit rather than nothing.
+  // Boolean State by device type; the general `contact` entry covers any other detector.
   { cluster: "booleanState", attribute: "stateValue", sensorType: "leak", unit: "bool", read: asBool, deviceType: 0x0043, words: LEAK_STATE },
   { cluster: "booleanState", attribute: "stateValue", sensorType: "freeze", unit: "bool", read: asBool, deviceType: 0x0041, words: FREEZE_STATE },
   { cluster: "booleanState", attribute: "stateValue", sensorType: "rain", unit: "bool", read: asBool, deviceType: 0x0044, words: RAIN_STATE },
@@ -203,42 +136,22 @@ export const SENSORS: readonly SensorMapping[] = [
 
   // Ambient measurements.
   { cluster: "temperatureMeasurement", attribute: "measuredValue", sensorType: "temperature", unit: "C", read: hundredths },
-  // A thermostat measures the room it is in, and publishes it here rather than
-  // through TemperatureMeasurement -- so asking a thermostat for the temperature
-  // got "none recorded", from the one device in the house whose whole job is
-  // knowing it. Its setpoint is a separate thing, reachable through `target_temp`.
+  // A thermostat publishes its room temperature here, not via TemperatureMeasurement.
   { cluster: "thermostat", attribute: "localTemperature", sensorType: "temperature", unit: "C", read: hundredths },
   { cluster: "relativeHumidityMeasurement", attribute: "measuredValue", sensorType: "humidity", unit: "%", read: hundredths },
-  // Lux, reported log-scaled. Passed through unconverted: the raw measurement is what
-  // a rule threshold compares against.
+  // Matter's log-scaled lux value, passed through raw for rule thresholds.
   { cluster: "illuminanceMeasurement", attribute: "measuredValue", sensorType: "illuminance", unit: "lux", read: asNumber },
   { cluster: "pressureMeasurement", attribute: "measuredValue", sensorType: "pressure", unit: "kPa", read: tenths },
   { cluster: "flowMeasurement", attribute: "measuredValue", sensorType: "flow", unit: "m3/h", read: tenths },
 
-  // An ordinal: 0 unknown, 1 good, rising to 6 extremely poor. Kept as the ordinal
-  // rather than invented units, so the scale stays the device's own.
+  // An ordinal, 0 unknown, 1 good … 6 extremely poor; kept as the device's own scale.
   { cluster: "airQuality", attribute: "airQuality", sensorType: "air_quality", unit: "level", read: asNumber, words: AIR_QUALITY },
-  // Alarm state: 0 normal, non-zero means it is sounding.
-  //
-  // Smoke and CO are separate sensors on the same device because they are separate
-  // dangers with separate responses -- one says leave, the other says ventilate. Only
-  // smoke was read, so an alarm sounding for carbon monoxide reported nothing at all,
-  // and a CO-only alarm looked like a device that measures nothing. Both are gated by
-  // the cluster's feature map, so a device without one simply has no value there.
+  // 0 normal, non-zero sounding. Smoke and CO are separate sensors, each gated on its feature.
   { cluster: "smokeCoAlarm", attribute: "smokeState", sensorType: "smoke_alarm", unit: "state", read: asNumber, words: ALARM_STATE, feature: "smokeAlarm" },
   { cluster: "smokeCoAlarm", attribute: "coState", sensorType: "co_alarm", unit: "state", read: asNumber, words: ALARM_STATE, feature: "coAlarm" },
-  // The same ordinal, about the thing that makes the alarm able to sound at all. A
-  // life-safety device with a flat battery is the failure everyone already knows about
-  // and nobody is told about.
   { cluster: "smokeCoAlarm", attribute: "batteryAlert", sensorType: "alarm_battery", unit: "state", read: asNumber, words: ALARM_STATE },
 
-  // Concentrations are floats in each substance's own unit, passed through unscaled —
-  // the number the device shows is the number a rule threshold should compare against.
-  //
-  // These units are the DEFAULTS for each substance. The device also publishes a
-  // `measurementUnit` attribute which is authoritative and which GIAP does not read
-  // yet: a device reporting CO2 in ppb rather than ppm would be labelled wrongly.
-  // Worth reading before this is trusted for anything but display.
+  // Floats, unscaled. These units are each substance's default; a declared `measurementUnit` wins.
   { cluster: "carbonMonoxideConcentrationMeasurement", attribute: "measuredValue", sensorType: "carbon_monoxide", unit: "ppm", read: asNumber },
   { cluster: "carbonDioxideConcentrationMeasurement", attribute: "measuredValue", sensorType: "carbon_dioxide", unit: "ppm", read: asNumber },
   { cluster: "nitrogenDioxideConcentrationMeasurement", attribute: "measuredValue", sensorType: "nitrogen_dioxide", unit: "ppb", read: asNumber },
@@ -250,10 +163,7 @@ export const SENSORS: readonly SensorMapping[] = [
   { cluster: "radonConcentrationMeasurement", attribute: "measuredValue", sensorType: "radon", unit: "ppm", read: asNumber },
   { cluster: "totalVolatileOrganicCompoundsConcentrationMeasurement", attribute: "measuredValue", sensorType: "total_volatile_organic_compounds", unit: "ppb", read: asNumber },
 
-  // Resource monitoring — an air purifier's two filters. Same cluster shape, one
-  // instance per filter, and two attributes each because they answer different
-  // questions: how worn the filter is, and whether the device is asking for it to be
-  // changed. The change indication is 0 OK, 1 Warning, 2 Critical.
+  // Resource monitoring: an air purifier's filters.
   { cluster: "hepaFilterMonitoring", attribute: "condition", sensorType: "hepa_filter_condition", unit: "%", read: asNumber },
   { cluster: "hepaFilterMonitoring", attribute: "changeIndication", sensorType: "hepa_filter_change", unit: "state", read: asNumber, words: CHANGE_INDICATION },
   { cluster: "activatedCarbonFilterMonitoring", attribute: "condition", sensorType: "carbon_filter_condition", unit: "%", read: asNumber },
@@ -271,13 +181,7 @@ const BY_PATH: ReadonlyMap<string, readonly SensorMapping[]> = (() => {
   return paths;
 })();
 
-/**
- * Which of the mappings on one cluster attribute this endpoint's reading is.
- *
- * A device-type-specific mapping wins where the endpoint claims that type; the
- * general one answers otherwise. Declaration order settles a device claiming two
- * of them, which no real device does and the spec does not allow.
- */
+/** The mapping for this endpoint: a device-type-specific one where claimed, else the general one. */
 export function sensorMappingFor(
   cluster: string,
   attribute: string,
@@ -291,14 +195,7 @@ export function sensorMappingFor(
   );
 }
 
-/**
- * Is this the mapping an endpoint with these device types reads through?
- *
- * The one place precedence is decided, so `describe`, `state` and the reading stream
- * cannot disagree. Asking only "does this mapping name a type this endpoint has"
- * left the GENERAL entry applying too, and a leak detector was described as having
- * both a `leak` and a `contact` -- one device, two names, one bit.
- */
+/** Is this the mapping these device types read through? The one place precedence is decided. */
 export function sensorApplies(
   mapping: SensorMapping,
   deviceTypes: readonly number[] = [],
@@ -306,29 +203,17 @@ export function sensorApplies(
   return sensorMappingFor(mapping.cluster, mapping.attribute, deviceTypes) === mapping;
 }
 
-/**
- * The reading a cluster attribute carries, or `undefined` when it is not one GIAP
- * understands — a light confirming its own state, a utility cluster, an attribute
- * whose decoded value is not the shape the mapping expects.
- */
+/** The reading a cluster attribute carries, or `undefined` if GIAP does not map it or its shape. */
 export function readingFor(
-  // The DEVICE this reading belongs to, not the node it arrived from. A bridge is
-  // one node and many devices, and two bridged thermometers reporting under one
-  // node id are indistinguishable to everything downstream -- worse, they collide
-  // in the dedupe caches on both sides of the socket, so each sweep sees the other
-  // one's value as a change and republishes forever.
+  // The DEVICE, not the node: a bridge's children would collide in the dedupe caches.
   deviceId: string,
   cluster: string,
   attribute: string,
   value: unknown,
   at: Date = new Date(),
-  // What the cluster says its numbers are in. `describe` has always read this;
-  // readings did not, so the same substance was described in one unit and reported
-  // in another -- ozone declared ppm and reported ppb, from one device, at once.
+  // The cluster's declared `measurementUnit`, which overrides the mapping's default.
   declaredUnit?: unknown,
-  // The endpoint's own device types, for a cluster whose meaning is not in the
-  // cluster -- see `deviceType` on `SensorMapping`. Empty means "not stated", which
-  // resolves to the general mapping rather than to none.
+  // The endpoint's device types; empty resolves to the general mapping, not to none.
   deviceTypes: readonly number[] = [],
 ): Reading | undefined {
   const mapping = sensorMappingFor(cluster, attribute, deviceTypes);

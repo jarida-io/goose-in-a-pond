@@ -1,20 +1,6 @@
 import { useState } from "react";
 import { ChevronRight } from "lucide-react";
 
-/**
- * The model's reasoning, as one line you can open.
- *
- * Replaces the always-expanded panel that put several paragraphs of half-formed
- * reasoning above every answer. Reasoning is worth keeping and rarely worth
- * reading, so it collapses to a single line that reports how long it took —
- * and says so in the past tense once it is over, because "Thinking…" that never
- * stops is a spinner that lies.
- *
- * While it runs, the label carries a sweep from left to right. That is the only
- * moving thing in the thread at that moment, so it reads as the model working
- * without needing a separate spinner.
- */
-
 /** "a moment" / "8 seconds" / "1m 04s" — never a bare millisecond count. */
 export function formatThinkingTime(ms: number | undefined): string {
   if (ms === undefined || ms < 0) return "a moment";
@@ -35,6 +21,7 @@ interface ThinkingDisclosureProps {
   ms?: number;
 }
 
+/** The model's reasoning as one openable line saying how long it took; past tense once it ends. */
 export function ThinkingDisclosure({ blocks, active, ms }: ThinkingDisclosureProps) {
   const [open, setOpen] = useState(false);
   const label = active ? "Thinking" : `Thought for ${formatThinkingTime(ms)}`;

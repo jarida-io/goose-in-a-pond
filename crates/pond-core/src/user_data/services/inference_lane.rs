@@ -1,53 +1,14 @@
-//! One lane for every background job that spends inference.
+//! One lane for every background job that spends inference: at most one runs per tick.
 //!
-//! # Why this exists
-//!
-//! Inference is the scarcest resource on a pond. On a Jetson Orin Nano there is
-//! exactly one model resident in GPU memory, decode is memory-bandwidth-bound,
-//! and two background jobs running at once do not each take half as long — they
-//! evict each other's KV cache and both get slower than either alone, while the
-//! household waits behind them for its next answer.
-//!
-//! Before this module there was no lane: memory consolidation, session titling
-//! and the proactive reviewer each ran their own `tokio::spawn` loop, each
-//! re-derived the same [`consolidation_schedule`] gate from its own copy of the
-//! inputs, and coordination between them was *pairwise and by hand*. The titling
-//! loop carried a literal "stand down while consolidation is mid-run" check
-//! against consolidation's cancel token. That is O(n²) checks in the number of
-//! jobs, every one of them written by whoever added the newest job, and every
-//! one of them a place to forget a direction: A yields to B, B never learns to
-//! yield to A, and both run.
-//!
-//! This module replaces that with a single question asked once per tick — *which
-//! one job may run now?* — whose answer is a single job by construction. Nothing
-//! can run concurrently because [`select_next`] cannot return two things.
-//!
-//! # What belongs here and what does not
-//!
-//! Only jobs that **spend inference**. A periodic job that is pure SQL — memory
-//! decay, log pruning, run-history cleanup — does not contend for the slot and
-//! must NOT be put in the lane: it would sit behind an LLM call for no reason,
-//! and idle-gating it would mean a busy household never gets its logs pruned.
-//!
-//! This module is also deliberately free of `tokio`, clocks and repositories: it
-//! decides, and the caller acts. That is what makes the starvation and
-//! mutual-exclusion properties testable in microseconds instead of via a
-//! scheduler that has to be waited on.
+//! Concurrent jobs on the single resident model evict each other's KV cache and both slow down.
+//! Pure-SQL jobs (decay, pruning) must stay out: behind the idle gate a busy pond never prunes.
 
 use std::time::Duration;
 
 use super::consolidation_schedule::{self, GateInputs, SkipReason};
 
-/// A background job that spends inference.
-///
-/// Adding a variant is the whole registration step — [`select_next`] needs no
-/// change, because the lane does not rank jobs by identity. See the module docs
-/// for why a pure-SQL job does not belong here.
-/// `Ord` is derived and therefore follows declaration order. That is not
-/// decoration: [`select_next`] documents declaration order as its tie-break, and
-/// a caller holding its jobs in a `HashMap` (as the server's registry does)
-/// would otherwise hand them over in an arbitrary order and make ties resolve
-/// differently between runs. Callers sort by this before deciding.
+/// A background job that spends inference. Declaration order is the derived `Ord` and
+/// [`select_next`]'s tie-break; callers sort jobs by it (a `HashMap` would randomise ties).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LaneJob {
     /// Merge and score the memory store.
@@ -58,21 +19,8 @@ pub enum LaneJob {
     ProactiveReview,
     /// Keep each active conversation's rolling summary current.
     SummaryRefresh,
-    /// Embed what the personal-context index cannot yet reach, and prune what it
-    /// should no longer hold.
-    ///
-    /// Declared after [`SummaryRefresh`] on purpose. Order is only the tie-break,
-    /// but the one tie worth deciding is this pair: the refresh WRITES rolling
-    /// summaries and this job embeds them, so on an exact tie the summary should
-    /// exist before something tries to index it.
-    ///
-    /// A pass is mostly SQL — adoption and orphan pruning — around an embedding
-    /// step that is not. It is in the lane for that middle part: embedding is a
-    /// forward pass through a second model, and the module's rule is about
-    /// spending inference, not about how many lines do. Splitting the pass to
-    /// keep the SQL out of the lane would break the adopt-embed-prune ordering
-    /// that `run_index_maintenance` asserts, to save a few milliseconds of
-    /// `COUNT(*)`.
+    /// Embed what the personal-context index lacks and prune what it should drop. Declared after
+    /// `SummaryRefresh` so on a tie a summary is written before it is indexed.
     IndexMaintenance,
 }
 
@@ -93,56 +41,24 @@ impl LaneJob {
 #[derive(Debug, Clone, Copy)]
 pub struct JobState {
     pub job: LaneJob,
-    /// This job's live enable toggle, re-read per tick so switching a feature
-    /// off takes effect on the next tick rather than at the next restart.
+    /// This job's live enable toggle, re-read per tick so it applies without a restart.
     pub enabled: bool,
     /// Time since this job last ran in this process; `None` if it never has.
     pub since_last_run: Option<Duration>,
-    /// The job's own minimum spacing. Consolidation's comes from
-    /// `memory_consolidation_interval_hours`; a cheap bounded job like titling
-    /// can set this to its poll period, which makes it "every tick it is
-    /// eligible".
+    /// Minimum spacing between this job's runs; its poll period here means "whenever eligible".
     pub interval_floor: Duration,
-    /// How quiet it must be before THIS job may take the slot.
-    ///
-    /// Per-job rather than shared, and the summary refresh is why. Consolidation
-    /// and titling are background chores: they want a long quiet (15 min) because
-    /// nothing is lost by waiting for one. The rolling-summary refresh is not a
-    /// chore — it maintains the context the NEXT turn will be answered from, so
-    /// it is meant to run in the gaps between turns and uses a ~30s threshold.
-    /// Forcing it to the chore threshold would starve it during exactly the
-    /// conversation it exists to serve.
-    ///
-    /// This does not weaken exclusion: no two jobs can run at once regardless of
-    /// their thresholds, because there is one slot. The threshold answers "may
-    /// background work take the slot from a person right now?", which is a
-    /// different question from "may two jobs run together?", and only the second
-    /// has one right answer for every job.
+    /// How quiet it must be before THIS job may take the slot. Per-job so the summary refresh
+    /// (~30 s) can run between turns while chores wait out a long quiet; exclusion is unaffected.
     pub idle_threshold: Duration,
-    /// Whether this job may run on a pond that has served no turn since boot.
-    ///
-    /// PER-JOB, and that is the whole point. `saw_activity_since_start` is one
-    /// value for the lane, so a caller that relaxed it to let ITSELF run
-    /// relaxed it for every other registered job at the same time -- and since
-    /// a never-run job sorts as maximally starved and the tie-break is
-    /// declaration order, the tick went to whichever job was declared first,
-    /// whose own task then refused it. The lane deadlocked while looking busy.
-    ///
-    /// The exemption exists because "nobody has chatted" is not the same as
-    /// "there is nothing to do": mail arrives from a connector, so the index
-    /// has real work on a pond that has served no turn at all.
+    /// Whether this job may run on a pond that has served no turn since boot (e.g. indexing
+    /// connector mail). Per-job: relaxing the lane-wide flag instead deadlocks the lane.
     pub exempt_from_activity_gate: bool,
 }
 
 /// Everything the lane needs for one tick.
-///
-/// The activity readings are shared because they describe the household, not a
-/// job. What each job does with them — how much quiet it insists on — is its own
-/// (`JobState::idle_threshold`).
 #[derive(Debug, Clone, Copy)]
 pub struct LaneInputs<'a> {
-    /// The "never on startup" guard — see
-    /// [`consolidation_schedule::saw_activity_since_start`].
+    /// The "never on startup" guard; see [`consolidation_schedule::saw_activity_since_start`].
     pub saw_activity_since_start: bool,
     /// Time since the most recent user activity, from either source.
     pub idle_for: Duration,
@@ -150,17 +66,11 @@ pub struct LaneInputs<'a> {
     pub jobs: &'a [JobState],
 }
 
-/// The lane's verdict for one tick.
-///
-/// `Run` carries exactly one job. That is the mutual-exclusion guarantee, and it
-/// is structural rather than a rule someone has to remember: there is no shape
-/// of this type that names two jobs.
+/// The lane's verdict for one tick; `Run` holding one job is the mutual-exclusion guarantee.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaneDecision {
     Run(LaneJob),
-    /// Nothing ran, and why. When several jobs were skipped for different
-    /// reasons this reports the one that blocked the *most* jobs, which is the
-    /// answer to "why is nothing happening?".
+    /// Nothing ran; carries the most lane-wide skip reason (see `most_informative`).
     Idle(SkipReason),
 }
 
@@ -173,30 +83,16 @@ impl LaneDecision {
     }
 }
 
-/// Pick the one job that may run this tick.
-///
-/// **Least-recently-run wins**, with declaration order as the tie-break. A job
-/// that has never run counts as infinitely starved and therefore outranks every
-/// job that has.
-///
-/// Not priority ordering, and the difference matters: titling is eligible every
-/// five minutes while consolidation is eligible every few hours, so under a
-/// fixed priority with titling above it, consolidation would lose every tick it
-/// was ever eligible for and never run at all. Least-recently-run cannot starve
-/// anything — a job that keeps losing keeps accumulating the very quantity the
-/// comparison is on. Each job's own `interval_floor` still bounds how *often* it
-/// can win, so fairness here does not mean "equally often".
+/// Pick the one job that may run this tick: least-recently-run wins (never-run beats all),
+/// ties go to declaration order. Not a priority queue, which would starve rare jobs.
 pub fn select_next(inputs: LaneInputs<'_>) -> LaneDecision {
     let mut best: Option<(&JobState, Duration)> = None;
-    // Tracks why jobs were skipped, so an idle lane can say something better
-    // than "nothing to do". Ordered by how much a reader can act on it.
     let mut blocked: Option<SkipReason> = None;
 
     for state in inputs.jobs {
         let decision = consolidation_schedule::should_run(GateInputs {
             enabled: state.enabled,
-            // The lane-wide observation, OR this one job's exemption. Never the
-            // other way round: one job's exemption must not qualify the rest.
+            // Per-job OR: one job's exemption must not qualify the rest.
             saw_activity_since_start: inputs.saw_activity_since_start
                 || state.exempt_from_activity_gate,
             idle_for: inputs.idle_for,
@@ -213,12 +109,9 @@ pub fn select_next(inputs: LaneInputs<'_>) -> LaneDecision {
                 });
             }
             consolidation_schedule::GateDecision::Run => {
-                // `None` means never run, which is the most starved a job can
-                // be — `Duration::MAX` is how that orders against real waits.
                 let waited = state.since_last_run.unwrap_or(Duration::MAX);
                 let wins = match best {
-                    // Strictly greater, so an equal wait leaves the earlier
-                    // declaration in place: the tie-break is order, not luck.
+                    // Strict `>` keeps the earlier declaration on a tie.
                     Some((_, best_waited)) => waited > best_waited,
                     None => true,
                 };
@@ -231,19 +124,12 @@ pub fn select_next(inputs: LaneInputs<'_>) -> LaneDecision {
 
     match best {
         Some((state, _)) => LaneDecision::Run(state.job),
-        // An empty lane is not "disabled", but reporting the reason of a job
-        // that does not exist would be worse. Disabled is the honest default:
-        // a lane with no jobs registered is off.
+        // A lane with no jobs registered is off.
         None => LaneDecision::Idle(blocked.unwrap_or(SkipReason::Disabled)),
     }
 }
 
-/// Which of two skip reasons better explains an idle lane.
-///
-/// A reader asking "why is nothing running?" is best served by the condition
-/// that is about the *whole lane* rather than one job's cadence: the household
-/// being mid-conversation explains everything, whereas one job's interval floor
-/// explains only that job.
+/// Which of two skip reasons better explains an idle lane: lane-wide beats one job's cadence.
 fn most_informative(a: SkipReason, b: SkipReason) -> SkipReason {
     fn rank(r: SkipReason) -> u8 {
         match r {
@@ -278,15 +164,6 @@ mod tests {
         }
     }
 
-    /// One job's exemption must not qualify the others.
-    ///
-    /// Before this was per-job, the index sweep relaxed the lane-wide activity
-    /// flag so IT could run on a pond nobody had chatted with. That relaxed the
-    /// flag for every registered job, and on a fresh boot every job is
-    /// never-run -- maximally starved -- so the tick went to whichever was
-    /// declared first. `IndexMaintenance` is declared last, so it lost every
-    /// tick to a job whose own task then refused the slot. Nothing ran, and
-    /// nothing said so.
     #[test]
     fn an_exemption_belongs_to_one_job_and_does_not_qualify_the_rest() {
         let mut sweep = job(LaneJob::IndexMaintenance, None, 0);
@@ -294,7 +171,6 @@ mod tests {
         let jobs = [job(LaneJob::Consolidation, None, 0), sweep];
 
         let decision = select_next(LaneInputs {
-            // Nobody has used this pond since boot.
             saw_activity_since_start: false,
             idle_for: LONG_IDLE,
             jobs: &jobs,
@@ -306,7 +182,6 @@ mod tests {
         );
     }
 
-    /// Without an exemption the gate still holds for everyone.
     #[test]
     fn no_job_runs_before_the_pond_has_been_used() {
         let jobs = [
@@ -332,14 +207,10 @@ mod tests {
         })
     }
 
-    // ── The property the whole module exists for ───────────────────────────
+    // ── Mutual exclusion ───────────────────────────────────────────────────
 
     #[test]
     fn a_tick_can_never_start_two_jobs() {
-        // Every job eligible, all wide open. Exactly one is chosen — this is the
-        // replacement for the pairwise "stand down while X is mid-run" checks,
-        // and it holds by the shape of the return type rather than by anyone
-        // remembering to write the check.
         let jobs = [
             job(LaneJob::Consolidation, None, 0),
             job(LaneJob::Titling, None, 0),
@@ -352,8 +223,6 @@ mod tests {
 
     #[test]
     fn a_household_mid_conversation_blocks_every_job() {
-        // The reason the gate is shared: any job taking the slot now is taking
-        // it from the person typing.
         let jobs = [
             job(LaneJob::Consolidation, None, 0),
             job(LaneJob::Titling, None, 0),
@@ -368,8 +237,6 @@ mod tests {
 
     #[test]
     fn an_untouched_process_runs_nothing() {
-        // "Never on startup", now inherited by every job at once rather than
-        // re-derived per loop.
         let jobs = [job(LaneJob::Consolidation, None, 0)];
         let decision = select_next(LaneInputs {
             saw_activity_since_start: false,
@@ -394,7 +261,7 @@ mod tests {
         assert_eq!(tick(&jobs), LaneDecision::Run(LaneJob::Titling));
     }
 
-    // ── Fairness: the reason this is not a priority queue ──────────────────
+    // ── Fairness ───────────────────────────────────────────────────────────
 
     #[test]
     fn the_longest_waiting_job_goes_first() {
@@ -408,8 +275,6 @@ mod tests {
 
     #[test]
     fn a_job_that_has_never_run_outranks_every_job_that_has() {
-        // `None` is infinitely starved. Without this a fresh job added to a
-        // long-running pond would queue behind jobs that had run seconds ago.
         let jobs = [
             job(LaneJob::Consolidation, Some(86_400), 0),
             job(LaneJob::Titling, None, 0),
@@ -419,9 +284,7 @@ mod tests {
 
     #[test]
     fn a_frequent_job_cannot_starve_a_rare_one() {
-        // The concrete failure a priority queue would have: titling is eligible
-        // every 5 minutes, consolidation every 6 hours. Simulate a day of ticks
-        // and assert consolidation actually gets the slot.
+        // Titling is eligible every 5 min, consolidation every 6 h.
         let mut titling_last: Option<u64> = Some(0);
         let mut consolidation_last: Option<u64> = Some(0);
         let mut consolidation_runs = 0;
@@ -460,8 +323,6 @@ mod tests {
 
     #[test]
     fn an_interval_floor_still_bounds_a_starved_job() {
-        // Fairness must not override a job's own cadence: waiting longest does
-        // not entitle a job to run before its floor has elapsed.
         let jobs = [
             job(LaneJob::Consolidation, Some(60), 6 * 3600),
             job(LaneJob::Titling, Some(10), 0),
@@ -478,15 +339,6 @@ mod tests {
         assert_eq!(tick(&jobs), LaneDecision::Run(LaneJob::Titling));
     }
 
-    /// The one tie in this lane whose direction is a real decision rather than
-    /// an arbitrary one.
-    ///
-    /// `SummaryRefresh` WRITES rolling summaries; `IndexMaintenance` embeds them.
-    /// Run the wrong way round on a tie and the sweep indexes the summary that
-    /// existed a moment ago, then waits a full interval to notice the new one.
-    /// Nothing breaks — the next pass repairs it — but the ordering is free, so
-    /// it is worth being on the correct side of, and worth failing loudly if a
-    /// later variant is inserted between them.
     #[test]
     fn a_summary_is_written_before_anything_tries_to_index_it() {
         assert!(
@@ -503,9 +355,6 @@ mod tests {
         assert_eq!(tick(&jobs), LaneDecision::Run(LaneJob::SummaryRefresh));
     }
 
-    /// The index sweep is a lane citizen like any other, and the property that
-    /// matters most is the one it would have broken by keeping its own loop:
-    /// it cannot run while another job holds the slot.
     #[test]
     fn the_index_sweep_cannot_run_beside_another_job() {
         // Starved far longer than the other, so it wins the tick outright...
@@ -515,10 +364,7 @@ mod tests {
         ];
         assert_eq!(tick(&jobs), LaneDecision::Run(LaneJob::IndexMaintenance));
 
-        // ...and winning is the whole grant. There is no shape of LaneDecision
-        // that names two jobs, which is why the old bespoke loop -- which asked
-        // nobody before embedding -- could contend with consolidation and this
-        // cannot.
+        // ...and winning is the whole grant: `LaneDecision` cannot name two jobs.
         assert_eq!(tick(&jobs).job(), Some(LaneJob::IndexMaintenance));
     }
 
@@ -526,8 +372,7 @@ mod tests {
 
     #[test]
     fn an_idle_lane_reports_the_reason_that_explains_the_most() {
-        // One job is merely waiting out its floor; the household is also active.
-        // "Still active" explains the whole lane, so it is the one to report.
+        // One job waits out its floor, but the household is active: the lane-wide reason wins.
         let jobs = [
             job(LaneJob::Consolidation, Some(60), 6 * 3600),
             job(LaneJob::Titling, Some(10), 300),
@@ -542,10 +387,7 @@ mod tests {
 
     #[test]
     fn a_short_threshold_job_runs_in_a_gap_that_blocks_the_chores() {
-        // The whole reason the threshold is per-job. The household paused for a
-        // minute: far too short for consolidation to take the slot, but exactly
-        // the gap the summary refresh is built for. A single shared threshold
-        // would have starved it during the conversation it serves.
+        // A one-minute pause: too short for consolidation, enough for the summary refresh.
         let jobs = [
             job(LaneJob::Consolidation, None, 0),
             JobState {

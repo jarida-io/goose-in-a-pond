@@ -34,9 +34,6 @@ const HEAT = 4;
 
 describe("which setpoint a thermostat request is about", () => {
   it("writes the cooling setpoint when the thermostat is cooling", () => {
-    // The bug: a thermostat sitting in Cool, told "set it to 20", had its HEATING
-    // setpoint moved and carried on cooling to 26. The write succeeded and the
-    // reported value was 20, so nothing looked wrong except the device.
     const plan = planControl(thermostat(COOL), "matter-1", "target_temp", 20);
 
     expect(plan.actions).toEqual([
@@ -56,8 +53,7 @@ describe("which setpoint a thermostat request is about", () => {
   });
 
   it("lets the value decide when the mode does not", () => {
-    // Auto runs both, so neither setpoint is the obvious one. Against a 12/26 pair,
-    // "make it 28" is plainly about cooling and "make it 10" plainly about heating.
+    // Auto runs both setpoints (12/26 here), so the value picks the nearer one.
     expect(targetSetpoint(thermostat(AUTO), 28)?.which).toBe("cooling");
     expect(targetSetpoint(thermostat(AUTO), 10)?.which).toBe("heating");
     expect(targetSetpoint(thermostat(OFF), 25)?.which).toBe("cooling");
@@ -68,7 +64,6 @@ describe("which setpoint a thermostat request is about", () => {
 
   it("bounds each setpoint by the other across the deadband", () => {
     // Heating is capped 2.5 below cooling; cooling is floored 2.5 above heating.
-    // This is why a thermostat advertising 30 refuses 24.
     const heating = targetSetpoint(thermostat(HEAT));
     expect(heating).toMatchObject({ which: "heating", min: 700, max: 2350 });
 
@@ -113,10 +108,7 @@ describe("which setpoint a thermostat request is about", () => {
     });
   });
   it("says what a mode-bound range is true of, and what the device can still reach", () => {
-    // A bare "7 to 23.5" reads as this thermostat's ceiling, so a reader concludes
-    // 30 is impossible -- when 30 is reachable the moment the mode changes. It also
-    // goes stale silently: the same question minutes later answers 16 to 32, with
-    // nothing to say why.
+    // A bare "7 to 23.5" reads as the device's ceiling, though a mode change reaches 30.
     const heating = describeNode(thermostat(HEAT)).capabilities.find(c => c.verb === "target_temp");
     expect(heating?.value).toEqual({
       kind: "number",
@@ -129,15 +121,13 @@ describe("which setpoint a thermostat request is about", () => {
     const cooling = describeNode(thermostat(COOL)).capabilities.find(c => c.verb === "target_temp");
     expect(cooling?.value).toMatchObject({ when: "while cooling; this device reaches 7 to 32 C across its modes" });
 
-    // Auto already spans both, so there is no condition to state and nothing wider
-    // to point at.
+    // Auto already spans both: no condition to state, nothing wider to point at.
     const auto = describeNode(thermostat(AUTO)).capabilities.find(c => c.verb === "target_temp");
     expect(auto?.value).toEqual({ kind: "number", unit: "C", min: 7, max: 32 });
   });
 
   it("states the condition without a wider range when there is none", () => {
-    // A heat-only thermostat has one setpoint: the range is the device's range, and
-    // claiming it "reaches" something else would be false.
+    // One setpoint, so its range is the device's range and nothing wider is "reached".
     const heatOnly = node(102, [
       named("Boiler"),
       endpoint(1, {
@@ -159,11 +149,7 @@ describe("which setpoint a thermostat request is about", () => {
     });
   });
   it("reads an appliance's own temperature setpoint, which is a number not a level", () => {
-    // Temperature Control has two shapes. The washer named levels and was read as a
-    // mode; this dishwasher states a number, and reading only the levels had GIAP
-    // telling a household "no, you cannot set a temperature for the dishwasher"
-    // about a device showing a 49 to 82 degree slider on its own screen. These are
-    // the values the Matter Virtual Device publishes.
+    // Temperature Control has two shapes: named levels, or (here, as MVD publishes) a number.
     const dishwasher = node(103, [
       named("Dishwasher"),
       endpoint(1, {
@@ -177,8 +163,7 @@ describe("which setpoint a thermostat request is about", () => {
       }),
     ]);
 
-    // Offered under the verb GIAP already has for a temperature in Celsius, rather
-    // than a verb per appliance.
+    // The existing `target_temp` verb, not a verb per appliance.
     expect(describeNode(dishwasher).capabilities.find(c => c.verb === "target_temp")?.value).toEqual(
       { kind: "number", unit: "C", min: 49, max: 82, step: 1 },
     );
@@ -199,8 +184,6 @@ describe("which setpoint a thermostat request is about", () => {
   });
 
   it("still reads a washer's levels as a mode, not a number", () => {
-    // The other shape, unchanged: a device naming its levels has no numeric
-    // setpoint to offer, and claiming one would invent a range.
     const washer = node(104, [
       named("Washer"),
       endpoint(1, {

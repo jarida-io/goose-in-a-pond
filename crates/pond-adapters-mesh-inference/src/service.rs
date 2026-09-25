@@ -29,9 +29,7 @@ use pond_mesh_protocol::wire::{
 
 use crate::from_wire_message;
 
-/// Errors from [`MeshInferenceService::request_invoice`] — the client-role
-/// counterpart to [`crate::MeshInferenceError`], which covers borrowing
-/// compute rather than requesting an invoice.
+/// Errors from [`MeshInferenceService::request_invoice`].
 #[derive(thiserror::Error, Debug)]
 pub enum InvoiceRequestError {
     #[error("mesh transport error: {0}")]
@@ -42,49 +40,37 @@ pub enum InvoiceRequestError {
     Timeout(PeerId),
 }
 
-/// Owns the *only* consumer of `MeshTransport::recv()` for a mesh-enabled Pond. Inbound frames
-/// are dispatched by kind: `*Request`s are served here (inference via `backing_provider`,
-/// invoices via `payment_rail`, capabilities) and `*Response`/`InferenceChunk` frames are routed
-/// to the in-flight outbound call they answer. A second `recv()` loop would silently steal frames.
+/// The *only* consumer of `MeshTransport::recv()` (a second loop would steal frames): serves
+/// `*Request`s, and routes `*Response`/`InferenceChunk` frames to the outbound call they answer.
 pub struct MeshInferenceService {
     pub(crate) transport: Arc<dyn MeshTransport>,
     pub(crate) peer_directory: Arc<dyn PeerDirectory>,
     pub(crate) credit_ledger: Arc<dyn CreditLedger>,
     pub(crate) usage_tally: Arc<dyn UsageTally>,
-    /// Read live at debit time, never cached — the rate can change without a restart.
+    /// Read live per request, never cached, so the lend ceiling can change without a restart.
     pub(crate) settings_repo: Arc<dyn SettingsRepository>,
-    /// How long `MeshInferenceProvider::stream_complete` waits for each next chunk (reset on
-    /// every chunk, not an overall deadline) before giving up on a silent peer. A constructor
-    /// parameter so tests can use a short one instead of a multi-second production timeout.
+    /// How long to wait for each reply chunk from a silent peer (per chunk, not overall).
     pub(crate) chunk_timeout: std::time::Duration,
     backing_provider: Arc<dyn LlmProvider>,
-    /// This Pond's own Lightning wallet, used to answer inbound `InvoiceRequest`s. `None` when
-    /// Lightning is not configured (off by default); inbound invoice requests then get an
-    /// `InvoiceResponseKind::Error` reply rather than being silently dropped.
+    /// Our Lightning wallet for inbound `InvoiceRequest`s; `None` answers them with an error.
     payment_rail: Option<Arc<dyn PaymentRail>>,
     pending: Mutex<HashMap<u64, mpsc::UnboundedSender<InferenceChunk>>>,
     pending_invoices: Mutex<HashMap<u64, mpsc::UnboundedSender<InvoiceResponse>>>,
     pending_capabilities: Mutex<HashMap<u64, mpsc::UnboundedSender<CapabilityResponse>>>,
     next_request_id: AtomicU64,
-    /// Lend-side throttle: tokens lent to each peer in the current window.
-    /// Separate from `usage_tally`'s permanent `tokens_lent` receivable —
-    /// this is in-memory, resets every window, and exists only to cap
-    /// volume, not to track real accounting.
+    /// Lend throttle: tokens lent per peer this window; in-memory, for capping, not accounting.
     lend_window: std::sync::Mutex<HashMap<PeerId, LendWindowState>>,
-    /// How long a lend-side window stays open before resetting. A
-    /// constructor param (like `chunk_timeout`) so tests can use a short one.
+    /// How long a lend window stays open before resetting.
     lend_window_duration: std::time::Duration,
 }
 
-/// One peer's lend-side window: start time and tokens lent since.
 struct LendWindowState {
     started_at: std::time::Instant,
     tokens_lent: u64,
 }
 
-/// Ensures `unregister_pending` runs even if the stream is dropped early
-/// (not just on normal completion) — otherwise the pending entry leaks.
-/// `Drop` can't `.await`, so cleanup runs on a spawned task.
+/// Unregisters the pending entry however the stream ends, so it can't leak. `Drop` can't
+/// `.await`, so cleanup runs on a spawned task.
 pub(crate) struct PendingGuard {
     service: Arc<MeshInferenceService>,
     request_id: u64,
@@ -101,10 +87,7 @@ impl Drop for PendingGuard {
 }
 
 impl MeshInferenceService {
-    /// Constructs the service and spawns its `recv()` loop. `backing_provider`
-    /// is whatever `LlmProvider` this Pond already has active locally — the
-    /// service delegates inbound requests to it, it does not discover or
-    /// build one itself.
+    /// Build the service and spawn its `recv()` loop; lent requests run on `backing_provider`.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         transport: Arc<dyn MeshTransport>,
@@ -137,22 +120,17 @@ impl MeshInferenceService {
         service
     }
 
-    /// The `LlmProvider` to use when this Pond wants to *borrow* — a thin
-    /// handle back into this same service (and therefore the same `recv()`
-    /// loop already spawned by [`Self::spawn`]).
+    /// The `LlmProvider` for borrowing: a handle into this service and its `recv()` loop.
     pub fn provider(self: &Arc<Self>) -> crate::MeshInferenceProvider {
         crate::MeshInferenceProvider::new(self.clone())
     }
 
-    /// A fresh id for a new outbound request, echoed back on every
-    /// `InferenceChunk` answering it.
+    /// A fresh outbound request id; replies echo it.
     pub(crate) fn next_request_id(&self) -> u64 {
         self.next_request_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Registers a channel for `request_id`'s replies, returned alongside a
-    /// [`PendingGuard`] that unregisters it on drop. Must be called before
-    /// the request frame is sent, so a fast reply can't race registration.
+    /// Register a reply channel for `request_id`. Call before sending, or a fast reply is lost.
     pub(crate) async fn register_pending(
         self: &Arc<Self>,
         request_id: u64,
@@ -170,8 +148,7 @@ impl MeshInferenceService {
         self.pending.lock().await.remove(&request_id);
     }
 
-    /// Whether `peer` may be served another request under the lend throttle,
-    /// rolling the window over if it's expired. `ceiling == 0` disables it.
+    /// May `peer` be served under the lend throttle? Rolls over an expired window.
     fn lend_window_check(&self, peer: PeerId, ceiling: u64) -> bool {
         if ceiling == 0 {
             return true;
@@ -201,10 +178,7 @@ impl MeshInferenceService {
             match self.transport.recv().await {
                 Ok((peer, bytes)) => {
                     let this = self.clone();
-                    // Off the recv loop immediately: a slow inbound request
-                    // (running the local model) must not block receiving the
-                    // next frame, e.g. a chunk answering a different
-                    // in-flight outbound request.
+                    // Off the recv loop: a slow local model must not block the next frame.
                     tokio::spawn(async move { this.dispatch(peer, bytes).await });
                 }
                 Err(err) => {
@@ -228,13 +202,10 @@ impl MeshInferenceService {
             Some(MeshFrameKind::Chunk(chunk)) => {
                 let pending = self.pending.lock().await;
                 if let Some(tx) = pending.get(&chunk.request_id) {
-                    // A dropped receiver means the requester already gave up
-                    // (timed out / stream was dropped) — nothing to do.
+                    // A dropped receiver means the requester gave up.
                     let _ = tx.send(chunk);
                 }
-                // An unknown request_id means the requester already
-                // unregistered (finished or gave up) — drop silently, not an
-                // error: this is an expected race, not a protocol violation.
+                // An unknown request_id is the expected finished/gave-up race; drop it silently.
             }
             Some(MeshFrameKind::InvoiceRequest(request)) => {
                 self.serve_invoice_request(peer, request).await
@@ -244,8 +215,7 @@ impl MeshInferenceService {
                 if let Some(tx) = pending.get(&response.request_id) {
                     let _ = tx.send(response);
                 }
-                // Same "requester already gave up" race as the InferenceChunk
-                // arm above — an unknown request_id is expected, not an error.
+                // Unknown request_id: the same expected race as above.
             }
             Some(MeshFrameKind::CapabilityRequest(request)) => {
                 self.serve_capability_request(peer, request).await
@@ -263,10 +233,7 @@ impl MeshInferenceService {
         }
     }
 
-    /// Server role: answer with what this Pond currently offers. Inference
-    /// is unconditionally `true` — `backing_provider` always exists, this
-    /// service wouldn't be constructed otherwise — Lightning reflects
-    /// whether `payment_rail` is configured right now.
+    /// Server role: what we offer; inference always (there is always a `backing_provider`).
     async fn serve_capability_request(&self, peer: PeerId, request: CapabilityRequest) {
         let frame = MeshFrame::capability_response(CapabilityResponse {
             request_id: request.request_id,
@@ -279,8 +246,7 @@ impl MeshInferenceService {
         }
     }
 
-    /// Server role: a peer wants to pay us and needs an invoice first. Uses
-    /// this Pond's own `payment_rail` — never the requesting peer's.
+    /// Server role: issue an invoice from our own `payment_rail` for a peer that wants to pay.
     async fn serve_invoice_request(&self, peer: PeerId, request: InvoiceRequest) {
         let response_kind = match &self.payment_rail {
             Some(rail) => match rail
@@ -305,9 +271,8 @@ impl MeshInferenceService {
         }
     }
 
-    /// Client role: ask `peer` for an invoice covering `amount`, so `PaymentRail::batch_settle`
-    /// has something real to pay. Call once per settlement attempt and never cache the result:
-    /// a Lightning invoice from `issue_invoice` is not necessarily reusable.
+    /// Client role: ask `peer` for an invoice for `amount`. Call per settlement attempt, never
+    /// cache: a Lightning invoice is not necessarily reusable.
     pub async fn request_invoice(
         &self,
         peer: PeerId,
@@ -345,15 +310,11 @@ impl MeshInferenceService {
         result
     }
 
-    /// How many times a completion producing no visible text is retried locally before the
-    /// lender reports it anyway. `backing_provider` has none of Goose's harness (no empty-turn
-    /// detection or re-engagement), so without this every retry happens on the BORROWER as a
-    /// full mesh round trip. One extra local completion is strictly cheaper.
+    /// Local attempts at a completion with no visible text before sending it anyway; cheaper than
+    /// the borrower retrying over the mesh (`backing_provider` lacks Goose's empty-turn handling).
     const MAX_EMPTY_COMPLETION_ATTEMPTS: u32 = 2;
 
-    /// Server role: run `backing_provider` against the borrower's request and
-    /// stream the reply back as a sequence of `InferenceChunk`s, terminated
-    /// by exactly one `usage` or `error` chunk.
+    /// Server role: stream `backing_provider`'s reply as chunks ending in one `usage` or `error`.
     async fn serve_request(&self, peer: PeerId, request: InferenceRequest) {
         // Refuse before spending local compute if the lend throttle is exhausted.
         let ceiling = self
@@ -381,9 +342,7 @@ impl MeshInferenceService {
 
         let messages: Vec<_> = request.messages.iter().map(from_wire_message).collect();
 
-        // Tokens spent on attempts discarded for producing no visible text are still real local
-        // compute, so they count against the lend window. The sent attempt's tokens are added
-        // separately below from the figure reported in its usage chunk.
+        // Discarded attempts still cost local compute, so they count against the lend window.
         let mut discarded_tokens_total: u32 = 0;
         let mut sent_usage: Option<pond_mesh_protocol::wire::UsageWire> = None;
 
@@ -393,16 +352,13 @@ impl MeshInferenceService {
                 .backing_provider
                 .stream_complete(&request.system_prompt, messages.clone());
 
-            // Buffered, not sent, until this attempt proves it has visible content: a chunk on
-            // the wire cannot be un-sent, and a `<think>` block can still be followed by a real
-            // answer. Once `seen_visible` flips, the rest of the attempt streams through so real
-            // content still reaches the borrower incrementally.
+            // Buffer until the attempt shows visible text (a sent chunk can't be un-sent, and a
+            // `<think>` block may precede an answer); then stream the rest.
             let mut pending: Vec<InferenceChunk> = Vec::new();
             let mut filter = ThoughtFilter::new();
             let mut seen_visible = false;
             let mut seq = 0u32;
-            // No per-chunk token count on the wire, so max_tokens is enforced
-            // against an estimate (chars/4) until real usage is reported.
+            // No per-chunk token count, so max_tokens is enforced on a chars/4 estimate.
             let mut estimated_tokens: u32 = 0;
             let mut attempt_usage = None;
 
@@ -432,8 +388,7 @@ impl MeshInferenceService {
                         }
 
                         if estimated_tokens >= request.max_tokens {
-                            // Borrower's own cap, not an error — end with a
-                            // usage chunk below, same as a normal completion.
+                            // The borrower's own cap: end normally, with a usage chunk.
                             break;
                         }
                     }
@@ -441,15 +396,12 @@ impl MeshInferenceService {
                         attempt_usage = Some(pond_mesh_protocol::wire::UsageWire {
                             prompt_tokens: stats.prompt_tokens,
                             completion_tokens: stats.completion_tokens,
-                            // Set on `sent_usage` once this attempt is known
-                            // to be the one actually sent — see below.
+                            // Set below once this attempt is the one sent.
                             charged_tokens: 0,
                         });
                     }
                     Err(err) => {
-                        // An attempt that errors outright isn't the empty-turn
-                        // case this retry exists for — surface it immediately
-                        // rather than mask a real failure behind a retry.
+                        // A real error is not the empty-turn case: surface it, don't retry.
                         for buffered in pending.drain(..) {
                             self.send_chunk(peer, buffered).await;
                         }
@@ -474,17 +426,13 @@ impl MeshInferenceService {
             }
 
             if seen_visible || is_last_attempt {
-                // Falls back to the estimate if the provider reported no
-                // usage, or max_tokens cut it short.
+                // The estimate if the provider reported no usage or max_tokens cut it short.
                 let mut usage = attempt_usage.unwrap_or(pond_mesh_protocol::wire::UsageWire {
                     prompt_tokens: 0,
                     completion_tokens: estimated_tokens,
                     charged_tokens: 0,
                 });
-                // The borrower needs to see the full bill — this attempt's
-                // tokens plus every discarded attempt before it — not just
-                // what it can see in `completion_tokens`, or its own ledger
-                // can never agree with what it's actually charged.
+                // The full bill, discarded attempts included, so the borrower's ledger agrees.
                 usage.charged_tokens =
                     discarded_tokens_total.saturating_add(usage.completion_tokens);
                 sent_usage = Some(usage);
@@ -500,10 +448,7 @@ impl MeshInferenceService {
                 break;
             }
 
-            // This attempt is being discarded — its tokens still cost local
-            // compute, so charge them now (the accurate reported count when
-            // the provider gave one, else the same char/4 estimate used
-            // above).
+            // Discarded: still charge its tokens (reported count, else the chars/4 estimate).
             discarded_tokens_total = discarded_tokens_total.saturating_add(
                 attempt_usage
                     .map(|u| u.completion_tokens)
@@ -517,9 +462,7 @@ impl MeshInferenceService {
             );
         }
 
-        // Lend side: `peer` owes us, so record_lent at exactly what
-        // `charged_tokens` already told them they owe (see above) — the
-        // same number, not a second computation that could drift from it.
+        // Record exactly the `charged_tokens` the borrower was billed, so the ledgers agree.
         let charged_tokens = sent_usage.map(|u| u.charged_tokens).unwrap_or(0);
         let _ = self
             .usage_tally
@@ -536,10 +479,7 @@ impl MeshInferenceService {
     }
 }
 
-/// Client role for capability queries — implemented directly on the service
-/// (rather than a thin handle type like [`crate::MeshInferenceProvider`])
-/// because there's only one method and no per-caller state to hold, unlike
-/// borrowing compute where `model_name()` needs `last_peer`.
+/// Client role for capability queries; no per-caller state, so no handle type.
 #[async_trait]
 impl PeerCapabilityQuery for MeshInferenceService {
     async fn capabilities_of(
@@ -571,10 +511,7 @@ impl PeerCapabilityQuery for MeshInferenceService {
     }
 }
 
-/// Bridges the inherent `request_invoice` to `pond-core`'s `InvoiceRequester` port so the
-/// settlement job in `pond-server` can hold this service as `Arc<dyn InvoiceRequester>`.
-/// The fully-qualified call below is deliberate: dot-call syntax would resolve to the inherent
-/// `request_invoice`, and spelling it out makes clear this is not infinite recursion.
+/// `InvoiceRequester` over the inherent `request_invoice` (called fully qualified: not recursion).
 #[async_trait]
 impl pond_core::mesh::ports::invoice_requester::InvoiceRequester for MeshInferenceService {
     async fn request_invoice(

@@ -1,22 +1,5 @@
-// ────────────────────────────────────────────────────────────
-// One plain sentence about this house, right now.
-//
-// It replaces "Nothing needs you right now." — true, but true of any house on
-// any day, which makes it wallpaper. A household glancing at a panel across a
-// room wants to know something they did not already know, and the pond knows
-// several such things: which lights are on, whether the doors are locked, what
-// the sky is doing, what time it is where they are.
-//
-// Deliberately ONE sentence and deliberately plain. This sits where a
-// suggestion would, on a screen whose whole job is to be glanced at, so it
-// reports and never asks. No counts dressed up as insight, no "you have 3
-// items", no exclamation.
-//
-// Everything here is derived from data the pond actually holds. Nothing is
-// inferred about mood, habit or intent — DESIGN.md §3, "never invent meaning
-// the data lacks". If the house has nothing to say, the line says something
-// true about the hour instead of manufacturing significance.
-// ────────────────────────────────────────────────────────────
+// One plain sentence about this house, right now. It reports and never asks, and uses only
+// data the pond actually holds (DESIGN.md §3); with nothing to say, it speaks of the hour.
 
 import type { DeviceData, WeatherData } from "../data/mockHome";
 
@@ -37,12 +20,7 @@ function locks(devices: DeviceData[]): { total: number; locked: number } {
   return { total: all.length, locked: all.filter((d) => d.locked === true).length };
 }
 
-/**
- * Join names the way a person would say them.
- *
- * Two get "and"; three or more get the first two and a count, because reading
- * six device names aloud off a panel is a list, not a sentence.
- */
+/** Joins names as spoken: two get "and"; three or more get the first two and a count. */
 function names(devices: DeviceData[]): string {
   const n = devices.map((d) => d.name);
   if (n.length === 1) return n[0];
@@ -50,22 +28,14 @@ function names(devices: DeviceData[]): string {
   return `${n[0]}, ${n[1]} and ${n.length - 2} more`;
 }
 
-/**
- * The sentence.
- *
- * Ordered by what a household would want to be told first. A door that is
- * unlocked at night outranks a light that is on, and a light that is on
- * outranks the weather — the weather is already in the header, so it only
- * speaks when nothing else has anything to say.
- */
+/** Most important first; the weather is already in the header, so it speaks only when nothing else does. */
 export function homeLine({ user, devices, weather, now }: HomeLineInput): string {
   const hour = now.getHours();
   const evening = hour >= 19 || hour < 6;
   const { total: lockTotal, locked } = locks(devices);
   const lit = litLights(devices);
 
-  // 1. An unlocked door after dark. The one thing worth interrupting for, and
-  //    still phrased as a report — the household can see the locks on screen.
+  // 1. An unlocked door after dark.
   if (evening && lockTotal > 0 && locked < lockTotal) {
     const open = lockTotal - locked;
     return open === lockTotal
@@ -73,13 +43,12 @@ export function homeLine({ user, devices, weather, now }: HomeLineInput): string
       : `${open} of ${lockTotal} doors are still unlocked.`;
   }
 
-  // 2. Everything shut, after dark. The good outcome, said once.
+  // 2. Everything shut, after dark.
   if (evening && lockTotal > 0 && locked === lockTotal && lit.length === 0) {
     return "All locked, and everything is off.";
   }
 
-  // 3. What is on. The most common useful thing, and the one a person is most
-  //    likely to act on from across a room.
+  // 3. What is on.
   if (lit.length > 0) {
     return lit.length === 1
       ? `${names(lit)} is on.`
@@ -93,19 +62,11 @@ export function homeLine({ user, devices, weather, now }: HomeLineInput): string
       : "Everything is off.";
   }
 
-  // 5. No devices at all. The pond still knows the sky and the hour, and a
-  //    household that has not added anything yet is exactly who should not be
-  //    told their house is empty.
+  // 5. No devices at all: the sky and the hour are still true.
   return skyLine(weather, hour, user);
 }
 
-/**
- * The fallback, for a pond with no devices in it.
- *
- * Uses the weather and the hour because those are true without a single device
- * paired. It is the first thing a new household sees on this screen, so it
- * reports something real rather than apologising for being empty.
- */
+/** Fallback for a pond with no devices: the weather and the hour are true without pairing anything. */
 function skyLine(weather: WeatherData, hour: number, user: string): string {
   const cond = (weather.cond || "").toLowerCase();
   const wet = /rain|drizzle|shower|storm/.test(cond);

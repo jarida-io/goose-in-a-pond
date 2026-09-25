@@ -26,11 +26,7 @@ function trafficColor(t: Route["traffic"]): string {
 const NAV_ICON_PATH  = "M3 11l19-9-9 19-2-8-8-2z";
 const ARROW_PATH     = "M5 12h14M12 5l7 7-7 7";
 
-/**
- * Maps card — inline SVG map + 3 generic route options + Open/Navigate buttons.
- * Source: giap-maps (no MCP server yet — mock data for Phase 5).
- * Route names are generic ("Highway / Downtown / Express") — not location-specific.
- */
+/** Maps card; mock data with generic route names until a giap-maps MCP server exists. */
 export function MapsCard(): React.ReactElement {
   return (
     <div className="mc">
@@ -138,9 +134,7 @@ export function MapsCard(): React.ReactElement {
               <div
                 style={{
                   fontSize: 11,
-                  // The purple "best route" background (#F5F3FF) drops the
-                  // general tertiary-text token just under 4.5:1 — darken it
-                  // for that row specifically.
+                  // On the best-route purple (#F5F3FF) the tertiary token falls under 4.5:1, so darken it.
                   color: r.best ? "#4B5570" : "var(--color-text-tertiary)",
                   marginTop: 2,
                   display: "flex",
@@ -184,7 +178,7 @@ export function MapsCard(): React.ReactElement {
           }}
           type="button"
           onClick={() => {
-            /* Phase 8: hand off to system maps app */
+            // TODO: hand off to the system maps app.
           }}
         >
           Open in Maps
@@ -208,7 +202,7 @@ export function MapsCard(): React.ReactElement {
           }}
           type="button"
           onClick={() => {
-            /* Phase 8: start in-app turn-by-turn navigation */
+            // TODO: start in-app turn-by-turn navigation.
           }}
         >
           Navigate

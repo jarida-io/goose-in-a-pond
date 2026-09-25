@@ -1,7 +1,5 @@
-//! The on-pond producer (PAI-8 P3s): a pure function from one [`BusEvent`] and one
-//! [`ContextSource`] to a [`RawItem`] or a named [`NotIngested`] refusal. A source has one
-//! `profile_id`, so keying on the member's source rather than the device registry is what makes
-//! ownership answerable. The match on [`BusEvent`] has NO wildcard arm, by design.
+//! The on-pond producer: pure, from a [`BusEvent`] and [`ContextSource`] to a [`RawItem`].
+//! Refusals are named [`NotIngested`]s. The [`BusEvent`] match has no wildcard arm, by design.
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use thiserror::Error;
@@ -16,63 +14,43 @@ use crate::user_data::domain::settings::Settings;
 
 // ── The worth-keeping policy ────────────────────────────────────────────────
 
-/// Sensor signals whose readings are TRANSITIONS rather than samples: keep transitions, drop
-/// samples, because a 30-second sensor is 2 880 rows a day per device and the series already
-/// lives in `sensor_readings` under `retention_sensor_days`. The rule keys on the SIGNAL, never
-/// the value: Matter's `contact` is `true = closed`, so a non-zero rule would invert it.
+/// Signals whose readings are transitions, not samples (those live in `sensor_readings`).
+/// Keyed on the signal, never the value: Matter's `contact` is `true = closed`.
 pub const DISCRETE_SENSOR_TYPES: &[&str] = &[
-    // The three that exist in this tree today: `motion` (the sensor route and
-    // the bus tests), `occupancy` and `contact` (the Matter bridge's
-    // `OCCUPANCY` and `BOOLEAN_STATE` clusters).
+    // Minted in this tree: `motion` (sensor route), `occupancy`/`contact` (Matter clusters).
     "motion",
     "occupancy",
     "contact",
-    // The same shape, for bridges that name them separately. Every one of these
-    // is binary by construction; none of them is a measurement.
+    // The same shape from bridges that name them separately; all binary.
     "door",
     "window",
     "smoke",
     "leak",
     "button",
-    // Water freezing in a pipe, and rain falling: the same one bit as `leak`, off the same
-    // Matter cluster and separated from it only by the endpoint's device type. Transitions by
-    // construction.
+    // One bit like `leak`, off the same Matter cluster; only the endpoint's device type differs.
     "freeze",
     "rain",
-    // The Matter `SmokeCoAlarm` cluster's own name for the same thing (#195). Normal/Warning/
-    // Critical rather than a boolean, but it changes rarely and every change matters. Kept
-    // alongside `smoke` above: the two names come from different bridges.
+    // Matter `SmokeCoAlarm`'s name for `smoke`: tri-state, but rare and every change matters.
     "smoke_alarm",
-    // Carbon monoxide, and the battery that lets either alarm sound at all. The same
-    // shape as `smoke_alarm` and, for CO, the same urgency by a different route: smoke
-    // says leave, CO says ventilate. Only smoke was mapped for a while, so an alarm
-    // sounding for carbon monoxide produced no reading anything here could keep.
+    // Carbon monoxide, and the battery that lets either alarm sound; same shape as `smoke_alarm`.
     "co_alarm",
     "alarm_battery",
-    // An air purifier asking for its filter to be changed. Same argument as `smoke_alarm`: 0/1/2
-    // rather than a boolean, but it changes a handful of times a year and asks for something to
-    // be DONE. The Matter bridge mints these in a shape the tripwire's extraction does not match,
-    // so listing them here is what stops the readings being silently discarded.
+    // Air-purifier filter alerts: 0/1/2 but rare and actionable. The tripwire's extraction misses
+    // the Matter bridge's shape for these, so only this list keeps them.
     "hepa_filter_change",
     "carbon_filter_change",
 ];
 
-/// Camera event types meaning "the pixels changed" rather than naming a thing.
-///
-/// `pond-adapters-vision` emits `"motion"` when no classifier ran, so such a pond ingests nothing
-/// rather than 8 640 empty rows a day; `context_producer_tracks_the_vision_pipeline.rs` guards it.
+/// Event types meaning "the pixels changed": vision emits `motion` when no classifier ran.
 pub const UNCLASSIFIED_CAMERA_EVENT_TYPES: &[&str] = &["motion"];
 
-/// A classified camera event below this confidence is dropped.
-///
-/// The same 0.5 as `pond-adapters-vision`'s `MIN_CLASSIFIER_CONFIDENCE`; the live gate is
-/// `POST /api/v1/camera/events`, whose confidence is client-sent. No confidence at all is kept.
+/// A classified camera event below this confidence is dropped; `None` is kept.
+/// Matches `pond-adapters-vision`'s `MIN_CLASSIFIER_CONFIDENCE`.
 pub const MIN_CAMERA_CONFIDENCE: f64 = 0.5;
 
 // ── Refusals ────────────────────────────────────────────────────────────────
 
-/// Why the worth-keeping rule dropped an event that was otherwise addressed to
-/// this source.
+/// Why the worth-keeping rule dropped an event otherwise addressed to this source.
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum DropReason {
     #[error(
@@ -94,9 +72,7 @@ pub enum DropReason {
 }
 
 /// Why a bus event did not become a context item.
-///
-/// Variants naming a missing prerequisite quote [`SourceAvailability::refusal`] rather than
-/// restating it: one sentence in this tree says what a connector waits for, a second would rot.
+/// Missing-prerequisite variants quote [`SourceAvailability::refusal`] rather than restating it.
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum NotIngested {
     #[error(
@@ -166,9 +142,7 @@ pub enum NotIngested {
 // ── The producer ────────────────────────────────────────────────────────────
 
 /// Turns bus events into [`RawItem`]s for the sources that follow them.
-///
-/// Constructed only from [`Settings`], so there is no way to hold one without having answered
-/// `context_ingest_enabled`: a toggle a caller can forget to read is a toggle that is on.
+/// Built only from [`Settings`], so no caller can skip reading `context_ingest_enabled`.
 #[derive(Debug, Clone)]
 pub struct BusProducer {
     enabled: bool,
@@ -187,10 +161,7 @@ impl BusProducer {
         self.enabled
     }
 
-    /// One event, one source: an item or a named refusal.
-    ///
-    /// Pure — no clock, no store, no global — so the same event and source always give the same
-    /// answer, which is what makes the idempotency claim below testable.
+    /// One event, one source: an item or a named refusal. Pure: no clock, store or global.
     pub fn raw_item_for(
         &self,
         source: &ContextSource,
@@ -200,9 +171,7 @@ impl BusProducer {
             return Err(NotIngested::Disabled);
         }
 
-        // 1. Availability, quoting the table's own sentence. A connector source
-        //    is refused here whatever the event is, so this cannot be reached by
-        //    picking an event that happens to match.
+        // 1. Availability, quoting the table's own sentence; refused whatever the event.
         let availability = source.kind().availability();
         if availability != SourceAvailability::Landed {
             return Err(NotIngested::SourceUnavailable {
@@ -211,10 +180,8 @@ impl BusProducer {
             });
         }
 
-        // 2. Of the kinds that HAVE landed, which does the bus feed? Exhaustive and
-        //    wildcard-free, so a ninth SourceKind does not compile until it is answered. The
-        //    connector arm is unreachable while step 1 stands, and is written anyway so
-        //    promoting a kind to `Landed` does not silently make it bus-ingestable.
+        // 2. Which landed kinds the bus feeds. No wildcard, so promoting a kind to `Landed` can't
+        //    silently make it bus-ingestable.
         match source.kind() {
             SourceKind::Sensor | SourceKind::Camera => {}
             SourceKind::Voice => return Err(NotIngested::VoiceIsCuratedByMemoryExtraction),
@@ -229,10 +196,7 @@ impl BusProducer {
             }
         }
 
-        // 3. This source's own state; pausing is the member's only control that stops copying
-        //    without deleting what is stored. Exhaustive and wildcard-free: a fifth status must
-        //    be dispositioned. Everything not `Connected` refuses, which matters because
-        //    `SourceStatus::parse` reads an unrecognised stored string as `Error`.
+        // 3. Source state: only `Connected` ingests; pausing stops copying without deleting.
         match source.status() {
             SourceStatus::Connected => {}
             status @ (SourceStatus::NeedsReauth | SourceStatus::Error | SourceStatus::Paused) => {
@@ -246,26 +210,18 @@ impl BusProducer {
         match event {
             BusEvent::Sensor(reading) => self.item_from_sensor(source, reading),
             BusEvent::Camera(camera) => self.item_from_camera(source, camera),
-            // No landed `SourceKind` has a sensitivity floor or retention window chosen for a
-            // device state change: `retention_category() == Device` holds only for `Mobile`,
-            // which is `AwaitingIngestRoute`.
+            // Only `Mobile` retains as `Device`, and it hasn't landed.
             BusEvent::Device(_) => Err(NotIngested::NoLandedSourceKindDescribesIt),
-            // The pond noticing itself. `proactive_review::reviewable` refuses
-            // exactly this pair for the same reason, and this is the second
-            // consumer of the bus to reach it independently.
+            // The pond noticing itself; `proactive_review::reviewable` refuses the same pair.
             BusEvent::Time(_) => Err(NotIngested::PondNoticingItself { event: "time" }),
             BusEvent::Session(_) => Err(NotIngested::PondNoticingItself { event: "session" }),
-            // A presence event carries its own `profile_id`, and this source
-            // carries a different one. There is no correct owner to store it
-            // under.
+            // Presence carries its own `profile_id`: no correct owner to store it under.
             BusEvent::Presence(_) => Err(NotIngested::WouldMisattribute),
         }
     }
 
     /// Every (source, item) pair one event produces across a household's sources.
-    ///
-    /// Two members may follow the same camera; the stored id `{source_id}:{external_id}` keeps
-    /// their rows distinct. Refusals are dropped; use [`raw_item_for`](Self::raw_item_for).
+    /// Refusals are dropped; use [`raw_item_for`](Self::raw_item_for) to see them.
     pub fn items_for<'a>(
         &self,
         sources: &'a [ContextSource],
@@ -319,9 +275,7 @@ impl BusProducer {
             occurred_at: reading.recorded_at,
             title: format!("{} at {}", reading.sensor_type, reading.device_id),
             body,
-            // Empty, and it must stay empty. A reading names no person, and
-            // `participants` is the field `ContextItem::from_parts` singles out
-            // as the one an upstream pastes arbitrary sender strings into.
+            // Must stay empty: a reading names no person.
             participants: Vec::new(),
         })
     }
@@ -358,9 +312,7 @@ impl BusProducer {
             kind: ItemKind::Event,
             occurred_at: camera.created_at,
             title: format!("{} at {}", camera.event_type, camera.camera_id),
-            // `snapshot_path` and `metadata` are deliberately absent: the body is text a model
-            // reads back into its window, and adapter-controlled JSON of unbounded size is token
-            // cost with no reading benefit. Both stay on the camera_events row.
+            // `snapshot_path` and `metadata` stay on the camera_events row: unbounded token cost.
             body,
             participants: Vec::new(),
         })
@@ -369,10 +321,7 @@ impl BusProducer {
 
 // ── Idempotency ─────────────────────────────────────────────────────────────
 
-/// The external id of a sensor reading: `sensor:{device}:{signal}:{instant}`.
-///
-/// Derived from the event alone, and `save_item` is idempotent on `(source_id, external_id)`, so
-/// a bus re-delivery UPDATEs the row. The value is out of the key; the instant is not quantised.
+/// The external id of a sensor reading, from the event alone so re-delivery updates the row.
 fn sensor_external_id(reading: &SensorReading) -> String {
     format!(
         "sensor:{}:{}:{}",
@@ -383,9 +332,7 @@ fn sensor_external_id(reading: &SensorReading) -> String {
 }
 
 /// The external id of a camera event: `camera:{camera}:{type}:{instant}`.
-///
-/// [`CameraEvent::id`] is deliberately NOT used: it is `None` until the row is persisted, so a
-/// publisher that ever published before persisting would mint a SECOND row for a stored event.
+/// Not [`CameraEvent::id`], which is `None` until persisted and would mint a second row.
 fn camera_external_id(camera: &CameraEvent) -> String {
     format!(
         "camera:{}:{}:{}",
@@ -395,8 +342,7 @@ fn camera_external_id(camera: &CameraEvent) -> String {
     )
 }
 
-/// Milliseconds, UTC, `Z`-suffixed. A fixed rendering, so the key does not move
-/// with the host's locale or offset.
+/// Milliseconds, UTC, `Z`-suffixed, so the key never moves with host locale or offset.
 fn instant(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
@@ -418,16 +364,13 @@ fn sensor_is_worth_keeping(reading: &SensorReading) -> Result<(), DropReason> {
 /// See [`UNCLASSIFIED_CAMERA_EVENT_TYPES`] and [`MIN_CAMERA_CONFIDENCE`].
 fn camera_is_worth_keeping(camera: &CameraEvent) -> Result<(), DropReason> {
     let label = camera.event_type.trim().to_ascii_lowercase();
-    // A blank label names nothing just as surely as "motion" does, and it is the
-    // shape an adapter that forgot to set the field produces.
+    // A blank label names nothing either; it's what an adapter that forgot the field sends.
     if label.is_empty() || UNCLASSIFIED_CAMERA_EVENT_TYPES.contains(&label.as_str()) {
         return Err(DropReason::NothingNamedIt {
             event_type: camera.event_type.clone(),
         });
     }
-    // Written as "at or above the floor is kept" rather than "below is dropped": `NaN < 0.5` is
-    // false, so the negative form would keep a confidence that is not a number. That value comes
-    // from outside this repo via `POST /api/v1/camera/events`, so it must narrow to a refusal.
+    // Written as "at or above is kept" so a client-sent `NaN` (every comparison false) is refused.
     match camera.confidence {
         None => Ok(()),
         Some(c) if c >= MIN_CAMERA_CONFIDENCE => Ok(()),
@@ -504,10 +447,7 @@ mod tests {
         })
     }
 
-    /// The name of a variant, by an exhaustive match with NO wildcard arm.
-    ///
-    /// Quantifies the fixture below over the enum rather than a hand-kept list: a seventh
-    /// `BusEvent` variant is a compile error here, where a count assertion would still pass.
+    /// A variant's name, by an exhaustive match so a new `BusEvent` variant won't compile here.
     fn variant_name(event: &BusEvent) -> &'static str {
         match event {
             BusEvent::Sensor(_) => "sensor",
@@ -519,8 +459,7 @@ mod tests {
         }
     }
 
-    /// One of every [`BusEvent`] variant, each labelled by [`variant_name`] so
-    /// the label cannot drift from the value it is attached to.
+    /// One of every [`BusEvent`] variant, labelled by [`variant_name`].
     fn one_of_each_variant() -> Vec<(&'static str, BusEvent)> {
         let every = vec![
             ("sensor", reading(HALL_PIR, "motion", 1.0, 10)),
@@ -563,9 +502,6 @@ mod tests {
                 }),
             ),
         ];
-        // The label on each entry is the one `variant_name` gives it, so a
-        // fixture that says "camera" beside a session event cannot exist. Every
-        // sweep below branches on that label.
         for (label, event) in &every {
             assert_eq!(
                 *label,
@@ -575,9 +511,7 @@ mod tests {
                 variant_name(event)
             );
         }
-        // And every variant appears exactly once. `variant_name` is exhaustive
-        // and wildcard-free, so a seventh variant fails to compile above; this
-        // is the other half -- that a variant which compiles is also present.
+        // And every variant appears exactly once.
         let mut labels: Vec<&str> = every.iter().map(|(l, _)| *l).collect();
         labels.sort_unstable();
         assert_eq!(
@@ -591,10 +525,7 @@ mod tests {
 
     // ── 1. Every variant is dispositioned ───────────────────────────────────
 
-    /// The event match has no wildcard arm, which is what makes the module doc's claim that a
-    /// seventh `BusEvent` variant cannot silently join hold: a single `_ =>` switches rustc's
-    /// exhaustiveness off with no compile error and no failing test. `ingest.rs` guards
-    /// `RawItem`'s fields the same way.
+    /// A single `_ =>` silently switches off exhaustiveness: no compile error, no failing test.
     #[test]
     fn the_event_match_has_no_wildcard_arm() {
         const SRC: &str = include_str!("producer.rs");
@@ -606,9 +537,7 @@ mod tests {
                 "the marker comment above the event match is gone, so this guard reads nothing",
             );
 
-        // Vacuity controls first: the extraction found the match and not the
-        // whole file. Without them a renamed marker makes every assertion below
-        // pass against an empty string.
+        // Vacuity controls: the extraction found the match, not the whole file.
         assert!(
             block.contains("match event {"),
             "the extracted fragment is not the event match: {block}"
@@ -640,9 +569,7 @@ mod tests {
         }
     }
 
-    /// Every `BusEvent` variant has a stated answer for a source that follows
-    /// the device it came from, and the four refusals name four DIFFERENT
-    /// reasons rather than one shrug.
+    /// The four refusals must name four different reasons.
     #[test]
     fn every_bus_event_variant_is_dispositioned() {
         let p = producer();
@@ -653,8 +580,7 @@ mod tests {
         let mut refusals: Vec<NotIngested> = Vec::new();
 
         for (name, event) in one_of_each_variant() {
-            // Offer each event to BOTH landed source kinds: a variant is only
-            // "dispositioned" if neither of them ingests it by accident.
+            // Offer each event to both bus-fed kinds; neither may ingest it by accident.
             let answers = [
                 p.raw_item_for(&sensor_src, &event),
                 p.raw_item_for(&camera_src, &event),
@@ -680,10 +606,7 @@ mod tests {
 
         assert_eq!(produced, 2, "neither device-shaped event produced an item");
 
-        // The four refused families each name their own reason. Asserting the
-        // VARIANT, not merely that something was refused: a producer that
-        // answered every non-device event with `Disabled` would pass a
-        // count-only check while saying nothing true.
+        // Assert each refusal's variant: a count-only check passes if everything says `Disabled`.
         assert!(
             refusals
                 .iter()
@@ -711,10 +634,7 @@ mod tests {
         );
     }
 
-    /// The premise of the `Device` refusal, asserted against the availability
-    /// table rather than against my opinion. If a source kind whose retention
-    /// category is `Device` ever lands, this fails and the arm above has to be
-    /// revisited instead of quietly staying wrong.
+    /// The premise of the `Device` refusal; if a `Device`-retention kind lands, revisit that arm.
     #[test]
     fn no_landed_source_kind_describes_a_device_state_change() {
         let landed_device_kinds: Vec<&str> = SourceKind::ALL
@@ -731,8 +651,7 @@ mod tests {
              `NoLandedSourceKindDescribesIt` is no longer true. Decide what a device state change \
              becomes before this ships."
         );
-        // Vacuity control: the filter can find rows at all, so "empty" is a
-        // fact about the availability of these kinds and not about the query.
+        // Vacuity control: the filter does match some kind.
         assert!(
             SourceKind::ALL
                 .into_iter()
@@ -742,8 +661,6 @@ mod tests {
         );
     }
 
-    /// Voice is `Landed`, so nothing structural refuses it. This is the
-    /// decision, and it is asserted rather than left to the doc comment.
     #[test]
     fn a_voice_source_is_refused_even_though_its_kind_has_landed() {
         assert_eq!(
@@ -764,9 +681,7 @@ mod tests {
 
     // ── 2. A kind that has not landed is refused, with the sentence ─────────
 
-    /// Every source kind that is not `Landed` is refused, and the refusal
-    /// carries `SourceAvailability::refusal()` VERBATIM rather than a second
-    /// sentence that could drift from it.
+    /// The refusal quotes `SourceAvailability::refusal()` verbatim, so the two can't drift.
     #[test]
     fn a_source_whose_kind_is_not_landed_is_refused_with_the_sentence_naming_what_is_missing() {
         let p = producer();
@@ -800,17 +715,14 @@ mod tests {
                 !availability.refusal().is_empty() && rendered.contains(availability.refusal()),
                 "the refusal does not carry the availability table's own sentence: {rendered}"
             );
-            // Names the MISSING THING, not a phase number: a guard that pins a phase id
-            // outlives the phase, one that pins the mechanism does not.
+            // Pin the missing mechanism, not a phase id, which expires.
             assert!(
                 rendered.contains("ingest route") || rendered.contains("connector"),
                 "the refusal does not name what has to land first: {rendered}"
             );
         }
 
-        // Vacuity controls, both directions. Without the first, a table that
-        // said `Landed` for everything would make the loop body unreachable and
-        // this test pass having asserted nothing.
+        // Vacuity controls, both directions.
         assert_eq!(
             refused,
             SourceKind::ALL.len() - 5,
@@ -824,10 +736,6 @@ mod tests {
         );
     }
 
-    /// Pausing a source stops the copying. Both directions, because a gate that
-    /// refused every status would pass the refusal half while making the whole
-    /// producer inert, and a gate that refused none would make the one control a
-    /// member has over an on-pond source a no-op.
     #[test]
     fn only_a_connected_source_ingests() {
         let p = producer();
@@ -861,9 +769,7 @@ mod tests {
              longer testing what it claims"
         );
 
-        // The narrowing direction, stated as its own claim: an unrecognised
-        // stored status parses as `Error`, so a corrupt row refuses rather than
-        // carrying on copying.
+        // A corrupt stored status parses as `Error`, so it refuses too.
         assert_eq!(SourceStatus::parse("who-knows"), SourceStatus::Error);
         assert_eq!(
             p.raw_item_for(
@@ -880,10 +786,7 @@ mod tests {
 
     // ── 3. Idempotency ──────────────────────────────────────────────────────
 
-    /// The same event, delivered twice, addresses the same row. And a DIFFERENT
-    /// event does not — without which "the id is stable" is also satisfied by
-    /// returning a constant, which would collapse every reading a device ever
-    /// made into one row.
+    /// A different event must get a different row, or a constant id would pass.
     #[test]
     fn re_delivering_the_same_event_addresses_the_same_row() {
         let p = producer();
@@ -911,8 +814,7 @@ mod tests {
             );
         }
 
-        // Each of the three parts of the key changes the id on its own. A key
-        // that ignored one of them would silently merge distinct events.
+        // Each of the key's three parts changes the id on its own.
         let base = p
             .raw_item_for(&sensor_src, &reading(HALL_PIR, "motion", 1.0, 10))
             .expect("produced")
@@ -942,10 +844,7 @@ mod tests {
         assert_ne!(base, other_device, "two devices share a row");
     }
 
-    /// The producer reads no clock. Repetition alone cannot prove that: [`instant`] renders
-    /// milliseconds, so minting the id repeatedly still passes under `Utc::now()`. The lead
-    /// assertion is positive instead — the key contains the EVENT's own instant — with the
-    /// repetition kept underneath as the cheaper check on the rest of the item.
+    /// Repetition passes even under `Utc::now()`; the key must hold the event's own instant.
     #[test]
     fn the_external_id_is_a_function_of_the_event_and_nothing_else() {
         let p = producer();
@@ -961,9 +860,7 @@ mod tests {
             item.external_id,
             instant(at(42))
         );
-        // Vacuity control: `instant` renders a DIFFERENT string for a different
-        // moment, so "contains" above is a real constraint rather than a
-        // substring that matches anything.
+        // Vacuity control: different moments render differently.
         assert_ne!(instant(at(42)), instant(at(43)));
 
         let ids: std::collections::BTreeSet<String> = (0..25)
@@ -976,8 +873,7 @@ mod tests {
              outside the event: {ids:?}",
             ids.len()
         );
-        // The whole item, not only the key: a body rebuilt from a clock would
-        // rewrite the row's text on every replay.
+        // The whole item too: a clock-built body would rewrite the row on every replay.
         let items: std::collections::BTreeSet<String> = (0..5)
             .map(|_| {
                 let item = p.raw_item_for(&src, &event).expect("produced");
@@ -990,9 +886,7 @@ mod tests {
             "the item's content is not stable: {items:?}"
         );
 
-        // The camera key is a second derivation and needs the same claim made
-        // about it; asserting only the sensor one leaves half the producer able
-        // to read a clock.
+        // The camera key is a separate derivation and needs the same claim.
         let cam_src = source(SourceKind::Camera, DOOR_CAM);
         let cam = p
             .raw_item_for(&cam_src, &camera(DOOR_CAM, "person", Some(0.9), 42))
@@ -1006,19 +900,12 @@ mod tests {
 
     // ── 4. Worth keeping, in both directions ────────────────────────────────
 
-    /// The sensor rule keeps what it claims to keep AND drops what it claims to
-    /// drop. Both halves, because a rule that drops everything passes a
-    /// drop-only test and makes the feature inert, and a rule that keeps
-    /// everything passes a keep-only test and puts 2 880 rows a day on a Jetson.
     #[test]
     fn the_sensor_rule_keeps_transitions_and_drops_samples() {
         let p = producer();
         let src = source(SourceKind::Sensor, HALL_PIR);
 
-        // Kept: discrete signals, at BOTH polarities. The value is deliberately
-        // not consulted -- Matter's `contact` reports `true = closed`, so a
-        // producer that kept only non-zero readings would file "the door is
-        // shut" and drop "the door opened".
+        // Kept at both polarities: Matter's `contact` is `true = closed`.
         for signal in ["motion", "occupancy", "contact", "door"] {
             for value in [0.0, 1.0] {
                 assert!(
@@ -1030,8 +917,7 @@ mod tests {
             }
         }
 
-        // Dropped: measurements. Each is a series `sensor_readings` already
-        // holds under `retention_sensor_days`.
+        // Dropped: measurements, already held in `sensor_readings`.
         for signal in ["temperature", "humidity", "co2", "pressure", "battery"] {
             let err = p
                 .raw_item_for(&src, &reading(HALL_PIR, signal, 21.4, 10))
@@ -1045,25 +931,19 @@ mod tests {
             );
         }
 
-        // An unrecognised signal drops. That is the narrowing direction: the
-        // opposite default answers an unknown sensor with 2 880 rows a day.
+        // An unrecognised signal drops: the narrowing default.
         assert!(
             p.raw_item_for(&src, &reading(HALL_PIR, "flux-capacitance", 1.0, 10))
                 .is_err(),
             "an unrecognised signal was kept, so a new sensor type defaults to being ingested"
         );
 
-        // Case and padding must not decide it, or one adapter's "Motion" is a
-        // measurement and another's "motion" is not.
+        // Case and padding must not decide it.
         assert!(p
             .raw_item_for(&src, &reading(HALL_PIR, " Motion ", 1.0, 10))
             .is_ok());
     }
 
-    /// The camera rule, both directions. The `motion` half is the load-bearing
-    /// one: it is the label the vision pipeline emits when nothing classified
-    /// the frame, and at a 10-second minimum interval that is 8 640 rows a day
-    /// that say only "the pixels changed".
     #[test]
     fn the_camera_rule_keeps_classifications_and_drops_bare_motion() {
         let p = producer();
@@ -1077,8 +957,7 @@ mod tests {
                  nothing either"
             );
         }
-        // No confidence at all is kept: the manual POST route may omit it, and
-        // the label has already done the narrowing.
+        // A missing confidence is kept: the manual POST route may omit it.
         assert!(p
             .raw_item_for(&src, &camera(DOOR_CAM, "person", None, 10))
             .is_ok());
@@ -1096,8 +975,7 @@ mod tests {
             );
         }
 
-        // A classified event the producer was unsure of is dropped, and says so
-        // -- a different refusal from "nothing named it".
+        // Low confidence is its own refusal, distinct from "nothing named it".
         let err = p
             .raw_item_for(&src, &camera(DOOR_CAM, "person", Some(0.2), 10))
             .expect_err("a low-confidence classification must be dropped");
@@ -1114,9 +992,6 @@ mod tests {
             .is_ok());
     }
 
-    /// A confidence that is not a number is refused: `Some(c) if c < FLOOR => drop` would KEEP
-    /// `NaN`, since every `NaN` comparison is false. `POST /api/v1/camera/events` carries
-    /// whatever a paired client sent, so an unreadable confidence must narrow to a refusal.
     #[test]
     fn a_confidence_that_is_not_a_number_is_refused_rather_than_kept() {
         let p = producer();
@@ -1132,10 +1007,7 @@ mod tests {
             "a NaN confidence was refused for the wrong reason: {err}"
         );
 
-        // Infinities go the other way and must not be caught by the same net:
-        // +inf clears any floor and is kept, -inf clears none and is dropped.
-        // Without this the test above is also satisfied by a rule that refuses
-        // every confidence it cannot compare, which would drop real events.
+        // Infinities still compare: +inf is kept, -inf dropped.
         assert!(p
             .raw_item_for(&src, &camera(DOOR_CAM, "person", Some(f64::INFINITY), 10))
             .is_ok());
@@ -1147,9 +1019,7 @@ mod tests {
             .is_err());
     }
 
-    /// Vacuity control for both rules above: neither constant is empty and neither rule is a
-    /// constant function. Without it, emptying `DISCRETE_SENSOR_TYPES` leaves only the keep
-    /// half of the sensor test failing, which reads as a fixture problem.
+    /// Vacuity control for both worth-keeping rules.
     #[test]
     fn the_worth_keeping_rules_are_not_constant_functions() {
         assert!(!DISCRETE_SENSOR_TYPES.is_empty());
@@ -1164,9 +1034,7 @@ mod tests {
 
     // ── The toggle ──────────────────────────────────────────────────────────
 
-    /// Off by default, and the same event that is refused when off is produced
-    /// when on -- so this is a claim about the toggle rather than about the
-    /// event being unproducible.
+    /// The same event is produced once the toggle is on, so this is about the toggle.
     #[test]
     fn the_producer_is_off_on_a_default_pond() {
         let event = reading(HALL_PIR, "motion", 1.0, 10);
@@ -1207,8 +1075,7 @@ mod tests {
     #[test]
     fn a_camera_event_cannot_feed_a_sensor_source() {
         let p = producer();
-        // Same provider string on purpose: only the FAMILY differs, so this
-        // cannot pass by accident of the device check.
+        // Same provider string on purpose, so only the family differs.
         let src = source(SourceKind::Sensor, DOOR_CAM);
         assert_eq!(
             p.raw_item_for(&src, &camera(DOOR_CAM, "person", Some(0.9), 10)),
@@ -1227,10 +1094,7 @@ mod tests {
         );
     }
 
-    /// Two members each following the same camera each get the event, in their
-    /// own corpus. Deliberate: a shared device can be more than one person's
-    /// context, and `profile_id` is not an `Option`, so the only way to say that
-    /// is two sources.
+    /// `profile_id` isn't an `Option`, so a shared device is two sources.
     #[test]
     fn two_members_following_one_camera_each_get_an_item() {
         let p = producer();
@@ -1273,9 +1137,7 @@ mod tests {
 
     // ── The item itself ─────────────────────────────────────────────────────
 
-    /// The body is prose about the reading, and the fields that are deliberately
-    /// left out stay out. `snapshot_path` in particular is a filesystem path
-    /// that is wrong the moment the file is pruned.
+    /// `snapshot_path` especially must stay out: it goes wrong the moment the file is pruned.
     #[test]
     fn a_camera_item_carries_the_event_and_not_the_adapters_payload() {
         let p = producer();

@@ -1,31 +1,8 @@
-/**
- * Web Audio utilities for the browser voice pipeline.
- *
- * Provides WAV encoding, VAD (Voice Activity Detection) via RMS analysis,
- * AudioContext management, and a ping tone generator -- all using standard
- * Web APIs with zero external dependencies.
- *
- * @module webAudioUtils
- */
-
 // ── WAV Encoding ──────────────────────────────────────────────────
 
 /**
- * Encode raw Float32 PCM samples as a 16-bit mono WAV file.
- *
- * Produces a complete RIFF/WAVE binary (44-byte header + PCM data) that
- * the pond-server Whisper endpoint accepts as `audio/wav`.
- *
- * @param samples  Raw PCM samples in the range [-1, 1]
- * @param sampleRate  Sample rate in Hz (typically 16000)
- * @returns ArrayBuffer containing a valid WAV file
- */
-/**
- * Microphone constraints, shared by every capture path.
- *
- * 16 kHz mono is what the transcription endpoint wants, so asking the browser
- * for it avoids a resample; echo cancellation is what stops the assistant
- * hearing its own speech as a new utterance.
+ * Shared by every capture path. 16 kHz mono spares transcription a resample; echo cancellation
+ * stops the assistant hearing its own speech as a new utterance.
  */
 export const MIC_CONSTRAINTS: MediaStreamConstraints = {
   audio: {
@@ -36,6 +13,7 @@ export const MIC_CONSTRAINTS: MediaStreamConstraints = {
   } as MediaTrackConstraints,
 };
 
+/** 16-bit mono WAV (44-byte header) of samples in [-1, 1], as pond-server's Whisper endpoint takes. */
 export function encodeWav(samples: Float32Array, sampleRate: number): ArrayBuffer {
   const numChannels = 1;
   const bitsPerSample = 16;
@@ -85,12 +63,7 @@ function writeString(view: DataView, offset: number, str: string): void {
 
 // ── RMS Calculation ───────────────────────────────────────────────
 
-/**
- * Calculate the Root Mean Square of an audio buffer.
- *
- * Returns a value between 0 and 1 representing the amplitude of the signal.
- * Used for both the AudioWaves visualisation and VAD speech detection.
- */
+/** RMS of the buffer: 0 to 1 for samples in [-1, 1]. */
 export function calculateRms(data: Float32Array): number {
   if (data.length === 0) return 0;
   let sum = 0;
@@ -102,17 +75,16 @@ export function calculateRms(data: Float32Array): number {
 
 // ── VAD Configuration ─────────────────────────────────────────────
 
-/** Thresholds for voice activity detection. */
 export interface VadConfig {
-  /** RMS level above which speech is considered active (default: 0.010) */
+  /** RMS above which speech is active. */
   speechOnsetThreshold: number;
-  /** Minimum duration in ms of sustained level to confirm speech onset (default: 60) */
+  /** Sustained ms above the onset threshold that confirm speech. */
   speechOnsetDurationMs: number;
-  /** RMS level below which silence is detected after speech (default: 0.005) */
+  /** RMS below which, after speech, silence is detected. */
   silenceThreshold: number;
-  /** Duration of silence in ms before recording stops (default: 400) */
+  /** Silence in ms before recording stops. */
   silenceTimeoutMs: number;
-  /** Maximum recording duration in ms (default: 30000) */
+  /** Maximum recording length in ms. */
   maxDurationMs: number;
 }
 
@@ -147,11 +119,7 @@ export function createVadState(): VadState {
   };
 }
 
-/**
- * Advance the VAD state machine with a new RMS reading.
- *
- * @returns `true` if the recording should stop (end-of-speech or timeout)
- */
+/** Feeds one RMS reading; returns true when recording should stop (end of speech or timeout). */
 export function advanceVad(
   state: VadState,
   rms: number,
@@ -164,7 +132,6 @@ export function advanceVad(
         if (state.onsetStart === null) {
           state.onsetStart = now;
         } else if (now - state.onsetStart >= config.speechOnsetDurationMs) {
-          // Speech onset confirmed
           state.phase = "speech";
           state.speechConfirmed = true;
           state.onsetStart = null;
@@ -183,13 +150,11 @@ export function advanceVad(
 
     case "trailing_silence":
       if (rms >= config.speechOnsetThreshold) {
-        // Speech resumed -- go back to speech phase
         state.phase = "speech";
         state.silenceStart = null;
         return false;
       }
       if (state.silenceStart !== null && now - state.silenceStart >= config.silenceTimeoutMs) {
-        // Silence timeout -- end of speech
         return true;
       }
       return false;
@@ -201,12 +166,7 @@ export function advanceVad(
 
 // ── Resampling ────────────────────────────────────────────────────
 
-/**
- * Downsample audio from the browser's native sample rate to 16kHz.
- *
- * Uses simple linear interpolation. The Whisper endpoint expects 16kHz
- * mono audio; browsers typically capture at 44.1kHz or 48kHz.
- */
+/** Linear interpolation; Whisper wants 16 kHz, and browsers capture at 44.1 or 48 kHz. */
 export function downsampleTo16k(buffer: Float32Array, fromRate: number): Float32Array {
   if (fromRate === 16000) return buffer;
   const ratio = fromRate / 16000;
@@ -226,12 +186,7 @@ export function downsampleTo16k(buffer: Float32Array, fromRate: number): Float32
 
 let _audioContext: AudioContext | null = null;
 
-/**
- * Get or create a shared AudioContext for playback.
- *
- * Must be called from a user gesture context on the first invocation
- * (browsers require user interaction to create/resume AudioContext).
- */
+/** Shared playback context; browsers require the first call to come from a user gesture. */
 export function getAudioContext(): AudioContext {
   if (!_audioContext || _audioContext.state === "closed") {
     _audioContext = new AudioContext();
@@ -242,9 +197,6 @@ export function getAudioContext(): AudioContext {
   return _audioContext;
 }
 
-/**
- * Close the shared AudioContext. Called on cleanup.
- */
 export function closeAudioContext(): void {
   if (_audioContext && _audioContext.state !== "closed") {
     _audioContext.close().catch(() => {});
@@ -254,22 +206,13 @@ export function closeAudioContext(): void {
 
 // ── TTS Playback Controller ──────────────────────────────────────
 
-/**
- * Manages TTS audio playback with interruptibility.
- *
- * Tracks the active AudioBufferSourceNode and a pending resolve callback
- * so that an external caller (e.g. barge-in handler) can immediately
- * silence playback and unblock the sentence queue.
- */
+// The active source and its resolve are tracked so barge-in can silence playback and unblock the queue.
 
 let _activeTtsSource: AudioBufferSourceNode | null = null;
 let _activeTtsResolve: (() => void) | null = null;
 let _ttsInterrupted = false;
 
-/**
- * Register the currently-playing TTS source node and its completion
- * resolve callback. Called by playTtsSentence before starting playback.
- */
+/** Called by playTtsSentence before playback starts. */
 export function registerTtsSource(
   source: AudioBufferSourceNode,
   resolve: () => void,
@@ -278,64 +221,38 @@ export function registerTtsSource(
   _activeTtsResolve = resolve;
 }
 
-/**
- * Clear the registered TTS source after it finishes naturally.
- */
+/** After a natural finish; interruptions go through stopTtsPlayback. */
 export function clearTtsSource(): void {
   _activeTtsSource = null;
   _activeTtsResolve = null;
 }
 
-/**
- * Immediately stop any in-progress TTS audio playback.
- *
- * - Calls .stop() on the active AudioBufferSourceNode
- * - Resolves the pending playback promise so the queue advances
- * - Sets an interrupted flag that the TTS queue checks before playing
- *   the next sentence
- *
- * Call this when barge-in is detected to silence the assistant mid-sentence.
- */
+/** Stops playback, resolves the pending promise and sets the flag the queue checks before each sentence. */
 export function stopTtsPlayback(): void {
   _ttsInterrupted = true;
   if (_activeTtsSource) {
     try { _activeTtsSource.stop(); } catch { /* already stopped */ }
     _activeTtsSource = null;
   }
-  // Resolve the pending playback promise so playNext() can check the flag
   if (_activeTtsResolve) {
     _activeTtsResolve();
     _activeTtsResolve = null;
   }
 }
 
-/**
- * Check and clear the TTS interrupted flag.
- *
- * The sentence queue calls this before playing each sentence.
- * Returns true if stopTtsPlayback() was called (meaning the queue
- * should drain without playing).
- */
+/** True from stopTtsPlayback() until resetTtsInterrupt(); the queue then drains without playing. */
 export function isTtsInterrupted(): boolean {
   return _ttsInterrupted;
 }
 
-/**
- * Reset the TTS interrupted flag. Call this when starting a new
- * pipeline run so previous interruptions don't carry over.
- */
+/** Call when a pipeline run starts, so an earlier interruption doesn't carry over. */
 export function resetTtsInterrupt(): void {
   _ttsInterrupted = false;
 }
 
 // ── Ping Tone Generator ──────────────────────────────────────────
 
-/**
- * Play a two-tone "ping" chime through the AudioContext.
- *
- * Produces a pleasant ascending two-note chirp (880Hz -> 1047Hz)
- * lasting ~200ms total -- equivalent to the Tauri play_ping command.
- */
+/** Two-note ascending chime, about 200 ms. */
 export function playPingTone(): void {
   const ctx = getAudioContext();
   const now = ctx.currentTime;
@@ -368,12 +285,8 @@ const ABBREV_RE = /(?:Mr|Mrs|Ms|Dr|Prof|St|Jr|Sr|vs|etc|approx|dept|govt)\./i;
 const MAX_SENTENCE_CHARS = 250;
 
 /**
- * Split text into sentences for incremental TTS.
- *
- * Ported from the Rust `split_sentences()` in `tts_text.rs`. Splits
- * on sentence-ending punctuation (.!?) followed by whitespace, but avoids
- * splitting on common abbreviations. Force-flushes at 250 chars to avoid
- * unbounded accumulation on code blocks or lists.
+ * Sentences for incremental TTS, not split at common abbreviations; force-flushed at MAX_SENTENCE_CHARS
+ * so code or lists can't pile up. Port of `split_sentences` in `crates/pond-voice/src/text.rs`.
  */
 export function splitSentences(text: string): string[] {
   if (!text.trim()) return [];
@@ -385,7 +298,6 @@ export function splitSentences(text: string): string[] {
     current += text[i];
     const ch = text[i];
 
-    // Force-flush at 250 chars (matches Tauri tts_text.rs behavior)
     if (current.length >= MAX_SENTENCE_CHARS) {
       sentences.push(current.trim());
       current = "";
@@ -414,10 +326,7 @@ export function splitSentences(text: string): string[] {
 
 // ── Markdown Stripping (for TTS) ─────────────────────────────────
 
-/**
- * Strip markdown syntax so TTS reads clean prose.
- * Ported from `strip_markdown_for_speech()` in `tts_text.rs`.
- */
+/** Port of `strip_markdown_for_speech` in `crates/pond-voice/src/text.rs`. */
 export function stripMarkdown(text: string): string {
   let out = text;
   // Code fences
@@ -487,10 +396,7 @@ const SYMBOL_RULES: [RegExp, string][] = [
   [/¾/g, "three quarters"],
 ];
 
-/**
- * Normalize symbols, units, and abbreviations for natural TTS pronunciation.
- * Ported from Rust `normalize_symbols_for_speech()` in `tts_text.rs`.
- */
+/** Port of `normalize_for_speech` in `crates/pond-voice/src/text.rs`. */
 export function normalizeForSpeech(text: string): string {
   let out = text;
   for (const [re, replacement] of SYMBOL_RULES) {
@@ -508,10 +414,6 @@ const DISMISSAL_PHRASES = [
 ];
 const EXIT_PHRASES = ["exit", "quit"];
 
-/**
- * Check if the transcript is a dismissal or exit command.
- * Returns `{ dismissed: true, isExit }` if matched.
- */
 export function checkDismissal(text: string): { dismissed: boolean; isExit: boolean } {
   const lower = text.toLowerCase().trim();
   if (EXIT_PHRASES.some((p) => lower === p || lower.startsWith(p + " "))) {
@@ -539,23 +441,13 @@ const TOOL_ANNOUNCEMENTS: Record<string, string> = {
   devices: "Checking your devices.",
 };
 
-/**
- * Get a spoken announcement for a tool call, or a generic fallback.
- */
 export function getToolAnnouncement(toolName: string): string {
   return TOOL_ANNOUNCEMENTS[toolName] ?? `Working on that.`;
 }
 
 // ── Thinking Tone ────────────────────────────────────────────────
 
-/**
- * Play a subtle ambient thinking tone (440Hz pulse at low volume).
- * Returns a stop function. Matches Tauri's thinking tone behavior.
- *
- * Callers gate this on `voice_thinking_tone_enabled`; this function itself is
- * unconditional so there is exactly one place that decides — the caller that
- * owns the settings — rather than a check here and a check there.
- */
+/** Unconditional: callers gate it on `voice_thinking_tone_enabled`, so only the settings owner decides. */
 export function playThinkingTone(): () => void {
   const ctx = getAudioContext();
   let stopped = false;
@@ -603,7 +495,7 @@ const QUIPS = [
 
 let _quipIdx = 0;
 
-/** Get a random conversational quip to fill silence during LLM inference. */
+/** The next quip, in rotation, to fill the silence during LLM inference. */
 export function getQuip(): string {
   const q = QUIPS[_quipIdx % QUIPS.length];
   _quipIdx++;
@@ -620,24 +512,19 @@ const WHISPER_ARTIFACT_PATTERNS = [
   /^\s*\.+\s*$/,                   // Just dots
 ];
 
-/** Exact-match hallucinations (lowercase, matches Tauri's 15-entry list). */
+/** Exact-match Whisper hallucinations, lowercase. */
 const WHISPER_HALLUCINATIONS = new Set([
   "thank you", "thank you.", "thanks for watching", "thanks for watching.",
   "bye", "bye.", "okay", "okay.", "so", "um", "uh", "you",
   "the end", "the end.", "thanks",
 ]);
 
-/**
- * Return true if the transcript text is a known Whisper artefact
- * (hallucination on silence/noise). Also rejects transcripts <= 2 chars
- * and repeated single syllables like "uh uh uh".
- */
+/** Known Whisper artefacts, plus anything of 2 chars or less and one word repeated ("uh uh uh"). */
 export function isWhisperArtifact(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed || trimmed.length <= 2) return true;
   if (WHISPER_ARTIFACT_PATTERNS.some((re) => re.test(trimmed))) return true;
   if (WHISPER_HALLUCINATIONS.has(trimmed.toLowerCase())) return true;
-  // Repeated syllable check: "uh uh uh" or "um um um"
   const words = trimmed.toLowerCase().split(/\s+/);
   if (words.length >= 2 && words.every((w) => w === words[0])) return true;
   return false;
@@ -649,13 +536,7 @@ const THINK_OPEN = [/<think>/i, /<thought>/i, /<\|channel>thought/i, /<\|tool_ca
 const THINK_CLOSE = [/<\/think>/i, /<\/thought>/i, /<channel\|>/i, /<\/tool_call>/i, /<tool_call\|>/i];
 const ORPHAN_SENTINELS = /<eos>|<\|eos\|>|<end_of_turn>/gi;
 
-/**
- * Stateful thought filter matching Tauri's ThoughtFilter behavior.
- * Handles: `<think>`, `<thought>`, `<|channel>thought...<channel|>`,
- * `<|tool_call>...<tool_call|>`, and orphan sentinels.
- *
- * Returns [visibleText, updatedInBlock].
- */
+/** Strips thought and tool-call blocks and orphan sentinels from a token stream; returns [visible, inBlock]. */
 export function filterThinkingFull(token: string, inBlock: boolean): [string, boolean] {
   let text = token.replace(ORPHAN_SENTINELS, "");
   let inside = inBlock;

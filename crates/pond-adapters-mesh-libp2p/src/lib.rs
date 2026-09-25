@@ -1,6 +1,4 @@
-//! Real `MeshTransport` for the private Pond Compute mesh (#132), built on
-//! libp2p. `PeerDirectory` stays mocked — trust-pin persistence belongs to
-//! the later `pond-infra` milestone, not networking.
+//! libp2p `MeshTransport` for the private Pond Compute mesh.
 
 pub mod adapter;
 pub mod behaviour;

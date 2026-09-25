@@ -1,14 +1,4 @@
-// Remembering where the window was.
-//
-// The Tauri shell got this from `tauri-plugin-window-state` with
-// `StateFlags::POSITION | SIZE`, so it is behaviour users already have and
-// would notice losing.
-//
-// The interesting part is not saving; it is refusing to restore. Move the
-// window to a second display, quit, unplug that display, and a naive restore
-// puts it at coordinates no screen covers -- off in the void, with no way to
-// drag it back. So a remembered position is only honoured if some display
-// still overlaps it.
+// Persisted window bounds, restored only while a display still overlaps them (unplugged monitors).
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -47,12 +37,7 @@ export function parseBounds(raw: string | null): Bounds | null {
   return { x: x!, y: y!, width: width!, height: height! };
 }
 
-/**
- * Does any display still overlap these bounds?
- *
- * Overlap rather than containment, deliberately: a window half off the edge of
- * a screen is a position the user chose and can still reach.
- */
+/** Overlap, not containment: a window half off a screen edge is still reachable. */
 export function isOnSomeDisplay(
   bounds: Bounds,
   displays: readonly Display[],
@@ -66,10 +51,7 @@ export function isOnSomeDisplay(
   );
 }
 
-/**
- * The bounds to actually open with: the remembered ones when they are still
- * reachable, otherwise null so the caller falls back to its default geometry.
- */
+/** Remembered bounds if still reachable, else null (caller uses its default geometry). */
 export function usableBounds(
   raw: string | null,
   displays: readonly Display[],

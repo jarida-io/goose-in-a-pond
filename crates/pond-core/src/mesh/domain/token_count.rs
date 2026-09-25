@@ -1,7 +1,4 @@
-//! Inference-token count for the private mesh's usage tally (#132).
-//!
-//! A newtype rather than a bare `u64` so a token count can't be silently
-//! confused with a millisat amount or any other integer at a call site.
+//! Inference-token count for the mesh usage tally.
 
 use serde::{Deserialize, Serialize};
 

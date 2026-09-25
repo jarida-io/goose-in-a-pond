@@ -1,7 +1,4 @@
-//! Stable identifier for a mesh peer (#132).
-//!
-//! A 32-byte newtype (an ed25519 public key / libp2p peer key length) rather than a
-//! bare `String`, so a peer id can't be confused with another identifier at a call site.
+//! Stable mesh peer id: 32 bytes, the length of an ed25519 public key / libp2p peer key.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -36,9 +33,7 @@ pub enum PeerIdParseError {
     InvalidHex(String),
 }
 
-/// Inverse of the hex `Display` — needed by any storage layer that persists
-/// a `PeerId` as text (e.g. a SQLite `TEXT PRIMARY KEY`) and has to parse it
-/// back on read.
+/// Inverse of the hex `Display`, for storage that persists a `PeerId` as text.
 impl std::str::FromStr for PeerId {
     type Err = PeerIdParseError;
 

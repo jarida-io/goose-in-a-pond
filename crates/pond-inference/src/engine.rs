@@ -1,7 +1,4 @@
-//! Core inference engine wrapping llama-cpp-2.
-//!
-//! Manages the LlamaBackend singleton, model loading/unloading, and provides
-//! the model reference needed by the generation loop in `provider.rs`.
+//! llama-cpp-2 engine: shared backend, model load/unload, and the model slot `provider.rs` uses.
 
 use anyhow::{Context, Result};
 use llama_cpp_2::llama_backend::LlamaBackend;
@@ -19,135 +16,68 @@ pub(crate) struct LoadedModel {
     pub model_id: String,
     pub chat_template: LlamaChatTemplate,
     pub capabilities: ModelCapabilities,
-    /// Persistent KV-cache context — kept alive between inference calls.
-    ///
-    /// On subsequent turns, prefix matching identifies tokens already in the
-    /// cache and only decodes the delta. This eliminates re-prefilling the
-    /// system prompt + tool declarations (~2000 tokens) on every turn.
-    ///
+    /// KV-cache context kept across calls so only the prompt delta is prefilled.
     /// MUST be set to `None` before the model is dropped or replaced.
     pub cached_ctx: Option<CachedInferenceContext>,
 }
 
-/// Persistent inference context with token history for KV-cache prefix reuse.
+/// Persistent context with its token history, for KV-cache prefix reuse.
 ///
 /// # Safety
 ///
-/// `LlamaContext<'model>` borrows from `LlamaModel`. We store it as `'static`
-/// via unsafe lifetime extension. The invariant is enforced by:
-/// 1. Both live inside the same `LoadedModel` struct
-/// 2. `cached_ctx` is declared AFTER `model` (Rust drops fields in declaration order)
-/// 3. `unload_model()` explicitly sets `cached_ctx = None` before dropping
-/// 4. All access is through `Mutex<Option<LoadedModel>>` — no aliasing
+/// `ctx` really borrows the sibling `model` but is stored as `'static`, so `cached_ctx` must be
+/// cleared before that model drops. All access goes through the model mutex.
 pub(crate) struct CachedInferenceContext {
-    /// The llama.cpp context with KV cache state from previous turns.
-    /// Lifetime is actually tied to the sibling `model` field.
+    /// KV-cache context; its `'static` really borrows `LoadedModel::model`.
     pub ctx: llama_cpp_2::context::LlamaContext<'static>,
     /// Tokens currently prefilled in the KV cache (for prefix matching).
     pub tokens_in_cache: Vec<llama_cpp_2::token::LlamaToken>,
 }
 
-// SAFETY: CachedInferenceContext is only accessed through Mutex<Option<LoadedModel>>.
-// The mutex serializes all access — only one thread touches the context at a time.
-// The raw pointer inside LlamaContext is to GPU/CPU memory managed by llama.cpp,
-// which is thread-safe when accessed serially (no concurrent decode calls).
+// SAFETY: only accessed through the `Mutex<Option<LoadedModel>>`, and llama.cpp contexts are
+// safe to use from any thread as long as calls are serialised.
 unsafe impl Send for CachedInferenceContext {}
 unsafe impl Sync for CachedInferenceContext {}
 
-/// The process's shared backend handle.
-///
-/// A STRONG `Arc` is held here for the life of the process, on purpose: see
-/// [`get_or_init_backend`] for why nothing in GIAP may ever drop a
-/// `LlamaBackend`. This replaced a `Weak`, whose whole point was to let the last
-/// engine free the backend -- exactly the behaviour that is now forbidden.
+/// Held strongly forever: nothing may drop a `LlamaBackend`; see [`get_or_init_backend`].
 static BACKEND: OnceLock<Arc<LlamaBackend>> = OnceLock::new();
 
 /// Set the llama.cpp log bridge exactly once, no matter how many callers race.
 static LOG_BRIDGE: Once = Once::new();
 
-/// Obtain the process-wide llama.cpp backend, **without ever entering
-/// `LlamaBackend::init`'s global compare-and-swap.**
-///
-/// # Why this does not call `LlamaBackend::init()`
-///
-/// `llama-cpp-2` tracks initialisation in a process-global `AtomicBool`
-/// (`LLAMA_BACKEND_INITIALIZED`), and `init()` is a CAS on it: the first caller
-/// in the process wins and every later one gets `BackendAlreadyInitialized`.
-/// Cargo unifies `llama-cpp-2 =0.1.146` into ONE crate shared with Goose, so that
-/// static is shared too -- and Goose treats losing that CAS as `unreachable!`,
-/// which PANICS (`goose-local-inference/src/llamacpp/mod.rs`). Its comment says
-/// "the runtime holds the only LlamaBackend for the life of the process": true of
-/// Goose with respect to itself, false in a process that also contains us.
-///
-/// Reproduced on a Mac 2026-08-13: an `ollama` pond embeds at startup, GIAP won
-/// the CAS, and the first local chat model afterwards panicked a tokio worker.
-///
-/// So GIAP does not compete for the flag at all. It initialises the C backend
-/// directly -- `llama_backend_init()` is idempotent, which this crate already
-/// relied on -- and constructs the proof-of-initialisation token itself.
-/// `LlamaBackend` is a field-less public struct, so that construction is safe and
-/// needs no `mem::zeroed()`. **The flag is therefore only ever set by Goose, whose
-/// CAS now always succeeds and whose `unreachable!` is genuinely unreachable.**
-/// This does not fight Goose's invariant; it restores it.
-///
-/// # Why the handle is never dropped
-///
-/// `impl Drop for LlamaBackend` resets that global flag AND calls
-/// `llama_backend_free()`. In a process with two consumers, whoever drops first
-/// frees the backend under the other and un-sets a flag it does not own; the
-/// second dropper then hits `unreachable!` inside a destructor. The only sound
-/// rule once the backend is shared is **initialise once, never free** -- so the
-/// `OnceLock` above holds a strong reference for the life of the process and the
-/// `Drop` never runs. Freeing at exit buys nothing (the OS reclaims) and the
-/// previous code already went out of its way to avoid ggml teardown races.
+/// The process-wide backend, initialised directly so GIAP never enters `LlamaBackend::init()`'s
+/// CAS: that flag is shared with Goose, which panics if it loses it. Never drop the handle: its
+/// `Drop` resets the flag and frees the backend under Goose.
 pub(crate) fn get_or_init_backend() -> Result<Arc<LlamaBackend>> {
     Ok(BACKEND
         .get_or_init(|| {
-            // SAFETY: `llama_backend_init` is the documented entry point and is
-            // idempotent -- Goose may also call it via `LlamaBackend::init()`.
-            // It touches only ggml's process-global setup, no GIAP state.
+            // SAFETY: idempotent (Goose may call it too) and touches only ggml's global setup.
             unsafe { llama_cpp_sys_2::llama_backend_init() };
             LOG_BRIDGE.call_once(|| llama_cpp_2::send_logs_to_tracing(LogOptions::default()));
             tracing::info!(
                 "llama backend ready (initialised directly; the llama-cpp-2 init flag is \
                  left to Goose so its runtime can never lose the race)"
             );
-            // Safe: `LlamaBackend` is a public field-less struct. It is only a
-            // token asserting the backend is up, which the call above guarantees.
+            // `LlamaBackend` is a field-less token asserting the backend is up, which it now is.
             Arc::new(LlamaBackend {})
         })
         .clone())
 }
 
-/// In-process GGUF inference engine.
-///
-/// Type alias for the model slot shared between the engine and spawn_blocking tasks.
+/// Model slot shared between the engine and `spawn_blocking` tasks.
 pub(crate) type ModelSlot = Arc<Mutex<Option<LoadedModel>>>;
 
-/// Owns the llama.cpp backend and at most one loaded model. Dropping the
-/// engine unloads the model and (if this is the last engine) frees the
-/// backend.
-///
-/// Field order matters: `model` is declared before `backend` so Rust drops
-/// the loaded model (and its Metal/GPU resources) before the backend calls
-/// `llama_backend_free()`.
+/// In-process GGUF inference engine: the shared backend plus at most one loaded model.
 pub struct LlamaCppEngine {
     model: ModelSlot,
     backend: Arc<LlamaBackend>,
     data_dir: PathBuf,
-    /// Cached capabilities — updated on model load/unload, read lock-free.
-    /// Avoids contending with the model mutex (which is held for the entire
-    /// duration of generation) when the agent needs to check tool_calling, etc.
+    /// Copy of the model's capabilities, readable without the mutex generation holds.
     capabilities: Arc<StdRwLock<ModelCapabilities>>,
 }
 
 impl LlamaCppEngine {
-    /// Create a new engine.
-    ///
-    /// `data_dir` is the root data directory; GGUF files are expected at
-    /// `{data_dir}/models/gguf/{filename}`.
-    ///
-    /// No model is loaded until [`load_model`] is called.
+    /// New engine with no model loaded; GGUFs are expected under `{data_dir}/models/gguf/`.
     pub fn new(data_dir: &Path) -> Result<Self> {
         let backend = get_or_init_backend()?;
         Ok(Self {
@@ -158,13 +88,7 @@ impl LlamaCppEngine {
         })
     }
 
-    /// Load a GGUF model, unloading any previously loaded model first.
-    ///
-    /// `model_id` can be:
-    /// - A filename with extension: `"gemma-4-E2B-it-Q4_K_M.gguf"`
-    /// - A stem without extension: `"gemma-4-E2B-it-Q4_K_M"`
-    ///
-    /// The file is resolved at `{data_dir}/models/gguf/{model_id}[.gguf]`.
+    /// Load `{data_dir}/models/gguf/{model_id}[.gguf]`, replacing any loaded model.
     pub async fn load_model(
         &self,
         model_id: &str,
@@ -175,8 +99,6 @@ impl LlamaCppEngine {
         let backend = self.backend.clone();
         let model_id_owned = model_id.to_string();
 
-        // Load in a blocking thread -- LlamaModel::load_from_file is a heavy
-        // CPU/GPU operation that must not block the tokio runtime.
         let loaded = tokio::task::spawn_blocking(move || {
             load_model_sync(
                 &backend,
@@ -189,24 +111,18 @@ impl LlamaCppEngine {
         .await
         .context("model loading task panicked")??;
 
-        // Update lock-free capabilities cache before acquiring the model lock.
         *self
             .capabilities
             .write()
             .expect("capabilities lock poisoned") = loaded.capabilities.clone();
 
-        // Swap: unload previous, install new.
         let mut guard = self.model.lock().await;
         *guard = Some(loaded);
         Ok(())
     }
 
     /// Unload the current model, freeing all GPU/CPU memory.
-    ///
-    /// Drops the cached context BEFORE the model to maintain the safety
-    /// invariant (context borrows from model).
     pub async fn unload_model(&self) {
-        // Reset capabilities cache first.
         *self
             .capabilities
             .write()
@@ -221,7 +137,6 @@ impl LlamaCppEngine {
         *guard = None;
     }
 
-    /// Whether a model is currently loaded.
     pub async fn is_loaded(&self) -> bool {
         self.model.lock().await.is_some()
     }
@@ -236,7 +151,6 @@ impl LlamaCppEngine {
             .unwrap_or_else(|| "none".to_string())
     }
 
-    /// The capabilities of the currently loaded model.
     pub async fn model_capabilities(&self) -> ModelCapabilities {
         self.model
             .lock()
@@ -246,11 +160,7 @@ impl LlamaCppEngine {
             .unwrap_or_default()
     }
 
-    /// Lock-free capabilities read — safe to call from sync contexts.
-    ///
-    /// Returns capabilities cached at model load time. Unlike `model_capabilities()`,
-    /// this never contends with the model mutex (which is held for the entire
-    /// duration of a generation task).
+    /// Capabilities cached at load; sync and never waits on the model mutex held during generation.
     pub fn cached_capabilities(&self) -> ModelCapabilities {
         self.capabilities
             .read()
@@ -258,12 +168,10 @@ impl LlamaCppEngine {
             .clone()
     }
 
-    /// Clone the model slot `Arc` for use in `spawn_blocking` tasks.
     pub(crate) fn model_slot(&self) -> ModelSlot {
         Arc::clone(&self.model)
     }
 
-    /// Clone the backend `Arc` for passing into blocking tasks.
     pub(crate) fn backend_arc(&self) -> Arc<LlamaBackend> {
         Arc::clone(&self.backend)
     }
@@ -277,11 +185,9 @@ impl LlamaCppEngine {
         }
     }
 
-    /// Resolve a model identifier to an absolute filesystem path.
     fn resolve_model_path(&self, model_id: &str) -> Result<PathBuf> {
         let gguf_dir = self.data_dir.join("models").join("gguf");
 
-        // Try as-is first (with extension).
         let with_ext = if model_id.ends_with(".gguf") {
             gguf_dir.join(model_id)
         } else {
@@ -292,7 +198,6 @@ impl LlamaCppEngine {
             return Ok(with_ext);
         }
 
-        // If model_id is an absolute path, use directly.
         let abs = Path::new(model_id);
         if abs.is_absolute() && abs.exists() {
             return Ok(abs.to_path_buf());
@@ -336,7 +241,6 @@ fn load_model_sync(
         }
     };
 
-    // Detect capabilities from the model identifier.
     let capabilities = ModelCapabilities::from_model_name(model_id);
 
     tracing::info!(
@@ -348,8 +252,7 @@ fn load_model_sync(
         "model loaded successfully"
     );
 
-    // Log flash attention status. The flag is applied at context creation time
-    // (not model load time), so we just record the intent here.
+    // Flash attention applies at context creation; only log the intent here.
     if flash_attention {
         tracing::info!("flash attention will be enabled for inference contexts");
     }
@@ -384,7 +287,6 @@ mod tests {
             capabilities: Arc::new(StdRwLock::new(ModelCapabilities::default())),
         };
 
-        // Non-existent path, but verify the logic.
         let err = engine.resolve_model_path("nonexistent-model").unwrap_err();
         let msg = err.to_string();
         assert!(

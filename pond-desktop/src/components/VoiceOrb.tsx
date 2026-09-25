@@ -6,7 +6,7 @@ export type OrbSize = "sm" | "md" | "lg" | "xl";
 interface Props {
   state: VoiceState;
   size?: OrbSize;
-  /** Live mic RMS (0-1-ish; typical speech is well under 1) — drives ring reactivity during wait/recording. */
+  /** Live mic RMS, 0-1 (speech sits well under 1); drives ring reactivity. */
   audioLevel?: number;
   /** Bump this to fire a one-shot "wake word heard" wink + flash ring. */
   pulseKey?: number;
@@ -31,9 +31,7 @@ const STATE_LABELS: Record<VoiceState, string> = {
   error:     "Error",
 };
 
-// Mirrors --orb-* tokens in design-tokens.css. recording gets its own cooler
-// blue (--orb-receiving) distinct from wait's purple, to visually signal
-// "actively receiving input" rather than "waiting."
+// Mirrors the --orb-* tokens in design-tokens.css.
 const STATE_COLOR_VAR: Record<VoiceState, string> = {
   idle:      "var(--orb-idle)",
   wait:      "var(--orb-listening)",
@@ -45,13 +43,10 @@ const STATE_COLOR_VAR: Record<VoiceState, string> = {
 
 export function VoiceOrb({ state, size = "md", audioLevel = 0, pulseKey = 0 }: Props) {
   const px = SIZE_PX[size];
-  // Raw mic RMS during normal speech is small (whisper's own onset threshold
-  // is ~0.01) — amplify into a visually useful 0-1 range for the CSS scale.
+  // Speech RMS is small (whisper's onset threshold is ~0.01): amplify into a usable 0-1.
   const level = Math.max(0, Math.min(1, audioLevel * 6));
 
-  // One-shot wink when the wake word lands (pulseKey bump from VoiceMode.tsx's
-  // wait->recording transition) — plays briefly, then the eye reverts to its
-  // normal ambient blink/look animation on its own.
+  // One-shot wink on each pulseKey bump (VoiceMode's wait -> recording transition).
   const [isWinking, setIsWinking] = useState(false);
   useEffect(() => {
     if (pulseKey === 0) return;
@@ -60,12 +55,7 @@ export function VoiceOrb({ state, size = "md", audioLevel = 0, pulseKey = 0 }: P
     return () => clearTimeout(t);
   }, [pulseKey]);
 
-  // While waiting for the wake word — where the orb spends almost all its
-  // resting time in normal use — the eyes follow the cursor instead of
-  // wandering on their own ambient cycle. cursorGaze === null means "not
-  // tracking" — either not waiting, or the cursor has left the window — in
-  // which case the eyes fall straight back to the normal CSS-driven random
-  // blink/look.
+  // While waiting, the eyes follow the cursor; null = not tracking, so the CSS blink/look resumes.
   const rootRef = useRef<HTMLDivElement>(null);
   const [cursorGaze, setCursorGaze] = useState<{ x: number; y: number } | null>(null);
 
@@ -100,19 +90,11 @@ export function VoiceOrb({ state, size = "md", audioLevel = 0, pulseKey = 0 }: P
     };
   }, [state]);
 
-  // Overrides the ambient orb-eye-look CSS animation with a direct position
-  // toward the cursor; removing the inline style (cursorGaze === null) lets
-  // the CSS animation resume on its own.
   const eyeStyle: React.CSSProperties | undefined = cursorGaze
     ? { animation: "none", translate: `${cursorGaze.x}px ${cursorGaze.y}px` }
     : undefined;
 
-  // Recording (mic input) and speaking (TTS output) both report live
-  // amplitude through the same audioLevel prop, throttled Rust-side to
-  // ~10x/sec — core scale and halo opacity are driven directly from it
-  // rather than a fixed-timing CSS loop like the other states' ambient
-  // ring-pulse. A short CSS transition (see .orb-glass__core / __halo)
-  // smooths the discrete updates into a visibly voice-reactive motion.
+  // Recording/speaking scale with audioLevel (~10 Hz from Rust); CSS transitions smooth the steps.
   const isSpeaking = state === "speaking";
   const isLiveReactive = state === "recording" || isSpeaking;
   const coreStyle: React.CSSProperties | undefined = isLiveReactive
@@ -122,9 +104,7 @@ export function VoiceOrb({ state, size = "md", audioLevel = 0, pulseKey = 0 }: P
     ? { opacity: 0.15 + level * 0.65 }
     : undefined;
 
-  // Speaking: spawn a small particle drifting outward from the edge on each
-  // amplitude spike, so the orb visibly "sparks" in time with the actual
-  // speech waveform rather than on a fixed rhythm.
+  // Speaking: each amplitude spike spawns a burst of particles drifting outward.
   const [particles, setParticles] = useState<Array<{ id: number; angle: number }>>([]);
   const particleIdRef = useRef(0);
   const lastSpikeAtRef = useRef(0);
@@ -132,11 +112,7 @@ export function VoiceOrb({ state, size = "md", audioLevel = 0, pulseKey = 0 }: P
   const MIN_SPIKE_INTERVAL_MS = 200;
   const PARTICLE_LIFETIME_MS = 1400;
   const PARTICLES_PER_SPIKE = 20;
-  // Pool cap sized for overlapping bursts: at the 200ms minimum spike
-  // interval, several bursts' worth of particles can be alive at once during
-  // their 1400ms lifetime. Too small a cap truncates an older burst
-  // mid-animation (a particle vanishing instead of fading) rather than
-  // letting it finish naturally.
+  // Fits overlapping bursts (200 ms min spike gap, 1400 ms lifetime) so none is cut mid-fade.
   const MAX_PARTICLES = 160;
 
   useEffect(() => {
@@ -145,9 +121,7 @@ export function VoiceOrb({ state, size = "md", audioLevel = 0, pulseKey = 0 }: P
     if (now - lastSpikeAtRef.current < MIN_SPIKE_INTERVAL_MS) return;
     lastSpikeAtRef.current = now;
 
-    // Particles spaced evenly around the circle (with a little jitter) read
-    // as a burst — a single dot at a random angle was too easy to miss,
-    // especially when it happened to land behind the face.
+    // Evenly spaced (with jitter) so it reads as a burst rather than a stray dot.
     const baseAngle = Math.random() * 360;
     const step = 360 / PARTICLES_PER_SPIKE;
     const spawned = Array.from({ length: PARTICLES_PER_SPIKE }, (_, i) => ({
@@ -166,10 +140,7 @@ export function VoiceOrb({ state, size = "md", audioLevel = 0, pulseKey = 0 }: P
   return (
     <div
       ref={rootRef}
-      // "orb-glass" — deliberately distinct from Canvas.tsx's unrelated
-      // .voice-orb/.voice-orb__ring classes (the "Tap to speak" button),
-      // which collided with these names and painted a solid legacy
-      // background straight through this component.
+      // Not "voice-orb": Canvas.tsx's unrelated .voice-orb classes would paint over this.
       className={`orb-glass orb-glass--${state}`}
       style={{
         width: px,
@@ -192,9 +163,7 @@ export function VoiceOrb({ state, size = "md", audioLevel = 0, pulseKey = 0 }: P
           className="orb-glass__particle"
           style={{
             "--particle-angle": `${p.angle}deg`,
-            // 0.42 clears the halo's outer edge (core at 31% + halo's 8%
-            // inset ≈ 39%), so the burst starts just outside the orb rather
-            // than inside it and drifting out through the halo.
+            // 0.42 clears the halo's outer edge (core 31% + halo inset 8% ≈ 39%).
             "--particle-radius": `${px * 0.42}px`,
           } as React.CSSProperties}
         />

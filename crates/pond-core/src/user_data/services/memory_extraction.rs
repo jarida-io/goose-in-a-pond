@@ -1,14 +1,7 @@
-//! Background memory extraction service.
+//! Background memory extraction after each turn; must never block the SSE chat stream.
 //!
-//! After each conversation turn, calls the `MemoryExtractor` port to pull
-//! durable facts, deduplicates against existing memories, and stores them.
-//! Runs asynchronously — must never block the SSE chat stream.
-//!
-//! This service is the *write gate* for extracted memory: whatever an extractor
-//! adapter hands over, nothing reaches the store without passing
-//! [`fact_defect`] and the dedup pass. Adapters may prompt their model as well
-//! as they like, but they are not trusted to be the only enforcement — a 4B
-//! model reliably ignores part of any instruction it is given.
+//! The write gate for extracted memory: every fact passes [`fact_defect`] and dedup here,
+//! whatever the extractor's prompt promised (a 4B model ignores parts of instructions).
 
 use crate::models::ports::embedding::EmbeddingProvider;
 use crate::user_data::domain::memory::{
@@ -30,10 +23,7 @@ pub struct MemoryExtractionService {
     last_run: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
     /// Minimum seconds between extraction runs.
     interval_secs: i64,
-    /// Optional embedder. When set, every stored fact carries an embedding and
-    /// dedup gains a semantic pass on top of the lexical one. When unset (or on
-    /// embed failure) facts are stored with `embedding: None`, exactly as
-    /// before — extraction never fails because embedding did.
+    /// Optional embedder, adding semantic dedup; extraction never fails because embedding did.
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
 }
 
@@ -46,8 +36,7 @@ impl MemoryExtractionService {
         }
     }
 
-    /// Attach an embedding provider so extracted facts are searchable by
-    /// `search_similar` the moment they are written.
+    /// Attach an embedder so new facts are `search_similar`-able as soon as they are written.
     pub fn with_embedding_provider(mut self, provider: Arc<dyn EmbeddingProvider>) -> Self {
         self.embedding_provider = Some(provider);
         self
@@ -63,9 +52,7 @@ impl MemoryExtractionService {
         session_id: Option<&str>,
         scope: &ProfileScope,
     ) {
-        // A guest's words are not written down. This is the write half of guest
-        // degradation: the read half (no memory injection) would be pointless
-        // if the turn still deposited a fragment the household could recall.
+        // A guest's words are never written down (the write half of guest degradation).
         if scope.excludes_everything() {
             return;
         }
@@ -73,7 +60,6 @@ impl MemoryExtractionService {
             return;
         }
 
-        // Rate limit
         {
             let mut last = self.last_run.lock().await;
             let now = chrono::Utc::now();
@@ -86,8 +72,7 @@ impl MemoryExtractionService {
             *last = Some(now);
         }
 
-        // Fetch recent memories for dedup. Grows as this run stores facts, so
-        // two near-identical facts in one turn cannot both land.
+        // The dedup corpus; grows as this run stores, so two near-identical facts can't both land.
         let mut existing: Vec<String> = repo
             .search_recent(&ProfileScope::Household, DEDUP_RECENT_WINDOW)
             .await
@@ -96,7 +81,6 @@ impl MemoryExtractionService {
             .map(|m| m.content.to_lowercase())
             .collect();
 
-        // Extract facts
         let facts = match extractor
             .extract(user_message, assistant_response, &existing)
             .await
@@ -113,16 +97,11 @@ impl MemoryExtractionService {
             return;
         }
 
-        // Deduplicate and store
         let mut stored = 0;
         for fact in facts {
             let content = normalise_fact_content(&fact.content);
 
-            // Quality gate. A defective fact is dropped, never repaired: the
-            // rewrite a mechanical fix would need (conjugating "I like" into
-            // "The user likes", inventing the referent of "the latter") is
-            // exactly the judgement we do not have here, and a wrong repair
-            // outlives the conversation that could have corrected it.
+            // Drop defective facts; never repair them (a wrong rewrite outlives its conversation).
             if let Some(defect) = fact_defect(&content) {
                 tracing::debug!(
                     defect = %defect,
@@ -131,13 +110,8 @@ impl MemoryExtractionService {
                 continue;
             }
 
-            // A correction is the one thing dedup must never swallow. It
-            // restates the fact it fixes, in almost the same words, which is
-            // exactly what both measures score as a duplicate — and dropping it
-            // leaves the *stale* row standing, so the store ends up asserting
-            // the thing the user just took the trouble to deny. Keep it and let
-            // consolidation supersede the old row, which is the one path that
-            // knows which of the two won.
+            // Corrections bypass dedup: they restate the fact they fix, and dropping one keeps the
+            // stale row. Consolidation later supersedes the old row.
             let is_correction =
                 fact.segment == MemorySegment::Correction || fact.corrects.is_some();
 
@@ -146,17 +120,8 @@ impl MemoryExtractionService {
                 continue;
             }
 
-            // A one-off request the assistant already carried out is not an
-            // ongoing project. Filed as Context it still informs the next few
-            // turns, then decays out (short tier) instead of sitting in the
-            // Project segment forever crowding out real commitments.
-            // A fact that never names the user is not the user's identity,
-            // relationship or preference, whatever label the model put on it.
-            // Demoted to Knowledge rather than rejected: a demotion is
-            // reversible by consolidation and keeps a genuinely useful fact
-            // that happened to be worded without the word "user"; a rejection
-            // loses it forever. This is what let five William Ruto biography
-            // facts sit in `identity` alongside the user's home city.
+            // Identity/relationship/preference facts that never name the user drop to Knowledge
+            // (reversible, unlike rejecting); done one-off requests become short-lived Context.
             let subject_misfiled = matches!(
                 fact.segment,
                 MemorySegment::Identity | MemorySegment::Relationship | MemorySegment::Preference
@@ -183,9 +148,7 @@ impl MemoryExtractionService {
                 (fact.segment.clone(), fact.importance)
             };
 
-            // Embedding is best-effort: a failure downgrades this fact to an
-            // unembedded row (the startup backfill picks it up later), it never
-            // aborts extraction.
+            // Best-effort: a failed embed stores the row unembedded for the startup backfill.
             let embedding = match &self.embedding_provider {
                 Some(provider) => match provider.embed(&content).await {
                     Ok(v) => Some(v),
@@ -199,11 +162,8 @@ impl MemoryExtractionService {
                 None => None,
             };
 
-            // Semantic dedup — catches paraphrases the lexical prefilter above
-            // cannot. Rows without an embedding score 0.0, so the
-            // search_similar -> search_recent fallback can never trigger a skip.
-            // Corrections are exempt here for the same reason as above: a
-            // correction embeds close to the claim it overturns by design.
+            // Semantic dedup for paraphrases. Unembedded fallback rows score 0.0, so never skip;
+            // corrections are exempt since they embed close to the claim they overturn.
             let semantic_candidate = if is_correction {
                 None
             } else {
@@ -238,10 +198,7 @@ impl MemoryExtractionService {
                 importance,
                 fact.corrects.clone(),
             );
-            // PAI-1: stamp the owner. Before this, every extracted memory was
-            // written with profile_id: None, which made `Owner(id)` reads select
-            // exactly the same rows as `Household` -- the scoping was real
-            // plumbing with nothing flowing through it.
+            // Owner scope stamps its id; Household stays `None`, which is what makes it shared.
             fragment.profile_id = scope.owner_id().map(str::to_string);
             fragment.embedding = embedding;
 
@@ -249,12 +206,8 @@ impl MemoryExtractionService {
                 tracing::warn!("[memory-extraction] failed to store fact: {e}");
             } else {
                 stored += 1;
-                // PAI-2 P3: the fact itself is not logged. This line is INFO,
-                // and INFO is what the on-disk log file under <data_dir>/logs
-                // keeps, so every extracted memory was landing in plaintext in
-                // a second place -- with none of the store's scoping, none of
-                // its retention, and none of chokepoint 1's redaction. The id
-                // correlates the line with the row; the row is the record.
+                // Never log the fact itself: INFO lands in the on-disk log, outside the store's
+                // scoping, retention and redaction. The id links the line to the row.
                 tracing::info!(
                     memory_id = %id,
                     chars = content.chars().count(),
@@ -301,8 +254,7 @@ mod tests {
         }
     }
 
-    /// Extractor that yields a scripted list of facts, so a test can drive
-    /// segment and multi-fact behaviour.
+    /// Extractor yielding a scripted list of facts.
     struct ScriptedExtractor(Vec<ExtractedFact>);
 
     impl ScriptedExtractor {
@@ -337,8 +289,7 @@ mod tests {
             .await;
     }
 
-    /// Embedding provider with a hand-picked vector per text, so tests control
-    /// cosine similarity exactly.
+    /// Embedder with a hand-picked vector per text, so tests control cosine similarity.
     struct ScriptedEmbedder(Vec<(&'static str, Vec<f32>)>);
 
     #[async_trait]
@@ -595,8 +546,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_reworded_duplicate_is_skipped_with_no_embeddings_at_all() {
-        // The degraded path: embedding_provider = "none", so the cosine pass is
-        // inert and the reworded copy shares no substring with the original.
+        // No embedder, so only the lexical pass can catch this substring-free reword.
         let repo = MockMemoryRepository::new();
         repo.add(MemoryFragment::from_extraction(
             "existing".to_string(),
@@ -656,8 +606,7 @@ mod tests {
 
     // ── corrections survive dedup ───────────────────────────────────────
 
-    /// Store one fact, then run the extractor with `correction` and see what
-    /// is left. Returns the contents in insertion order.
+    /// Store `existing`, extract `correction`, and return what is left in insertion order.
     async fn store_then_extract(existing: &str, correction: ExtractedFact) -> Vec<String> {
         let repo = MockMemoryRepository::new();
         repo.add(MemoryFragment::from_extraction(
@@ -683,8 +632,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_reversed_correction_does_not_lose_to_the_stale_row() {
-        // The regression: both sides reduce to the identical token set, so the
-        // correction was dropped and only the row it contradicts survived.
+        // Both sides reduce to the same token set.
         let stale = "The user prefers dark mode over light mode";
         let fixed = "The user prefers light mode over dark mode";
         let stored = store_then_extract(
@@ -704,9 +652,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_correction_survives_even_when_it_is_a_lexical_duplicate() {
-        // Same order, same words plus one — the token measure calls this a
-        // duplicate (Jaccard 0.75, containment 1.00). Only the Correction
-        // exemption keeps it, which is what isolates it from the order fix.
+        // A lexical duplicate (Jaccard 0.75, containment 1.00): only the exemption keeps it.
         let stale = "The user's mother's name is Florence.";
         let fixed = "The user's mother's name is Florence Atieno.";
         assert!(
@@ -720,8 +666,7 @@ mod tests {
                 segment: MemorySegment::Relationship,
                 importance: 0.7,
                 tier: MemoryTier::Long,
-                // Segment is not Correction — the `corrects` field alone must
-                // be enough, matching MemoryFragment::is_correction().
+                // `corrects` alone must suffice, as in `MemoryFragment::is_correction`.
                 corrects: Some(stale.to_string()),
             },
         )
@@ -829,11 +774,6 @@ mod attribution_tests {
     use super::*;
     use crate::user_data::mocks::mock_memory::MockMemoryRepository;
 
-    /// Before PAI-1 wired the write side, every extracted memory was stored
-    /// with `profile_id: None`. That made `Owner(id)` reads select exactly the
-    /// same rows as `Household` -- real plumbing with nothing flowing through
-    /// it. Nothing tested it, because the only fixtures that produced an owned
-    /// row set `profile_id` by hand, a state no production path could reach.
     #[tokio::test]
     async fn an_extracted_memory_is_stamped_with_its_owner() {
         let repo = MockMemoryRepository::new();
@@ -867,9 +807,6 @@ mod attribution_tests {
         );
     }
 
-    /// The write half of guest degradation. Suppressing memory *injection* for
-    /// a guest is pointless if the turn still deposits a fragment the whole
-    /// household can recall afterwards.
     #[tokio::test]
     async fn a_guest_turn_writes_nothing_at_all() {
         let repo = MockMemoryRepository::new();
@@ -895,8 +832,6 @@ mod attribution_tests {
         );
     }
 
-    /// Household stays unattributed, which is what makes it shared context and
-    /// what every pre-PAI-1 row already is.
     #[tokio::test]
     async fn a_household_turn_stays_unattributed() {
         let repo = MockMemoryRepository::new();

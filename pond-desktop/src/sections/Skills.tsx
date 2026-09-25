@@ -23,9 +23,7 @@ const SKILL_ICONS: Record<string, React.ElementType> = {
 };
 const SKILL_ICON_KEYS = Object.keys(SKILL_ICONS);
 
-// ── Icon inference — guess a fitting icon from the skill's name, so a name
-// like "Settings Helper" gets a wrench rather than the generic sparkles
-// every skill got before this existed. Order matters: first match wins. ──
+// ── Icon inference from the skill's name; order matters, first match wins ──
 const ICON_KEYWORDS: Array<[string, string[]]> = [
   ["wrench",    ["setting", "config", "tool", "repair", "maintenance", "fix"]],
   ["bell",      ["remind", "alert", "notify", "notification"]],
@@ -47,9 +45,7 @@ function inferSkillIcon(name: string): string {
 }
 
 function SkillIcon({ icon, name, size = 16 }: { icon: string; name?: string; size?: number }) {
-  // A skill saved before per-name inference existed (or one nobody has
-  // touched the icon on) is still sitting on the "sparkles" default — infer
-  // for display so old skills read as well as new ones, without a migration.
+  // "sparkles" is the untouched default, so infer from the name for display (no migration needed).
   const key = icon === "sparkles" && name ? inferSkillIcon(name) : icon;
   const Icon = SKILL_ICONS[key] ?? Sparkles;
   return <Icon size={size} />;
@@ -62,10 +58,7 @@ export function Skills() {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [icon, setIcon] = useState("sparkles");
-  // Whether the icon was deliberately chosen (a picker click, or a saved
-  // skill that already had a real icon) — while false, typing the name
-  // keeps re-inferring a fitting icon; once true, the name no longer
-  // overrides what was chosen.
+  // Icon deliberately chosen (picker click, or a saved real icon); until then the name re-infers it.
   const [iconTouched, setIconTouched] = useState(false);
   const [content, setContent] = useState("");
   const [showForm, setShowForm] = useState(false);
@@ -97,10 +90,7 @@ export function Skills() {
     setEditingSkill(s);
     setName(s.name);
     setDescription(s.description);
-    // A skill still on the "sparkles" default hasn't had a deliberate icon
-    // chosen for it — infer from its name now, and keep re-inferring if the
-    // name changes, same as a brand-new skill. A skill with a real icon
-    // keeps it untouched by further name edits.
+    // Still on the "sparkles" default: infer, and keep re-inferring on rename like a new skill.
     const savedIcon = s.icon || "sparkles";
     setIcon(savedIcon === "sparkles" ? inferSkillIcon(s.name) : savedIcon);
     setIconTouched(savedIcon !== "sparkles");

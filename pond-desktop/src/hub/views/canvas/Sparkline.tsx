@@ -5,10 +5,7 @@ interface SparklineProps {
   positive: boolean;
 }
 
-/**
- * Minimal SVG polyline sparkline.
- * Ported from goose-hub-mcp.jsx lines 201-213.
- */
+/** Minimal SVG polyline sparkline. */
 export function Sparkline({ data, positive }: SparklineProps): React.ReactElement | null {
   if (!data || data.length < 2) return null;
 

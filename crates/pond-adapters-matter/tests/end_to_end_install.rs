@@ -29,9 +29,7 @@ async fn a_fresh_pond_installs_a_controller_and_talks_to_it() {
         Duration::from_secs(240),
         &MatterNotifier::disabled(),
         &url,
-        // IP only. BLE is a radio on the machine running the test, and on macOS
-        // the OS kills a process that touches it without an Info.plist entry —
-        // which `node` run from a test harness has not got.
+        // IP only: macOS kills a `node` that touches BLE without an Info.plist entry.
         false,
     )
     .await
@@ -41,18 +39,14 @@ async fn a_fresh_pond_installs_a_controller_and_talks_to_it() {
         "GIAP started it, so it must hold the handle"
     );
 
-    // Idempotent: a second call recognises the running controller as one of
-    // ours — by its greeting, not merely by something answering the port — and
-    // reuses it.
+    // Idempotent: the second call recognises its controller by greeting and reuses it.
     let reused = ensure_matter_server(
         &data_dir,
         port,
         Duration::from_secs(10),
         &MatterNotifier::disabled(),
         &url,
-        // IP only. BLE is a radio on the machine running the test, and on macOS
-        // the OS kills a process that touches it without an Info.plist entry —
-        // which `node` run from a test harness has not got.
+        // IP only.
         false,
     )
     .await
@@ -62,7 +56,6 @@ async fn a_fresh_pond_installs_a_controller_and_talks_to_it() {
         "a live controller must be reused, not replaced"
     );
 
-    // And it speaks the protocol.
     let (client, _events) = MatterClient::connect(&url)
         .await
         .expect("the greeting must be one this version accepts");
@@ -91,10 +84,7 @@ async fn a_fresh_pond_installs_a_controller_and_talks_to_it() {
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
-/// Asking for BLE must never cost the controller: macOS SIGKILLs a bare `node` that touches
-/// CoreBluetooth with no `NSBluetoothAlwaysUsageDescription`, uncatchable, so a respawn loop
-/// follows. Either greeting passes, as long as `ensure_matter_server` still returns a controller
-/// that speaks the protocol and reports `ble` truthfully.
+/// Either greeting passes, if a controller comes up, speaks the protocol and reports `ble` truly.
 #[tokio::test]
 #[ignore = "runs npm ci against the network"]
 async fn asking_for_ble_never_costs_the_controller() {
@@ -130,8 +120,7 @@ async fn asking_for_ble_never_costs_the_controller() {
         .expect("the controller must speak the protocol either way");
     client.send("ping", serde_json::json!({})).await.unwrap();
 
-    // Whatever it says, it must be what it actually loaded — the fallback drops
-    // the transport, so a controller reporting `true` here has really got it.
+    // The fallback drops BLE, so reporting `true` here means it really loaded.
     println!(
         "BLE was {} on this host",
         if client.has_ble() {

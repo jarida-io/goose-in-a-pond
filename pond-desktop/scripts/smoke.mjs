@@ -1,17 +1,5 @@
-// Launch the real Electron main process and assert the bridge it publishes.
-//
-// This is what replaces `cargo test --manifest-path pond-desktop/src-tauri/...`
-// -- a command the docs told people to run by hand and which no CI job ever
-// ran. It proves the things a unit test structurally cannot: that the app
-// boots without an unhandled main-process exception, that the window opens,
-// that the app:// protocol handler actually serves the built bundle, and that
-// the preload exposes exactly the surface the contract declares and nothing
-// else.
-//
-// Deliberately NOT proven here, and left to the manual runbook: the macOS menu
-// and therefore the clipboard, any TCC prompt, a real microphone, a real
-// sidecar, the .dmg, and whether the tray icon is visible as opposed to merely
-// constructed without throwing.
+// Boots the real Electron app: window opens, app:// serves the bundle, preload surface is exact.
+// Not covered (manual runbook): macOS menu/clipboard, TCC, mic, real sidecar, .dmg, tray visibility.
 
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
@@ -51,9 +39,7 @@ async function waitForPage(timeoutMs = 45_000) {
 /** Minimal CDP client: enough to evaluate expressions in the page. */
 async function connect(page) {
   if (typeof WebSocket === "undefined") {
-    // Node gained a global WebSocket in 22. Electron 44 requires >= 22.12.0
-    // anyway, so this only fires on a runtime too old to run the app at all —
-    // but a named error beats a bare ReferenceError from inside the harness.
+    // Only a Node too old to run the app hits this; a named error beats a bare ReferenceError.
     throw new Error(
       `this script needs a global WebSocket, which Node gained in 22 (running ${process.version}). ` +
         "electron@44 declares engines >= 22.12.0, so upgrade rather than polyfill.",
@@ -93,18 +79,8 @@ async function connect(page) {
   };
 }
 
-// POND_SERVER_BIN points at a path that does not exist, which the resolver
-// correctly IGNORES rather than treating as an error -- so on a dev machine
-// this still finds target/{release,debug}/pond-server and starts it, while in
-// CI there is no such binary and the shell comes up against nothing. Both are
-// fine: what is being asserted is that the window renders either way.
-//
-// `detached` puts Electron in its own process group so the cleanup below can
-// signal the WHOLE tree. Without it, SIGKILLing the main process orphans any
-// pond-server it spawned: the shell takes its children down on before-quit,
-// will-quit, SIGINT/SIGTERM and the exit hook, and SIGKILL is the one signal
-// that reaches none of them. That is a genuine property of the app, not a
-// harness quirk, and it is why the children carry pidfile reapers.
+// A nonexistent POND_SERVER_BIN is ignored: dev finds target/*/pond-server, CI runs serverless.
+// `detached` = own process group, so the final SIGKILL also reaches any spawned pond-server.
 const child = spawn(electron, [APP_DIR, `--remote-debugging-port=${PORT}`], {
   env: { ...process.env, POND_SERVER_BIN: "/nonexistent-on-purpose" },
   stdio: ["ignore", "pipe", "pipe"],
@@ -133,9 +109,7 @@ try {
 
   const cdp = await connect(page);
 
-  // The renderer really came from the protocol handler, not from a blank page.
-  // React mounts a tick or two after the document loads, so poll rather than
-  // sampling once -- a single check here is a flake generator.
+  // React mounts a tick or two after load, so poll; one sample is flaky.
   const title = await cdp.evaluate("document.title");
   let rootMounted = false;
   for (let i = 0; i < 40 && !rootMounted; i++) {
@@ -188,8 +162,7 @@ try {
     console.log("ok  unknown event refused by the preload");
   }
 
-  // A real IPC round-trip. False is the right answer with no server running;
-  // what is being checked is that the call completes at all.
+  // Real IPC round-trip; false is fine with no server, only completion is checked.
   const health = await cdp.evaluate("window.giap.invoke('server_health')");
   if (typeof health !== "boolean") {
     fail(`server_health returned ${JSON.stringify(health)}, expected a boolean`);

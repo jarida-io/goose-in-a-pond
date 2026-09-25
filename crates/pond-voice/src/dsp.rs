@@ -1,32 +1,10 @@
-//! Audio primitives, in one place.
+//! Pure, `std`-only audio primitives shared by the server and both adapters.
 //!
-//! Before this module the same handful of operations existed in up to four
-//! copies each — WAV encoding in `pond-adapters-whisper`, `pond-adapters-piper`,
-//! `pond-server/piper_http.rs` and the desktop shell's own native audio; RMS in
-//! three; resampling and the VAD state machine in two apiece. Fixing one copy
-//! never fixed the others.
-//!
-//! Everything here is pure and `std`-only so it can be shared by the server and
-//! both adapters without any of them inheriting a runtime. The desktop shell no
-//! longer needs it at all: its capture moved to the renderer's Web Audio, and
-//! the TypeScript counterparts of these functions live in
-//! `pond-desktop/src/modes/voice/webAudioUtils.ts`.
-//!
-//! ## Sample scaling
-//!
-//! f32 audio is in `[-1.0, 1.0]` and converts to i16 by multiplying by
-//! [`i16::MAX`] (32767) after clamping. The previous copies agreed on this —
-//! whisper spelled it `32_767.0` and piper spelled it `i16::MAX as f32`, which
-//! are the same number — so collapsing them changes no audio. That was checked
-//! before the collapse, because a "pure move" that quietly altered scaling
-//! would be an unusually hard bug to find.
+//! TypeScript counterparts live in `pond-desktop/src/modes/voice/webAudioUtils.ts`.
 
 // ── Level ────────────────────────────────────────────────────────────────────
 
-/// Root-mean-square level of a block of normalised samples.
-///
-/// Zero for an empty block, so callers can treat "no audio yet" as silence
-/// without a special case.
+/// Root-mean-square level of normalised samples; zero for an empty block.
 pub fn rms(samples: &[f32]) -> f32 {
     if samples.is_empty() {
         return 0.0;
@@ -37,9 +15,6 @@ pub fn rms(samples: &[f32]) -> f32 {
 // ── Rate conversion ──────────────────────────────────────────────────────────
 
 /// Linearly resample to 16 kHz, the rate whisper expects.
-///
-/// Returns the input untouched when it is already 16 kHz — the common case on
-/// a device whose default input config happens to match.
 pub fn resample_to_16k(samples: &[f32], src_rate: u32) -> Vec<f32> {
     if src_rate == 16_000 || src_rate == 0 || samples.is_empty() {
         return samples.to_vec();
@@ -95,7 +70,6 @@ pub fn encode_wav_pcm16(pcm: &[u8], sample_rate: u32) -> Vec<u8> {
     wav
 }
 
-/// Encode normalised f32 samples as mono 16 kHz WAV.
 pub fn encode_wav_mono_16k(samples: &[f32]) -> Vec<u8> {
     encode_wav_pcm16(&f32_to_pcm16(samples), 16_000)
 }
@@ -140,23 +114,9 @@ const FMT_PCM: u16 = 1;
 const FMT_IEEE_FLOAT: u16 = 3;
 const FMT_EXTENSIBLE: u16 = 0xFFFE;
 
-/// Decode a WAV to normalised mono f32, walking the RIFF chunk list properly.
+/// Decode a WAV to normalised mono f32, walking the RIFF chunk list.
 ///
-/// The implementation this replaces assumed the data chunk began at byte 44
-/// and the payload was 16-bit mono, reading the sample rate from a fixed
-/// offset. That holds only for WAVs GIAP itself produced. It also backs
-/// `POST /api/v1/transcribe`, which real phone recorders hit — and those emit
-/// `LIST`/`INFO` chunks before `data`, 18- and 40-byte `fmt ` chunks,
-/// `WAVE_FORMAT_EXTENSIBLE`, stereo and 24-bit. Every one of those decoded to
-/// noise rather than an error, so whisper hallucinated on garbage instead of
-/// the caller learning anything was wrong.
-///
-/// Handles PCM 8/16/24/32-bit and IEEE float 32/64-bit, any channel count
-/// (downmixed by averaging), and `EXTENSIBLE` via its SubFormat tag.
-///
-/// This parses untrusted input from the network. It never panics, never
-/// indexes out of bounds, and never allocates based on an unvalidated length
-/// field — every allocation is bounded by bytes actually present.
+/// Untrusted network input: must never panic, and allocations are bounded by bytes present.
 pub fn decode_wav(bytes: &[u8]) -> Result<DecodedWav, WavError> {
     // RIFF....WAVE
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
@@ -167,8 +127,7 @@ pub fn decode_wav(bytes: &[u8]) -> Result<DecodedWav, WavError> {
     let mut fmt: Option<FmtChunk> = None;
     let mut data: Option<&[u8]> = None;
 
-    // Chunk list: 4-byte id, 4-byte little-endian size, payload, then a pad
-    // byte when the size is odd.
+    // Chunks: 4-byte id, 4-byte LE size, payload, then a pad byte if the size is odd.
     while pos + 8 <= bytes.len() {
         let id = &bytes[pos..pos + 4];
         let size = u32::from_le_bytes([
@@ -178,8 +137,7 @@ pub fn decode_wav(bytes: &[u8]) -> Result<DecodedWav, WavError> {
             bytes[pos + 7],
         ]) as usize;
         let body_start = pos + 8;
-        // Clamp rather than trust: a truncated file (or a hostile size field)
-        // must not push the slice past the buffer.
+        // Clamp: a truncated file or hostile size must not slice past the buffer.
         let body_end = body_start.saturating_add(size).min(bytes.len());
         let body = &bytes[body_start..body_end];
 
@@ -189,14 +147,11 @@ pub fn decode_wav(bytes: &[u8]) -> Result<DecodedWav, WavError> {
             _ => {} // LIST, INFO, JUNK, fact, id3 … skipped by design
         }
 
-        // Advance past the payload plus its pad byte. saturating_add keeps a
-        // hostile size from wrapping the cursor backwards into an infinite loop.
+        // saturating_add stops a hostile size wrapping the cursor back into an endless loop.
         let advance = size + (size & 1);
         pos = body_start.saturating_add(advance);
         if advance == 0 && id != b"data" {
-            // A zero-length unknown chunk is legal; a stream of them is not
-            // progress. body_start already moved us forward by 8, so this only
-            // guards against a pathological cursor.
+            // body_start is already 8 past pos, so zero-length chunks still make progress.
             continue;
         }
     }
@@ -234,8 +189,7 @@ fn parse_fmt(body: &[u8]) -> Result<FmtChunk, WavError> {
     let sample_rate = u32::from_le_bytes([body[4], body[5], body[6], body[7]]);
     let bits_per_sample = u16::from_le_bytes([body[14], body[15]]);
 
-    // EXTENSIBLE carries the real format in the first two bytes of its
-    // SubFormat GUID, at offset 24 of the fmt body.
+    // EXTENSIBLE's real format is the first two bytes of its SubFormat GUID, at offset 24.
     if format_tag == FMT_EXTENSIBLE {
         if body.len() < 26 {
             return Err(WavError::Unsupported(
@@ -266,8 +220,7 @@ fn decode_samples(data: &[u8], fmt: &FmtChunk) -> Result<Vec<f32>, WavError> {
     // Per-sample decoders, all normalising into [-1.0, 1.0].
     let (bytes_per_sample, convert): (usize, fn(&[u8]) -> f32) =
         match (fmt.format_tag, fmt.bits_per_sample) {
-            // 8-bit PCM is UNSIGNED with a 128 midpoint — the one PCM depth
-            // that is not two's complement.
+            // 8-bit PCM is unsigned around 128, the only depth that isn't two's complement.
             (FMT_PCM, 8) => (1, |b| (b[0] as f32 - 128.0) / 128.0),
             (FMT_PCM, 16) => (2, |b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32_768.0),
             (FMT_PCM, 24) => (3, |b| {
@@ -294,14 +247,11 @@ fn decode_samples(data: &[u8], fmt: &FmtChunk) -> Result<Vec<f32>, WavError> {
         return Err(WavError::Unsupported("zero-size frame".into()));
     }
 
-    // Whole frames only — a trailing partial frame is dropped rather than
-    // read past the end.
     let frames = data.len() / frame_bytes;
     let mut out = Vec::with_capacity(frames);
     for f in 0..frames {
         let base = f * frame_bytes;
-        // Downmix by averaging: a stereo phone recording becomes the mono
-        // whisper wants, instead of the left channel plus interleaved noise.
+        // Downmix by averaging; whisper wants mono.
         let mut acc = 0.0f32;
         for c in 0..channels {
             let s = base + c * bytes_per_sample;
@@ -317,10 +267,8 @@ fn decode_samples(data: &[u8], fmt: &FmtChunk) -> Result<Vec<f32>, WavError> {
 /// What one poll of the VAD implies for a speculative transcription.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VadEvent {
-    /// Nothing to do.
     None,
-    /// A silence run just began — worth transcribing what we have so far,
-    /// overlapping inference with the rest of the silence wait.
+    /// A silence run began: transcribe speculatively during the rest of the silence wait.
     SpawnSpeculative,
     /// Speech resumed, so any in-flight speculative result is stale.
     DiscardSpeculative,
@@ -328,52 +276,20 @@ pub enum VadEvent {
     Confirmed,
 }
 
-/// Whether one frame of audio is speech.
+/// Whether one frame of audio is speech: the evidence [`SpeculativeVad`] runs on.
 ///
-/// [`SpeculativeVad`] is the *policy* — when to fire a speculative
-/// transcription, when to call the endpoint, how long a pause has to last. This
-/// is the *evidence* that policy runs on, and the two are separated because
-/// they change for different reasons and at different rates.
-///
-/// Before this split the policy took an RMS reading and a threshold, which
-/// meant "speech" was permanently defined as "louder than 0.005". That is the
-/// oldest detector there is and it fails in both directions daily: a sentence
-/// trailing off drops below the line and gets clipped, and a fan or a fridge
-/// sits above it forever so the utterance never ends. Neither is fixable by
-/// moving the number — a value tuned in a quiet room is wrong in a loud one,
-/// and nothing in the design notices.
-///
-/// Taking `&[f32]` rather than a level is what makes a model implementable
-/// here: a neural detector needs the samples, not a summary of them. The frame
-/// is whatever the caller polls at; a detector that needs a specific size
-/// buffers internally.
+/// Frames come at whatever size the caller polls; fixed-window detectors buffer internally.
 pub trait SpeechDetector {
-    /// Is this frame speech? `&mut self` because a real detector carries state
-    /// between frames — Silero runs an LSTM, and feeding it windows
-    /// independently would reset that every frame and quietly measure a worse
-    /// model than the one you installed.
+    /// Is this frame speech? Takes `&mut self` as detectors (Silero's LSTM) keep state.
     fn is_speech(&mut self, frame: &[f32]) -> bool;
 
-    /// Forget everything. Called between utterances, so one turn's trailing
-    /// state cannot bias the start of the next.
+    /// Forget all state; called between utterances so one turn can't bias the next.
     fn reset(&mut self) {}
 }
 
-/// Re-frames a stream of variable-length reads into fixed-size windows.
+/// Re-frames variable-length reads into exactly consecutive fixed-size windows.
 ///
-/// A model detector needs an exact window — Silero wants 512 samples at 16 kHz
-/// and nothing else — while a capture loop hands over whatever arrived since it
-/// last looked. At a 30 ms poll that is *about* 480 samples, but only about:
-/// scheduling jitter makes each read a different length, and a detector that
-/// assumed otherwise would silently see overlapping or skipped audio.
-///
-/// Overlap and skip are the failure to care about, because neither is visible.
-/// An LSTM fed a window that repeats 40 ms it already saw does not error; it
-/// just carries a slightly wrong state forward, forever, and the detector is
-/// merely a bit worse than the one you benchmarked.
-///
-/// This keeps the leftover between calls so the windows it emits are exactly
-/// consecutive, with no sample seen twice and none dropped.
+/// Models need exact windows (Silero: 512 samples at 16 kHz), but capture reads jitter.
 #[derive(Debug, Clone)]
 pub struct Windower {
     size: usize,
@@ -388,11 +304,7 @@ impl Windower {
         }
     }
 
-    /// Append `samples` and hand each complete window to `on_window`.
-    ///
-    /// Called with zero windows when a read was short, and with several when a
-    /// read was long or a poll was late. A caller that needs one answer per
-    /// call keeps the last one.
+    /// Append `samples` and pass each complete window (zero or several) to `on_window`.
     pub fn push(&mut self, samples: &[f32], mut on_window: impl FnMut(&[f32])) {
         self.buf.extend_from_slice(samples);
         let mut consumed = 0;
@@ -401,8 +313,7 @@ impl Windower {
             consumed += self.size;
         }
         if consumed > 0 {
-            // Drain from the front rather than reallocating: the leftover is
-            // always smaller than one window, so this copies at most 511 floats.
+            // The leftover is under one window, so draining the front copies little.
             self.buf.drain(..consumed);
         }
     }
@@ -418,12 +329,7 @@ impl Windower {
     }
 }
 
-/// Speech is anything louder than a threshold. The incumbent.
-///
-/// Kept, and kept honest, for three reasons: it is what ships today so it is
-/// the baseline any replacement has to beat; it costs about half a microsecond
-/// per frame, which no model will match; and it is the only detector that
-/// works with no model file present, which matters on first run.
+/// Speech is RMS at or above a threshold. The only detector that needs no model file.
 #[derive(Debug, Clone, Copy)]
 pub struct RmsDetector {
     threshold: f32,
@@ -437,35 +343,15 @@ impl RmsDetector {
 
 impl SpeechDetector for RmsDetector {
     fn is_speech(&mut self, frame: &[f32]) -> bool {
-        // `>=`, not `>`: the caller this replaced treated `rms < threshold` as
-        // silence, so a frame exactly at the threshold counted as speech.
-        //
-        // This is `rms >= t` rather than `!(rms < t)`, and the difference is
-        // NaN — the one input on which this is not a pure refactor. The old
-        // `rms < t` was false for NaN, so a NaN frame counted as *speech* and
-        // held the endpoint open forever; a microphone that started emitting
-        // NaN mid-utterance would record to the hard cap and hand whisper a
-        // buffer of it. Here NaN is silence, so the utterance ends.
-        //
-        // That is the better answer, and it is also the consistent one: the
-        // onset gate this loop sits downstream of already asks `rms >=
-        // SPEECH_RMS` (`pond-adapters-whisper` `record_mono_f32_vad`), so NaN
-        // has always failed to *start* a recording. Writing `!(rms < t)` here
-        // to make the refactor bit-exact would reinstate the hang and leave the
-        // two gates disagreeing about the same sample.
-        //
-        // Nothing manufactures a NaN today — the i16 and u16 capture paths
-        // cannot, and the f32 path passes driver samples through unaltered —
-        // so this is a disposition, not a fix for an observed bug.
+        // `>=`: a frame at the threshold is speech, and NaN is silence (as in the whisper onset
+        // gate); `!(rms < t)` would let a NaN stream hold the endpoint open forever.
         rms(frame) >= self.threshold
     }
 }
 
 /// Debounced end-of-speech detector that also drives speculative inference.
 ///
-/// Feed it one speech/not-speech decision per `poll_ms`. It reports the start
-/// of each silence run exactly once (not on every poll), which is what makes
-/// the speculative transcription fire once per pause rather than continuously.
+/// Feed one speech decision per `poll_ms`; the start of each silence run is reported once.
 #[derive(Debug, Clone)]
 pub struct SpeculativeVad {
     silent_for_ms: u64,
@@ -483,9 +369,6 @@ impl SpeculativeVad {
     }
 
     /// Advance one poll.
-    ///
-    /// Takes a decision, not a level. What counted as speech is the detector's
-    /// business; this only cares how long the answer has been "no".
     pub fn on_speech(&mut self, is_speech: bool) -> VadEvent {
         if !is_speech {
             let was_speaking = self.silent_for_ms == 0;
@@ -529,8 +412,6 @@ mod tests {
 
     #[test]
     fn scaling_matches_the_two_implementations_this_replaces() {
-        // whisper used `* 32_767.0`, piper `* i16::MAX as f32`. Same number —
-        // this pins it so a future edit cannot quietly change level.
         assert_eq!(f32_to_pcm16(&[1.0]), 32_767i16.to_le_bytes());
         assert_eq!(f32_to_pcm16(&[-1.0]), (-32_767i16).to_le_bytes());
         assert_eq!(f32_to_pcm16(&[0.0]), 0i16.to_le_bytes());
@@ -551,7 +432,7 @@ mod tests {
         assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 22_050);
     }
 
-    // ── the shapes a real phone emits, which used to decode to noise ─────
+    // ── the shapes a real phone emits ────────────────────────────────────
 
     /// Builds a WAV with arbitrary extra chunks before `data`.
     fn wav_with(fmt_body: Vec<u8>, extra_chunks: &[(&[u8; 4], Vec<u8>)], data: Vec<u8>) -> Vec<u8> {
@@ -595,8 +476,6 @@ mod tests {
         f
     }
 
-    /// The classic breakage: the old decoder assumed `data` began at byte 44,
-    /// so a LIST chunk shifted every sample and produced noise.
     #[test]
     fn a_list_chunk_before_data_no_longer_shifts_the_samples() {
         let pcm = f32_to_pcm16(&[0.5, -0.5, 0.25, -0.25]);
@@ -716,8 +595,6 @@ mod tests {
         );
     }
 
-    /// A chunk size far larger than the buffer must clamp, not panic — this is
-    /// the shape a hostile upload takes.
     #[test]
     fn a_lying_chunk_size_cannot_read_past_the_buffer() {
         let mut out = Vec::new();
@@ -769,8 +646,6 @@ mod tests {
         assert_eq!(got.sample_rate, 16_000);
     }
 
-    /// Every prefix of a valid file must fail cleanly. This is the cheap
-    /// stand-in for a fuzzer over the parser.
     #[test]
     fn no_prefix_of_a_valid_wav_can_panic() {
         let full = wav_with(
@@ -807,13 +682,7 @@ mod tests {
         assert_eq!(resample_to_16k(&s, 32_000).len(), 50);
     }
 
-    /// The old signature, kept alive as an oracle.
-    ///
-    /// The state machine's tests were rewritten in the same commit as the state
-    /// machine, which is the exact situation where a refactor drifts and drags
-    /// its tests along with it. This is the pre-refactor logic, transcribed
-    /// from the deleted `on_rms`, so the new implementation is checked against
-    /// what the old one *did* rather than against what its new tests say.
+    /// Pre-refactor `on_rms` logic, kept as an independent oracle for `SpeculativeVad`.
     fn oracle(state: &mut (u64, u64, u64), rms: f32, threshold: f32) -> VadEvent {
         let (silent_for_ms, silence_ms, poll_ms) = (&mut state.0, state.1, state.2);
         if rms < threshold {
@@ -840,8 +709,7 @@ mod tests {
     #[test]
     fn the_split_changed_no_behaviour() {
         const THRESHOLD: f32 = 0.01;
-        // Levels chosen to straddle the threshold, including landing exactly on
-        // it — the boundary is where an inverted comparison hides.
+        // Straddle the threshold and hit it exactly, where an inverted comparison hides.
         let levels = [0.5, 0.001, 0.01, 0.0099, 0.0101, 0.0, 0.2, 0.005, 0.5, 0.0];
 
         for &(silence_ms, poll_ms) in &[(300u64, 100u64), (90, 30), (1_000, 100), (30, 30)] {
@@ -849,8 +717,7 @@ mod tests {
             let mut oracle_state = (0u64, silence_ms, poll_ms);
             let mut detector = RmsDetector::new(THRESHOLD);
 
-            // Repeat the pattern so multi-run sequences are covered, not just
-            // the first pause.
+            // Repeat so later pauses are covered, not just the first.
             for round in 0..4 {
                 for (i, &level) in levels.iter().enumerate() {
                     // A constant frame whose RMS is exactly `level`.
@@ -875,8 +742,7 @@ mod tests {
         let mut out = Vec::new();
         let mut next = 0.0f32;
         for &n in reads {
-            // Each sample is its own index, so a dropped or repeated sample is
-            // visible in the output rather than hidden in a sea of zeros.
+            // Each sample is its own index, so a dropped or repeated one shows.
             let read: Vec<f32> = (0..n)
                 .map(|_| {
                     next += 1.0;
@@ -890,16 +756,13 @@ mod tests {
 
     #[test]
     fn windows_are_exactly_consecutive_under_jitter() {
-        // The realistic case: a 30 ms poll at 16 kHz is ~480 samples, but never
-        // exactly, and a 512-sample model needs exact windows regardless.
+        // A 30 ms poll at 16 kHz is ~480 samples, never exactly; the model needs 512.
         let reads = [480, 512, 470, 490, 300, 700, 480, 480, 1, 999];
         let got = windows_of(512, &reads);
 
         assert!(!got.is_empty());
         let flat: Vec<f32> = got.concat();
-        // No sample seen twice, none skipped: the concatenation must be
-        // 1, 2, 3, ... with no gap. This is the assertion that would fail if
-        // the leftover were dropped or re-emitted.
+        // No sample seen twice or skipped: the concatenation must be 1, 2, 3, ...
         let expected: Vec<f32> = (1..=flat.len()).map(|i| i as f32).collect();
         assert_eq!(flat, expected, "windows are not contiguous");
         for w in &got {
@@ -926,8 +789,7 @@ mod tests {
     fn one_long_read_emits_every_window_it_contains() {
         let mut w = Windower::new(512);
         let mut count = 0;
-        // A late poll delivers a backlog. All of it must be processed, or the
-        // detector silently falls behind real time and never catches up.
+        // A late poll's backlog must all be processed, or the detector falls behind.
         w.push(&[0.5; 512 * 3 + 7], |_| count += 1);
         assert_eq!(count, 3);
         assert_eq!(w.pending(), 7);
@@ -947,13 +809,8 @@ mod tests {
 
     #[test]
     fn a_nan_frame_counts_as_silence() {
-        // The one input where this is not a pure refactor, pinned so the choice
-        // is visible rather than incidental. The old comparison (`rms < t`,
-        // false for NaN) called a NaN frame speech and never ended the
-        // utterance; this calls it silence. See the note on `is_speech`.
         let mut d = RmsDetector::new(0.01);
         assert!(!d.is_speech(&[f32::NAN; 4]), "NaN is silence, deliberately");
-        // An empty frame has an RMS of 0.0, which both versions call silence.
         assert!(!d.is_speech(&[]));
     }
 
@@ -962,18 +819,13 @@ mod tests {
         let mut d = RmsDetector::new(0.01);
         assert!(d.is_speech(&[0.5; 4]));
         assert!(!d.is_speech(&[0.001; 4]));
-        // Exactly at the threshold is speech: the code this replaced treated
-        // `rms < threshold` as silence, so equality fell on the speech side.
         assert!(d.is_speech(&[0.01; 4]), "the boundary belongs to speech");
         assert!(!d.is_speech(&[0.0099; 4]));
     }
 
     #[test]
     fn a_detector_can_be_swapped_at_runtime() {
-        // Step 3 selects the detector from a settings row, so the trait has to
-        // survive being put behind a pointer. Object safety is easy to lose by
-        // accident (a generic method, `Self: Sized`) and annoying to discover
-        // one crate away.
+        // Pins object safety, so the detector can be chosen at runtime.
         let mut boxed: Box<dyn SpeechDetector> = Box::new(RmsDetector::new(0.01));
         assert!(boxed.is_speech(&[0.5; 4]));
         boxed.reset();
@@ -1009,15 +861,6 @@ mod tests {
         assert_eq!(vad.on_speech(SILENCE >= T), VadEvent::SpawnSpeculative);
     }
 
-    /// Regression against a real file, not a synthetic one.
-    ///
-    /// GIAP's own `tests/blobs/jfk.wav` fixture carries a 26-byte `LIST` chunk
-    /// between `fmt ` and `data`, so its payload begins at byte 78. The decoder
-    /// this replaces started reading at a hardcoded 44 and therefore prepended
-    /// 17 samples of chunk header as audio. It was even and thus stayed i16
-    /// aligned, so the rest of the file decoded correctly — which is precisely
-    /// why it went unnoticed. The existing whisper-side test hand-rolled a
-    /// `data` search to dodge the same bug the production path had.
     #[test]
     fn the_real_jfk_fixture_has_a_pre_data_chunk_and_still_decodes() {
         let path =
@@ -1044,14 +887,13 @@ mod tests {
         // Length must match the declared data chunk, not the distance from 44.
         assert_eq!(got.samples.len(), (bytes.len() - data_at) / 2);
 
-        // And the first samples must be real audio, not chunk header bytes
-        // reinterpreted as PCM. jfk.wav opens on near-silence.
+        // The first samples must be audio, not chunk bytes; jfk.wav opens on near-silence.
         assert!(
             got.samples[..64].iter().all(|s| s.abs() < 0.05),
             "leading samples look like chunk bytes, not audio"
         );
 
-        // What the old decoder would have produced, for contrast.
+        // Contrast with a decoder that assumes data at byte 44.
         let old_len = (bytes.len() - 44) / 2;
         assert_eq!(
             old_len - got.samples.len(),

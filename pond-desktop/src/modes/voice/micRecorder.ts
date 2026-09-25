@@ -1,19 +1,4 @@
-// Fixed-duration microphone capture, for wake-word calibration.
-//
-// This is the capture half of WebVoiceBackend.recordWithVad with the VAD taken
-// out: calibration records for a fixed window and keeps everything, because
-// the point is to hear exactly what the user said, not to decide when they
-// stopped.
-//
-// It replaces four IPC commands and 811 lines of cpal in the Rust shell. Under
-// Tauri the mic had to live natively; under Chromium getUserMedia is right
-// there, and the WAV no longer has to cross a process boundary -- the old
-// stop_recording returned Vec<u8>, which serialised as a JSON array of
-// integers, so a 3.5s 16kHz mono recording travelled as roughly 400 KB of
-// text and was copied back to bytes on the other side.
-//
-// It also means calibration works in the browser dev surface, where it used
-// to render an error.
+// Wake-word calibration capture: a fixed window with no VAD, so nothing the user said is cut.
 
 import { MIC_CONSTRAINTS, encodeWav, downsampleTo16k, calculateRms } from "./webAudioUtils";
 
@@ -36,12 +21,7 @@ export interface FixedRecorder {
   abort(): void;
 }
 
-/**
- * Record for `durationMs`, reporting the input level as it goes.
- *
- * The recorder owns its own AudioContext and closes it on the way out, so a
- * cancelled calibration cannot leave the microphone indicator lit.
- */
+/** Closes its own AudioContext on every exit, so a cancel can't leave the mic indicator lit. */
 export function recordFixedDuration(
   durationMs: number,
   onLevel?: (rms: number) => void,
@@ -103,9 +83,7 @@ export function recordFixedDuration(
         analyser.fftSize = 2048;
         source.connect(analyser);
 
-        // ScriptProcessorNode is deprecated, but it is what the rest of this
-        // codebase's capture path uses; switching to an AudioWorklet is a
-        // separate change that should move every call site at once.
+        // Deprecated, but shared with every other capture path; move them all to AudioWorklet together.
         const processor = ctx.createScriptProcessor(PROCESSOR_BUFFER, 1, 1);
         processor.onaudioprocess = (e) => {
           chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));

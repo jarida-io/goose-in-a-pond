@@ -122,7 +122,7 @@ export function NotificationsView({ go }: NotificationsViewProps) {
   const { serverOnline, scheduleRuns } = useAppState();
   const [readIds, setReadIds] = useState<Set<string>>(new Set());
 
-  // Derive all items from state.scheduleRuns (already kept fresh by AppContext) + mock data
+  // scheduleRuns is kept fresh by AppContext, so nothing is fetched here.
   const allItems = useMemo<Notification[]>(() => {
     const runNotifs = scheduleRuns.map(buildNotificationFromRun);
     return [...runNotifs, ...MOCK_NOTIFICATIONS].sort(

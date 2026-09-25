@@ -40,11 +40,7 @@
 use crate::user_data::domain::settings::Settings;
 use chrono::{DateTime, FixedOffset, Offset, Utc};
 
-/// How confident the pond is about the name it is using.
-///
-/// Carried so a caller can phrase itself honestly. "You are in Nairobi" and
-/// "your time zone suggests Nairobi" are different claims, and a tool that
-/// cannot tell them apart will state a guess as a fact.
+/// How confident the pond is about its place name, so callers never state a guess as fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
     /// Somebody typed it, or a detection wrote it.
@@ -68,12 +64,7 @@ pub struct Location {
 }
 
 impl Location {
-    /// Whether the coordinates are usable.
-    ///
-    /// `(0, 0)` is the struct's default and a real point in the Gulf of Guinea.
-    /// Treating it as unset is a deliberate trade: a pond moored there gets to
-    /// type its coordinates twice, and every other pond stops asking the
-    /// weather for a forecast off the coast of Ghana.
+    /// Whether the coordinates are usable; `(0, 0)` (the default, out at sea) counts as unset.
     pub fn has_coordinates(&self) -> bool {
         self.latitude != 0.0 || self.longitude != 0.0
     }
@@ -83,19 +74,8 @@ impl Location {
         !self.name.is_empty()
     }
 
-    /// Coordinates and a label for a weather lookup, or `None` when there is
-    /// nothing to ask about.
-    ///
-    /// This decision was written out twice in `main.rs`, once for the HTTP
-    /// server and once for voice mode, as two copies of the same six lines —
-    /// and both copies read the raw settings fields, so neither of them knew
-    /// about the time-zone fallback. A pond that finished onboarding with a
-    /// zone and no weather box was told it had no location by a pond holding
-    /// the answer, on both surfaces, in the same words.
-    ///
-    /// The label is the place name when there is one and the coordinates
-    /// otherwise, because the provider geocodes a name on demand and a name is
-    /// what a person recognises in a log line.
+    /// Coordinates and a label for a weather lookup, or `None` when there is nothing to ask.
+    /// The label prefers the name: the provider geocodes it, so a name alone is enough.
     pub fn weather_target(&self) -> Option<(f64, f64, String)> {
         if !self.has_coordinates() && !self.is_named() {
             return None;
@@ -108,21 +88,13 @@ impl Location {
         Some((self.latitude, self.longitude, label))
     }
 
-    /// The place, phrased for a person, or `None` when there is nothing to say.
-    ///
-    /// Callers that used to write their own "not configured" string should use
-    /// this and say nothing when it is `None` — an interface that reports its
-    /// own missing configuration to a household is talking to the wrong person.
+    /// The place, phrased for a person; on `None` say nothing rather than "not configured".
     pub fn describe(&self) -> Option<&str> {
         self.is_named().then_some(self.name.as_str())
     }
 }
 
-/// The place name a time zone implies.
-///
-/// `Africa/Nairobi` → `Nairobi`; `America/New_York` → `New York`. Zones without
-/// a region part (`UTC`) imply nothing, which is correct — UTC is not a place
-/// anybody lives.
+/// The place a zone implies: `America/New_York` → `New York`; `UTC` implies none.
 pub fn place_from_timezone(zone: &str) -> Option<String> {
     let leaf = zone.rsplit('/').next()?;
     if leaf == zone || leaf.is_empty() {
@@ -160,14 +132,7 @@ pub fn resolve(settings: &Settings) -> Location {
 
 // ── Zones ───────────────────────────────────────────────────────────────────
 
-/// Every IANA zone this build knows, sorted, e.g. `Africa/Nairobi`.
-///
-/// The IANA database rather than a curated list, because a curated list is a
-/// promise that somebody will keep curating it, and nobody did: the three that
-/// existed had drifted apart and none of them held `Africa/Kampala`. The cost
-/// of the full set is a `<select>` with several hundred entries, which is a UI
-/// problem with UI answers (grouping, search) rather than a reason to tell a
-/// household its own zone does not exist.
+/// Every IANA zone this build knows, sorted; the full set, as curated lists drift and miss zones.
 pub fn zones() -> Vec<&'static str> {
     let mut all: Vec<&'static str> = chrono_tz::TZ_VARIANTS.iter().map(|z| z.name()).collect();
     all.sort_unstable();
@@ -175,20 +140,11 @@ pub fn zones() -> Vec<&'static str> {
 }
 
 /// Whether `zone` is a real IANA zone.
-///
-/// The server had NO validation: any string a client sent was stored, and a
-/// misspelled zone reached the cron scheduler as a schedule that would never
-/// fire, with nothing anywhere saying why.
 pub fn is_valid_zone(zone: &str) -> bool {
     zone.trim().parse::<chrono_tz::Tz>().is_ok()
 }
 
-/// Canonical spelling for a zone a person or an older client may have typed.
-///
-/// Accepts the exact name and a case-insensitive match; returns `None` for
-/// anything the database does not hold. Case-insensitivity is here because
-/// `africa/nairobi` is a reasonable thing to type and an unreasonable thing to
-/// reject, not because zone names are case-insensitive — they are not.
+/// Canonical spelling of a typed zone (case-insensitive match); `None` if the database lacks it.
 pub fn normalize_zone(zone: &str) -> Option<String> {
     let t = zone.trim();
     if t.is_empty() {
@@ -207,37 +163,21 @@ pub fn normalize_zone(zone: &str) -> Option<String> {
 // ── Time ────────────────────────────────────────────────────────────────────
 
 /// The current local time in `zone`, or `None` if the zone is not real.
-///
-/// Callers were each doing their own `parse::<Tz>()` and each choosing a
-/// different thing to do when it failed — one defaulted to UTC, one dropped the
-/// schedule, one formatted the error into a prompt. One function, one answer.
 pub fn now_in(zone: &str, now: DateTime<Utc>) -> Option<DateTime<chrono_tz::Tz>> {
     let tz: chrono_tz::Tz = zone.trim().parse().ok()?;
     Some(now.with_timezone(&tz))
 }
 
 /// Which spelling of an offset a caller needs.
-///
-/// Both are correct and aimed at different readers, so this is a parameter
-/// rather than one being a prettier version of the other. Three hand-rolled
-/// implementations existed when this was added — this module's, `world_clock`'s
-/// and `get_current_time`'s — and they rendered the same instant three ways in
-/// one conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OffsetStyle {
     /// `+03:00`, `-09:30`. Fixed width, always minutes. For pickers and data.
     Iso,
-    /// `UTC+3`, `UTC-9:30`. Hours unpadded, minutes only when non-zero. For
-    /// prose a model reads aloud.
+    /// `UTC+3`, `UTC-9:30`: unpadded hours, minutes only when non-zero. For prose read aloud.
     Prose,
 }
 
 /// Write an already-resolved offset in the requested style.
-///
-/// Takes the offset rather than a zone so a caller that has parsed a zone does
-/// not parse it twice. The sign handling is the part worth centralising: it is
-/// integer arithmetic on a possibly-negative second count, and the hand-rolled
-/// copies each got the half-hour zones subtly different.
 pub fn format_offset(offset: FixedOffset, style: OffsetStyle) -> String {
     let total = offset.local_minus_utc();
     let (sign, secs) = if total < 0 {
@@ -258,11 +198,7 @@ pub fn offset_label_styled(zone: &str, now: DateTime<Utc>, style: OffsetStyle) -
     Some(format_offset(now_in(zone, now)?.offset().fix(), style))
 }
 
-/// The UTC offset in `zone` right now, as `+03:00`.
-///
-/// Computed for an instant rather than stored, because an offset is not a
-/// property of a zone: half the world changes its offset twice a year, and a
-/// cached `+01:00` for `Europe/London` is wrong for four months of it.
+/// The UTC offset in `zone` at `now`, as `+03:00`; never cache it, since DST moves it.
 pub fn offset_label(zone: &str, now: DateTime<Utc>) -> Option<String> {
     offset_label_styled(zone, now, OffsetStyle::Iso)
 }
@@ -278,11 +214,7 @@ pub struct ZoneChoice {
     pub place: String,
 }
 
-/// The whole catalogue, ready to render.
-///
-/// Offsets are resolved against `now` and handed out together, so a picker does
-/// not do several hundred zone lookups of its own and does not have to know
-/// that an offset depends on the date.
+/// The whole catalogue, ready to render, with offsets resolved for `now`.
 pub fn zone_catalogue(now: DateTime<Utc>) -> Vec<ZoneChoice> {
     zones()
         .into_iter()
@@ -311,8 +243,6 @@ mod tests {
 
     // ── Zones ───────────────────────────────────────────────────────────
 
-    /// The reason the hand-maintained lists were replaced: none of the three
-    /// held this zone, so a household in Kampala could not pick its own.
     #[test]
     fn the_catalogue_holds_zones_no_hand_list_did() {
         let all = zones();
@@ -342,8 +272,6 @@ mod tests {
         assert_eq!(all, sorted, "a picker renders this in order");
     }
 
-    /// The server stored whatever it was sent, so a typo became a schedule
-    /// that would never fire and never explain itself.
     #[test]
     fn a_zone_that_does_not_exist_is_refused() {
         assert!(is_valid_zone("Africa/Nairobi"));
@@ -365,8 +293,6 @@ mod tests {
 
     // ── Time ────────────────────────────────────────────────────────────
 
-    /// An offset is a property of an INSTANT, not of a zone. London is +00:00
-    /// in January and +01:00 in July, and a cached answer is wrong for months.
     #[test]
     fn an_offset_follows_the_date_not_the_zone() {
         let jan = Utc.with_ymd_and_hms(2026, 1, 15, 12, 0, 0).unwrap();
@@ -390,8 +316,6 @@ mod tests {
         );
     }
 
-    /// Not every offset is a whole hour, and a formatter that assumed so would
-    /// tell most of India and all of Nepal the wrong time.
     #[test]
     fn a_half_hour_offset_is_formatted_correctly() {
         let now = Utc.with_ymd_and_hms(2026, 1, 15, 12, 0, 0).unwrap();
@@ -425,9 +349,6 @@ mod tests {
         assert_eq!(utc.place, "");
     }
 
-    /// Both copies of the weather wiring gated on the raw fields, so an
-    /// onboarded pond that had only ever been given a time zone was refused
-    /// weather by a pond that knew which city it was in.
     #[test]
     fn a_zone_alone_is_enough_to_ask_about_the_weather() {
         let target = resolve(&with("", "Africa/Nairobi", 0.0, 0.0)).weather_target();
@@ -445,8 +366,6 @@ mod tests {
         assert_eq!(resolve(&with("", "UTC", 0.0, 0.0)).weather_target(), None);
     }
 
-    /// The three spellings that existed before this: the picker's `+03:00`,
-    /// world_clock's `UTC+3`, and get_current_time's `UTC+03:00`.
     #[test]
     fn the_two_styles_are_both_correct_and_differ_only_in_shape() {
         let now = Utc.with_ymd_and_hms(2026, 1, 15, 12, 0, 0).unwrap();
@@ -460,8 +379,6 @@ mod tests {
         );
     }
 
-    /// Sign handling on a negative half-hour offset — the arithmetic each
-    /// hand-rolled copy got subtly different.
     #[test]
     fn a_negative_half_hour_offset_keeps_its_sign_in_both_styles() {
         let now = Utc.with_ymd_and_hms(2026, 1, 15, 12, 0, 0).unwrap();
@@ -488,7 +405,6 @@ mod tests {
         assert_eq!(l.origin, Origin::Configured);
     }
 
-    /// The defect this service exists for: the pond knew, and said it did not.
     #[test]
     fn an_empty_name_falls_back_to_the_timezone() {
         let l = resolve(&with("", "Africa/Nairobi", 0.0, 0.0));

@@ -1,7 +1,5 @@
-//! How long the pond keeps a context item (PAI-8 P1), honouring the `HEADLESS_BY_DESIGN` settings
-//! `retention_events_by_category` and `retention_sensitive_days` (PAI-8 3.1); the UI half is owed.
-//! Trap: `0` means keep forever in these settings, so a plain `u32::min` answers "delete now" for
-//! "keep forever" and destroys data. Use [`Window`] and [`Window::stricter`] instead of a `u32`.
+//! How long the pond keeps a context item.
+//! Trap: `0` means forever, so a plain `u32::min` deletes kept data; use [`Window::stricter`].
 
 use std::collections::HashMap;
 
@@ -11,15 +9,10 @@ use crate::context::domain::SourceKind;
 use crate::security::domain::event::{EventCategory, PrivacySensitivity};
 use crate::user_data::domain::settings::Settings;
 
-/// Ceiling on a retention window, in days. Matches `pruning.rs`'s `MAX_RETENTION_DAYS`, because
-/// `Utc::now() - Duration::days(n)` panics rather than erroring outside chrono's range and these
-/// numbers come from user-editable settings. ~100 years is forever for any real deployment.
+/// Day cap (~100 years), as in `pruning.rs`: user settings past chrono's range would panic.
 pub const MAX_RETENTION_DAYS: i64 = 36_500;
 
 /// A retention window: some number of days, or forever.
-///
-/// A newtype rather than a `u32` because the `0 = forever` convention makes
-/// ordinary integer comparison wrong in the dangerous direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Window {
     Days(u32),
@@ -36,9 +29,7 @@ impl Window {
         }
     }
 
-    /// The stricter of two windows, the one that deletes sooner. `Forever` is the identity, not
-    /// the zero: an item's category window and the sensitive-data cap both apply, and a
-    /// per-category setting of 90 days must not extend a 7-day sensitive cap set to bound it.
+    /// The stricter of two windows, the one that deletes sooner; `Forever` is the identity.
     pub fn stricter(self, other: Window) -> Window {
         match (self, other) {
             (Window::Forever, w) | (w, Window::Forever) => w,
@@ -58,9 +49,7 @@ impl Window {
 /// The retention policy in force, read from [`Settings`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextRetention {
-    /// Per-`EventCategory` override, snake_case key to days. The same map
-    /// `prune_events` reads, so a household that set "sensor: 5" gets five days
-    /// of sensor readings in both stores.
+    /// Per-`EventCategory` override, snake_case key to days; the same map `prune_events` reads.
     by_category: HashMap<String, u32>,
     /// Fallback when a category has no override.
     baseline_days: u32,
@@ -85,9 +74,7 @@ impl ContextRetention {
         )
     }
 
-    /// The settings key an [`EventCategory`] is stored under, derived through serde as
-    /// `pruning.rs`'s `category_key` does. A hand-written table could disagree with the keys the
-    /// settings map holds, and would present as "the retention I configured is being ignored".
+    /// The settings key for an [`EventCategory`], derived via serde like `pruning.rs` does.
     pub fn category_key(category: EventCategory) -> String {
         serde_json::to_value(category)
             .ok()
@@ -111,9 +98,7 @@ impl ContextRetention {
         }
     }
 
-    /// Every (kind, sensitivity-class) bucket a purge has to sweep, with its cutoff. A `None`
-    /// cutoff means keep forever and the caller skips it. Quantified over [`SourceKind::ALL`] and
-    /// both sensitivity classes so a new source kind is swept the day it is added.
+    /// Every (kind, sensitivity-class) bucket to sweep with its cutoff; `None` means skip it.
     pub fn sweep_plan(&self, now: DateTime<Utc>) -> Vec<RetentionBucket> {
         let mut plan = Vec::new();
         for kind in SourceKind::ALL {
@@ -153,9 +138,6 @@ mod tests {
         ContextRetention::new(HashMap::new(), baseline, sensitive)
     }
 
-    /// The trap. `0` is forever in every one of these settings, so combining
-    /// windows with a plain integer `min` answers "delete everything now" for
-    /// "keep everything always".
     #[test]
     fn zero_means_forever_and_never_wins_a_min() {
         assert_eq!(Window::from_setting(0), Window::Forever);
@@ -170,8 +152,6 @@ mod tests {
         assert_eq!(Window::Forever.cutoff(Utc::now()), None);
     }
 
-    /// The sensitive cap is a CAP: a generous per-category setting must not
-    /// extend it. This is the pairing the user configured on purpose.
     #[test]
     fn the_sensitive_cap_bounds_a_generous_category() {
         let mut by_category = HashMap::new();
@@ -190,8 +170,7 @@ mod tests {
         );
     }
 
-    /// A category with no override falls back to the baseline, and the key it
-    /// looks under is the one the settings map actually holds.
+    /// Also checks that a category with no override falls back to the baseline.
     #[test]
     fn the_category_key_is_the_one_settings_uses() {
         assert_eq!(
@@ -218,8 +197,6 @@ mod tests {
         );
     }
 
-    /// Defaults, taken from `Settings` rather than restated, so this fails if
-    /// the shipped default changes and nobody revisits what it means here.
     #[test]
     fn the_default_settings_produce_a_bounded_window() {
         let r = ContextRetention::from_settings(&Settings::default());
@@ -234,9 +211,7 @@ mod tests {
         }
     }
 
-    /// The sweep is quantified over the enum, so a kind added tomorrow is
-    /// swept tomorrow. Pinned by count, because the failure is silent: a bucket
-    /// missing from the plan is a bucket nothing ever deletes.
+    /// Pinned by count: a bucket missing from the plan is one nothing ever deletes.
     #[test]
     fn the_sweep_plan_covers_every_kind_and_both_classes() {
         let plan = retention(30, 7).sweep_plan(Utc::now());
@@ -264,9 +239,7 @@ mod tests {
         );
     }
 
-    /// Vacuity control for the test above: with `0` everywhere the plan is the
-    /// same length and every cutoff is `None`. If `from_setting` ever stopped
-    /// reading `0` as forever, the count assertion alone would not notice.
+    /// Vacuity control for the test above: the count alone can't see `0` stop meaning forever.
     #[test]
     fn a_forever_policy_produces_the_same_buckets_and_no_cutoffs() {
         let plan = retention(0, 0).sweep_plan(Utc::now());
@@ -277,8 +250,6 @@ mod tests {
         );
     }
 
-    /// A user-supplied retention big enough to overflow chrono's arithmetic
-    /// must clamp rather than panic; `pruning.rs` hit this first.
     #[test]
     fn an_absurd_window_clamps_instead_of_panicking() {
         let cutoff = Window::Days(u32::MAX).cutoff(Utc::now());

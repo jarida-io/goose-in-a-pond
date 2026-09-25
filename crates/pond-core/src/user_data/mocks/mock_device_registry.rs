@@ -4,8 +4,7 @@ use crate::user_data::ports::device_registry::{Device, DeviceRegistry, RegisterD
 use anyhow::Result;
 use async_trait::async_trait;
 
-/// No-op device registry — always returns an empty list.
-/// Use for tests that do not exercise home-control features.
+/// Always returns an empty list; for tests that don't exercise home control.
 pub struct MockDeviceRegistry;
 
 #[async_trait]

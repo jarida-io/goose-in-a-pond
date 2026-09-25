@@ -1,11 +1,4 @@
-// The screen renders, at all of it.
-//
-// This file exists because it should have existed sooner. `DashboardGrid` was
-// covered only by tests of the store beneath it, so a reference to `home` from
-// inside a child component — where it was never in scope — typechecked, passed
-// 603 unit tests, and put "home is not defined" on the panel. A render test is
-// the only thing that catches that class of mistake, and every card has to be
-// rendered for it to count.
+// Renders every card: only a render catches a child referencing something out of scope.
 
 import { render, screen, fireEvent, cleanup } from "@testing-library/react";
 import { describe, expect, it, beforeEach, vi } from "vitest";
@@ -19,9 +12,7 @@ function renderGrid() {
 }
 
 beforeEach(() => {
-  // This repo does not configure Testing Library's automatic cleanup, so
-  // renders otherwise accumulate in the document and a second `getByRole`
-  // finds the first test's markup as well as this one's.
+  // Testing Library's automatic cleanup isn't configured here, so renders would accumulate.
   cleanup();
   localStorage.clear();
   __resetLayoutCache();
@@ -35,16 +26,10 @@ describe("the default screen", () => {
   it("shows the greeting and the device section", () => {
     renderGrid();
     expect(screen.getByRole("heading", { level: 1 })).toBeTruthy();
-    // "Devices" is also a row in the arrange sheet and could be a room name, so
-    // the query names the heading rather than the string.
+    // "Devices" is also an arrange-sheet row and could be a room, so query the heading.
     expect(screen.getByRole("heading", { name: "Devices", level: 2 })).toBeTruthy();
   });
 
-  /**
-   * The line that replaced "Nothing needs you right now". It is a sentence
-   * about THIS house, so the only stable assertion is that it is a sentence
-   * and that the old wallpaper is gone.
-   */
   it("says something about this house rather than nothing", () => {
     const { container } = renderGrid();
     expect(screen.queryByText("Nothing needs you right now.")).toBeNull();
@@ -53,12 +38,7 @@ describe("the default screen", () => {
   });
 });
 
-/**
- * Every card, mounted.
- *
- * The bug this file was written for lived in ONE branch of a switch. Rendering
- * the default layout would not have found it; rendering all of them does.
- */
+/** Hidden cards too: the default layout doesn't reach every branch. */
 describe("every card in the catalogue", () => {
   it("mounts without throwing", () => {
     localStorage.setItem(
@@ -71,21 +51,11 @@ describe("every card in the catalogue", () => {
 });
 
 describe("the arrange button's name", () => {
-  /**
-   * `InkButton` does not forward `aria-label` — it renders
-   * `<button class="ink-btn"><span>Arrange</span></button>` and drops the
-   * attribute. So the visible text IS the accessible name, and the small-panel
-   * rule has to CLIP it rather than `display: none` it, or every panel under
-   * 900px gets an unlabelled icon button.
-   *
-   * Asserted here because the CSS that would break it lives in a media query
-   * jsdom never evaluates: the guard has to be on the name existing at all.
-   */
+  /** InkButton drops `aria-label`, so the text is the name: small-panel CSS must clip it, not hide it. */
   it("comes from text, since the aria-label is dropped", () => {
     const { container } = renderGrid();
     const btn = screen.getByRole("button", { name: /Arrange/ });
     expect(btn.getAttribute("aria-label")).toBeNull();
-    // The name must come from a real text node that CSS can clip but not remove.
     expect(container.querySelector(".dash__btn-label")?.textContent).toBe("Arrange");
   });
 });
@@ -98,7 +68,6 @@ describe("search", () => {
     expect(screen.getByText(/Matching "kitchen"/i)).toBeTruthy();
   });
 
-  /** A search is a question about the whole house, so the room filter steps aside. */
   it("puts the room filter away while searching", () => {
     const { container } = renderGrid();
     expect(container.querySelector(".ink-segmented")).toBeTruthy();
@@ -118,14 +87,12 @@ describe("search", () => {
 describe("arranging", () => {
   it("opens the sheet and lists what is on Home", () => {
     renderGrid();
-    // The button and the sheet it opens share a name, which is correct for a
-    // screen reader and ambiguous for a query — so ask for the button.
+    // The sheet shares the button's name, so ask for the button.
     fireEvent.click(screen.getByRole("button", { name: /Arrange/ }));
     expect(screen.getByRole("heading", { name: "On Home" })).toBeTruthy();
     expect(screen.getAllByRole("button", { name: /Move .* up/ }).length).toBeGreaterThan(0);
   });
 
-  /** The first card cannot move up, the last cannot move down. */
   it("disables the moves that would fall off an end", () => {
     renderGrid();
     fireEvent.click(screen.getByRole("button", { name: /Arrange/ }));
@@ -135,13 +102,6 @@ describe("arranging", () => {
 });
 
 
-/**
- * Form carrying data (DESIGN.md §3).
- *
- * Both of these are a single ternary, which is exactly why they are worth a
- * test: a ternary on a boolean nobody asserts is a claim, and the browser will
- * not show you either case unless the house happens to be in it.
- */
 describe("cards that grow when they have something to say", () => {
   const base = {
     user: "Jerry",
@@ -176,10 +136,6 @@ describe("cards that grow when they have something to say", () => {
     cleanup();
   });
 
-  /**
-   * A house with two lamps has the same problem as a house with none: a devices
-   * card holding one row of tiles, and empty columns beside it.
-   */
   it("lets the weather spread when there is little else", async () => {
     const { DashboardGrid: Grid } = await mountWith([lamp], silent);
     const { container } = render(<Grid sessionId="s" onNavigate={() => {}} onTalk={() => {}} />);

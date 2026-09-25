@@ -1,35 +1,21 @@
-//! Port trait for the dynamic tool registry: a unified view of every available tool, built-in GIAP
-//! and external MCP extension alike, for system-prompt construction and tool resolution.
-
 use async_trait::async_trait;
 
 use crate::mcp::domain::external_tool::ExternalToolDescription;
 
-/// Registry of all tool descriptions available to the agent pipeline.
-///
-/// Built-in tools are seeded at construction. External MCP extension
-/// tools are registered/deregistered as extensions are added/removed.
+/// All tool descriptions: built-ins seeded at construction, extension tools added/removed live.
 #[async_trait]
 pub trait ToolRegistryPort: Send + Sync {
-    /// Return all registered tool descriptions (built-in + external).
     async fn all_tools(&self) -> Vec<ExternalToolDescription>;
 
-    /// Formatted description lines for system prompt injection: `"tool_name -- description"` for
-    /// built-ins, `"extension/tool_name -- description"` for external tools. When `compact` is
-    /// true, descriptions are truncated to 80 characters.
+    /// System-prompt lines, `"tool_name -- description"` (external: `"extension/tool_name -- …"`).
+    /// `compact` truncates descriptions to 80 characters.
     async fn prompt_description_lines(&self, compact: bool) -> Vec<String>;
 
-    /// Register tools from an external MCP extension.
-    ///
-    /// `tools` is a list of `(tool_name, description)` pairs.
-    /// Replaces any previously registered tools for the same extension.
+    /// Replaces any tools previously registered for `ext_name`; `tools` is `(name, description)`.
     async fn register_extension_tools(&self, ext_name: &str, tools: Vec<(String, String)>);
 
-    /// Remove all tools from a given extension.
     async fn deregister_extension(&self, ext_name: &str);
 
-    /// Look up which extension provides a given tool name.
-    ///
-    /// Returns the extension name, or `None` if the tool is not registered.
+    /// The extension that provides `tool_name`.
     async fn resolve_extension(&self, tool_name: &str) -> Option<String>;
 }

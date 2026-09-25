@@ -1,7 +1,6 @@
-//! HF cache cleanup + disk-usage reporting for `/api/v1/models/{cleanup,disk-usage}`.
-//! Deletion stays inside `{data_dir}/hf_cache` and the `{data_dir}/models/**` mirror: a blob goes
-//! only when no symlink references it and its name is not in `protected_names`; `.incomplete`
-//! files only past `STALE_INCOMPLETE_AGE`; a snapshot dir only when every entry is a dead symlink.
+//! HF cache cleanup and disk usage for `/api/v1/models/{cleanup,disk-usage}`.
+//! Deletes only inside `hf_cache` and the `models/**` mirror: unreferenced, unprotected blobs,
+//! `.incomplete` files past `STALE_INCOMPLETE_AGE`, and snapshot dirs of only dead symlinks.
 
 use serde::Serialize;
 use std::collections::HashSet;
@@ -10,8 +9,7 @@ use std::time::{Duration, SystemTime};
 
 use tokio::fs;
 
-/// Stale `*.incomplete` resume files older than this are eligible for
-/// deletion during a sweep.
+/// Age past which a `*.incomplete` resume file may be swept.
 pub const STALE_INCOMPLETE_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// One blob removed during a cleanup sweep.
@@ -49,9 +47,7 @@ pub struct DiskUsage {
 
 // ── Public entry points ──────────────────────────────────────────────────────
 
-/// Run one sweep over `{data_dir}/hf_cache`. `protected_names` is the
-/// set of model filenames that must survive even when unreferenced
-/// (anything currently assigned via `model_role_assignments`).
+/// Sweep `{data_dir}/hf_cache`; `protected_names` (role-assigned files) survive even unreferenced.
 pub async fn run_cleanup(
     data_dir: &Path,
     protected_names: &HashSet<String>,
@@ -59,9 +55,7 @@ pub async fn run_cleanup(
     run_cleanup_with_threshold(data_dir, protected_names, STALE_INCOMPLETE_AGE).await
 }
 
-/// Same as [`run_cleanup`], but lets the caller override the stale-
-/// `.incomplete` threshold. Tests pass `Duration::ZERO` to delete every
-/// resume file regardless of mtime.
+/// [`run_cleanup`] with a custom stale-`.incomplete` threshold (`ZERO` sweeps every one).
 pub async fn run_cleanup_with_threshold(
     data_dir: &Path,
     protected_names: &HashSet<String>,
@@ -69,7 +63,6 @@ pub async fn run_cleanup_with_threshold(
 ) -> anyhow::Result<CleanupReport> {
     let hub_dir = data_dir.join("hf_cache").join("hub");
     if fs::metadata(&hub_dir).await.is_err() {
-        // No cache at all → nothing to sweep.
         return Ok(CleanupReport::default());
     }
 
@@ -105,16 +98,13 @@ pub async fn run_cleanup_with_threshold(
             if referenced.contains(&canonical) {
                 continue;
             }
-            // Protected-name check: is there a snapshot pointing at this blob
-            // whose basename is on the protected list?
+            // Spare blobs a snapshot links under a protected basename.
             if let Some(basenames) = snapshot_basenames.get(&canonical) {
                 if basenames.iter().any(|b| protected_names.contains(b)) {
                     continue;
                 }
             }
-            // Also protect if a flat name equal to the blob's stem is in the
-            // protected list (covers the edge case where the assignment names
-            // a blob that has no surviving symlink).
+            // Also spare a blob whose own name is protected (assignment with no surviving symlink).
             if protected_names.contains(&name) {
                 continue;
             }
@@ -218,8 +208,7 @@ pub async fn collect_disk_usage(data_dir: &Path) -> anyhow::Result<DiskUsage> {
     let models_root = data_dir.join("models");
     if fs::metadata(&models_root).await.is_ok() {
         for cat in &["gguf", "whisper", "tts", "embedding", "llamafile", "llm"] {
-            // "whisper" is virtual — files live in models/ root as ggml-*.bin,
-            // and "llm" is the on-disk dir for llamafile binaries.
+            // "whisper" is virtual (models/ggml-*.bin); "llm" holds llamafile binaries.
             match *cat {
                 "whisper" => {
                     let bytes = sum_files_matching(&models_root, |n| {
@@ -277,8 +266,7 @@ pub async fn collect_disk_usage(data_dir: &Path) -> anyhow::Result<DiskUsage> {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Walk `data_dir/models/**`, resolve every symlink, and return the set
-/// of canonical blob paths that something currently points at.
+/// Canonical targets of every symlink under `data_dir/models/**`.
 async fn collect_referenced_blobs(data_dir: &Path) -> HashSet<PathBuf> {
     let mut referenced = HashSet::new();
     let models_root = data_dir.join("models");
@@ -289,8 +277,7 @@ async fn collect_referenced_blobs(data_dir: &Path) -> HashSet<PathBuf> {
     referenced
 }
 
-/// Recursive: every symlink under `dir` resolved to its target via
-/// `fs::canonicalize`. Bounded by filesystem depth — `models/` is shallow.
+/// Collect canonical targets of symlinks under `dir`, recursively (`models/` is shallow).
 fn walk_collect_symlink_targets<'a>(
     dir: &'a Path,
     out: &'a mut HashSet<PathBuf>,
@@ -317,10 +304,7 @@ fn walk_collect_symlink_targets<'a>(
     })
 }
 
-/// Map each blob's canonical path to the set of basenames of every
-/// snapshot symlink that targets it. Used during cleanup so we can
-/// protect blobs whose declared filename matches an assigned-but-
-/// unsymlinked role.
+/// Blob canonical path → basenames of the snapshot symlinks targeting it (for name protection).
 async fn collect_snapshot_basenames(
     hub_dir: &Path,
 ) -> std::collections::HashMap<PathBuf, HashSet<String>> {
@@ -359,8 +343,7 @@ async fn collect_snapshot_basenames(
     out
 }
 
-/// True if every entry in `dir` is a broken symlink (`fs::metadata` returns
-/// `Err` on the path because the target is missing).
+/// True if every entry in `dir` is a broken symlink; false for an empty dir.
 async fn is_fully_orphaned(dir: &Path) -> bool {
     let mut entries = match fs::read_dir(dir).await {
         Ok(d) => d,
@@ -375,12 +358,10 @@ async fn is_fully_orphaned(dir: &Path) -> bool {
             return false;
         }
     }
-    // Empty dirs are not deleted (safer); only fully-broken dirs are.
     any_entry
 }
 
-/// Sum the byte sizes of every file beneath `dir`, following symlinks
-/// (`fs::metadata` resolves the target). Returns 0 when `dir` is absent.
+/// Total bytes under `dir`, following symlinks; 0 when `dir` is absent.
 fn sum_tree_bytes<'a>(
     dir: &'a Path,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = u64> + Send + 'a>> {
@@ -399,7 +380,6 @@ fn sum_tree_bytes<'a>(
             if file_type.is_dir() {
                 total = total.saturating_add(sum_tree_bytes(&path).await);
             } else {
-                // metadata() follows symlinks → counts the target size.
                 if let Ok(m) = fs::metadata(&path).await {
                     total = total.saturating_add(m.len());
                 }
@@ -409,8 +389,7 @@ fn sum_tree_bytes<'a>(
     })
 }
 
-/// Sum bytes of files in the top level of `dir` whose name matches
-/// `predicate`. Used for the virtual "whisper" category (`models/ggml-*.bin`).
+/// Bytes of top-level files in `dir` whose name matches `predicate`.
 async fn sum_files_matching(dir: &Path, predicate: impl Fn(&str) -> bool) -> u64 {
     let mut total = 0u64;
     let mut entries = match fs::read_dir(dir).await {
@@ -432,8 +411,7 @@ async fn sum_files_matching(dir: &Path, predicate: impl Fn(&str) -> bool) -> u64
     total
 }
 
-/// Coarse category inference from a path. Used only for the response
-/// shape; the sweep never gates deletion on this.
+/// Coarse category for the response only; deletion never depends on it.
 fn infer_category(path: &Path) -> String {
     let s = path.display().to_string().to_ascii_lowercase();
     if s.contains("/gguf") || s.contains("--gguf") || s.ends_with(".gguf") {
@@ -461,8 +439,7 @@ mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
 
-    /// Create a synthetic HF-cache repo dir with a blob, returning the
-    /// blob path. `repo_folder` is the full `models--…` folder name.
+    /// Synthetic HF-cache blob; `repo_folder` is the full `models--…` folder name.
     fn make_blob(root: &Path, repo_folder: &str, etag: &str, body: &[u8]) -> PathBuf {
         let blobs = root
             .join("hf_cache")
@@ -475,8 +452,7 @@ mod tests {
         blob
     }
 
-    /// Make a flat-path symlink at `models/<sub>` pointing at `target`.
-    /// Mirrors what the migration leaves on disk.
+    /// Symlink `models/<sub>` → `target`, as the migration leaves on disk.
     fn link_flat(root: &Path, sub: &str, target: &Path) -> PathBuf {
         let link = root.join("models").join(sub);
         if let Some(parent) = link.parent() {
@@ -532,9 +508,7 @@ mod tests {
             "feedface",
             b"assigned blob contents",
         );
-        // Snapshot symlink with the assigned filename — but no flat
-        // models/** symlink. This mirrors a model that was deactivated
-        // but is still listed as the role assignment.
+        // Snapshot link with the assigned name, no models/** link: deactivated but still assigned.
         let snap_dir = tmp
             .path()
             .join("hf_cache")
@@ -569,9 +543,7 @@ mod tests {
         let stale = blobs_dir.join("abc123.incomplete");
         std::fs::write(&stale, b"partial").unwrap();
 
-        // Drive the threshold to zero so any `.incomplete` is "stale"
-        // regardless of mtime — avoids needing a filetime crate just
-        // for one test backdate.
+        // Zero threshold makes any `.incomplete` stale, with no filetime crate to backdate.
         let report = run_cleanup_with_threshold(tmp.path(), &HashSet::new(), Duration::ZERO)
             .await
             .unwrap();

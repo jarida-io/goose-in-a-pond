@@ -3,9 +3,7 @@ import { describe, expect, it } from "vitest";
 import { describeError, redactSetupCode, setupCodeKind } from "../src/log.js";
 
 describe("setup code redaction", () => {
-  // A Matter pairing code grants fabric access. A leaked one in a log file is a
-  // working credential for anyone who reads it, so these are the shapes that must
-  // never survive into a log line or an error message the API serves.
+  // Security: a pairing code grants fabric access, so none may reach a log or an API error.
   it("removes QR payloads", () => {
     expect(redactSetupCode("commissioning MT:Y.K9042C00KA0648G00 failed")).toBe(
       "commissioning [redacted:setup-code] failed",
@@ -23,15 +21,12 @@ describe("setup code redaction", () => {
   });
 
   it("leaves digit runs of other lengths alone", () => {
-    // Over-eager on length would redact node ids, ports and timestamps, and a log
-    // that redacts everything is as useless as one that redacts nothing.
     expect(redactSetupCode("node 18 on port 5580")).toBe("node 18 on port 5580");
     expect(redactSetupCode("took 1234567 ms")).toBe("took 1234567 ms");
   });
 
   it("does not leave a readable fragment of a code behind", () => {
-    // The QR rule runs first for exactly this reason: a digit rule biting a piece out
-    // of a payload would blank part of it and print the rest.
+    // The QR rule must run before the digit rule, or it would redact only part of a payload.
     const redacted = redactSetupCode("MT:Y.K9042C00KA0648G00");
     expect(redacted).toBe("[redacted:setup-code]");
     expect(redacted).not.toMatch(/\d{4}/);
@@ -52,9 +47,6 @@ describe("setup code redaction", () => {
 
 describe("error description", () => {
   it("renders the whole cause chain, not just the outermost layer", () => {
-    // The bug this exists for: a failed discovery reported "discovery of node
-    // discovery failed" and dropped the cause, which is the only part that says
-    // what to do about it.
     const cause = new Error("no usable network interface");
     const wrapped = new Error("discovery of node discovery failed", { cause });
 

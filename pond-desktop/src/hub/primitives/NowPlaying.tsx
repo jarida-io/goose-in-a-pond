@@ -12,13 +12,10 @@ interface NowPlayingProps {
 
 export function NowPlaying({ variant = "bar" }: NowPlayingProps) {
   const np = useHomeData().nowPlaying;
-  // Cosmetic-only toggle used while Spotify isn't connected, so the demo
-  // widget still feels interactive rather than dead.
+  // Cosmetic toggle so the demo widget stays interactive while Spotify isn't connected.
   const [demoPlaying, setDemoPlaying] = useState(true);
   const playing = np.connected ? np.playing : demoPlaying;
-  // Spotify is linked but refusing requests, so the transport controls would
-  // fail the same way the playback read did. Disable them and let the widget
-  // carry the explanation instead of pretending to be an idle player.
+  // Spotify is linked but refusing requests: the controls would fail too, so disable them.
   const errored = Boolean(np.error);
 
   function handlePlayPause() {
@@ -32,10 +29,7 @@ export function NowPlaying({ variant = "bar" }: NowPlayingProps) {
     if (np.connected) void controlNowPlaying(action);
   }
 
-  // A real cover turns the whole card into its background (scrimmed for text
-  // legibility) rather than sitting in a small tile above the track name —
-  // the swatch-and-icon treatment below is only the fallback for when there
-  // is no art to show.
+  // Real cover art becomes the scrimmed card background; the swatch-and-icon is the no-art fallback.
   const hasArt = !errored && Boolean(np.albumArt);
 
   return (
@@ -80,10 +74,7 @@ export function NowPlaying({ variant = "bar" }: NowPlayingProps) {
       </div>
       <div className="np__ctrls">
         {errored ? (
-          /* Three dead transport buttons say nothing and do nothing. The one
-             useful action here is asking again. The poll does come back on its
-             own after a refusal, but slowly — this is how you skip the wait
-             once you have just fixed it. */
+          /* Repeated refusals stop the poll; a person asking again is what resumes it. */
           <button className="np__retry" onClick={() => void refreshNowPlaying(true)}>
             Try again
           </button>

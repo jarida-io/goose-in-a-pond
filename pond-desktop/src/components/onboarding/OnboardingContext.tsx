@@ -1,7 +1,4 @@
-// ────────────────────────────────────────────────────────────
-// Onboarding Wizard — Shared Context
-// Provides draft state + patch helper to all step components.
-// ────────────────────────────────────────────────────────────
+// Onboarding wizard context: the draft and a patch helper for every step.
 
 import React, { createContext, useContext, useState, useCallback, useEffect } from "react";
 import type { OnboardingDraft } from "./onboarding.types";

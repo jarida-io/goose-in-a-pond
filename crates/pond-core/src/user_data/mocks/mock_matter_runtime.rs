@@ -1,7 +1,4 @@
-//! Mock for `MatterRuntimePort` — a runtime pinned to a chosen state, which
-//! records the reconcile requests it is given. Lets `pond-api` tests assert
-//! that each state produces its own error, and that saving settings actually
-//! asks the runtime to converge.
+//! `MatterRuntimePort` stub pinned to a chosen state, recording reconcile requests.
 
 use crate::user_data::ports::device_commissioning::{
     CommissionedDevice, DeviceCommissioningPort, SetupCode,
@@ -13,8 +10,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 
-/// A commissioner that always succeeds, returning a device derived from the
-/// code it was given. Paired with `StubMatterRuntime` in the connected state.
+/// Always-succeeding commissioner; the device is derived from the setup code.
 pub struct StubCommissioner {
     /// Node id handed back for every commission call.
     pub node_id: u64,
@@ -41,8 +37,7 @@ impl DeviceCommissioningPort for StubCommissioner {
     }
 }
 
-/// A runtime fixed in one state. `apply` does not change the state (tests set
-/// it explicitly); it only records what was asked for.
+/// A runtime fixed in one state; `apply` only records the request.
 pub struct StubMatterRuntime {
     status: Mutex<MatterStatus>,
     commissioner: Option<Arc<dyn DeviceCommissioningPort>>,
@@ -113,7 +108,6 @@ impl StubMatterRuntime {
         self.applied.lock().unwrap().clone()
     }
 
-    /// How many times `shutdown` was called.
     pub fn shutdown_count(&self) -> usize {
         *self.shutdowns.lock().unwrap()
     }

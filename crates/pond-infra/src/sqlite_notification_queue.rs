@@ -1,7 +1,4 @@
-//! SQLite-backed offline notification queue (#99).
-//!
-//! Stores targeted notifications in the `notifications` table (migration 0027)
-//! until the target device's stream delivers them.
+//! SQLite-backed queue holding targeted notifications until the device's stream delivers them.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -137,17 +134,8 @@ mod tests {
         q.mark_delivered(&[]).await.unwrap();
     }
 
-    /// PAI-7 P5 and section 7's "Delivery" test, against real SQLite rather than
-    /// a stub: a member with two devices, one of them offline, gets one durable
-    /// row per device and the offline one is still waiting on reconnect.
-    ///
-    /// **This is the assertion the whole per-device-id decision exists for.**
-    /// `notifications.id` is the PRIMARY KEY (migration 0027) and `enqueue` is an
-    /// `INSERT OR REPLACE`, so a fan-out that reused one logical id across a
-    /// member's two devices would leave exactly ONE row -- and against the stub
-    /// queue in `broadcast_notification_sender` that mistake is invisible,
-    /// because a `Vec` happily holds two rows with the same id. The stub cannot
-    /// see this defect. Only the table can.
+    /// `notifications.id` is the primary key and `enqueue` is `INSERT OR REPLACE`, so a shared
+    /// id across devices would leave one row; only the real table (not the stub) shows that.
     #[tokio::test]
     async fn a_member_with_two_devices_gets_one_durable_row_each() {
         use crate::broadcast_notification_sender::BroadcastNotificationSender;
@@ -180,8 +168,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        // The kitchen tablet stays unattributed, which is the state a shared
-        // screen is in on every real pond.
+        // The kitchen tablet stays unattributed, like a real shared screen.
 
         let queue = Arc::new(SqliteNotificationQueue::new(db.system.clone()));
         let (tx, _rx) = tokio::sync::broadcast::channel(8);
@@ -201,9 +188,7 @@ mod tests {
         );
         assert_eq!(queue.list_undelivered("watch-liz").await.unwrap().len(), 1);
 
-        // The shared screen is not Liz's device and holds nothing. This is the
-        // vacuity control as well: an enqueue that wrote nothing at all would
-        // satisfy this assertion and fail the two above.
+        // Also the vacuity control: an enqueue that wrote nothing would pass only this one.
         assert!(
             queue.list_undelivered("tablet").await.unwrap().is_empty(),
             "an unattributed device is nobody's, so a targeted proposal never lands on it"

@@ -1,7 +1,5 @@
-//! Joins [`producer`](crate::context::producer) to [`IngestPipeline`] (PAI-8 P3s); the policy
-//! lives here. [`INGEST_SCOPE`] picks the sources, the toggle is answered before the store read,
-//! and an unreadable store refuses ([`AbsorbError`]) with a traced reason. Not a subscriber: the
-//! caller owns the bus and passes fresh `Settings` per event; a cached copy would ignore new PUTs.
+//! Joins [`producer`](crate::context::producer) to [`IngestPipeline`].
+//! Not a bus subscriber: callers pass fresh `Settings` per event, or new PUTs would be ignored.
 
 use std::sync::Arc;
 
@@ -15,10 +13,8 @@ use crate::shared::ports::event_bus::BusEvent;
 use crate::user_data::domain::profile::ProfileScope;
 use crate::user_data::domain::settings::Settings;
 
-/// The household scope the pond enumerates context sources under when deciding which an event
-/// belongs to. The read has no asker, and each source supplies its own `profile_id` to its item.
-/// A constant, not an argument: a caller would eventually pass a session's scope, and a `Guest`
-/// turn arriving while a sensor fired would then stop the pond recording.
+/// Scope for enumerating sources; each source supplies its own `profile_id` to its items.
+/// A constant, not an argument: a session's `Guest` scope would stop the pond recording.
 pub const INGEST_SCOPE: ProfileScope = ProfileScope::Household;
 
 /// What one bus event did.
@@ -26,12 +22,9 @@ pub const INGEST_SCOPE: ProfileScope = ProfileScope::Household;
 pub struct AbsorbReport {
     /// One per stored row. Plural because two members may follow one device.
     pub ingested: Vec<IngestOutcome>,
-    /// Sources that were offered the event and said no. The overwhelmingly
-    /// common answer, since most sources do not follow the device that fired.
+    /// Sources that were offered the event and said no.
     pub refused: usize,
-    /// Sources that accepted the event and whose row could not be written.
-    /// Counted rather than returned as an error: one failed write must not stop
-    /// the other members' sources from getting theirs.
+    /// Accepted but unwritable rows; counted, not an error, so other sources still get theirs.
     pub storage_failures: usize,
 }
 
@@ -43,9 +36,7 @@ impl AbsorbReport {
 
 #[derive(Debug, Error)]
 pub enum AbsorbError {
-    /// The source list could not be read. An error rather than an empty report: "no sources" and
-    /// "I cannot tell you what the sources are" are different answers, and conflating them makes a
-    /// broken store look like a household that has configured nothing.
+    /// The source list was unreadable; an error so a broken store doesn't look unconfigured.
     #[error(
         "could not read this household's context sources, so the event was offered to none of \
          them: {0}"
@@ -65,9 +56,6 @@ impl BusIngest {
     }
 
     /// Offer one bus event to every source that might follow it.
-    ///
-    /// `settings` and `now` are parameters, not fields: the toggle is answered from whatever the
-    /// caller last read, and the ingest timestamp is the caller's clock so idempotency is testable.
     pub async fn absorb(
         &self,
         settings: &Settings,
@@ -75,8 +63,7 @@ impl BusIngest {
         now: DateTime<Utc>,
     ) -> Result<AbsorbReport, AbsorbError> {
         let producer = BusProducer::from_settings(settings);
-        // Before the read, not after it. On a default pond this is the whole
-        // cost of the feature: a bool, once per bus event, and no query.
+        // Before the store read, so a default pond pays one bool per event and no query.
         if !producer.is_enabled() {
             return Ok(AbsorbReport::default());
         }
@@ -173,9 +160,6 @@ mod tests {
         BusIngest::new(repo.clone(), Arc::new(IngestPipeline::new(repo, redactor)))
     }
 
-    /// The happy path, and the two halves of it that matter: the row lands, and
-    /// it lands under the SOURCE's owner rather than under anything the event
-    /// said.
     #[tokio::test]
     async fn an_event_from_a_followed_device_is_stored_under_the_sources_owner() {
         let repo = Arc::new(MockContextRepository::new());
@@ -197,13 +181,9 @@ mod tests {
         assert_eq!(stored[0].source_id(), "src-jerry");
     }
 
-    /// The toggle, both directions, through THIS entry point — a producer that
-    /// honoured it and a service that read the store anyway would still cost a
-    /// query per event on every default pond.
     #[tokio::test]
     async fn a_default_pond_stores_nothing_and_does_not_even_read_the_store() {
-        // The store is armed to fail on every read. With the toggle off that is
-        // not an error, because the read never happens.
+        // The store fails every read, so success here means it was never read.
         let repo = Arc::new(
             MockContextRepository::new().with_unreadable_sources("the store must not be read"),
         );
@@ -214,8 +194,7 @@ mod tests {
             .expect("a disabled producer must not touch the store");
         assert_eq!(report, AbsorbReport::default());
 
-        // Vacuity control: the same call with the toggle ON reaches the store,
-        // so the line above is a fact about the toggle and not about the mock.
+        // Vacuity control: with the toggle on, the same store does get read.
         let armed = Arc::new(
             MockContextRepository::new().with_unreadable_sources("the store must not be read"),
         );
@@ -226,9 +205,6 @@ mod tests {
             .is_err());
     }
 
-    /// An unreadable source list refuses. It does NOT report an empty pond,
-    /// which is the permissive answer and the one that makes a broken store look
-    /// like a working feature.
     #[tokio::test]
     async fn an_unreadable_source_list_refuses_rather_than_reporting_no_sources() {
         let repo = Arc::new(MockContextRepository::new().with_unreadable_sources("disk is gone"));
@@ -247,10 +223,6 @@ mod tests {
         );
     }
 
-    /// One event, three sources: the two that follow the device each get a row under their own
-    /// owner, and the third is refused. Both halves matter: stopping at the first match passes a
-    /// one-follower test, and offering the event to every source passes a count-only test while
-    /// filing the porch sensor's motion under the hall sensor's followers.
     #[tokio::test]
     async fn one_event_reaches_every_source_that_follows_it_and_no_others() {
         let repo = Arc::new(MockContextRepository::new());
@@ -280,9 +252,6 @@ mod tests {
         assert_eq!(owners, vec!["jerry".to_string(), "liz".to_string()]);
     }
 
-    /// A storage failure is counted and does not become an `Err`, because the
-    /// caller is a loop over a broadcast channel: an event that returned `Err`
-    /// for one source's write would report the whole tick as failed.
     #[tokio::test]
     async fn a_failed_write_is_counted_rather_than_abandoning_the_event() {
         let repo =
@@ -301,9 +270,6 @@ mod tests {
         assert!(repo.all_items().is_empty());
     }
 
-    /// The same event twice writes one row. The producer's key makes this true
-    /// and the store enforces it; this asserts the two agree end to end, which
-    /// neither can do alone.
     #[tokio::test]
     async fn re_delivering_one_event_through_the_service_writes_one_row() {
         let repo = Arc::new(MockContextRepository::new());
@@ -325,8 +291,7 @@ mod tests {
             repo.all_items().len()
         );
 
-        // Vacuity control: a DIFFERENT reading does write a second row, so the
-        // line above is idempotency and not a store that drops writes.
+        // Vacuity control: a different reading does write a second row.
         ingest
             .absorb(&on(), &motion(HALL_PIR, 20), at(200))
             .await
@@ -334,10 +299,7 @@ mod tests {
         assert_eq!(repo.all_items().len(), 2);
     }
 
-    /// The scope this service enumerates under is the household's, and it is not
-    /// reachable from a session. Asserted rather than commented, because a
-    /// narrower value here is a silently empty corpus and a wrong `Owner` is a
-    /// misattribution.
+    /// A narrower scope silently empties the corpus; a wrong `Owner` misattributes.
     #[test]
     fn the_enumeration_scope_is_the_households() {
         assert_eq!(INGEST_SCOPE, ProfileScope::Household);

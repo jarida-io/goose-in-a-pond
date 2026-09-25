@@ -1,26 +1,6 @@
-// Reaping a child process that outlived the shell.
-//
-// Killing the app hard -- Force Quit, an OOM kill, a main-process crash --
-// leaves the shell's children running. Nothing else cleans that up: spawned
-// children are not killed when their parent dies on POSIX.
-//
-// Both children need this, for different reasons. The voice child, `pond-server
-// chat`, holds the microphone and cannot notice on its own, because in the
-// shipped voice configuration it never reads stdin and so never sees the closed
-// pipe. The sidecar, `pond-server serve`, holds port 4000 -- and because the
-// shell adopts any healthy server it finds there, an orphan is not merely
-// leaked but INHERITED, silently, by every subsequent launch until something
-// kills it.
-//
-// So we write the child's pid to a well-known per-user file at spawn, and on
-// the next launch reap it -- but only after confirming the pid is alive AND
-// still the kind of process we think it is, so a reused pid is never killed.
-//
-// This is a workaround for roughly twenty missing lines in the child (a
-// stdin-EOF watcher racing its run loop). Once that exists, kill the shell
-// during a live session and see whether the child exits on its own; if it
-// does, this whole module can go. Recording that here so it is not kept
-// forever by inertia.
+// Reaps children a hard-killed shell left running: POSIX doesn't kill them with the parent.
+// A pid is killed only if alive AND still our kind of process, so a reused pid is spared.
+// TODO: drop this once the children exit on stdin EOF themselves (a missing watcher).
 
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync, rmSync } from "node:fs";
@@ -39,15 +19,7 @@ export interface OrphanDeps {
   warn(message: string): void;
 }
 
-/**
- * Does this command line identify our voice child?
- *
- * Requires BOTH the `pond-server` binary token and the `chat` subcommand, so a
- * bare `pond-server serve` -- the dashboard server, which may well be running
- * -- is never mistaken for it. Keying on the binary and the subcommand and
- * never on the flags is what lets orphan recovery still reap a child spawned
- * by a version of the shell that used different flags.
- */
+/** Our voice child: `pond-server` + `chat`. Flags are ignored: older shells used others. */
 export function cmdlineIsVoiceChild(cmdline: string): boolean {
   return (
     cmdline.includes("pond-server") &&
@@ -55,14 +27,7 @@ export function cmdlineIsVoiceChild(cmdline: string): boolean {
   );
 }
 
-/**
- * Does this command line identify our pond-server sidecar?
- *
- * The mirror image of cmdlineIsVoiceChild, and for the same reason: the voice
- * child is also a `pond-server`, so matching the binary alone would have each
- * reaper killing the other's process. Keyed on the subcommand and never on
- * --port, so a sidecar that fell back past 4000 is still recognised as ours.
- */
+/** Our sidecar: `pond-server` + `serve`. Not keyed on --port, which may fall back past 4000. */
 export function cmdlineIsServerChild(cmdline: string): boolean {
   return (
     cmdline.includes("pond-server") &&
@@ -91,11 +56,7 @@ export const SERVER_CHILD: ChildKind = {
   matches: cmdlineIsServerChild,
 };
 
-/**
- * A stable per-user token, used only to keep pidfiles from colliding between
- * accounts on a shared host. The temp dir is already user-private on most
- * platforms; this makes the isolation explicit.
- */
+/** A stable per-user token, so pidfiles from different accounts on one host never collide. */
 function perUserToken(): string {
   const uid = process.getuid?.();
   if (typeof uid === "number") return String(uid);
@@ -110,14 +71,8 @@ export function pidfilePath(kind: ChildKind): string {
 }
 
 /**
- * Parse a pid out of the pidfile's contents.
- *
- * Rejects anything that is not a positive integer. Zero and negatives matter
- * more than they look: `process.kill(0, sig)` signals the ENTIRE process
- * group, and a negative pid signals the group with that id -- so a truncated
- * or zero-filled pidfile would have the shell kill itself and everything it
- * spawned. The Rust this replaces parsed into an unsigned type and let "0"
- * through.
+ * Parse a pidfile; positive integers only. `process.kill(0)` signals our whole process
+ * group and a negative pid signals another group, so a junk file must never yield those.
  */
 export function readPidfile(contents: string | null): number | null {
   if (contents === null) return null;
@@ -129,20 +84,8 @@ export function readPidfile(contents: string | null): number | null {
 }
 
 /**
- * Classify a pid:
- *
- *   * `true`  -- alive, and its command line matches this kind. Ours, safe to
- *     kill.
- *   * `false` -- confirmed gone, or alive but unrelated (a reused pid). Never
- *     kill; the pidfile record is stale.
- *   * `null`  -- INDETERMINATE. We could not tell, so the caller must not
- *     treat it as dead: doing so destroys the only record of a child that may
- *     still be holding the microphone.
- *
- * The liveness check comes first and costs no subprocess, which matters
- * because the overwhelmingly common case is a stale pidfile naming a pid that
- * died long ago. The Rust ran `ps` unconditionally, including on a memory-
- * pressured board where spawning it is exactly what fails.
+ * `true`: alive and this kind, safe to kill. `false`: gone or a reused pid, record stale.
+ * `null`: unknown, so keep the record. Liveness goes first: it spawns no `ps`.
  */
 export function pidIsChildOfKind(
   pid: number,
@@ -165,10 +108,7 @@ export function pidIsChildOfKind(
   return trimmed !== "" && kind.matches(trimmed);
 }
 
-/**
- * Read the pidfile and, if it names a live child of this kind, kill it and
- * clear the file.
- */
+/** Kill the child the pidfile names if it is alive and this kind, then clear the file. */
 export function reapPidfileOrphan(
   kind: ChildKind,
   deps: OrphanDeps,
@@ -190,9 +130,7 @@ export function reapPidfileOrphan(
       deps.removeFile(path);
       return;
     default:
-      // Liveness is unknown. Do NOT delete the pidfile: a real orphan may still
-      // be holding the mic, and this is the only record of it. Keeping it lets
-      // a later launch retry rather than orphaning the child permanently.
+      // Unknown: keep the pidfile, the only record of an orphan that may hold the mic.
       deps.warn(
         `could not determine the status of ${kind.label} pidfile pid ${pid}; keeping the pidfile so a later launch can retry recovery`,
       );
@@ -203,8 +141,7 @@ export function reapPidfileOrphan(
 export const realOrphanDeps: OrphanDeps = {
   isAlive(pid) {
     try {
-      // Signal 0 performs the permission and existence checks without sending
-      // anything. EPERM means it exists but is not ours -- still alive.
+      // Signal 0 only checks; EPERM means alive but not ours.
       process.kill(pid, 0);
       return true;
     } catch (e) {
@@ -222,9 +159,7 @@ export const realOrphanDeps: OrphanDeps = {
         timeout: 5_000,
       });
     } catch {
-      // Either `ps` could not be spawned, or it exited non-zero because the
-      // process vanished between our liveness check and this call. Both are
-      // indeterminate from here; the caller keeps the pidfile.
+      // `ps` failed to spawn, or the pid vanished since the liveness check: indeterminate.
       return null;
     }
   },
@@ -250,10 +185,7 @@ export const realOrphanDeps: OrphanDeps = {
   },
 };
 
-/**
- * Record the live child's pid. Best effort: a failure only means orphan
- * recovery is unavailable, not that the session is broken.
- */
+/** Record the child's pid. Best effort: failure only loses orphan recovery. */
 export function writePidfile(
   kind: ChildKind,
   pid: number,

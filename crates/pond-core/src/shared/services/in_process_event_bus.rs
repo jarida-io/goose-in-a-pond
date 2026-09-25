@@ -1,14 +1,5 @@
-//! In-process [`EventBus`] backed by a bounded `tokio::sync::broadcast` channel
-//! (#91).
-//!
-//! This is both the production implementation and the test double — it is a
-//! pure in-process primitive with no I/O, so it lives in the Core's services
-//! rather than an adapter crate.
-//!
-//! **Bounded by design:** the channel has a fixed capacity, so a slow or stuck
-//! subscriber cannot make the bus grow without limit — it simply lags and drops
-//! the oldest missed events (surfaced as `Lagged`, which we skip). This caps
-//! memory and keeps one bad consumer from stalling publishers.
+//! In-process [`EventBus`] on a bounded `tokio::sync::broadcast` channel.
+//! Bounded: a slow subscriber drops its oldest missed events rather than stalling publishers.
 
 use async_stream::stream;
 use tokio::sync::broadcast;
@@ -18,8 +9,7 @@ use crate::shared::ports::event_bus::{BusEvent, BusStream, EventBus};
 /// Default channel depth — generous for bursty sensor traffic while bounded.
 const DEFAULT_CAPACITY: usize = 256;
 
-/// Broadcast-backed event bus. Cheap to clone via `Arc`; subscribers created
-/// after a `publish` do not receive prior events (live pub/sub, not a log).
+/// Live pub/sub, not a log: subscribers never see events published before they joined.
 pub struct InProcessEventBus {
     tx: broadcast::Sender<BusEvent>,
 }
@@ -60,7 +50,6 @@ impl EventBus for InProcessEventBus {
                     Ok(event) => yield event,
                     // Slow consumer fell behind: skip the gap, keep streaming.
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    // All senders dropped: end the stream.
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
@@ -115,15 +104,10 @@ mod tests {
     #[tokio::test]
     async fn publish_with_no_subscribers_is_noop() {
         let bus = InProcessEventBus::new();
-        bus.publish(BusEvent::Sensor(sample_reading())); // must not panic
+        bus.publish(BusEvent::Sensor(sample_reading()));
         assert_eq!(bus.subscriber_count(), 0);
     }
 
-    /// The bus carries the clock, presence and session-activity events too
-    /// (PAI-7 P1 and P2). Cheap to assert and worth asserting: the broadcast
-    /// channel clones every event to every subscriber, so a variant that is
-    /// expensive or awkward to clone is a problem for the whole spine, not just
-    /// its publisher.
     #[tokio::test]
     async fn subscribers_receive_the_clock_presence_and_session_events() {
         use crate::shared::domain::session_activity::{

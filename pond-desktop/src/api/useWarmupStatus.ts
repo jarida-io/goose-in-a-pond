@@ -1,12 +1,4 @@
-// ────────────────────────────────────────────────────────────
-// useWarmupStatus — live view of the boot/model-change prefix warm-up.
-//
-// Polls GET /api/v1/warmup while the state is "warming" (the model is loading
-// and the prompt prefix precompiling) and stops on any terminal state. On any
-// error it settles to null and never throws — a pond that cannot report
-// warm-up is a pond that chats exactly as before, so the banner just absents
-// itself (graceful degradation, same contract as useMemoryStatus).
-// ────────────────────────────────────────────────────────────
+// useWarmupStatus: polls GET /api/v1/warmup while "warming"; null on any error, never throws.
 
 import { useState, useEffect } from "react";
 import { api } from "./PondApiClient";
@@ -22,8 +14,7 @@ export function useWarmupStatus(): WarmupStatus | null {
     let timer: ReturnType<typeof setTimeout> | null = null;
 
     const tick = () => {
-      // Partial api mocks (tests) and older clients may lack the method; a
-      // synchronous throw here must degrade the same as a failed request.
+      // Clients lacking the method (partial test mocks) throw synchronously; degrade the same way.
       let call: Promise<import("./types").WarmupStatus>;
       try {
         call = api.getWarmupStatus();
@@ -34,8 +25,7 @@ export function useWarmupStatus(): WarmupStatus | null {
       call
         .then((s) => {
           if (cancelled) return;
-          // request<T> can hand back undefined or an HTML shell on a broken
-          // route — guard before trusting the shape.
+          // request<T> may return undefined or an HTML shell on a broken route.
           if (!s || typeof s.state !== "string") {
             setStatus(null);
             return;

@@ -1,7 +1,4 @@
 //! Model catalog domain types.
-//!
-//! `ModelRecord` is the single source of truth for a model's metadata across the LLM
-//! (gguf/llamafile/ollama), ASR, TTS and Embedding families; family-specific fields are `Option`.
 
 use serde::{Deserialize, Serialize};
 
@@ -19,15 +16,9 @@ pub enum ModelCategory {
     Ollama,
     /// Whisper GGUF for speech-to-text.
     Whisper,
-    /// Piper TTS — ONNX binary + config file. **Legacy.**
-    ///
-    /// Kokoro replaced Piper and nothing seeds these any more. Dropping the variant would make
-    /// `from_str("tts_piper")` return `None`, so pre-swap catalogue rows would fail to load.
+    /// Legacy Piper TTS; kept so old `tts_piper` catalogue rows still load.
     TtsPiper,
-    /// Kokoro TTS voice — a 522 KB style vector (`<voice>.bin`).
-    ///
-    /// A voice is not a model: all voices share one set of engine weights and differ only by a
-    /// style table, so the quality tier that picks the shared `.onnx` is a separate setting.
+    /// Kokoro voice: a 522 KB style vector over shared weights (their tier is a separate setting).
     TtsKokoro,
     /// HTTP TTS server (OpenAI-compatible /v1/audio/speech).
     TtsHttp,
@@ -63,10 +54,7 @@ impl ModelCategory {
         }
     }
 
-    /// The catalog category an LLM `chat_provider` string names.
-    ///
-    /// `Settings.chat_provider` is a provider id ("local", "gguf", "ollama", "llamafile") while
-    /// `ModelRecord.id` is keyed by category; `llamafile` is the fallback for unknown strings.
+    /// Catalog category for a `Settings.chat_provider` id; unknown ones fall back to `Llamafile`.
     pub fn for_chat_provider(provider: &str) -> Self {
         match provider {
             "local" | "gguf" => Self::Gguf,
@@ -75,10 +63,7 @@ impl ModelCategory {
         }
     }
 
-    /// The runtime provider name that serves this category — the inverse of
-    /// [`Self::for_chat_provider`], whose catch-all this matches so the pair round-trips for
-    /// every LLM category. Meaningful only for [`Self::is_llm`] categories: nothing loads a
-    /// Whisper or Kokoro model through a chat provider.
+    /// Runtime provider serving this category; inverse of [`Self::for_chat_provider`] for LLMs.
     pub fn runtime_provider(&self) -> &'static str {
         match self {
             Self::Gguf => "local",
@@ -87,22 +72,19 @@ impl ModelCategory {
         }
     }
 
-    /// True for LLM models that can be assigned to a chat/think/task role.
+    /// True for LLM categories (chat/think/task/tool roles).
     pub fn is_llm(&self) -> bool {
         matches!(self, Self::Gguf | Self::Llamafile | Self::Ollama)
     }
 
-    /// True for speech-to-text models.
     pub fn is_asr(&self) -> bool {
         matches!(self, Self::Whisper)
     }
 
-    /// True for text-to-speech models.
     pub fn is_tts(&self) -> bool {
         matches!(self, Self::TtsPiper | Self::TtsKokoro | Self::TtsHttp)
     }
 
-    /// True for sentence embedding models.
     pub fn is_embedding(&self) -> bool {
         matches!(self, Self::Embedding)
     }
@@ -110,10 +92,7 @@ impl ModelCategory {
 
 // ── ModelRecord ───────────────────────────────────────────────────────────────
 
-/// Persisted catalog entry for a single model across all supported families.
-///
-/// The primary key is `id = "{category}/{name}"` — stable across registry refreshes.
-/// Family-specific columns are `None` for other families.
+/// Persisted catalog entry for one model of any family; other families' columns are `None`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRecord {
     /// Stable primary key: `"{category}/{name}"` e.g. `"gguf/llama-3b"`.
@@ -177,18 +156,14 @@ impl ModelRecord {
 
 // ── BinaryRecord ─────────────────────────────────────────────────────────────
 
-/// Metadata for a tool binary (e.g. whisper-server, piper) fetched from the catalog.
-///
-/// Binary downloads are version-pinned and platform-specific.
-/// The catalog (online registry JSON) includes a `tools` section that seeds these records.
+/// A version-pinned tool binary (e.g. whisper-server), seeded from the catalog's `tools` section.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BinaryRecord {
     /// Stable identifier, e.g. `"whisper-server"` or `"piper"`.
     pub name: String,
     /// Pinned version string, e.g. `"v1.8.4"`.
     pub version: String,
-    /// Per-platform download URLs keyed by `"{os}-{arch}"`,
-    /// e.g. `"macos-arm64"`, `"linux-x86_64"`, `"windows-x86_64"`.
+    /// Download URLs keyed by `"{os}-{arch}"`, e.g. `"macos-arm64"`, `"linux-x86_64"`.
     pub platforms: std::collections::HashMap<String, String>,
 }
 
@@ -229,9 +204,7 @@ impl BinaryRecord {
 
 // ── ModelRoleAssignment ───────────────────────────────────────────────────────
 
-/// Records which model is assigned to a given role.
-///
-/// Valid roles: `"chat"` | `"think"` | `"task"` | `"asr"` | `"tts"` | `"embedding"`.
+/// Which model is assigned to a role (vocabulary: `ModelRole`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRoleAssignment {
     pub role: String,
@@ -239,10 +212,7 @@ pub struct ModelRoleAssignment {
 }
 
 impl ModelRoleAssignment {
-    /// Whether a model of `category` may take `role`.
-    ///
-    /// Delegates to [`ModelRole`], which owns the role vocabulary. A free function because
-    /// `role` arrives as a free-form API/CLI string, and an unknown one must answer `false`.
+    /// Whether a model of `category` may take `role`; an unknown role string answers `false`.
     pub fn category_matches_role(category: &ModelCategory, role: &str) -> bool {
         crate::models::domain::model_role::ModelRole::from_str(role)
             .is_some_and(|r| r.accepts(category))
@@ -292,14 +262,12 @@ mod tests {
             ModelCategory::for_chat_provider("llamafile"),
             ModelCategory::Llamafile
         );
-        // Unknown providers fall to llamafile rather than panicking: the caller
-        // is doing a catalog lookup that is allowed to miss.
+        // Unknown providers fall to llamafile: the catalog lookup is allowed to miss.
         assert_eq!(
             ModelCategory::for_chat_provider("something-new"),
             ModelCategory::Llamafile
         );
-        // Every answer is an LLM category -- a chat provider can never name a
-        // whisper or piper row.
+        // A chat provider can never name a whisper or piper row.
         for p in ["local", "gguf", "ollama", "llamafile", "mock"] {
             assert!(
                 ModelCategory::for_chat_provider(p).is_llm(),

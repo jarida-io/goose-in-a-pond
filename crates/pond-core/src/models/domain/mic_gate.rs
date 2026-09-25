@@ -1,12 +1,9 @@
-//! Process-wide microphone permission: the enforcement of `Settings::mic_enabled`. It is a
-//! global because two adapter crates need it and the capture entry points are free functions.
-//! Enforcement means refusing to OPEN the device — capturing and discarding still lights the OS
-//! mic indicator — so every call site checks this gate before `default_input_device()`.
+//! Process-wide enforcement of `Settings::mic_enabled`. Check it before `default_input_device()`:
+//! the device must not even OPEN, as capture-and-discard still lights the OS mic indicator.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Default open: an install that has never touched the setting still has a
-/// working microphone, and `Settings::mic_enabled` itself defaults to true.
+/// Default open, matching `Settings::mic_enabled`'s own default.
 static MIC_ENABLED: AtomicBool = AtomicBool::new(true);
 
 /// Microphone capture was refused because the user turned the mic off.
@@ -24,10 +21,7 @@ impl std::fmt::Display for MicDisabled {
 
 impl std::error::Error for MicDisabled {}
 
-/// Apply the current `Settings::mic_enabled`.
-///
-/// Called at startup and whenever settings change, so revoking permission takes
-/// effect on the next capture attempt rather than at the next restart.
+/// Apply `Settings::mic_enabled`; call on every settings change so revocation is immediate.
 pub fn set_mic_enabled(enabled: bool) {
     let previous = MIC_ENABLED.swap(enabled, Ordering::SeqCst);
     if previous != enabled {
@@ -57,8 +51,7 @@ pub fn ensure_mic_enabled() -> Result<(), MicDisabled> {
 mod tests {
     use super::*;
 
-    /// These mutate a process global, so they share one lock rather than
-    /// racing each other under the test harness's thread pool.
+    /// The tests mutate a process global, so they serialise on this lock.
     static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn with_gate(f: impl FnOnce()) {
@@ -96,8 +89,7 @@ mod tests {
         });
     }
 
-    /// The message reaches the user through capture errors, so it has to name
-    /// the setting rather than read like a hardware fault.
+    /// Users see this via capture errors; it must not read like a hardware fault.
     #[test]
     fn the_refusal_names_the_setting() {
         let msg = MicDisabled.to_string();

@@ -1,27 +1,5 @@
-//! PAI-5 P6: the setting is the gate, and the gate is tested with its input.
-//!
-//! `thinking_is_never_replayed.rs` proves the READ has one caller. This proves
-//! the WRITE obeys the user, which is the half a source scan cannot see.
-//!
-//! The failure this is shaped against is on this programme's record. PAI-5 P1
-//! guarded `is_voice` as an identifier and never its composition; the token was
-//! present, every test passed, and the feature leaked reasoning on every desktop
-//! voice turn because the other input was hardcoded. So the assertions here are
-//! about MEANING: the same call sequence, run twice with the setting on and off,
-//! must produce different storage. Nothing here asserts that a symbol exists.
-//!
-//! Two specific mutations this must catch, both of which compile:
-//!
-//! * `with_thinking` ignoring its argument (`self.persist_thinking = true`).
-//!   `writes_nothing_when_the_user_did_not_ask` fails.
-//! * `record_thinking` dropping its gate, so the buffer fills and the drain
-//!   writes it. Same test fails, because the drain is what reaches storage.
-//!
-//! And one that does not compile away: the blocks must be keyed to the
-//! ASSISTANT row, whose id `ChatService` mints internally. A handler cannot
-//! know that id, which is why the write lives here at all -- so
-//! `blocks_are_keyed_to_the_assistant_row_chatservice_minted` reads the id back
-//! out of what storage was handed rather than assuming one.
+//! Reasoning is persisted only when the user's `persist_thinking` setting allows it.
+//! Asserted by running the same turn with it on and off; reads: `thinking_is_never_replayed.rs`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -126,8 +104,7 @@ impl SessionStorage for RecordingStorage {
     }
 }
 
-/// Never actually streamed here -- `persist_assistant_turn` is called directly,
-/// exactly as both SSE handlers call it after their stream drains.
+/// Never streamed: tests call `persist_assistant_turn` directly, as the SSE handlers do.
 struct InertAgent;
 
 #[async_trait]
@@ -143,8 +120,7 @@ impl Agent for InertAgent {
     }
 }
 
-/// One turn, driven through the same two calls the SSE handlers make: offer the
-/// thinking frames as they arrive, then persist the assistant turn.
+/// One turn via the SSE handlers' two calls: offer thinking frames, then persist the turn.
 async fn run_turn(enabled: bool) -> Arc<RecordingStorage> {
     let storage = Arc::new(RecordingStorage::default());
     let service = ChatService::new(
@@ -169,8 +145,7 @@ async fn run_turn(enabled: bool) -> Arc<RecordingStorage> {
 async fn writes_nothing_when_the_user_did_not_ask() {
     let storage = run_turn(false).await;
 
-    // The default. `persist_thinking` is false out of the box, so this is the
-    // state every existing pond is in and the one that must be airtight.
+    // `persist_thinking` defaults to false, so this is every existing pond's state.
     assert!(
         storage.thinking().is_empty(),
         "reasoning text was written to storage with `persist_thinking = false`: \
@@ -182,8 +157,7 @@ async fn writes_nothing_when_the_user_did_not_ask() {
         storage.thinking()
     );
 
-    // Vacuity control: the turn itself must have happened, or "nothing was
-    // written" is a statement about a turn that never ran.
+    // Vacuity control: the turn itself must have been persisted.
     assert_eq!(
         storage.messages().len(),
         2,
@@ -218,11 +192,7 @@ async fn blocks_are_keyed_to_the_assistant_row_chatservice_minted() {
     );
     assert_eq!(session_id, "gate-session");
 
-    // THE POINT OF PUTTING THE WRITE INSIDE ChatService. The assistant row's id
-    // is minted by `persist_assistant_turn` (`Uuid::new_v4()`); no handler can
-    // know it. If this ever keyed to the SESSION id, or to the user row, the
-    // history read would attach a turn's reasoning to the wrong answer -- or to
-    // every answer.
+    // The key must be the assistant row id `persist_assistant_turn` mints; no handler knows it.
     let msgs = storage.messages();
     let assistant = msgs
         .iter()
@@ -263,9 +233,7 @@ async fn one_turns_reasoning_never_lands_on_the_next_turns_answer() {
         .await
         .unwrap();
 
-    // The terminal voice loop keeps ONE ChatService for the life of the
-    // process, so an undrained buffer is not a hypothetical: it would re-attach
-    // the first turn's reasoning to every answer that followed, forever.
+    // The voice loop reuses one ChatService: an undrained buffer taints every later answer.
     let written = storage.thinking();
     assert_eq!(
         written.len(),
@@ -293,10 +261,7 @@ async fn empty_and_whitespace_passages_are_not_stored() {
         .await
         .unwrap();
 
-    // A turn that emitted no real reasoning must leave no rows, not a row
-    // containing "". The history read distinguishes absent from empty, and a
-    // blank block would render an empty thinking panel on a turn that did not
-    // think.
+    // No rows, not blank ones: the history read renders a blank block as an empty panel.
     assert!(
         storage.thinking().is_empty(),
         "blank reasoning passages were persisted: {:?}",

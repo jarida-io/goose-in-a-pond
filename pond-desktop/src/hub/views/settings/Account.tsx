@@ -248,12 +248,10 @@ export function AccountDetail({ go }: AccountDetailProps) {
     }
   }
 
-  // Derive display values from settings
   const userName = settings.user_name ?? "";
   const homeName = settings.home_name ?? settings.weather_location_name ?? "Goose Pond";
   const timezone = settings.timezone ?? "UTC";
 
-  // Count unique rooms from device list (devices have a `room` field)
   const roomSet = new Set(
     devices
       .filter((d) => typeof d.room === "string")

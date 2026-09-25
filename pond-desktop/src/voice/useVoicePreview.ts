@@ -2,12 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api/PondApiClient";
 import { statementAt } from "./voiceCatalogue";
 
-/**
- * The sentence the engine's own tests speak, kept in step with
- * `PREVIEW_SENTENCE` in `pond-adapters-kokoro`. The picker cycles
- * `PREVIEW_STATEMENTS` instead; this is the fixed one for anywhere that needs a
- * single known line.
- */
+/** Fixed preview line, in step with `PREVIEW_SENTENCE` in `pond-adapters-kokoro`. */
 export const PREVIEW_SENTENCE =
   "Hello, I'm Jarida. I live here on your shelf, I think on my own, " +
   "and nothing you say to me leaves this room.";
@@ -25,18 +20,10 @@ interface UseVoicePreview {
   busy: boolean;
   /** The statement currently being spoken, or last spoken. */
   statement: string | null;
-  /**
-   * Live amplitude of the audio actually playing, 0–1.
-   *
-   * Read from the decoded waveform rather than guessed, so the orb moves
-   * because *this voice* is speaking — loud on a stressed syllable, still in
-   * the gaps. A synthetic pulse would look the same for every voice, which is
-   * exactly the comparison the picker exists to make.
-   */
+  /** Live 0–1 amplitude read from the decoded waveform, so the orb moves with this voice. */
   level: number;
 }
 
-/** RMS of one window of samples. */
 function rms(samples: Float32Array, from: number, to: number): number {
   let sum = 0;
   const end = Math.min(to, samples.length);
@@ -46,15 +33,8 @@ function rms(samples: Float32Array, from: number, to: number): number {
 }
 
 /**
- * Speak a sample through the server's TTS engine.
- *
- * The settings screens persist voice and pace the moment they change, so a
- * preview is just "say it with what is saved now" — no separate preview
- * endpoint, and no way for the sample to disagree with the setting on screen.
- *
- * Every call supersedes the last. Dragging the pace slider fires a preview per
- * settled value, and without that the user would hear a queue of stale samples
- * play out one after another, each answering a pace they had already left.
+ * Speak a sample through the server's TTS with the saved settings (screens persist on change).
+ * Each call supersedes the last, so a dragged pace slider doesn't queue stale samples.
  */
 export function useVoicePreview(): UseVoicePreview {
   const [state, setState] = useState<PreviewState>("idle");
@@ -114,14 +94,7 @@ export function useVoicePreview(): UseVoicePreview {
     }
   }, [releaseAudio]);
 
-  /**
-   * Build the per-window amplitude envelope from the WAV bytes.
-   *
-   * Parsed straight out of the 16-bit PCM rather than through an AudioContext:
-   * this needs the shape of the clip, not playback, and a second audio graph
-   * for a settings preview is a device the page does not need to hold.
-   * Returns null for anything that is not the mono PCM16 the server sends.
-   */
+  /** Amplitude envelope parsed from the WAV (no AudioContext needed); null unless mono PCM16. */
   const buildEnvelope = useCallback((wav: ArrayBuffer) => {
     const view = new DataView(wav);
     if (wav.byteLength < 44) return null;
@@ -134,8 +107,7 @@ export function useVoicePreview(): UseVoicePreview {
     const samples = new Float32Array(count);
     for (let i = 0; i < count; i++) samples[i] = view.getInt16(44 + i * 2, true) / 32768;
 
-    // ~30 ms windows: fast enough to catch a syllable, slow enough that the
-    // orb reads as breathing rather than flickering.
+    // ~30 ms: catches a syllable without the orb flickering.
     const windowSecs = 0.03;
     const per = Math.max(1, Math.round(sampleRate * windowSecs));
     const windows = new Float32Array(Math.ceil(count / per));
@@ -188,9 +160,7 @@ export function useVoicePreview(): UseVoicePreview {
         playCount.current += 1;
         setState("playing");
 
-        // Follow playback position into the envelope. `currentTime` is the
-        // only honest clock here — a timer started at play() drifts away from
-        // the audio the moment the tab is throttled.
+        // Index by `currentTime`: a timer started at play() drifts once the tab is throttled.
         const tick = () => {
           if (!mounted.current || generation.current !== mine) return;
           const env = envelopeRef.current;
@@ -198,8 +168,7 @@ export function useVoicePreview(): UseVoicePreview {
           if (env && el && !el.paused) {
             const idx = Math.floor(el.currentTime / env.windowSecs);
             const raw = env.windows[Math.min(idx, env.windows.length - 1)] ?? 0;
-            // Speech RMS sits well under 1; lift it into a usable range for
-            // the orb, which expects roughly mic-level input.
+            // Speech RMS sits well under 1; x3 lifts it to the mic-level range the orb expects.
             setLevel(Math.min(1, raw * 3));
           }
           rafRef.current = requestAnimationFrame(tick);

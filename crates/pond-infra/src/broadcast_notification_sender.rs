@@ -1,36 +1,6 @@
-//! `NotificationSender` over an in-process broadcast channel + offline queue (#99).
-//!
-//! - foreground: publish on a `tokio::sync::broadcast` channel that connected
-//!   `/notifications/stream` clients subscribe to;
-//! - offline: persist targeted notifications to the queue so a disconnected
-//!   device gets them on reconnect;
-//! - background (scaffold): hand targeted notifications to the optional
-//!   [`NotificationRelay`] (FCM/APNs), best-effort.
-//!
-//! STATUS, corrected 2026-08-11 by PAI-7 P5. This comment used to read "the
-//! queue + relay paths are exercised only via targeted `send()` … only the
-//! producer call site is pending", and half of it is still true: all four
-//! production producers (`main.rs`'s schedule-completion bridge,
-//! `schedule_executors.rs`'s rule `Notify`, the `send_notification` MCP tool and
-//! `routes.rs`'s pairing notice) still call `broadcast()`.
-//!
-//! What has changed is that there is now a way to address one household member
-//! rather than the house: [`BroadcastNotificationSender::send_to_profile`],
-//! which resolves PAI-1 P9's `devices.profile_id` through `DeviceAttribution`
-//! and delivers one copy per attributed device down the existing targeted
-//! `send()` path -- queue, relay, live fan-out. **Nothing in production calls it
-//! yet**, because every producer above lives in a file PAI-7 P5 did not own, and
-//! the phase stamp says so rather than implying otherwise. Wiring it is one line
-//! in `main.rs` (keep the concrete `Arc<BroadcastNotificationSender>` alongside
-//! the `dyn NotificationSender` it already builds) plus a caller -- PAI-7 P4's
-//! reviewer is the intended one.
-//!
-//! The rule the new path enforces is PAI-7's invariant 4: a proposal is
-//! addressed to a profile and **never** broadcast. So a member with no
-//! attributed device reaches nobody, a failed attribution read reaches nobody,
-//! and an unwired attribution reaches nobody. None of those falls back to
-//! `broadcast()`, and there is no code path here that could: the decision is
-//! carried by `TargetedDelivery`, which has no variant meaning "the household".
+//! `NotificationSender` over a broadcast channel (live clients), an offline queue, and an
+//! optional push [`NotificationRelay`]. [`BroadcastNotificationSender::send_to_profile`] never
+//! falls back to `broadcast()`: a member it can't address reaches nobody.
 
 use std::sync::Arc;
 
@@ -44,18 +14,11 @@ use pond_core::user_data::ports::device_attribution::{
 };
 use tokio::sync::broadcast;
 
-/// Sentinel `target` meaning "deliver to every connected device".
-///
-/// Defined from the domain constant rather than spelled again here. The
-/// targeted path recognises this string in order to REFUSE it, so a second
-/// literal that drifted by one character would switch the refusal off without
-/// changing any line a reader would think to check.
+/// Sentinel `target` for "every connected device". Keep it the domain constant: the targeted
+/// path refuses this string, and a drifted copy would silently disable the refusal.
 pub const BROADCAST_TARGET: &str = RESERVED_BROADCAST_TARGET;
 
-/// Caps applied to every notification at this single enforcement point, so no
-/// producer (tool call, schedule bridge, …) can persist or stream an
-/// arbitrarily large payload. Truncation is by character, never by byte, so a
-/// multi-byte boundary can't panic.
+/// Payload caps enforced here for every producer; truncation is by char so it can't split UTF-8.
 const MAX_TITLE_CHARS: usize = 200;
 const MAX_BODY_CHARS: usize = 2000;
 
@@ -69,13 +32,8 @@ fn clamp(mut n: Notification) -> Notification {
     n
 }
 
-/// What actually happened when a notification was addressed to one member.
-///
-/// The plan says who it was *for*; `queued` and `failed` say who it reached.
-/// They are separate because they fail for different reasons and only one of
-/// them is a bug: an empty `queued` under [`TargetedDelivery::Undeliverable`] is
-/// the system working, and an empty `queued` under
-/// [`TargetedDelivery::ToDevices`] means every write failed.
+/// Outcome of addressing one member. Empty `queued` is expected under
+/// [`TargetedDelivery::Undeliverable`] but means every write failed under `ToDevices`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileDeliveryReport {
     /// Who this was addressed to, and why it reached nobody when it did.
@@ -87,7 +45,6 @@ pub struct ProfileDeliveryReport {
 }
 
 impl ProfileDeliveryReport {
-    /// True when nothing at all was delivered.
     pub fn reached_nobody(&self) -> bool {
         self.queued.is_empty()
     }
@@ -97,13 +54,7 @@ pub struct BroadcastNotificationSender {
     tx: broadcast::Sender<Notification>,
     queue: Arc<dyn NotificationQueueRepository>,
     relay: Option<Arc<dyn NotificationRelay>>,
-    /// PAI-1 P9's device-to-profile rung, when it has been wired.
-    ///
-    /// `Option` rather than a required constructor argument so that adding
-    /// targeted delivery did not change `new`'s signature -- `main.rs` and two
-    /// `pond-api` integration tests build this and none of them is in PAI-7 P5's
-    /// footprint. `None` is a refusal, not a fallback: see
-    /// [`Self::send_to_profile`].
+    /// Device-to-profile lookup; `None` makes [`Self::send_to_profile`] refuse, never fall back.
     attribution: Option<Arc<dyn DeviceAttribution>>,
 }
 
@@ -121,35 +72,14 @@ impl BroadcastNotificationSender {
         }
     }
 
-    /// Give this sender the ability to address a household member.
-    ///
-    /// Without it [`Self::send_to_profile`] delivers to nobody, which is the
-    /// correct direction for an unwired dependency: an assistant that cannot
-    /// work out whose phone to use must not resolve that by using everybody's.
+    /// Enable addressing a member; without it [`Self::send_to_profile`] delivers to nobody.
     pub fn with_device_attribution(mut self, attribution: Arc<dyn DeviceAttribution>) -> Self {
         self.attribution = Some(attribution);
         self
     }
 
-    /// Deliver one notification to one household member's devices.
-    ///
-    /// PAI-7 P5, and the first path in the tree that addresses a person rather
-    /// than a house. Four things about it are load-bearing:
-    ///
-    /// 1. **It never broadcasts.** Not when the member owns no device, not when
-    ///    the attribution read fails, not when the attribution is unwired.
-    ///    [`TargetedDelivery`] cannot express a broadcast, so this is a property
-    ///    of the type rather than of the arms written below.
-    /// 2. **Each device gets its own notification id.** `notifications.id` is the
-    ///    PRIMARY KEY and `SqliteNotificationQueue::enqueue` is an
-    ///    `INSERT OR REPLACE`, so reusing one id across a member's two devices
-    ///    would leave exactly one queued row -- the phone that was switched off,
-    ///    the one the queue exists for, being the one most likely to lose it.
-    /// 3. **A per-device failure does not abort the rest.** One device with a
-    ///    stale row should not cost a member the notification on their other.
-    /// 4. **It returns a report rather than a `Result`.** "Nobody was reachable"
-    ///    is not an error, and typing it as one invites a caller to answer it
-    ///    with a fallback.
+    /// Deliver one notification to one member's devices; never broadcasts. Each device gets its
+    /// own id (`enqueue` is `INSERT OR REPLACE` by id); one device failing doesn't stop the rest.
     pub async fn send_to_profile(
         &self,
         profile_id: &str,
@@ -196,11 +126,7 @@ impl BroadcastNotificationSender {
     }
 }
 
-/// One stored row per device, derived from the logical notification id.
-///
-/// Deterministic so a re-send of the same logical notification replaces its own
-/// row per device rather than accumulating, which is what `INSERT OR REPLACE`
-/// already gives us for a single device.
+/// Deterministic per-device id, so a re-send replaces each device's row instead of adding one.
 fn per_device_notification_id(notification_id: &str, device_id: &str) -> String {
     format!("{notification_id}:{device_id}")
 }
@@ -302,9 +228,7 @@ mod tests {
         assert_eq!(queued.body.chars().count(), MAX_BODY_CHARS);
     }
 
-    /// Answers `devices_for_profile` from a script, and records nothing else --
-    /// the other three methods panic, so a test that passes because the code
-    /// under test asked a different question is impossible.
+    /// Scripts `devices_for_profile`; other methods panic so a test can't pass via the wrong query.
     struct ScriptedAttribution {
         devices: std::sync::Mutex<Option<Result<Vec<String>>>>,
     }
@@ -357,9 +281,7 @@ mod tests {
         }
     }
 
-    /// Everything on the channel right now. `try_recv` rather than `recv` on
-    /// purpose: the assertions below are about what did NOT get published, and
-    /// an `await` on an empty channel would hang instead of failing.
+    /// Everything on the channel now; `try_recv` so asserting on nothing fails instead of hanging.
     fn drain(rx: &mut broadcast::Receiver<Notification>) -> Vec<Notification> {
         let mut out = Vec::new();
         while let Ok(n) = rx.try_recv() {
@@ -368,9 +290,7 @@ mod tests {
         out
     }
 
-    /// The positive case, and the vacuity control for the three refusal tests
-    /// below: without it they would all pass against a `send_to_profile` whose
-    /// body was `return`.
+    /// Vacuity control for the refusal tests below.
     #[tokio::test]
     async fn a_member_with_two_devices_gets_one_copy_each_and_the_house_gets_none() {
         let (tx, mut rx) = broadcast::channel(8);
@@ -397,8 +317,7 @@ mod tests {
             "background push is attempted per device, not once for the member"
         );
 
-        // Per-device ids, because `notifications.id` is the PRIMARY KEY and
-        // `enqueue` is an INSERT OR REPLACE.
+        // Per-device ids: `enqueue` is an INSERT OR REPLACE on the `notifications.id` key.
         let enqueued = queue.enqueued.lock().unwrap();
         let ids: Vec<&str> = enqueued.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(ids.len(), 2);
@@ -409,11 +328,6 @@ mod tests {
         );
     }
 
-    /// PAI-7 invariant 4, in the shape that costs a privacy failure when it is
-    /// wrong. `devices_for_profile` deliberately returns no unattributed device,
-    /// so a member who has never paired a phone is unreachable -- and the
-    /// tempting repair, "fall back to broadcast so they still see it", is
-    /// exactly the disclosure this workstream exists to prevent.
     #[tokio::test]
     async fn a_member_with_no_attributed_device_reaches_nobody_rather_than_everybody() {
         let (tx, mut rx) = broadcast::channel(8);
@@ -440,9 +354,6 @@ mod tests {
         );
     }
 
-    /// A failed attribution read narrows. This is the case a delivery path is
-    /// most tempted to widen, because the notification is real and the only
-    /// thing missing is the address.
     #[tokio::test]
     async fn a_failed_attribution_read_reaches_nobody() {
         let (tx, mut rx) = broadcast::channel(8);
@@ -465,10 +376,6 @@ mod tests {
         );
     }
 
-    /// The state every install is in today: `main.rs` builds this sender and
-    /// wires no attribution. An unwired dependency must refuse, because the
-    /// alternative -- treating "I have no way to address a member" as "address
-    /// everyone" -- is a scope-widening default reached by omission.
     #[tokio::test]
     async fn an_unwired_attribution_reaches_nobody() {
         let (tx, mut rx) = broadcast::channel(8);
@@ -485,10 +392,7 @@ mod tests {
         assert!(drain(&mut rx).is_empty());
     }
 
-    /// A device id is caller-supplied at registration, so a device really can be
-    /// registered as `"broadcast"`. Attributed to a member, delivering to it
-    /// would take the sentinel branch of `send` and publish to every subscriber
-    /// -- a household broadcast produced by the targeted path.
+    /// Device ids are caller-supplied, and sending to "broadcast" would hit every subscriber.
     #[tokio::test]
     async fn a_device_registered_as_the_sentinel_is_not_delivered_to() {
         let (tx, mut rx) = broadcast::channel(8);

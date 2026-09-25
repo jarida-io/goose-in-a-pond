@@ -4,12 +4,7 @@ use std::fmt;
 use std::sync::Mutex;
 
 /// One step of the boot-time prefix warm-up (see `Agent::prewarm`).
-///
-/// Three states, not a percentage: the engine exposes no progress inside a
-/// model load or a prefill, and a bar that invents numbers is worse than one
-/// that says what it knows. `Warming` covers everything between "asked" and
-/// "the first token came back"; the UI renders it as an indeterminate bar
-/// with elapsed time, and voice mode speaks it.
+/// States, not a percentage: the engine reports no progress inside a model load or prefill.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum WarmupPhase {
@@ -17,11 +12,9 @@ pub enum WarmupPhase {
     Warming,
     /// The prefix is resident in the engine's KV cache; turn 1 will reuse it.
     Ready,
-    /// Nothing to warm on this backend (mock, HTTP providers) or explicitly
-    /// disabled. The UI shows nothing; voice skips the "warming up" line.
+    /// Nothing to warm on this backend (mock, HTTP providers), or warm-up is disabled.
     Skipped { reason: String },
-    /// The warm-up generation failed. Chat still works — the first real turn
-    /// simply pays the full prefill, exactly as before this feature existed.
+    /// The warm-up generation failed; the first real turn just pays the full prefill.
     Failed { reason: String },
 }
 
@@ -33,64 +26,26 @@ pub struct AgentRequest {
     /// Optional image attachments for multimodal models.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<crate::models::domain::message::ImageAttachment>,
-    /// When true, the request originates from voice mode. The agent should
-    /// disable thinking, keep responses concise, and avoid formatting.
+    /// From voice mode: the agent disables thinking and keeps replies short and unformatted.
     #[serde(default)]
     pub voice_mode: bool,
-    /// When true, the request originates from Canvas mode. The agent should
-    /// always prefer tool calls over textual descriptions so that results
-    /// render as visual cards on the user's screen.
+    /// From Canvas mode: prefer tool calls over prose so results render as visual cards.
     #[serde(default)]
     pub canvas_mode: bool,
-    /// Whose data this turn may reach.
-    ///
-    /// Resolved once, at the edge, by
-    /// [`identity_resolution::resolve`](crate::user_data::services::identity_resolution::resolve),
-    /// and carried down rather than recomputed -- two resolutions of one turn
-    /// could disagree, and the one nearer the data would win.
-    ///
-    /// There is **no `Default` on `AgentRequest`** and this field is not
-    /// optional in Rust, so every construction site has to say what it means.
-    /// That is deliberate: a scope is an authorisation decision, and the
-    /// compile error when a new caller appears is the review. The serde default
-    /// exists only so a request serialized before this field existed still
-    /// deserializes, and it reproduces the pre-PAI-1 behaviour exactly.
+    /// Whose data this turn may reach; resolved once at the edge, never recomputed downstream.
+    /// No `Default` on `AgentRequest`, so every construction site must choose. The serde
+    /// default exists only for payloads serialized before this field.
     #[serde(default = "ProfileScope::household")]
     pub profile_scope: ProfileScope,
-    /// The speaking member's own preferences, resolved alongside the scope.
-    ///
-    /// `None` means "no personal context in this prompt" -- which is what a
-    /// `Guest` turn gets, and what a pond with no primary member set has always
-    /// got. It is deliberately not "fall back to whoever is primary": using one
-    /// member's name and language while a different member is talking is the
-    /// wrong-attribution failure in its most visible form.
-    ///
-    /// Rides the request rather than being fetched in the adapter, for the same
-    /// reason as `profile_scope`: resolved once, at the edge, by the layer that
-    /// can actually reach a `ProfileRepository`.
+    /// The speaking member's own preferences, resolved at the edge alongside the scope.
+    /// `None` means no personal context; never substitute the primary member's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_context: Option<crate::prompts::ProfileContext>,
-    /// When set, restricts this turn to only the listed tool-group prefixes
-    /// (e.g. `"giap-weather"`), on top of whatever tool selection would
-    /// otherwise choose. Set by a recipe run whose YAML declares
-    /// `extensions:`; `None` means "no recipe-imposed restriction" -- the
-    /// ordinary case for chat turns.
+    /// Tool-group prefixes (e.g. `"giap-weather"`) a recipe's `extensions:` limits this turn to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_group_allowlist: Option<Vec<String>>,
-    /// This turn is the boot-time prefix warm-up, not a person asking anything.
-    ///
-    /// There is nobody to be wrong at, so the completeness check
-    /// (`Settings::goal_check_enabled`, armed in the Goose adapter) is not armed
-    /// for it. That check is deliberately ON for real turns and deliberately
-    /// costs roughly twice the inferences per turn -- measured, on a warm-up
-    /// ping, as a second 4,188-token round-trip asking the model to "finish
-    /// anything still outstanding" after it had already replied `ok`.
-    ///
-    /// Skipping it cannot move the warmed prefix, which is the only thing that
-    /// would make this unsafe: arming the goal does not alter the FIRST
-    /// request's payload -- it appends a nudge as a later user message, so it
-    /// only ever adds a round-trip after the first one has finished. Verified
-    /// from a captured payload pair (`GIAP_CAPTURE_PAYLOAD`).
+    /// This turn is the boot-time prefix warm-up, so the completeness check is not armed.
+    /// Safe: the check only appends a later message, never altering the warmed first request.
     #[serde(default)]
     pub warmup: bool,
 }
@@ -107,8 +62,7 @@ pub enum AgentStreamEvent {
     Status {
         content: String,
     },
-    /// Internal reasoning / chain-of-thought from models that support thinking
-    /// (Gemma 4, Qwen3, DeepSeek-R1). Only emitted when `show_thinking` is enabled.
+    /// Model reasoning (chain-of-thought); only emitted when `show_thinking` is enabled.
     Thinking {
         content: String,
     },
@@ -129,44 +83,21 @@ pub enum AgentStreamEvent {
     ReviewStatus {
         content: String,
     },
-    /// Revised answer from the adversarial reviewer.
-    /// The frontend should replace the previously streamed text with this content.
+    /// Revised answer from the adversarial reviewer; replaces the text streamed so far.
     ReviewRevision {
         content: String,
         score: u8,
         rounds: u32,
     },
-    /// The agent loop stopped because the request's turn budget was exhausted,
-    /// not because the task was finished. Carries the budget that was hit so a
-    /// client can say so and offer a one-click continuation turn — without this
-    /// the user just gets the engine's "would you like me to continue?" as
-    /// plain text with nothing wired to answer it.
+    /// The turn budget ran out before the task finished; lets a client offer a continuation.
     TurnLimitReached {
         max_turns: u32,
     },
-    /// A delegation running underneath this turn changed state — PAI-6 P6.
-    ///
-    /// A delegating turn is otherwise a spinner: the parent is parked inside one
-    /// `delegate` tool call for the whole of a child's run, which on-device is
-    /// minutes, and nothing reaches the client until the tool result does. These
-    /// frames are what let a client draw the tree instead.
-    ///
-    /// # What it may carry, and what it may not
-    ///
-    /// PAI-6 invariant 4 says a subagent's conversation never becomes the
-    /// parent's history — only its final result, as a tool result. A progress
-    /// frame is about a child, so it is a frame and nothing else: no consumer
-    /// may fold `detail` into the turn's text or its persisted tool results.
-    ///
-    /// `detail` is deliberately narrow. It carries a tool NAME while a child is
-    /// calling one, and a GIAP-authored reason when a run fails. It never
-    /// carries the child's prose, its reasoning, or a tool call's ARGUMENTS —
-    /// on this pond those can be a household memory query or device state
-    /// (PAI-2 minimisation), and the producer that fills this field cannot
-    /// express any of them. See `orchestrator.rs :: child_tool_names`.
+    /// A delegation running under this turn changed state.
+    /// `detail` holds only a tool name or GIAP's failure reason (never child prose or arguments)
+    /// and must never be folded into the turn's text or persisted tool results.
     SubagentProgress {
-        /// The `TaskRun` id, so a client can group frames per child rather than
-        /// per role — one turn may delegate the same role twice.
+        /// The `TaskRun` id; group frames by this, not role (a turn may delegate a role twice).
         task_id: String,
         /// The role that was delegated to, for the label on the tree.
         role: String,
@@ -179,8 +110,7 @@ pub enum AgentStreamEvent {
         model_role: String,
         /// Token usage for this response (estimated if real counts unavailable).
         usage: Option<crate::models::ports::provider::UsageStats>,
-        /// Per-turn inference performance stats (TTFT, prefill/decode tok/s,
-        /// context utilization). None when the engine reports nothing.
+        /// Per-turn inference stats (TTFT, tok/s, context use), when the engine reports any.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stats: Option<super::turn_stats::TurnStats>,
     },
@@ -189,30 +119,18 @@ pub enum AgentStreamEvent {
     },
 }
 
-/// Where a delegation has got to, as a client sees it — PAI-6 P6.
-///
-/// A closed set rather than a free string, so a consumer that adds a branch is
-/// told when a new state appears instead of silently rendering nothing. It is
-/// deliberately NOT
-/// [`TaskStatus`](crate::shared::domain::orchestration::TaskStatus): that enum
-/// is the run's lifecycle and has no way to say "the child is calling a tool",
-/// which is the state a delegating turn spends most of its wall clock in and the
-/// only one that says anything is still happening.
-///
-/// [`From<TaskStatus>`](Self::from) is an exhaustive match, so a lifecycle state
-/// added over there is a compile error here rather than a frame nobody drew.
+/// Where a delegation has got to, as a client sees it.
+/// Unlike `TaskStatus` (the run lifecycle) it can say "calling a tool", the usual state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubagentStatus {
-    /// Authorised, waiting for the device. On-device this is where a second
-    /// delegation from the same turn sits while its sibling runs.
+    /// Authorised, waiting for the device (e.g. behind a sibling delegation from the same turn).
     Queued,
     /// Holding the device and replying.
     Running,
     /// Calling a tool. `detail` is the tool's name and never its arguments.
     Tool,
-    /// Finished with an answer, which arrives separately as the `delegate` tool
-    /// result — never in a progress frame.
+    /// Finished; the answer arrives as the `delegate` tool result, never in a progress frame.
     Completed,
     /// Stopped, by the parent or by the parent's own turn ending.
     Cancelled,
@@ -234,11 +152,7 @@ impl SubagentStatus {
         SubagentStatus::Failed,
     ];
 
-    /// The wire spelling, for a renderer that has no serializer to hand.
-    ///
-    /// `the_wire_spelling_is_the_serialized_spelling` pins this against serde
-    /// for every variant. Two spellings of one state is how a client ends up
-    /// with a branch that can never be true.
+    /// The serde wire spelling, for a renderer with no serializer to hand.
     pub fn as_str(self) -> &'static str {
         match self {
             SubagentStatus::Queued => "queued",
@@ -266,11 +180,7 @@ impl From<crate::shared::domain::orchestration::TaskStatus> for SubagentStatus {
     }
 }
 
-/// The four states of the workflow loop.
-///
-/// Serializes to the contract's snake_case state strings
-/// (`wait` / `listen` / `thinking` / `speak`) so
-/// [`WorkflowEvent::StateChanged`] flattens to `{"event":"state","state":"wait"}`.
+/// The four states of the workflow loop, serialized as the NDJSON contract's state strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowState {
@@ -324,17 +234,12 @@ impl fmt::Display for WorkflowState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum WorkflowEvent {
-    /// Prefix warm-up progress at session start (see `Agent::prewarm`).
-    /// `state` is `warming` while the model loads and the prompt prefix
-    /// prefills, then exactly one of `ready` / `skipped` / `failed`. Emitted
-    /// BEFORE `Ready`, so a shell can show "warming up" during the one stretch
-    /// where the child is alive but cannot yet listen.
+    /// Prefix warm-up progress: `warming`, then exactly one of `ready`/`skipped`/`failed`.
+    /// Emitted before `Ready`, while the child is alive but cannot yet listen.
     Warmup { state: String },
     /// Emitted once after models are loaded, before entering the wait loop.
     Ready { session_id: String },
-    /// A workflow state transition. Serializes as
-    /// `{"event":"state","state":"wait"}` — the variant is tagged `state` and
-    /// the wrapped [`WorkflowState`] serializes to the snake_case state string.
+    /// A workflow state transition; serializes as `{"event":"state","state":"wait"}`.
     #[serde(rename = "state")]
     StateChanged { state: WorkflowState },
     /// A confirmed user utterance (post-ASR).
@@ -355,25 +260,16 @@ pub enum WorkflowEvent {
     Error { message: String },
     /// The loop is exiting cleanly. `reason` is `stdin_eof` | `dismissed` | `error`.
     Exit { reason: String },
-    /// Live mic input level during `wait`/`recording`, throttled by the emitter
-    /// (not every poll produces one — see the whisper adapter's audio-level sink).
+    /// Live mic input level during `wait`/`recording`, throttled by the emitter.
     AudioLevel { rms: f32 },
-    /// Legacy internal-only: user input text. Carries no external contract shape;
-    /// [`WorkflowEvent::to_ndjson`] returns `None` for it so the sink skips it.
+    /// Internal-only user input text; `to_ndjson` skips it.
     UserInput(String),
-    /// Legacy internal-only: full agent output text. Carries no external contract
-    /// shape; [`WorkflowEvent::to_ndjson`] returns `None` for it so the sink skips it.
+    /// Internal-only full agent output text; `to_ndjson` skips it.
     AgentOutput(String),
 }
 
 impl WorkflowEvent {
-    /// Serialize this event to a single NDJSON line for the child-process
-    /// stdout contract, or `None` for the legacy internal-only variants
-    /// (`UserInput` / `AgentOutput`) that carry no external contract shape.
-    ///
-    /// The returned string is a single line with NO trailing newline — the
-    /// writer appends `\n` and flushes. `serde_json` never emits interior
-    /// newlines for these shapes, so one event maps to exactly one line.
+    /// One NDJSON line (no trailing newline) for the stdout contract; `None` for internal-only.
     pub fn to_ndjson(&self) -> Option<String> {
         match self {
             Self::UserInput(_) | Self::AgentOutput(_) => None,
@@ -382,19 +278,12 @@ impl WorkflowEvent {
     }
 }
 
-/// Minimum interval between emitted audio-level readings, regardless of how
-/// often the caller's polling loop runs.
+/// Minimum interval between emitted audio-level readings.
 const AUDIO_LEVEL_MIN_INTERVAL_MS: u128 = 100;
-/// Minimum change in RMS required to re-emit within the interval window —
-/// cuts idle-silence chatter once the level has settled.
+/// Minimum RMS change required to emit; cuts idle-silence chatter once the level settles.
 const AUDIO_LEVEL_MIN_DELTA: f32 = 0.02;
 
-/// Throttles a raw per-poll RMS stream down to a UI-friendly cadence before
-/// handing it to an arbitrary sink (e.g. an NDJSON writer producing
-/// [`WorkflowEvent::AudioLevel`] lines). Lives in `pond-core` (not an
-/// adapter crate) so both the whisper adapter (mic input, wait/recording
-/// states) and the piper adapter (TTS output, speaking state) can share one
-/// throttle implementation without adapters depending on each other.
+/// Throttles a per-poll RMS stream to a UI-friendly cadence; shared by whisper and piper.
 pub struct ThrottledAudioLevelSink {
     inner: Box<dyn Fn(f32) + Send + Sync>,
     last_emit: Mutex<Option<std::time::Instant>>,
@@ -410,9 +299,7 @@ impl ThrottledAudioLevelSink {
         }
     }
 
-    /// Feed one poll's RMS reading. Emits through `inner` only if enough time
-    /// has passed since the last emission AND the value moved meaningfully —
-    /// otherwise it's a no-op.
+    /// Feed one poll's RMS reading; emits only if the interval has passed and the value moved.
     pub fn maybe_emit(&self, rms: f32) {
         let now = std::time::Instant::now();
         let mut last_emit = self.last_emit.lock().unwrap();
@@ -432,10 +319,7 @@ impl ThrottledAudioLevelSink {
 }
 
 // ── Golden NDJSON serializer tests ──────────────────────────────────────────
-//
-// These assert the EXACT JSON strings the terminal-voice-in-desktop contract
-// (Architecture A) specifies. The desktop shell parses these off child stdout;
-// any drift here breaks the parser, so the strings are pinned byte-for-byte.
+// Pinned byte-for-byte: the desktop shell parses these lines off child stdout.
 #[cfg(test)]
 mod ndjson_golden_tests {
     use super::*;
@@ -574,12 +458,10 @@ mod ndjson_golden_tests {
 
     #[test]
     fn ndjson_lines_contain_no_interior_newlines() {
-        // One event must serialize to exactly one line.
         let ev = WorkflowEvent::Token {
             content: "a\nb".to_string(),
         };
         let line = ev.to_ndjson().unwrap();
-        // The embedded newline in content must be escaped, not literal.
         assert!(!line.contains('\n'), "line had a raw newline: {line:?}");
         assert!(line.contains("\\n"));
     }
@@ -604,9 +486,6 @@ mod agent_request_scope_tests {
         }
     }
 
-    /// The scope must survive the trip from the API edge to the adapter. It is
-    /// resolved once, at the edge, precisely so nothing downstream re-derives
-    /// it -- a second resolution could disagree and the deeper one would win.
     #[test]
     fn the_scope_survives_a_serde_round_trip() {
         for scope in [
@@ -620,10 +499,7 @@ mod agent_request_scope_tests {
         }
     }
 
-    /// A request serialized before this field existed must still deserialize,
-    /// and must land on the behaviour that release had -- unfiltered household
-    /// access. Anything narrower would silently break stored payloads; there is
-    /// nothing wider.
+    /// It must land on household access, the behaviour from before the field existed.
     #[test]
     fn a_payload_from_before_the_field_existed_still_deserializes() {
         let legacy = r#"{"message":"hi","session_id":"s1","model_role":"chat"}"#;
@@ -631,15 +507,7 @@ mod agent_request_scope_tests {
         assert_eq!(parsed.profile_scope, ProfileScope::Household);
     }
 
-    /// PAI-6 P6. The renderer's spelling and the wire's spelling are the same
-    /// string for every state.
-    ///
-    /// `main.rs` prints [`SubagentStatus::as_str`] while `routes.rs` serializes
-    /// the value into the SSE frame, so the two are read by different clients
-    /// and would drift silently. Iterating [`SubagentStatus::ALL`] rather than
-    /// listing cases here is deliberate: a variant added without a spelling is
-    /// caught by the `as_str` match arm, and a variant added without an `ALL`
-    /// entry is caught by the length assertion below.
+    /// `main.rs` prints `as_str` and `routes.rs` serializes, for different clients.
     #[test]
     fn the_wire_spelling_is_the_serialized_spelling() {
         assert_eq!(
@@ -660,14 +528,6 @@ mod agent_request_scope_tests {
         }
     }
 
-    /// A progress frame is about a CHILD, and carries no room for its
-    /// conversation.
-    ///
-    /// PAI-6 invariant 4 and PAI-2's minimisation rule meet on this variant:
-    /// `detail` is the only free-text field it has, and the whole design rests
-    /// on that field being narrow. This pins the SHAPE -- four keys, `detail`
-    /// absent when there is none -- so that a later change adding, say, a
-    /// `text` or `thinking` key to the wire has to argue with a test.
     #[test]
     fn a_progress_frame_carries_four_fields_and_no_transcript() {
         let event = AgentStreamEvent::SubagentProgress {

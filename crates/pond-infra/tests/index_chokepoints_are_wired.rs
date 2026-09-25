@@ -1,73 +1,13 @@
-//! Phase B: does *production* mirror its memory writes into the shared index?
-//!
-//! `SqliteMemoryRepository::with_vector_index` is documented as a 100%
-//! chokepoint -- nothing else in the workspace issues SQL against
-//! `memory_fragments`, so `add`, `delete` and `update_embedding` see every
-//! write. That is true of the adapter and says nothing about `main.rs`, which is
-//! where the chokepoint was actually leaking: the type has FOUR production
-//! construction sites and for a long while exactly one of them chained the
-//! index.
-//!
-//! The three that did not were `run_chat` (the voice/CLI path, which hands its
-//! repo to `build_goose_backend` and so registers the `giap-memory` tool),
-//! `run_agent_cmd` (same, for all three of its arms), and `run_memories_cmd`
-//! (`pond memories add` / `remove`, a separate process with its own
-//! `Database`). Every one of them compiles, runs, and looks correct. The symptom
-//! is not an error: it is a memory that is present in `pond_system.db` and
-//! absent from `pond_vectors.db` until a sweep happens to notice, and a `remove`
-//! that takes the row and leaves the vector behind as an orphan. Nothing warned
-//! you, unlike redaction -- which had a guard, and which is why the redaction
-//! sites stayed wired while these three did not.
-//!
-//! Like its sibling `redaction_chokepoints_are_wired.rs`, this reads `main.rs`
-//! as text, which is a weaker instrument than an integration test and is chosen
-//! for the same reason: `pond-server` is not in `ci.yml`'s test list (it is
-//! covered only by `cargo check`), so a guard that lives there never runs on a
-//! pull request. `pond-infra` owns both `SqliteMemoryRepository` and
-//! `SqliteVectorIndex` -- the two adapters these bindings exist to join -- and it
-//! *is* in that list. `include_str!` creates no dependency edge: it does not
-//! link `pond-server`, it just refuses to compile if the path moves.
-//!
-//! # Why this scans DOWN and its sibling scans UP
-//!
-//! The one line worth being careful about. `RedactingMemoryRepository::new(` is
-//! a decorator: it appears ABOVE the construction it wraps, so the redaction
-//! guard looks upward. `.with_vector_index(` is a builder method: it appears
-//! ON or BELOW the construction it modifies. Copying the sibling's
-//! `wrapped_within` verbatim would have produced a guard that never found a
-//! single chained site and therefore failed loudly -- the harmless failure. The
-//! dangerous one is the mirror image of the bug that guard already carries a
-//! fixture for, and it is pinned below.
+//! Every production `SqliteMemoryRepository` in `main.rs` must chain the vector index.
+//! A text scan via `include_str!`: pond-server's tests don't run in CI, pond-infra's do.
 
 const MAIN: &str = include_str!("../../pond-server/src/main.rs");
 
-/// Sites that legitimately do NOT chain the index, keyed by the enclosing
-/// function, each with the reason it is exempt.
-///
-/// Empty, deliberately, and kept as machinery rather than deleted: every one of
-/// the four paths has a `Database` and therefore a `db.vectors` pool, so "no
-/// index available here" is not a reason any current site can claim. What three
-/// of them genuinely lack is an EMBEDDER, and that is a reason to pass a `None`
-/// model id -- not a reason to skip the index. `the_cli_paths_index_without_a_model_id`
-/// below records that distinction by name, because collapsing the two is how a
-/// path would quietly stop mirroring while looking like it had a good excuse.
-///
-/// A future entry belongs here only if the site truly cannot reach a vector
-/// pool. Anything else is a bypass wearing an exemption.
+/// `(enclosing fn, reason)` exemptions: only a site with no vector pool may be listed here.
 const EXCLUSIONS: &[(&str, &str)] = &[];
 
-/// The builder call must appear on the construction's own line or in the few
-/// lines below it -- `rustfmt` splits `.with_vector_index(` off onto its own
-/// line whenever the arguments are long, and three of the four production sites
-/// keep it inline, so neither a single-line nor a next-line-only check works.
-///
-/// `construction` bounds the search: the window must never reach FORWARD over a
-/// LATER construction of the same type. That is the same defect the sibling
-/// guard documents in reverse -- there, a bare construction below a wrapped one
-/// inherited the wrapper; here, a bare construction ABOVE a chained one would
-/// find the chained one's `.with_vector_index(` inside its own window and be
-/// reported as indexed. Pinned as a fixture in
-/// `the_window_never_reaches_over_a_later_construction`.
+/// Whether `method` is on the `site` line or just below (rustfmt wraps it), stopping before
+/// the next `construction` so a bare site can't borrow a later site's call.
 fn chained_within(lines: &[&str], site: usize, method: &str, construction: &str) -> bool {
     let ceiling = (site + 7).min(lines.len());
     let mut end = ceiling;
@@ -89,9 +29,7 @@ fn sites(lines: &[&str], needle: &str) -> Vec<usize> {
         .collect()
 }
 
-/// Which top-level function a line sits in, by scanning up to the nearest
-/// column-zero `fn`. Used so a failure names the path a reader can go and look
-/// at -- `main.rs:8457` alone sends them hunting, `run_memories_cmd` does not.
+/// Nearest column-zero `fn` above `site`, so failures name a function, not a line number.
 fn enclosing_fn(lines: &[&str], site: usize) -> String {
     for line in lines[..=site].iter().rev() {
         for prefix in ["async fn ", "fn ", "pub async fn ", "pub fn "] {
@@ -113,10 +51,7 @@ fn enclosing_fn(lines: &[&str], site: usize) -> String {
 fn every_memory_repository_construction_mirrors_into_the_index() {
     let lines: Vec<&str> = MAIN.lines().collect();
     let found = sites(&lines, "SqliteMemoryRepository::new(");
-    // Pinned, not a floor -- the lesson the sibling guard learned the expensive
-    // way. `>= 4` lets a FIFTH construction appear unnoticed, which is the
-    // likeliest shape for a new bypass: a write path added beside an existing
-    // one, copied from whichever neighbour was closest.
+    // Pinned, not a floor: `>= 4` would let a fifth, copied bypass site slip in unnoticed.
     assert_eq!(
         found.len(),
         4,
@@ -144,9 +79,7 @@ fn every_memory_repository_construction_mirrors_into_the_index() {
 
     for (site, function) in found.iter().zip(&where_they_are) {
         if let Some((_, reason)) = EXCLUSIONS.iter().find(|(f, _)| f == function) {
-            // An exemption is a claim about the path, so make it cost something:
-            // if the site starts chaining the index anyway, the claim is stale
-            // and the entry should go rather than sit there excusing nothing.
+            // A site that chains anyway makes its exemption stale; the entry should go.
             assert!(
                 !chained_within(
                     &lines,
@@ -179,17 +112,8 @@ fn every_memory_repository_construction_mirrors_into_the_index() {
     }
 }
 
-/// The reason three of the four sites pass `None` for the model id, recorded so
-/// that a later reader does not "fix" it by inventing one.
-///
-/// `run_chat`, `run_agent_cmd` and `run_memories_cmd` have no embedder --
-/// the first two pass `None` for `embedding_provider` into
-/// `build_goose_backend`, and the third is a bare CLI process. A vector they
-/// could not attribute to a model is exactly the case `mirror` handles by
-/// returning: it leaves any existing entry alone and lets the sweep own it,
-/// rather than stripping entries the server had correctly written. Passing a
-/// guessed model id there would corrupt the index far more quietly than not
-/// indexing at all, which is why this is pinned rather than left to taste.
+/// These three paths have no embedder. `None` makes `mirror` defer to the sweep; a guessed
+/// model id would silently corrupt the index.
 #[test]
 fn the_cli_paths_index_without_a_model_id() {
     let lines: Vec<&str> = MAIN.lines().collect();
@@ -221,18 +145,6 @@ fn the_cli_paths_index_without_a_model_id() {
     );
 }
 
-/// The mirror image of the bug the sibling guard carries a fixture for, pinned
-/// before it can happen rather than after.
-///
-/// `chained_within` scans a fixed window DOWNWARD, so a bare construction
-/// sitting a few lines ABOVE a chained one would find the chained one's
-/// `.with_vector_index(` inside its own window and be reported as indexed. The
-/// sibling guard's version of this went unnoticed until a review demonstrated it
-/// by hand; there is no reason to re-learn it here.
-///
-/// Pinned on synthetic lines, because the alternative is editing `main.rs` in
-/// place and asserting the suite goes red -- which proves it once, leaves
-/// nothing behind, and cannot run in CI.
 #[test]
 fn the_window_never_reaches_over_a_later_construction() {
     let lines = vec![
@@ -257,8 +169,7 @@ fn the_window_never_reaches_over_a_later_construction() {
         "a bare construction ABOVE a chained one must NOT inherit its builder \
          call -- this is the whole failure mode the window bound exists for"
     );
-    // Both of these must still read as chained, or the guard could pass by
-    // rejecting everything, which is the other way a text guard goes vacuous.
+    // Both must still read as chained, or a guard rejecting everything would pass.
     assert!(
         chained_within(
             &lines,
@@ -281,10 +192,7 @@ fn the_window_never_reaches_over_a_later_construction() {
     );
 }
 
-/// `enclosing_fn` is load-bearing twice over: it names the path in every failure
-/// message and it is the key `EXCLUSIONS` is looked up by. A silent regression to
-/// `<unknown>` would make an exemption stop matching and, worse, make the
-/// four-function assertion above fail for a reason that reads like a code change.
+/// `EXCLUSIONS` is keyed by `enclosing_fn`, so a regression to `<unknown>` breaks exemptions.
 #[test]
 fn enclosing_fn_finds_the_nearest_column_zero_function() {
     let lines = vec![

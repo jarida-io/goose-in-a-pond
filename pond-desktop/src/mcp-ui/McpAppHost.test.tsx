@@ -5,20 +5,8 @@ import { McpAppHost } from "./McpAppHost";
 afterEach(() => cleanup());
 
 /**
- * The MCP App frame runs untrusted HTML and must not share the host's origin.
- *
- * `html` comes from `api.getMcpResource(...)`, i.e. whatever an MCP server chose
- * to serve — attacker-controlled the moment any third-party server ships a
- * `ui://` resource. This used to render with
- * `sandbox="allow-scripts allow-same-origin"`, and a `srcdoc` iframe inherits the
- * embedder's origin, so `allow-same-origin` handed that origin back: the guest
- * could read `parent.localStorage` (where `PondApiClient` keeps
- * `giap-session-token` and the refresh token) and strip this very `sandbox`
- * attribute off the parent DOM.
- *
- * Omitting `allow-same-origin` gives the frame an opaque origin, which is also
- * what MCP Apps (SEP-1865) requires: "the Host and the Sandbox MUST have
- * different origins".
+ * The frame runs untrusted MCP-server HTML: with `allow-same-origin` a `srcdoc` iframe gets the host's
+ * origin and can read the session tokens in `parent.localStorage`. SEP-1865 also requires distinct origins.
  */
 describe("McpAppHost sandbox", () => {
   const APP_HTML = "<!doctype html><title>t</title><body>hi</body>";
@@ -32,15 +20,13 @@ describe("McpAppHost sandbox", () => {
 
   it("never grants allow-same-origin to the app frame", () => {
     const sandbox = frame().getAttribute("sandbox") ?? "";
-    // Vacuity control: an absent or empty attribute is NOT a pass. A missing
-    // `sandbox` attribute is the least sandboxed state there is.
+    // Checking allow-scripts too, so a missing sandbox attribute (the least sandboxed state) fails.
     expect(sandbox).toContain("allow-scripts");
     expect(sandbox).not.toContain("allow-same-origin");
   });
 
   it("grants nothing beyond allow-scripts", () => {
-    // Enumerated rather than spot-checked, so a future `allow-popups` or
-    // `allow-top-navigation` has to be argued for here rather than appearing.
+    // Enumerated, so any new token has to be argued for here.
     const tokens = (frame().getAttribute("sandbox") ?? "").split(/\s+/).filter(Boolean);
     expect(tokens).toEqual(["allow-scripts"]);
   });
@@ -53,13 +39,7 @@ describe("McpAppHost sandbox", () => {
   });
 });
 
-/**
- * Messages into the frame are addressed to the opaque origin, not to `"*"`.
- *
- * An opaque origin serialises to the literal string `"null"`. `"*"` also
- * delivers, but it means "whatever origin this frame has now", which stops being
- * safe the moment the frame navigates or the sandbox is loosened.
- */
+/** An opaque origin serialises as "null"; `"*"` would deliver to whatever origin the frame has later. */
 describe("McpAppHost postMessage targeting", () => {
   it("addresses the app frame as the null origin", () => {
     const { container } = render(<McpAppHost html="<p>x</p>" toolName="t" />);
@@ -68,9 +48,7 @@ describe("McpAppHost postMessage targeting", () => {
     expect(frameWindow, "jsdom gave the frame no contentWindow to spy on").not.toBeNull();
 
     const posted: string[] = [];
-    // The component posts to the FRAME's window, not the host's — spying on
-    // `window.postMessage` captures nothing, which is how the first version of
-    // this test passed against a `"*"` targetOrigin.
+    // Spy on the frame's window: the component never posts to the host's.
     const spy = vi
       .spyOn(frameWindow!, "postMessage")
       .mockImplementation(((_msg: unknown, origin: string) => {
@@ -87,10 +65,7 @@ describe("McpAppHost postMessage targeting", () => {
 
     spy.mockRestore();
 
-    // Unconditional, and asserted BEFORE the origin check. A handshake that
-    // never reached the component would otherwise make every assertion below
-    // vacuously true — proven by mutation: with `if (posted.length > 0)`
-    // wrapping the loop, flipping the constant back to `"*"` still passed.
+    // Asserted first, or a handshake that never arrived would let the loop below pass vacuously.
     expect(posted.length, "the ui/initialize handshake produced no reply").toBeGreaterThan(0);
     for (const origin of posted) {
       expect(origin).toBe("null");

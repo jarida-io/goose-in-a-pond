@@ -1,27 +1,6 @@
 /**
- * The live chat turn, owned by the module rather than by a component.
- *
- * `GuiMode` renders sections through a `switch`, not a router, so pressing
- * anything in the sidebar UNMOUNTS `<Chat />`. While the turn driver lived
- * inside that component, every sidebar press threw away the transcript, the
- * queued follow-ups and the streaming bubble -- the stream itself kept running
- * and kept decoding tokens into `setMessages` calls on a dead component, which
- * React drops silently. So the answer arrived, was written to the database, and
- * was invisible to the person who asked for it.
- *
- * A turn is not a property of whichever screen happens to be showing. Its
- * lifetime is the window's, so it lives here, at module scope, and the screens
- * subscribe. Two of them do: the Chat section and the Hub's chat view, which
- * are two renderings of one conversation rather than two conversations.
- *
- * The shape -- a private `state` object, a `subs` set, `commit()`, and a hook
- * over `useSyncExternalStore` -- is the one `hub/state/hubDataStore.ts` and
- * `hubStore.ts` already use for state that has to outlive a view.
- *
- * Chosen over the app-wide reducer in `AppContext` for one measured reason:
- * `messages` changes once per token, and `AppContext` sits above `GuiMode`, so
- * every token would repaint the sidebar, the toasts and whatever section is
- * open. A store with its own snapshot repaints only what subscribed to it.
+ * The live chat turn, at module scope because `<Chat />` unmounts on every sidebar press.
+ * Not in the `AppContext` reducer: `messages` changes per token and would repaint the app.
  */
 
 import { useSyncExternalStore } from "react";
@@ -55,8 +34,7 @@ export interface Message {
   status?: string;
   cards?: ContextCardType[];
   thinkingBlocks?: string[];
-  /** Wall clock around the reasoning stream, so the disclosure can say how
-   *  long it took rather than showing an open-ended "Thinking…". */
+  /** Reasoning-stream wall clock, so the disclosure can say how long it took. */
   thinkingStartedAt?: number;
   thinkingEndedAt?: number;
   modelRole?: string;
@@ -66,23 +44,15 @@ export interface Message {
   historyToolNames?: string[];
   /** Set when the agent stopped on its turn budget — renders a Continue action. */
   turnLimit?: number;
-  /** PAI-4 P7b. Set when the turn's `context_warning` frame said the window is
-   *  filling — renders the pressure line and the "Compact now" control. */
+  /** From the turn's `context_warning` frame; renders the pressure line and "Compact now". */
   contextWarning?: ContextWarning;
-  /** PAI-6 P6. Delegations this turn started, folded from `subagent_progress`
-   *  frames. Rendered WHILE streaming, unlike every other note here: a tree
-   *  nobody sees until the turn ends is the spinner it replaces. */
+  /** Folded from `subagent_progress` frames; unlike the other notes, rendered while streaming. */
   delegations?: SubagentRun[];
-  /** Image preview URLs — either a live send's local previewUrl, or a
-   *  built `${apiBase}${url}` for images replayed from session history. */
+  /** A live send's local preview URLs, or attachment URLs for replayed history. */
   images?: string[];
-  /** The persisted session_messages.id this bubble corresponds to. Absent
-   *  for a just-sent live turn until the "done" event backfills it (see
-   *  `runTurn`) — copy/edit/refresh/like/dislike are disabled until then,
-   *  since they all act against this id. */
+  /** session_messages.id; unset on a live turn until `done` backfills it, disabling its actions. */
   backendId?: string;
-  /** Agent messages only: current like/dislike vote, mirrors the backend's
-   *  `liked` column. `null`/absent = no vote. */
+  /** Agent messages only; mirrors the backend `liked` column, `null`/absent = no vote. */
   liked?: boolean | null;
 }
 
@@ -118,12 +88,6 @@ function sessionMessagesToMessages(raw: SessionMessage[]): Message[] {
             tc.name.includes("__") ? tc.name.split("__").pop()! : tc.name,
           )
         : undefined;
-      // PAI-5 P6. The panel below already renders `thinkingBlocks` and is
-      // already gated on `!streaming`, which is exactly right for replayed
-      // history. All that was missing was the refill: before this, reasoning
-      // existed only for the lifetime of the SSE connection that produced it,
-      // so reloading a conversation showed every answer with the thinking that
-      // led to it silently gone.
       const thinkingBlocks = m.thinking?.length ? m.thinking : undefined;
       out.push({
         id: ++_msgId,
@@ -132,11 +96,6 @@ function sessionMessagesToMessages(raw: SessionMessage[]): Message[] {
         historyToolNames,
         images,
         thinkingBlocks,
-        // The persisted id and the vote ride the SAME row as the reasoning.
-        // Pushing them as a second entry renders every assistant turn twice on
-        // reload, which is what a keep-both merge of these two changes does if
-        // nobody looks — `Chat.test.tsx`'s PAI-5 replay tests caught it as
-        // "found multiple elements with the text".
         backendId: m.id,
         liked: m.liked ?? null,
       });
@@ -159,9 +118,7 @@ export interface ChatRunSnapshot {
   readonly messages: readonly Message[];
   readonly busy: boolean;
   readonly queued: readonly string[];
-  /** Reseeded per turn, so the working quip differs between turns but holds
-   *  still while one runs -- including across a remount, which is the whole
-   *  point of it living here. */
+  /** Reseeded per turn: the working quip changes between turns but holds across a remount. */
   readonly turnSeed: number;
   readonly loadingSession: boolean;
   readonly sessionId: string | undefined;
@@ -169,15 +126,7 @@ export interface ChatRunSnapshot {
   readonly completedTurns: number;
 }
 
-/**
- * The one seam between a module-scope driver and React.
- *
- * The driver cannot read app state or call `dispatch`; both belong to a mounted
- * provider. `AppContextProvider` installs this and keeps it current, for the
- * same reason the schedule listener lives there rather than in a section: a
- * turn started in Chat keeps arriving while you are looking at Devices, and its
- * `done` frame still has to reach the reducer.
- */
+/** App state and dispatch from `AppContextProvider`; the module-scope driver has neither. */
 export interface ChatRunBridge {
   readonly sessionToken: string | null;
   readonly serverOnline: boolean;
@@ -198,8 +147,7 @@ interface InternalState {
   completedTurns: number;
   /** Turns a mounted surface has actually shown. `hasLiveThread` is the gap. */
   acknowledgedTurns: number;
-  /** Bumped per run. Every write inside a stream loop checks it, so a
-   *  conversation switched mid-turn cannot be written into by the old turn. */
+  /** Bumped per run; writes check it, so an old turn can't write into a switched conversation. */
   runSeq: number;
   /** The `<think>` parser's carry bit, owned by whichever run is streaming. */
   inThinkBlock: boolean;
@@ -244,13 +192,7 @@ const state: InternalState = {
   subs: new Set(),
 };
 
-/**
- * Rebuild the snapshot once, then tell everyone.
- *
- * `useSyncExternalStore` compares snapshots by identity and throws if
- * `getSnapshot` returns a fresh object on every call, so the object is built
- * HERE, on mutation, and `getSnapshot` only hands back the field.
- */
+/** Snapshot built on mutation: `useSyncExternalStore` needs a stable `getSnapshot` result. */
 function commit(): void {
   state.snapshot = {
     messages: state.messages,
@@ -303,29 +245,13 @@ export function getChatRun(): ChatRunSnapshot {
 }
 
 /**
- * Should opening a chat surface land in the thread rather than on the wall?
- *
- * `Chat.tsx` argues at length that the wall, not the last conversation, is the
- * right landing, and that argument is about arriving with nothing in flight.
- * It does not cover arriving to find your own answer already written and never
- * seen -- that is not a choice about where to steer, it is the thing you came
- * back for. So exactly two conditions, and no timer: a timer would make where
- * you land depend on how long you were away, which is not something anyone can
- * predict from the outside.
- *
- * Both self-clear. Once a mounted surface has shown the finished turn it calls
- * `acknowledgeCompletion`, and the next visit is the wall again, as designed.
+ * Land in the thread, not the wall, while a turn runs or its answer is unseen. Both conditions
+ * self-clear via `acknowledgeCompletion`; deliberately no timer.
  */
 export function hasLiveThread(): boolean {
   if (state.busy) return true;
   if (state.completedTurns > state.acknowledgedTurns) return true;
-  // A pointer left behind by the last window, read synchronously.
-  //
-  // The timing is load-bearing: a surface decides which screen to open on while
-  // it is mounting, and `resumeActiveRun` cannot answer by then — it has a
-  // round trip to make. Without this the app lands on the wall and the turn it
-  // is about to resume into appears a second later behind it, which is the
-  // exact failure this whole change exists to remove.
+  // Read synchronously: surfaces pick a screen while mounting, before resumeActiveRun answers.
   return readRunPointer() !== null;
 }
 
@@ -339,25 +265,17 @@ export function acknowledgeCompletion(): void {
 
 export function setChatRunBridge(bridge: ChatRunBridge): () => void {
   state.bridge = bridge;
-  // A bridge arriving with the server up is also the signal that a queue held
-  // through an outage can move again -- see `drainQueue`.
+  // A bridge with the server up releases a queue held through an outage.
   drainQueue();
   return () => {
-    // Identity-checked: StrictMode runs mount, unmount, mount, so a blind clear
-    // here would null the bridge that the second mount had already installed.
+    // Identity check: under StrictMode a blind clear would null the second mount's bridge.
     if (state.bridge === bridge) state.bridge = null;
   };
 }
 
 // ── Object URLs ───────────────────────────────────────────────────────────────
 
-/**
- * Revoke previews this store created that no surviving message still shows.
- *
- * Never touches a URL from `api.sessionAttachmentUrl`: history images are
- * ordinary http URLs, and revoking one is a no-op that would still be a lie
- * about who owns what.
- */
+/** Revoke store-created previews no surviving message shows; never history (http) URLs. */
 function revokeOwnedPreviews(surviving: readonly Message[]): void {
   if (state.ownedPreviews.size === 0) return;
   const stillShown = new Set<string>();
@@ -375,19 +293,11 @@ function revokeOwnedPreviews(surviving: readonly Message[]): void {
 export interface SendTurn {
   text: string;
   images?: ImageAttachment[];
-  /** Composer preview object URLs. The store takes ownership of revoking them:
-   *  the bubble outlives the tray now, so the tray must not. */
+  /** Composer preview object URLs; the store revokes them, since the bubble outlives the tray. */
   previewUrls?: string[];
 }
 
-/**
- * Send, or queue if a reply is still streaming.
- *
- * The composer stays live throughout, so a thought does not have to wait for
- * the model. Attachments are deliberately NOT queued -- they belong to the turn
- * they were attached to, and silently re-binding them to a later message would
- * send an image with the wrong question.
- */
+/** Send, or queue while a reply streams. Attachments never queue: they belong to their turn. */
 export function sendTurn(turn: SendTurn): void {
   if (state.busy) {
     if (!turn.text) return;
@@ -398,18 +308,10 @@ export function sendTurn(turn: SendTurn): void {
   void runTurn(turn);
 }
 
-/**
- * Drain one queued message.
- *
- * Lives here rather than in an effect keyed on `busy`, which is where it used
- * to live: an effect belongs to a mounted component, so leaving Chat with two
- * follow-ups queued meant they were never sent. Reading `state.queued` at call
- * time also removes the stale-closure hazard that effect was written around.
- */
+/** Drain one queued message. Module-level, not an effect, so the queue survives leaving Chat. */
 function drainQueue(): void {
   if (state.busy || state.queued.length === 0) return;
-  // Held, never dropped. The bridge reinstalling with the server back up calls
-  // this again, so an outage delays the queue instead of eating it.
+  // Held, not dropped: the bridge reinstalling after an outage calls this again.
   if (!state.bridge?.serverOnline) return;
   const [next, ...rest] = state.queued;
   state.queued = rest;
@@ -417,14 +319,6 @@ function drainQueue(): void {
   void runTurn({ text: next });
 }
 
-/**
- * One turn's frames, whichever stream they arrive on.
- *
- * Extracted so that a turn STARTED here and a turn REATTACHED to after a reload
- * fold identically. Two copies of this would be two chances to disagree about
- * what a frame means, which is the same reason the Hub renders a projection of
- * one message model rather than keeping its own.
- */
 interface TurnCtx {
   /** True once the conversation has moved on and this run must stop writing. */
   stale: () => boolean;
@@ -432,6 +326,7 @@ interface TurnCtx {
   agentMsgId: number;
 }
 
+/** Folds one turn's frames, for started and reattached turns alike, so the two can't disagree. */
 async function consume(
   stream: AsyncGenerator<unknown>,
   ctx: TurnCtx,
@@ -440,19 +335,14 @@ async function consume(
     if (ctx.stale()) return;
     const ev = event as ChatEvent;
 
-    // Where this client has got to, so a reattach can ask for the rest and
-    // nothing arrives twice.
+    // Read position, so a reattach asks only for the rest.
     if (typeof ev.seq === "number") {
       state.lastSeq = ev.seq;
       rememberRun();
     }
 
     if (ev.type === "run_started") {
-      // The turn now has a name, and so does its conversation: the server mints
-      // the session id up front rather than at the end, so this is the first
-      // moment the client can know it. Adopting it here is what makes the
-      // pointer below writable at all -- waiting for `done` would mean a reload
-      // one second into a turn had nothing to come back to.
+      // The server mints the session id up front; adopting it now lets a reload mid-turn resume.
       state.runId = ev.run_id ?? null;
       state.epoch = ev.epoch ?? null;
       if (ev.session_id && !state.sessionId) {
@@ -464,15 +354,11 @@ async function consume(
       continue;
     }
     if (ev.type === "reattached" || ev.type === "cancelled") {
-      // Bookkeeping frames, not content. `cancelled` is followed by a `done`
-      // that carries `interrupted`, which is what the bubble reads.
+      // Bookkeeping only; `cancelled` is followed by a `done` carrying `interrupted`.
       continue;
     }
     if (ev.type === "replay_gap" || ev.type === "run_evicted") {
-      // The server cannot hand back what this client missed. Say so on the
-      // bubble rather than stitching a partial answer together and presenting
-      // it as whole -- and reload the session, which is authoritative for
-      // everything that actually committed.
+      // Missed frames can't be replayed; reload the session rather than show a partial answer.
       console.warn(
         "Chat run lost frames; reloading the conversation:",
         ev.type,
@@ -490,12 +376,7 @@ async function consume(
         mutate((prev) => {
           const last = prev[prev.length - 1];
           if (!last || last.role !== "agent") return prev;
-          // A bubble already showing an error is finished. The error arm
-          // OVERWRITES `text` while this one APPENDS to it, so text arriving
-          // after an error ran straight onto the end of the error sentence --
-          // "…missing providerI could not produce a response". The server sends
-          // these as two separate frames and deliberately keeps streaming past an
-          // error, so the honest rendering is two messages, not one string.
+          // The server streams on past an error: start a new bubble, don't append to the error.
           if (last.error) {
             return [
               ...prev,
@@ -513,9 +394,7 @@ async function consume(
       patchLastAgent((last) => ({
         ...last,
         thinkingBlocks: [...(last.thinkingBlocks ?? []), ev.content as string],
-        // First chunk opens the span; every chunk moves the close, so the
-        // duration is how long reasoning actually streamed rather than
-        // how long the whole turn took.
+        // First chunk opens the span, each chunk moves the close: reasoning time, not turn time.
         thinkingStartedAt: last.thinkingStartedAt ?? now,
         thinkingEndedAt: now,
       }));
@@ -590,11 +469,8 @@ async function consume(
           completionTokens: ev.usage?.completion_tokens ?? 0,
         });
       }
-      // The stream never carries the persisted message ids, so copy/edit/
-      // refresh/like/dislike (which all act on a real backend id) have
-      // nothing to target yet. Fetch the small tail of the session and
-      // match by id, not array position — same reasoning as turn_stats
-      // below, a session switch mid-fetch must not misattribute this.
+      // The stream carries no persisted ids, which the message actions need: fetch the session tail
+      // and attach by local id, so a mid-fetch session switch can't misattribute them.
       const doneSessionId = ev.session_id;
       const forUser = ctx.userMsgId;
       const forAgent = ctx.agentMsgId;
@@ -623,14 +499,11 @@ async function consume(
             }),
           );
         } catch {
-          // Non-fatal: the turn already rendered; only the action icons
-          // stay disabled until the next successful history load.
+          // Non-fatal: only the action icons stay disabled until the next history load.
         }
       })();
     } else if (ev.type === "turn_stats") {
-      // Attach by id, not array position — a mid-stream session switch
-      // replaces `messages` with another conversation's history, and the
-      // stats must never land on one of those messages.
+      // By id, not position: a mid-stream session switch replaces `messages` with another history.
       const stats = ev as unknown as TurnStats;
       mutate((prev) =>
         prev.map((m) =>
@@ -638,10 +511,7 @@ async function consume(
         ),
       );
     } else if (ev.type === "turn_limit_reached") {
-      // The agent ran out of turns rather than finishing. Mark the message
-      // (by id, same reasoning as turn_stats) so it offers a Continue action
-      // instead of leaving the backend's "would you like me to continue?"
-      // as a question nothing can answer.
+      // Out of turns, not finished: mark it (by id) so it offers a Continue action.
       const limit = ev.max_turns ?? 0;
       mutate((prev) =>
         prev.map((m) =>
@@ -649,9 +519,7 @@ async function consume(
         ),
       );
     } else if (ev.type === "subagent_progress") {
-      // PAI-6 P6. Attach by id — same reasoning as turn_stats — and fold
-      // through the one shared reducer, so this surface and the hub cannot
-      // disagree about what a frame means.
+      // By id; folded through the shared reducer so this surface and the hub agree.
       mutate((prev) =>
         prev.map((m) =>
           m.id === ctx.agentMsgId
@@ -663,9 +531,7 @@ async function consume(
         ),
       );
     } else if (ev.type === "context_warning") {
-      // PAI-4 P7b. The window is filling. Attach by id — same reasoning as
-      // turn_stats and turn_limit_reached — so the note lands on this turn
-      // and not on whatever message a mid-stream session switch left last.
+      // The context window is filling; attach by id, like turn_stats.
       const cw = ev as unknown as ContextWarning;
       mutate((prev) =>
         prev.map((m) =>
@@ -681,8 +547,7 @@ async function runTurn(turn: SendTurn): Promise<void> {
   const images = turn.images ?? [];
   if (!text && images.length === 0) return;
 
-  // Claimed synchronously, before the first await, so two sends in one tick
-  // cannot both start a run.
+  // Claimed before the first await, so two sends in one tick can't both start a run.
   state.busy = true;
   state.turnSeed = Date.now();
   state.inThinkBlock = false;
@@ -727,17 +592,14 @@ async function runTurn(turn: SendTurn): Promise<void> {
         token ?? undefined,
         undefined,
         images,
-        // Ask the server to keep going if this window goes away. Everything
-        // below -- remembering the run, reattaching on the way back -- is only
-        // reachable because of this flag.
+        // Resumable: the run outlives this window, which the reattach path depends on.
         true,
       ),
       ctx,
     );
   } catch (e) {
     if (stale()) return;
-    // Loud on the console as well as in the bubble: with no surface mounted the
-    // bubble is the only record, and it is not read until someone comes back.
+    // Also logged: with no surface mounted, the bubble goes unread.
     console.warn("Chat turn failed:", e);
     patchLastAgent((last) => ({
       ...last,
@@ -755,8 +617,7 @@ async function runTurn(turn: SendTurn): Promise<void> {
       state.busy = false;
       state.completedTurns += 1;
       commit();
-      // A microtask, so a run that rejects before its first await cannot
-      // recurse straight back into itself on this stack.
+      // Microtask, so a run rejecting before its first await can't recurse on this stack.
       queueMicrotask(drainQueue);
     }
   }
@@ -764,14 +625,7 @@ async function runTurn(turn: SendTurn): Promise<void> {
 
 // ── Surviving a reload ────────────────────────────────────────────────────────
 
-/**
- * Where the run pointer is kept between page loads.
- *
- * `localStorage` and not the store, obviously — the store dies with the window,
- * which is the case this exists for. It holds no conversation content, only
- * enough to ask the server what it is still doing: the session, the run, the
- * server process that run belongs to, and how far this client had read.
- */
+/** localStorage key for the run pointer: no content, only enough to ask what's still running. */
 const RUN_POINTER_KEY = "giap-chat-run";
 
 interface RunPointer {
@@ -792,8 +646,7 @@ function rememberRun(): void {
   try {
     localStorage.setItem(RUN_POINTER_KEY, JSON.stringify(pointer));
   } catch {
-    // Private browsing, or storage disabled. Losing the pointer costs a resume,
-    // not a turn — the answer is still persisted server-side either way.
+    // Storage unavailable: losing the pointer costs a resume, not the answer.
   }
 }
 
@@ -818,15 +671,8 @@ function readRunPointer(): RunPointer | null {
 }
 
 /**
- * Pick up a turn this window was never around for.
- *
- * The reload story, end to end. The store died with the last window, so the
- * transcript comes from the session's persisted messages and the turn in flight
- * comes from the run's own replay — the one part the database cannot answer,
- * because an assistant turn is only written once it finishes.
- *
- * Returns whether anything was resumed. Every failure is quiet and ends in the
- * same place: no run, and a conversation the user can still read.
+ * Reattach to a turn started by a previous window: history from the DB, the in-flight answer
+ * from the run's replay. Resolves whether anything resumed; failures are quiet.
  */
 export async function resumeActiveRun(): Promise<boolean> {
   const pointer = readRunPointer();
@@ -841,11 +687,7 @@ export async function resumeActiveRun(): Promise<boolean> {
     return false;
   }
 
-  // Gone, or gone with the process that owned it. Either way the pointer is
-  // stale and the persisted messages are the whole truth — but the conversation
-  // still opens, because the person was just in it and `hasLiveThread` has
-  // already sent the surface to the thread on the strength of that pointer.
-  // Landing them in an empty one would be worse than the wall they were spared.
+  // Run gone: the pointer is stale, but still open the thread `hasLiveThread` already chose.
   if (
     !active ||
     active.run_id !== pointer.runId ||
@@ -858,9 +700,7 @@ export async function resumeActiveRun(): Promise<boolean> {
     return false;
   }
   if (active.state !== "running") {
-    // It finished while nothing was here to see it. The answer is in the
-    // database by now, so there is nothing to tail — but the thread should
-    // still open on it rather than on the wall.
+    // Finished unseen: the answer is persisted, so just open the thread on it.
     forgetRun();
     await openSession(pointer.sessionId);
     state.completedTurns += 1;
@@ -868,8 +708,7 @@ export async function resumeActiveRun(): Promise<boolean> {
     return true;
   }
 
-  // Everything committed so far, which is the user's question and every turn
-  // before this one. The answer being written right now is not in here yet.
+  // Committed history, including the question; the in-flight answer isn't persisted yet.
   await openSession(pointer.sessionId);
 
   const runId = ++state.runSeq;
@@ -881,8 +720,7 @@ export async function resumeActiveRun(): Promise<boolean> {
   state.epoch = pointer.epoch;
   state.lastSeq = pointer.lastSeq;
 
-  // A bubble for the answer in progress. The user's half is already on screen
-  // from the history load above, so only the agent's is added here.
+  // Only the agent bubble: the question came with the history above.
   const agentMsg: Message = {
     id: ++_msgId,
     role: "agent",
@@ -902,9 +740,7 @@ export async function resumeActiveRun(): Promise<boolean> {
   try {
     const token = state.bridge?.sessionToken ?? null;
     api.setToken(token);
-    // From where this client had actually read, not from the beginning: the
-    // frames before that are already on screen from a previous window, and
-    // replaying them would write the answer out twice.
+    // From lastSeq, not 0, so frames the last window already read are not replayed.
     await consume(
       api.reattachRun(
         pointer.runId,
@@ -941,21 +777,8 @@ export async function resumeActiveRun(): Promise<boolean> {
 }
 
 /**
- * Let go of the run this window is driving, and stop it server-side.
- *
- * Bumping `runSeq` alone only stops us *writing* the frames down -- the run is
- * `Detached`, so the model keeps generating to completion for nobody. Measured
- * against a live pond: a client that left at frame 2 had its run finish at
- * frame 664, seventy-three seconds later, and post-turn memory extraction then
- * opened a further provider call on the same single-slot engine.
- *
- * Deliberately leaving a turn is not the case `resumable` exists for. That case
- * is the window going away with the turn still running, which is unchanged:
- * nothing here runs on unload, so a closed window still comes back to a
- * finished answer.
- *
- * Fire-and-forget: navigation must not wait on the network, and a stop the user
- * asked for should not look like it failed because the request did.
+ * Forget the run and cancel it server-side: a detached run otherwise generates to completion
+ * for nobody. Fire-and-forget; not called on unload, so a closed window can still resume.
  */
 function stopServerRun(): void {
   const runId = state.runId;
@@ -966,14 +789,7 @@ function stopServerRun(): void {
   });
 }
 
-/**
- * Stop the turn on purpose.
- *
- * The only way now: a detached run does not end because its reader left, so
- * closing the window or navigating away is no longer a cancel. Local state is
- * cleared regardless of what the server says, because a stop the user asked for
- * should not appear to have failed on a network error.
- */
+/** The only cancel: a detached run outlives its reader. Local state clears even if this fails. */
 export async function abortRun(): Promise<void> {
   const runId = state.runId;
   state.runSeq += 1;
@@ -999,16 +815,8 @@ function replaceMessages(next: Message[]): void {
 }
 
 /**
- * Open one conversation, replaying its persisted history.
- *
- * `stopCurrentRun` is the difference between *leaving* a turn and merely
- * *re-reading* one, and it defaults to off because three of this function's
- * four callers are the latter: `resumeActiveRun` uses it to lay down the
- * history before it reattaches, and the `replay_gap` / `run_evicted` arm uses
- * it to reload a conversation whose run is still generating. Cancelling from
- * in here would have aborted the very run those paths exist to recover.
- *
- * Only the wall's "open this conversation" passes `true`.
+ * Open a conversation from its persisted history. `stopCurrentRun` is for leaving a turn; resume
+ * and replay-gap recovery only re-read, so it defaults off (only the wall passes `true`).
  */
 export async function openSession(
   sessionId: string,
@@ -1034,13 +842,8 @@ export async function openSession(
 }
 
 /**
- * Follow a session id someone else set -- a deep link, or the `session-created`
- * event `AppContext` listens for.
- *
- * Bails when the id already matches, because the driver sets it on `done` and
- * the resulting dispatch must not reload history over the live stream. Bails
- * while busy for the same reason from the other direction: that listener is a
- * second writer, and a running turn is not its to replace.
+ * Follow a session id set elsewhere (deep link, `session-created`). No-op when it already
+ * matches (the driver set it on `done`) or while a turn runs.
  */
 export async function followExternalSession(sessionId: string): Promise<void> {
   if (sessionId === state.sessionId) return;
@@ -1058,7 +861,7 @@ export async function followExternalSession(sessionId: string): Promise<void> {
 /** New chat: stop the run, drop the queue, clear the transcript. */
 export function resetConversation(): void {
   state.runSeq += 1;
-  stopServerRun(); // what this function's doc comment has always claimed to do
+  stopServerRun();
   state.busy = false;
   state.queued = [];
   state.sessionId = undefined;
@@ -1089,11 +892,7 @@ export function patchMessage(
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-/**
- * Module state outlives a test file's `render`/`cleanup`, so every suite that
- * touches chat has to start from a known one. Same contract as
- * `__resetHubDataForTests`.
- */
+/** Resets module state, which outlives a test file's render/cleanup. */
 export function __resetChatRunForTests(): void {
   state.messages = [];
   state.busy = false;

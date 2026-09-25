@@ -1,23 +1,5 @@
-// ────────────────────────────────────────────────────────────
-// What is on Home, and in what order — decided by the household.
-//
-// Home was pared back on purpose: the room pills, camera strip, routines row,
-// to-do widget and category dock were removed because together they made a
-// screen you read rather than glanced at. Both `hub/views/Home.tsx` and
-// `sections/Dashboard.tsx` say so in their headers.
-//
-// This does not put them back. The DEFAULT is exactly the screen that decision
-// produced — devices, weather, music, and the one suggestion that asks. What
-// changes is that a household with four cameras and no music can say so,
-// instead of every household getting the same compromise. The question moves
-// from "what belongs on Home" to "what belongs on YOUR Home", which is a
-// question only the household can answer and a cheaper one to get right.
-//
-// Persisted to localStorage rather than the settings table on purpose. It is a
-// per-panel preference — the kitchen screen and the study screen are looking at
-// the same pond and reasonably want different Homes — and `giap-section` next
-// to it already works this way.
-// ────────────────────────────────────────────────────────────
+// Which cards Home shows, in what order, chosen by the household. In localStorage rather than
+// the settings table: it is per panel, and two panels on one pond may want different Homes.
 
 import { useSyncExternalStore } from "react";
 
@@ -38,20 +20,11 @@ export interface CardSpec {
   title: string;
   /** One line, shown while editing, saying what the card is for. */
   hint: string;
-  /**
-   * Columns the card wants on a wide grid. Devices earn two because a row of
-   * one tile is not a glance; everything else says its piece in one.
-   */
+  /** Columns on a wide grid; devices take two because a one-tile row is not a glance. */
   span: 1 | 2;
 }
 
-/**
- * The catalogue, in the order the edit sheet lists them.
- *
- * Every entry is backed by a real slice of `HomeData` — nothing here is a
- * placeholder for data the pond does not have, which is the same rule the
- * interface follows (DESIGN.md §3, "never invent meaning the data lacks").
- */
+/** The catalogue, in edit-sheet order; every entry is backed by real `HomeData` (DESIGN.md §3). */
 export const CARDS: readonly CardSpec[] = [
   { id: "suggestion", title: "Suggestion", hint: "The one thing asking for you", span: 2 },
   { id: "devices", title: "Devices", hint: "Lights, locks, plugs and thermostats", span: 2 },
@@ -68,17 +41,11 @@ const CARD_IDS = new Set<string>(CARDS.map((c) => c.id));
 export interface DashboardLayout {
   /** Visible cards, in display order. */
   order: CardId[];
-  /** Everything the household has switched off. Kept so the edit sheet can offer them back. */
+  /** Switched-off cards, kept so the edit sheet can offer them back. */
   hidden: CardId[];
 }
 
-/**
- * Today's Home, exactly.
- *
- * Changing this changes what a household sees on first run and after a reset,
- * so it is the one place the pared-back decision still lives. Adding a card
- * here is a product decision; adding one in the edit sheet is theirs.
- */
+/** First-run and post-reset Home; adding a card here is a product decision. */
 export const DEFAULT_LAYOUT: DashboardLayout = {
   order: ["suggestion", "devices", "weather", "nowPlaying"],
   hidden: ["scenes", "cameras", "routines", "todos"],
@@ -94,16 +61,7 @@ function emit(): void {
   for (const s of subs) s();
 }
 
-/**
- * Read the stored layout, repairing anything that no longer makes sense.
- *
- * A stored layout outlives the release that wrote it: a card can be removed
- * from the catalogue, or added to it, between one launch and the next. Rather
- * than versioning the payload, every read is reconciled against `CARDS` —
- * unknown ids are dropped and cards the household has never seen are added to
- * `hidden`, so a new card appears in the edit sheet as something they may turn
- * on rather than appearing on their Home unannounced.
- */
+/** Stored layout reconciled with `CARDS`: unknown ids dropped, cards added since go to `hidden`. */
 function read(): DashboardLayout {
   let stored: unknown;
   try {
@@ -111,8 +69,7 @@ function read(): DashboardLayout {
     if (!raw) return DEFAULT_LAYOUT;
     stored = JSON.parse(raw);
   } catch {
-    // Unreadable or unavailable storage (a private window, a wiped panel) is
-    // not an error worth surfacing — it means "no preference expressed yet".
+    // Unavailable storage (private window, wiped panel) just means no preference yet.
     return DEFAULT_LAYOUT;
   }
 
@@ -129,9 +86,7 @@ function read(): DashboardLayout {
   const seen = new Set<CardId>([...order, ...hidden]);
   const unseen = CARDS.map((c) => c.id).filter((id) => !seen.has(id));
 
-  // An empty Home is a broken Home, not a preference. Someone who hides
-  // everything gets the default back rather than a blank panel with no way
-  // into the edit sheet except memory.
+  // An empty Home has no way back to the edit sheet, so it gets the default instead.
   if (order.length === 0) return DEFAULT_LAYOUT;
 
   return { order, hidden: [...hidden, ...unseen] };
@@ -146,8 +101,7 @@ function write(next: DashboardLayout): void {
   try {
     localStorage.setItem(KEY, JSON.stringify(next));
   } catch {
-    // The arrangement still applies for this session; it just will not survive
-    // a reload. Losing the preference is better than losing the interaction.
+    // Still applies for this session; it just won't survive a reload.
   }
   emit();
 }
@@ -190,20 +144,12 @@ export function hideCard(id: CardId): void {
   const l = ensureLoaded();
   if (!l.order.includes(id)) return;
   const order = l.order.filter((o) => o !== id);
-  // Refuse to empty the screen. The last card stays, because a Home with
-  // nothing on it also has no way back to the sheet that would fix it.
+  // The last card stays: an empty Home has no way back to the edit sheet.
   if (order.length === 0) return;
   write({ order, hidden: [...l.hidden, id] });
 }
 
-/**
- * Move a card one place, in `delta` direction.
- *
- * Explicit moves rather than drag alone: a drag is unusable from a keyboard and
- * awkward with a thumb on a 480px-tall panel, and DESIGN.md §6 makes keyboard
- * operability a floor rather than an enhancement. Drag can be added over this
- * later; it cannot replace it.
- */
+/** Move a card one place; explicit moves keep reordering keyboard-operable (DESIGN.md §6). */
 export function moveCard(id: CardId, delta: -1 | 1): void {
   const l = ensureLoaded();
   const from = l.order.indexOf(id);

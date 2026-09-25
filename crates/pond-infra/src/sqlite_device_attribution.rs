@@ -1,14 +1,4 @@
-//! SQLite-backed [`DeviceAttribution`] -- PAI-1's device-to-profile rung.
-//!
-//! Reads and writes `devices.profile_id` (migration `0043_device_profile.sql`)
-//! and joins it to `push_tokens` for the delivery direction PAI-7 section 3.4
-//! needs.
-//!
-//! Nothing constructs this yet. See the phase stamp in
-//! `docs/architecture/pai/01-identity-and-profile-boundaries.md` and the
-//! `device_profile_rung_is_not_wired_yet` guard in
-//! `crates/pond-infra/tests/`, which fails the day it is wired and forces that
-//! stamp to be rewritten.
+//! SQLite-backed [`DeviceAttribution`]: `devices.profile_id`, joined to `push_tokens`.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -38,9 +28,7 @@ impl DeviceAttribution for SqliteDeviceAttribution {
         .execute(&self.pool)
         .await?;
         if result.rows_affected() == 0 {
-            // A write that matched nothing is how an unwired feature looks
-            // exactly like a working one. The caller asked to attribute a
-            // device that is not registered; say so.
+            // A zero-row write would otherwise look like success.
             return Err(anyhow!("no registered device with id {device_id:?}"));
         }
         Ok(())
@@ -52,17 +40,13 @@ impl DeviceAttribution for SqliteDeviceAttribution {
                 .bind(device_id)
                 .fetch_optional(&self.pool)
                 .await?;
-        // Both "no such device" and "device with no member" answer `None`, and
-        // that is correct for this port's one consumer: the resolver's
-        // paired-device rung treats either as "I do not know" and falls through.
+        // No device and no member both answer `None`; the resolver treats either as unknown.
         Ok(row.flatten())
     }
 
     async fn devices_for_profile(&self, profile_id: &str) -> Result<Vec<String>> {
         let profile_id = checked_profile_id(profile_id)?;
-        // `profile_id = ?` and nothing else. An unattributed device has NULL
-        // here and SQLite's NULL never equals a bound value, so the delivery
-        // set cannot silently acquire the household's shared screens.
+        // NULL never equals a bound value, so unattributed (shared) devices stay out.
         let ids: Vec<(String,)> = sqlx::query_as(
             "SELECT id FROM devices WHERE profile_id = ? ORDER BY created_at DESC, id",
         )
@@ -110,8 +94,7 @@ mod tests {
         _tmp: TempDir,
     }
 
-    /// Two members, three devices, three push tokens. Nothing is attributed --
-    /// which is the state every existing pond is in after migration 0043.
+    /// Fixture with nothing attributed, as on every pond after migration 0043.
     async fn fixture() -> Fixture {
         let tmp = TempDir::new().unwrap();
         let db = Database::init(tmp.path()).await.unwrap();
@@ -177,8 +160,6 @@ mod tests {
         );
     }
 
-    /// The whole point of the rung, in one assertion: profile -> devices ->
-    /// push tokens, and it stops at the member's own devices.
     #[tokio::test]
     async fn a_profile_can_be_asked_for_its_devices_and_their_push_tokens() {
         let f = fixture().await;
@@ -202,9 +183,7 @@ mod tests {
         );
         assert_eq!(tokens[0].platform, PushPlatform::Expo);
 
-        // The vacuity control: the fixture really does hold the rows this test
-        // is claiming are excluded. Without this, an empty database would pass
-        // every assertion above.
+        // Vacuity control: the excluded rows really exist.
         let all: (i64,) = sqlx::query_as("SELECT count(*) FROM push_tokens")
             .fetch_one(&f.pool)
             .await
@@ -212,10 +191,6 @@ mod tests {
         assert_eq!(all.0, 3, "fixture must hold three tokens to exclude two");
     }
 
-    /// The decision this rung turns on. An unattributed device is nobody's, and
-    /// a targeted delivery must not reach it -- "deliver to nobody" and
-    /// "deliver to everybody" are very different failures, and only one of them
-    /// discloses a member's proposal to the household.
     #[tokio::test]
     async fn an_unattributed_device_belongs_to_nobody_not_to_everybody() {
         let f = fixture().await;
@@ -251,9 +226,6 @@ mod tests {
             .is_empty());
     }
 
-    /// PAI-1 P2's lesson, applied to a new foreign key: removing a household
-    /// member must not fail because they owned a phone, and must not leave that
-    /// phone pointing at a ghost.
     #[tokio::test]
     async fn deleting_a_member_releases_their_devices_and_keeps_the_phone_working() {
         let f = fixture().await;

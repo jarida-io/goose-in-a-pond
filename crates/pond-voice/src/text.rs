@@ -1,27 +1,8 @@
 //! Turning model output into speakable text.
 //!
-//! Everything here is pure: `&str` in, `String` out, no I/O, no async, no
-//! framework types. That is what lets it live in a leaf crate anything can
-//! depend on without inheriting a runtime.
-//!
-//! Before this crate the same logic existed in FOUR places: here (as private
-//! helpers inside `ChatService`), a 981-line verbatim Rust port in the Tauri
-//! desktop shell, and two TypeScript copies under `pond-desktop/src/`. Any fix
-//! had to be applied four times or the surfaces drifted. The Rust port went
-//! with the shell in the Electron migration; the TypeScript copies remain, and
-//! carry parity comments back to here.
-//!
-//! Moved verbatim from `pond-core/src/shared/services/chat.rs:144-1067` with
-//! its tests. Items are `pub` only because they now cross a crate boundary;
-//! the bodies are unchanged.
+//! TypeScript ports of these functions live under `pond-desktop/src/`; keep them in step.
 
-/// Split completed sentences out of a text buffer.
-///
-/// Sentence boundaries: `.`, `?`, `!` followed by whitespace or end-of-string,
-/// and bare newlines. Forces a flush at 250 characters to handle code blocks
-/// or long lists without sentence punctuation.
-///
-/// Returns `(sentences_to_speak, remaining_buffer)`.
+/// Split completed sentences out of a buffer, returning `(sentences, remainder)`.
 pub fn split_sentences(text: &str) -> (Vec<String>, String) {
     const MAX_BUF: usize = 250;
     let mut sentences: Vec<String> = Vec::with_capacity(8);
@@ -52,7 +33,6 @@ pub fn split_sentences(text: &str) -> (Vec<String>, String) {
                     break;
                 }
             } else if *ch == '\n' {
-                // Newline is its own boundary
                 let chunk = remainder[..*i].trim().to_string();
                 if !chunk.is_empty() {
                     sentences.push(chunk);
@@ -60,7 +40,7 @@ pub fn split_sentences(text: &str) -> (Vec<String>, String) {
                 let next = i + 1;
                 remainder = remainder[next..].to_string();
                 found = true;
-                let _ = idx; // suppress unused warning
+                let _ = idx;
                 break;
             }
         }
@@ -73,20 +53,9 @@ pub fn split_sentences(text: &str) -> (Vec<String>, String) {
     (sentences, remainder)
 }
 
-/// Convert a markdown string to plain text suitable for TTS.
+/// Convert markdown to plain text for TTS, then apply `normalize_for_speech`.
 ///
-/// Handles:
-/// - Code fences (``` / ~~~) — block skipped entirely
-/// - Inline code (`…`) — backticks removed, content kept
-/// - Bold / italic (`**`, `__`, `*`, `_`) — markers removed
-/// - Headers (`#`, `##`, …) — `#` stripped, text kept
-/// - Blockquotes (`> `) — `>` stripped, text kept
-/// - Unordered lists (`- `, `* `, `+ `) — marker stripped, text kept
-/// - Ordered lists (`1. `, `2. `, …) — marker stripped, text kept
-/// - Horizontal rules (`---`, `***`, `___`) — line dropped
-/// - Links (`[text](url)`) — url dropped, text kept
-/// - Images (`![alt](url)`) — dropped entirely
-/// - Strikethrough (`~~…~~`) — markers removed
+/// Drops code blocks, images, link URLs and horizontal rules; other markup keeps its text.
 pub fn strip_markdown_for_speech(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut in_code_fence = false;
@@ -108,7 +77,6 @@ pub fn strip_markdown_for_speech(text: &str) -> String {
             continue;
         }
 
-        // Strip structural prefix then inline markers
         let content = strip_line_prefix(trimmed);
         let content = strip_inline_md(content);
         let content = content.trim().to_string();
@@ -234,8 +202,7 @@ pub fn strip_inline_md(s: &str) -> String {
     out
 }
 
-/// Find a `[text](url)` link starting at `start` (which points to `[`).
-/// Returns `(end_index, link_text)` where `end_index` is one past the closing `)`.
+/// Parse a `[text](url)` link at `start`; returns `(end, text)`, `end` one past the `)`.
 pub fn find_link(chars: &[char], start: usize) -> Option<(usize, String)> {
     if chars.get(start) != Some(&'[') {
         return None;
@@ -260,7 +227,6 @@ pub fn find_link(chars: &[char], start: usize) -> Option<(usize, String)> {
         return None;
     }
     let text_end = j; // index of `]`
-                      // Must be followed by `(`
     if chars.get(j + 1) != Some(&'(') {
         return None;
     }
@@ -282,8 +248,7 @@ pub fn find_link(chars: &[char], start: usize) -> Option<(usize, String)> {
     Some((k, link_text))
 }
 
-/// Find the closing occurrence of `marker` in `chars` starting at `start`.
-/// Returns the index where the marker begins (not one-past-end).
+/// Find the closing `marker` from `start`; returns where it begins, not one past its end.
 pub fn find_marker_close(chars: &[char], start: usize, marker: &[char]) -> Option<usize> {
     let mlen = marker.len();
     let limit = chars.len().saturating_sub(mlen - 1);
@@ -297,7 +262,7 @@ pub fn find_marker_close(chars: &[char], start: usize, marker: &[char]) -> Optio
 
 // ── Lookup tables for TTS normalization ──────────────────────────────────────
 
-/// Unit suffixes matched after a number. Sorted longest-first for greedy matching.
+/// Unit suffixes matched after a number. First match wins: a unit must precede its prefixes.
 pub const UNIT_SUFFIXES: &[(&str, &str)] = &[
     // ── Compound / slash units ──
     ("km/h", " kilometers per hour"),
@@ -406,7 +371,7 @@ pub const UNIT_SUFFIXES: &[(&str, &str)] = &[
     ("gal", " gallons"),
     ("qt", " quarts"),
     ("pt", " pints"),
-    // ── Single-char units (last — shortest match) ──
+    // ── Short units (last: shortest match) ──
     ("Hz", " hertz"),
     ("Pa", " pascals"),
     ("W", " watts"),
@@ -485,8 +450,7 @@ pub const STANDALONE_SYMBOLS: &[(char, &str)] = &[
     ('—', ", "),
 ];
 
-/// Convert symbols and abbreviations to their spoken equivalents so that
-/// TTS engines (Piper, etc.) pronounce them correctly.
+/// Convert symbols and abbreviations to spoken words so TTS pronounces them.
 pub fn normalize_for_speech(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let len = chars.len();
@@ -558,17 +522,14 @@ pub fn normalize_for_speech(text: &str) -> String {
 
         // ── Period / dot — context-dependent ────────────────────────────────────
         if ch == '.' {
-            // Between digits: "3.14" → "3 point 14"
-            // BUT keep as decimal when followed by a unit suffix (3.5GHz → "3.5 gigahertz")
+            // "3.14" → "3 point 14", unless a unit follows: "3.5GHz" → "3.5 gigahertz".
             let prev_digit = i > 0 && chars[i - 1].is_ascii_digit();
             let next_digit = chars.get(i + 1).map_or(false, |c| c.is_ascii_digit());
             if prev_digit && next_digit {
-                // Peek ahead: find the end of the digit run after the dot
                 let mut j = i + 1;
                 while j < len && chars[j].is_ascii_digit() {
                     j += 1;
                 }
-                // If a unit suffix follows the digits, keep the dot as-is (decimal)
                 let has_unit = try_read_unit_suffix(&chars, j).is_some();
                 if has_unit {
                     out.push(ch);
@@ -664,11 +625,7 @@ pub fn normalize_for_speech(text: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Try to match a unit suffix at position `i` (immediately after a number ended).
-/// Allows one optional space between number and unit: "5kg" and "5 kg" both match.
-/// Rejects if the char after the suffix is alphabetic (prevents "5mining" → "5 minutes").
-/// Common abbreviations with periods — matched case-insensitively.
-/// (abbreviation_lowercase, expansion, char_length_including_dots)
+/// Abbreviations with periods, matched case-insensitively; keys must be lowercase.
 pub const ABBREVIATIONS: &[(&str, &str)] = &[
     ("e.g.", "for example"),
     ("i.e.", "that is"),
@@ -716,12 +673,9 @@ pub const ABBREVIATIONS: &[(&str, &str)] = &[
     ("dec.", "December"),
 ];
 
-/// Try to match a common abbreviation starting at position `i`.
-/// `i` must be at a word boundary (start-of-string or after whitespace/punctuation).
-/// Returns `(expansion, total_chars_consumed)`.
+/// Expand an abbreviation starting a word at `i`, returning `(expansion, chars_consumed)`.
 pub fn try_read_abbreviation(chars: &[char], i: usize) -> Option<(String, usize)> {
     let len = chars.len();
-    // Must be at a word boundary
     let at_boundary = i == 0
         || chars[i - 1].is_whitespace()
         || matches!(chars[i - 1], '(' | ',' | '"' | '\'' | '[');
@@ -729,7 +683,7 @@ pub fn try_read_abbreviation(chars: &[char], i: usize) -> Option<(String, usize)
         return None;
     }
 
-    // Build a lowercase window from position i (up to 10 chars)
+    // 10 must cover the longest abbreviation.
     let window_end = (i + 10).min(len);
     let window: String = chars[i..window_end]
         .iter()
@@ -745,6 +699,7 @@ pub fn try_read_abbreviation(chars: &[char], i: usize) -> Option<(String, usize)
     None
 }
 
+/// Match a unit suffix just after a number at `i`, allowing one space ("5 kg").
 pub fn try_read_unit_suffix(chars: &[char], i: usize) -> Option<(String, usize)> {
     let len = chars.len();
     let (unit_start, space_consumed) = if i < len && chars[i] == ' ' {
@@ -782,16 +737,14 @@ pub fn try_read_unit_suffix(chars: &[char], i: usize) -> Option<(String, usize)>
     None
 }
 
-/// Scan a number (digits, optional single `.` for decimals) starting at `start`.
-/// Returns `(number_string, chars_consumed)`.  Returns `("", 0)` if no digit found.
+/// Scan a decimal number at `start`, returning `(text, chars_consumed)`; `("", 0)` if none.
 pub fn read_number(chars: &[char], start: usize) -> (String, usize) {
     let mut j = start;
     while j < chars.len() && chars[j].is_ascii_digit() {
         j += 1;
     }
-    // Optional decimal part
     if chars.get(j) == Some(&'.') && chars.get(j + 1).map_or(false, |c| c.is_ascii_digit()) {
-        j += 1; // consume '.'
+        j += 1;
         while j < chars.len() && chars[j].is_ascii_digit() {
             j += 1;
         }
@@ -803,14 +756,7 @@ pub fn read_number(chars: &[char], start: usize) -> (String, usize) {
     (s, j - start)
 }
 
-/// Try to parse a time expression at position `start` in `chars`.
-///
-/// Recognises:
-/// - `H:MM am/pm`  e.g. `3:45pm`  → "3 45 PM"
-/// - `HH:MM`       e.g. `15:30`   → "15 30"
-/// - `H am/pm`     e.g. `9am`     → "9 AM"
-///
-/// Returns `Some((spoken, chars_consumed))` on success, `None` otherwise.
+/// Parse a time like `3:45pm`, `15:30` or `9am` at `start`, returning `(spoken, consumed)`.
 pub fn try_read_time(chars: &[char], start: usize) -> Option<(String, usize)> {
     let len = chars.len();
     let mut j = start;
@@ -871,8 +817,7 @@ pub fn try_read_time(chars: &[char], start: usize) -> Option<(String, usize)> {
         None
     };
 
-    // Require at least one of: `:MM` or `am/pm`.
-    // A bare `3` with nothing after is not a time.
+    // A bare number is not a time: require `:MM` or `am/pm`.
     if minute_str.is_none() && ampm.is_none() {
         return None;
     }
@@ -899,38 +844,25 @@ pub fn try_read_time(chars: &[char], start: usize) -> Option<(String, usize)> {
     Some((spoken, j - start))
 }
 
-/// Strip `<think>…</think>` reasoning blocks from a streaming text chunk.
-///
-/// Models like Qwen3/QwQ/DeepSeek-R1 emit reasoning inside `<think>` tags before
-/// their actual answer.  TTS should skip that content; only the visible answer
-/// should be spoken.
-///
-/// `in_block` is the carry-over state from the previous chunk (we may be in the
-/// middle of a block that started in an earlier event).
-///
-/// Returns `(visible_text, updated_in_block)`.
+/// Strip `<think>…</think>` blocks from a streaming chunk; `in_block` carries across chunks.
 pub fn filter_thinking(chunk: &str, mut in_block: bool) -> (String, bool) {
     let mut visible = String::with_capacity(chunk.len());
     let mut rest = chunk;
 
     loop {
         if in_block {
-            // Inside a think block — look for the closing tag.
             if let Some(end) = rest.find("</think>") {
                 rest = &rest[end + "</think>".len()..];
                 in_block = false;
             } else {
-                // Entire remaining chunk is still inside the block — skip it all.
                 break;
             }
         } else {
-            // Outside a think block — look for the opening tag.
             if let Some(start) = rest.find("<think>") {
                 visible.push_str(&rest[..start]);
                 rest = &rest[start + "<think>".len()..];
                 in_block = true;
             } else {
-                // No more think blocks — everything remaining is visible.
                 visible.push_str(rest);
                 break;
             }
@@ -946,10 +878,7 @@ mod tests {
 
     #[test]
     fn punctuation_survives_the_whole_speech_pass() {
-        // The marks are prosody once they reach Kokoro — a comma is a pause, a
-        // question mark bends the pitch up — so this pass must not treat them
-        // as formatting. It never did; the loss was downstream, in espeak. This
-        // is here so that stays true.
+        // Punctuation is prosody to Kokoro (pauses, pitch), so this pass must keep it.
         assert_eq!(
             strip_markdown_for_speech("**Hello**, world! Are you _sure_? Yes; really."),
             "Hello, world! Are you sure? Yes; really.",
@@ -1047,12 +976,10 @@ mod tests {
 
     #[test]
     fn filter_thinking_split_across_chunks() {
-        // First chunk opens the block but doesn't close it
         let (text1, in_block) = filter_thinking("prefix<think>start of reasoning", false);
         assert_eq!(text1, "prefix");
         assert!(in_block);
 
-        // Second chunk closes it and continues with real content
         let (text2, in_block2) = filter_thinking("end of reasoning</think>real answer", in_block);
         assert_eq!(text2, "real answer");
         assert!(!in_block2);
@@ -1164,13 +1091,11 @@ mod tests {
 
     #[test]
     fn normalize_time_zero_minutes_dropped() {
-        // 3:00 PM → "3 PM" (the :00 is silent when am/pm present)
         assert_eq!(normalize_for_speech("at 3:00pm"), "at 3 PM");
     }
 
     #[test]
     fn normalize_time_not_a_time_bare_number() {
-        // A lone digit with nothing after it must NOT be consumed as a time
         assert_eq!(normalize_for_speech("I have 3 cats"), "I have 3 cats");
     }
 
@@ -1324,12 +1249,9 @@ mod tests {
 
 // -- Wake-word matching -----------------------------------------------------
 
-/// Reduce a transcript to lowercase alphabetic words separated by single
-/// spaces.
+/// Reduce a transcript to lowercase alphabetic words separated by single spaces.
 ///
-/// Whisper punctuates freely — "Hey, goose." — which breaks any naive
-/// comparison against "hey goose". Everything that matches or strips a wake
-/// word works on this form, on both sides, so the two can never disagree.
+/// Wake-word matching and stripping use this form on both sides; whisper punctuates freely.
 pub fn normalize_transcript(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_alphabetic() { c } else { ' ' })
@@ -1342,16 +1264,7 @@ pub fn normalize_transcript(s: &str) -> String {
 
 /// Position of `trigger` inside `haystack`, as a word range, or `None`.
 ///
-/// Both arguments must already be normalized. Matching is on **whole words**:
-/// a substring search fires "goose" on "mongoose" and "juice" on "juices",
-/// and a wake word that greets you when you say *mongoose* is worse than one
-/// you occasionally have to repeat.
-///
-/// This is what makes the two-window re-check unnecessary. That re-check
-/// existed to suppress exactly these false positives, and it cost every real
-/// activation a second, independent transcription of a one-syllable word —
-/// which whisper frequently declined to produce, so the wake word simply did
-/// not fire. Matching precisely in one pass is both stricter and faster.
+/// Both must already be normalized. Whole words only, so "goose" never fires on "mongoose".
 pub fn find_trigger_words(haystack: &str, trigger: &str) -> Option<(usize, usize)> {
     let hay: Vec<&str> = haystack.split_whitespace().collect();
     let needle: Vec<&str> = trigger.split_whitespace().collect();
@@ -1368,32 +1281,15 @@ pub fn contains_trigger(haystack: &str, trigger: &str) -> bool {
     find_trigger_words(haystack, trigger).is_some()
 }
 
-/// Drop a wake word from the front of a command transcript.
-///
-/// The detector captures audio from *before* it fired, so the wake word lands
-/// in the command clip — that lookback is what stops "Goose, what's the
-/// weather" losing "what's the" to detection latency. The cost is that the
-/// model then hears its own name, so it comes off here.
-///
-/// Only a **leading** occurrence is removed, and only one: "goose, remind me
-/// to buy a goose" must keep the second. Anything before the trigger is a
-/// mis-transcribed run-up to it ("uh, goose, ...") and goes too.
-/// Words allowed to precede the wake word and still leave it "leading".
-///
-/// An explicit list, not a positional window. A window of "the first few
-/// words" looks equivalent and is not: it also matches the wake word used as
-/// an ordinary noun near the start of a sentence, so a follow-up turn of
-/// "feed the goose" was stripped down to nothing and the user's request
-/// vanished. Every word here is filler — none of them can be the point of a
-/// sentence — so consuming them alongside the greeting is always safe.
+/// Filler that may precede a leading wake word; a content word here could erase a command.
 const RUN_UP_WORDS: &[&str] = &["um", "uh", "er", "hey", "hi", "hello", "ok", "okay", "so"];
 
+/// Strip one leading wake word, plus any filler before it; the rest is returned as heard.
 pub fn strip_leading_wake_word(transcript: &str, triggers: &[String]) -> String {
     let normalized = normalize_transcript(transcript);
     let words: Vec<&str> = normalized.split_whitespace().collect();
 
-    // Prefer the longest matching trigger ("hey goose" over "goose") so the
-    // greeting is consumed whole, and the earliest match among equals.
+    // Longest trigger wins ("hey goose" over "goose"), then the earliest.
     let best = triggers
         .iter()
         .filter_map(|t| find_trigger_words(&normalized, t))
@@ -1401,15 +1297,11 @@ pub fn strip_leading_wake_word(transcript: &str, triggers: &[String]) -> String 
         .max_by_key(|&(start, end)| (end - start, std::cmp::Reverse(start)));
 
     let Some((_, end)) = best else {
-        // No wake word: a conversational follow-up, which must reach the model
-        // exactly as it was heard. Returning the normalized form here would
-        // strip the punctuation and casing out of every ordinary turn.
+        // No wake word: a follow-up, which must reach the model exactly as heard.
         return transcript.trim().to_string();
     };
 
-    // Cut the ORIGINAL text after `end` words, not the normalized one.
-    // A normalized word is precisely a maximal run of alphabetic characters,
-    // so the two forms can be walked in step.
+    // Cut the original after `end` words: a normalized word is a maximal alphabetic run.
     let mut words_seen = 0usize;
     let mut in_word = false;
     let mut cut = transcript.len();
@@ -1431,8 +1323,7 @@ pub fn strip_leading_wake_word(transcript: &str, triggers: &[String]) -> String 
         cut = transcript.len();
     }
 
-    // Drop the punctuation the wake word was wearing — the comma in
-    // "Goose, what's the weather" belongs to the greeting, not the request.
+    // Drop the greeting's punctuation, like the comma in "Goose, what's the weather".
     transcript[cut..]
         .trim_start_matches(|c: char| !c.is_alphanumeric())
         .trim()
@@ -1463,8 +1354,6 @@ mod wake_word_tests {
         assert!(contains_trigger("well hey goose there", "hey goose"));
     }
 
-    /// The false positives the two-window re-check used to guard against.
-    /// Whole-word matching rejects them outright, in one pass.
     #[test]
     fn a_trigger_never_matches_inside_a_longer_word() {
         assert!(!contains_trigger("i saw a mongoose today", "goose"));
@@ -1496,9 +1385,6 @@ mod wake_word_tests {
         );
     }
 
-    /// The command is what the model is about to read. Normalizing it would
-    /// cost every request its apostrophes, casing and question marks, so the
-    /// match happens on a normalized copy and the cut lands in the original.
     #[test]
     fn the_surviving_command_keeps_its_original_punctuation() {
         let t = triggers(&["goose"]);
@@ -1508,8 +1394,6 @@ mod wake_word_tests {
         );
     }
 
-    /// The lookback deliberately captures the run-up to the wake word, so
-    /// filler ahead of it is expected and must not survive into the command.
     #[test]
     fn a_short_run_up_before_the_wake_word_is_dropped_too() {
         let t = triggers(&["goose"]);
@@ -1519,7 +1403,6 @@ mod wake_word_tests {
         );
     }
 
-    /// Only the leading one: the user is allowed to talk about geese.
     #[test]
     fn a_later_mention_of_the_wake_word_is_kept() {
         let t = triggers(&["goose"]);
@@ -1529,7 +1412,6 @@ mod wake_word_tests {
         );
     }
 
-    /// Deep in the sentence it is a noun, not a greeting.
     #[test]
     fn a_wake_word_past_the_run_up_window_is_left_alone() {
         let t = triggers(&["goose"]);
@@ -1537,9 +1419,6 @@ mod wake_word_tests {
         assert_eq!(out, "tell me all about the goose please");
     }
 
-    /// The bug a positional run-up window hid: a short follow-up turn whose
-    /// SUBJECT is the wake word was gutted to an empty command, and the user's
-    /// request silently became nothing. Only filler may precede the greeting.
     #[test]
     fn a_short_command_about_the_wake_word_survives_intact() {
         let t = triggers(&["goose"]);
@@ -1556,8 +1435,6 @@ mod wake_word_tests {
         }
     }
 
-    /// Filler is filler wherever it appears in the run-up, and content is not
-    /// filler however short it is.
     #[test]
     fn only_filler_may_precede_the_greeting() {
         let t = triggers(&["goose"]);
@@ -1573,8 +1450,6 @@ mod wake_word_tests {
         );
     }
 
-    /// "hey goose" and "goose" both match; consuming only "goose" would leave
-    /// a stray "hey" at the front of the command.
     #[test]
     fn the_longest_matching_trigger_wins() {
         let t = triggers(&["goose", "hey goose"]);
@@ -1594,8 +1469,6 @@ mod wake_word_tests {
         );
     }
 
-    /// A conversational follow-up turn has no wake word at all, and must
-    /// reach the model intact.
     #[test]
     fn a_transcript_without_the_wake_word_passes_through() {
         let t = triggers(&["goose"]);
@@ -1605,7 +1478,6 @@ mod wake_word_tests {
         );
     }
 
-    /// Stripping must not fire on a word that merely contains the trigger.
     #[test]
     fn stripping_respects_word_boundaries() {
         let t = triggers(&["goose"]);
@@ -1618,8 +1490,7 @@ mod wake_word_tests {
 
 // -- Whisper artifacts ------------------------------------------------------
 
-/// Remove Whisper non-speech tags (`[BLANK_AUDIO]`, `[MUSIC]`, `[NOISE]`, …)
-/// and return the remaining text trimmed.  If nothing real remains, returns "".
+/// Strip whisper's non-speech tags and known hallucinations; "" if nothing real remains.
 pub fn strip_whisper_artifacts(text: &str) -> String {
     // Strip all [BRACKETED_TAGS] — Whisper uses these for non-speech events.
     let mut out = String::with_capacity(text.len());

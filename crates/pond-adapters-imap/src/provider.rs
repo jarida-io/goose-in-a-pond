@@ -1,12 +1,8 @@
-//! Where a household's mail lives. The same shape as the CalDAV presets: the protocol is
-//! uniform and the setup is not, and every preset needs an app-specific password, so the
-//! hint is shown at the password box rather than in documentation.
+//! IMAP provider presets, like the CalDAV ones; each needs an app-specific password.
 
-/// A mail host this pond knows how to reach.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImapProvider {
-    /// Gmail. Needs 2FA plus an app password; IMAP must also be enabled in
-    /// Gmail's own settings, which is the step people miss.
+    /// Gmail: needs 2FA, an app password, and IMAP enabled in Gmail's settings.
     Gmail,
     /// iCloud Mail. IMAP is the honest ceiling here, as CalDAV is for calendar.
     ICloud,
@@ -28,9 +24,7 @@ impl ImapProvider {
         }
     }
 
-    /// Implicit TLS on 993 throughout. STARTTLS on 143 is deliberately not
-    /// offered: it begins in the clear, and a downgrade there is invisible to
-    /// the household. Every provider above supports 993.
+    /// Implicit TLS on 993; STARTTLS is not offered, as its downgrade would be invisible.
     pub fn port(&self) -> u16 {
         match self {
             Self::Custom { port, .. } => *port,
@@ -38,8 +32,7 @@ impl ImapProvider {
         }
     }
 
-    /// Stable identifier written to `context_sources.provider`. Part of the
-    /// schema: renaming one orphans every source a household connected.
+    /// Persisted in `context_sources.provider`; renaming a value orphans connected sources.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Gmail => "gmail",
@@ -71,9 +64,7 @@ impl ImapProvider {
         }
     }
 
-    /// Rebuild from what was stored, for a source being re-synced. `host_port` is `host:port`
-    /// and only the custom variant reads it: a stored `gmail` row cannot be pointed at another
-    /// server by editing a column.
+    /// Rebuild from storage; only `Custom` reads `host_port` (`host:port`), so presets stay put.
     pub fn from_stored(provider: &str, host_port: Option<&str>) -> Option<Self> {
         match provider {
             "gmail" => Some(Self::Gmail),
@@ -122,8 +113,7 @@ mod tests {
         assert_eq!(p.port(), 993);
     }
 
-    /// Guessing a mail host is how a pond ends up sending an app password
-    /// somewhere the household never named.
+    /// Guessing a host would send credentials somewhere the household never named.
     #[test]
     fn a_custom_provider_without_a_host_is_not_rebuilt() {
         assert_eq!(ImapProvider::from_stored("custom", None), None);

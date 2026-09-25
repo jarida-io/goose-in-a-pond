@@ -25,10 +25,7 @@ const CLOCK_PATH =
 const PIN_PATH =
   "M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z M12 10m-3 0a3 3 0 1 0 6 0 3 3 0 1 0-6 0";
 
-/**
- * Calendar card — 4 events with colored bars + "next in 23 min" pill.
- * Source: giap-calendar (no MCP server yet — mock data for Phase 5).
- */
+/** Calendar card; mock data until a giap-calendar MCP server exists. */
 export function CalendarCard(): React.ReactElement {
   return (
     <div className="mc">

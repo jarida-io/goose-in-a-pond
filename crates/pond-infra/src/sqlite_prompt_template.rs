@@ -1,6 +1,4 @@
-//! SQLite-backed implementation of `PromptTemplateRepository`.
-//!
-//! Uses the `prompt_templates` table in `pond_system.db` (migration 0009).
+//! SQLite `PromptTemplateRepository` over the `prompt_templates` table in `pond_system.db`.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -94,10 +92,7 @@ impl PromptTemplateRepository for SqlitePromptTemplateRepository {
 
     async fn seed_system_template(&self, template: &PromptTemplate) -> Result<()> {
         sqlx::query(
-            // `factory_version` is stamped only on rows this reseed OWNS -- the
-            // WHERE clause means a customized row is not touched at all, so it
-            // keeps the generation it was forked from. That difference is the
-            // whole signal the Prompts tab reads to offer an update.
+            // Customized rows keep their old `factory_version`: the Prompts tab's update cue.
             "INSERT INTO prompt_templates \
              (name, content, description, is_system, is_customized, factory_version, \
               updated_at) \
@@ -162,8 +157,6 @@ mod tests {
         }
     }
 
-    /// The bug this guards: the startup factory reseed used a plain upsert,
-    /// so a user's edit to a system template silently reverted on restart.
     #[tokio::test]
     async fn seed_never_clobbers_a_customized_template() {
         let repo = repo().await;
@@ -200,16 +193,7 @@ mod tests {
         );
     }
 
-    /// A customized row keeps the generation it was forked from; an owned row
-    /// moves with the reseed. That difference IS the notice.
-    ///
-    /// The alternative everyone reaches for first is to clear `is_customized`
-    /// where the content still matches an old factory string. That is migration
-    /// 0035's settings adoption run backwards: `DEFAULT_ADOPTIONS` moves a value
-    /// only where `value = old_default` AND `is_user_set = 0`, because "a row on
-    /// its own proves nothing". `is_customized` is this table's `is_user_set` —
-    /// written by exactly one thing, an explicit Save — so clearing it throws
-    /// away the only honest signal of intent and replaces it with a guess.
+    /// `is_customized` is set only by an explicit Save; never re-derive it from content.
     #[tokio::test]
     async fn a_customized_row_keeps_its_generation_and_an_owned_one_moves() {
         let repo = repo().await;
@@ -225,7 +209,6 @@ mod tests {
         edited.is_customized = true;
         repo.upsert(&edited).await.unwrap();
 
-        // A later generation ships.
         repo.seed_system_template(&factory_at("balanced", "gen 2", 2))
             .await
             .unwrap();
@@ -251,8 +234,7 @@ mod tests {
         );
     }
 
-    /// An explicit reset (upsert with is_customized=false) hands the row back
-    /// to the factory: later seeds update it again.
+    /// A reset is an upsert with `is_customized = false`.
     #[tokio::test]
     async fn reset_returns_the_row_to_factory_ownership() {
         let repo = repo().await;

@@ -1,27 +1,13 @@
-// ────────────────────────────────────────────────────────────
-// Suggestion — the one thing on Home that asks.
-//
-// Everything else on this screen reports: the weather is 24°, four lights are
-// on, this track is playing. This is the only element that wants an answer, so
-// it is the only one that gets weight, and it is answerable where it stands —
-// approving must not cost a navigation, or the answer is "later" every time.
-//
-// Backed by the proposal system that has been generating these all along with
-// nowhere to show them (`GET /api/v1/proposals`).
-// ────────────────────────────────────────────────────────────
+// Suggestion: the one thing on Home that asks; answerable in place, or every answer is "later".
 
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api/PondApiClient";
 import type { Proposal, ProposalDecision } from "../../api/types";
 
 interface Props {
-  /** Who is asking. Without one the server cannot tell who a suggestion is
-      addressed to, so there is nothing safe to show. */
+  /** Who is asking; suggestions are per-person, so without it nothing is safe to show. */
   sessionId: string | null;
-  /**
-   * What to show when there is nothing to suggest. Falls back to a plain
-   * reassurance when a caller has nothing more specific to say.
-   */
+  /** Shown when there is nothing to suggest; defaults to a plain reassurance. */
   quiet?: React.ReactNode;
 }
 
@@ -38,17 +24,10 @@ export function Suggestion({ sessionId, quiet }: Props) {
     }
     try {
       const list = await api.listProposals(sessionId);
-      // Personal context produces suggestions from several sources at once —
-      // conversations, calendar, sensors — so more than one can be waiting.
-      // They are all kept, but only the first is open: a stack of expanded
-      // cards is a to-do list, and a to-do list is the clutter this screen
-      // exists without.
       setProposals(list.proposals);
       setError(null);
     } catch {
-      // A suggestion that cannot be fetched is not an error worth a banner:
-      // there is simply nothing to show. Errors here would be the loudest thing
-      // on a screen whose whole job is quiet.
+      // A failed fetch just means nothing to show; a banner would be the loudest thing on a quiet screen.
       setProposals([]);
     }
   }, [sessionId]);
@@ -60,17 +39,14 @@ export function Suggestion({ sessionId, quiet }: Props) {
   async function decide(answered: Proposal, decision: ProposalDecision) {
     if (!sessionId || deciding) return;
     setDeciding(true);
-    // Optimistic: the card goes the moment it is answered, and the next one
-    // takes its place. A spinner on a decision this small reads as doubt about
-    // whether the tap registered.
+    // Optimistic: a spinner on a decision this small reads as doubt that the tap registered.
     const before = proposals;
     setProposals((all) => all.filter((p) => p.id !== answered.id));
     try {
       await api.decideProposal(answered.id, sessionId, decision);
       void load();
     } catch {
-      // Put it back rather than swallow it — a suggestion that silently failed
-      // to send would look answered and never happen.
+      // Restore it: a silently failed send would look answered and never happen.
       setProposals(before);
       setError("That didn't send. Try again.");
     } finally {
@@ -95,9 +71,7 @@ export function Suggestion({ sessionId, quiet }: Props) {
   }
 
   const [first, ...rest] = proposals;
-  // Only the first is open. The rest are one line each, so a household can see
-  // there is more waiting without the screen turning into a queue to work
-  // through — and answering the top one promotes the next.
+  // Only the first is open; the rest are one line each, and answering the top one promotes the next.
   const shown = expanded ? rest : [];
 
   return (

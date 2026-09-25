@@ -1,7 +1,4 @@
-//! Content hashes used to pin mesh peers to a known-good harness/model (#132).
-//!
-//! `HarnessHash` and `ModelHash` are distinct newtypes over `[u8; 32]` so the two can't be
-//! compared by accident. The blake3 hashing lives in `pond-mesh-protocol`, not here.
+//! Hashes pinning mesh peers to a known-good harness/model; blake3 lives in `pond-mesh-protocol`.
 
 use serde::{Deserialize, Serialize};
 
@@ -44,8 +41,7 @@ mod tests {
     fn harness_and_model_hash_are_distinct_types() {
         let harness = HarnessHash::from([1u8; 32]);
         let model = ModelHash::from([1u8; 32]);
-        // Same bytes, different types — this would not compile if they were aliases:
-        // assert_eq!(harness, model);
+        // Distinct types: `assert_eq!(harness, model)` does not compile.
         assert_eq!(harness.as_bytes(), model.as_bytes());
     }
 

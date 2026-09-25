@@ -1,7 +1,4 @@
-//! Integration tests for POST /api/v1/chat over the full stack: axum router,
-//! ChatService, SessionStorage. LLM backend calls are mocked with wiremock, so no
-//! real llamafile process is needed.
-//! Run: cargo test -p pond-api --test chat_integration_test
+//! `/api/v1/chat` over the full stack (router, ChatService, SQLite sessions) with a mock agent.
 
 use std::sync::Arc;
 
@@ -37,10 +34,7 @@ impl OnboardingRepository for CompletedOnboarding {
     async fn reset(&self) -> anyhow::Result<()> {
         Ok(())
     }
-    // PAI-2 P7 made this a required trait method rather than a defaulted one:
-    // a default would have to answer from `get_current_step`, and a stub that
-    // answers "not onboarded" makes every onboarding write route public
-    // wherever it is used. The name of this stub is the answer.
+    // Answering "not onboarded" would make every onboarding write route public.
     async fn is_complete(&self) -> anyhow::Result<bool> {
         Ok(true)
     }
@@ -80,8 +74,7 @@ impl DeviceRegistry for MockDeviceRegistry {
 
 // ── Test fixture ───────────────────────────────────────────────────────────────
 
-/// Build a test router backed by a real tempdir SQLite database.
-/// All chat goes through MockAgent (GooseAdapter in production).
+/// Router over a tempdir SQLite database; chat goes through MockAgent.
 async fn make_app() -> (axum::Router, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let db = pond_infra::db::Database::init(tmp.path()).await.unwrap();
@@ -220,7 +213,6 @@ async fn post_chat_returns_echo_via_agent() {
         "expected echo response, got: {}",
         json
     );
-    // session_id is present
     assert!(json["session_id"].is_string());
 }
 
@@ -243,7 +235,6 @@ async fn post_chat_auto_creates_session() {
     let session_id = json["session_id"]
         .as_str()
         .expect("session_id must be string");
-    // Auto-generated sessions are UUIDs (36 chars with hyphens)
     assert_eq!(session_id.len(), 36, "expected UUID-length session_id");
 }
 
@@ -373,18 +364,13 @@ async fn health_endpoint_accessible_without_auth() {
 
 // ── Persistence regression ─────────────────────────────────────────────────────
 
-/// Regression: chat/stream must persist user and assistant messages to
-/// pond_system.db so GET /sessions/{id}/messages can read them. Drain the stream
-/// body fully before querying: persistence happens inside the async_stream
-/// generator and only runs when polled.
+/// Drain the stream before querying: persistence runs inside the stream generator, when polled.
 #[tokio::test]
 async fn chat_stream_persists_messages_readable_via_sessions_endpoint() {
     let (app, _tmp) = make_app().await;
 
     let session_id = "stream-persist-test";
 
-    // POST /api/v1/chat/stream — drain the full SSE body so the stream
-    // generator runs to completion and both add_message calls execute.
     let stream_resp = app
         .clone()
         .oneshot(
@@ -410,7 +396,6 @@ async fn chat_stream_persists_messages_readable_via_sessions_endpoint() {
         .await
         .unwrap();
 
-    // GET /api/v1/sessions/{id}/messages — must return the persisted rows.
     let get_resp = app
         .oneshot(
             Request::builder()
@@ -452,8 +437,7 @@ async fn chat_stream_persists_messages_readable_via_sessions_endpoint() {
 
 // ── Tool-result persistence ────────────────────────────────────────────────────
 
-/// A mock agent that emits one ToolCall + one ToolResult before the final text,
-/// so the tool-persistence path in chat_stream is exercised.
+/// Emits one ToolCall and one ToolResult before the final text.
 struct ToolEmittingMockAgent;
 
 #[async_trait::async_trait]
@@ -602,8 +586,6 @@ async fn make_app_with_agent(
     )
 }
 
-/// Regression: tool result rows (role=tool) must be persisted alongside
-/// user + assistant rows so the full turn is recoverable from the DB.
 #[tokio::test]
 async fn chat_stream_persists_tool_result_rows() {
     let (app, _tmp) = make_app_with_agent(Arc::new(ToolEmittingMockAgent)).await;
@@ -669,8 +651,7 @@ async fn chat_stream_persists_tool_result_rows() {
     assert_eq!(messages.last().unwrap()["role"], "assistant");
 }
 
-/// A mock agent whose Done event carries TurnStats — verifies the /chat/stream
-/// SSE surface emits the `turn_stats` event with the engine numbers.
+/// A mock agent whose Done event carries TurnStats.
 struct StatsEmittingMockAgent;
 
 #[async_trait::async_trait]
@@ -727,8 +708,6 @@ impl pond_core::models::ports::agent::Agent for StatsEmittingMockAgent {
     }
 }
 
-/// The SSE stream must surface a `turn_stats` event carrying the engine's
-/// per-turn performance numbers when the agent's Done event includes them.
 #[tokio::test]
 async fn chat_stream_emits_turn_stats_event() {
     let (app, _tmp) = make_app_with_agent(Arc::new(StatsEmittingMockAgent)).await;
@@ -772,10 +751,7 @@ async fn chat_stream_emits_turn_stats_event() {
     assert_eq!(payload["inference_count"], 1);
 }
 
-/// Truncating a conversation must tell the ENGINE, not only the database: the
-/// live engine session holds its own copy of the turns, so deleting rows alone
-/// leaves the model reading messages the user removed. Asserted through
-/// `MockAgent::forgotten_sessions`, since `Agent::forget_session` defaults to a no-op.
+/// The engine session holds its own copy of the turns, so deleting rows alone is not enough.
 #[tokio::test]
 async fn truncating_a_session_also_makes_the_engine_forget_it() {
     let agent = Arc::new(MockAgent::new());
@@ -839,8 +815,7 @@ async fn truncating_a_session_also_makes_the_engine_forget_it() {
         )
         .await
         .unwrap();
-    // Status before any other claim: an error payload would satisfy a body
-    // predicate just as well as a success.
+    // Status first: an error payload could satisfy a later predicate too.
     assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
 
     assert_eq!(

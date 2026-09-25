@@ -1,14 +1,4 @@
-//! Model downloader — Whisper ASR, Silero VAD, Kokoro TTS, and llamafile LLM.
-//!
-//! All models are downloaded into subdirectories of GIAP's data directory:
-//! - `models/ggml-*.bin`        — Whisper GGML models
-//! - `models/silero/`           — Silero VAD weights
-//! - `models/kokoro/`           — Kokoro engine, tokenizer and voices
-//! - `models/tts/`              — Piper voice models
-//! - `models/llm/`              — llamafile LLM models
-//!
-//! llamafile bundles model weights + llama.cpp server into a single executable.
-//! Running it with `--server --port 8080` starts an OpenAI-compatible HTTP server.
+//! Model and voice-data downloads into the data directory.
 
 use anyhow::{anyhow, Context, Result};
 use std::io::Write as _;
@@ -16,32 +6,17 @@ use std::path::{Path, PathBuf};
 
 // ── Piper TTS model download ───────────────────────────────────────────────────
 
-/// Directory for TTS voice models: `<data_dir>/models/tts/`.
+/// Piper voice dir; still read to detect a pre-Kokoro install.
 pub fn tts_models_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("models").join("tts")
 }
 
-// `download_piper_model_entry` used to live here — it fetched a `.onnx` voice
-// and its `.onnx.json` config. It lost its last caller when Kokoro replaced
-// Piper as the engine, and the module comment that once licensed the resulting
-// dead-code warning ("gating each item individually would noise up the module")
-// described a `legacy-subprocess` feature that no longer exists. Deleted rather
-// than re-explained. `tts_models_dir` above stays: two callers still read that
-// directory to notice a pre-Kokoro install.
-
 // ── Piper binary download ──────────────────────────────────────────────────────
 
-/// KEEP. The piper *binary* download is dead, but `ensure_espeak_ng_data`
-/// still borrows the phoneme data out of that release tarball — this constant
-/// outlives the cluster it sits in. Do not remove it with the surrounding
-/// dead code.
+/// Still needed: `ensure_espeak_ng_data` takes its phoneme data from this release's tarball.
 const PIPER_GITHUB_BASE: &str = "https://github.com/rhasspy/piper/releases/download/2023.11.14-2";
 
-/// Somewhere to send byte-level progress while a file is being fetched.
-///
-/// Called as `(filename, downloaded, total)`. Exists so the Kokoro setup path
-/// can report into the same tracker the Models page already polls, instead of
-/// the UI growing a second, parallel idea of what "downloading" means.
+/// Byte-progress sink, called as `(filename, downloaded, total)`.
 pub type DlProgress = std::sync::Arc<dyn Fn(&str, u64, u64) + Send + Sync>;
 
 // ── Kokoro engine ─────────────────────────────────────────────────────────────
@@ -54,26 +29,15 @@ pub fn kokoro_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("models").join("kokoro")
 }
 
-/// Which voices a start-up must have on disk, given the configured setting.
-///
-/// **Always includes the default**, then the configured voice when it is a
-/// different, resolvable Kokoro id.
-///
-/// An install that predates the engine swap carries a Piper filename in
-/// `voice_tts_voice` (`en_US-ryan-high.onnx`), which is not a Kokoro voice id
-/// and never will be. This used to bail on that name and fetch nothing at all,
-/// so a fresh install had no style table, the first utterance failed, and every
-/// turn fell back to Piper — with the logs showing only "skipping download".
-/// The adapter already falls back to the default voice; what it cannot do is
-/// conjure the file.
+/// Voices start-up must fetch: always the default, plus the configured one if it is a valid
+/// Kokoro id (pre-Kokoro installs still hold a Piper filename here).
 fn voices_to_fetch(configured: &str) -> Vec<String> {
     let mut wanted = vec![pond_adapters_kokoro::DEFAULT_VOICE.to_string()];
     let configured = configured.trim();
     if configured.is_empty() || configured == pond_adapters_kokoro::DEFAULT_VOICE {
         return wanted;
     }
-    // Validated against a throwaway root: this asks "is this a usable voice
-    // id", which is a property of the name, not of where it would be written.
+    // Throwaway root: only the name's validity matters.
     if pond_adapters_kokoro::voices::voice_path(Path::new("/"), configured).is_ok() {
         wanted.push(configured.to_string());
     } else {
@@ -86,35 +50,20 @@ fn voices_to_fetch(configured: &str) -> Vec<String> {
     wanted
 }
 
-/// Ensure the Kokoro engine can start: the tokenizer, one set of weights, and
-/// the default voice.
-///
-/// The catalogue lists voices (522 KB each) but not these — a voice is useless
-/// without the shared weights, and nothing else would ever fetch them. Without
-/// this, `KokoroOutput::new` fails on the missing tokenizer and TTS silently
-/// stays on Piper, which looks exactly like the engine swap never happening.
-///
-/// Best-effort: every failure leaves Piper as the engine rather than leaving
-/// the pond mute. `quality` picks which `.onnx` to fetch.
+/// Best-effort fetch of the Kokoro tokenizer, weights and voices (the catalogue has only
+/// voices); `quality` picks the `.onnx`. Any failure leaves Piper as the engine.
 pub async fn ensure_kokoro_engine(data_dir: &Path, quality: &str, voice: &str) {
     ensure_kokoro_engine_reporting(data_dir, quality, voice, None).await
 }
 
 /// `ensure_kokoro_engine`, reporting byte progress for whatever it fetches.
-///
-/// The settings screen uses this so a 326 MB tier change shows a real bar
-/// instead of a spinner that could mean anything.
 pub async fn ensure_kokoro_engine_reporting(
     data_dir: &Path,
     quality: &str,
     voice: &str,
     report: Option<DlProgress>,
 ) {
-    // Progress goes to STDERR, not stdout. Under `--json-events` — which is the
-    // only mode the desktop's voice child runs in — stdout carries NDJSON and
-    // nothing else, so a `println!` here is a contract violation that breaks
-    // the session before it starts. `json_events_contract_test` caught exactly
-    // that. `download_file` writes its own status to stderr for the same reason.
+    // Status to stderr only: under `--json-events` stdout carries NDJSON and nothing else.
     let dir = kokoro_dir(data_dir);
     let voices = dir.join("voices");
     if let Err(e) = std::fs::create_dir_all(&voices) {
@@ -180,16 +129,8 @@ pub async fn ensure_kokoro_engine_reporting(
 
 // ── Silero VAD ────────────────────────────────────────────────────────────────
 
-/// The exact revision the detector was measured against.
-///
-/// Pinned rather than `main` because `pond_adapters_silero` hard-codes this
-/// model's shape — a 512-sample window and a `[2, 1, 128]` recurrent state —
-/// and a retag upstream would not fail the build. It would fail one inference
-/// per window at run time, and the detector deliberately treats an inference
-/// error as *speech* so a dead VAD cannot cut a sentence in half. The symptom
-/// of a silently changed model is therefore a microphone that never closes
-/// until the hard cap, with nothing in the log that points upstream. A pin
-/// costs nothing.
+/// Pinned: the adapter hard-codes this model's shape, and a changed model errors at run time,
+/// which the detector reads as speech, so the mic never closes.
 const SILERO_REVISION: &str = "e71cae966052b992a7eca6b17738916ce0eca4ec";
 
 /// Where the detector looks: `<data_dir>/models/silero/silero_vad.onnx`.
@@ -207,11 +148,7 @@ fn silero_url() -> String {
     )
 }
 
-/// Fetch the Silero VAD weights unless they are already on disk.
-///
-/// 2 MB, once. Returns `None` when the file is neither present nor fetchable;
-/// the caller degrades to the energy gate rather than failing, because a pond
-/// with no network still has to be able to listen.
+/// Fetch the Silero weights if absent; `None` means the caller falls back to the energy gate.
 pub async fn ensure_silero_model(data_dir: &Path) -> Option<PathBuf> {
     let dest = silero_model_path(data_dir);
     if dest.exists() {
@@ -224,8 +161,7 @@ pub async fn ensure_silero_model(data_dir: &Path) -> Option<PathBuf> {
         return None;
     }
 
-    // stderr, like every other status line in this module: the voice child runs
-    // under `--json-events`, where stdout carries NDJSON and nothing else.
+    // stderr: under `--json-events` stdout is NDJSON only.
     eprintln!("  Listen   fetching the speech detector (2 MB, one time)...");
     match download_file(&silero_url(), &dest, 2).await {
         Ok(()) => Some(dest),
@@ -237,18 +173,11 @@ pub async fn ensure_silero_model(data_dir: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Returns the path where espeak-ng-data should live: `<data_dir>/bin/espeak-ng-data/`.
 pub fn piper_espeak_data_path(data_dir: &Path) -> PathBuf {
     data_dir.join("bin").join("espeak-ng-data")
 }
 
-/// Ensure espeak-ng-data is installed at `<data_dir>/bin/espeak-ng-data/`.
-///
-/// On first run (or after a source-only build that didn't copy the data):
-///   1. macOS: try `brew install espeak-ng` and copy from Homebrew prefix.
-///   2. All platforms fallback: download the Linux x86_64 piper tarball and
-///      extract only the `espeak-ng-data/` subtree.  The phoneme data files
-///      are platform-agnostic (text/binary tables, not native code).
+/// Install espeak-ng-data if missing: brew on macOS, else the (portable) Linux piper tarball.
 pub async fn ensure_espeak_ng_data(data_dir: &Path) {
     let dest = piper_espeak_data_path(data_dir);
     if dest.exists() {
@@ -266,7 +195,6 @@ pub async fn ensure_espeak_ng_data(data_dir: &Path) {
             .await
         {
             if output.status.success() {
-                // Find data dir in Homebrew prefix.
                 for candidate in &[
                     "/opt/homebrew/lib/espeak-ng-data",
                     "/usr/local/lib/espeak-ng-data",
@@ -280,7 +208,6 @@ pub async fn ensure_espeak_ng_data(data_dir: &Path) {
                         }
                     }
                 }
-                // Homebrew installed but path detection failed — do broader search.
                 if let Ok(out) = tokio::process::Command::new("brew")
                     .args(["--prefix", "espeak-ng"])
                     .output()
@@ -302,15 +229,10 @@ pub async fn ensure_espeak_ng_data(data_dir: &Path) {
     }
 
     // ── Option 2: download from piper Linux x86_64 tarball ──────────────────
-    // The phoneme data files are platform-independent; we borrow them from the
-    // Linux release and they work on macOS/Windows just as well.
     let url = format!("{}/piper_linux_x86_64.tar.gz", PIPER_GITHUB_BASE);
     println!("  downloading espeak-ng-data...");
 
-    // PAI-2 P6a: github.com is not a curated public suffix, so it classifies
-    // Sensitive and both restrictive modes refuse it. That is the intended
-    // polarity -- espeak-ng-data is a convenience fetch, and the caller already
-    // treats a failure as non-fatal.
+    // Restrictive modes refuse github.com (Sensitive); intended, this fetch is optional.
     let call = match pond_core::shared::services::egress::begin(&url, "GET") {
         Ok(call) => call,
         Err(denied) => {
@@ -348,7 +270,6 @@ pub async fn ensure_espeak_ng_data(data_dir: &Path) {
         for entry in tar.entries()? {
             let mut entry = entry?;
             let path = entry.path()?.into_owned();
-            // Only extract entries under espeak-ng-data/
             let mut comps = path.components();
             comps.next(); // strip top-level "piper/"
             let relative: std::path::PathBuf = comps.collect();
@@ -376,7 +297,6 @@ pub async fn ensure_espeak_ng_data(data_dir: &Path) {
     }
 }
 
-/// Recursively copy a directory tree from `src` to `dst`.
 fn copy_dir_all(src: &Path, dst: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -392,15 +312,9 @@ fn copy_dir_all(src: &Path, dst: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ── llamafile LLM model registry ──────────────────────────────────────────────
-
 // ── Generic file download helper ──────────────────────────────────────────────
 
-/// Download `url` to `dest`, showing a live progress line.  Skips if `dest` exists.
-/// Read a Hugging Face access token from one of the conventional env vars.
-/// Used to download gated models (Gemma, Llama-Guard, etc.) without manual
-/// curl invocations. Returns `None` when neither var is set, in which case
-/// callers fall back to anonymous access (which works fine for public repos).
+/// HF token from the conventional env vars, for gated repos; `None` means anonymous access.
 fn hugging_face_token() -> Option<String> {
     for var in ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN"] {
         if let Ok(v) = std::env::var(var) {
@@ -413,8 +327,7 @@ fn hugging_face_token() -> Option<String> {
     None
 }
 
-/// Mirrors `main::default_data_dir()` — kept here because `model_download` runs
-/// inside the binary AND as a library helper without access to main's privates.
+/// Mirrors `main::default_data_dir()`, which this library code can't reach.
 fn resolve_data_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("POND_DATA_DIR") {
         return PathBuf::from(dir);
@@ -424,10 +337,7 @@ fn resolve_data_dir() -> PathBuf {
         .join("goose-in-a-pond")
 }
 
-/// Stream a Hugging Face URL through the hf_cache (resumable, etag-aware,
-/// auth survives redirects). Symlinks the legacy flat `dest` path to the
-/// content-addressed blob so `filesystem_model_storage::path_for()` still
-/// returns the same on-disk location.
+/// Fetch via the hf_cache and link `dest` to the blob, where `path_for()` still expects it.
 async fn download_via_hf_cache(
     repo_id: &str,
     revision: &str,
@@ -439,7 +349,6 @@ async fn download_via_hf_cache(
     let data_dir = resolve_data_dir();
     let cache = pond_hf_cache::HfCache::new(&data_dir);
 
-    // Token precedence: existing env-var helper first, then HfCache's token file.
     let token: Option<String> = hugging_face_token().or_else(|| cache.token().map(String::from));
 
     let client = pond_hf_cache::build_redirect_aware_client(token.as_deref())?;
@@ -449,7 +358,6 @@ async fn download_via_hf_cache(
         .with_revision(revision.to_string());
     let fetch = repo.file(filename.to_string());
 
-    // Progress closure: reuses the verbatim CLI progress line from the legacy path.
     let approx_total = approx_size_mb * 1_048_576;
     let mut last_printed = 0u64;
     let reported_name = dest
@@ -463,15 +371,11 @@ async fn download_via_hf_cache(
         } else {
             total
         };
-        // Every chunk, not throttled like the console line below: the tracker
-        // is polled on its own cadence and a throttle here would only make the
-        // bar lag behind the transfer.
+        // Unthrottled: the tracker is polled on its own cadence.
         if let Some(r) = report.as_ref() {
             r(&reported_name, downloaded, effective_total);
         }
-        // Throttle stdout updates to ~256 KiB to avoid flooding. Returning
-        // `true` here as well as at the end: the value is "keep going", not
-        // "I printed something".
+        // Print every 256 KiB; `true` means "keep going", not "printed".
         if downloaded < effective_total && downloaded.saturating_sub(last_printed) < 262_144 {
             return true;
         }
@@ -485,8 +389,7 @@ async fn download_via_hf_cache(
             pct
         );
         std::io::stderr().flush().ok();
-        // The CLI download has no way to be asked to stop — there is no UI
-        // holding it — so it always continues.
+        // Nothing can cancel a CLI download.
         true
     };
 
@@ -496,7 +399,6 @@ async fn download_via_hf_cache(
         .with_context(|| format!("hf_cache fetch {repo_id}/{filename}@{revision}"))?;
     eprintln!();
 
-    // Symlink (or copy fallback on non-unix) the legacy dest path to the blob.
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await.ok();
     }
@@ -527,6 +429,7 @@ async fn link_or_copy(src: &Path, dest: &Path) -> Result<()> {
         .with_context(|| format!("copy {} -> {}", src.display(), dest.display()))
 }
 
+/// Download `url` to `dest` (HF URLs via the hf_cache), with progress on stderr.
 pub async fn download_file(url: &str, dest: &Path, approx_size_mb: u64) -> Result<()> {
     download_file_reporting(url, dest, approx_size_mb, None).await
 }
@@ -538,9 +441,7 @@ pub async fn download_file_reporting(
     approx_size_mb: u64,
     report: Option<DlProgress>,
 ) -> Result<()> {
-    // Progress/status output goes to stderr: this downloader is reachable from the
-    // `--json-events` chat path (first-run model fetch), where stdout is reserved
-    // exclusively for NDJSON. Interactive callers still see it on the terminal.
+    // stderr: reachable from the `--json-events` chat path, where stdout is NDJSON only.
     eprintln!(
         "  downloading {} (~{} MB)",
         dest.file_name().unwrap_or_default().to_string_lossy(),
@@ -554,24 +455,14 @@ pub async fn download_file_reporting(
     }
 
     let client = reqwest::Client::builder().build()?;
-    // Hugging Face gates models behind both repo-level licenses (e.g. Gemma)
-    // AND auth tokens. Forward `HF_TOKEN` (or the standard `HUGGING_FACE_HUB_TOKEN`)
-    // when present so gated downloads succeed without hand-fetching the file.
     let mut req = client.get(url);
     if url.contains("huggingface.co") {
         if let Some(tok) = hugging_face_token() {
             req = req.bearer_auth(tok);
         }
     }
-    // PAI-2 P6a. Stated out loud rather than discovered: neither
-    // `huggingface.co` nor `github.com` is in `KNOWN_PUBLIC_SUFFIXES`, so both
-    // classify Sensitive, so `network_mode = "allowlist"` refuses every model
-    // download from here on. That is the correct polarity -- invariant 4 says
-    // the fail-Sensitive default stands and public suffixes are added
-    // deliberately, not to soften a refusal -- and it IS a behaviour change for
-    // anyone already on `allowlist`. The fix is an actionable message, which
-    // `EgressDenied` already renders (mode, host, and what to set), plus the
-    // URL for context so the operator knows which download stopped.
+    // HF and github.com classify Sensitive, so `allowlist` refuses model downloads by design;
+    // don't add them to `KNOWN_PUBLIC_SUFFIXES` to soften that.
     let call = pond_core::shared::services::egress::begin(url, "GET")
         .with_context(|| format!("Failed to fetch {url}"))?;
     let sent = req.send().await;
@@ -579,8 +470,6 @@ pub async fn download_file_reporting(
     let resp = sent.with_context(|| format!("Failed to fetch {url}"))?;
 
     if !resp.status().is_success() {
-        // Surface the most common error (gated repo + missing token) in plain
-        // English so operators see a clear next step instead of "Server returned 401".
         if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 {
             return Err(anyhow!(
                 "{} {} for {url} — this looks like a gated Hugging Face repo. \
@@ -630,90 +519,48 @@ pub async fn download_file_reporting(
 }
 
 // ── Face recognition models ──────────────────────────────────────────────────
-//
-// Stack (preferred → fallback):
-//
-//   Embedder:  AdaFace IR-101 (250 MB) → ArcFace R50 from buffalo_l (174 MB)
-//   Detector:  SCRFD 34G       (140 MB) → SCRFD 10G  from buffalo_l ( 17 MB)
-//   PAD:       Silent-Face V2  (  2 MB) primary
-//              DeepPixBis      (  2 MB) secondary  ── ensembled in adapter
-//
-// AdaFace beats ArcFace on low-light / blurry crops (IJCB 2022 winner) and
-// SCRFD 34G catches faces at smaller pixel sizes than 10G.  DeepPixBis is
-// patch-based PAD — pairs well with Silent-Face's full-image classifier
-// for stronger replay-attack rejection.  Each URL is overridable via env
-// var so a dead mirror can be swapped without rebuilding.
 
-/// On-disk directory where face models live: `<data_dir>/models/face/`.
 #[cfg(feature = "face-onnx")]
 pub fn face_models_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("models").join("face")
 }
 
-/// Returns the canonical (default) paths for the four face-recognition model
-/// files.  `(embedding, detector, antispoof_primary, antispoof_secondary)`.
-///
-/// All four are env-overridable in `build_face_recognition` (`POND_FACE_*_PATH`).
-/// The auto-downloader prefers the new defaults but keeps the old buffalo_l
-/// files (`w600k_r50.onnx` + `scrfd.onnx`) as fallback when a fresh download
-/// of a new model fails (e.g. mirror 404).
+/// Default `(embedder, detector, antispoof, antispoof_2)` paths (`POND_FACE_*_PATH` overrides).
 #[cfg(feature = "face-onnx")]
 pub fn face_model_paths(data_dir: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
     let dir = face_models_dir(data_dir);
     (
-        // Embedder & detector slot filenames are kept neutral so a future
-        // upgrade (e.g. AdaFace once an ONNX export materialises) can land
-        // without renaming on disk. The boot lookup in
-        // `build_face_recognition` prefers these over the buffalo_l fallback.
+        // Fixed slot names, not model ids: the embedder slot holds Glint-R100.
         dir.join("adaface_ir101.onnx"),
         dir.join("scrfd_34g.onnx"),
         dir.join("antispoof.onnx"),
-        // The secondary PAD filename tracks the model identity so the
-        // adapter's filename-based variant heuristic recognises it as
-        // DeepPixBis without needing an env-var override.
+        // Must stay `OULU_*`: the adapter picks DeepPixBis preprocessing by filename.
         dir.join("OULU_Protocol_2_model_0_0.onnx"),
     )
 }
 
-/// `buffalo_l.zip` from InsightFace ships both the SCRFD 10G detector
-/// (`det_10g.onnx`) and the ArcFace R50 embedder (`w600k_r50.onnx`) in a
-/// single ~281 MB archive.  Kept as the fallback bundle when the AdaFace +
-/// SCRFD-34G mirrors fail.
+/// Fallback bundle (SCRFD 10G + ArcFace R50) for when the preferred mirrors fail.
 #[cfg(feature = "face-onnx")]
 const BUFFALO_L_ZIP_URL: &str =
     "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip";
 #[cfg(feature = "face-onnx")]
 const BUFFALO_L_APPROX_MB: u64 = 281;
 
-/// Glint-R100 embedder — ArcFace ResNet-100 trained on the cleaned
-/// Glint360K corpus.  112×112 input, 512-d output (drop-in for the R50
-/// in buffalo_l: same matcher math, same threshold table).  Deeper
-/// backbone + larger training set → +0.3-0.6 % on hard verification
-/// benchmarks vs. R50, with the same ~261 MB on-disk footprint as
-/// AdaFace.  Hosted by the Immich team — the most reliable ONNX mirror
-/// for InsightFace-family weights.
-///
-/// Override the URL with `POND_FACE_EMBEDDING_URL` if needed.
+/// Glint-R100: drop-in for buffalo_l's R50 (112×112 in, 512-d out, same thresholds).
 #[cfg(feature = "face-onnx")]
 const EMBEDDING_DEFAULT_URL: &str =
     "https://huggingface.co/immich-app/antelopev2/resolve/main/recognition/model.onnx";
 #[cfg(feature = "face-onnx")]
 const EMBEDDING_APPROX_MB: u64 = 261;
 
-/// SCRFD 34G GNKPS — same SCRFD family as the 10G in buffalo_l, deeper
-/// backbone.  Same 5-point landmark contract our Umeyama alignment relies
-/// on.  ~39 MB on disk.  Hosted by the Immich team.
-///
-/// Override the URL with `POND_FACE_DETECTOR_URL`.
+/// SCRFD 34G GNKPS: keeps the 5-point landmarks the Umeyama alignment relies on.
 #[cfg(feature = "face-onnx")]
 const DETECTOR_DEFAULT_URL: &str =
     "https://huggingface.co/immich-app/scrfd_34g_gnkps/resolve/main/detection/model.onnx";
 #[cfg(feature = "face-onnx")]
 const DETECTOR_APPROX_MB: u64 = 39;
 
-/// Silent-Face MiniFASNetV2 anti-spoof model — 3-class export
-/// `[fake_2D, fake_3D, live]` at 80×80 BGR input.  Override the mirror
-/// with `POND_FACE_ANTISPOOF_URL`.
+/// Silent-Face MiniFASNetV2: 3-class `[fake_2D, fake_3D, live]`, 80×80 BGR input.
 #[cfg(feature = "face-onnx")]
 const ANTISPOOF_MIRRORS: &[&str] = &[
     "https://huggingface.co/hash-ash/Silent-Face-Anti-Spoofing-ONNX/resolve/main/2.7_80x80_MiniFASNetV2.onnx",
@@ -722,47 +569,19 @@ const ANTISPOOF_MIRRORS: &[&str] = &[
 #[cfg(feature = "face-onnx")]
 const ANTISPOOF_APPROX_MB: u64 = 2;
 
-/// DeepPixBis (OULU-NPU Protocol-2) PAD — patch-based binary supervision,
-/// 224×224 RGB input, sigmoid scalar `output_binary` head.  Complementary
-/// to Silent-Face's full-image classifier — better at print + screen-replay
-/// rejection.  The ONNX file is hosted on the GitHub release of
-/// `ffletcherr/face-recognition-liveness` and matches the architecture
-/// from the Deep Pixel-wise Binary Supervision paper (IDIAP).
-///
-/// The OnnxAntispoof adapter auto-detects DeepPixBis from the filename
-/// (`OULU_*` ⇒ DeepPixBis224) and switches to the right preprocessing.
-/// Override the URL with `POND_FACE_ANTISPOOF_2_URL` if needed.
+/// DeepPixBis PAD: 224×224 RGB input, sigmoid `output_binary` head.
 #[cfg(feature = "face-onnx")]
 const DEEPPIXBIS_DEFAULT_URL: &str =
     "https://github.com/ffletcherr/face-recognition-liveness/releases/download/v0.1/OULU_Protocol_2_model_0_0.onnx";
 #[cfg(feature = "face-onnx")]
 const ANTISPOOF_2_APPROX_MB: u64 = 13;
 
-// Shared by the face (#face-onnx) and vision (#vision-onnx) downloaders.
 #[cfg(any(feature = "face-onnx", feature = "vision-onnx"))]
 fn env_url_override(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|s| !s.trim().is_empty())
 }
 
-/// Download face recognition models into `<data_dir>/models/face/`.
-///
-/// Preferred stack (4 files, ~400 MB total):
-/// - `adaface_ir101.onnx`  (AdaFace IR-101 embedder, ~250 MB)
-/// - `scrfd_34g.onnx`      (SCRFD 34G detector with 5-pt landmarks, ~140 MB)
-/// - `antispoof.onnx`      (Silent-Face MiniFASNetV2 PAD, ~2 MB)
-/// - `deeppixbis.onnx`     (DeepPixBis secondary PAD, ~5 MB)
-///
-/// Fallback (when the AdaFace / SCRFD-34G mirrors are unreachable) reuses
-/// the buffalo_l bundle to populate `w600k_r50.onnx` (ArcFace R50) and
-/// `scrfd.onnx` (SCRFD 10G).  `build_face_recognition` then prefers the
-/// new files when present and silently uses the buffalo_l fallback
-/// otherwise — so a missing mirror downgrades quality but never breaks
-/// face recognition.
-///
-/// Each URL is overridable via env so a dead mirror can be replaced
-/// without recompiling: `POND_FACE_EMBEDDING_URL`,
-/// `POND_FACE_DETECTOR_URL`, `POND_FACE_ANTISPOOF_URL`,
-/// `POND_FACE_ANTISPOOF_2_URL`.
+/// Fetch missing face models; buffalo_l stands in if the preferred embedder/detector fail.
 #[cfg(feature = "face-onnx")]
 pub async fn download_face_models(data_dir: &Path) -> Result<()> {
     let (embed, detect, antispoof, antispoof_2) = face_model_paths(data_dir);
@@ -770,9 +589,6 @@ pub async fn download_face_models(data_dir: &Path) -> Result<()> {
     tokio::fs::create_dir_all(&dir).await?;
 
     // ── Embedder: Glint-R100 (preferred) ────────────────────────────────────
-    // Verified ONNX mirror at immich-app/antelopev2.  On download failure
-    // we let the buffalo_l block below fetch ArcFace R50 instead — same
-    // matcher math, lower low-light tolerance.
     if !embed.exists() {
         let url = env_url_override("POND_FACE_EMBEDDING_URL")
             .unwrap_or_else(|| EMBEDDING_DEFAULT_URL.to_string());
@@ -803,9 +619,6 @@ pub async fn download_face_models(data_dir: &Path) -> Result<()> {
     }
 
     // ── Buffalo_L fallback for whichever of {embed, detect} is still missing.
-    // Always runs when needed, regardless of whether the env-overrides above
-    // were attempted, so a fresh install ends up with a working stack out of
-    // the box (just with the smaller buffalo_l models, not the upgrades).
     let fallback_embed = dir.join("w600k_r50.onnx");
     let fallback_detect = dir.join("scrfd.onnx");
     let need_fallback_embed = !embed.exists() && !fallback_embed.exists();
@@ -864,11 +677,7 @@ pub async fn download_face_models(data_dir: &Path) -> Result<()> {
     }
 
     // ── Secondary anti-spoof: DeepPixBis (OULU-NPU Protocol 2) ──────────────
-    // Verified ONNX mirror at the GitHub release of
-    // `ffletcherr/face-recognition-liveness`.  When both primary +
-    // secondary load successfully the adapter ensembles via
-    // `max(spoof_score)`, which strictly improves replay-attack
-    // rejection.  Failure is non-fatal — Silent-Face V2 still runs alone.
+    // With both PADs loaded, the adapter ensembles them via `max(spoof_score)`.
     if !antispoof_2.exists() {
         let url = env_url_override("POND_FACE_ANTISPOOF_2_URL")
             .unwrap_or_else(|| DEEPPIXBIS_DEFAULT_URL.to_string());
@@ -886,8 +695,7 @@ pub async fn download_face_models(data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Stream `buffalo_l.zip`, extracting only `det_10g.onnx` → `scrfd.onnx`
-/// and `w600k_r50.onnx` → `w600k_r50.onnx` into `out_dir`.
+/// Extract `w600k_r50.onnx` and `det_10g.onnx` from `buffalo_l.zip` to the two dest paths.
 #[cfg(feature = "face-onnx")]
 async fn fetch_buffalo_l_zip(out_dir: &Path, embed_dest: &Path, detect_dest: &Path) -> Result<()> {
     println!(
@@ -896,9 +704,7 @@ async fn fetch_buffalo_l_zip(out_dir: &Path, embed_dest: &Path, detect_dest: &Pa
     );
 
     let client = reqwest::Client::builder().build()?;
-    // PAI-2 P6a: a `cfg`-gated sender is still a sender. This one only
-    // compiles under `face-onnx`, which is exactly why it is easy to miss --
-    // the egress guard scans source text, not the built binary.
+    // `cfg`-gated senders still need the egress gate: the guard scans source, not the binary.
     let call = pond_core::shared::services::egress::begin(BUFFALO_L_ZIP_URL, "GET")
         .context("Failed to fetch buffalo_l.zip")?;
     let sent = client.get(BUFFALO_L_ZIP_URL).send().await;
@@ -996,21 +802,15 @@ async fn fetch_buffalo_l_zip(out_dir: &Path, embed_dest: &Path, detect_dest: &Pa
     Ok(())
 }
 
-// ── Vision classifier model (#130 follow-up) ─────────────────────────────────
-//
-// YOLOX-Nano (Apache-2.0, ~3.7 MB) from the official Megvii release — labels
-// motion events person/pet/package via pond-adapters-vision-onnx. Mirrors the
-// face-model pattern: fetched automatically at serve startup on `vision-onnx`
-// builds so a fresh `cargo run` works out of the box, env-overridable mirror.
+// ── Vision classifier model ──────────────────────────────────────────────────
+// YOLOX-Nano (Apache-2.0): labels motion events person/pet/package.
 
-/// On-disk directory where vision models live: `<data_dir>/models/vision/`.
 #[cfg(feature = "vision-onnx")]
 pub fn vision_models_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("models").join("vision")
 }
 
-/// Filename of the default vision classifier (the auto-downloaded model).
-/// `vision_classifier_model` left empty resolves to this file.
+/// The auto-downloaded classifier; an empty `vision_classifier_model` resolves to it.
 #[cfg(feature = "vision-onnx")]
 pub const VISION_CLASSIFIER_DEFAULT_FILE: &str = "yolox_nano.onnx";
 
@@ -1020,9 +820,7 @@ const VISION_CLASSIFIER_DEFAULT_URL: &str =
 #[cfg(feature = "vision-onnx")]
 const VISION_CLASSIFIER_APPROX_MB: u64 = 4;
 
-/// Ensure the default vision classifier model is on disk, downloading it on
-/// first run. No-op when the file already exists. Override the mirror with
-/// `POND_VISION_CLASSIFIER_URL`.
+/// Fetch the default classifier unless it's on disk; returns its path.
 #[cfg(feature = "vision-onnx")]
 pub async fn download_vision_classifier(data_dir: &Path) -> Result<PathBuf> {
     let dir = vision_models_dir(data_dir);
@@ -1050,11 +848,6 @@ mod tests {
 
     // ── Silero VAD ────────────────────────────────────────────────────────────
 
-    /// A branch here would be a live dependency on whatever `main` points at
-    /// today, and the adapter hard-codes this model's window and state shape.
-    /// The failure mode is not a build break — it is one inference error per
-    /// window at run time, which the detector deliberately reports as *speech*,
-    /// which is a microphone that never closes.
     #[test]
     fn the_silero_weights_are_pinned_to_a_commit_not_a_branch() {
         assert_eq!(
@@ -1065,11 +858,7 @@ mod tests {
         assert!(SILERO_REVISION.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
-    /// The URL is only ever exercised on a fresh install, so a typo in it
-    /// survives every run on a machine that already has the file. This is the
-    /// one place it can be checked cheaply: `download_file` dispatches on
-    /// `parse_hf_url` returning `Some`, and a malformed URL silently falls
-    /// through to the plain-reqwest path instead.
+    /// A malformed URL silently skips the hf_cache path, and only a fresh install would notice.
     #[test]
     fn the_silero_url_routes_through_the_hf_cache() {
         let (repo, revision, filename) =
@@ -1087,8 +876,7 @@ mod tests {
         std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
         std::fs::write(&dest, b"not really a model, but present").unwrap();
 
-        // No network is mocked: reaching for one would fail the test rather
-        // than pass it silently.
+        // No network is mocked: any fetch fails the test.
         let got = ensure_silero_model(tmp.path()).await;
 
         assert_eq!(got.as_deref(), Some(dest.as_path()));
@@ -1111,8 +899,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        // Temporarily redirect the model URL by downloading from our mock URL directly.
-        // We test via download_file (the raw HTTP helper) since model URLs come from the catalog.
+        // Model URLs come from the catalogue, so exercise `download_file` directly.
         let tmp = TempDir::new().unwrap();
         let dest = tmp.path().join("ggml-base.en.bin");
         let url = format!("{}/ggml-base.en.bin", server.uri());
@@ -1163,31 +950,12 @@ mod tests {
         );
     }
 
-    // ── PAI-2 P6a: the network-mode gate on the download path ────────────────
-    //
-    // `egress_guard.rs` checks that this FILE mentions a tracker symbol. This
-    // file has THREE senders (`download_file`, `ensure_espeak_ng_data`, and the
-    // `face-onnx`-gated `fetch_buffalo_l_zip`), so that check would go green on
-    // one of them while the other two still phoned out. This is the behavioural
-    // half for the one that matters: `download_file` is the path every model,
-    // voice and ONNX fetch in the product goes through.
-    //
-    // The other two are NOT covered behaviourally and this says so rather than
-    // implying otherwise. `ensure_espeak_ng_data` shells out to `brew` and has
-    // half a dozen environment-dependent early returns before it reaches the
-    // network, so a test of it would pass on this machine without ever touching
-    // the gate — a vacuous test wearing a coverage badge. `fetch_buffalo_l_zip`
-    // only compiles under `--features face-onnx`. Both are gated in source and
-    // reviewed; neither is proven here.
+    // ── Network-mode gate on the download path ───────────────────────────────
+    // Only `download_file` is tested here; `ensure_espeak_ng_data` (brew-dependent early
+    // returns) and `fetch_buffalo_l_zip` (`face-onnx` only) are gated in source, untested.
 
-    /// Restores the previous mode however the test exits, panic included.
-    ///
-    /// `network_mode` is a process-global `RwLock` shared with every other test
-    /// in this binary. Flipping it to `Offline` is safe here only because
-    /// `Offline` still permits loopback and every sibling test in this crate
-    /// that sends anything sends to 127.0.0.1 (wiremock, or the reserved port 1
-    /// above). A test that wanted `Allowlist` would refuse those and would need
-    /// a serialising lock instead.
+    /// Restores the mode on drop. `network_mode` is process-global; `Offline` is safe only
+    /// because it still permits loopback, which is all sibling tests send to.
     struct ModeGuard(pond_core::shared::services::egress::NetworkMode);
 
     impl ModeGuard {
@@ -1208,8 +976,7 @@ mod tests {
     async fn offline_refuses_a_download_and_says_which_setting_did_it() {
         use pond_core::shared::services::egress::NetworkMode;
 
-        // A loopback server that WOULD serve the file, so the permitted half
-        // below is a real download and not an assertion about nothing.
+        // Serves the file, so the permitted half below is a real download.
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/ok.bin"))
@@ -1221,11 +988,7 @@ mod tests {
         let _mode = ModeGuard::set(NetworkMode::Offline);
 
         // ── refused ──────────────────────────────────────────────────────────
-        // `.invalid` is reserved and never resolves (RFC 2606). If the gate
-        // stopped firing this would still fail, but with a DNS error — which is
-        // exactly what the two assertions below tell apart. An error message
-        // that does not name the setting is indistinguishable from the network
-        // being down, which is the defect P5 found in the weather route.
+        // `.invalid` never resolves, so an ungated fetch fails with a DNS error, not this one.
         let err = download_file(
             "https://cdn.invalid/model.bin",
             &tmp.path().join("refused.bin"),
@@ -1250,8 +1013,7 @@ mod tests {
         );
 
         // ── still permitted ──────────────────────────────────────────────────
-        // The vacuity control. A gate that refused everything would satisfy the
-        // assertions above and take the pond off its own loopback model server.
+        // Vacuity control: a gate refusing everything would pass the checks above.
         let allowed = tmp.path().join("ok.bin");
         download_file(&format!("{}/ok.bin", server.uri()), &allowed, 1)
             .await
@@ -1294,15 +1056,12 @@ mod kokoro_engine_tests {
         assert_eq!(voices_to_fetch("   "), vec![DEFAULT.to_string()]);
     }
 
-    /// A real, different voice is fetched alongside the default — the default
-    /// is the safety net, not a replacement for what was asked for.
     #[test]
     fn a_valid_voice_is_fetched_alongside_the_default() {
         let v = voices_to_fetch("bm_george");
         assert_eq!(v, vec![DEFAULT.to_string(), "bm_george".to_string()]);
     }
 
-    /// Asking for the default names it once, not twice.
     #[test]
     fn the_default_is_not_requested_twice() {
         assert_eq!(voices_to_fetch(DEFAULT), vec![DEFAULT.to_string()]);
@@ -1320,14 +1079,8 @@ mod kokoro_engine_tests {
 
 pub use pond_core::models::domain::drafter::drafter_for;
 
-/// Is this file a drafter this engine can actually load?
-///
-/// A present-but-wrong drafter is worse than a missing one: it fails inside
-/// context creation on the first turn, where the error says "null reference"
-/// and points nowhere. Two files are easy to confuse here -- the ik_llama.cpp
-/// centroid drafters declare `gemma4_mtp` and upstream llama.cpp will not load
-/// them -- so check for the architecture upstream registers rather than
-/// trusting the filename.
+/// Checks the architecture upstream llama.cpp registers: ik_llama.cpp's centroid drafters
+/// declare `gemma4_mtp` and fail at first-turn context creation with an opaque error.
 fn is_loadable_drafter(path: &std::path::Path) -> bool {
     use std::io::Read;
     let Ok(mut f) = std::fs::File::open(path) else {
@@ -1344,16 +1097,7 @@ fn is_loadable_drafter(path: &std::path::Path) -> bool {
     head.windows(16).any(|w| w == b"gemma4-assistant")
 }
 
-/// Make sure the drafter for `chat_model` is on disk, fetching it if it is not.
-///
-/// Returns the path when speculative decoding can be used. Every failure path
-/// returns `None` and leaves the pond decoding without speculation, because a
-/// missing drafter is a lost optimisation and not a broken assistant.
-///
-/// Self-correcting in the two ways that matter: a partial download never lands
-/// under the real name (it is written to `.part` and renamed only after it
-/// validates), and a file that is present but not loadable is deleted and
-/// re-fetched rather than being handed to the engine to fail on.
+/// Ensure `chat_model`'s drafter is on disk; `None` on any failure means no speculation.
 pub async fn ensure_mtp_drafter(data_dir: &Path, chat_model: &str) -> Option<std::path::PathBuf> {
     let spec = drafter_for(chat_model)?;
     let dir = data_dir.join("models").join("gguf");
@@ -1414,8 +1158,7 @@ mod drafter_tests {
         std::fs::write(&junk, b"not a gguf at all").unwrap();
         assert!(!is_loadable_drafter(&junk));
 
-        // GGUF magic alone is not enough: the ik_llama centroid drafters are
-        // real GGUFs that upstream llama.cpp cannot load.
+        // Valid GGUF magic, wrong arch: the ik_llama centroid drafter case.
         let wrong_arch = tmp.path().join("y.gguf");
         let mut body = b"GGUF".to_vec();
         body.extend_from_slice(&[0u8; 512]);

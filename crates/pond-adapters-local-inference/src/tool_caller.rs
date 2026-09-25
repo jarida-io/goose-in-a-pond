@@ -1,6 +1,5 @@
-//! Tool-calling specialist engine: a small GGUF model generates structured tool-call arguments
-//! when the main LLM sends empty `{}`. The specialist sees ONLY the tool schema and the user
-//! query, never conversation history, which keeps inference under 100ms for a 270M model.
+//! A small GGUF specialist that fills in tool-call arguments when the main LLM sends `{}`. It
+//! sees only the tool schema and user query, never history, to stay under 100 ms at 270M.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -12,27 +11,19 @@ use pond_core::mcp::ports::tools::tool_caller::ToolCaller;
 use std::path::Path;
 use std::sync::Arc;
 
-/// In-process GGUF specialist for tool-call argument generation.
-///
-/// Loaded once at startup (~200MB for FunctionGemma 270M) and kept resident. Shares the
-/// `InferenceRuntime` singleton with the main model but occupies a separate model slot.
+/// Kept resident (~200 MB at 270M) in its own slot of the shared `InferenceRuntime`.
 pub struct ToolCallerEngine {
     provider: Arc<dyn GooseProvider>,
     model_config: ModelConfig,
 }
 
 impl ToolCallerEngine {
-    /// Build the engine for the given GGUF model file.
-    ///
-    /// `model_id` is a filename stem (e.g. `"functiongemma-270m-q4_k_m"`) or
-    /// a raw `.gguf` filename. The file must exist under `$data_dir/models/gguf/`.
+    /// `model_id` is the stem or `.gguf` filename of a file under `$data_dir/models/gguf/`.
     pub async fn new(model_id: &str, data_dir: &Path) -> Result<Self> {
-        // Register the GGUF model in Goose's global registry (same pattern as
-        // GooseAdapter::register_gguf_model in goose_agent.rs).
         register_tool_model(model_id, data_dir);
 
         let mut model_config = ModelConfig::new(normalise_model_id(model_id));
-        model_config.temperature = Some(0.0); // deterministic output
+        model_config.temperature = Some(0.0);
         model_config.max_tokens = Some(256); // tool calls are short
 
         println!("[tool_caller] loading specialist model: {}", model_id);
@@ -57,15 +48,12 @@ impl ToolCaller for ToolCallerEngine {
         tool_schema_json: &str,
         user_query: &str,
     ) -> Result<serde_json::Map<String, serde_json::Value>> {
-        // Build FunctionGemma's native prompt format, bypassing Goose's template rendering
-        // entirely: no Jinja, no rmcp Tool objects. The model answers with
-        // <start_function_call>call:NAME{key:<escape>val<escape>}<end_function_call>.
-        // Ref: https://ai.google.dev/gemma/docs/functiongemma/formatting-and-best-practices
+        // FunctionGemma's native prompt, bypassing Goose's templates. Ref:
+        // https://ai.google.dev/gemma/docs/functiongemma/formatting-and-best-practices
 
         let declaration = build_functiongemma_declaration(tool_name, tool_schema_json);
 
-        // The system prompt IS the function declaration — FunctionGemma was trained
-        // with this exact activation phrase followed by inline declarations.
+        // FunctionGemma was trained on this exact activation phrase + inline declarations.
         let system = format!(
             "You are a model that can do function calling with the following functions{}",
             declaration
@@ -81,8 +69,6 @@ impl ToolCaller for ToolCallerEngine {
         );
         println!("[tool_caller] └─────────────────────────────────────");
 
-        // Pass NO tools to the provider — we've baked the declaration into the
-        // system prompt. The model generates text, we parse the function call.
         let messages = vec![Message::user().with_text(user_query)];
         let (response, _usage) = self
             .provider
@@ -102,7 +88,6 @@ impl ToolCaller for ToolCallerEngine {
             &response_text[..response_text.len().min(300)]
         );
 
-        // Parse: try FunctionGemma's native format first, then JSON fallback
         if let Some(args) = parse_functiongemma_call(&response_text) {
             println!(
                 "[tool_caller] parsed FunctionGemma call: {:?}",
@@ -126,10 +111,7 @@ impl ToolCaller for ToolCallerEngine {
     }
 }
 
-/// Build a FunctionGemma-style function declaration from a JSON schema.
-///
-/// Output format (no spaces, all on one line):
-/// `<start_function_declaration>declaration:NAME{description:<escape>DESC<escape>,parameters:{properties:{key:{description:<escape>DESC<escape>,type:<escape>TYPE<escape>}},required:[<escape>key<escape>],type:<escape>OBJECT<escape>}}<end_function_declaration>`
+/// FunctionGemma `<start_function_declaration>` text for a JSON schema, one line, no spaces.
 fn build_functiongemma_declaration(tool_name: &str, schema_json: &str) -> String {
     let schema: serde_json::Value =
         serde_json::from_str(schema_json).unwrap_or_else(|_| serde_json::json!({}));
@@ -155,7 +137,6 @@ fn build_functiongemma_declaration(tool_name: &str, schema_json: &str) -> String
         decl.push_str("<escape>,");
     }
 
-    // Parameters
     decl.push_str("parameters:{properties:{");
     if let Some(props) = properties {
         let prop_strs: Vec<String> = props
@@ -180,7 +161,6 @@ fn build_functiongemma_declaration(tool_name: &str, schema_json: &str) -> String
     }
     decl.push_str("},");
 
-    // Required
     let required = schema
         .get("required")
         .and_then(|r| r.as_array())
@@ -201,10 +181,7 @@ fn build_functiongemma_declaration(tool_name: &str, schema_json: &str) -> String
     decl
 }
 
-/// Parse FunctionGemma's native `<start_function_call>` output format.
-///
-/// Format: `<start_function_call>call:NAME{key:<escape>string_val<escape>,key2:42}<end_function_call>`
-/// String values use `<escape>` delimiters. Bare values for integers/booleans.
+/// Parse `<start_function_call>call:NAME{k:<escape>str<escape>,n:42}<end_function_call>`.
 fn parse_functiongemma_call(text: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
     let call_start = text.find("<start_function_call>call:")?;
     let after_tag = &text[call_start + "<start_function_call>call:".len()..];
@@ -276,15 +253,11 @@ fn parse_functiongemma_call(text: &str) -> Option<serde_json::Map<String, serde_
     }
 }
 
-/// Parse the specialist model's output into a tool-call arguments map.
-///
-/// Accepts `{"name": ..., "arguments": {...}}`, a bare arguments object, and either of those
-/// embedded in markdown code fences.
+/// JSON fallback: `{"name", "arguments"}` or a bare arguments object, fenced or not.
 fn parse_tool_call_json(
     text: &str,
     tool_name: &str,
 ) -> Result<serde_json::Map<String, serde_json::Value>> {
-    // Strip markdown code fences if present
     let cleaned = text
         .trim()
         .strip_prefix("```json")
@@ -295,7 +268,7 @@ fn parse_tool_call_json(
         .unwrap_or(text.trim())
         .trim();
 
-    // Find the first '{' and last '}' to extract JSON even with surrounding text
+    // Tolerate prose around the JSON.
     let start = cleaned.find('{');
     let end = cleaned.rfind('}');
     let json_str = match (start, end) {
@@ -378,10 +351,7 @@ fn register_tool_model(model_id: &str, data_dir: &Path) {
                     backend_id: None,
                     storage: LocalModelStorage::ManualPath,
                     settings: ModelSettings {
-                        // Native tool calling forced ON — but we pass no tools to
-                        // complete(), so this only affects response handling. The
-                        // prompt is FunctionGemma's exact format built in
-                        // generate_tool_call(); the embedded chat template renders it.
+                        // Affects only response handling; the prompt carries the tools.
                         tool_calling: ToolCallingMode::ForceNative,
                         // Dynamic context from available memory.
                         context_size: None,

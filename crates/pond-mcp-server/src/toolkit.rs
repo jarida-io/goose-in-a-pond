@@ -1,22 +1,5 @@
-//! Toolkit MCP Server — the tool-relevance escape hatch (Phase D2).
-//!
-//! Provides 2 tools: `list_tool_groups`, `enable_tool_group`.
-//!
-//! ## Why this exists
-//!
-//! Phase D narrows which extension tool schemas reach the model, per session, so
-//! a 27-tool surface (~3,339 prompt tokens, 40.8% of the budget) fits
-//! an 8K-class on-device budget. Narrowing is only safe if the model can reach a
-//! capability that was not preloaded — otherwise a mis-scored session is a dead
-//! end and the user just gets a worse assistant.
-//!
-//! This server is that hatch, and it is why the whole feature is defensible: the
-//! tool surface is LAZILY LOADED, not restricted. The model still decides
-//! natively whether and which tools to call; it can also decide that it needs a
-//! group nobody predicted, and say so.
-//!
-//! Both tools are in the always-on core set, so they are present in every
-//! session regardless of selection.
+//! Toolkit MCP server: the escape hatch that loads a tool group narrowing left out.
+//! Always in the core set, so a mis-scored session can still reach any capability.
 
 use pond_core::mcp::domain::tool_group::TOOLKIT_EXTENSION;
 use pond_core::mcp::ports::tools::tool_selection_control::{
@@ -57,8 +40,7 @@ pub struct EnableToolGroupParams {
     pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
-/// Pull the group name out of `group`, falling back to the extras bag under the
-/// aliases a small model is most likely to invent.
+/// The `group` param, falling back to the aliases a small model tends to invent.
 fn resolve_group(params: &EnableToolGroupParams) -> Option<String> {
     if let Some(g) = params.group.as_ref() {
         let g = g.trim();
@@ -88,12 +70,7 @@ pub struct ToolkitMcpServer {
 
 #[tool_router]
 impl ToolkitMcpServer {
-    /// Every tool this server exposes, without constructing it or its deps.
-    ///
-    /// `tool_router()` is generated private to this module, so inventory code
-    /// outside it could not reach the real definitions and resorted to scanning
-    /// source text for `#[tool(` instead. This is the enumeration that scan was
-    /// standing in for.
+    /// Every tool this server exposes, without constructing it (`tool_router()` is private).
     pub(crate) fn tool_defs() -> Vec<rmcp::model::Tool> {
         Self::tool_router().list_all()
     }
@@ -119,9 +96,7 @@ Use when a capability you need seems to be missing.")]
                 "All available tools are already loaded for this conversation.",
             )]));
         };
-        // `_meta`, not `current_session_id()`. See `session_meta.rs`: the global
-        // is a `RwLock<String>` raced by four concurrent chat streams, so it can
-        // name a different member's conversation than the one that called.
+        // `_meta`, not `current_session_id()`: that global is raced by concurrent chat streams.
         let Some(session_id) = crate::session_from_meta(&ctx.meta) else {
             return Ok(CallToolResult::success(vec![Content::text(
                 "All available tools are already loaded for this conversation.",
@@ -176,9 +151,7 @@ Load a group of tools that is not currently available, by its exact name (e.g. \
                  'group'.",
             )]));
         };
-        // Widening is authorisation, so it reads the one channel that cannot be
-        // raced. An unattributable call widens nothing rather than widening
-        // whichever conversation happened to start a turn most recently.
+        // Authorisation: only `_meta` can't be raced, and an unattributed call widens nothing.
         let Some(session_id) = crate::session_from_meta(&ctx.meta) else {
             return Ok(CallToolResult::success(vec![Content::text(
                 "Tool groups cannot be changed from here — every group already available \
@@ -200,10 +173,7 @@ Load a group of tools that is not currently available, by its exact name (e.g. \
                     loaded.join(", ")
                 ))]))
             }
-            // The group IS loaded; its tools just are not callable yet. The
-            // catch-all below says "Could not load" and points at
-            // list_tool_groups, both of which would be wrong here and would send
-            // the model back round a loop it has already completed.
+            // Loaded, not yet callable: the catch-all reply would send the model looping.
             Err(ToolSelectionError::NotReady(_)) => {
                 Ok(CallToolResult::success(vec![Content::text(format!(
                     "Loaded '{group}', but its tools only become callable on your next turn. \
@@ -211,9 +181,7 @@ Load a group of tools that is not currently available, by its exact name (e.g. \
                      already had."
                 ))]))
             }
-            // A failure is reported as tool SUCCESS carrying the explanation: an
-            // MCP error makes small models retry the same bad call, whereas a
-            // readable message with the valid names lets them self-correct.
+            // Reported as success: an MCP error makes small models retry the same bad call.
             Err(e) => Ok(CallToolResult::success(vec![Content::text(format!(
                 "Could not load '{group}': {e}. Call list_tool_groups for the exact names."
             ))])),
@@ -251,19 +219,15 @@ struct ToolkitDeps {
 
 static TOOLKIT_DEPS: OnceLock<ToolkitDeps> = OnceLock::new();
 
-/// Install the tool-selection control handle. Call once at startup, AFTER the
-/// agent adapter exists (it is the implementor). Without it both tools degrade
-/// to "everything is already loaded", which is the truthful answer when no
-/// narrowing is in effect.
+/// Install the tool-selection control. Call once, AFTER the agent adapter (its implementor)
+/// exists; without it both tools answer "everything is already loaded".
 pub fn init_toolkit_deps(control: Option<Arc<dyn ToolSelectionControl>>) {
     let _ = TOOLKIT_DEPS.set(ToolkitDeps { control });
 }
 
 /// Spawn function compatible with Goose's `SpawnServerFn` type.
 pub fn spawn_toolkit_server(reader: DuplexStream, writer: DuplexStream) {
-    // Unlike the other servers this does NOT expect(): the toolkit extension is
-    // registered before the adapter that implements the port is built, so a
-    // missing handle is a legitimate transient state, not a bug.
+    // No expect(): the extension registers before its implementing adapter is built.
     let control = TOOLKIT_DEPS.get().and_then(|d| d.control.clone());
     let server = ToolkitMcpServer::new(control);
     crate::serve_builtin("giap-toolkit", server, reader, writer);
@@ -275,20 +239,7 @@ pub fn spawn_toolkit_server(reader: DuplexStream, writer: DuplexStream) {
 mod tests {
     use super::*;
 
-    /// Widening a session's tool surface is authorisation, so it may only ever
-    /// read the per-call channel.
-    ///
-    /// `crate::current_session_id()` is a process-global `RwLock<String>` written
-    /// once per turn, with `Semaphore::new(4)` concurrent chat streams racing it.
-    /// Both tools here used to read it, so one member's `enable_tool_group` could
-    /// widen a different member's allow-set — and `session_meta.rs` had already
-    /// written down why that is not acceptable: *"Correct authorisation on a
-    /// misattributed session is not correct."*
-    ///
-    /// A source scan because the alternative needs a live `RequestContext`, which
-    /// rmcp does not offer a constructor for. Comments are stripped so the note
-    /// explaining the ban does not itself trip it — without that, this guard
-    /// would have failed on the day it landed for reasons unrelated to the code.
+    /// A source scan, as rmcp offers no `RequestContext` constructor; comments are stripped.
     #[test]
     fn neither_tool_reads_the_process_global_session() {
         let src = include_str!("toolkit.rs");
@@ -302,8 +253,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        // Vacuity control: the scan must be able to see the call it permits, or
-        // a rename would make this silently pass forever.
+        // Vacuity control: a rename must not make this pass silently.
         assert!(
             code.contains("session_from_meta("),
             "neither tool resolves a session from _meta — this guard is scanning \
@@ -326,8 +276,6 @@ mod tests {
         assert_eq!(resolve_group(&params), Some("giap-schedule".to_string()));
     }
 
-    /// Small on-device models routinely rename the argument. Recovering costs
-    /// nothing and saves a whole round trip.
     #[test]
     fn group_is_recovered_from_common_aliases() {
         for alias in ["name", "extension", "tool_group", "group_name"] {
@@ -355,21 +303,8 @@ mod tests {
         assert_eq!(resolve_group(&params), None);
     }
 
-    /// Under `tool_selection_mode = "minimal"` these two tools are the ENTIRE
-    /// tool surface, and the reason that mode exists is a 4%-of-prompt-budget
-    /// ceiling. So the ceiling has to be a test, not a claim in a doc comment.
-    ///
-    /// The budget is `LOCAL_PROMPT_CLAMP` = 8,192 tokens (the prompt-side clamp
-    /// every local provider gets, whatever its n_ctx), 4% of which is 327
-    /// tokens. Tool JSON tokenizes at very close to 4 chars/token on the Gemma
-    /// template — the 61-tool payload measured 30,463 chars against 7,633
-    /// counted prompt tokens, 0.2% off — so the ceiling in characters is 1,308
-    /// (the arithmetic below truncates twice, which is why it is not 1,310).
-    ///
-    /// Measured on the real serialized schemas rather than the source text,
-    /// because what costs tokens is what `list_all()` hands the model: adding
-    /// one optional field to `EnableToolGroupParams` is a one-line change that
-    /// would quietly move this number.
+    /// In "minimal" mode these two tools are the whole surface: 4% of `LOCAL_PROMPT_CLAMP`
+    /// (8,192 tokens) at ~4 chars/token on the Gemma template, measured on serialized schemas.
     #[test]
     fn the_hatch_fits_four_percent_of_the_prompt_budget() {
         const PROMPT_BUDGET_TOKENS: usize = 8_192;

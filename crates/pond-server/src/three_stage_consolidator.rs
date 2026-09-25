@@ -1,11 +1,4 @@
-//! Three-stage adversarial memory consolidation.
-//!
-//! Runs three sequential LLM calls — Proposer, Adversary, Judge — to
-//! consolidate memories with higher confidence than a single-pass approach.
-//! The Adversary guards against information loss; the Judge resolves disputes.
-//!
-//! Designed for Gemma 4 E2B on Jetson Orin Nano: each prompt is under 200
-//! tokens so the three calls complete within a single context window budget.
+//! Memory consolidation as three LLM calls: Proposer, Adversary (guards against loss), Judge.
 
 use anyhow::{anyhow, Result};
 use pond_core::models::domain::message::ChatMessage;
@@ -17,9 +10,6 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 // ── Prompts ─────────────────────────────────────────────────────────────────
-// XML-structured system prompts for each consolidation agent.
-// Each agent runs with thinking enabled so it can reason about relationships
-// between memories before committing to a decision.
 
 const PROPOSER_PROMPT: &str = "\
 <identity>
@@ -122,10 +112,7 @@ impl ThreeStageConsolidator {
         Self { live_provider }
     }
 
-    /// Run the full Proposer -> Adversary -> Judge pipeline.
-    ///
-    /// Checks the `cancel` token between each stage to allow early termination.
-    /// Events are streamed via `event_tx` when provided, enabling live UI updates.
+    /// Run all three stages, checking `cancel` between them; progress goes to `event_tx` if set.
     pub async fn run(
         &self,
         memories: &[MemoryFragment],
@@ -229,7 +216,6 @@ impl ThreeStageConsolidator {
         Ok(result)
     }
 
-    /// Get the LLM provider, returning an error if none is available.
     async fn get_provider(&self) -> Result<Arc<dyn LlmProvider>> {
         let guard = self.live_provider.read().await;
         guard
@@ -238,7 +224,6 @@ impl ThreeStageConsolidator {
             .ok_or_else(|| anyhow!("no LLM provider available for consolidation"))
     }
 
-    /// Stage 1: ask the LLM to propose merge/prune/supersede actions.
     async fn run_proposer(
         &self,
         formatted_memories: &str,
@@ -256,7 +241,6 @@ impl ThreeStageConsolidator {
         Ok(parse_proposals(&cleaned))
     }
 
-    /// Stage 2: ask the LLM to challenge each proposal.
     async fn run_adversary(
         &self,
         formatted_memories: &str,
@@ -277,7 +261,6 @@ impl ThreeStageConsolidator {
         Ok(parse_challenges(&cleaned))
     }
 
-    /// Stage 3: ask the LLM to make final accept/reject decisions.
     async fn run_judge(
         &self,
         proposals: &[ConsolidationProposal],
@@ -302,10 +285,6 @@ impl ThreeStageConsolidator {
 
 // ── Formatting ───────────────────────────────────────────────────────────────
 
-/// Format memories into a compact text representation for LLM prompts.
-///
-/// Format: `[{id}] ({segment}, {importance:.1}) {content}`
-/// Appends ` [corrects: {corrects}]` for correction memories.
 fn format_memories(memories: &[MemoryFragment]) -> String {
     memories
         .iter()
@@ -346,7 +325,6 @@ fn extract_json_array(text: &str) -> Option<String> {
     None
 }
 
-/// Parse the Proposer's JSON output into `ConsolidationProposal` values.
 fn parse_proposals(raw: &str) -> Vec<ConsolidationProposal> {
     let json_str = match extract_json_array(raw) {
         Some(s) => s,
@@ -506,7 +484,6 @@ fn parse_proposals(raw: &str) -> Vec<ConsolidationProposal> {
     proposals
 }
 
-/// Parse the Adversary's JSON output into `ChallengeVerdict` values.
 fn parse_challenges(raw: &str) -> Vec<ChallengeVerdict> {
     let json_str = match extract_json_array(raw) {
         Some(s) => s,
@@ -543,7 +520,6 @@ fn parse_challenges(raw: &str) -> Vec<ChallengeVerdict> {
     challenges
 }
 
-/// Parse the Judge's JSON output into `JudgeDecision` values.
 fn parse_decisions(raw: &str) -> Vec<JudgeDecision> {
     let json_str = match extract_json_array(raw) {
         Some(s) => s,
@@ -582,10 +558,7 @@ async fn send_event(
     }
 }
 
-/// Zip proposals, challenges, and decisions by index into `TrialExchange` values.
-///
-/// Missing challenges default to a high-severity rejection (conservative).
-/// Missing decisions default to rejected.
+/// Zip stages by index. Missing entries fail safe: a High challenge, a rejected decision.
 fn build_exchanges(
     proposals: Vec<ConsolidationProposal>,
     challenges: Vec<ChallengeVerdict>,
@@ -785,7 +758,6 @@ mod tests {
         assert_eq!(exchanges.len(), 2);
         assert!(exchanges[0].judgment.accepted);
         assert!(!exchanges[1].judgment.accepted);
-        // Second challenge should be the default high-severity rejection
         assert!(matches!(
             exchanges[1].challenge.severity,
             ChallengeSeverity::High

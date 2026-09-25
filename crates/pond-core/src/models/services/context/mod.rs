@@ -1,6 +1,5 @@
-//! Context-window management: [`context_governor`] resolves the active window,
-//! [`context_budget`] splits it, [`context_monitor`] tracks live utilisation, and
-//! [`model_class`] decides which compaction mechanisms the model can afford.
+//! Context window: [`context_governor`] resolves it, [`context_budget`] splits it,
+//! [`context_monitor`] tracks use, [`model_class`] picks the compaction a model can afford.
 pub mod answer_contract;
 pub mod context_budget;
 pub mod context_governor;

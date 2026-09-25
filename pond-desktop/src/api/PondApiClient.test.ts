@@ -217,9 +217,7 @@ describe("compactSession()", () => {
   });
 
   it("resolves a refusal rather than throwing", async () => {
-    // The endpoint answers 200 with a status/reason pair for everything short
-    // of a server fault, so the client must NOT model a refusal as an error —
-    // being refused is the common path.
+    // The endpoint answers 200 with status/reason for anything short of a server fault.
     fetchMock.mockResolvedValueOnce(
       okJson({
         session_id: "s1",
@@ -349,21 +347,13 @@ describe("chatStream()", () => {
   });
 
   it("throws ApiError when chat endpoint returns a non-auth error", async () => {
-    // A 500 is a genuine failure and still throws; a 401 is handled separately
-    // (re-authenticate and retry) — see the re-authentication suite.
+    // A 401 re-authenticates instead; see the re-authentication suite.
     fetchMock.mockResolvedValueOnce(errJson(500, "internal error"));
     const gen = client().chatStream("hi");
     await expect(gen.next()).rejects.toBeInstanceOf(ApiError);
   });
 
-  /**
-   * The server's SSE handler holds one of four `sse_semaphore` permits and an
-   * `AttachGuard` for as long as the response body is open. `releaseLock()`
-   * alone does not close it, so an abandoned turn kept both — measured against
-   * a live pond, four abandoned streams made every later send return
-   * `503 Too many concurrent streams` in under 2 ms, until the browser
-   * happened to garbage-collect the Response.
-   */
+  /** An open body holds one of four server SSE permits; `releaseLock()` alone does not close it. */
   it("cancels the body when the consumer walks away mid-stream", async () => {
     const encoder = new TextEncoder();
     let cancelled: unknown = "not cancelled";
@@ -620,9 +610,7 @@ describe("pullOllamaModel()", () => {
   });
 });
 
-// ── searchLlamafileModels ─────────────────────────────────────────────────────
-
-// ── wake-word calibration ────────────────────────────────────────��───────────
+// ── wake-word calibration ─────────────────────────────────────────────────────
 
 describe("calibrateWakeWord()", () => {
   it("POSTs multipart form to /voice/calibrate", async () => {
@@ -644,7 +632,6 @@ describe("calibrateWakeWord()", () => {
       "http://localhost:4000/api/v1/voice/calibrate",
       expect.objectContaining({ method: "POST" }),
     );
-    // Verify body is FormData (not JSON)
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(init.body).toBeInstanceOf(FormData);
   });
@@ -728,9 +715,7 @@ describe("re-authentication after a rejected token", () => {
   const future = new Date(Date.now() + 3_600_000).toISOString();
 
   function seedStaleSession() {
-    // The client thinks its token is valid (future expiry), but the server
-    // rejects it — exactly the post-restart / rotated-token case. A refresh
-    // token is present so re-auth resolves without a full pairing.
+    // Unexpired but server-rejected token (restart/rotation); the refresh token avoids re-pairing.
     localStorage.setItem("giap-session-token", "stale");
     localStorage.setItem("giap-refresh-token", "r1");
     localStorage.setItem("giap-token-expires-at", future);
@@ -755,14 +740,12 @@ describe("re-authentication after a rejected token", () => {
       const auth = (init?.headers as Record<string, string> | undefined)?.[
         "Authorization"
       ];
-      // The stale token is rejected; the refreshed one succeeds.
       return auth === "Bearer stale"
         ? errJson(401, "Invalid or expired token")
         : okJson([{ id: "d1", name: "Lamp", is_online: true }]);
     });
 
     const api = client();
-    // Five concurrent calls all carry the stale token and 401 together.
     await Promise.all([
       api.listDevices(),
       api.listDevices(),
@@ -771,7 +754,6 @@ describe("re-authentication after a rejected token", () => {
       api.listDevices(),
     ]);
 
-    // Coalesced: one refresh for the whole burst, not one per request.
     expect(refreshCalls).toBe(1);
   });
 
@@ -797,13 +779,11 @@ describe("re-authentication after a rejected token", () => {
       const auth = (init?.headers as Record<string, string> | undefined)?.[
         "Authorization"
       ];
-      // The chat stream is rejected on the stale token, accepted on the fresh one.
       return auth === "Bearer stale"
         ? errJson(401, "Invalid or expired token")
         : emptySse();
     });
 
-    // Consuming the stream must not throw — it recovers and completes.
     const api = client();
     for await (const _ of api.chatStream("hi", undefined, "stale")) {
       /* drain */
@@ -870,7 +850,7 @@ describe("per-instance client id", () => {
 
     const id = getId();
     expect(id).toMatch(/^pond-desktop-.+/);
-    expect(id).not.toBe("pond-desktop"); // the old shared id that caused revocation churn
+    expect(id).not.toBe("pond-desktop"); // a shared id causes revocation churn
     expect(localStorage.getItem("giap-client-id")).toBe(id);
   });
 
@@ -886,8 +866,7 @@ describe("per-instance client id", () => {
   });
 });
 
-// One call redirects the whole singleton, which is what lets the shell correct
-// a fallback port without reloading the renderer.
+// One call redirects the singleton, so the shell can fix a fallback port without a reload.
 describe("setBase", () => {
   it("follows the shell's server URL for requests it has not sent yet", async () => {
     const fetchMock = vi.fn().mockResolvedValue({

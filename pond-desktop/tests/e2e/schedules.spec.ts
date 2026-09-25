@@ -23,7 +23,6 @@ test.describe("Schedules section", () => {
 
   test("navigating to Schedules renders the section", async ({ page }) => {
     await goToSchedules(page);
-    // Section heading or empty-state message should appear
     await expect(
       page
         .getByText(/schedules?/i)
@@ -37,14 +36,12 @@ test.describe("Schedules section", () => {
     // api-mocks returns [] for GET /api/v1/schedules
     await goToSchedules(page);
 
-    // Wait for the list fetch to complete — no schedule cards should appear
     await page.waitForTimeout(500);
     await expect(page.getByText(/morning briefing/i)).not.toBeVisible();
     await expect(page.getByText(/evening summary/i)).not.toBeVisible();
   });
 
   test("renders a schedule returned by the API", async ({ page }) => {
-    // Override the schedules mock to return one entry
     await page.route("**/api/v1/schedules", (route) => {
       if (route.request().method() === "GET") {
         return route.fulfill({
@@ -82,7 +79,6 @@ test.describe("Schedules section", () => {
   test("create schedule form submits correctly", async ({ page }) => {
     let postBody: Record<string, string> | null = null;
 
-    // Override POST to capture the payload
     await page.route("**/api/v1/schedules", (route) => {
       if (route.request().method() === "POST") {
         postBody = route.request().postDataJSON() as Record<string, string>;
@@ -102,14 +98,13 @@ test.describe("Schedules section", () => {
 
     await goToSchedules(page);
 
-    // Open the schedule form — use "New Schedule" specifically to avoid matching "New Routine"
+    // "New Schedule" specifically, so "New Routine" doesn't match.
     const addBtn = page
       .getByRole("button", { name: /new schedule/i })
       .or(page.getByRole("button").filter({ hasText: /add schedule|create schedule/i }))
       .first();
     await addBtn.click();
 
-    // Fill in the form if inputs become visible
     const nameInput = page
       .getByPlaceholder(/name/i)
       .or(page.getByLabel(/name/i))
@@ -133,13 +128,11 @@ test.describe("Schedules section", () => {
       await promptInput.fill("Give me a morning briefing");
     }
 
-    // Submit
     const submitBtn = page
       .getByRole("button", { name: /save|create|submit/i })
       .first();
     if (await submitBtn.isVisible({ timeout: 2_000 })) {
       await submitBtn.click();
-      // Give the POST handler time to fire
       await page.waitForTimeout(500);
       expect(postBody).not.toBeNull();
     }
@@ -148,7 +141,6 @@ test.describe("Schedules section", () => {
   test("delete button calls DELETE endpoint", async ({ page }) => {
     let deleteCalled = false;
 
-    // Accept browser confirm() dialogs automatically
     page.on("dialog", (dialog) => dialog.accept());
 
     await page.route("**/api/v1/schedules", (route) => {
@@ -178,13 +170,11 @@ test.describe("Schedules section", () => {
     await goToSchedules(page);
     await expect(page.getByText("To Delete")).toBeVisible({ timeout: 10_000 });
 
-    // Schedules.tsx renders: <Button aria-label="Delete schedule">
     const deleteBtn = page.getByRole("button", { name: "Delete schedule" }).first();
     await expect(deleteBtn).toBeVisible({ timeout: 5_000 });
     await deleteBtn.click();
 
-    // Delete now goes through the custom ConfirmDialog (replaced window.confirm in
-    // the UX-humanization pass), so confirm via its destructive button.
+    // Deletion is confirmed in ConfirmDialog, not window.confirm.
     const confirmBtn = page.locator(".confirm-dialog__btn--destructive");
     await expect(confirmBtn).toBeVisible({ timeout: 5_000 });
     await confirmBtn.click();

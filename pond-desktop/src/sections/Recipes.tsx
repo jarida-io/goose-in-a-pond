@@ -5,10 +5,8 @@ import { api } from "../api/PondApiClient";
 import { PageHeader, useConfirm } from "../components/shared";
 import type { AgentRecipe, RecipeParameter, RecipeExtensionSpec } from "../api/types";
 
-// ── Extension vocabulary — the same names `recipe_extension_to_tool_group`
-// recognises server-side (crates/pond-api/src/routes.rs). Anything else a
-// hand-authored recipe declares still round-trips through the YAML editor,
-// it just won't appear pre-checked here. ──────────────────────────────────
+// ── Extension vocabulary ──────────────────────────────────────────────────
+// Names `recipe_extension_to_tool_group` (crates/pond-api/src/routes.rs) knows; others round-trip via YAML.
 const EXTENSION_OPTIONS: Array<{ name: string; label: string }> = [
   { name: "weather", label: "Weather" },
   { name: "schedule", label: "Schedule" },
@@ -45,9 +43,7 @@ function yamlString(s: string): string {
   return JSON.stringify(s);
 }
 
-/** Hand-rolled YAML block-style serializer — matches the Hub's `RecipeBuilderModal`
- * approach of writing JSON-quoted scalars (valid YAML flow scalars). Kept simple on
- * purpose: a recipe built here only ever needs flat strings and lists of flat objects. */
+/** Minimal YAML writer using JSON-quoted scalars, like the Hub's `RecipeBuilderModal`; flat values only. */
 function buildRecipeYaml(f: RecipeFormState): string {
   const lines: string[] = [];
   lines.push(`title: ${yamlString(f.title || f.name)}`);
@@ -81,10 +77,7 @@ function buildRecipeYaml(f: RecipeFormState): string {
   return lines.join("\n") + "\n";
 }
 
-/** Best-effort extraction of the `prompt:` scalar for the editor. Recipes
- * built by this editor (or the Hub's builder) always write it as a single
- * JSON-quoted line, which this fully round-trips; a hand-authored multi-line
- * block scalar (`prompt: |`) falls back to the raw following line. */
+/** Best-effort `prompt:` read: round-trips the one-line JSON-quoted form; a block scalar yields "". */
 function extractPrompt(yaml: string): string {
   const match = yaml.match(/^prompt:\s*(.+)$/m);
   if (!match) return "";
@@ -250,8 +243,7 @@ export function Recipes() {
     setRunning(r.name);
     setRunError(null);
     try {
-      // Drain the stream — a full chat surface for a recipe's response
-      // lives in Chat/the Hub; this just fires the run and confirms it started.
+      // Output is discarded: Chat/the Hub show a recipe's response; this only runs it.
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       for await (const _event of api.runRecipe(r.name, { parameters })) {
         // no-op: consuming the generator drives the run to completion

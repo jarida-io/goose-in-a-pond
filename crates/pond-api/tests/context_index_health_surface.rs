@@ -1,7 +1,4 @@
-//! The index's coverage leaves the process, and can be repaired from outside it. Embeddings
-//! off must answer, not 500; every corpus is its own row, at zero with no coverage fraction
-//! when nothing qualifies, because an average hid one that could never populate; rebuild
-//! reports what it cleared, since the sweep re-embeds only ABSENT rows; both need a token.
+//! Index health/rebuild routes. Rebuild clears rows because the sweep re-embeds only absent ones.
 
 use std::sync::Arc;
 
@@ -67,10 +64,7 @@ impl DeviceRegistry for NoDevices {
     }
 }
 
-/// Named, and of a fixed width, because the route reports both and a mismatch
-/// against either is the defect this surface exists to expose. It embeds
-/// nothing: no test here asks it to, and a health count is a `JOIN` over stored
-/// rows rather than anything the model is asked to compute.
+/// Named, with a fixed width: the route reports both, and a mismatch in either is a defect.
 const STUB_MODEL: &str = "stub-embed-v1";
 
 struct StubEmbedder;
@@ -99,21 +93,15 @@ struct Harness {
     _tmp: tempfile::TempDir,
 }
 
-/// The two knobs that decide which of the three shapes a pond is in: no index at
-/// all (the CLI paths and every other test in this crate), an index with nobody
-/// to fill it (`embedding_provider = "none"`, a real configuration), or a live
-/// one.
+/// Pond shapes: no index (CLI), index but no embedder (`embedding_provider = "none"`), or live.
 async fn make_app(wire_index: bool, wire_embedder: bool) -> Harness {
     let tmp = tempfile::tempdir().unwrap();
     let db = pond_infra::db::Database::init(tmp.path()).await.unwrap();
     let system = db.system.clone();
     let profiles = Arc::new(SqliteProfileRepository::new(system.clone()));
-    // Built whether or not it is wired into `AppState`, so a test can seed
-    // vectors into a pond whose route is expected to report no index.
+    // Built even when unwired, so a test can seed vectors into a pond that reports no index.
     let index = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-    // Held by the harness as well as the state, so a test can wait on it and
-    // prove the route actually wakes the sweep rather than merely holding a
-    // handle it never uses.
+    // Also held by the harness, so a test can prove the route wakes the sweep.
     let reindex = Arc::new(tokio::sync::Notify::new());
     let hs = MockHandshake::new();
     hs.add_valid_token("test-token".to_string()).await;
@@ -142,10 +130,7 @@ async fn make_app(wire_index: bool, wire_embedder: bool) -> Harness {
         embedding_provider: wire_embedder
             .then(|| Arc::new(StubEmbedder) as Arc<dyn EmbeddingProvider + Send + Sync>),
         vector_index: wire_index.then(|| index.clone() as Arc<dyn VectorIndex>),
-        // Present only when a sweep would exist to wake, which in production
-        // means an embedder: `main.rs` spawns the sweep inside the same
-        // `if let Some(provider)`. Wiring it whenever the index is present would
-        // make this harness claim a refill on a pond where nothing can refill.
+        // Only with an embedder, as in `main.rs`, which spawns the sweep only when one exists.
         index_reindex: (wire_index && wire_embedder).then(|| reindex.clone()),
         account_sync: None,
         sensor_storage: Arc::new(MockSensorStorage::new()),
@@ -227,9 +212,7 @@ async fn make_app(wire_index: bool, wire_embedder: bool) -> Harness {
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
-/// `memory_fragments.profile_id` is a real foreign key and `db.rs` enables
-/// `foreign_keys` on every connection, so a fixture that invents a member id is
-/// rejected. Create the member first.
+/// A real member: `memory_fragments.profile_id` is an enforced foreign key.
 async fn member(h: &Harness) -> String {
     h.profiles
         .create(CreateProfileRequest {
@@ -241,9 +224,7 @@ async fn member(h: &Harness) -> String {
         .id
 }
 
-/// A live memory, written as SQL rather than through `memory_repo`: the health
-/// query counts SOURCE rows in `pond_system.db`, and this crate's harness holds
-/// an in-memory mock repository whose rows never reach the table being counted.
+/// A live memory via SQL: `memory_repo` here is a mock whose rows never reach the table.
 async fn add_memory(h: &Harness, id: &str, profile: &str) {
     sqlx::query(
         "INSERT INTO memory_fragments (id, profile_id, content, source, tags, created_at, \
@@ -256,10 +237,7 @@ async fn add_memory(h: &Harness, id: &str, profile: &str) {
     .unwrap();
 }
 
-/// A session carrying a real rolling summary and NO owner. `liveness_sql(Summary)` requires
-/// `profile_id IS NOT NULL`, so such a session is excluded from every count that uses the
-/// predicate: on the live pond 27 of them existed and the corpus reported zero qualifying
-/// rows, which reads exactly like an empty corpus.
+/// A session with a rolling summary and no owner, which `liveness_sql(Summary)` excludes.
 async fn add_unattributed_summary(h: &Harness, id: &str) {
     sqlx::query(
         "INSERT INTO sessions (id, created_at, profile_id, rolling_summary, \
@@ -317,9 +295,7 @@ async fn rebuild(h: &Harness) -> (StatusCode, Value) {
     send(&h.app, Method::POST, "/api/v1/context/index/rebuild", true).await
 }
 
-/// The row for one corpus, by name. Absence is a failure rather than a `None`:
-/// the port's contract is that every corpus is represented, because a corpus
-/// missing from the answer is a corpus nobody can see is broken.
+/// The row for one corpus; panics if absent, since every corpus must be represented.
 fn corpus_row<'a>(body: &'a Value, corpus: &str) -> &'a Value {
     body["corpora"]
         .as_array()
@@ -381,10 +357,7 @@ async fn the_coverage_number_leaves_the_process() {
     let h = make_app(true, true).await;
     let liz = member(&h).await;
 
-    // Four live memories: one indexed under the current model, one under an
-    // older one (present, unusable, repaired by RE-embedding), two with no
-    // vector at all (repaired by embedding). Three different repairs, which is
-    // why the answer keeps them apart rather than reporting one shortfall.
+    // Four memories: one current, one under a stale model (needs re-embedding), two unindexed.
     for id in ["m1", "m2", "m3", "m4"] {
         add_memory(&h, id, &liz).await;
     }
@@ -413,10 +386,7 @@ async fn the_coverage_number_leaves_the_process() {
     assert_eq!(memory["missing_rows"], 2);
     assert_eq!(memory["coverage"], 0.25);
 
-    // The claim the per-corpus shape exists for. This pond has no attributed
-    // session, so the summary corpus cannot populate AT ALL -- and it says so as
-    // its own row, at zero, instead of being averaged into the memory corpus's
-    // number and disappearing.
+    // No attributed session, so the summary corpus cannot populate: its own row, at zero.
     let summary = corpus_row(&body, "summary");
     assert_eq!(summary["rows"], 0);
     assert_eq!(
@@ -429,18 +399,12 @@ async fn the_coverage_number_leaves_the_process() {
     assert_eq!(corpus_row(&body, "context")["rows"], 0);
 }
 
-/// Clearing the index is only half of "reindex"; the other half is the refilling sweep,
-/// which is idle-gated and so will not normally run while the person who pressed the button
-/// is still there. Without the wake, the route empties the panel and leaves it empty until
-/// the next scheduled pass, which on a pond nobody restarts looks like doing nothing.
+/// The refill sweep is idle-gated, so without a wake it would not run while the user watches.
 #[tokio::test]
 async fn rebuilding_wakes_the_sweep_that_refills_it() {
     let h = make_app(true, true).await;
 
-    // Subscribed BEFORE the request. `Notify` only holds a permit for a
-    // `notify_one` with no waiter, so a test that starts listening afterwards
-    // can pass on the stored permit alone and would keep passing if the route
-    // fired at the wrong moment.
+    // Listen BEFORE the request: a later listener could pass on `Notify`'s stored permit alone.
     let listener = h.reindex.clone();
     let woken = tokio::spawn(async move { listener.notified().await });
     tokio::task::yield_now().await;
@@ -459,9 +423,6 @@ async fn rebuilding_wakes_the_sweep_that_refills_it() {
         .expect("waiter task panicked");
 }
 
-/// A pond with no sweep to wake still clears, and says it did not refill. This is the CLI
-/// shape, where `refilling: true` would be a lie that reads as success: the caller would
-/// wait for a rebuild that nothing in the process is going to perform.
 #[tokio::test]
 async fn a_pond_with_no_sweep_clears_and_admits_nothing_will_refill_it() {
     let h = make_app(true, false).await;
@@ -475,17 +436,13 @@ async fn a_pond_with_no_sweep_clears_and_admits_nothing_will_refill_it() {
     );
 }
 
-/// An empty corpus and an EXCLUDED corpus both report zero qualifying rows and need opposite
-/// fixes, so the surface has to tell them apart. A pond with no sessions at all cannot show
-/// the difference: 27 sessions held a rolling summary no query could reach and the route
-/// still read 100% covered, because 0 of 0 does not drag an average down.
+/// Empty and excluded corpora both show zero qualifying rows but need opposite fixes.
 #[tokio::test]
 async fn a_corpus_excluded_by_its_predicate_is_not_reported_as_an_empty_one() {
     let h = make_app(true, true).await;
     let liz = member(&h).await;
 
-    // A healthy corpus alongside, because the failure mode is precisely that a
-    // working corpus makes the overall figure look fine.
+    // A healthy corpus alongside: it is what makes the overall figure look fine.
     add_memory(&h, "m1", &liz).await;
     add_vector(&h, Corpus::Memory, "m1", STUB_MODEL).await;
 
@@ -512,8 +469,7 @@ async fn a_corpus_excluded_by_its_predicate_is_not_reported_as_an_empty_one() {
          embedding repairs it, so it must not be reported as though embedding would: {body}"
     );
 
-    // The control, and the reason this test is not vacuous: a genuinely empty
-    // corpus must NOT raise the same flag, or the flag means nothing.
+    // Control: a genuinely empty corpus must NOT raise the same flag.
     let context = corpus_row(&body, "context");
     assert_eq!(context["rows"], 0);
     assert_eq!(context["source_rows"], 0);
@@ -522,7 +478,6 @@ async fn a_corpus_excluded_by_its_predicate_is_not_reported_as_an_empty_one() {
         "an empty corpus is waiting for data and is not broken: {body}"
     );
 
-    // And the shape that made this invisible: the pond still reads fully covered.
     assert_eq!(
         body["coverage"], 1.0,
         "this is the trap, pinned deliberately. Coverage counts only qualifying rows, so an \
@@ -558,9 +513,7 @@ async fn rebuilding_reports_what_it_cleared_and_leaves_the_index_empty() {
         "a corpus is listed at zero rather than omitted, for the same reason the health rows are"
     );
 
-    // The index really is empty: the live memory now reads as missing, which is
-    // what the maintenance sweep looks for. Nothing was lost -- the source row
-    // is still there, which is the whole reason this file is deletable.
+    // Now "missing", which the sweep re-embeds; the source row survives, so nothing is lost.
     let (_, after) = health(&h).await;
     assert_eq!(after["matching"], 0);
     assert_eq!(after["missing"], 1);

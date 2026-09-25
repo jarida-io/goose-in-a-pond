@@ -1,6 +1,4 @@
-//! In-memory [`ContextRepository`] for tests. It implements the scope rule rather than ignoring
-//! it: half the guards here are about which rows a scope may see, and a mock that returned
-//! everything would make all of them pass.
+//! In-memory [`ContextRepository`] for tests. Enforces the scope rule so scope guards can fail.
 
 use std::sync::Mutex;
 
@@ -18,9 +16,7 @@ use crate::user_data::domain::profile::ProfileScope;
 pub struct MockContextRepository {
     sources: Mutex<Vec<ContextSource>>,
     items: Mutex<Vec<ContextItem>>,
-    /// When set, every read of the source list fails with this message. An unreadable store is not
-    /// a store with no rows: a caller that treated the two alike would carry on, which is the
-    /// permissive answer.
+    /// When set, every read of the source list fails with this message.
     unreadable_sources: Mutex<Option<String>>,
     /// When set, every item write fails with this message.
     unwritable_items: Mutex<Option<String>>,
@@ -63,8 +59,7 @@ impl ContextRepository for MockContextRepository {
     async fn upsert_source(&self, source: &ContextSource) -> Result<()> {
         let mut sources = self.sources.lock().unwrap();
         match sources.iter_mut().find(|s| s.id() == source.id()) {
-            // Kind and owner are part of a source's identity: the real adapter
-            // will not change them and migration 0044 refuses the update.
+            // Unlike the real adapter (migration 0044), this also overwrites kind and owner.
             Some(existing) => *existing = source.clone(),
             None => sources.push(source.clone()),
         }

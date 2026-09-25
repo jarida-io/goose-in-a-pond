@@ -6,7 +6,6 @@
 use crate::models::domain::message::{ChatMessage, Role};
 use crate::user_data::domain::session::SessionMessage;
 
-/// Builds conversation history for context injection.
 pub struct HistoryManager {
     history_char_budget: usize,
 }
@@ -18,9 +17,7 @@ impl HistoryManager {
         }
     }
 
-    /// Build the history message array from stored session messages.
-    ///
-    /// Returns messages in chronological order, trimmed to fit the budget.
+    /// Whole turns that fit the budget, in chronological order.
     pub fn build_history(&self, stored: &[SessionMessage]) -> Vec<ChatMessage> {
         if stored.is_empty() {
             return Vec::new();
@@ -28,10 +25,8 @@ impl HistoryManager {
 
         let messages: Vec<ChatMessage> = stored.iter().map(|s| s.message.clone()).collect();
 
-        // Group into turns starting at each user message.
         let turns = group_into_turns(&messages);
 
-        // Walk newest-first, keep turns that fit in budget.
         let mut kept: Vec<&[ChatMessage]> = Vec::new();
         let mut used_chars = 0usize;
 
@@ -44,16 +39,12 @@ impl HistoryManager {
             kept.push(turn);
         }
 
-        // Reverse to chronological order and flatten.
         kept.reverse();
         kept.into_iter().flat_map(|t| t.iter().cloned()).collect()
     }
 }
 
-/// Group a flat message list into turns.
-///
-/// A turn is a user message plus every following non-user message. Leading non-user messages,
-/// such as an orphan tool result with no preceding user turn, are dropped.
+/// Turns: a user message plus the non-user messages after it. Leading non-user messages drop.
 fn group_into_turns(messages: &[ChatMessage]) -> Vec<&[ChatMessage]> {
     let mut turns: Vec<&[ChatMessage]> = Vec::new();
     let mut start = 0;
@@ -63,7 +54,6 @@ fn group_into_turns(messages: &[ChatMessage]) -> Vec<&[ChatMessage]> {
         let next_is_user = !at_end && messages[i].role == Role::User;
 
         if (next_is_user || at_end) && start < i {
-            // Only include turns that start with a user message.
             if messages[start].role == Role::User {
                 turns.push(&messages[start..i]);
             }
@@ -134,7 +124,6 @@ mod tests {
 
     #[test]
     fn tool_calls_kept_with_turn() {
-        // Turn with tool call must not be split.
         let stored = vec![
             session_msg(Role::User, "weather?"),
             session_msg(Role::Assistant, ""),
@@ -163,7 +152,6 @@ mod tests {
 
     #[test]
     fn tool_call_metadata_preserved_through_history() {
-        // Assistant turn with tool call metadata must keep its tool_calls field.
         let asst_with_call = SessionMessage {
             id: uuid::Uuid::new_v4().to_string(),
             session_id: "test".to_string(),
@@ -206,8 +194,6 @@ mod tests {
 
     #[test]
     fn leading_orphan_tool_message_is_dropped() {
-        // History that starts with a tool result with no preceding user turn
-        // should drop the orphan.
         let stored = vec![
             session_msg(Role::Tool, "orphan result"),
             session_msg(Role::User, "hi"),

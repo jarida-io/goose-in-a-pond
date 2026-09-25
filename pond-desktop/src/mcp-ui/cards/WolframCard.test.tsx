@@ -22,9 +22,7 @@ const MERCURY = {
 
 describe("WolframCard", () => {
   it("is registered under the key the server's hint uses", () => {
-    // The Rust side emits `[[[mcp-ui:wolfram:{...}]]]` and pond-api turns the
-    // segment before the JSON into `ui.card_type`. If these two strings ever
-    // disagree the card silently stops rendering, with nothing failing.
+    // Nothing else catches a mismatch with the Rust hint: the card just silently stops rendering.
     expect(findCardByHint("wolfram")?.component).toBe(WolframCard);
   });
 
@@ -56,17 +54,13 @@ describe("WolframCard", () => {
     fireEvent.click(screen.getByRole("button", { name: /a chemical element/i }));
 
     const sent = onAction.mock.calls[0][0] as string;
-    // The label and the original question are the whole message: the id is a
-    // list key now, and sending one would ask the model to quote a handle that
-    // names nothing.
     expect(sent).toContain("a chemical element");
     expect(sent).toContain("mercury");
     expect(sent).not.toContain("w1");
   });
 
   it("renders suggestions as plain labels where there is nothing to send to", () => {
-    // Canvas has no composer, so it passes no onAction. A button that does
-    // nothing when pressed is worse than a label.
+    // Canvas has no composer, so it passes no onAction.
     render(<WolframCard data={MERCURY} toolName="t" />);
     expect(screen.queryByRole("button", { name: /a chemical element/i })).toBeNull();
     expect(screen.getByText("a chemical element")).toBeTruthy();
@@ -78,7 +72,6 @@ describe("WolframCard", () => {
   });
 
   it("renders a partial payload instead of blanking", () => {
-    // A hint that arrives without pods or suggestions is still an answer.
     render(<WolframCard data={{ query: "2+2", primary: "4" }} toolName="t" />);
     expect(screen.getByText("4")).toBeTruthy();
     expect(screen.queryByText(/Working it out/i)).toBeNull();
@@ -88,8 +81,7 @@ describe("WolframCard", () => {
     render(<WolframCard data={MERCURY} toolName="t" />);
     const link = screen.getByRole("link") as HTMLAnchorElement;
     expect(link.href).toContain("wolframalpha.com/input");
-    // The API endpoint carries the AppID in its query string. This link is the
-    // human-facing page, and it is rendered into the transcript.
+    // The AppID belongs only on the API URL; this link is rendered into the transcript.
     expect(link.href).not.toContain("appid");
     expect(link.rel).toContain("noopener");
   });

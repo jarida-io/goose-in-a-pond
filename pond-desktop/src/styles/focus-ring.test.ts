@@ -5,16 +5,9 @@ import { fileURLToPath } from "node:url";
 
 const BASE_CSS = join(dirname(fileURLToPath(import.meta.url)), "base.css");
 
-/**
- * The `!important` focus-visible block, as source text.
- *
- * A structural guard rather than a rendered one: jsdom does not apply an external
- * stylesheet's cascade, so there is nothing to measure. The same shape as the
- * no-emoji lint beside it -- read the source, assert the property.
- */
+/** Selectors of the `!important` focus-visible rule, read from source: jsdom skips external CSS. */
 function importantFocusSelectors(): string[] {
-  // Comments first: this rule carries a long one, and a selector list read straight
-  // out of the file would arrive with the last comment line glued to it.
+  // Strip comments first, or the rule's own comment gets glued to its selector list.
   const css = readFileSync(BASE_CSS, "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
   const match = css.match(
     /([^};]*)\{[^}]*outline:\s*2px solid var\(--focus-ring\) !important[^}]*\}/,
@@ -28,10 +21,7 @@ function importantFocusSelectors(): string[] {
 
 describe("the focus ring", () => {
   it("does not draw a second ring around a text field", () => {
-    // The bug this exists for: the Register-device dialog's Setup code input showed
-    // TWO concentric accent borders. Text fields already have a focus treatment --
-    // an accent border plus a 3px halo -- and this rule added an outline 2px outside
-    // it. `autoFocus` on that field is why it was the one that showed it worst.
+    // Text fields already get an accent border plus halo on focus; this outline doubled it.
     const selectors = importantFocusSelectors();
 
     for (const element of ["input", "textarea", "select"]) {
@@ -44,9 +34,7 @@ describe("the focus ring", () => {
   });
 
   it("still guarantees a ring for everything that has no other indicator", () => {
-    // The safety net's whole point: several component stylesheets set
-    // `outline: none` on custom controls with no replacement. Removing text fields
-    // must not quietly remove the protection from anything else.
+    // Several component stylesheets set `outline: none` with no replacement; this is their net.
     const selectors = importantFocusSelectors();
 
     for (const element of ["button", "a", '[role="button"]', "[tabindex]"]) {
@@ -55,9 +43,7 @@ describe("the focus ring", () => {
   });
 
   it("leaves text fields a focus indicator of their own", () => {
-    // Not a second ring, but not zero rings either. `:focus`, not `:focus-visible`,
-    // because a text field earns an indicator on any focus -- including the
-    // programmatic `autoFocus` that opens the dialog.
+    // `:focus`, not `:focus-visible`: a text field needs an indicator on any focus, even autoFocus.
     const css = readFileSync(BASE_CSS, "utf8");
     const rule = css.match(/input:focus,\s*textarea:focus,\s*select:focus\s*\{([^}]*)\}/);
 

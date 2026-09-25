@@ -5,7 +5,6 @@ import type { GuiSection } from "../desktopState";
 import { Hub } from "../hub/Hub";
 import { HubOverlay } from "../hub/overlays/HubOverlay";
 
-// Lazy section imports
 import { Dashboard } from "../sections/Dashboard";
 import { Chat } from "../sections/Chat";
 import { Devices } from "../sections/Devices";
@@ -50,7 +49,6 @@ function SectionContent({ section }: { section: GuiSection }) {
 export function GuiMode() {
   const state = useAppState();
 
-  // Hub mode: render the full Hub shell (no sidebar, no app-shell chrome)
   if (state.section === "hub") {
     return <Hub />;
   }

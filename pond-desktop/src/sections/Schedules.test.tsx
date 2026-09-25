@@ -82,7 +82,6 @@ describe("Schedules section", () => {
 
     renderSchedules();
 
-    // After data loads, schedule should appear
     await waitFor(() => {
       expect(screen.getByText("Morning Briefing")).toBeTruthy();
     });
@@ -109,7 +108,6 @@ describe("Schedules section", () => {
       expect(api.listSchedules).toHaveBeenCalled();
     });
 
-    // No schedule names should be visible
     expect(screen.queryByText("Morning Briefing")).toBeNull();
   });
 
@@ -123,7 +121,6 @@ describe("Schedules section", () => {
 
     await waitFor(() => screen.getByText("Morning Briefing"));
 
-    // Find and click delete button
     const deleteButtons = screen.getAllByRole("button");
     const deleteBtn = deleteButtons.find(
       (b) => b.getAttribute("aria-label")?.toLowerCase().includes("delete") || b.title?.toLowerCase().includes("delete"),
@@ -146,7 +143,6 @@ describe("Schedules section", () => {
 
     await waitFor(() => screen.getByText("Morning Briefing"));
 
-    // Click pause/toggle button
     const pauseButtons = screen.getAllByRole("button");
     const pauseBtn = pauseButtons.find(
       (b) =>
@@ -217,14 +213,12 @@ describe("Schedules section", () => {
 
     await waitFor(() => expect(api.listSchedules).toHaveBeenCalled());
 
-    // Open form
     const addButton = screen.getAllByRole("button").find(
       (b) => b.textContent?.toLowerCase().includes("add") || b.textContent?.toLowerCase().includes("new"),
     );
     if (addButton) {
       fireEvent.click(addButton);
 
-      // Fill in form fields if visible
       const nameInput = screen.queryByPlaceholderText(/name/i) ?? screen.queryByLabelText(/name/i);
       const cronInput = screen.queryByPlaceholderText(/cron/i) ?? screen.queryByLabelText(/cron/i);
       const promptInput = screen.queryByPlaceholderText(/prompt/i) ?? screen.queryByLabelText(/prompt/i);

@@ -3,15 +3,8 @@ import { useEffect, useRef, type RefObject } from "react";
 const FOCUSABLE_SELECTOR =
   'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
-/**
- * Focus management for modal dialogs: moves focus into the dialog when it
- * becomes active, traps Tab/Shift+Tab inside it, closes on Escape, and
- * restores focus to whatever triggered it once it closes/unmounts.
- *
- * `active` gates everything so this can be called unconditionally from a
- * component that's always mounted (e.g. a dialog provider) but only shows
- * its dialog sometimes.
- */
+/** Modal focus: moves focus in, traps Tab, closes on Escape, restores focus on close. `active`
+ *  gates it all, so always-mounted providers can call it unconditionally. */
 export function useDialogFocusTrap<T extends HTMLElement>(
   active: boolean,
   onClose: () => void,

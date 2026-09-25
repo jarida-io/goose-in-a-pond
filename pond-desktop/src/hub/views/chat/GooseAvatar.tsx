@@ -6,14 +6,7 @@ interface GooseAvatarProps {
   state?: "idle" | "working" | "listening";
 }
 
-/**
- * The goose, small, in a badge.
- *
- * Kept as its own component because Canvas and the hub chat both place a goose
- * beside a message and expect a fixed round mark. It now draws the shared
- * `<Goose />` rather than the old 24px line glyph, so all three screens moved
- * to the new artwork at once.
- */
+/** The shared `<Goose />` in a fixed round badge, for placing beside a message. */
 export function GooseAvatar({ size = 30, state = "idle" }: GooseAvatarProps) {
   return (
     <span

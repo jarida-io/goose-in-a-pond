@@ -1,7 +1,5 @@
-//! Retrieval — the second `<system-context>` corpus (PAI-8 P2). Context items are not written into
-//! `memories`; a mailbox would drown a curated store. [`split_preamble_budget`] SPLITS the memory
-//! budget rather than adding, so no block escapes `CompactionProfile`'s arithmetic. The blend is
-//! not memory's: an item has no importance, and its `occurred_at` may be in the future.
+//! Retrieval for the second `<system-context>` corpus, kept apart so mail can't drown memories.
+//! [`split_preamble_budget`] splits the memory budget; adding would escape `CompactionProfile`.
 
 use chrono::{DateTime, Utc};
 
@@ -9,27 +7,19 @@ use crate::context::domain::ContextItem;
 
 /// Weight of semantic similarity. The same 0.5 the memory blend uses.
 pub const SIMILARITY_WEIGHT: f32 = 0.5;
-/// Weight of how near the item's own moment is to now. Occupies the slot
-/// memory gives to stored importance.
+/// Weight of how near the item's own moment is to now (memory's importance slot).
 pub const PROXIMITY_WEIGHT: f32 = 0.3;
 /// Weight of how recently the pond ingested it. Memory's recency slot.
 pub const INGEST_RECENCY_WEIGHT: f32 = 0.2;
 
-/// Half-life, in days, of both time terms. Matches
-/// `memory_relevance::RECENCY_HALF_LIFE_DAYS`: an item from today scores 1.0,
-/// one a fortnight away scores 0.5.
+/// Half-life, in days, of both time terms; matches `memory_relevance::RECENCY_HALF_LIFE_DAYS`.
 pub const HALF_LIFE_DAYS: f32 = 14.0;
 
-/// Share of the preamble's memory budget that goes to context when there is any context to show.
-///
-/// A third, not a half: memory is the curated store. This is the number to turn down first when
-/// the preamble has to shrink.
+/// Context's share of the memory budget when there is any; less than half as memory is curated.
 pub const CONTEXT_BUDGET_SHARE: f32 = 1.0 / 3.0;
 
-/// The XML tag the context block rides in, inside the user message's `<system-context>`.
-///
-/// Distinct from `<memories>` so the model can tell what it was told from what arrived. Whoever
-/// wires the block into the adapter also owes this tag an entry in `prompts.rs`.
+/// Tag for the context block inside `<system-context>`; distinct from `<memories>`.
+/// Wiring the block into the adapter also needs an entry for this tag in `prompts.rs`.
 pub const CONTEXT_BLOCK_TAG: &str = "personal-context";
 
 /// Decay in `[0, 1]` for a gap of `days`, in either direction.
@@ -37,14 +27,12 @@ fn decay(days: f32) -> f32 {
     0.5_f32.powf(days.abs() / HALF_LIFE_DAYS)
 }
 
-/// How near this item's own moment is to `now` — **symmetric**, so a meeting
-/// three weeks away decays exactly like a message three weeks old.
+/// How near this item's moment is to `now`, symmetric: future and past decay alike.
 pub fn proximity_score(item: &ContextItem, now: DateTime<Utc>) -> f32 {
     decay((now - item.occurred_at()).num_seconds() as f32 / 86_400.0)
 }
 
-/// How recently the pond learned of this item. One-sided: an item cannot be
-/// ingested in the future, and if a clock skew says it was, the answer is 1.0.
+/// How recently the pond learned of this item; a clock-skewed future ingest scores 1.0.
 pub fn ingest_recency_score(item: &ContextItem, now: DateTime<Utc>) -> f32 {
     let days = (now - item.ingested_at()).num_seconds() as f32 / 86_400.0;
     if days <= 0.0 {
@@ -54,10 +42,7 @@ pub fn ingest_recency_score(item: &ContextItem, now: DateTime<Utc>) -> f32 {
     }
 }
 
-/// Blended score for one candidate.
-///
-/// `similarity` is `None` for a candidate that arrived by recency alone, and forfeits the term
-/// rather than taking a neutral value; see `memory_relevance::relevance_score`.
+/// Blended score; a `None` similarity (recency-only candidate) forfeits that term.
 pub fn relevance_score(item: &ContextItem, similarity: Option<f32>, now: DateTime<Utc>) -> f32 {
     let sim = similarity.unwrap_or(0.0).clamp(0.0, 1.0);
     SIMILARITY_WEIGHT * sim
@@ -65,8 +50,7 @@ pub fn relevance_score(item: &ContextItem, similarity: Option<f32>, now: DateTim
         + INGEST_RECENCY_WEIGHT * ingest_recency_score(item, now)
 }
 
-/// Sort candidates best-first. Ties break on id so the rendered block — and
-/// therefore the KV prefix beyond it — is reproducible for identical inputs.
+/// Sort best-first; ties break on id so the block, and the KV prefix after it, is stable.
 pub fn rank_by_relevance(candidates: &mut [(ContextItem, Option<f32>)], now: DateTime<Utc>) {
     candidates.sort_by(|a, b| {
         let sa = relevance_score(&a.0, a.1, now);
@@ -84,10 +68,7 @@ pub struct BudgetSplit {
     pub context_tokens: usize,
 }
 
-/// Split the turn's memory budget between the two corpora.
-///
-/// `have_context` is "is there anything to put in the block", not "is the
-/// feature on": a pond with no context sources must not pay a token for this.
+/// Split the memory budget; `have_context` means "anything to show", not "feature on".
 pub fn split_preamble_budget(memory_token_budget: usize, have_context: bool) -> BudgetSplit {
     if !have_context {
         return BudgetSplit {
@@ -102,16 +83,12 @@ pub fn split_preamble_budget(memory_token_budget: usize, have_context: bool) -> 
     }
 }
 
-/// Estimated prompt cost of one rendered item. The same chars/4 heuristic the
-/// memory injection loop uses, over the same text that will be rendered.
+/// Estimated prompt cost of one rendered item, by the memory loop's chars/4 heuristic.
 pub fn estimated_tokens(item: &ContextItem) -> usize {
     render_line(item).len() / 4 + 1
 }
 
-/// Take items best-first until the budget is spent.
-///
-/// Keeps the first item even when it alone exceeds the budget, as the memory loop does: one
-/// over-long item beats an empty block.
+/// Take items best-first until the budget is spent, always keeping the first (as memory does).
 pub fn select_within_budget<'a>(
     ranked: &'a [(ContextItem, Option<f32>)],
     token_budget: usize,
@@ -129,10 +106,7 @@ pub fn select_within_budget<'a>(
     kept
 }
 
-/// One item as the model sees it.
-///
-/// The date is written out because "tomorrow" in an ingested body is relative to a moment the
-/// model cannot see.
+/// One item as the model sees it, dated, since "tomorrow" in a body is relative to then.
 pub fn render_line(item: &ContextItem) -> String {
     let when = item.occurred_at().format("%Y-%m-%d %H:%M");
     let who = if item.participants().is_empty() {
@@ -161,10 +135,7 @@ pub fn render_line(item: &ContextItem) -> String {
     }
 }
 
-/// The whole block, or an empty string when there is nothing to say.
-///
-/// Empty rather than an empty tag pair: a `<personal-context></personal-context>`
-/// in every prompt costs tokens on every turn and tells the model nothing.
+/// The whole block, or an empty string (not an empty tag pair) when there is nothing to say.
 pub fn render_block(items: &[&ContextItem]) -> String {
     if items.is_empty() {
         return String::new();
@@ -217,8 +188,7 @@ mod tests {
         );
     }
 
-    /// The reason this file does not reuse `memory_relevance::recency_score`.
-    /// A calendar event a year out must not score like one this afternoon.
+    /// Why this doesn't reuse `memory_relevance::recency_score`.
     #[test]
     fn a_far_future_item_decays_like_a_far_past_one() {
         let now = Utc::now();
@@ -254,8 +224,6 @@ mod tests {
         assert_eq!(candidates[2].0.id(), "old");
     }
 
-    /// Ties break on id, so the block is byte-identical for identical inputs and
-    /// the KV prefix beyond it does not move.
     #[test]
     fn an_exact_tie_breaks_deterministically() {
         let now = Utc::now();
@@ -269,8 +237,6 @@ mod tests {
         assert_eq!(two[0].0.id(), "aaa");
     }
 
-    /// A pond with no context sources must pay nothing: the memory block keeps
-    /// every token it has today.
     #[test]
     fn an_empty_corpus_costs_the_memory_block_nothing() {
         let split = split_preamble_budget(3000, false);
@@ -278,9 +244,6 @@ mod tests {
         assert_eq!(split.context_tokens, 0);
     }
 
-    /// The budget is a split of what the turn already had, never an addition:
-    /// a block that appears in the prompt but not in the profile's arithmetic
-    /// is how the history budget starts lying.
     #[test]
     fn the_split_never_adds_tokens_to_the_preamble() {
         for budget in [0usize, 1, 7, 500, 3000, 100_000] {
@@ -315,8 +278,7 @@ mod tests {
         assert_eq!(kept.len(), 1, "the token budget was not applied");
         assert_eq!(kept[0].id(), "a");
 
-        // A budget of zero still yields the single best item rather than an
-        // empty block -- the same choice the memory loop makes.
+        // A zero budget still yields the single best item.
         assert_eq!(select_within_budget(&ranked, 0).len(), 1);
         assert!(select_within_budget(&[], 1000).is_empty());
     }

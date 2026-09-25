@@ -1,14 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-/// Runtime capabilities declared by an LLM provider.
-///
-/// Each adapter populates this from the active model's known features; services and routes
-/// branch on it. Fields default conservatively (false / 4096) so an unknown model works safely.
+/// Runtime capabilities of the active model; defaults are conservative (false / 4096).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCapabilities {
-    /// Model supports internal chain-of-thought reasoning.
-    /// Gemma 4: `<|channel>thought...<channel|>`
-    /// Qwen3 / DeepSeek-R1: `<think>...</think>`
+    /// Reasoning: `<|channel>thought...<channel|>` (Gemma 4), `<think>...</think>` (Qwen3, R1).
     pub thinking: bool,
 
     /// Model accepts image content in messages (multimodal vision).
@@ -23,9 +18,7 @@ pub struct ModelCapabilities {
     /// Supports constrained/structured output (GBNF grammar, JSON mode).
     pub structured_output: bool,
 
-    /// Model supports native tool calling (e.g. Gemma 4 `<|tool_call>` format).
-    /// When true, tool definitions are passed via the chat template.
-    /// When false, tools are described in the system prompt text.
+    /// Native tool calling: tools go via the chat template, else as system-prompt text.
     pub tool_calling: bool,
 }
 
@@ -42,10 +35,7 @@ impl Default for ModelCapabilities {
     }
 }
 
-/// Substrings that identify a multimodal (image-input) model family outright.
-///
-/// Each entry is distinctive enough that a plain `contains` cannot collide with
-/// an unrelated model name. `llava` also covers `bakllava`.
+/// Substrings that mark a vision model outright, safe for `contains` (`llava` covers `bakllava`).
 const VISION_NAME_FRAGMENTS: &[&str] = &[
     "llava",
     "moondream",
@@ -58,32 +48,22 @@ const VISION_NAME_FRAGMENTS: &[&str] = &[
     "smolvlm",
     "idefics",
     "multimodal",
-    // Ollama publishes this one unseparated, so the `vl` SEGMENT rule below
-    // cannot see it: `qwen2.5vl` splits into `qwen2` / `5vl`, never a bare `vl`.
-    // The hyphenated `qwen2.5-vl` and `qwen3-vl` spellings are already covered
-    // by that rule.
+    // Ollama's unhyphenated tag splits into `qwen2` / `5vl`, so the `vl` segment rule misses it.
     "qwen2.5vl",
 ];
 
-/// Whole name segments (split on any non-alphanumeric character) that identify a multimodal
-/// model. Segment matching rather than `contains`: `vl` as a bare substring appears inside
-/// plenty of unrelated words, and a false positive here is the expensive direction (see
-/// [`ModelCapabilities::name_implies_vision`]).
+/// Vision-marking name segments (split on non-alphanumerics): `vl` is too common a substring.
 const VISION_NAME_SEGMENTS: &[&str] = &["vision", "vl", "vlm"];
 
-/// Spellings of the Gemma 4 family, including the `gemma3n` name Ollama and Hugging Face use
-/// for the same weights (`gemma3n:e4b`). Consulted by the vision rule only: the other axes in
-/// [`ModelCapabilities::from_model_name`] still match `gemma-4*` literally, because widening
-/// them would also change thinking, tool-calling and context-window behaviour.
+/// Gemma 4 spellings, incl. `gemma3n` (Ollama/HF's name for the same weights). Vision rule only:
+/// widening the other axes would change thinking, tool-calling and context-window behaviour.
 const GEMMA4_NAME_FRAGMENTS: &[&str] = &[
     "gemma-4", "gemma4", "gemma_4", "gemma-3n", "gemma3n", "gemma_3n",
 ];
 
 impl ModelCapabilities {
-    /// Whether a model NAME is evidence that the model accepts image input. Open-weight names
-    /// only, and biased to `false`: a false positive tells a text-only model it can see and it
-    /// invents images, while a false negative only withholds the `<vision>` prompt section.
-    /// `E1B` is excluded as the one featured Gemma 4 with `mmproj: None`.
+    /// Whether a model name implies image input. Biased to `false`: a false positive makes a
+    /// text-only model invent images. `E1B` is the one Gemma 4 without an mmproj.
     #[must_use]
     pub fn name_implies_vision(name: &str) -> bool {
         let lower = name.to_ascii_lowercase();
@@ -98,10 +78,7 @@ impl ModelCapabilities {
                 .any(|segment| VISION_NAME_SEGMENTS.contains(&segment))
     }
 
-    /// Detect capabilities from a model name string.
-    ///
-    /// This is a heuristic based on known model families. Adapters can
-    /// override with more precise information from provider APIs.
+    /// Heuristic capabilities from known model-family names; adapters may know better.
     pub fn from_model_name(name: &str) -> Self {
         let lower = name.to_lowercase();
         let mut caps = Self::default();
@@ -118,9 +95,7 @@ impl ModelCapabilities {
             caps.thinking = true;
         }
 
-        // Vision-capable model families. Kept in one place (and deliberately
-        // narrower than the other axes below) because this flag is the only one
-        // that can put a claim about the model's own senses into its prompt.
+        // Deliberately narrow: only this flag puts a claim about the model's senses in its prompt.
         caps.vision = Self::name_implies_vision(name);
 
         // Audio-capable (Gemma 4 E2B/E4B only)
@@ -221,10 +196,7 @@ mod tests {
 
     // ── Vision detection ──────────────────────────────────────────────────
 
-    /// The headline false positive. E1B is the one Gemma 4 with no vision
-    /// encoder — it is literally the entry the local registry excludes via
-    /// `mmproj: None` — so a name rule that says "gemma-4 means vision" tells a
-    /// blind model it can see.
+    /// E1B has no vision encoder (`mmproj: None`), so "gemma-4 means vision" is wrong.
     #[test]
     fn gemma4_e1b_has_no_vision_in_any_spelling() {
         for name in [
@@ -259,8 +231,6 @@ mod tests {
         }
     }
 
-    /// The false negatives that left the production bug ("I cannot describe
-    /// images, I am a text-based assistant") unfixed on every HTTP provider.
     #[test]
     fn common_http_vision_models_are_recognised() {
         for name in [
@@ -269,8 +239,7 @@ mod tests {
             "llama-3.2-90b-vision-instruct",
             "qwen2.5-vl",
             "qwen2.5-vl:7b",
-            // Ollama's real published tag has no hyphen, so the `vl` segment
-            // rule cannot see it and it needs its own fragment.
+            // Ollama's real, unhyphenated tag.
             "qwen2.5vl",
             "qwen2.5vl:7b",
             "Qwen2-VL-7B-Instruct",
@@ -291,8 +260,6 @@ mod tests {
         }
     }
 
-    /// Silence is the safe answer, so text-only models must stay false — and a
-    /// bare `vl`/`vision` SUBSTRING must not be what decides it.
     #[test]
     fn text_only_models_are_not_credited_with_vision() {
         for name in [
@@ -330,10 +297,7 @@ mod tests {
 mod probe_gap_tests {
     use super::*;
 
-    /// The gap that made Nemotron hallucinate instead of calling a tool.
-    /// `thinking_mode = "auto"` resolves through this function, which reads the FILENAME;
-    /// Nemotron reasons and `ModelProbe` sees that, but its name does not say so, so the
-    /// prompt drops the thinking section while the engine has `enable_thinking = true`.
+    /// "auto" thinking reads the name, which hides that Nemotron reasons; `ModelProbe` sees it.
     #[test]
     fn the_name_heuristic_does_not_know_nemotron_reasons() {
         let caps = ModelCapabilities::from_model_name("NVIDIA-Nemotron3-Nano-4B-Q4_K_M");

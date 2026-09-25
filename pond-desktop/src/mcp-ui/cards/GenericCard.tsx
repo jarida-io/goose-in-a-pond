@@ -12,5 +12,4 @@ export function GenericCard({ data }: McpCardProps) {
   );
 }
 
-// GenericCard is NOT auto-registered — it's used as an explicit fallback
-// by Canvas and ContextCard when no registered renderer matches.
+// Not auto-registered: Canvas and ContextCard use it explicitly when no registered renderer matches.

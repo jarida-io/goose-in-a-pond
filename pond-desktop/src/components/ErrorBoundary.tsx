@@ -1,11 +1,6 @@
 import React from "react";
 
-// Catches render-time exceptions anywhere below this boundary and surfaces a
-// readable error screen instead of unmounting the whole React tree (which is
-// what produced the "completely white window" the user reported on Voice
-// mode and after asking certain questions). The boundary also exposes a
-// "Try again" button that resets the error state without forcing the user
-// to close and reopen the app.
+// Shows a readable error screen with "Try again" instead of a blank window on a render error.
 
 interface Props {
   children: React.ReactNode;
@@ -23,9 +18,7 @@ export class ErrorBoundary extends React.Component<Props, State> {
   }
 
   componentDidCatch(err: Error, info: React.ErrorInfo) {
-    // Best-effort dev/console signal. Tauri DevTools (and `npm run tauri dev`)
-    // pick this up — invaluable when a section throws and the boundary
-    // would otherwise just show a friendly message with no reproducer.
+    // Logged so DevTools shows the stack the friendly screen hides.
     // eslint-disable-next-line no-console
     console.error("[ErrorBoundary] React render failed:", err, info?.componentStack);
   }

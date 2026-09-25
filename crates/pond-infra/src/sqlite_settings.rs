@@ -1,22 +1,8 @@
-//! SQLite-backed implementation of `SettingsRepository`.
+//! SQLite-backed `SettingsRepository`: one `settings` row per field, defaults for missing keys.
 //!
-//! Uses the existing `settings(key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)` table
-//! in `pond_system.db`. Each Setting field maps to one row; missing keys fall back to
-//! `Settings::default()`.
-//!
-//! IMPORTANT: `update()` issues one upsert per field — never batched into
-//! a single query (sqlx only executes the first statement when multiple are batched).
-//! The whole sequence runs inside one transaction so concurrent writers cannot
-//! interleave per-key and leave a torn hybrid of two snapshots.
-//!
-//! Every write is `INSERT … ON CONFLICT(key) DO UPDATE`, never `INSERT OR
-//! REPLACE`: replace deletes the row and re-inserts it, which resets
-//! `is_user_set` to its column default and would silently forget that the user
-//! had chosen the key (see migration 0035).
-//!
-//! Every field MUST have both an upsert in `update_fields` and an arm in
-//! `apply_key`; a field with only one of the two is silently unsaved or silently
-//! unread. `roundtrip_persists_every_field` guards the whole class.
+//! One upsert per field (sqlx runs only the first batched statement), all in one transaction.
+//! `ON CONFLICT DO UPDATE`, never `INSERT OR REPLACE`, which would reset `is_user_set`.
+//! Every field needs an upsert in `update_fields` AND an arm in `apply_key`.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -61,9 +47,7 @@ impl SettingsRepository for SqliteSettingsRepository {
     ) -> Result<()> {
         let mut tx = self.pool.begin().await?;
 
-        // `only` = write just these keys (the caller's patch), so a save of one
-        // field cannot revert a field another writer changed since the caller
-        // read its snapshot. `None` = write every field.
+        // `only` limits writes to the caller's patch so it can't revert another writer's change.
         macro_rules! upsert {
             ($key:expr, $val:expr) => {
                 if only.is_none_or(|keys| keys.contains($key)) {
@@ -189,7 +173,7 @@ impl SettingsRepository for SqliteSettingsRepository {
         upsert!("weather_latitude", settings.weather_latitude.to_string());
         upsert!("weather_longitude", settings.weather_longitude.to_string());
         upsert!("weather_location_name", &settings.weather_location_name);
-        // Vision (#130)
+        // Vision
         upsert!(
             "vision_enabled",
             if settings.vision_enabled {
@@ -206,7 +190,7 @@ impl SettingsRepository for SqliteSettingsRepository {
             settings.vision_motion_threshold.to_string()
         );
         upsert!("vision_classifier_model", &settings.vision_classifier_model);
-        // Matter (#195)
+        // Matter
         upsert!("matter_ws_url", &settings.matter_ws_url);
         upsert!(
             "matter_ble_enabled",
@@ -216,7 +200,7 @@ impl SettingsRepository for SqliteSettingsRepository {
                 "false"
             }
         );
-        // Private mesh (#132)
+        // Private mesh
         upsert!(
             "mesh_enabled",
             if settings.mesh_enabled {
@@ -350,10 +334,7 @@ impl SettingsRepository for SqliteSettingsRepository {
                 "false"
             }
         );
-        // API keys are NOT here: PAI-2 P2 moved them to `SecretRepository`.
-        // See `crate::secret_migration` for the one-time move of any row an
-        // existing pond already had. `searxng_url` is an endpoint, not a
-        // credential, and stays.
+        // API keys live in `SecretRepository`; `searxng_url` is an endpoint, not a credential.
         upsert!("searxng_url", settings.searxng_url.as_deref().unwrap_or(""));
         // Embedding
         upsert!("active_embedding_model", &settings.active_embedding_model);
@@ -577,9 +558,7 @@ impl SettingsRepository for SqliteSettingsRepository {
                 "false"
             }
         );
-        // PAI-7 P6. Without these four lines the fields deserialize, apply and
-        // then vanish on the next read -- the failure mode the roundtrip test
-        // below exists for.
+        // Unprompted speech
         upsert!(
             "unprompted_speech_enabled",
             if settings.unprompted_speech_enabled {
@@ -594,9 +573,7 @@ impl SettingsRepository for SqliteSettingsRepository {
             "unprompted_speech_categories",
             &settings.unprompted_speech_categories
         );
-        // PAI-7 P4's toggle. Same two lines, same failure mode if either is
-        // missing: the reviewer would be switched on, persist nothing, and be
-        // off again on the next read.
+        // Proactive review
         upsert!(
             "proactive_review_enabled",
             if settings.proactive_review_enabled {
@@ -605,9 +582,7 @@ impl SettingsRepository for SqliteSettingsRepository {
                 "false"
             }
         );
-        // PAI-8's on-pond producer. Same pair, same failure mode: with only one
-        // of the two, a household switches ingest on, watches nothing arrive,
-        // and reads the toggle back as `false` forever.
+        // Context ingest
         upsert!(
             "ext_context_enabled",
             if settings.ext_context_enabled {
@@ -664,9 +639,7 @@ impl SettingsRepository for SqliteSettingsRepository {
         if keys.is_empty() {
             return Ok(());
         }
-        // UPDATE, not upsert: a patch may carry a key that is not a real
-        // Settings field, and an unknown key must not conjure a settings row.
-        // The caller writes the values first, so every real key has one.
+        // UPDATE, not upsert, so an unknown key can't create a row; callers write values first.
         let mut tx = self.pool.begin().await?;
         for key in keys {
             sqlx::query("UPDATE settings SET is_user_set = 1 WHERE key = ?")
@@ -687,7 +660,6 @@ impl SettingsRepository for SqliteSettingsRepository {
     }
 }
 
-/// Apply a single key-value pair from the DB onto a `Settings` struct.
 fn apply_key(s: &mut Settings, key: &str, value: &str) {
     match key {
         "primary_profile_id" => {
@@ -753,13 +725,8 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
             }
         }
         "voice_tts_voice" => s.voice_tts_voice = value.to_string(),
-        // Stored faithfully, NOT clamped. Clamping here would make a write and
-        // the following read disagree, which is exactly what
-        // `roundtrip_persists_every_field` exists to catch — and it did.
-        // The range belongs to whoever uses the value: the API validates it and
-        // `KokoroOutput::set_speed` clamps defensively at synthesis time.
-        // NaN is still refused, because it would round-trip as `null` and read
-        // back as the default with no way to tell it ever failed.
+        // Stored unclamped so write and read agree; consumers clamp. Non-finite is refused: NaN
+        // would round-trip as `null` and silently read back as the default.
         "voice_tts_speed" => {
             if let Ok(v) = value.parse::<f32>() {
                 if v.is_finite() {
@@ -768,10 +735,7 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
             }
         }
         "voice_tts_quality" => s.voice_tts_quality = value.to_string(),
-        // Stored verbatim. Canonicalising here would make a write and the
-        // following read disagree, which is exactly what
-        // `roundtrip_persists_every_field` caught for `voice_tts_speed`.
-        // Rejecting an unknown backend is `settings_validation`'s job.
+        // Stored verbatim so write and read agree; `settings_validation` rejects unknown backends.
         "vad_backend" => s.vad_backend = value.to_string(),
         "voice_recording_duration_secs" => {
             if let Ok(v) = value.parse() {
@@ -851,7 +815,7 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
             }
         }
         "weather_location_name" => s.weather_location_name = value.to_string(),
-        // Vision (#130)
+        // Vision
         "vision_enabled" => s.vision_enabled = value == "true",
         "vision_camera_url" => s.vision_camera_url = value.to_string(),
         "vision_camera_id" => s.vision_camera_id = value.to_string(),
@@ -866,33 +830,19 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
             }
         }
         "vision_classifier_model" => s.vision_classifier_model = value.to_string(),
-        // Matter (#195)
-        // `matter_enabled` was a setting while Matter was opt-in. A row may
-        // still be here from then, and it is ignored rather than honoured: the
-        // toggle that set it is gone, so an install that had it off would have
-        // no way back and every device command would refuse with advice
-        // pointing at a control that no longer exists.
+        // Matter
+        // Legacy `matter_enabled` is ignored: its toggle is gone, so an old `false` would stick.
         "matter_enabled" => {}
-        // An empty row must not defeat the default. `get` starts from
-        // `Settings::default()` and overwrites it row by row, so a stored empty
-        // string would leave no address at all — and the Devices tab renders
-        // the default as the input's *placeholder*, making a blank field
-        // indistinguishable from a set one. The user then gets "must be a
-        // WebSocket URL" about a field that looks filled in. Blank means "never
-        // chosen", which is what the default is for.
+        // Blank keeps the default; the Devices tab shows it as a placeholder, so blank looks set.
         "matter_ws_url" => {
             if !value.trim().is_empty() {
-                // Migrated on read rather than by a schema migration: the value
-                // is a plain settings row, and rewriting it here means an
-                // install that never touched the field follows the default
-                // across the move to the matter.js controller instead of
-                // pointing at a path nothing serves.
+                // Migrated on read so an old default follows the move to the matter.js controller.
                 s.matter_ws_url =
                     pond_core::user_data::domain::settings::migrate_matter_ws_url(value);
             }
         }
-        // Private mesh (#132)
         "matter_ble_enabled" => s.matter_ble_enabled = value == "true",
+        // Private mesh
         "mesh_enabled" => s.mesh_enabled = value == "true",
         "lightning_enabled" => s.lightning_enabled = value == "true",
         "mesh_settlement_millisats_per_token" => {
@@ -913,8 +863,7 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
         "thinking_mode" => s.thinking_mode = value.to_string(),
         "show_thinking" => s.show_thinking = value == "true",
         "reasoning_effort" => s.reasoning_effort = value.to_string(),
-        // Anything other than the literal "true" leaves reasoning text
-        // unpersisted. A privacy control narrows on an unreadable value.
+        // Only a literal "true" persists reasoning: a privacy control narrows on bad input.
         "persist_thinking" => s.persist_thinking = value == "true",
         "context_window_override" => {
             if let Ok(v) = value.parse() {
@@ -948,7 +897,6 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
         // Embedding
         "active_embedding_model" => s.active_embedding_model = value.to_string(),
         "embedding_provider" => s.embedding_provider = value.to_string(),
-        // Fast path
         // Agent tuning
         "agent_timeout_secs" => {
             if let Ok(v) = value.parse() {
@@ -1044,10 +992,7 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
         "tool_request_detection" => s.tool_request_detection = value == "true",
         // Data
         "telemetry_enabled" => s.telemetry_enabled = value == "true",
-        // `api_key_*` has no arm: PAI-2 P2 moved that material to
-        // `SecretRepository`. A legacy row left behind by a failed migration
-        // falls through to the `_ => {}` arm below and is ignored rather than
-        // re-hydrated onto a struct that `GET /settings` serialises.
+        // No `api_key_*` arm: a leftover row must not reach the struct `GET /settings` serialises.
         "searxng_url" => {
             s.searxng_url = if value.is_empty() {
                 None
@@ -1063,35 +1008,21 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
         "ext_system_enabled" => s.ext_system_enabled = value == "true",
         "ext_device_enabled" => s.ext_device_enabled = value == "true",
         "ext_sensor_enabled" => s.ext_sensor_enabled = value == "true",
-        // PAI-6 P5. `value == "true"` is the right comparison here rather than a
-        // parse-with-fallback: anything unreadable in that column is not "true",
-        // so a corrupt row leaves delegation OFF.
+        // A corrupt row is not "true", so delegation stays off.
         "ext_orchestrator_enabled" => s.ext_orchestrator_enabled = value == "true",
-        // `value == "true"` rather than a parse-with-fallback, but note the bias
-        // runs the OTHER way from the ext_* flags above: the field defaults ON,
-        // so a corrupt row silences the working tone rather than enabling
-        // something. That is the safe direction for audio -- an unreadable row
-        // can never make the speaker start pulsing on its own.
+        // Defaults ON, but a corrupt row still reads false: silence is the safe failure for audio.
         "voice_thinking_tone_enabled" => s.voice_thinking_tone_enabled = value == "true",
-        // PAI-7 P6. `value == "true"` for the same reason as the line above:
-        // anything unreadable in that column is not "true", so a corrupt row
-        // leaves the pond quiet rather than talking.
+        // A corrupt row is not "true", so the pond stays quiet.
         "unprompted_speech_enabled" => s.unprompted_speech_enabled = value == "true",
-        // The two window bounds and the category list are stored verbatim and
-        // validated where they are USED, not here. A parse at this layer would
-        // have to choose a value for a malformed row, and every choice it could
-        // make is a decision about whether the pond speaks -- which belongs to
-        // the gate, where "unparseable" means quiet hours are in force.
+        // Stored verbatim; the speech gate parses them and treats unparseable as quiet hours.
         "quiet_hours_start" => s.quiet_hours_start = value.to_string(),
         "quiet_hours_end" => s.quiet_hours_end = value.to_string(),
         "unprompted_speech_categories" => s.unprompted_speech_categories = value.to_string(),
         "proactive_review_enabled" => s.proactive_review_enabled = value == "true",
-        // PAI-8's on-pond producer. `value == "true"` for the third time and for
-        // the same reason: a corrupt or unreadable row is not "true", so the
-        // failure direction is that the pond copies nothing into the corpus.
+        // A corrupt row is not "true", so nothing is copied into the corpus.
         "context_ingest_enabled" => s.context_ingest_enabled = value == "true",
         "ext_context_enabled" => s.ext_context_enabled = value == "true",
-        _ => {} // unknown key — ignore
+        _ => {}
     }
 }
 
@@ -1114,14 +1045,12 @@ mod tests {
     async fn privacy_and_home_settings_roundtrip() {
         let repo = fresh_repo().await;
 
-        // Defaults before any write: mic/cameras ON, cloud fallback OFF, home empty.
         let s0 = repo.get().await.unwrap();
         assert!(s0.mic_enabled);
         assert!(s0.cameras_enabled);
         assert!(!s0.cloud_fallback_enabled);
         assert_eq!(s0.home_name, "");
 
-        // Persist non-default privacy toggles + a home name.
         let mut s = s0;
         s.mic_enabled = false;
         s.cameras_enabled = false;
@@ -1136,11 +1065,6 @@ mod tests {
         assert_eq!(got.home_name, "The Anyumba Home");
     }
 
-    /// A stored empty Matter address must not defeat the default. `get` starts
-    /// from `Settings::default()` and overwrites row by row, so an empty row
-    /// used to leave no address at all — and because the Devices tab renders
-    /// the default as the input's *placeholder*, the user saw a filled-looking
-    /// field and an error saying it was invalid.
     #[tokio::test]
     async fn an_empty_matter_url_falls_back_to_the_default() {
         let repo = fresh_repo().await;
@@ -1157,8 +1081,6 @@ mod tests {
         assert_eq!(repo.get().await.unwrap().matter_ws_url, default_url);
     }
 
-    /// The fallback must not swallow a real address: someone running the
-    /// controller on another host has to keep the URL they chose.
     #[tokio::test]
     async fn a_stored_matter_url_still_wins_over_the_default() {
         let repo = fresh_repo().await;
@@ -1172,11 +1094,6 @@ mod tests {
         );
     }
 
-    /// Every install predating the matter.js controller holds the old default,
-    /// which points at a path the current controller does not serve. Without
-    /// this rewrite, upgrading would silently break Matter for everyone who
-    /// never touched the field — the worst shape of breakage, because the
-    /// setting still LOOKS right.
     #[tokio::test]
     async fn the_superseded_controller_default_is_migrated_on_read() {
         let repo = fresh_repo().await;
@@ -1193,8 +1110,6 @@ mod tests {
         );
     }
 
-    /// An address the user typed is theirs — another host, another port. Only
-    /// the exact old default moves.
     #[tokio::test]
     async fn a_user_chosen_controller_address_is_left_alone() {
         let repo = fresh_repo().await;
@@ -1210,9 +1125,7 @@ mod tests {
         }
     }
 
-    /// Perturb every scalar field of a serialised `Settings` to a value that
-    /// differs from the input, so a field that fails to persist shows up as a
-    /// mismatch after a round-trip.
+    /// Changes every scalar so a field that fails to persist shows up after a round-trip.
     fn perturb(value: &serde_json::Value) -> serde_json::Value {
         use serde_json::Value;
         match value {
@@ -1233,11 +1146,6 @@ mod tests {
         }
     }
 
-    /// Every field must survive `update()` -> `get()`. A field with an upsert but
-    /// no `apply_key` arm (write-only), or an `apply_key` arm but no upsert
-    /// (never written), fails here — the class of bug that made
-    /// `ext_vision_enabled` a privacy toggle that could not be turned off and
-    /// `ext_sensor_enabled` inert.
     #[tokio::test]
     async fn roundtrip_persists_every_field() {
         let repo = fresh_repo().await;
@@ -1270,8 +1178,6 @@ mod tests {
         );
     }
 
-    /// A targeted write must not revert fields it does not name — the lost-update
-    /// path when two clients each save one field.
     #[tokio::test]
     async fn update_fields_writes_only_the_named_keys() {
         let repo = fresh_repo().await;
@@ -1280,8 +1186,7 @@ mod tests {
         first.mic_enabled = false;
         repo.update(&first).await.unwrap();
 
-        // A second writer holding a STALE snapshot (mic_enabled still true)
-        // saves only telemetry_enabled.
+        // A second writer with a stale snapshot saves only `telemetry_enabled`.
         let mut stale = repo.get().await.unwrap();
         stale.mic_enabled = true;
         stale.telemetry_enabled = false;
@@ -1295,16 +1200,10 @@ mod tests {
 
     const MIGRATION_0035: &str = include_str!("../migrations/system/0035_settings_user_intent.sql");
 
-    /// The on-disk system migration directory. `include_str!` needs a literal
-    /// path, so it cannot reach a migration a FUTURE `DEFAULT_ADOPTIONS` entry
-    /// names; reading the directory can.
+    /// Read at runtime: `include_str!` can't reach a migration a future adoption entry names.
     const SYSTEM_MIGRATIONS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/migrations/system");
 
     /// The SQL of the system migration whose filename starts with `number`.
-    ///
-    /// This is the FORWARD half of the tie between `DEFAULT_ADOPTIONS` and the
-    /// SQL: an entry naming a migration that was never written fails here
-    /// instead of registering an adoption that nothing performs.
     fn migration_sql(number: &str) -> String {
         let mut matches: Vec<std::path::PathBuf> = std::fs::read_dir(SYSTEM_MIGRATIONS_DIR)
             .unwrap_or_else(|e| panic!("cannot read {SYSTEM_MIGRATIONS_DIR}: {e}"))
@@ -1327,20 +1226,13 @@ mod tests {
         std::fs::read_to_string(&matches[0]).expect("read migration file")
     }
 
-    /// `migration_sql` resolves against `CARGO_MANIFEST_DIR`. If that ever
-    /// stops pointing at the shipped migrations, every forward-tie assertion
-    /// below would pass vacuously — so pin it to the one file that is also
-    /// compiled in via `include_str!`.
+    /// Pins the runtime lookup to the file `include_str!` compiles in.
     #[test]
     fn migration_lookup_resolves_to_the_shipped_files() {
         assert_eq!(migration_sql("0035"), MIGRATION_0035);
     }
 
-    /// The adoption UPDATE statements of a migration, whitespace-normalised.
-    ///
-    /// Full-line `--` comments are dropped first; the shipped migrations put
-    /// all prose on its own line, and a `--` inside a string literal would be
-    /// a false strip.
+    /// A migration's UPDATEs, whitespace-normalised. Strips only full-line `--` comments.
     fn adoption_update_statements(sql: &str) -> Vec<String> {
         let stripped: String = sql
             .lines()
@@ -1374,14 +1266,7 @@ mod tests {
             .collect()
     }
 
-    /// Replay the value-adoption half of a migration against an
-    /// already-migrated schema, and report how many statements ran.
-    ///
-    /// `fresh_repo` runs migrations on an EMPTY settings table, so the only
-    /// way to exercise an adoption is to seed the pre-migration rows and run
-    /// the UPDATEs again. It executes the SHIPPED SQL (minus the one-shot
-    /// `ALTER TABLE`) rather than a copy, so these assertions cannot drift
-    /// from what an install actually runs.
+    /// Re-runs a migration's shipped UPDATEs over seeded rows; returns how many ran.
     async fn replay_adoption_updates(pool: &Pool<Sqlite>, sql: &str) -> usize {
         let statements = adoption_update_statements(sql);
         for stmt in &statements {
@@ -1390,8 +1275,7 @@ mod tests {
         statements.len()
     }
 
-    /// Replay every registered adoption in migration order, as an install that
-    /// upgrades across all of them does.
+    /// Replays every registered adoption in migration order.
     async fn replay_default_adoption(pool: &Pool<Sqlite>) -> usize {
         let mut ran = 0;
         for migration in adoption_migrations() {
@@ -1400,17 +1284,7 @@ mod tests {
         ran
     }
 
-    /// The tie in BOTH directions, statically:
-    ///
-    /// - forward — every `DEFAULT_ADOPTIONS` entry has an UPDATE that actually
-    ///   moves its key from `old_default` to `new_default`, guarded on
-    ///   `is_user_set`;
-    /// - backward — a migration carries no adoption UPDATE that the registry
-    ///   does not describe.
-    ///
-    /// Without this, a registry entry and its SQL can disagree (or the SQL can
-    /// be missing outright) and every runtime test still passes, because they
-    /// only ever replay the statements that do exist.
+    /// Runtime replays only run the SQL that exists, so this checks registry and SQL both ways.
     #[test]
     fn every_adoption_entry_has_matching_migration_sql() {
         for migration in adoption_migrations() {
@@ -1430,11 +1304,7 @@ mod tests {
                 let want_set = format!("SET value = '{}'", e.new_default);
                 let want_key = format!("key = '{}'", e.key);
                 let want_old = format!("AND value = '{}'", e.old_default);
-                // `AND is_user_set = 0`, not a bare `is_user_set = 0`: the bare
-                // substring also matches a statement that ASSIGNS the column
-                // (`SET is_user_set = 0`, which would unmark a key) instead of
-                // guarding on it. Only the conjunction proves the guard is an
-                // additional condition on the WHERE clause.
+                // `AND` so it can't match the assignment `SET is_user_set = 0`.
                 const WANT_GUARD: &str = "AND is_user_set = 0";
                 assert!(
                     statements.iter().any(|s| s.contains(&want_set)
@@ -1452,20 +1322,8 @@ mod tests {
         }
     }
 
-    /// `new_default` must be the literal the STORE actually holds for today's
-    /// default — the half of the registry check that pond-core cannot make.
-    ///
-    /// The domain has no way to render a field the way this adapter does, and
-    /// the obvious stand-in is wrong: the adapter writes numbers with
-    /// `Display`, while a `serde_json` round-trip widens every `f32` to `f64`
-    /// (`0.05f32` is `0.05` here but `0.05000000074505806` through JSON). A
-    /// registry checked against the JSON form would demand a literal that no
-    /// `WHERE value = '...'` guard could ever match, so the migration would
-    /// silently adopt nothing.
-    ///
-    /// So write `Settings::default()` through the real adapter and read the
-    /// rows back. No rendering is inferred; whatever an install stores is what
-    /// the registry must name.
+    /// Checked via the real adapter, not JSON: `Display` writes `0.05f32` as `0.05`, but a
+    /// `serde_json` round-trip widens it to `0.05000000074505806`.
     #[tokio::test]
     async fn every_adoption_entry_states_the_literal_the_adapter_writes() {
         let repo = fresh_repo().await;
@@ -1520,13 +1378,6 @@ mod tests {
             .map(|(v,)| v)
     }
 
-    /// An install whose row still holds the OLD default never chose it, so the
-    /// new default is adopted — the whole point of 0035.
-    ///
-    /// Driven off `DEFAULT_ADOPTIONS` rather than a fixed key list, so a later
-    /// migration is covered the day it is registered. Keys are seeded at the
-    /// value they held before their FIRST adoption and the migrations replay in
-    /// order, which is what an install upgrading across several of them does.
     #[tokio::test]
     async fn migration_adopts_defaults_the_user_never_chose() {
         let repo = fresh_repo().await;
@@ -1555,8 +1406,7 @@ mod tests {
             );
         }
 
-        // Each key ends at the NEWEST registered value for it — with chained
-        // adoptions that is the last entry, not the first.
+        // Chained adoptions: each key ends at its last registered value, not its first.
         for key in &seeded {
             let newest = DEFAULT_ADOPTIONS
                 .iter()
@@ -1569,8 +1419,7 @@ mod tests {
             );
         }
 
-        // The adopted literals must also PARSE back into what the code defaults
-        // to today — a stored '50' is worthless if `apply_key` drops it.
+        // The adopted literals must also parse back through `apply_key`.
         let got = repo.get().await.unwrap();
         let want = Settings::default();
         assert_eq!(got.agent_max_turns, want.agent_max_turns);
@@ -1580,8 +1429,6 @@ mod tests {
         );
     }
 
-    /// A stored value that differs from the old default IS a choice, whether or
-    /// not it was ever marked. Adoption must leave it alone.
     #[tokio::test]
     async fn migration_leaves_a_deliberately_different_value_alone() {
         let repo = fresh_repo().await;
@@ -1597,18 +1444,10 @@ mod tests {
         assert_eq!(repo.get().await.unwrap().agent_max_turns, 5);
     }
 
-    /// Re-running the file (a restored backup, a re-applied migration, a copy
-    /// of the guard in a later migration) must change nothing the second time.
-    ///
-    /// EVERY registered key is marked, not one of them. Marking only
-    /// `agent_max_turns` proved only that `agent_max_turns`' UPDATE carries the
-    /// `is_user_set` guard; a later entry whose UPDATE omitted it would re-adopt
-    /// a value the user had deliberately chosen, and this test would still pass.
+    /// Marks every registered key, so each entry's UPDATE is proven to carry the guard.
     #[tokio::test]
     async fn migration_is_idempotent() {
         let repo = fresh_repo().await;
-        // The value each key held before its FIRST adoption, and the value it
-        // should hold after all of them.
         let mut oldest: Vec<(&str, &str)> = Vec::new();
         let mut newest: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
         for e in DEFAULT_ADOPTIONS {
@@ -1636,10 +1475,7 @@ mod tests {
             );
         }
 
-        // The user then deliberately picks the OLD value back for EVERY
-        // registered key and says so. Raw SQL for the values because the keys
-        // are enumerated from the registry and have no common typed setter;
-        // `mark_user_set` is the real adapter method.
+        // The user picks every old value back and marks it (raw SQL: no common typed setter).
         for (key, old) in &oldest {
             sqlx::query("UPDATE settings SET value = ? WHERE key = ?")
                 .bind(old)
@@ -1669,8 +1505,6 @@ mod tests {
         );
     }
 
-    /// Only the keys a `PUT /api/v1/settings` patch carries count as user
-    /// intent. Snapshot writers pin every key and must claim nothing.
     #[tokio::test]
     async fn only_a_patch_write_records_user_intent() {
         let repo = fresh_repo().await;
@@ -1692,8 +1526,7 @@ mod tests {
         assert!(repo.is_user_set("agent_max_turns").await.unwrap());
         assert!(!repo.is_user_set("hybrid_compaction_enabled").await.unwrap());
 
-        // A later value write must not forget the mark — `INSERT OR REPLACE`
-        // dropped the row and silently reset the flag.
+        // A later value write must not forget the mark.
         repo.update(&repo.get().await.unwrap()).await.unwrap();
         repo.set_key("agent_max_turns", "12".to_string())
             .await
@@ -1711,13 +1544,11 @@ mod tests {
     async fn retention_events_settings_roundtrip() {
         let repo = fresh_repo().await;
 
-        // Defaults before any write.
         let s0 = repo.get().await.unwrap();
         assert_eq!(s0.retention_events_days, 30);
         assert_eq!(s0.retention_sensitive_days, 7);
         assert!(s0.retention_events_by_category.is_empty());
 
-        // Persist non-default per-category + sensitivity retention.
         let mut s = s0;
         s.retention_events_days = 45;
         s.retention_sensitive_days = 3;

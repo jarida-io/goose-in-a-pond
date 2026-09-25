@@ -33,7 +33,7 @@ function corpus(over: Partial<ContextCorpusCoverage> = {}): ContextCorpusCoverag
   };
 }
 
-/** The pond this whole panel was built for: an index at roughly 2%. */
+/** An index at roughly 2% coverage. */
 function thinlyIndexed(): ContextIndexHealth {
   return {
     indexed: true,
@@ -67,9 +67,7 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("coverageState", () => {
-  /// The two zero cases are the whole reason this is four states and not a
-  /// percentage: a store nobody has written to is fine and self-correcting, a
-  /// store full of rows nobody can reach is the defect.
+  // Why states, not a percentage: an unwritten store is fine; unreachable rows are the defect.
   it("separates a store nobody has written to from one nobody can reach", () => {
     expect(coverageState({ rows: 0, indexed_rows: 0 })).toBe("vacant");
     expect(coverageState({ rows: 17, indexed_rows: 0 })).toBe("unindexed");
@@ -80,28 +78,20 @@ describe("coverageState", () => {
     expect(coverageState({ rows: 17, indexed_rows: 17 })).toBe("complete");
   });
 
-  /// The third zero case, and the one that nearly got away.
-  ///
-  /// A corpus whose filter excludes every row reports the same zero qualifying
-  /// rows as an empty one, and reads as "nothing stored yet" — which is how the
-  /// live pond showed 100% coverage while 27 sessions held a rolling summary no
-  /// query could reach. The source count is the only thing separating them.
+  // A filter that excludes every row also reports zero rows; only `source_rows` tells it from empty.
   it("separates an empty store from one whose every row is filtered out", () => {
     expect(coverageState({ rows: 0, indexed_rows: 0, source_rows: 0 })).toBe("vacant");
     expect(coverageState({ rows: 0, indexed_rows: 0, source_rows: 27 })).toBe("excluded");
   });
 
   it("does not report more indexed than stored as an unfinished job", () => {
-    // A sweep that has embedded a row since the count was taken must not leave
-    // a corpus stuck reading "partial" forever.
+    // A sweep can embed a row after the count was taken.
     expect(coverageState({ rows: 4, indexed_rows: 5 })).toBe("complete");
   });
 });
 
 describe("formatCoverage", () => {
   it("keeps a barely-populated index distinguishable from an empty one", () => {
-    // Rounding would print "0%" for both, which is precisely the reading that
-    // let a 2% index pass for a broken one and a broken one pass for 2%.
     expect(formatCoverage(0.002)).toBe("<1%");
     expect(formatCoverage(0)).toBe("0%");
     expect(formatCoverage(0.02)).toBe("2%");
@@ -137,8 +127,7 @@ describe("coverageNote", () => {
       corpus({ corpus: "summary", rows: 0, source_rows: 27, structurally_excluded: true }),
     );
     expect(note).toContain("27 stored");
-    // The actionable half. "Not indexed" invites someone to wait for a sweep
-    // that can never pick these up, because nothing about them qualifies.
+    // "Not indexed" would invite waiting for a sweep that can never pick these up.
     expect(note).toMatch(/will not fix/i);
   });
 });
@@ -158,12 +147,10 @@ describe("IndexCoveragePanel", () => {
   it("makes a corpus at zero unmissable without alarming about an empty one", async () => {
     renderPanel();
 
-    // The memory corpus: 17 rows, none of them reachable. Counts AND words.
     expect(await screen.findByText("0 / 17")).toBeTruthy();
     expect(screen.getByText(/Not searchable/)).toBeTruthy();
 
-    // The summary corpus has nothing stored, which is not the same failure and
-    // must not be dressed as one.
+    // The summary corpus: empty, not failing.
     expect(screen.getByText("0 / 0")).toBeTruthy();
     expect(screen.getByText("Nothing stored yet.")).toBeTruthy();
   });
@@ -206,8 +193,6 @@ describe("IndexCoveragePanel", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Reindex" }));
 
     await waitFor(() => expect(mocked(api.rebuildContextIndex)).toHaveBeenCalledTimes(1));
-    // Health is re-read, because the numbers on screen are now stale by
-    // definition — the table has just been emptied.
     await waitFor(() => expect(mocked(api.getContextIndexHealth)).toHaveBeenCalledTimes(2));
     expect(await screen.findByText(/Cleared 3 vectors/)).toBeTruthy();
     expect(screen.getByText(/in the background/)).toBeTruthy();

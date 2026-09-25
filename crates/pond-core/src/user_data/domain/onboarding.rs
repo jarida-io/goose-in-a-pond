@@ -1,41 +1,34 @@
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
-/// Steps in the onboarding wizard.
-///
-/// The middleware only gates on `Completed` — intermediate step names are
-/// informational only.  Unknown step strings (e.g. old DB rows with
-/// "VerifyDevice", "Identity", "Assistant") parse as `Err(())`, which causes
-/// the wizard to restart from the beginning; the user finishes and the DB is
-/// updated to `Completed`.
+/// Onboarding wizard steps. Middleware gates only on `Completed`; an unknown stored step
+/// string parses as `Err(())`, which restarts the wizard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OnboardingStep {
-    /// Step 0: Welcome screen — GIAP intro, handshake happens here.
+    /// GIAP intro; the handshake happens here.
     Welcome,
-    /// Step 1: Basics — display name, preferred name, birthday, avatar.
+    /// Display name, preferred name, birthday, avatar.
     Basics,
-    /// Step 2: Language & Location — locale, timezone, city, weather.
+    /// Locale, timezone, city, weather.
     Location,
-    /// Step 3: Accessibility — atypical speech, slow TTS, high contrast, reduce motion.
+    /// Atypical speech, slow TTS, high contrast, reduce motion.
     Accessibility,
-    /// Step 4: Personality — prompt style and assistant personality hint.
+    /// Prompt style and assistant personality hint.
     Personality,
-    /// Step 5: Goose's Identity — assistant name, TTS voice, household note.
+    /// Assistant name, TTS voice, household note.
     GooseIdentity,
-    /// Step 6: Wake Word — choose a wake phrase or enter a custom one.
+    /// A preset or custom wake phrase.
     WakeWord,
-    /// Step 7: AI Model — LLM provider and model selection.
+    /// LLM provider and model.
     Model,
-    /// Step 8: Extensions — enable curated extensions (Weather, MCP Memory).
+    /// Curated extensions (Weather, MCP Memory).
     Extensions,
     /// Terminal state — unlocks all protected routes.
     Completed,
 }
 
 impl OnboardingStep {
-    /// All steps in wizard order, including the terminal `Completed` state.
-    /// Used to derive progress counts (`total_steps`, `steps_completed`) so the
-    /// API never hardcodes a length that can drift from the enum.
+    /// Every step in wizard order, `Completed` included; progress counts derive from it.
     pub const ALL: [OnboardingStep; 10] = [
         Self::Welcome,
         Self::Basics,
@@ -49,8 +42,7 @@ impl OnboardingStep {
         Self::Completed,
     ];
 
-    /// 1-based position of this step within [`OnboardingStep::ALL`].
-    /// `Welcome` → 1, … `Extensions` → 9, `Completed` → 10.
+    /// 1-based position within [`OnboardingStep::ALL`] (`Completed` → 10).
     pub fn position(self) -> usize {
         Self::ALL
             .iter()
@@ -141,9 +133,7 @@ mod tests {
 
     #[test]
     fn all_covers_every_variant_and_is_ordered() {
-        // ALL must list all 10 variants exactly once, in wizard order.
         assert_eq!(OnboardingStep::ALL.len(), 10);
-        // Each step's `next()` is the following entry in ALL (except the terminal).
         for pair in OnboardingStep::ALL.windows(2) {
             if pair[0] != OnboardingStep::Completed {
                 assert_eq!(pair[0].next(), pair[1]);
@@ -156,7 +146,6 @@ mod tests {
         assert_eq!(OnboardingStep::Welcome.position(), 1);
         assert_eq!(OnboardingStep::Extensions.position(), 9);
         assert_eq!(OnboardingStep::Completed.position(), 10);
-        // Strictly increasing across ALL.
         let positions: Vec<usize> = OnboardingStep::ALL.iter().map(|s| s.position()).collect();
         assert!(positions.windows(2).all(|w| w[0] < w[1]));
     }
@@ -172,13 +161,10 @@ mod tests {
 
     #[test]
     fn unknown_step_string_returns_err() {
-        // Old DB rows with legacy names must not panic — they return Err(())
-        // which the repository converts to None, restarting from Welcome.
         assert!(OnboardingStep::from_str("VerifyDevice").is_err());
         assert!(OnboardingStep::from_str("CreateProfile").is_err());
         assert!(OnboardingStep::from_str("ConfigurePersonality").is_err());
         assert!(OnboardingStep::from_str("ConnectDevices").is_err());
-        // Old 4-step names also restart cleanly
         assert!(OnboardingStep::from_str("Identity").is_err());
         assert!(OnboardingStep::from_str("Assistant").is_err());
     }

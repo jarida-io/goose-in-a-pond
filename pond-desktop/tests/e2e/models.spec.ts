@@ -1,16 +1,4 @@
-/**
- * Playwright E2E tests for the Models section.
- *
- * Covers:
- * - Provider tabs (LLM / ASR / TTS) are visible
- * - Active role pills show the assigned model
- * - Memory status is displayed
- * - Download progress bar shows during active downloads
- *
- * All tests use mocked API routes — no running pond-server required.
- *
- * Run: cd pond-desktop && npx playwright test tests/e2e/models.spec.ts
- */
+/** Models section E2E against mocked API routes: roles, memory status, fit meters, downloads. */
 import { test, expect } from "@playwright/test";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
 
@@ -21,10 +9,6 @@ async function goToModels(page: Parameters<typeof mockAllApiRoutes>[0]) {
     .or(page.locator('[title="Models"]'))
     .first();
   await modelsBtn.click({ timeout: 10_000 });
-  // No tab hop any more. The screen used to open on a guided-setup wizard with
-  // the real view behind a "Manage" tab; that split was removed deliberately —
-  // see the header comment in `src/sections/Models.tsx` — so roles, memory and
-  // downloads are on the section itself now.
 }
 
 test.describe("Models section", () => {
@@ -34,16 +18,13 @@ test.describe("Models section", () => {
 
   test("models section loads without errors", async ({ page }) => {
     await goToModels(page);
-    // Should not show a crash / blank page
     await expect(page.locator("body")).not.toBeEmpty();
-    // Some model-related text should be present
     await expect(
       page.getByText(/model|llm|asr|tts|llamafile|ollama|gguf/i).first()
     ).toBeVisible({ timeout: 10_000 });
   });
 
   test("active chat role pill shows assigned model", async ({ page }) => {
-    // Override active-roles to return a specific model assignment
     await page.route("**/api/v1/models/active-roles", (route) =>
       route.fulfill({
         json: {
@@ -58,7 +39,6 @@ test.describe("Models section", () => {
 
     await goToModels(page);
 
-    // The active model name should appear somewhere in the Models section
     await expect(
       page.getByText(/llama3\.2|llama3/i).first()
     ).toBeVisible({ timeout: 10_000 });
@@ -77,11 +57,7 @@ test.describe("Models section", () => {
 
     await goToModels(page);
 
-    // The header reports what a model can ACTUALLY have — 4096 MB of budget,
-    // rendered "4.0 GB" beside "for models" — not the 8192 MB device total.
-    // That is deliberate: the fit meters measure against the usable figure,
-    // and `fitReading` keeps the bar and the sentence agreeing about the same
-    // model. So the raw total is not on this screen to assert.
+    // Shows the model budget (4096 MB), not the device total: the fit meters use the budget.
     await expect(
       page.locator(".mdl-stat", { hasText: "for models" }),
     ).toContainText("4.0 GB", { timeout: 10_000 });
@@ -160,10 +136,7 @@ test.describe("Models section", () => {
 
     await goToModels(page);
 
-    // The fit meter is now inline on every row rather than a badge that only
-    // appears on a spill, and it carries its verdict in `title` (see
-    // `fitReading` in src/sections/models/modelsView.ts). So the assertion is
-    // no longer "how many badges" but "what does each row's meter say".
+    // Every row has a fit meter; its verdict is in `title` (fitReading in modelsView.ts).
     const meters = page.locator(".mdl-row__fit");
     await expect(meters.first()).toBeVisible({ timeout: 10_000 });
 
@@ -205,10 +178,7 @@ test.describe("Models section", () => {
 
     await goToModels(page);
 
-    // The model list renders, and the meter declines to give a verdict rather
-    // than drawing a confident bar from nothing — "a confident bar drawn from
-    // nothing is worse than no bar" (src/sections/Models.tsx). The element is
-    // present either way now, so the claim is about what it says.
+    // Unknown budget: the meter gives no verdict rather than a bar drawn from nothing.
     await expect(page.getByText(/gemma3n e2b/i).first()).toBeVisible({ timeout: 10_000 });
     await expect(
       page.locator(".mdl-row__fit[title*='Size unknown']"),
@@ -257,11 +227,7 @@ test.describe("Models section", () => {
 
     await goToModels(page);
 
-    // The bar carries a role and an accessible name now, so it can be named
-    // directly. The old `.or(getByText(/%|progress/))` fallback dated from
-    // markup that had neither, and matched both the bar and its own "26%"
-    // label — two elements, which is a strict-mode violation rather than a
-    // missing indicator.
+    // Named by role: text matching would also hit its "26%" label (strict mode).
     await expect(
       page.getByRole("progressbar", { name: /llama3\.2-3b\.gguf download progress/i }),
     ).toBeVisible({ timeout: 10_000 });

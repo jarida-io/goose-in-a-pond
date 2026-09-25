@@ -10,17 +10,12 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Send a prepared request and report the egress to the shared tracker (#113).
-/// This adapter has its own `reqwest::Client`, so it cannot use `pond-mcp-server`'s
-/// `traced_get`; it records host, method, status and latency into `pond-core` itself
-/// and returns the raw result so callers keep their own error handling.
+/// Egress-gated, egress-traced send; this crate's own client can't use `traced_get`.
 pub(crate) async fn traced_send(
     builder: reqwest::RequestBuilder,
     url: &str,
 ) -> anyhow::Result<reqwest::Response> {
-    // PAI-2 P5: gate first. open-meteo is on the curated public list, so
-    // `allowlist` permits it and `offline` does not -- which is the whole
-    // point: an offline pond stops asking a third party where the user lives.
+    // Gate first: an `offline` pond must stop asking a third party where the user lives.
     pond_core::shared::services::egress::check_egress(url)?;
 
     let start = std::time::Instant::now();
@@ -79,7 +74,6 @@ impl WeatherData {
 
 // ── Forecast ─────────────────────────────────────────────────────────────────
 
-/// One day in a multi-day forecast.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForecastDay {
     pub date: String,
@@ -94,7 +88,6 @@ pub struct ForecastDay {
     pub sunset: String,
 }
 
-/// Multi-day forecast for a location.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForecastData {
     pub location_name: String,
@@ -132,8 +125,7 @@ impl ForecastData {
 
 // ── Port trait ────────────────────────────────────────────────────────────────
 
-/// Port for fetching weather conditions.
-/// Implementations should cache results for ~15 minutes.
+/// Port for fetching weather; implementations should cache results for ~15 minutes.
 #[async_trait]
 pub trait WeatherProvider: Send + Sync {
     /// Current weather for the configured default location.

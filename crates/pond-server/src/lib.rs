@@ -1,7 +1,4 @@
-//! Library target for `pond-server`.
-//!
-//! Exposing key modules here allows integration tests in `tests/` to import
-//! them without duplicating code from `main.rs`.
+//! Library target for `pond-server`, so integration tests in `tests/` can import modules.
 
 pub mod account_sync;
 pub mod hf_cache_migration;

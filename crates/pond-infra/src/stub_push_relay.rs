@@ -1,9 +1,4 @@
-//! Stub FCM/APNs relay (#99, Phase 2 scaffold).
-//!
-//! Resolves a device's stored push token (#95) and *logs* the intended
-//! background push instead of really sending it. Replacing this with real
-//! FCM-v1 / APNs HTTP is a follow-up (needs service credentials + a device).
-//! The token is never logged in full.
+//! Logging fallback relay used when no usable FCM key exists; never logs the full token.
 
 use std::sync::Arc;
 
@@ -36,7 +31,6 @@ impl NotificationRelay for StubPushRelay {
             return Ok(());
         };
         let prefix = token_log_prefix(&token.token);
-        // Scaffold: real FCM/APNs delivery is a follow-up.
         tracing::info!(
             device = %notification.target,
             platform = token.platform.as_str(),
@@ -108,10 +102,7 @@ mod tests {
         relay.relay(&notif()).await.unwrap();
     }
 
-    /// Regression: a token whose 8th byte falls inside a multi-byte character
-    /// used to panic while building the log prefix. `relay` is awaited inline
-    /// in `BroadcastNotificationSender::send`, which catches errors but not
-    /// panics, so this would have taken down the whole notification send.
+    /// `BroadcastNotificationSender::send` awaits this inline and catches errors, not panics.
     #[tokio::test]
     async fn relay_does_not_panic_on_a_multi_byte_token() {
         let tokens = Arc::new(StubTokens::default());

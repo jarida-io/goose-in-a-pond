@@ -3,8 +3,7 @@ import { HubIco } from "../../primitives/HubIco";
 import { useDeviceState } from "../../state/hubStore";
 
 // ── Room grid wiring ───────────────────────────────────────────
-// Maps room keys to the device IDs in hubStore/mockHome.ts.
-// Only light-type devices are toggled here; IDs are from mockHome.ts.
+// Room keys → light device IDs from mockHome.ts (lights are the only kind toggled here).
 
 interface RoomConfig {
   key: string;
@@ -132,11 +131,7 @@ function LitCount(): React.ReactElement {
   );
 }
 
-/**
- * Smart Home card — 2x2 room toggle grid + 4 sensor rows.
- * Room toggle buttons are wired to hubStore — toggling here syncs with Home tiles.
- * Source: giap-device.list_registered_devices + hubStore.
- */
+/** Smart Home card; room toggles go through hubStore, so Home tiles stay in sync. Sensors are mock. */
 export function SmartHomeCard(): React.ReactElement {
   return (
     <div className="mc">

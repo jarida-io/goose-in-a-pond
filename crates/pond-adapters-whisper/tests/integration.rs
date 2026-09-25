@@ -1,10 +1,4 @@
-//! Integration tests for `WhisperKeywordDetector`.
-//!
-//! The detector is driven through a small mock `WhisperBackend` that returns a
-//! canned transcript, so these exercise the detection state machine without a
-//! model or a microphone. The `WhisperInput` half of this file's original
-//! subject — the HTTP backend behind `--features legacy-subprocess` — was
-//! deleted in 2026-08.
+//! `WhisperKeywordDetector` tests via a canned-transcript mock backend; no model or microphone.
 
 // ── Mock backend ──────────────────────────────────────────────────────────────
 
@@ -21,8 +15,7 @@ impl WhisperBackend for MockBackend {
     }
 }
 
-/// A `MicHandle` backed by a scripted (no-hardware) device, for tests that
-/// only need a valid handle to construct — not to actually capture.
+/// A no-hardware `MicHandle`, for tests that only need one to construct, not to capture.
 fn test_mic() -> pond_audio::MicHandle {
     let (mic, _join) = pond_audio::spawn(
         Box::new(pond_audio::testing::ScriptedCapture::silence(0, 20)),
@@ -33,8 +26,6 @@ fn test_mic() -> pond_audio::MicHandle {
     mic
 }
 
-/// The activation prompt must mention the trigger word so the user knows
-/// what to say.
 #[test]
 fn wake_word_detector_prompt_mentions_goose() {
     let detector = WhisperKeywordDetector::new(
@@ -52,8 +43,6 @@ fn wake_word_detector_prompt_mentions_goose() {
     );
 }
 
-/// Verify the type satisfies the `WakeWordDetector` port so it can be
-/// wired into `ChatService`.
 #[test]
 fn wake_word_detector_is_wake_word_detector_trait_object() {
     let _: Arc<dyn WakeWordDetector> = Arc::new(WhisperKeywordDetector::new(

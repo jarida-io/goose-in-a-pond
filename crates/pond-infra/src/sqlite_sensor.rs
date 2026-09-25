@@ -1,7 +1,4 @@
-//! SQLite-backed implementations of `SensorStorage` and `CameraStorage`.
-//!
-//! IMPORTANT: Both use `db.logs.clone()` — sensor_readings and camera_events
-//! are in `pond_logs.db`, NOT `pond_system.db`.
+//! SQLite `SensorStorage` and `CameraStorage`. Both tables are in `pond_logs.db`: pass `db.logs`.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -34,20 +31,12 @@ struct SensorRow {
     created_at: String,
 }
 
-/// Render a range bound the way `created_at` is stored, so SQLite's text
-/// comparison orders it correctly — the column is TEXT, not a date type.
+/// Formats a bound like stored `created_at`: the column is TEXT and compared as text.
 fn format_bound(dt: DateTime<Utc>) -> String {
     dt.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
-/// A stored `created_at`, or the epoch if it cannot be read.
-///
-/// The epoch, NOT `Utc::now()`, and the difference matters now that a reading's age
-/// decides whether it may be reported as current. `now` makes an unreadable timestamp
-/// the freshest row in the table — a reading of unknown vintage presented as this
-/// second's. The epoch fails the other way: unreadable reads as ancient, so a caller
-/// checking staleness treats it as stale, which is the safe direction for a value
-/// nobody can date.
+/// Unreadable timestamps parse as the epoch, not now, so staleness checks see them as stale.
 fn parse_dt(s: &str) -> chrono::DateTime<Utc> {
     chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
         .map(|ndt| ndt.and_utc())
@@ -68,17 +57,8 @@ fn sensor_row_to_reading(row: SensorRow) -> SensorReading {
 impl SensorStorage for SqliteSensorStorage {
     async fn record(&self, reading: SensorReading) -> Result<()> {
         sqlx::query(
-            // The reading's own timestamp, not `datetime('now')`.
-            //
-            // `recorded_at` was accepted and thrown away, so what came back out was
-            // the INSERT time — close enough while nothing measured the gap, and
-            // wrong the moment something did. The Matter controller stamps a reading
-            // with its own clock, and there is a queue and an event bus between that
-            // and this line.
-            //
-            // Same text format `format_bound` and `parse_dt` use, because the column
-            // is TEXT and the range queries compare it as text. Byte-compatible with
-            // what `datetime('now')` wrote, so existing rows still order correctly.
+            // The reading's own time, not `datetime('now')`, in `format_bound`'s TEXT format;
+            // byte-compatible with `datetime('now')`, so older rows still order correctly.
             "INSERT INTO sensor_readings (device_id, sensor_type, value, unit, created_at) \
              VALUES (?, ?, ?, ?, ?)",
         )
@@ -199,11 +179,7 @@ impl SensorStorage for SqliteSensorStorage {
         }
         let since_str = since.map(format_bound);
         let until_str = until.map(format_bound);
-        // MAX(unit) is a deterministic pick, not a comparison that means
-        // anything: the unit is invariant for a (device_id, sensor_type) pair,
-        // so any row in the window answers it without a second query. Over an
-        // empty window every aggregate is NULL, which is exactly the "no
-        // reading here" answer the caller needs.
+        // MAX(unit) just picks one (unit is fixed per device/type); an empty window is all NULL.
         let row: AggregateRow = sqlx::query_as(
             "SELECT COUNT(value) AS count, \
                     MIN(value)   AS min_value, \
@@ -354,9 +330,7 @@ mod tests {
         }
     }
 
-    /// Seed a reading at a chosen time, bypassing the port. Kept for the rows this
-    /// suite wants dated years apart, which is quicker to write directly than to
-    /// build a `SensorReading` for.
+    /// Seeds a reading at a chosen time, bypassing the port.
     async fn insert_at(pool: &Pool<Sqlite>, device_id: &str, t: &str, v: f64, created_at: &str) {
         sqlx::query(
             "INSERT INTO sensor_readings (device_id, sensor_type, value, unit, created_at) \
@@ -392,12 +366,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_readings_own_timestamp_survives_the_round_trip() {
-        // It did not. `record` bound four fields and wrote `datetime('now')` for the
-        // fifth, so `recorded_at` was accepted and discarded and what came back out
-        // was the INSERT time. Close enough while nothing measured the gap -- and
-        // wrong the moment `get_sensor_reading` started reporting a reading's age to
-        // decide whether it may be called current. There is a controller clock, a
-        // queue and an event bus upstream of this line.
         let (pool, _tmp) = make_logs_pool().await;
         let store = SqliteSensorStorage::new(pool);
 
@@ -419,10 +387,6 @@ mod tests {
 
     #[test]
     fn a_timestamp_nobody_can_read_is_ancient_rather_than_now() {
-        // The direction matters. `Utc::now()` made an unreadable timestamp the
-        // freshest row in the table -- a reading of unknown vintage presented as this
-        // second's, which is the worst possible input to a staleness check. The epoch
-        // fails the other way, so such a row reads as stale.
         assert_eq!(parse_dt("not a timestamp"), DateTime::UNIX_EPOCH);
         assert_eq!(parse_dt(""), DateTime::UNIX_EPOCH);
         assert_eq!(parse_dt("2026-08-30 14:05:09"), at("2026-08-30 14:05:09"));
@@ -471,8 +435,7 @@ mod tests {
         }
         let storage = SqliteSensorStorage::new(pool);
 
-        // `since` is inclusive and `until` exclusive, so this window is the
-        // 11:00 reading alone.
+        // `since` is inclusive and `until` exclusive: only the 11:00 reading.
         let rows = storage
             .get_history(
                 "room1",
@@ -538,8 +501,6 @@ mod tests {
         insert_at(&pool, "room1", "temperature", 10.0, "2026-01-01 10:00:00").await;
         let storage = SqliteSensorStorage::new(pool);
 
-        // A window with no rows must report absence, not an extremum. The
-        // in-memory fold this replaced returned an infinity here.
         let agg = storage
             .aggregate(
                 "room1",

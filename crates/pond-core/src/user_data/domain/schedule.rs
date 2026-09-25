@@ -1,16 +1,9 @@
-//! Schedule domain types — pure Rust, no external framework imports.
-//!
-//! Represents scheduled automations that fire on a cron cadence.
-//! Each schedule carries a [`TaskKind`] that determines what happens
-//! on each fire: send a prompt to the LLM agent, or POST a webhook.
+//! Scheduled automations (cron, one-shot or event-triggered) and sensor rule types.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// What a scheduled task does when it fires.
-///
-/// `PartialEq` only (not `Eq`): [`SensorTriggerSpec`] carries an `f64`
-/// comparison threshold.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TaskKind {
@@ -18,26 +11,21 @@ pub enum TaskKind {
     AgentPrompt { prompt: String },
     /// POST to an external webhook URL (backward compat).
     Webhook { webhook_url: String },
-    /// Fire when a matching sensor/camera/device event arrives on the
-    /// EventBus (#92). Event-triggered: never registered with cron — the
-    /// rules engine invokes it via the scheduler's `run_now` path.
+    /// Fires on a matching bus event; never cron-registered, the rules engine calls `run_now`.
     SensorTrigger(SensorTriggerSpec),
 }
 
 impl TaskKind {
-    /// `true` for kinds that fire on events rather than a cron cadence.
-    /// The scheduler skips cron registration for these.
+    /// Event-fired kinds, which the scheduler never registers with cron.
     pub fn is_event_triggered(&self) -> bool {
         matches!(self, TaskKind::SensorTrigger(_))
     }
 }
 
-/// The sentinel `cron` value for a one-shot, mirroring `"@event"` for a sensor
-/// rule. Neither is ever parsed; both exist so a list of schedules reads
-/// honestly.
+/// Display-only `cron` sentinel for a one-shot (like `"@event"` for sensor rules); never parsed.
 pub const CRON_ONCE: &str = "@once";
 
-// ── Sensor/event-triggered rules (#92) ───────────────────────────────────────
+// ── Sensor/event-triggered rules ─────────────────────────────────────────────
 
 /// Which bus-event family a rule listens to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,8 +43,7 @@ pub struct TriggerSource {
     /// `device_id` / `camera_id` to match; `None` = any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
-    /// Sensor `sensor_type` / camera `event_type` / device state key to
-    /// match (e.g. `"motion"`, `"person"`, `"power"`); `None` = any.
+    /// Sensor type, camera event type or device state key (e.g. `"motion"`); `None` = any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signal: Option<String>,
 }
@@ -72,19 +59,15 @@ pub enum CompareOp {
     Eq,
 }
 
-/// When a matching event actually fires the rule. All set parts must hold
-/// (AND). An empty condition always matches.
+/// When a matching event fires the rule: every set part must hold; empty always matches.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TriggerCondition {
-    /// Numeric comparison against the event's value (sensor reading value,
-    /// camera confidence, or numeric device state). Requires `value`.
+    /// Compared against the event's value; only applies together with `value`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub op: Option<CompareOp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
-    /// Local-time window bounds, `"HH:MM"`. When `after` > `before` the
-    /// window wraps midnight (e.g. `after "18:30"`, `before "06:00"` ≈
-    /// "after sunset"). Malformed bounds fail closed (never match).
+    /// Local `"HH:MM"` bounds; wraps midnight if `after` > `before`. Malformed bounds never match.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -103,8 +86,7 @@ pub enum TriggerAction {
     Notify { title: String, body: String },
 }
 
-/// A sensor/event-triggered automation rule (#92):
-/// "if `source` emits an event matching `condition`, run `actions`".
+/// Event rule: if `source` emits an event matching `condition`, run `actions`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SensorTriggerSpec {
     pub source: TriggerSource,
@@ -116,19 +98,8 @@ pub struct SensorTriggerSpec {
     pub cooldown_secs: u64,
 }
 
-/// A bus event projected onto the fields trigger evaluation needs — keeps
-/// the evaluation pure and testable without importing the bus type here.
-/// Built by `BusEvent::trigger_view()`.
-///
-/// **`#[non_exhaustive]` is a safety property, not future-proofing** (PAI-7
-/// P1). `trigger_view()` returns `None` for the events that are not
-/// device-shaped — a clock tick, a session transition — because a rule written
-/// with `device_id: None, signal: None` matches *anything* in its family, so a
-/// placeholder view would fire the automations somebody wrote about their
-/// house on the hour, every hour. This attribute is what stops a consumer in
-/// another crate answering that `None` with a view of its own: outside
-/// pond-core the struct literal does not compile at all. Its fields stay
-/// readable.
+/// A bus event's trigger fields, built by `BusEvent::trigger_view()`. `#[non_exhaustive]` stops
+/// other crates faking a view for non-device events, which would fire every filterless rule.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct TriggerEventView<'a> {
@@ -139,33 +110,18 @@ pub struct TriggerEventView<'a> {
     pub value: Option<f64>,
 }
 
-/// Why a sensor rule was refused at the edge.
-///
-/// Every variant here describes a rule that would be ACCEPTED and then be
-/// silent: `matches` fails closed on a malformed time window, an empty filter
-/// string matches no device that exists, and a rule with no actions only
-/// discovers it has nothing to do when the executor bails at fire time. A
-/// household automation that quietly never runs is worse than one that was
-/// refused, because nobody goes looking for it until the thing it was supposed
-/// to prevent has happened. This is domain policy, not transport: the same
-/// answer has to hold for whichever surface accepts the rule.
+/// Why a sensor rule was refused: each case would otherwise be accepted and silently never work.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleRejection {
     /// No actions: the executor bails at fire time on every single fire.
     NoActions,
-    /// `after`/`before` outside `HH:MM`. `in_time_window` fails closed on
-    /// these, so the rule matches nothing, ever.
+    /// `after`/`before` not `HH:MM`, so the window fails closed and the rule never matches.
     MalformedTimeBound { field: &'static str, value: String },
-    /// A comparison operator without a threshold, or a threshold without an
-    /// operator. `matches` requires both, so half a condition is silently no
-    /// condition — the rule fires on every reading instead of the ones asked
-    /// for.
+    /// Only one of operator/threshold: `matches` ignores it, so the rule fires on every reading.
     HalfCondition,
-    /// An empty `device_id` / `signal` filter, which matches no real event.
-    /// `None` is how "any" is expressed; `Some("")` is a mistake.
+    /// A `Some("")` filter, which matches no real event; `None` means "any".
     EmptyFilter { field: &'static str },
-    /// An action that cannot do anything: no device to switch, no text to
-    /// prompt with, no notification to show.
+    /// An action with nothing to do: no device, prompt text or notification text.
     EmptyAction { index: usize, reason: &'static str },
 }
 
@@ -204,14 +160,7 @@ impl SensorTriggerSpec {
         60
     }
 
-    /// Refuse the rules that would be accepted and then never fire (or fire and
-    /// then fail). See [`RuleRejection`] for why each case is worth a 400
-    /// rather than silence.
-    ///
-    /// Deliberately NOT validated here: the id and the cron expression. The
-    /// scheduler adapter already rejects a duplicate id, and an event rule
-    /// never registers a cron job at all, so a second opinion on either would
-    /// be a copy of a rule that lives somewhere else and drifts from it.
+    /// Refuses rules that would never fire or always fail; id and cron are the scheduler's job.
     pub fn validate(&self) -> Result<(), RuleRejection> {
         if self.actions.is_empty() {
             return Err(RuleRejection::NoActions);
@@ -260,10 +209,8 @@ impl SensorTriggerSpec {
         Ok(())
     }
 
-    /// Pure evaluation: does `event` at local wall-clock `local_time`
-    /// satisfy this rule's source + condition?
+    /// Whether `event` at local wall-clock `local_time` satisfies source and condition.
     pub fn matches(&self, event: &TriggerEventView<'_>, local_time: chrono::NaiveTime) -> bool {
-        // Source family + optional exact filters.
         if self.source.kind != event.kind {
             return false;
         }
@@ -278,7 +225,6 @@ impl SensorTriggerSpec {
             }
         }
 
-        // Numeric comparison (requires both an operator and a threshold).
         if let (Some(op), Some(threshold)) = (self.condition.op, self.condition.value) {
             let Some(v) = event.value else {
                 return false;
@@ -295,7 +241,6 @@ impl SensorTriggerSpec {
             }
         }
 
-        // Local-time window. Malformed bounds fail closed.
         in_time_window(
             self.condition.after.as_deref(),
             self.condition.before.as_deref(),
@@ -304,8 +249,7 @@ impl SensorTriggerSpec {
     }
 }
 
-/// `true` when `t` falls inside the optional `[after, before)` local-time
-/// window; wraps midnight when `after` > `before`. Malformed bounds → false.
+/// Whether `t` is in the half-open `[after, before)` window, wrapping midnight; malformed → false.
 fn in_time_window(after: Option<&str>, before: Option<&str>, t: chrono::NaiveTime) -> bool {
     let parse = |s: &str| chrono::NaiveTime::parse_from_str(s, "%H:%M").ok();
     match (after, before) {
@@ -320,30 +264,14 @@ fn in_time_window(after: Option<&str>, before: Option<&str>, t: chrono::NaiveTim
     }
 }
 
-/// A scheduled automation persisted by the scheduler.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Schedule {
     pub id: String,
     pub label: String,
-    /// 6-field cron expression: `<sec> <min> <hour> <dom> <month> <dow>`
-    ///
-    /// Carries a display sentinel rather than an expression for schedules that
-    /// are never cron-registered: `"@event"` for a sensor rule, `"@once"` for a
-    /// one-shot. See [`Schedule::is_one_shot`].
+    /// 6-field cron (`<sec> <min> <hour> <dom> <month> <dow>`), or `"@event"`/`"@once"` sentinels.
     pub cron: String,
-    /// Fire ONCE at this instant, then delete. `None` for a recurring schedule.
-    ///
-    /// **A cron expression cannot express a one-shot, and that is the whole
-    /// reason this field exists.** The 6-field form has no year, so even a fully
-    /// specified `0 35 14 9 8 *` means *every* 9 August at 14:35 — a ten-minute
-    /// timer written as cron becomes an annual alarm. The catalog has advertised
-    /// "Reminders, alarms, timers" and `pond-voice` has documented "stop the
-    /// kitchen timer" for as long as neither was possible.
-    ///
-    /// Stored as an absolute UTC instant, not a duration, because the delay has
-    /// to be re-derived on restart: `tokio_cron_scheduler`'s one-shot takes a
-    /// `std::time::Instant`, which is monotonic and meaningless across a
-    /// process boundary.
+    /// One-shot fire time (cron has no year field). Absolute UTC, not a delay, because
+    /// `tokio_cron_scheduler`'s monotonic `Instant` must be re-derived after a restart.
     #[serde(default)]
     pub fire_at: Option<DateTime<Utc>>,
     /// IANA timezone (e.g. `"Africa/Nairobi"`). Cron is evaluated in this zone.
@@ -357,22 +285,12 @@ pub struct Schedule {
 }
 
 impl Schedule {
-    /// Fires once and then deletes itself.
-    ///
-    /// Sits beside [`TaskKind::is_event_triggered`] and is read by the same
-    /// place for the same reason: both answer "should the scheduler register a
-    /// cron job for this", and for both the answer is no.
-    ///
-    /// Deliberately NOT a `TaskKind` variant. *What* a schedule does and *when*
-    /// it fires are orthogonal — a timer that sends a notification and a timer
-    /// that runs an agent prompt are both timers — and a variant would force
-    /// every `match` on `TaskKind` to grow an arm that has nothing to say.
+    /// Fires once, then deletes itself. Not a `TaskKind` variant: what and when are orthogonal.
     pub fn is_one_shot(&self) -> bool {
         self.fire_at.is_some()
     }
 }
 
-/// Status of a single scheduled execution.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
@@ -381,7 +299,6 @@ pub enum RunStatus {
     Failed,
 }
 
-/// A single execution record for a scheduled task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduleRun {
     pub id: String,
@@ -393,7 +310,6 @@ pub struct ScheduleRun {
     pub error: Option<String>,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
-    /// Duration in milliseconds.
     pub duration_ms: Option<u64>,
 }
 
@@ -444,7 +360,7 @@ mod tests {
         assert_eq!(back, RunStatus::Completed);
     }
 
-    // ── Sensor-trigger rules (#92) ────────────────────────────────────────
+    // ── Sensor-trigger rules ──────────────────────────────────────────────
 
     fn motion_after_sunset_rule() -> SensorTriggerSpec {
         SensorTriggerSpec {
@@ -585,16 +501,12 @@ mod tests {
         assert!(!mk(CompareOp::Eq, 1.0).matches(&ev(0.5), noon));
     }
 
-    // ── Rule validation (PAI-7 P8) ────────────────────────────────────────
-    //
-    // Each of these asserts the DEFECT first and the refusal second. A rule
-    // that is merely refused proves nothing; what makes the refusal worth a
-    // 400 is that the accepted version is silent.
+    // ── Rule validation ───────────────────────────────────────────────────
+    // Each test asserts the defect first, then the refusal.
 
     #[test]
     fn a_valid_rule_validates() {
-        // The vacuity control for every test below: the fixture they mutate is
-        // accepted before they touch it.
+        // Vacuity control: the fixture the tests below mutate starts out valid.
         assert_eq!(motion_after_sunset_rule().validate(), Ok(()));
     }
 
@@ -602,8 +514,6 @@ mod tests {
     fn a_malformed_time_bound_is_refused_because_it_matches_nothing() {
         let mut spec = motion_after_sunset_rule();
         spec.condition.after = Some("sunset".into());
-        // The defect: the window fails closed, so this rule never fires — at
-        // 22:00, which is exactly when the user meant it to.
         assert!(!spec.matches(&motion_event(), at("22:00")));
         assert_eq!(
             spec.validate(),
@@ -620,8 +530,6 @@ mod tests {
     fn half_a_condition_is_refused_because_it_is_silently_no_condition() {
         let mut spec = motion_after_sunset_rule();
         spec.condition.value = None; // operator with no threshold
-                                     // The defect: `matches` needs both, so the comparison vanishes and the
-                                     // rule fires on a reading of 0.0 — the opposite of "when motion".
         let mut quiet = motion_event();
         quiet.value = Some(0.0);
         assert!(spec.matches(&quiet, at("22:00")));
@@ -647,9 +555,7 @@ mod tests {
     fn a_rule_with_no_actions_is_refused() {
         let mut spec = motion_after_sunset_rule();
         spec.actions.clear();
-        // The defect is one layer out and cannot be asserted here: the executor
-        // bails with "sensor rule has no actions" on every fire, so the rule
-        // records a failed run each time its sensor twitches.
+        // The defect is in the executor (a failed run per fire), so only the refusal is checked.
         assert_eq!(spec.validate(), Err(RuleRejection::NoActions));
     }
 
@@ -677,8 +583,7 @@ mod tests {
             spec.validate(),
             Err(RuleRejection::EmptyAction { index: 0, .. })
         ));
-        // A notification with only a body is legal — a title-less toast still
-        // says something.
+        // A body-only notification is legal.
         let spec = SensorTriggerSpec {
             actions: vec![TriggerAction::Notify {
                 title: String::new(),
@@ -691,8 +596,7 @@ mod tests {
 
     #[test]
     fn rejections_say_what_to_change() {
-        // These strings are the body of a 400. "invalid rule" would send the
-        // user to the logs.
+        // These are the body of a 400 response.
         let text = RuleRejection::MalformedTimeBound {
             field: "before",
             value: "6pm".into(),

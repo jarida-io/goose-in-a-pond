@@ -1,8 +1,4 @@
 //! SchedulerPort — schedule recurring tasks via cron expressions.
-//!
-//! Allows GIAP to fire time-based automations (e.g. "every morning at 8 AM,
-//! summarise overnight sensor readings").  The adapter lives in
-//! `pond-infra-scheduler` (workspace-included, no Goose dep).
 
 use crate::user_data::domain::schedule::{Schedule, ScheduleRun, TaskKind};
 use anyhow::Result;
@@ -14,24 +10,13 @@ use std::sync::Arc;
 pub struct CreateScheduleRequest {
     pub id: String,
     pub label: String,
-    /// 6-field cron expression with leading seconds field
-    /// (e.g. `"0 0 8 * * *"` = 08:00:00 daily), or a display sentinel for a
-    /// schedule that is never cron-registered (`"@event"`, `"@once"`).
+    /// 6-field cron with leading seconds (`"0 0 8 * * *"`), or a sentinel (`"@event"`, `"@once"`).
     pub cron: String,
-    /// Fire ONCE at this instant, then delete. `None` for a recurring schedule.
-    ///
-    /// When set, `cron` is a sentinel and is never parsed — a 6-field cron has
-    /// no year field, so it cannot express "once" at all. See
-    /// [`crate::user_data::domain::schedule::Schedule::fire_at`].
+    /// Fire once at this instant, then delete. When set, `cron` is a sentinel, never parsed.
     #[serde(default)]
     pub fire_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Alternate way to arrive at a one-shot: fire once at `cron`'s next
-    /// occurrence (computed from `cron` + `timezone`), then delete. Lets a
-    /// caller that only knows "9am, once" — not an absolute instant — ask
-    /// for a one-shot without doing its own cron math. Ignored if `fire_at`
-    /// is already set; `cron` must still be a normal parseable expression
-    /// when this is `true` (it is read once to compute the instant, then
-    /// discarded the same way an explicit `fire_at` discards it).
+    /// Fire once at `cron`'s next occurrence, then delete. Ignored if `fire_at` is set;
+    /// `cron` must still parse (it's read once for the instant, then discarded).
     #[serde(default)]
     pub once: bool,
     /// IANA timezone (e.g. `"Africa/Nairobi"`).
@@ -40,23 +25,18 @@ pub struct CreateScheduleRequest {
     pub kind: TaskKind,
 }
 
-/// Request payload for updating an existing scheduled task.
-/// All fields are optional — only provided fields are changed.
+/// Partial update of a scheduled task: only provided fields change.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct UpdateScheduleRequest {
     pub label: Option<String>,
     pub cron: Option<String>,
     pub timezone: Option<String>,
     pub kind: Option<TaskKind>,
-    /// Fire ONCE at this instant instead of recurring. `Some` converts the
-    /// schedule to a one-shot, mirroring [`CreateScheduleRequest::fire_at`].
-    /// Providing `cron` without `fire_at`/`once` converts a one-shot schedule
-    /// back to recurring, clearing any previously stored fire_at.
+    /// `Some` converts to a one-shot at this instant. A `cron` without `fire_at`/`once`
+    /// converts a one-shot back to recurring, clearing the stored `fire_at`.
     #[serde(default)]
     pub fire_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Alternate way to convert to a one-shot: fire once at `cron`'s next
-    /// occurrence rather than an explicit `fire_at`. See
-    /// [`CreateScheduleRequest::once`]. Ignored if `fire_at` is set.
+    /// Convert to a one-shot at `cron`'s next occurrence; ignored if `fire_at` is set.
     #[serde(default)]
     pub once: bool,
 }
@@ -79,17 +59,15 @@ pub trait SchedulerPort: Send + Sync {
     /// List schedules sorted by next fire time (soonest first).
     async fn list_upcoming(&self, limit: u32) -> Result<Vec<Schedule>>;
 
-    /// Inject the real executor after the agent is constructed.
-    /// Called once during startup to break the circular init dependency.
+    /// Inject the real executor once the agent exists (breaks a circular init dependency).
     async fn set_executor(
         &self,
         executor: Arc<dyn crate::user_data::ports::schedule_execution::ScheduleExecutor>,
     ) -> Result<()>;
 }
 
-// ── Backward-compatible aliases ───���──────────────────────────────────────────
-// These allow existing code that references the old names to keep compiling
-// during the transition. Remove once all call sites are migrated.
+// ── Backward-compatible aliases ────────────────────────────────────────────────
+// Remove once all call sites use the new names.
 
 /// Deprecated — use [`CreateScheduleRequest`] instead.
 pub type CreateTaskRequest = CreateScheduleRequest;

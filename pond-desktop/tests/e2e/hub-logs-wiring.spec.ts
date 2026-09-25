@@ -1,10 +1,4 @@
-/**
- * Phase 8 wave 3 — Logs sub-screen real-data wiring
- *
- * Verifies:
- * 1. Logs screen loads and renders log rows from mocked api.listLogs()
- * 2. Filter pill switches client-side filter and updates visible rows
- */
+/** Logs sub-screen wired to api.listLogs(), with client-side level filters. */
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
@@ -15,11 +9,9 @@ const MOCK_LOGS = [
   { id: 4, timestamp: "2026-06-04T08:50:18Z", level: "ERROR", source: "mcp",     message: "giap-news handshake failed — disabled" },
 ];
 
-/** Wire all routes required to reach the Logs sub-screen. */
 async function setupLogsRoutes(page: Page, opts: { logEntries?: object[] } = {}) {
   const logEntries = opts.logEntries ?? MOCK_LOGS;
 
-  // Core infrastructure routes
   await page.route("**/api/v1/health", (r) =>
     r.fulfill({ json: { status: "ok", version: "test" } }),
   );
@@ -119,11 +111,9 @@ test.describe("Hub — Logs sub-screen wiring", () => {
     await setupLogsRoutes(page);
     await goToLogsScreen(page);
 
-    // At least one log entry from MOCK_LOGS should be visible
     await expect(page.getByText("Server bound to 127.0.0.1:4000")).toBeVisible({ timeout: 5_000 });
     await expect(page.getByText("giap-news handshake failed — disabled")).toBeVisible({ timeout: 3_000 });
 
-    // Level badges should be present
     await expect(page.locator(".logrow__lvl--info").first()).toBeVisible({ timeout: 3_000 });
     await expect(page.locator(".logrow__lvl--warn").first()).toBeVisible({ timeout: 3_000 });
     await expect(page.locator(".logrow__lvl--error").first()).toBeVisible({ timeout: 3_000 });
@@ -133,27 +123,20 @@ test.describe("Hub — Logs sub-screen wiring", () => {
     await setupLogsRoutes(page);
     await goToLogsScreen(page);
 
-    // Wait for initial data to render
     await expect(page.getByText("Server bound to 127.0.0.1:4000")).toBeVisible({ timeout: 5_000 });
 
-    // Click the "Error" filter tab
     await page.getByRole("tab", { name: "Error" }).click();
     await page.waitForTimeout(300);
 
-    // ERROR entry should still be visible
     await expect(page.getByText("giap-news handshake failed — disabled")).toBeVisible({ timeout: 3_000 });
 
-    // INFO entry should no longer be visible
     await expect(page.getByText("Server bound to 127.0.0.1:4000")).not.toBeVisible({ timeout: 3_000 });
 
-    // Switch to "Warn" tab
     await page.getByRole("tab", { name: "Warn" }).click();
     await page.waitForTimeout(300);
 
-    // WARN entry visible
     await expect(page.getByText("Available memory below 25% (1.8 GB)")).toBeVisible({ timeout: 3_000 });
 
-    // ERROR entry not visible
     await expect(page.getByText("giap-news handshake failed — disabled")).not.toBeVisible({ timeout: 3_000 });
   });
 });

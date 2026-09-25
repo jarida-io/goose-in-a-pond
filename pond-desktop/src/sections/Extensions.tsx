@@ -32,14 +32,8 @@ import { useAppState } from "../state/AppContext";
 import { useConfirm, ErrorBanner } from "../components/shared";
 import type { Extension, AddExtensionRequest, MarketplaceExtension, SecretRequirement, AgentTool } from "../api/types";
 
-/**
- * Open a URL in the user's real browser.
- *
- * In the desktop shell this must go through the main process: window.open on
- * an app:// page creates another in-app window rather than leaving the app,
- * so the old catch-all fallback was wrong rather than merely degraded. (The
- * shell also denies window.open outright, which is what makes that safe.)
- */
+/** Open a URL in the real browser. In the shell it must go via the main process:
+ *  `window.open` on an app:// page opens another in-app window. */
 async function openExternal(url: string) {
   if (isDesktopShell()) {
     await invoke("open_external", { url });
@@ -130,10 +124,7 @@ function SecretField({
   );
 }
 
-/**
- * How long to wait for a browser hand-off before giving up. Generous: the user
- * may have to log in to the provider and pick an account first.
- */
+/** Browser hand-off timeout; generous because the user may have to log in and pick an account. */
 const OAUTH_POLL_TIMEOUT_MS = 5 * 60 * 1000;
 
 /** OAuth sign-in block for a single oauth_flow requirement. */
@@ -146,9 +137,7 @@ function OAuthBlock({
 }: {
   req: SecretRequirement;
   extensionId: string;
-  /** A token is already stored. Shown as context — it never stands in for
-   *  completing a flow, since a stored token may belong to a different OAuth
-   *  app or have stopped working. */
+  /** A token is already stored. Context only: it never counts as a completed flow (it may be stale). */
   alreadyAuthorized?: boolean;
   onAuthorized: () => void;
   disabled: boolean;
@@ -179,12 +168,8 @@ function OAuthBlock({
       const { auth_url, state } = await api.initiateOAuth(req.key, extensionId);
       openExternal(auth_url);
 
-      // Poll the outcome of THIS flow, identified by its state nonce.
-      //
-      // Watching the secret store instead is wrong on re-authorisation: the
-      // token key is already there from the previous sign-in, so the first
-      // poll reports success ~2s in and the modal completes whether or not the
-      // user ever finished — or even opened — the browser flow.
+      // Poll THIS flow by its state nonce: on re-authorisation the store already holds the old
+      // token, so watching it would report success before the user signs in.
       const startedAt = Date.now();
       pollRef.current = setInterval(async () => {
         try {
@@ -194,7 +179,6 @@ function OAuthBlock({
             stopPoll();
             setOauthState("done");
             onAuthorized();
-            // Show "Reconnecting..." for 1.5s then signal complete
             reconnectTimerRef.current = setTimeout(() => {
               setOauthState("reconnecting");
             }, 800);
@@ -208,9 +192,7 @@ function OAuthBlock({
             return;
           }
 
-          // "pending" and "unknown" both mean keep waiting — a server that
-          // restarted mid-flow reports "unknown" for a nonce it never issued,
-          // which is indistinguishable from a hand-off still in progress.
+          // "pending" and "unknown" both mean keep waiting: a server restarted mid-flow reports "unknown".
           if (Date.now() - startedAt > OAUTH_POLL_TIMEOUT_MS) {
             stopPoll();
             setOauthState("idle");
@@ -226,7 +208,6 @@ function OAuthBlock({
     }
   }
 
-  // Determine icon — music for Spotify-like, generic KeyRound otherwise
   const isMusic = req.key.toLowerCase().includes("spotify") || req.display_name.toLowerCase().includes("spotify");
   const BtnIcon = isMusic ? Music : KeyRound;
 
@@ -301,7 +282,6 @@ function SecretConfigModal({
   const apiKeyReqs = ext.required_secrets.filter((r) => r.kind === "api_key" || r.kind === "generic");
   const oauthReqs = ext.required_secrets.filter((r) => r.kind === "oauth_flow");
 
-  // Track text values for api_key / generic fields
   const [values, setValues] = useState<Record<string, string>>(() =>
     Object.fromEntries(apiKeyReqs.map((r) => [r.key, ""])),
   );
@@ -310,17 +290,13 @@ function SecretConfigModal({
   const [saving, setSaving] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
 
-  // Authorisations completed *in this modal session*, not tokens that merely
-  // exist in the store. Seeding this from fulfilledMap made the edit-mode modal
-  // auto-complete on mount for an OAuth-only extension, so re-authorising —
-  // after switching OAuth apps, or when the stored token stopped working — was
-  // impossible without deleting the secret by hand first.
+  // Authorisations completed in this modal session, not stored tokens: seeding from
+  // fulfilledMap would auto-complete an OAuth-only edit on mount and block re-authorising.
   const [oauthDone, setOauthDone] = useState<Record<string, boolean>>(() =>
     Object.fromEntries(oauthReqs.map((r) => [r.key, false])),
   );
 
-  // When all oauth-only requirements are fulfilled and there are no api key fields,
-  // auto-close after a reconnect delay
+  // OAuth-only modals auto-close once every flow is done.
   const onlyOauth = apiKeyReqs.length === 0 && oauthReqs.length > 0;
   const allOauthDone = oauthReqs.length > 0 && oauthReqs.every((r) => oauthDone[r.key]);
 
@@ -368,7 +344,6 @@ function SecretConfigModal({
     setSaving(true);
     setGlobalError(null);
     try {
-      // Build secrets map — only include non-empty values
       const secrets: Record<string, string> = {};
       for (const req of apiKeyReqs) {
         if (values[req.key]?.trim()) {
@@ -383,12 +358,10 @@ function SecretConfigModal({
     }
   }
 
-  // Close on backdrop click
   function handleBackdropClick(e: React.MouseEvent<HTMLDivElement>) {
     if (e.target === e.currentTarget) onClose();
   }
 
-  // Close on Escape
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
       if (e.key === "Escape") onClose();
@@ -884,7 +857,6 @@ function MarketplaceCard({
   async function handleInstallClick() {
     if (isInstalled || justInstalled || installing) return;
     if (needsSecrets) {
-      // Show the secret config modal instead of installing immediately
       setShowSecretModal(true);
     } else {
       await doInstall();
@@ -1045,7 +1017,6 @@ function BrowseTab({
     );
   }
 
-  // featured first, then alphabetical
   const sorted = [...items].sort((a, b) => {
     if (a.featured && !b.featured) return -1;
     if (!a.featured && b.featured) return 1;
@@ -1067,11 +1038,7 @@ function BrowseTab({
 }
 
 // ── Tools Tab ────────────────────────────────────────────────
-//
-// Flat, cross-extension MCP tool browser (moved from the old developer-only
-// Agent screen) — every tool from every enabled extension, grouped by
-// extension, with its description. Complements the per-card tool lists in
-// the Installed tab, which only show bare names.
+// Every enabled extension's tools with descriptions; Installed cards show bare names only.
 
 function ToolsTab() {
   const [tools, setTools]     = useState<AgentTool[]>([]);
@@ -1140,11 +1107,9 @@ function ToolsTab() {
 type Tab = "installed" | "tools" | "browse";
 
 interface SecretEditState {
-  /** The installed extension name being configured */
   extName: string;
-  /** The marketplace metadata (for required_secrets list) — may be null if not found */
+  /** Marketplace entry, for its required_secrets list. */
   mktExt: MarketplaceExtension | null;
-  /** Which secrets are already fulfilled */
   fulfilledMap: Record<string, boolean>;
 }
 
@@ -1167,7 +1132,6 @@ export function Extensions() {
     setError(null);
     try {
       const res = await api.listExtensions();
-      // Backend returns { extensions: [...] } or plain array
       const list = Array.isArray(res)
         ? (res as Extension[])
         : ((res as { extensions: Extension[] }).extensions ?? []);
@@ -1224,7 +1188,6 @@ export function Extensions() {
     }
   }, [marketplaceCache.length]);
 
-  // Once marketplace data is available, check auth status for each installed extension with secrets
   useEffect(() => {
     if (marketplaceCache.length === 0 || extensions.length === 0) return;
 
@@ -1237,7 +1200,6 @@ export function Extensions() {
 
     if (extsWithSecrets.length === 0) return;
 
-    // Fire parallel checks — non-blocking, update state as results arrive
     for (const ext of extsWithSecrets) {
       api.getExtensionSecrets(ext.name)
         .then((res) => {
@@ -1251,19 +1213,16 @@ export function Extensions() {
           setSecretStatus((prev) => ({ ...prev, [ext.name]: "unknown" }));
         });
     }
-  // Run whenever extensions list or marketplace cache changes
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [extensions.length, marketplaceCache.length]);
 
   async function handleConfigureSecrets(extName: string) {
-    // Find matching marketplace entry by name
     const mktExt = marketplaceCache.find(
       (m) => m.name.toLowerCase() === extName.toLowerCase() || m.id.toLowerCase() === extName.toLowerCase(),
     ) ?? null;
 
     if (!mktExt || mktExt.required_secrets.length === 0) return;
 
-    // Fetch current fulfillment status
     let fulfilledMap: Record<string, boolean> = {};
     try {
       const res = await api.getExtensionSecrets(extName);
@@ -1275,15 +1234,8 @@ export function Extensions() {
     setSecretEditState({ extName, mktExt, fulfilledMap });
   }
 
-  /**
-   * Refresh the auth status badge for one extension.
-   *
-   * Every path out of `handleSecretEditComplete` that stored or completed
-   * something has to call this, including the OAuth-only path where the modal
-   * completes with `{}` - that is the normal payload when the only requirement
-   * is an `oauth_flow` one, so skipping it left the badge stale on exactly the
-   * extension the user had just finished authorising.
-   */
+  /** Refresh one extension's auth badge. Call it on every `handleSecretEditComplete` path that
+   *  stored or completed something, including OAuth-only completion (payload `{}`). */
   function refreshSecretBadge(extName: string) {
     api.getExtensionSecrets(extName)
       .then((res) => {
@@ -1316,17 +1268,11 @@ export function Extensions() {
       return;
     }
 
-    // `request()` hands back undefined for a 204 or any non-JSON 2xx, so a
-    // server that predates this route's response body - a stale staged sidecar,
-    // most likely - would throw a TypeError here, outside the catch above, with
-    // the modal already unmounted and no message shown at all.
+    // `request()` yields undefined for a 204 or non-JSON 2xx, e.g. from an older sidecar.
     const outcome = result ?? { stored: 0, restarted: false, restart_error: null };
 
     if (outcome.restart_error) {
-      // Stored, but the extension is not running with them — the state that
-      // used to be reported as a plain success. `load()` brings the
-      // extension's own error status onto its card, where it persists after
-      // this message has gone.
+      // Stored but not running; `load()` puts the lasting error status on the card.
       flash(
         `Credentials saved, but ${extName} did not restart: ${outcome.restart_error}`,
         false,

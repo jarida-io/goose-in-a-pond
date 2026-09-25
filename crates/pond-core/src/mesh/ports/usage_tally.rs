@@ -10,10 +10,8 @@ pub enum UsageTallyError {
     General(String),
 }
 
-/// Driven Port: UsageTally
-///
-/// The borrowed pair is what we owe a peer and all `SettlementService` pays against; the
-/// lent pair is observability only. `mark_settled` only ever reduces `tokens_borrowed`.
+/// Borrowed tokens are what we owe a peer and all `SettlementService` pays against; lent is
+/// observability only. `mark_settled` only ever reduces `tokens_borrowed`.
 #[async_trait]
 pub trait UsageTally: Send + Sync {
     async fn record_borrowed(

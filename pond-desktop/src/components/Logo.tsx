@@ -1,9 +1,4 @@
-// ────────────────────────────────────────────────────────────
-// Logo — theme-aware brand image.
-//
-// Renders goose-logo.png in light mode and goose-logo-dark.png
-// in dark mode. Reacts to live theme changes via useTheme().
-// ────────────────────────────────────────────────────────────
+// Brand logo that follows the live light/dark theme.
 
 import { useTheme } from "../hub/state/themeStore";
 import gooseLogoLight from "../assets/goose-logo.png";

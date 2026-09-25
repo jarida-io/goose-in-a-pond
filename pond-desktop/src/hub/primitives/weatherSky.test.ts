@@ -1,14 +1,5 @@
-// The sky is legible, and stays legible.
-//
-// The weather card is the one place in this interface where colour carries
-// meaning rather than marking state, and it carries white text over four
-// gradients and five conditions. That is exactly the arrangement where a
-// contrast floor gets asserted in a comment and then quietly stops being true.
-//
-// So it is asserted here instead. The scrim alpha in `dashboard-grid.css` is
-// DERIVED — 0.45 is the smallest flat value at which every stop of every sky
-// clears 4.5:1 against white — and this file recomputes that rather than
-// trusting it. Change a sky and this test tells you what it cost.
+// White text must clear 4.5:1 on every sky; the scrim alpha in `dashboard-grid.css` (0.45)
+// is derived as the smallest flat value that does, and is recomputed here.
 
 import { describe, expect, it } from "vitest";
 import { skyConditionFor } from "./WeatherWidget";
@@ -27,7 +18,6 @@ function contrast(a: number[], b: number[]): number {
   return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
 }
 
-/** Composite `fg` at `alpha` over `bg`. */
 function over(fg: number[], alpha: number, bg: number[]): number[] {
   return bg.map((c, i) => fg[i] * alpha + c * (1 - alpha));
 }
@@ -71,10 +61,6 @@ describe("white text on every sky", () => {
     }
   });
 
-  /**
-   * Snow is the case the first scrim missed. It brightens rather than darkens,
-   * so it pushes a sky toward the colour of the text sitting on it.
-   */
   it("clears 4.5:1 on a snow-brightened sky too", () => {
     for (const stops of Object.values(SKIES)) {
       for (const stop of stops) {
@@ -84,11 +70,6 @@ describe("white text on every sky", () => {
     }
   });
 
-  /**
-   * The alpha is the smallest that works, not a comfortable one. If a lighter
-   * scrim would do, the cards are darker than they need to be — and if this
-   * starts failing, a sky has been added that the derivation never saw.
-   */
   it("is no more opaque than it has to be", () => {
     const lighter = SCRIM_ALPHA - 0.05;
     const anyFails = Object.values(SKIES)
@@ -99,11 +80,6 @@ describe("white text on every sky", () => {
 });
 
 describe("reading the condition", () => {
-  /**
-   * The bug this pins: the icon vocabulary contains `cloudSun`, and testing for
-   * sun before cloud made "Partly cloudy" — the commonest sky there is — render
-   * as a cloudless noon.
-   */
   it("calls partly cloudy a cloud, not a clear sky", () => {
     expect(skyConditionFor("cloudSun", "Partly cloudy")).toBe("cloud");
   });

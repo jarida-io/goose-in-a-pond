@@ -1,15 +1,7 @@
-//! SQLite-backed log adapters (`pond_logs.db`). Two stores, two purposes:
+//! SQLite-backed log adapters (`pond_logs.db`), kept apart so log noise can't bury activity:
 //!
-//! - [`SqliteOperationalLog`] — the `event_log` table (migration 0001). Drained
-//!   `tracing` output, backing the Logs viewer. Its only writer is
-//!   `pond-server`'s tracing drain.
-//! - [`SqliteEventLog`] — the unified, typed, append-only `events` table
-//!   (migration 0004, #109) implementing [`EventLog`]. The authoritative record
-//!   of what the assistant did.
-//!
-//! The two are kept apart on purpose: the drain mirrors every INFO+ line, so
-//! merging them would bury the activity feed in log noise. See
-//! [`pond_core::security::ports::audit`] for which to reach for.
+//! - [`SqliteOperationalLog`]: `event_log`, drained `tracing` output for the Logs viewer.
+//! - [`SqliteEventLog`]: typed, append-only `events`; the record of what the assistant did.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -92,15 +84,11 @@ impl OperationalLogRepository for SqliteOperationalLog {
     }
 }
 
-/// Default cap on `query` results when the caller doesn't set `EventQuery.limit`,
-/// and the hard ceiling regardless of what they ask for — so a single query can
-/// never pull an unbounded number of rows into memory.
+/// Default `EventQuery.limit`; `MAX_QUERY_LIMIT` caps any request so rows stay bounded.
 const DEFAULT_QUERY_LIMIT: i64 = 500;
 const MAX_QUERY_LIMIT: i64 = 5_000;
 
-/// Render a `#[serde(rename_all = "snake_case")]` unit enum as its bare string
-/// (e.g. `EventCategory::Sensor` -> `"sensor"`) for storage, via serde so the
-/// on-disk value always matches the wire form.
+/// A unit enum's serde string, so the stored value always matches the wire form.
 fn enum_to_str<T: Serialize>(value: &T) -> Result<String> {
     match serde_json::to_value(value)? {
         serde_json::Value::String(s) => Ok(s),
@@ -115,10 +103,7 @@ fn enum_from_str<T: DeserializeOwned>(s: &str) -> Result<T> {
     ))?)
 }
 
-/// The on-disk sensitivity strings that are `>=` `min` on the
-/// `Public < Internal < Sensitive < Secret` ordering. The column stores
-/// snake_case text, so a `>=` comparison can't be done in SQL — we expand to an
-/// `IN (...)` set instead.
+/// Stored strings `>= min`; the column is text, so SQL gets an `IN (...)` set, not `>=`.
 fn sensitivities_at_least(min: PrivacySensitivity) -> Vec<String> {
     [
         PrivacySensitivity::Public,
@@ -132,9 +117,7 @@ fn sensitivities_at_least(min: PrivacySensitivity) -> Vec<String> {
     .collect()
 }
 
-/// Counterpart of [`sensitivities_at_least`]: the on-disk strings that are
-/// `<=` `max`. Lets the audit/activity read paths exclude `Secret` events in
-/// the store itself, so `LIMIT` counts only surfaceable rows (#157 follow-up).
+/// Stored strings `<= max`; filtering in SQL makes `LIMIT` count only surfaceable rows.
 fn sensitivities_at_most(max: PrivacySensitivity) -> Vec<String> {
     [
         PrivacySensitivity::Public,
@@ -148,9 +131,7 @@ fn sensitivities_at_most(max: PrivacySensitivity) -> Vec<String> {
     .collect()
 }
 
-/// Append the shared `EventQuery` `WHERE` fragments (everything except
-/// ordering/limit) to `sql`, in a fixed order so binding can match positionally.
-/// Used by both `query` (SELECT) and `purge` (DELETE).
+/// Shared `WHERE` fragments for `query` and `purge`, in the order `bind_filters` binds them.
 fn push_filters(sql: &mut String, query: &EventQuery) {
     if query.category.is_some() {
         sql.push_str(" AND category = ?");
@@ -175,8 +156,6 @@ fn push_filters(sql: &mut String, query: &EventQuery) {
     }
 }
 
-/// Append ` AND privacy_sensitivity IN (?, …)` with `n` placeholders (no-op
-/// when the set is empty).
 fn push_sensitivity_in_clause(sql: &mut String, n: usize) {
     if n == 0 {
         return;
@@ -191,8 +170,7 @@ fn push_sensitivity_in_clause(sql: &mut String, n: usize) {
     sql.push(')');
 }
 
-/// Bind the values for [`push_filters`] in the same order. Returns the query so
-/// callers can chain additional binds (e.g. a trailing `LIMIT`).
+/// Binds the [`push_filters`] values in the same order.
 fn bind_filters<'q>(
     mut q: sqlx::query::Query<'q, Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
     query: &'q EventQuery,
@@ -225,8 +203,7 @@ fn bind_filters<'q>(
     Ok(q)
 }
 
-/// Unified, append-only event store (#109) implementing [`EventLog`] over the
-/// `events` table in `pond_logs.db`.
+/// Append-only [`EventLog`] over the `events` table.
 pub struct SqliteEventLog {
     pool: Pool<Sqlite>,
 }
@@ -236,7 +213,6 @@ impl SqliteEventLog {
         Self { pool }
     }
 
-    /// Wrap as `Arc<dyn EventLog>`.
     pub fn into_dyn(self) -> Arc<dyn EventLog> {
         Arc::new(self)
     }
@@ -279,8 +255,7 @@ impl EventLog for SqliteEventLog {
     }
 
     async fn query(&self, query: EventQuery) -> Result<Vec<Event>> {
-        // Build a fully parameterized statement — every filter is a bound `?`,
-        // never string-interpolated, so untrusted filter values can't inject SQL.
+        // Every filter is a bound `?`, never interpolated: filter values are untrusted.
         let mut sql = String::from(
             "SELECT id, timestamp, category, action, session_id, trace_id, attributes, \
              privacy_sensitivity FROM events WHERE 1 = 1",
@@ -301,10 +276,7 @@ impl EventLog for SqliteEventLog {
     }
 
     async fn purge(&self, query: EventQuery) -> Result<u64> {
-        // Same parameterized filters as `query`, but a DELETE — no ORDER/LIMIT.
-        // A filterless query (all `None`) purges every event ("clear my
-        // activity"); any set filter narrows it (per-category retention, a time
-        // window, a session, or a sensitivity floor).
+        // A filterless query purges every event ("clear my activity").
         let mut sql = String::from("DELETE FROM events WHERE 1 = 1");
         push_filters(&mut sql, &query);
 
@@ -442,16 +414,12 @@ mod event_log_tests {
         assert_eq!(log.query(EventQuery::default()).await.unwrap().len(), 1);
     }
 
-    /// #157 follow-up: `max_sensitivity` filters IN THE SQL, so a `LIMIT`
-    /// counts only surfaceable rows — Secret events can't starve the result.
     #[tokio::test]
     async fn query_max_sensitivity_filters_in_sql_before_limit() {
         let log = fresh().await;
         let base = chrono::Utc::now();
 
-        // Newest rows are Secret; older rows are visible. A post-filter over a
-        // LIMIT 2 window would return only 0 visible rows — the SQL filter
-        // must return both visible ones instead.
+        // Newest rows are Secret, so a post-filter over LIMIT 2 would return nothing.
         for i in 0..2 {
             let mut secret = Event::new(EventCategory::Auth, format!("auth.token.{i}"))
                 .sensitivity(PrivacySensitivity::Secret);

@@ -1,14 +1,8 @@
 //! MCP tool schema conversion to `ToolDefinition`.
-//!
-//! Bridges between MCP server tool listings and the `InferenceProvider`
-//! tool format. Called at startup after listing tools from the MCP server.
 
 use pond_core::models::ports::inference::ToolDefinition;
 
-/// Convert an MCP tool (name + description + JSON Schema) into a `ToolDefinition`.
-///
-/// The `schema` parameter is the JSON Schema object from the MCP tool listing,
-/// passed through directly as `parameters_schema`.
+/// Convert an MCP tool into a `ToolDefinition`; `schema` passes through as `parameters_schema`.
 pub fn mcp_tool_to_definition(
     name: &str,
     description: &str,
@@ -21,9 +15,7 @@ pub fn mcp_tool_to_definition(
     }
 }
 
-/// Extract human-readable text from an MCP `CallToolResult` content array.
-/// Each content item carries a `type`; only `"text"` items are concatenated
-/// and every other type is skipped.
+/// Concatenate the `"text"` items of an MCP `CallToolResult` content array; skip other types.
 pub fn extract_tool_result_text(content: &[serde_json::Value]) -> String {
     let mut parts = Vec::new();
     for item in content {

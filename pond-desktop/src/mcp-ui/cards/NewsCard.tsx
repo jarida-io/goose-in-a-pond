@@ -8,7 +8,7 @@ interface NewsItem {
   source?: string;
 }
 
-// ---- Tag color map (bg + text) matching the design spec ----
+// ---- Tag colors (design spec) ----
 
 const TAG_STYLES: Record<string, { bg: string; color: string }> = {
   tech:       { bg: "#EDE9FE", color: "#7C3AED" },
@@ -34,7 +34,7 @@ function resolveTagStyle(tag: string): { bg: string; color: string } {
   return TAG_STYLES[tag.toLowerCase()] ?? FALLBACK_TAG_STYLE;
 }
 
-// ---- Speech-bubble icon (15px, #64748B) from the design ----
+// ---- Speech-bubble icon ----
 
 function HeadlineIcon() {
   return (
@@ -59,7 +59,6 @@ function NewsCard({ data, variant }: McpCardProps) {
   const isCompact = variant === "compact";
   const visibleItems = items.slice(0, isCompact ? 2 : 6);
 
-  // Date chip: prefer data.date, otherwise generate from current date
   const dateLabel = (() => {
     if (data.date) return String(data.date);
     const now = new Date();

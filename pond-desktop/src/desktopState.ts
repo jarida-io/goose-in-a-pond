@@ -63,8 +63,7 @@ export const SIDEBAR_GROUPS: SidebarGroup[] = [
 export const DESKTOP_SECTIONS: Array<{ section: GuiSection; label: string }> =
   SIDEBAR_GROUPS.flatMap((g) => g.sections.map(({ section, label }) => ({ section, label })));
 
-// Include all valid sections — some are routable but not in the sidebar
-// "hub" is hidden from the classic sidebar; entry is via Settings > "Preview Goose Hub"
+// Routable but not in the sidebar; "hub" is entered via Settings > "Preview Goose Hub".
 const HIDDEN_SECTIONS: GuiSection[] = ["faces", "canvas", "hub"];
 const SECTION_SET = new Set<GuiSection>([
   ...DESKTOP_SECTIONS.map((s) => s.section),
@@ -75,11 +74,7 @@ export function normalizeDesktopMode(value: string | null | undefined): DesktopM
   return value === "voice" || value === "gui" ? value : "gui";
 }
 
-/** Sections that were renamed, and where somebody sitting on the old one lands.
- *
- * The Memories tab became Context. Without this, anyone whose app was last left
- * on that tab reopens on the dashboard — which reads as the app losing their
- * place rather than as a screen being renamed. */
+/** Renamed section ids and their new home, so a persisted old id does not reopen on the dashboard. */
 const RENAMED_SECTIONS: Record<string, GuiSection> = {
   memory: "context",
   connections: "context",

@@ -1,9 +1,4 @@
-//! Device MCP Server — devices, user profile, model config, skills, recipes.
-//!
-//! Provides 6 tools: `list_registered_devices`, `get_user_profile`,
-//! `get_model_assignments`, `list_skills`, `load_skill`, `get_recipe`.
-//! Depends on [`DeviceRegistry`], [`SettingsRepository`],
-//! and [`UserSkillRepository`].
+//! Device MCP server: registered devices, user profile and user skills.
 
 use pond_core::user_data::ports::device_registry::DeviceRegistry;
 use pond_core::user_data::ports::settings::SettingsRepository;
@@ -48,12 +43,7 @@ pub struct DeviceMcpServer {
 
 #[tool_router]
 impl DeviceMcpServer {
-    /// Every tool this server exposes, without constructing it or its deps.
-    ///
-    /// `tool_router()` is generated private to this module, so inventory code
-    /// outside it could not reach the real definitions and resorted to scanning
-    /// source text for `#[tool(` instead. This is the enumeration that scan was
-    /// standing in for.
+    /// Every tool this server exposes, without constructing it; `tool_router()` is module-private.
     pub(crate) fn tool_defs() -> Vec<rmcp::model::Tool> {
         Self::tool_router().list_all()
     }
@@ -88,10 +78,7 @@ impl DeviceMcpServer {
                     devices
                         .iter()
                         .map(|d| {
-                            // Capabilities are the difference between a name and
-                            // something actionable. Without them the model knows a
-                            // fan exists and has to discover what it accepts by
-                            // trying and failing in front of the user.
+                            // Capabilities spare the model trial-and-error in front of the user.
                             let can = if d.capabilities.is_empty() {
                                 String::new()
                             } else {
@@ -148,9 +135,7 @@ impl DeviceMcpServer {
                 None,
             )
         })?;
-        // "not configured" was this tool telling the household about its own
-        // setup. Ask the location service instead: it falls back to the time
-        // zone, so the answer is usually a place rather than an apology.
+        // The location service falls back to the time zone, so this is usually a place.
         let location = pond_core::user_data::services::location::resolve(&settings)
             .describe()
             .unwrap_or("unknown")
@@ -288,10 +273,7 @@ pub fn init_device_deps(
 
 /// Spawn function compatible with Goose's `SpawnServerFn` type.
 pub fn spawn_device_server(reader: DuplexStream, writer: DuplexStream) {
-    // Missing deps = this path never initialised this extension (the voice/CLI
-    // binary vs `serve` install different families). A skipped extension is a
-    // logged, contained failure; a panic here took down every builtin server's
-    // startup at once (2026-08-27, giap-context in the voice child).
+    // Not every binary installs these deps; a panic here would take down every builtin server.
     let Some(deps) = DEVICE_DEPS.get() else {
         tracing::error!(
             "spawn_device_server called before init_device_deps — extension will not start"

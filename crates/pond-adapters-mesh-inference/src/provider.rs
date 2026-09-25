@@ -17,8 +17,7 @@ use pond_mesh_protocol::wire::{ChunkKind, InferenceRequest, MeshFrame};
 use crate::service::MeshInferenceService;
 use crate::to_wire_message;
 
-/// v1 caps how much a single mesh request can ask a peer to generate. Not
-/// user-configurable yet — revisit alongside real settings wiring.
+/// Max tokens one mesh request may ask a peer to generate; not user-configurable yet.
 const DEFAULT_MAX_TOKENS: u32 = 2048;
 
 #[derive(thiserror::Error, Debug)]
@@ -37,15 +36,10 @@ pub enum MeshInferenceError {
     Timeout(PeerId),
 }
 
-/// Client role: an `LlmProvider` backed by a trusted peer's compute instead
-/// of a local model. See the crate-level docs for why this is a thin handle
-/// into [`MeshInferenceService`] rather than owning a transport itself.
+/// Client role: an `LlmProvider` running on a trusted peer's compute.
 pub struct MeshInferenceProvider {
     service: Arc<MeshInferenceService>,
-    /// The peer that served the most recent request, surfaced through
-    /// `model_name()`. Peer selection is inherently async (queries three
-    /// ports) but `model_name()` isn't, so this is populated as a side
-    /// effect of `stream_complete` rather than computed on demand.
+    /// Last serving peer, for the sync `model_name()`; peer selection itself is async.
     last_peer: StdMutex<Option<PeerId>>,
 }
 
@@ -57,10 +51,7 @@ impl MeshInferenceProvider {
         }
     }
 
-    /// First trusted peer that's both connected and has spendable credit. No
-    /// capability/model matching — `PeerDirectory` only knows `PeerId →
-    /// TrustScope`, not what a peer runs. Documented v1 limitation; revisit
-    /// once peers can advertise what they offer.
+    /// First trusted, connected peer with credit; no model matching, peers don't advertise any.
     async fn select_peer(&self) -> Result<PeerId, MeshInferenceError> {
         let trusted = self.service.peer_directory.list_trusted_peers(None).await?;
         let connected: HashSet<PeerId> = self
@@ -102,8 +93,7 @@ impl LlmProvider for MeshInferenceProvider {
     fn model_name(&self) -> String {
         match *self.last_peer.lock().unwrap_or_else(|e| e.into_inner()) {
             Some(peer) => format!("mesh:{peer}"),
-            // No request has gone out yet, so no peer is known — this is a
-            // real, if uninformative, answer, not a placeholder for a bug.
+            // No request has gone out yet.
             None => "mesh".to_string(),
         }
     }
@@ -140,10 +130,8 @@ impl LlmProvider for MeshInferenceProvider {
                 return;
             }
 
-            // First-token latency for the borrow path — issue #132 budgets
-            // sub-300ms on a LAN-local trusted chain. Mesh is a coarse relay with
-            // no `time_to_first_token_ms` from the backing provider, so this logs
-            // standalone rather than feeding Goose's TurnStats.
+            // First-token latency, logged standalone: the wire has no `time_to_first_token_ms`
+            // to feed Goose's TurnStats.
             let mut first_token_logged = false;
 
             loop {
@@ -161,10 +149,8 @@ impl LlmProvider for MeshInferenceProvider {
                             yield Ok(StreamToken::Text(text));
                         }
                         Some(ChunkKind::Usage(usage)) => {
-                            // `charged_tokens` covers the lender's discarded
-                            // empty-completion retries; `completion_tokens`
-                            // does not. `0` means a peer predating the field,
-                            // so fall back rather than bill a completion at 0.
+                            // `charged_tokens` includes the lender's discarded retries; `0` means
+                            // an older peer, so fall back to `completion_tokens`.
                             let billed_tokens = if usage.charged_tokens > 0 {
                                 usage.charged_tokens
                             } else {
@@ -176,10 +162,8 @@ impl LlmProvider for MeshInferenceProvider {
                                 .usage_tally
                                 .record_borrowed(peer, TokenCount::new(billed_tokens as u64))
                                 .await;
-                            // Spends down the balance select_peer checked, at
-                            // the one dev-decided rate every Pond settles at
-                            // (not a local setting — a borrower reading its
-                            // own number could simply set it to pay less).
+                            // At the fixed network-wide rate: a local setting would let a
+                            // borrower pay less.
                             let spent = billed_tokens as u64
                                 * pond_core::mesh::domain::settlement::MESH_SETTLEMENT_MILLISATS_PER_TOKEN;
                             if let Err(err) = self
@@ -196,10 +180,7 @@ impl LlmProvider for MeshInferenceProvider {
                             yield Ok(StreamToken::Usage(UsageStats {
                                 prompt_tokens: usage.prompt_tokens,
                                 completion_tokens: usage.completion_tokens,
-                                // The wire protocol has no reasoning-token
-                                // counter — mesh is a coarse Text/Usage-only
-                                // relay, not a full provider passthrough, so
-                                // this is genuinely unmeasured, not zero.
+                                // Not on the wire: unmeasured, not zero.
                                 reasoning_tokens: None,
                             }));
                             break;
@@ -210,8 +191,7 @@ impl LlmProvider for MeshInferenceProvider {
                         }
                         None => {} // empty chunk payload — skip, wait for the next one
                     },
-                    // Channel closed with no terminal chunk ever seen: the
-                    // service's recv loop stopped (transport died).
+                    // Closed without a terminal chunk: the service's recv loop died.
                     Ok(None) => {
                         yield Err(anyhow::Error::from(MeshInferenceError::Timeout(peer)));
                         break;
@@ -222,7 +202,6 @@ impl LlmProvider for MeshInferenceProvider {
                     }
                 }
             }
-            // `_pending_guard` drops here (or earlier) and unregisters `request_id`.
         })
     }
 }

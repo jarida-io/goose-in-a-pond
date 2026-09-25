@@ -97,9 +97,7 @@ export function NewRoutineModal({ onClose, onCreated }: Props) {
     return `Run the ${name} routine: ${list}.`;
   }
 
-  /** Escape a string for embedding in a YAML double-quoted scalar. Backslash must
-   *  be escaped BEFORE the quote, otherwise a routine name like `C:\path` produces
-   *  an invalid `\p` escape sequence that breaks the recipe YAML on the server. */
+  /** Escape for a YAML double-quoted scalar. Backslashes first, so the quote escapes are not doubled. */
   function yamlDoubleQuoted(s: string): string {
     return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   }

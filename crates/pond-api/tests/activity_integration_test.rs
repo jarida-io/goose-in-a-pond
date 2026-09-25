@@ -1,7 +1,4 @@
-//! #114 acceptance: `GET /api/v1/activity` answers "what happened" with
-//! filtering, and `/activity/summary` answers "last hour/day/week". Drives a
-//! real router with a live `SqliteEventLog` wired into `AppState`. Also asserts
-//! the security rule that `Secret`-classified events are never surfaced.
+//! `/api/v1/activity` routes over a real `SqliteEventLog`; `Secret` events must never surface.
 
 use std::sync::Arc;
 
@@ -27,14 +24,12 @@ use pond_infra::sqlite_session_storage::SqliteSessionStorage;
 use pond_infra::sqlite_skill::SqliteSkillRepository;
 use tower::ServiceExt;
 
-/// Build the router with a real `SqliteEventLog` pre-seeded with a few events
-/// (two visible, one `Secret`). Returns the router + tempdir guard.
+/// Router over a real event log seeded with two visible events and one `Secret` one.
 async fn make_app() -> (axum::Router, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let db = Database::init(tmp.path()).await.unwrap();
     let pool = db.system.clone();
 
-    // Seed the unified event store.
     let event_log: Arc<dyn EventLog> = Arc::new(SqliteEventLog::new(db.logs.clone()));
     event_log
         .append(
@@ -179,7 +174,6 @@ async fn activity_lists_events_and_hides_secret() {
 
     let (status, body) = get_json(&app, "/api/v1/activity").await;
     assert_eq!(status, StatusCode::OK);
-    // Two seeded events are visible; the Secret one is excluded.
     assert_eq!(body["count"], 2, "Secret event must be hidden");
     let actions: Vec<&str> = body["events"]
         .as_array()
@@ -195,10 +189,7 @@ async fn activity_lists_events_and_hides_secret() {
     );
 }
 
-/// #157 review follow-up: Secret rows are excluded in the store query itself, so
-/// `limit` counts only surfaceable events. The seeded Secret event is the NEWEST
-/// row, so a post-filter would fetch [Secret, device] for `limit=2` and return
-/// one visible event; the SQL-level filter must return both.
+/// Secret rows must be filtered in SQL: the newest row is Secret, so a post-filter returns one.
 #[tokio::test]
 async fn activity_limit_counts_only_visible_events() {
     let (app, _tmp) = make_app().await;
@@ -276,17 +267,14 @@ async fn delete_json(app: &axum::Router, uri: &str) -> (StatusCode, serde_json::
 async fn clear_activity_by_category_then_all() {
     let (app, _tmp) = make_app().await;
 
-    // Purge just the device category → 1 removed.
     let (status, body) = delete_json(&app, "/api/v1/activity?category=device").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["purged"], 1);
 
-    // sensor.reading still listed; device gone.
     let (_, after) = get_json(&app, "/api/v1/activity").await;
     assert_eq!(after["count"], 1);
     assert_eq!(after["events"][0]["action"], "sensor.reading");
 
-    // Purge everything (incl. the hidden Secret event) → 2 remaining removed.
     let (status, body) = delete_json(&app, "/api/v1/activity").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(

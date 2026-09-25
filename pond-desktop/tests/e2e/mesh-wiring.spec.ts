@@ -1,8 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
 
-// #132 Milestone 6: the Mesh section renders trusted peers from
-// GET /api/v1/mesh/peers and round-trips add/remove through the mocked API.
+// Mesh section: trusted peers from GET /api/v1/mesh/peers, add/remove via the mocked API.
 
 async function openMeshSection(page: import("@playwright/test").Page) {
   await mockAllApiRoutes(page);
@@ -15,9 +14,7 @@ async function openMeshSection(page: import("@playwright/test").Page) {
 
 test("mesh section shows disabled state when mesh is off", async ({ page }) => {
   await openMeshSection(page);
-  // Two `.empty-state` blocks legitimately coexist on this screen — "mesh is
-  // off" and "no peers yet" — so the assertion names the one under test rather
-  // than matching the class and tripping strict mode.
+  // Two .empty-state blocks coexist (mesh off, no peers), so filter by text for strict mode.
   await expect(
     page.locator(".empty-state").filter({ hasText: "Mesh is disabled" }),
   ).toBeVisible();

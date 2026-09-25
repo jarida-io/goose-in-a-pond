@@ -9,8 +9,7 @@ import { RecipeBuilderModal } from "./RecipeBuilderModal";
 
 async function executeRoutine(name: string): Promise<void> {
   try {
-    // Server resolves the recipe's prompt and streams the agent turn; we
-    // consume the events to completion but don't surface them in the UI.
+    // Drain the run's event stream; the events aren't shown.
     for await (const _ of api.runRecipe(name)) {
       void _;
     }
@@ -20,9 +19,7 @@ async function executeRoutine(name: string): Promise<void> {
 }
 
 // ─── RoutinesView ──────────────────────────────────────────────
-// One-tap scene cards backed by AgentRecipe records from the backend.
-// Run posts to /api/v1/recipes/:name/run; we don't await the stream —
-// fire and forget while the visual "Running…" toast plays.
+// One-tap cards for backend AgentRecipes; runs are fire-and-forget behind the "Running…" toast.
 
 export function RoutinesView() {
   const routines = useRoutines();

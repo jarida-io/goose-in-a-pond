@@ -25,10 +25,6 @@ const line = (devices: DeviceData[], now = at(14)) =>
   homeLine({ user: "Jerry", devices, weather, now });
 
 describe("what it leads with", () => {
-  /**
-   * The one thing worth being told first. Still a report rather than an alarm —
-   * the locks are on the same screen, and a household can see them.
-   */
   it("says an unlocked door after dark before anything else", () => {
     const d = [
       dev({ id: "Front Door", kind: "lock", locked: false }),
@@ -79,10 +75,6 @@ describe("what is on", () => {
     expect(line(d)).toBe("A is on.");
   });
 
-  /**
-   * `on` is undefined for devices that do not report it. Undefined is not off,
-   * and guessing either way would state something the pond does not know.
-   */
   it("does not count a light that never said", () => {
     const d = [dev({ id: "A", kind: "light" })];
     expect(line(d)).toBe("Everything is off.");
@@ -90,11 +82,6 @@ describe("what is on", () => {
 });
 
 describe("a pond with no devices in it", () => {
-  /**
-   * The first thing a new household sees here. It should report something true
-   * rather than apologise for being empty — they have not done anything wrong
-   * by not having paired a lamp yet.
-   */
   it("talks about the sky rather than the empty house", () => {
     expect(line([])).toBe("Partly cloudy, 64° out.");
   });
@@ -113,18 +100,12 @@ describe("a pond with no devices in it", () => {
     );
   });
 
-  /** The small hours are the one place the household's own name earns its space. */
   it("uses their name in the small hours", () => {
     expect(homeLine({ user: "Jerry", devices: [], weather, now: at(3) })).toContain("Jerry");
   });
 });
 
 describe("as a sentence", () => {
-  /**
-   * It sits where a suggestion would, on a screen built to be glanced at. A
-   * line that runs past a breath is a paragraph, and a paragraph there is the
-   * thing the pared-back Home was trying to remove.
-   */
   it("stays short enough to take in at a glance", () => {
     const many = ["A", "B", "C", "D", "E", "F"].map((id) =>
       dev({ id: `${id} Light`, kind: "light", on: true }),

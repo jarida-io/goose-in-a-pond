@@ -1,15 +1,12 @@
-//! A capture device that plays a supplied waveform. Deliberately not `#[cfg(test)]`: it exists
-//! to make the subscribers in other crates testable, since a loop that opens
-//! `default_input_device()` itself cannot be driven without a microphone and a person.
+//! A scripted capture device; not `#[cfg(test)]` because other crates' tests drive it.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::owner::{CaptureDevice, MicShared};
 
-/// Feeds 16 kHz mono f32 into the ring in real-time-sized slices, then silence. Deterministic
-/// in content, approximate in timing, which is what a poll loop with a 30 ms tick depends on.
-/// Assert on captured audio and on VAD transitions, never on exact sample counts at an instant.
+/// Feeds 16 kHz mono f32 in real-time-sized slices, then silence; timing is approximate.
+/// Assert on captured audio and VAD transitions, never on sample counts at an instant.
 pub struct ScriptedCapture {
     samples: Vec<f32>,
     chunk_ms: u64,
@@ -28,9 +25,6 @@ impl ScriptedCapture {
     }
 
     /// `speech_ms` of tone followed by `silence_ms` of quiet.
-    ///
-    /// The shape every VAD assertion is about: onset, sustain, then a silence
-    /// run long enough to confirm end-of-utterance.
     pub fn utterance(speech_ms: u64, silence_ms: u64, chunk_ms: u64) -> Self {
         let n = |ms: u64| (16_000 * ms / 1000) as usize;
         let mut s: Vec<f32> = (0..n(speech_ms))
@@ -68,8 +62,7 @@ impl CaptureDevice for ScriptedCapture {
                         at = end;
                         c
                     } else {
-                        // Past the script: keep the device "live" with silence
-                        // so a poll loop sees a running stream, not a stall.
+                        // Past the script: silence, so a poll loop sees a live stream, not a stall.
                         &silence
                     };
                     shared
@@ -141,8 +134,6 @@ mod tests {
         let _ = join.join();
     }
 
-    /// The reader must deliver only what arrived after it started — a new
-    /// capture beginning with the previous turn's tail is a real failure mode.
     #[test]
     fn a_reader_sees_only_audio_captured_after_it_started() {
         let (h, join) = spawn(
@@ -168,8 +159,6 @@ mod tests {
         let _ = join.join();
     }
 
-    /// Draining twice must not repeat audio — a capture path that re-read the
-    /// same window would transcribe the same words twice.
     #[test]
     fn draining_twice_does_not_repeat_audio() {
         let (h, join) = spawn(
@@ -195,8 +184,6 @@ mod tests {
         let _ = join.join();
     }
 
-    /// A reader that falls more than a window behind must REPORT the hole
-    /// rather than return a shorter clip that still sounds like speech.
     #[test]
     fn a_reader_that_falls_behind_counts_what_it_lost() {
         // Ring holds 100 ms; the script delivers far more than that.
@@ -221,9 +208,6 @@ mod tests {
         let _ = join.join();
     }
 
-    /// The bug a second subscriber would otherwise hit: `CpalCapture::start`
-    /// opens with a `self.stop()`, so a naive re-apply on the second `open()`
-    /// drops and rebuilds a live stream mid-turn.
     #[test]
     fn a_second_open_does_not_interrupt_a_live_stream() {
         let (h, join) = spawn(

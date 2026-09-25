@@ -1,7 +1,5 @@
-//! CalDAV as a read-only personal-context source (PAI-8 §0: no write method exists). Every
-//! request is gated by `check_egress` and tracked by `record_egress`; the only body ever sent is
-//! a `calendar-query` naming a date range (invariant 7). Credentials come from `SecretRepository`
-//! and are never logged. `<C:expand>` (RFC 4791 §9.6.5) leaves RRULE and timezones to the server.
+//! Read-only CalDAV context source: every request passes `check_egress`/`record_egress`, the
+//! only body sent is a date-range `calendar-query`, and credentials are never logged.
 
 mod ics;
 mod provider;
@@ -17,25 +15,19 @@ use chrono::{DateTime, Duration, Utc};
 use pond_core::context::ingest::RawItem;
 use std::time::Duration as StdDuration;
 
-/// How long any single CalDAV request may take. Explicit because the default is none: a hung
-/// server would otherwise hold a scheduled sync task open forever, with no error anybody sees.
+/// Per-request timeout; reqwest's default is none, so a hung server would stall sync forever.
 const REQUEST_TIMEOUT: StdDuration = StdDuration::from_secs(30);
 
-/// A calendar this pond can read.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Calendar {
     /// Absolute URL, resolved against the server's origin.
     pub url: String,
     pub display_name: String,
-    /// The server's change tag, when it offered one. A sync whose ctag matches
-    /// the stored one has nothing to fetch.
+    /// Server change tag, if offered; a matching stored ctag means nothing to fetch.
     pub ctag: Option<String>,
 }
 
-/// Everything needed to reach one household member's calendar account.
-///
-/// `password` is an app-specific password in every supported provider. The manual `Debug` impl
-/// below redacts it so a `{:?}` in a trace line cannot leak the credential.
+/// One member's CalDAV account. `password` is an app-specific password; `Debug` redacts it.
 #[derive(Clone)]
 pub struct CalDavConfig {
     pub provider: CalDavProvider,
@@ -53,13 +45,10 @@ impl std::fmt::Debug for CalDavConfig {
     }
 }
 
-/// Reads a CalDAV account. Owns its HTTP client, per the adapter template.
 pub struct CalDavAdapter {
     client: reqwest::Client,
     config: CalDavConfig,
-    /// Overridden only by tests, exactly as the weather adapter does it: a
-    /// wiremock server has no fixed URL, and the alternative is a connector
-    /// nothing can exercise without the real account.
+    /// Test-only override (wiremock has no fixed URL).
     base_url: Option<String>,
 }
 
@@ -96,8 +85,7 @@ impl CalDavAdapter {
         )
     }
 
-    /// Resolve an href, which servers return as a path far more often than as
-    /// an absolute URL, against the origin actually in use.
+    /// Resolve an href (usually a bare path) against the origin in use.
     fn absolute(&self, href: &str) -> String {
         if href.starts_with("http://") || href.starts_with("https://") {
             return href.to_string();
@@ -117,9 +105,7 @@ impl CalDavAdapter {
         )
     }
 
-    /// Send a WebDAV request, gated and tracked. The gate is checked BEFORE the send and the
-    /// record written after, so an `offline` pond refuses with no packet leaving, and the
-    /// refusal names the host rather than surfacing as a timeout.
+    /// WebDAV request, egress-gated before the send (offline sends nothing) and recorded after.
     async fn dav(
         &self,
         method: &str,
@@ -150,9 +136,7 @@ impl CalDavAdapter {
         let response = result.context("the calendar server could not be reached")?;
         let code = response.status();
         if code == reqwest::StatusCode::UNAUTHORIZED || code == reqwest::StatusCode::FORBIDDEN {
-            // Named separately because the answer is different: this is the one
-            // failure a household can fix, and it must not be retried into a
-            // rate limit by the scheduler.
+            // Its own error: the user can fix it, and blind retries would hit a rate limit.
             return Err(anyhow!(
                 "the calendar account refused these credentials -- most providers need an \
                  app-specific password rather than the account password"
@@ -167,10 +151,7 @@ impl CalDavAdapter {
             .context("the calendar server's reply could not be read")
     }
 
-    /// Walk `well-known -> principal -> calendar home -> calendars`.
-    ///
-    /// Discovery rather than a hard-coded path because a household with two
-    /// calendars is normal and a guessed path finds one of them at best.
+    /// Walk `well-known -> principal -> calendar home -> calendars` rather than guess one path.
     pub async fn discover_calendars(&self) -> Result<Vec<Calendar>> {
         const PRINCIPAL: &str = r#"<d:propfind xmlns:d="DAV:"><d:prop><d:current-user-principal/></d:prop></d:propfind>"#;
         const HOME: &str = r#"<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:calendar-home-set/></d:prop></d:propfind>"#;
@@ -205,8 +186,7 @@ impl CalDavAdapter {
             .await?;
         Ok(parse_multistatus(&list_doc)?
             .into_iter()
-            // The calendar home is itself a collection and comes back in this
-            // list; only entries that declare `calendar` are calendars.
+            // The home collection is listed too; keep only entries typed `calendar`.
             .filter(|r| r.resource_types.iter().any(|t| t == "calendar"))
             .map(|r| Calendar {
                 url: self.absolute(&r.href),
@@ -216,8 +196,7 @@ impl CalDavAdapter {
             .collect())
     }
 
-    /// Events in a window, as items the ingest pipeline can take. A window, not everything,
-    /// because §3's volume argument is what keeps this corpus inside brute-force retrieval.
+    /// Events in a window, as ingest items; bounded so retrieval can stay brute-force.
     pub async fn events_in_window(
         &self,
         calendar_url: &str,
@@ -244,8 +223,7 @@ impl CalDavAdapter {
         Ok(items)
     }
 
-    /// The default sync window: recent past, near future. Asymmetric on purpose: "what did I
-    /// agree to last week" is a real question and "what is happening in eleven months" is not.
+    /// Default sync window: recent past, near future; asymmetric on purpose.
     pub fn default_window(now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
         (now - Duration::days(30), now + Duration::days(90))
     }
@@ -263,8 +241,6 @@ mod tests {
         }
     }
 
-    /// A credential that prints itself in a trace line is a leak waiting for a
-    /// bad day, and `{:?}` on a config struct is how it happens.
     #[test]
     fn the_password_is_not_printable_by_accident() {
         let rendered = format!("{:?}", cfg());
@@ -288,9 +264,6 @@ mod tests {
         );
     }
 
-    /// This crate must contain no method that writes to somebody's account.
-    /// Stated as a test because "we decided not to" is not enforcement, and the
-    /// first person to add a helpful `create_event` will not read PAI-8 §0.
     #[test]
     fn nothing_here_can_write_to_the_account() {
         let source = include_str!("lib.rs");

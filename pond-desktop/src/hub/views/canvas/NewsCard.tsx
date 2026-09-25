@@ -31,10 +31,7 @@ const NEWS_ITEMS: NewsItem[] = [
   },
 ];
 
-/**
- * News card — 4 headlines with category pills + ago + chevron.
- * Source: giap-news.get_top_stories (mock data for Phase 5).
- */
+/** News card for giap-news.get_top_stories; mock data for now. */
 export function NewsCard(): React.ReactElement {
   return (
     <div className="mc">

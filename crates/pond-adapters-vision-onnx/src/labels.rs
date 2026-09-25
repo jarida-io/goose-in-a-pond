@@ -1,10 +1,6 @@
-//! COCO class index → GIAP event label mapping. The recommended models are
-//! trained on COCO's 80 classes; every class GIAP does not care about maps to
-//! `None` and the event stays plain `"motion"`. "package" is NOT a COCO class,
-//! so luggage classes (backpack / handbag / suitcase) act as the proxy.
+//! COCO class → GIAP event label. COCO has no "package", so luggage classes stand in.
 
-/// GIAP label for a COCO class index, or `None` when the class is not
-/// home-relevant (event falls back to `"motion"`).
+/// GIAP label for a COCO class, or `None` (plain `"motion"`) when not home-relevant.
 pub fn coco_to_giap_label(class_idx: usize) -> Option<&'static str> {
     match class_idx {
         0 => Some("person"),

@@ -1,7 +1,4 @@
-// ────────────────────────────────────────────────────────────
-// GIAP Desktop — API Type Definitions
-// Mirror of pond-server REST API shapes
-// ────────────────────────────────────────────────────────────
+// Types mirroring the pond-server REST API shapes.
 
 export interface HealthResponse {
   status: string;
@@ -40,17 +37,9 @@ export interface NowPlayingApiResponse {
   album_art?: string | null;
   progress_ms?: number;
   duration_ms?: number;
-  /**
-   * Set when Spotify answered but refused the request — `"unauthorized"`,
-   * `"forbidden"`, `"rate_limited"` or `"unavailable"`. Absent on a healthy
-   * response, including the genuine "connected but nothing playing" case.
-   */
+  /** Why Spotify refused: "unauthorized" | "forbidden" | "rate_limited" | "unavailable". */
   error?: string;
-  /**
-   * The literal HTTP status Spotify answered with, when it answered at all.
-   * Absent on a healthy response and on transport failures — which is the
-   * point: only a real 4XX counts toward the stop rule below.
-   */
+  /** Spotify's HTTP status; absent on transport errors, so only real 4XXs stop polling. */
   upstream_status?: number;
   /** Human-readable explanation for `error`, safe to show as-is. */
   message?: string;
@@ -59,13 +48,8 @@ export interface NowPlayingApiResponse {
 export type MusicControlAction = "play" | "pause" | "next" | "previous";
 
 // ── OAuth ────────────────────────────────────────────────────
-/**
- * Outcome of a single OAuth flow, keyed server-side by its `state` nonce.
- *
- * `unknown` is not a failure on its own — a flow whose nonce the server never
- * issued (it restarted mid-flow) reports it too, so callers should keep waiting
- * until their own timeout rather than treating it as terminal.
- */
+/** One OAuth flow's outcome, keyed by `state` nonce. `unknown` is not terminal (the server may
+ *  have restarted mid-flow): keep waiting until the caller's own timeout. */
 export interface OAuthFlowStatus {
   status: "pending" | "completed" | "failed" | "unknown";
   error?: string;
@@ -88,17 +72,9 @@ export interface Settings {
   active_whisper_model?: string;
   active_tts_model?: string;
   voice_tts_voice?: string;
-  /**
-   * Speaking pace as a multiplier, 0.5–2.0. 1.0 is the voice as trained.
-   * Stored as a multiplier rather than a percentage because that is exactly
-   * what the engine's `speed` tensor takes — no conversion, nothing to get
-   * backwards between the slider and the model.
-   */
+  /** Pace multiplier 0.5–2.0 (1.0 = as trained), fed as-is to the engine's `speed` tensor. */
   voice_tts_speed?: number;
-  /**
-   * Quality tier — a Kokoro quantization (`q8` | `q8f16` | `q4f16` | `fp16` |
-   * `fp32`). Picking a tier picks an `.onnx` file; there is nothing else to it.
-   */
+  /** Kokoro quantization (`q8` | `q8f16` | `q4f16` | `fp16` | `fp32`); picks the `.onnx` file. */
   voice_tts_quality?: string;
   voice_thinking_tone_enabled?: boolean;
 
@@ -109,9 +85,7 @@ export interface Settings {
   thinking_mode?: string;
   reasoning_effort?: string;
   show_thinking?: boolean;
-  /** PAI-5 P6. Whether reasoning text survives the stream that produced it.
-   *  Orthogonal to `show_thinking`, which only decides whether it is shown
-   *  live — showing something once and keeping it are different consents. */
+  /** Persist reasoning text after the stream; a separate consent from `show_thinking` (live). */
   persist_thinking?: boolean;
   review_mode?: string;
   review_max_rounds?: number;
@@ -208,48 +182,23 @@ export interface Settings {
   ext_system_enabled?: boolean;
   ext_device_enabled?: boolean;
   ext_sensor_enabled?: boolean;
-  /**
-   * Delegation to saved agent roles. The one extension toggle that ships OFF —
-   * turning it on lets the assistant run a second agent autonomously on this
-   * device. Read it as `=== true`, never `!== false`: absent must mean off.
-   */
+  /** Delegation to saved agent roles. Ships OFF: read as `=== true` so absent means off. */
   ext_orchestrator_enabled?: boolean;
 
-  // Speaking and acting unprompted (PAI-7 P4 and P6).
-  //
-  // Both booleans ship OFF and must be read as `=== true`, never `!== false`:
-  // a key the server has not sent yet, or a settings read that failed, has to
-  // mean "does not speak" and "does not review". These are the only settings in
-  // this type that decide whether the assistant addresses somebody who did not
-  // address it, so the widening direction is the one that matters.
-  /**
-   * May the pond reason about the household unasked, and propose things?
-   * Needs `ext_orchestrator_enabled` as well — the reviewer runs its work as a
-   * delegated child, so with delegation off there is nothing to run it in.
-   */
+  // Speaking and acting unprompted. Both ship OFF: read as `=== true` so absent means off.
+  /** Unasked review and proposals; needs `ext_orchestrator_enabled` (runs as a delegated child). */
   proactive_review_enabled?: boolean;
   /** May the pond speak without having been spoken to? */
   unprompted_speech_enabled?: boolean;
-  /**
-   * Start of the nightly window in which the pond never speaks unprompted,
-   * local `"HH:MM"`. ABSOLUTE: the server checks this window before consent,
-   * presence and category, so no combination of the others produces speech
-   * inside it. Wraps midnight when start > end; equal bounds mean silent all
-   * day; a value the server cannot parse also means silence.
-   */
+  /** Quiet-hours start, local `"HH:MM"`; overrides every other speech setting. Wraps midnight
+   *  when start > end; equal bounds or an unparseable value mean always silent. */
   quiet_hours_start?: string;
   /** End of the quiet-hours window, local `"HH:MM"`. See `quiet_hours_start`. */
   quiet_hours_end?: string;
-  /**
-   * Comma-separated notification categories that may be SPOKEN unprompted.
-   * Defaults to `"alert"` alone. An unrecognised or blank entry matches
-   * nothing, so a typo silences that category rather than opening the rest.
-   */
+  /** Comma-separated categories spoken unprompted (default "alert"); unknown ones match nothing. */
   unprompted_speech_categories?: string;
 
-  // API keys are NOT on Settings (PAI-2 P2). They live in the secret store and
-  // are managed through listSecretKeys / setSecret / deleteSecret; the server
-  // never returns a secret VALUE, only whether the key is set.
+  // API keys are not here: see listSecretKeys / setSecret / deleteSecret (values are write-only).
   searxng_url?: string | null;
 
   // Data retention
@@ -272,11 +221,7 @@ export interface Settings {
   vision_fps?: number;
   vision_motion_threshold?: number;
 
-  // Matter (smart-home fabric). `matter_enabled` is gone, not just absent from
-  // this type: the integration runs by default and installs its own controller,
-  // so there was nothing left for the field to mean. A stored row from before
-  // the removal is ignored on read rather than honoured, because an install that
-  // had it off would otherwise have no way back once the toggle went.
+  // Matter (smart-home fabric). No on/off toggle; a stored `matter_enabled` is ignored.
   matter_ws_url?: string;
   /** Whether the controller pairs over Bluetooth as well as over the network. */
   matter_ble_enabled?: boolean;
@@ -284,19 +229,8 @@ export interface Settings {
   // Inference stats display
   show_turn_stats?: boolean;
 
-  // ── Settings the server has always accepted but this type could not name ──
-  //
-  // Every one of these is a real `Settings` field on the Rust side, persisted
-  // and writable through `PUT /api/v1/settings` — `update_settings` merges the
-  // request body into the stored object with no field allowlist, so anything
-  // that round-trips through serde is settable. They were simply absent here,
-  // which meant the desktop app could not type a write to them even though a
-  // phone or a curl could send one. `catalogue.test.ts` fails if this type and
-  // the settings catalogue ever disagree again.
-  //
-  // Two of them — `network_mode` and `security_policy_mode` — decide whether
-  // the pond may reach the internet at all, so "reachable only from curl" was
-  // the wrong place for them to live.
+  // ── Network, security and other server settings ───────────────────────────
+  // `catalogue.test.ts` fails if this type and the settings catalogue disagree.
 
   /** How hard outbound HTTP is gated. Server rejects anything else with 422. */
   network_mode?: "open" | "allowlist" | "offline";
@@ -316,7 +250,7 @@ export interface Settings {
   summary_idle_secs?: number;
   compaction_verbatim_days?: number;
 
-  // Retention — the unified events log (#117)
+  // Retention — the unified events log
   retention_events_days?: number;
   retention_events_by_category?: Record<string, number>;
   retention_sensitive_days?: number;
@@ -327,9 +261,7 @@ export interface Settings {
   vision_classifier_model?: string;
 }
 
-/** What the Matter integration is actually doing, as opposed to what was
- *  asked for. `enabled` is the saved setting; `state` is reality — the two
- *  differ while the controller is starting up or cannot be reached. */
+/** Matter runtime: `enabled` = intent, `state` = reality (differ while starting or unreachable). */
 export interface MatterStatus {
   enabled: boolean;
   url: string;
@@ -406,22 +338,14 @@ export interface Device {
   room?: string;
   is_online: boolean;
   last_seen?: string;
-  /**
-   * What the device can be told to do, in `set_device_state`'s verbs — `power`,
-   * `brightness`, `fan_speed`, and the rest.
-   *
-   * `GET /api/v1/devices` has always sent this and this type dropped it, so the
-   * Devices card had nothing to gate on and offered every device a power button.
-   * A contact sensor's list is empty, which is the fact that stops it being asked
-   * to turn on.
-   */
+  /** `set_device_state` verbs it accepts (`power`, `brightness`, …); a contact sensor has none. */
   capabilities?: string[];
   /** The address the server knows, when it knows one. */
   ip_address?: string;
   metadata?: Record<string, unknown>;
 }
 
-// ── Mesh (#132) ───────────────────────────────────────────────
+// ── Mesh ──────────────────────────────────────────────────────
 // Mirrors 'pond_core::mesh::domain' + the /api/v1/mesh/* routes.
 export interface MeshPeer {
   peer_id: string;
@@ -443,9 +367,7 @@ export interface MeshPeerCapabilities {
   lightning_available: boolean;
 }
 
-/** Read-only status for the periodic settlement job. No write counterpart —
- * the exchange rate (millisats_per_token) is a settings-API-only knob until
- * that rate is actually decided, deliberately not editable from this UI. */
+/** Periodic settlement job status. Read-only: `millisats_per_token` is settings-API only. */
 export interface MeshSettlementStatus {
   configured: boolean;
   millisats_per_token: number;
@@ -537,59 +459,26 @@ export interface MemoryFragment {
 }
 
 // ── Semantic index coverage ───────────────────────────────────
-//
-// Mirrors `context_index_health` and `rebuild_context_index` in
-// `crates/pond-api/src/routes.rs`. Both answer **200 with `indexed: false`**
-// when the pond has no vector index or no embedder, because embeddings switched
-// off is a working configuration — retrieval falls back to recency and the pond
-// answers fine — and an error there would make a healthy pond indistinguishable
-// from a broken one at exactly the moment somebody is trying to tell them apart.
-//
-// So `indexed` is the discriminator and nothing else is: the counts are absent,
-// not zero, in that answer, and reading a missing count as 0 would report an
-// empty index for a pond that simply never had one.
+// Mirrors `context_index_health` / `rebuild_context_index` (pond-api routes.rs). No index or
+// embedder answers 200 with `indexed: false` and the counts absent, not zero.
 
 /** The three stores the index covers, spelled as the server spells them. */
 export type ContextCorpus = "memory" | "context" | "summary";
 
-/**
- * One store's share of the index.
- *
- * `coverage` is `null` rather than a number when `rows` is 0, because 0/0 is
- * neither 0% nor 100% and both readings actively mislead — zero paints a
- * permanent red figure on a pond that has simply never stored a memory, and one
- * paints a green 100% on a corpus that is structurally unable to answer
- * anything. Render the `null` as "nothing to index", never as a percentage.
- */
+/** One store's share of the index. `coverage` is null when `rows` is 0 (0/0): render it as
+ *  "nothing to index", never as a percentage. */
 export interface ContextCorpusCoverage {
   corpus: ContextCorpus;
   /** Live rows in the source store that qualify for indexing. */
   rows: number;
-  /**
-   * Every row in the source table, ignoring the qualifying filter.
-   *
-   * Never the denominator of coverage. It answers the one question `rows`
-   * cannot: is this corpus EMPTY, or is everything in it being excluded? Both
-   * read as zero qualifying rows and they need opposite fixes.
-   */
+  /** Unfiltered source-table row count; tells "empty" from "all excluded", never a denominator. */
   source_rows: number;
-  /**
-   * `rows === 0` while the table is not empty — a filter is excluding
-   * everything, and no amount of embedding repairs it.
-   *
-   * Measured on a live pond: 27 sessions carried a rolling summary, none
-   * qualified, and the index reported itself 100% covered because zero of zero
-   * cannot pull an average down.
-   */
+  /** `rows === 0` on a non-empty table: a filter excludes everything; re-embedding won't fix it. */
   structurally_excluded: boolean;
   /** Of those, the ones carrying a vector from the model currently configured. */
   indexed_rows: number;
   missing_rows: number;
-  /**
-   * Rows holding a vector from some OTHER embedder. They score plausibly and
-   * are wrong, so they are unreachable in practice until re-embedded — which is
-   * what the rebuild route exists for.
-   */
+  /** Rows with a vector from another embedder: they score plausibly but wrongly until rebuilt. */
   mismatched: number;
   coverage: number | null;
 }
@@ -615,12 +504,7 @@ export interface ContextCorpusCleared {
   cleared: number;
 }
 
-/**
- * The result of emptying the index. Every corpus is listed, including the ones
- * at zero, so a corpus that was never populated is still visible afterwards.
- */
-/** What one sync pass did. Counts, not a success flag: "nothing new" and
- *  "found eleven things" are both successes and are not the same answer. */
+/** What one sync pass did, as counts rather than a success flag. */
 export interface AccountSyncSummary {
   sources: number;
   unchanged: number;
@@ -628,8 +512,7 @@ export interface AccountSyncSummary {
   needs_reauth: number;
   failed: number;
   paused: number;
-  /** What each account did. The totals say whether anything happened; this
-   *  says where from, which is the question somebody with two accounts has. */
+  /** Per-account breakdown of the totals. */
   per_source?: SourceSyncOutcome[];
 }
 
@@ -655,8 +538,7 @@ export interface ContextItem {
   body: string;
   occurred_at: string;
   participants: string[];
-  /** Whether retrieval can currently reach it. Usually the answer to
-   *  "why did search not find this". */
+  /** Whether retrieval can currently reach it. */
   searchable: boolean;
 }
 
@@ -680,14 +562,11 @@ export interface ContextSource {
   awaiting_index: number;
 }
 
+/** Result of emptying the index; lists every corpus, even those at zero. */
 export interface ContextIndexRebuild {
   indexed: boolean;
   reason?: string;
-  /**
-   * Vectors dropped. Taken from the DELETE rather than summed from `corpora`,
-   * so rows written under a corpus name a later build stopped using are still
-   * counted here.
-   */
+  /** Vectors dropped per the DELETE; includes rows under corpus names no longer in `corpora`. */
   cleared: number;
   corpora: ContextCorpusCleared[];
 }
@@ -714,12 +593,7 @@ export interface ModelEntry {
   is_active: boolean;
   ram_estimate_mb?: number;
   recommended_role?: string;
-  /**
-   * Declared maximum context window, straight from the catalog row the backend
-   * persisted. LLM entries only; absent when the catalog provider could not
-   * answer. Prefer this over inferring the window from `name` — the name
-   * heuristic is a copy of a backend rule that has already moved on.
-   */
+  /** Catalog-declared max context window (LLMs only); prefer it to guessing from `name`. */
   context_length?: number;
   /** Quantisation scheme, e.g. "Q4_K_M" — read from the model file's own header. */
   quantization?: string;
@@ -737,7 +611,6 @@ export interface ModelEntry {
 
 /** GET /api/v1/warmup — the boot/model-change prefix warm-up (see Agent::prewarm). */
 export interface WarmupStatus {
-  /** warming | ready | skipped | failed */
   state: "warming" | "ready" | "skipped" | "failed";
   /** Present on skipped/failed. */
   reason?: string;
@@ -771,32 +644,15 @@ export interface PromptTemplate {
   is_system: boolean;
   /** User-edited: the startup factory reseed leaves this template alone. */
   is_customized?: boolean;
-  /**
-   * Which generation of the built-in templates this row came from. The reseed
-   * stamps the current one on rows it owns; an edited row keeps the generation
-   * it was forked from, so `is_customized && factory_version < FACTORY_VERSION`
-   * means "there is a newer built-in you have not seen".
-   */
+  /** Built-in template generation; an edited row keeps the one it was forked from. */
   factory_version?: number;
   updated_at?: string;
 }
 
-/**
- * Mirrors `FACTORY_VERSION` in
- * `crates/pond-core/src/user_data/domain/prompt_template.rs`. Bump both together
- * — `promptTemplateIsOutdated` compares against this, and a stale copy here
- * means the update notice never appears.
- */
+/** Mirrors `FACTORY_VERSION` in pond-core `user_data/domain/prompt_template.rs`; bump both. */
 export const PROMPT_FACTORY_VERSION = 1;
 
-/**
- * True when the user's edit predates the current built-in template.
- *
- * Only ever a NOTICE. The row is never adopted on the user's behalf:
- * `is_customized` is the one honest record that somebody chose this text, and
- * the settings adoption it would otherwise imitate (migration 0035) is explicit
- * that a value moves only when the user never set it.
- */
+/** True when the user's edit predates the current built-in; notice only, never overwrite it. */
 export function promptTemplateIsOutdated(t: PromptTemplate): boolean {
   return (
     t.is_system === true &&
@@ -876,14 +732,7 @@ export interface ActiveRun {
 
 export type ChatEventType = "text" | "thinking" | "tool_call" | "tool_result" | "done" | "error" | "status" | "review_status" | "review_revision" | "tool_revision" | "turn_stats" | "turn_limit_reached" | "context_warning" | "subagent_progress" | "run_started" | "reattached" | "replay_gap" | "run_evicted" | "cancelled";
 
-/**
- * PAI-6 P6. Where one delegation has got to.
- *
- * The spellings are `SubagentStatus::as_str` in `pond-core`, pinned against
- * that enum's serde on the Rust side by `the_wire_spelling_is_the_serialized_spelling`.
- * `tool` is the state a delegating turn spends most of its wall clock in, and
- * the only one that says anything is still happening.
- */
+/** One delegation's progress; spellings are pond-core's `SubagentStatus::as_str`. */
 export type SubagentStatus =
   | "queued"
   | "running"
@@ -893,24 +742,18 @@ export type SubagentStatus =
   | "turn_budget_exhausted"
   | "failed";
 
-// Sent as a fresh user turn when the agent stopped on its turn budget. The
-// backend has no dedicated resume endpoint — a continuation IS just the next
-// message — so this lives in one place to keep both chat surfaces identical.
+/** Sent as the next user turn to resume after the turn budget ran out (no resume endpoint). */
 export const CONTINUE_TURN_MESSAGE = "Continue where you left off.";
 
-// Per-turn inference performance stats emitted by the backend after each assistant turn.
-// All timing/throughput fields may be null when the provider does not report them.
+/** Per-turn inference stats; timing fields are null when the provider doesn't report them. */
 export interface TurnStats {
   type: "turn_stats";
   ttft_ms: number | null;
   prefill_ms: number | null;
   decode_tok_per_sec: number | null;
   prefill_tok_per_sec: number | null;
-  // What the turn actually decoded, and what it got back from the KV cache.
-  // `prefill_tok_per_sec` is a rate over `prefilled_tokens`, not `prompt_tokens`:
-  // on a warm turn most of the prompt is reused and never prefilled at all.
-  // `reused_prefix_tokens === 0` on turn 2+ means the prefix stopped being
-  // token-stable, which is the single most useful number here.
+  // `prefill_tok_per_sec` is over `prefilled_tokens`, not `prompt_tokens` (KV-cache reuse).
+  // `reused_prefix_tokens === 0` on turn 2+ means the prefix is no longer token-stable.
   prefilled_tokens: number | null;
   reused_prefix_tokens: number | null;
   prompt_tokens: number;
@@ -922,19 +765,8 @@ export interface TurnStats {
   inference_count: number;
 }
 
-// PAI-4 P7b. The server pushes this mid-stream when `ContextHealth.should_compact`
-// is true for the session that just took a turn (routes.rs, guarded by the
-// default-true `context_monitor_enabled`). It is NOT the same shape as the
-// `POST /sessions/{id}/compact` response body below, and the two differences are
-// the ones a client gets wrong:
-//
-//  - `turns_remaining` is a raw u32 here, and the monitor uses `u32::MAX`
-//    (4294967295) to mean "growth is unknown". The endpoint sends `null` for the
-//    same state. Never print this number without clamping it.
-//  - `warning` is only populated above 60% utilisation, but `should_compact`
-//    also fires through the `estimated_turns_remaining < 3` limb, which can be
-//    true below that. So `warning: null` on a `context_warning` frame is a
-//    producible state, not a defensive `?`.
+/** Mid-stream frame when `should_compact` is true. Unlike `CompactionReport`, `turns_remaining`
+ *  may be `TURNS_REMAINING_UNKNOWN` (clamp before printing) and `warning` may be null. */
 export interface ContextWarning {
   type: "context_warning";
   utilization_pct: number;
@@ -951,11 +783,8 @@ export interface CompactionReport {
   session_id: string;
   /** "compacted" only when a pass actually persisted a new summary. */
   status: "compacted" | "skipped";
-  /**
-   * Why it was skipped. The server's vocabulary, verbatim: monitor_disabled,
-   * compaction_disabled, not_under_pressure, no_summariser, already_running,
-   * cooling_down, nothing_to_summarise, preempted_by_turn, failed.
-   */
+  /** Why it was skipped: monitor_disabled, compaction_disabled, not_under_pressure, no_summariser,
+   *  already_running, cooling_down, nothing_to_summarise, preempted_by_turn, failed. */
   reason: string | null;
   outcome: string | null;
   context: {
@@ -984,19 +813,13 @@ export interface ChatEvent {
   };
   /** Turn budget that was exhausted — present on "turn_limit_reached" events. */
   max_turns?: number;
-  /** PAI-6 P6 — present on "subagent_progress" events. The run this frame is
-   *  about; one turn may delegate the same role twice, so the id and not the
-   *  role is what groups a tree's nodes. */
+  /** On "subagent_progress": the run; group tree nodes by it, not `role` (a role can repeat). */
   task_id?: string;
-  /** The delegated role — the label on a tree node. Present on
-   *  "subagent_progress" events only; a chat event has no other notion of a
-   *  role. */
+  /** On "subagent_progress": the delegated role, shown as the tree node's label. */
   role?: string;
   /** Present on "subagent_progress" events. */
   status?: SubagentStatus;
-  /** A tool NAME while a child is calling one, or the pond's own reason when a
-   *  run failed. Never the child's words, its reasoning, or a tool call's
-   *  arguments — the server cannot put those here (PAI-2 minimisation). */
+  /** A child's current tool name, or the pond's failure reason. Never the child's words or args. */
   detail?: string;
   done?: boolean;
   session_id?: string;      // present on done events
@@ -1006,23 +829,17 @@ export interface ChatEvent {
     prompt_tokens: number;
     completion_tokens: number;
   };
-  /** The run's frame sequence, read from the SSE `id:` field rather than the
-   *  JSON body. What a reattach resumes from. */
+  /** Frame sequence from the SSE `id:` field (not the JSON body); a reattach resumes from it. */
   seq?: number;
-  /** Present on "run_started", "reattached", "run_evicted", "cancelled" and on
-   *  every done frame — the turn this belongs to. */
+  /** The turn this belongs to; on run_started, reattached, run_evicted, cancelled and done. */
   run_id?: string;
-  /** Present on "run_started" and "reattached". A different epoch means the run
-   *  this client remembers died with a previous server process. */
+  /** On "run_started"/"reattached"; a new epoch means the remembered run died with the server. */
   epoch?: string;
-  /** Present on "done": the turn was cancelled or timed out rather than
-   *  finishing on its own. */
+  /** On "done": the turn was cancelled or timed out. */
   interrupted?: boolean;
-  /** Present on "replay_gap": the oldest frame the server can still replay.
-   *  Everything the client missed before it is unrecoverable. */
+  /** On "replay_gap": the oldest replayable frame; anything missed before it is lost. */
   first_available_seq?: number;
-  /** Present on "replay_gap" and "run_evicted": what the client should do,
-   *  which is always to reload the session rather than pretend it caught up. */
+  /** On "replay_gap"/"run_evicted": what to do, which is always to reload the session. */
   advice?: string;
 }
 
@@ -1112,8 +929,7 @@ export interface SessionMessageToolCall {
   arguments: string;
 }
 
-/** Attachment metadata for a persisted image on a session message. `url` is
- *  relative to the API base, e.g. `/api/v1/sessions/<sid>/attachments/<aid>`. */
+/** A persisted image on a session message; `url` is relative to the API base. */
 export interface SessionMessageImage {
   id: string;
   mime_type: string;
@@ -1133,15 +949,9 @@ export interface SessionMessage {
   tool_call_id?: string;
   /** Present on messages (typically role="user") that had images attached. */
   images?: SessionMessageImage[];
-  /** PAI-5 P6. The reasoning passages this reply was produced by, in emission
-   *  order — present only on role="assistant" messages recorded while
-   *  `persist_thinking` was on. Absent (not `[]`) when nothing was kept, so a
-   *  turn that was never recorded is distinguishable from one that thought
-   *  nothing. */
+  /** Reasoning passages in order, if `persist_thinking` was on; absent (not `[]`) if unrecorded. */
   thinking?: string[];
-  /** Training-feedback vote from the chat UI's like/dislike controls.
-   *  `true` = liked (kept as training data), `false` = disliked (excluded),
-   *  `null`/absent = no vote. */
+  /** Training-feedback vote: true keeps it as training data, false excludes it, null = no vote. */
   liked?: boolean | null;
 }
 
@@ -1165,11 +975,7 @@ export interface DownloadEntry {
   category: string;
   downloaded_bytes: number;
   total_bytes: number | null;
-  /**
-   * `paused` keeps the partial file and can be resumed; `cancelled` threw it
-   * away. Both arrive from the same stop — the transfer checks a flag between
-   * chunks, the only moment it is not blocked inside a read.
-   */
+  /** `paused` keeps the partial file for resuming; `cancelled` deletes it. */
   status: "downloading" | "paused" | "done" | "error" | "cancelled";
   error?: string;
 }
@@ -1259,9 +1065,7 @@ export interface MarketplaceExtension {
   required_secrets: SecretRequirement[];
 }
 
-// ── Logs / Telemetry ─────────────────────────────────────────
-// ── Activity / Observability ──────────────────────────────────
-//
+// ── Activity / Logs ──────────────────────────────────────────
 // Mirrors GET /api/v1/activity and GET /api/v1/activity/summary.
 
 export type EventCategory =
@@ -1277,9 +1081,7 @@ export type AttributeValue =
   | { text: string };
 
 export interface ActivityEvent {
-  // The backend `Event` domain type has no stable id (GET /api/v1/activity
-  // serializes category/action/timestamp/trace_id/etc., not a row id). Optional
-  // so consumers derive a stable React key instead of keying on `undefined`.
+  // The backend sends no row id; consumers derive their own React key.
   id?: string;
   timestamp: string;
   category: EventCategory;
@@ -1319,10 +1121,7 @@ export interface LogEntry {
 }
 
 // ── Face Recognition models (auto-managed status) ──────────────
-//
-// Mirrors the JSON returned by GET /api/v1/faces/models. The desktop
-// Models section renders this read-only — pond-server downloads the
-// three files automatically on first boot when built with `face-onnx`.
+// GET /api/v1/faces/models; read-only, the server fetches the files on first boot (`face-onnx`).
 export interface FaceModelEntry {
   name: string;        // file basename, e.g. "w600k_r50.onnx"
   label: string;       // human-readable, e.g. "ArcFace R50"
@@ -1350,13 +1149,7 @@ export class ApiError extends Error {
   }
 }
 
-/**
- * A suggestion the pond has made and is waiting on an answer for.
- *
- * Shape mirrors `proposal_json` in `crates/pond-api/src/routes.rs`. Every field
- * the server sends is here; `trigger` is what the pond noticed, which is what
- * makes a suggestion explicable rather than uncanny.
- */
+/** A pending suggestion from the pond; mirrors `proposal_json` in pond-api routes.rs. */
 export interface Proposal {
   id: string;
   summary: string;

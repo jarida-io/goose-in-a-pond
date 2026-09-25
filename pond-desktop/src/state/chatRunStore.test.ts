@@ -1,18 +1,4 @@
-/**
- * The turn outlives the view.
- *
- * `GuiMode` swaps sections with a `switch`, so every sidebar press unmounts
- * `<Chat />`. These tests drive the store directly, with no component mounted,
- * because that is exactly the condition it exists for: a turn still streaming
- * while nothing is there to show it.
- *
- * The one that matters most — "keeps folding frames after the last subscriber
- * leaves" — does mount, through `useChatRun`, and then unmounts, because a real
- * subscriber leaving is the event under test and a hand-rolled stand-in for it
- * would be testing the stand-in. Before this store, the frames that arrived
- * after that point were decoded and thrown away: the answer arrived, was
- * written to the database, and was invisible to the person who asked for it.
- */
+/** Drives the store with nothing mounted, as happens whenever a sidebar press unmounts Chat. */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook } from "@testing-library/react";
@@ -59,13 +45,7 @@ function stream(events: ChatEvent[]): AsyncGenerator<ChatEvent> {
   })();
 }
 
-/**
- * A stream held open until the test says otherwise.
- *
- * `push` delivers one frame, `end` closes it. Both resolve once the driver has
- * actually consumed the frame, so a test can unsubscribe at a known point in
- * the middle of a turn rather than racing it.
- */
+/** Held-open stream; `push`/`end` resolve once the driver has consumed the frame. */
 function deferredStream() {
   const pending: ChatEvent[] = [];
   let wake: (() => void) | null = null;
@@ -120,8 +100,7 @@ beforeEach(() => {
   setChatRunBridge(bridge());
   vi.mocked(api.getSessionMessages).mockResolvedValue([]);
   vi.mocked(api.getActiveRun).mockResolvedValue(null);
-  // The real one returns `Promise<void>`; a bare `vi.fn()` returns undefined,
-  // which only the callers that `await` it happen to survive.
+  // stopServerRun chains `.catch` on it, so it must return a promise.
   vi.mocked(api.cancelRun).mockResolvedValue(undefined);
   localStorage.clear();
 });
@@ -166,7 +145,6 @@ describe("a turn nobody is watching", () => {
     const held = deferredStream();
     vi.mocked(api.chatStream).mockReturnValue(held.gen as never);
 
-    // A mounted surface, subscribed exactly the way a real one is.
     const mounted = renderHook(() => useChatRun());
 
     sendTurn({ text: "why do geese fly in a V" });
@@ -259,8 +237,7 @@ describe("talking back to the app", () => {
   });
 
   it("still sends when no provider is mounted to bridge it", async () => {
-    // The client holds its own token and refreshes it, so a bridgeless send
-    // degrades to "the client authenticates itself", not to a failed send.
+    // The client holds and refreshes its own token, so a bridgeless send still authenticates.
     __resetChatRunForTests();
     vi.mocked(api.chatStream).mockReturnValue(
       stream([
@@ -314,8 +291,6 @@ describe("hasLiveThread", () => {
     expect(hasLiveThread()).toBe(true);
 
     await held.end();
-    // Finished, and nothing was mounted to show it -- still the thing you came
-    // back for.
     expect(hasLiveThread()).toBe(true);
 
     acknowledgeCompletion();
@@ -371,8 +346,7 @@ describe("image previews", () => {
       images: [{ data: "AAA", mime_type: "image/png" }],
       previewUrls: ["blob:pond/one"],
     });
-    // A history image on the same transcript: an ordinary http URL that this
-    // store did not make and must not claim to free.
+    // A history image: an http URL this store didn't create.
     patchMessage(getChatRun().messages[1].id, {
       images: ["/api/v1/sessions/s/attachments/a1"],
     });
@@ -403,14 +377,7 @@ describe("truncateFrom", () => {
 
 // ── Surviving a reload ────────────────────────────────────────────────────────
 
-/**
- * The window died and came back.
- *
- * There is no way to really reload inside a test, so these drive the seam the
- * reload goes through: a run pointer left in `localStorage` by the last window,
- * and a store that starts empty. What is under test is whether the app can pick
- * up a turn it was never around for.
- */
+/** Drives the reload seam: a run pointer in localStorage and an empty store. */
 describe("resuming a run this window never started", () => {
   const POINTER = {
     sessionId: "sess-live",
@@ -433,10 +400,7 @@ describe("resuming a run this window never started", () => {
   });
 
   it("sends the surface to the thread before the server has even answered", async () => {
-    // A surface decides which screen to open while it mounts, and the round
-    // trip below has not happened yet. Landing on the wall and having the turn
-    // appear behind it a second later is the failure this change exists to
-    // remove, so the pointer alone has to be enough.
+    // Surfaces pick a screen while mounting, before any round trip, so the pointer must suffice.
     leaveAPointer();
     expect(hasLiveThread()).toBe(true);
   });
@@ -456,8 +420,7 @@ describe("resuming a run this window never started", () => {
 
     await resumeActiveRun();
 
-    // `hasLiveThread` already sent the surface to the thread on the strength of
-    // the pointer, so leaving it empty would be worse than the wall it skipped.
+    // hasLiveThread already chose the thread from the pointer, so it must not open empty.
     expect(getChatRun().messages[0].text).toBe("still here");
   });
 
@@ -487,8 +450,7 @@ describe("resuming a run this window never started", () => {
     const resumed = resumeActiveRun();
     await flush();
 
-    // Resumed from where the LAST window had read, not from the beginning:
-    // replaying what is already on screen would write the answer out twice.
+    // From the last window's read position, not from 0.
     expect(vi.mocked(api.reattachRun).mock.calls[0].slice(0, 3)).toEqual([
       "run-7",
       4,
@@ -569,8 +531,6 @@ describe("remembering the run", () => {
       seq: 1,
     } as ChatEvent);
 
-    // Deliberately not deferred to the end of the turn: the whole point is to
-    // survive a reload that could happen in the next moment.
     const pointer = JSON.parse(localStorage.getItem("giap-chat-run") ?? "{}");
     expect(pointer.runId).toBe("run-9");
     expect(pointer.epoch).toBe("epoch-a");
@@ -634,13 +594,7 @@ describe("stopping on purpose", () => {
     expect(localStorage.getItem("giap-chat-run")).toBeNull();
   });
 
-  /**
-   * Measured against a live pond before this was wired: a client that stopped
-   * reading at frame 2 had its run finish at frame 664, seventy-three seconds
-   * later, and post-turn memory extraction then opened a further provider call
-   * on the same single-slot engine. Bumping `runSeq` stops us writing the
-   * frames down; it was never what stopped the model.
-   */
+  /** Bumping `runSeq` only stops local writes; the model keeps generating unless cancelled. */
   it("stops the run when a new chat abandons it, as its doc has always said", async () => {
     const held = deferredStream();
     vi.mocked(api.chatStream).mockReturnValue(held.gen as never);
@@ -675,13 +629,7 @@ describe("stopping on purpose", () => {
     expect(api.cancelRun).toHaveBeenCalledWith("run-21");
   });
 
-  /**
-   * The other three `openSession` callers are recovery, not abandonment:
-   * `resumeActiveRun` lays down history before reattaching, and the
-   * `replay_gap` / `run_evicted` arm reloads a conversation whose run is still
-   * generating. Cancelling by default would have aborted the run each of them
-   * exists to recover.
-   */
+  /** Resume and replay-gap recovery re-read a live run, so cancelling by default would kill it. */
   it("does not stop the run when a session is merely re-read", async () => {
     const held = deferredStream();
     vi.mocked(api.chatStream).mockReturnValue(held.gen as never);
@@ -699,11 +647,7 @@ describe("stopping on purpose", () => {
     expect(api.cancelRun).not.toHaveBeenCalled();
   });
 
-  /**
-   * The guard on the whole point of `resumable`. Leaving a turn deliberately
-   * cancels it; the window going away does not, and nothing here runs on
-   * unload — so a closed window still comes back to a finished answer.
-   */
+  /** Leaving on purpose cancels; a window going away must not (nothing runs on unload). */
   it("does not stop a run just because the last subscriber unmounted", async () => {
     const held = deferredStream();
     vi.mocked(api.chatStream).mockReturnValue(held.gen as never);
@@ -736,8 +680,6 @@ describe("stopping on purpose", () => {
     } as ChatEvent);
     vi.mocked(api.cancelRun).mockRejectedValue(new Error("offline"));
 
-    // A stop the user asked for must not look like it failed because the
-    // network did.
     await expect(abortRun()).resolves.toBeUndefined();
     expect(getChatRun().busy).toBe(false);
   });

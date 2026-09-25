@@ -1,5 +1,4 @@
 //! Application service for onboarding use cases.
-//! This orchestrates onboarding progression logic.
 
 use crate::user_data::domain::onboarding::OnboardingStep;
 use crate::user_data::ports::onboarding::OnboardingRepository;
@@ -14,13 +13,11 @@ impl<R: OnboardingRepository> OnboardingService<R> {
         Self { repo }
     }
 
-    /// Start onboarding
     pub async fn start(&self) -> Result<()> {
         self.repo.save_step(OnboardingStep::Welcome).await?;
         Ok(())
     }
 
-    /// Advance onboarding to next step.
     pub async fn advance(&self) -> Result<()> {
         if let Some(current) = self.repo.get_current_step().await {
             let next = current.next();
@@ -29,13 +26,7 @@ impl<R: OnboardingRepository> OnboardingService<R> {
         Ok(())
     }
 
-    /// Record that the client has reached `step`, moving progress **forward only**.
-    ///
-    /// If the persisted step is already at or past `step` (by wizard position),
-    /// the furthest-reached step is retained — so a client re-reporting an
-    /// earlier step (e.g. after navigating Back) never regresses progress. This
-    /// is what makes resume-from-N correct. Returns the step that is now
-    /// persisted.
+    /// Record reaching `step`, never moving progress backwards; returns the step now persisted.
     pub async fn advance_to(&self, step: OnboardingStep) -> Result<OnboardingStep> {
         let target = match self.repo.get_current_step().await {
             Some(current) if current.position() >= step.position() => current,
@@ -45,12 +36,10 @@ impl<R: OnboardingRepository> OnboardingService<R> {
         Ok(target)
     }
 
-    /// Get the current onboarding status.
     pub async fn status(&self) -> Option<OnboardingStep> {
         self.repo.get_current_step().await
     }
 
-    /// Reset onboarding state to allow starting from scratch.
     pub async fn reset(&self) -> Result<()> {
         self.repo.reset().await
     }
@@ -207,8 +196,6 @@ mod tests {
 
     #[tokio::test]
     async fn advance_to_never_regresses() -> Result<()> {
-        // Reaching a later step then re-reporting an earlier one (e.g. Back-nav)
-        // must keep the furthest-reached step — this is what makes resume correct.
         let service = OnboardingService::new(MockRepo::new());
         service.advance_to(OnboardingStep::Model).await?;
         let saved = service.advance_to(OnboardingStep::Basics).await?;

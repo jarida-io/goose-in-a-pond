@@ -1,6 +1,4 @@
-//! The real capture device: opening a stream and pushing frames. Everything decidable — the
-//! privacy gate, the state machine, buffering, format normalisation — lives in [`crate::owner`]
-//! and [`crate::ring`], where it is testable without a sound card.
+//! The real capture device; all testable logic lives in [`crate::owner`] and [`crate::ring`].
 
 use std::sync::Arc;
 
@@ -9,10 +7,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crate::owner::{CaptureDevice, MicShared};
 use crate::ring::{i16_to_f32, to_mono_f32, u16_to_f32};
 
-/// `cpal::Stream` is `!Send` — CoreAudio attaches property listeners to the creating thread.
-/// It is created on, used by, and dropped on the owner thread and never touched elsewhere, so
-/// the transfer is sound. The field is never read: holding the stream alive is what keeps the
-/// device open, and dropping it is what closes it.
+/// `cpal::Stream` is `!Send` (CoreAudio ties listeners to its thread); it never leaves the owner.
+/// Holding it keeps the device open.
 struct SendableStream(#[allow(dead_code)] cpal::Stream);
 unsafe impl Send for SendableStream {}
 
@@ -57,9 +53,6 @@ impl CpalCapture {
 }
 
 /// Every input device this host exposes, for a settings picker.
-///
-/// There was no device enumeration anywhere before — every call site took
-/// `default_input_device()` and a user with the wrong default had no recourse.
 pub fn input_device_names() -> Vec<String> {
     cpal::default_host()
         .input_devices()
@@ -81,8 +74,6 @@ impl CaptureDevice for CpalCapture {
         let config: cpal::StreamConfig = supported.into();
 
         // Resample once, here, so subscribers only ever see 16 kHz mono f32.
-        // Previously each consumer resampled its own window on every pass —
-        // the wake-word detector did it every 300 ms over 2.5 s of audio.
         let push = move |mono: Vec<f32>| {
             let at_16k = pond_voice::dsp::resample_to_16k(&mono, sample_rate);
             let mut ring = shared.ring.lock().unwrap_or_else(|e| e.into_inner());
@@ -131,8 +122,7 @@ impl CaptureDevice for CpalCapture {
     }
 
     fn stop(&mut self) {
-        // Dropping the stream closes the device — that is what makes
-        // `mic_enabled = false` actually turn the OS indicator off.
+        // Dropping the stream closes the device, which turns the OS mic indicator off.
         self.stream = None;
     }
 }
@@ -141,21 +131,17 @@ impl CaptureDevice for CpalCapture {
 mod tests {
     use super::*;
 
-    /// Enumeration must never panic on a headless box or one with no input.
     #[test]
     fn enumeration_is_safe_with_or_without_devices() {
         let _ = input_device_names();
     }
 
-    /// An unknown name falls back to the default rather than failing outright —
-    /// a stale device setting should not make the assistant deaf.
+    /// A stale device setting must not make the assistant deaf.
     #[test]
     fn an_unknown_preferred_device_falls_back_to_the_default() {
         let cap = CpalCapture::with_device("no-such-device-8f3a2b");
         match cap.pick() {
-            // Fell back to a real default.
             Ok(_) => {}
-            // Or this machine genuinely has no input at all.
             Err(e) => assert!(e.contains("no audio input device"), "{e}"),
         }
     }

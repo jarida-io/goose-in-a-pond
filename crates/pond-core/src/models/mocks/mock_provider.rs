@@ -4,10 +4,7 @@ use async_trait::async_trait;
 use crate::models::domain::message::{ChatMessage, Role};
 use crate::models::ports::provider::LlmProvider;
 
-/// Mock LLM provider for testing.
-///
-/// Returns a canned response that echoes the last user message.
-/// Model name: "mock-v1".
+/// Mock LLM provider ("mock-v1") that echoes the last user message.
 pub struct MockProvider;
 
 impl MockProvider {
@@ -26,7 +23,6 @@ impl LlmProvider for MockProvider {
         // Simulate a tiny thinking delay
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        // Find the last user message to echo
         let last_user_msg = messages
             .iter()
             .rev()

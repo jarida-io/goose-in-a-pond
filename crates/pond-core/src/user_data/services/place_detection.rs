@@ -60,10 +60,7 @@ impl Source {
         }
     }
 
-    /// Whether this source states a fact rather than a guess.
-    ///
-    /// A zone-derived name is a guess: the zone was chosen for this house, so
-    /// it is usually the right city, but nobody ever said so.
+    /// Whether this source states a fact rather than a guess (a zone-derived name is a guess).
     pub fn is_certain(self) -> bool {
         matches!(self, Source::Device | Source::Geocoded | Source::Network)
     }
@@ -99,10 +96,7 @@ pub struct Hints<'a> {
     pub device_coords: Option<(f64, f64)>,
 }
 
-/// Run the cascade.
-///
-/// `network` is `None` unless the household has turned on the source that
-/// reveals their address; passing `Some` is the decision, not a detail.
+/// Run the cascade; pass `network` only when the household opted in, since it reveals their IP.
 pub async fn detect(
     hints: Hints<'_>,
     by_name: Option<&dyn PlaceLookup>,
@@ -123,9 +117,7 @@ pub async fn detect(
         .map(str::to_string)
         .or_else(|| implied.clone());
 
-    // 3. The device's own position beats every lookup, so it is taken first
-    //    when present — but it still needs a NAME, which only the other
-    //    sources can give, so it does not short-circuit the cascade.
+    // 3. Device coordinates ((0,0) = unset) beat any lookup; the name stays the typed/zone one.
     if let Some((lat, lon)) = hints.device_coords.filter(|(a, b)| *a != 0.0 || *b != 0.0) {
         return Detected {
             name: candidate.unwrap_or_default(),
@@ -145,8 +137,7 @@ pub async fn detect(
                     name: fix.name,
                     latitude: fix.latitude,
                     longitude: fix.longitude,
-                    // The geocoder's zone only when it is real: a bad string
-                    // here would be stored and later refuse to schedule.
+                    // Only a valid zone: a bad one would be stored and then fail to schedule.
                     timezone: fix
                         .timezone
                         .filter(|z| is_valid_zone(z))
@@ -183,9 +174,7 @@ pub async fn detect(
         }
     }
 
-    // Nothing placed it. The zone is still worth returning: it is the half of
-    // the answer that never needed a network, and a household that gets a zone
-    // and a plausible city has lost only the forecast.
+    // Nothing placed it; still return the zone and implied city, which needed no network.
     Detected {
         name: candidate.unwrap_or_default(),
         latitude: 0.0,
@@ -232,8 +221,6 @@ mod tests {
         }
     }
 
-    /// The defect this exists for: onboarding's detect produced a name and no
-    /// coordinates, then switched weather on.
     #[tokio::test]
     async fn the_zone_alone_produces_coordinates_via_the_geocoder() {
         let geo = Geo(Some(fix("Nairobi, Kenya", -1.286, 36.817, None)));
@@ -272,7 +259,6 @@ mod tests {
         assert_eq!(out.source, Source::Geocoded);
     }
 
-    /// The device knows best, but it does not know what the place is CALLED.
     #[tokio::test]
     async fn device_coordinates_win_and_still_carry_a_name() {
         let out = detect(
@@ -290,7 +276,6 @@ mod tests {
         assert_eq!(out.name, "Nairobi", "the zone still supplies the name");
     }
 
-    /// (0,0) is the unset sentinel, not a position off Ghana.
     #[tokio::test]
     async fn null_island_from_a_device_is_not_a_fix() {
         let geo = Geo(Some(fix("Nairobi, Kenya", -1.286, 36.817, None)));
@@ -307,7 +292,6 @@ mod tests {
         assert_eq!(out.source, Source::Geocoded);
     }
 
-    /// The private sources must be tried BEFORE the one that reveals the house.
     #[tokio::test]
     async fn the_network_is_a_last_resort_not_a_first_choice() {
         let geo = Geo(Some(fix("Nairobi, Kenya", -1.286, 36.817, None)));
@@ -344,7 +328,6 @@ mod tests {
         assert_eq!(out.timezone, "Europe/London");
     }
 
-    /// Never wired unless somebody turned it on.
     #[tokio::test]
     async fn without_the_network_source_nothing_reaches_for_it() {
         let out = detect(
@@ -364,7 +347,6 @@ mod tests {
         );
     }
 
-    /// A zone from a source is still a string from outside.
     #[tokio::test]
     async fn a_nonsense_zone_from_a_source_is_not_stored() {
         let geo = Geo(Some(fix("Nowhere", 1.0, 1.0, Some("Mars/Olympus"))));

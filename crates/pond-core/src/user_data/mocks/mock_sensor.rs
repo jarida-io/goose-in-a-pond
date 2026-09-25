@@ -191,8 +191,6 @@ mod tests {
         assert!(latest.is_some());
     }
 
-    /// A reading at a fixed offset from an epoch, so history ordering and time
-    /// windows are deterministic.
     fn reading_at(value: f64, hours: i64) -> SensorReading {
         SensorReading {
             device_id: "room1".to_string(),
@@ -211,8 +209,7 @@ mod tests {
         storage
     }
 
-    // The three tests below exercise the port's *default* implementations,
-    // which every store that does not override them relies on.
+    // The three tests below exercise the port's default implementations.
 
     #[tokio::test]
     async fn aggregate_over_empty_window_is_all_none() {

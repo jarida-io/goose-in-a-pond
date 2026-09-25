@@ -1,7 +1,4 @@
-// ────────────────────────────────────────────────────────────
-// Step 0 — Welcome
-// Real system info from GET /api/v1/health + /system/info
-// ────────────────────────────────────────────────────────────
+// Step 0, Welcome: system info from GET /api/v1/health and /system/info.
 
 import { Lock, Mic, Shield } from "lucide-react";
 import { Logo } from "../../Logo";

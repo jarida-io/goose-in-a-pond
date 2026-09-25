@@ -1,10 +1,6 @@
-//! SQLite-backed implementation of `TelemetryPort`.
+//! SQLite-backed `TelemetryPort` over `turn_metrics` in `pond_logs.db`.
 //!
-//! Persists `TurnMetrics` to the `turn_metrics` table in `pond_logs.db`
-//! (migration 0005) so telemetry survives a restart. Writes go to SQLite
-//! first, then to an in-memory cache that mirrors `InMemoryTelemetry` —
-//! reads are served from the cache, which is hydrated from SQLite once at
-//! construction time.
+//! Writes go to SQLite, then the cache; reads use only the cache, hydrated once at construction.
 
 use anyhow::Result;
 use sqlx::{Pool, Row, Sqlite};
@@ -19,9 +15,7 @@ pub struct SqliteTelemetry {
 }
 
 impl SqliteTelemetry {
-    /// Connects to `pond_logs.db` and hydrates the in-memory cache with
-    /// every turn previously persisted, so queries right after a restart
-    /// see the full history.
+    /// Loads every persisted turn into the in-memory cache.
     pub async fn new(pool: Pool<Sqlite>) -> Result<Self> {
         let turns = Self::load_all(&pool).await?;
         Ok(Self {
@@ -77,18 +71,14 @@ fn row_to_turn_metrics(row: &sqlx::sqlite::SqliteRow) -> TurnMetrics {
         inference_count: row
             .get::<Option<i64>, _>("inference_count")
             .map(|v| v as u32),
-        // Same NULL-vs-zero rule as 0008: a turn that decoded nothing because
-        // the prompt was cached is a measurement; a row from before 0010 is not.
+        // NULL stays None: a cached-prompt zero is a measurement, a pre-0010 NULL is not.
         prefilled_tokens: row
             .get::<Option<i64>, _>("prefilled_tokens")
             .map(|v| v as u32),
         reused_prefix_tokens: row
             .get::<Option<i64>, _>("reused_prefix_tokens")
             .map(|v| v as u32),
-        // Nullable, and NULL must stay None rather than becoming Some(0).
-        // Migration 0008 says why: a zero from an unmeasured turn is evidence
-        // that does not exist, and it averages into every conclusion drawn from
-        // this table.
+        // NULL stays None, not Some(0): an unmeasured zero would skew every average.
         reasoning_tokens: row
             .get::<Option<i64>, _>("reasoning_tokens")
             .map(|v| v as u32),
@@ -209,14 +199,10 @@ mod tests {
             prefill_tok_per_sec: Some(600.0),
             context_limit_tokens: Some(3072),
             inference_count: Some(1),
-            // A turn that decoded its whole prompt and reused nothing — the
-            // shape a cold first turn has.
+            // A cold first turn: whole prompt decoded, nothing reused.
             prefilled_tokens: Some(100 * turn_number),
             reused_prefix_tokens: Some(0),
-            // The unmeasured case on purpose: this is what a turn from a
-            // provider with no `ProviderStats` looks like, and what every row
-            // written before migration 0008 looks like. The tests that care
-            // about the measured case set them explicitly.
+            // Unmeasured on purpose (no `ProviderStats`); tests needing values set them.
             reasoning_tokens: None,
             reengagements: None,
         }
@@ -253,23 +239,7 @@ mod tests {
         assert_eq!(turns[0].tool_cache_hit, Some(false));
     }
 
-    /// What thinking cost, and what it cost when it went wrong, must survive
-    /// the trip through SQLite — including the case that carries the most
-    /// information and is easiest to lose.
-    ///
-    /// **It reopens the database, and that is the whole test.** Reads are
-    /// served from the in-memory cache (see the module doc), so a version of
-    /// this that wrote and then read through the same `SqliteTelemetry`
-    /// round-trips through a `Vec` and touches neither the INSERT's column
-    /// list nor `row_to_turn_metrics`. That version was written first, and it
-    /// passed with the reader mutated to collapse NULL into a measured zero —
-    /// which is precisely the defect it was supposed to name. The reopen is
-    /// what forces `load_all`.
-    ///
-    /// The values are chosen so that no field can stand in for another: 0
-    /// reasoning tokens with 2 re-engagements is a turn that thought nothing
-    /// and *still* went silent twice, which is a real gemma-4-E2B shape and is
-    /// distinguishable from every other combination below.
+    /// Must reopen the database: reads come from the cache, so only a reopen exercises `load_all`.
     #[tokio::test]
     async fn reasoning_cost_and_re_engagements_survive_sqlite() {
         let tmp = tempdir().unwrap();
@@ -292,18 +262,11 @@ mod tests {
             telemetry.record_turn(make_turn("sess-1", 3)).await.unwrap();
         }
 
-        // Reopen: the cache is empty and every value below came back out of the
-        // table through `row_to_turn_metrics`.
         let db = Database::init(tmp.path()).await.unwrap();
         let telemetry = SqliteTelemetry::new(db.logs).await.unwrap();
         let turns = telemetry.get_turns("sess-1").await.unwrap();
         assert_eq!(turns.len(), 3, "rows did not survive the reopen at all");
 
-        // The distinction the whole design rests on. If the reader ever maps
-        // NULL to 0, this is the assertion that catches it -- and it is the
-        // reason `reasoning_tokens` is Option and not u32: a zero from an
-        // unmeasured turn averages into every conclusion drawn from this table
-        // as though somebody had measured it.
         assert_eq!(
             turns[0].reasoning_tokens,
             Some(0),
@@ -331,7 +294,6 @@ mod tests {
             telemetry.record_turn(make_turn("sess-1", 2)).await.unwrap();
         }
 
-        // Reopen against the same on-disk database — simulates a process restart.
         let db = Database::init(tmp.path()).await.unwrap();
         let telemetry = SqliteTelemetry::new(db.logs).await.unwrap();
 

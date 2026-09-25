@@ -1,7 +1,4 @@
-//! `mic_enabled` end to end, from the HTTP surface to the capture gate. This
-//! privacy control once shipped enforced nowhere: the wake-word detector, both
-//! capture paths and the barge-in listener all kept opening the device. Payload
-//! and round-trip tests cannot see that; only this join can.
+//! `mic_enabled` end to end, from the HTTP surface to the capture gate.
 
 use std::sync::Arc;
 
@@ -37,9 +34,7 @@ impl OnboardingRepository for MockRepo {
     async fn reset(&self) -> anyhow::Result<()> {
         Ok(())
     }
-    // This fixture is a set-up pond, and since PAI-2 P7 that is what decides
-    // whether `PUT /settings` answers a caller with no token. See the token on
-    // the requests below.
+    // A set-up pond: `PUT /settings` then needs a token (see the requests below).
     async fn is_complete(&self) -> anyhow::Result<bool> {
         Ok(true)
     }
@@ -83,10 +78,7 @@ async fn app() -> (axum::Router, tempfile::TempDir) {
     let session_storage: Arc<dyn pond_core::user_data::ports::session_storage::SessionStorage> =
         Arc::new(pond_infra::sqlite_session_storage::SqliteSessionStorage::new(db.system.clone()));
 
-    // PAI-2 P7: `PUT /settings` stops answering anonymous callers once the pond
-    // is set up, and this fixture IS a set-up pond -- `MockRepo` reports
-    // `Completed` and `skip_onboarding` is true. The token is what keeps these
-    // tests measuring the capture gate rather than the auth middleware.
+    // A set-up pond rejects anonymous `PUT /settings`; the token keeps these tests on the gate.
     let mock_hs = MockHandshake::new();
     mock_hs.add_valid_token("test-token".to_string()).await;
 
@@ -185,10 +177,7 @@ async fn app() -> (axum::Router, tempfile::TempDir) {
     )
 }
 
-/// The gate is a process global, so these tests would race each other under
-/// cargo's default parallel harness — measured: 1-2 failures per run. They take
-/// one lock and restore the prior value, so the suite is deterministic whatever
-/// else is running in the binary.
+/// The gate is process-global: tests take this lock and restore the prior value.
 static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct GateGuard {
@@ -229,7 +218,6 @@ async fn put_mic_enabled(app: &axum::Router, value: bool) -> StatusCode {
     res.status()
 }
 
-/// The whole point: the HTTP surface must reach the capture gate.
 #[tokio::test]
 async fn turning_the_microphone_off_over_http_closes_the_capture_gate() {
     let _gate = GateGuard::take();
@@ -250,8 +238,6 @@ async fn turning_the_microphone_off_over_http_closes_the_capture_gate() {
     assert!(mic_gate::ensure_mic_enabled().is_ok());
 }
 
-/// Revoking must take effect on the next capture attempt, not at the next
-/// restart. A privacy control you have to reboot to apply is not one.
 #[tokio::test]
 async fn revocation_does_not_wait_for_a_restart() {
     let _gate = GateGuard::take();
@@ -269,7 +255,6 @@ async fn revocation_does_not_wait_for_a_restart() {
     );
 }
 
-/// A settings patch that does not mention the microphone must not disturb it.
 #[tokio::test]
 async fn an_unrelated_settings_patch_leaves_the_microphone_alone() {
     let _gate = GateGuard::take();

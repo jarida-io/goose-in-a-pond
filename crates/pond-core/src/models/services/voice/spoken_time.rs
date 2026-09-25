@@ -1,12 +1,6 @@
-//! Deterministic digit-time → spoken-English conversion for voice mode.
-//!
-//! Small on-device models mis-say two-digit minutes ("23" as "oh three"), so voice
-//! prompts inject [`spoken_time`]'s phrase instead of raw `HH:MM` digits.
+//! Spoken-English times for voice prompts: small models mis-say minute "23" as "oh three".
 
-/// Render a 24-hour `hour`/`minute` as a natural spoken-English phrase,
-/// e.g. `spoken_time(5, 23) == "five twenty-three in the morning"`.
-/// `hour24` and `minute` are clamped into range (`0..24`, `0..60`) so a
-/// malformed caller never panics.
+/// Speak a 24-hour time, e.g. `(5, 23)` -> "five twenty-three in the morning"; input is clamped.
 pub fn spoken_time(hour24: u32, minute: u32) -> String {
     let hour24 = hour24.min(23);
     let minute = minute.min(59);
@@ -41,8 +35,7 @@ pub fn spoken_time(hour24: u32, minute: u32) -> String {
     format!("{hour_word} {minute_phrase} {period}")
 }
 
-/// English word for `0..=59`. Tens (20/30/40/50) combine with a hyphenated
-/// ones word for non-round values, e.g. `23 -> "twenty-three"`.
+/// English word for `0..=59`, e.g. `23 -> "twenty-three"`.
 fn number_word(n: u32) -> std::borrow::Cow<'static, str> {
     const ONES: [&str; 20] = [
         "zero",

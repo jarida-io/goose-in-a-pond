@@ -1,34 +1,5 @@
-//! PAI-1 P9's identity half is wired, and the device id it is wired from can
-//! only have come from the pond.
-//!
-//! This is the mirror image of `device_profile_rung_is_not_wired_yet.rs`, whose
-//! three claims are now all retired: that file asserted an absence and failed
-//! the day a caller landed. This asserts a presence, and a provenance.
-//!
-//! # Why source tripwires rather than only behaviour
-//!
-//! The behaviour is tested where it is pure — `pond_core::security::domain::
-//! proven_device` for what each rung resolves, `device_rung_resolves_a_member.rs`
-//! next door for the chain through real SQLite. Neither can see the two things
-//! that would silently switch this rung off or turn it dangerous:
-//!
-//! * **Off:** a `Handshake` implementor that does not answer `caller_for_token`
-//!   returns `Ok(None)`, so no request carries a device, so the strongest rung
-//!   is unreachable — and nothing errors. `dead_code` cannot warn about it: the
-//!   method is a `pub` trait item with a default body.
-//! * **Dangerous:** `Principal::device_id` filled from a header, a body field or
-//!   a query parameter. `IdentificationSource::PairedDevice` outranks face and
-//!   explicit identification, so a client-asserted device id would outrank every
-//!   proof the pond can make — the same argument that put the pairing
-//!   attribution on the CODE and not on the pairing request.
-//!
-//! Both are one line, in a file the behavioural tests do not read.
-//!
-//! `include_str!` creates no dependency edge and needs no link, so this runs in
-//! CI's fast pass — `ci.yml` has no `cargo test -p pond-server` and no
-//! `cargo test -p pond-api` in the fast set for this crate's purposes, and a
-//! guard placed next to `main.rs` would never fire on a pull request (PAI-2 P3's
-//! lesson).
+//! The device rung is wired, and a principal's device id can only come from the pond's token.
+//! `include_str!` adds no dependency edge, so this runs in CI's fast pass (no pond-server tests).
 
 use std::path::{Path, PathBuf};
 
@@ -37,10 +8,7 @@ const ROUTES: &str = include_str!("../../pond-api/src/routes.rs");
 const POLICY: &str = include_str!("../../pond-core/src/security/ports/policy.rs");
 const HANDSHAKE_PORT: &str = include_str!("../../pond-core/src/security/ports/handshake.rs");
 
-/// The workspace's `crates/` directory, for the tests that walk every file
-/// rather than reading a named one. A guard that names today's files cannot see
-/// the implementor added tomorrow, which is the assertion-window failure this
-/// programme keeps re-learning.
+/// The workspace `crates/` dir, walked so a guard also sees files added after it was written.
 fn crates_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -56,8 +24,7 @@ fn rust_sources() -> Vec<(PathBuf, String)> {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                // `target/` under a crate would be another checkout's build
-                // artifacts, never source.
+                // A `target/` under a crate is build output, never source.
                 if path.file_name().is_some_and(|n| n == "target") {
                     continue;
                 }
@@ -74,14 +41,8 @@ fn rust_sources() -> Vec<(PathBuf, String)> {
     out
 }
 
-/// Everything before the `#[cfg(test)] mod …`, i.e. the part of a file that
-/// ships. Test doubles legitimately construct principals with devices on them;
-/// production has exactly one place that may.
-///
-/// Cutting at the first `#[cfg(test)]` of any kind is wrong and was wrong here
-/// on the first run: `middleware/mod.rs` has a `#[cfg(test)] fn` two hundred
-/// lines above `auth_middleware`, so that rule sliced the auth path itself out
-/// of "production" and every assertion below passed by reading nothing.
+/// The shipped part of a file: everything before its `#[cfg(test)] mod`. Not the first
+/// `#[cfg(test)]`: `middleware/mod.rs` has a `#[cfg(test)] fn` above `auth_middleware`.
 fn production_slice(src: &str) -> &str {
     let mut from = 0usize;
     while let Some(at) = src[from..].find("#[cfg(test)]") {
@@ -95,15 +56,11 @@ fn production_slice(src: &str) -> &str {
     src
 }
 
-/// Whether a path is test code rather than shipped code.
 fn is_test_path(path: &Path) -> bool {
     path.components()
         .any(|c| c.as_os_str() == "tests" || c.as_os_str() == "benches")
 }
 
-/// Guard against the guard. If an `include_str!` stops pointing at the file this
-/// test believes it points at, every assertion below passes by matching nothing
-/// — four of this programme's recorded vacuous-test incidents were that shape.
 #[test]
 fn the_files_this_test_reads_are_the_ones_it_thinks_they_are() {
     assert!(
@@ -140,13 +97,7 @@ fn the_files_this_test_reads_are_the_ones_it_thinks_they_are() {
 
 // ── The device's provenance ────────────────────────────────────────────────
 
-/// `Principal::with_device` has exactly ONE production call site, it is the auth
-/// middleware, and its argument is the handshake lookup's own answer.
-///
-/// This is the assertion about an ARGUMENT rather than a presence, and it is the
-/// one that matters most: `.with_device(header_value)` compiles, wires, streams
-/// and looks exactly like this line in a diff. A second call site anywhere else
-/// is the same defect with more steps.
+/// One production `with_device` call: the auth middleware's, fed the token lookup's answer.
 #[test]
 fn the_device_on_a_principal_can_only_have_come_from_the_token() {
     let mut sites: Vec<(PathBuf, String)> = Vec::new();
@@ -179,10 +130,7 @@ fn the_device_on_a_principal_can_only_have_come_from_the_token() {
          layer there is no token to have proved anything, so whatever that argument is, the pond \
          did not issue it."
     );
-    // The ARGUMENT, exactly, and not merely "mentions the right variable
-    // somewhere". `.with_device(asserted.unwrap_or(caller.device_id))` contains
-    // `caller.device_id` and is the whole defect; that mutation was run, and
-    // this is the assertion that was rewritten because of it.
+    // Match the argument exactly: `asserted.unwrap_or(caller.device_id)` also contains it.
     let argument = line
         .split_once(".with_device(")
         .map(|(_, rest)| rest)
@@ -203,13 +151,7 @@ fn the_device_on_a_principal_can_only_have_come_from_the_token() {
     );
 }
 
-/// The middleware reads a device from the token lookup and from nothing else.
-///
-/// The previous test says `with_device`'s argument is right; this one says no
-/// second spelling of "the device" got into the auth path at all — an
-/// `X-Device-Id` header parsed into a local and threaded through would satisfy
-/// the argument check by passing a variable that is not `caller.device_id`, but
-/// this catches the parse.
+/// Also catches a device header parsed into a local, which the argument check can't see.
 #[test]
 fn the_auth_middleware_never_reads_a_device_from_the_client() {
     let production = production_slice(MIDDLEWARE);
@@ -245,13 +187,7 @@ fn the_auth_middleware_never_reads_a_device_from_the_client() {
     }
 }
 
-/// The dev loopback bypass returns before a token is read, so it carries no
-/// device — and must not acquire one.
-///
-/// Getting this wrong is the failure worth naming: resolving a loopback caller
-/// to "the device that paired most recently" would make every local request
-/// speak as whoever last paired a phone, on a bypass whose whole point is that
-/// nobody authenticated.
+/// The bypass authenticates nobody, so a "last-paired device" fallback would forge a member.
 #[test]
 fn the_loopback_bypass_carries_no_device() {
     let production = production_slice(MIDDLEWARE);
@@ -285,8 +221,6 @@ fn the_loopback_bypass_carries_no_device() {
     );
 }
 
-/// `Principal` has no other way to acquire a device: the three constructors all
-/// start it at `None`, and nothing else assigns the field.
 #[test]
 fn every_principal_starts_with_no_device() {
     let production = production_slice(POLICY);
@@ -305,14 +239,7 @@ fn every_principal_starts_with_no_device() {
 
 // ── The rung is reachable ──────────────────────────────────────────────────
 
-/// Every `impl Handshake for` either answers `caller_for_token` or is on the
-/// allowlist below, with a reason.
-///
-/// The port defaults this method to `Ok(None)` deliberately — the default
-/// narrows, so a forgotten override loses a capability rather than granting one
-/// — but a forgotten override on the SQLite adapter would make PAI-1 P9 inert
-/// on every real pond while the whole workspace stayed green. That is the exact
-/// shape this programme has shipped three times.
+/// `caller_for_token` defaults to `Ok(None)`, so a missed override silently disables the rung.
 #[test]
 fn every_handshake_adapter_answers_who_a_token_belongs_to() {
     // (type name, why it legitimately cannot answer)
@@ -346,8 +273,7 @@ fn every_handshake_adapter_answers_who_a_token_belongs_to() {
                 .next()
                 .unwrap_or("")
                 .to_string();
-            // Impl blocks in this workspace are at column 0, so the first
-            // line that is exactly `}` closes this one.
+            // Impls sit at column 0 here, so the first bare `}` line closes this one.
             let rest = &body[start..];
             let end = rest.find("\n}\n").map(|e| e + 3).unwrap_or(rest.len());
             let block = &rest[..end];
@@ -388,8 +314,7 @@ fn every_handshake_adapter_answers_who_a_token_belongs_to() {
         );
     }
 
-    // A stale allowlist entry is a hole: it excuses a name nothing implements,
-    // and the day something does, it is excused before anyone looks.
+    // A stale entry would pre-excuse whatever later takes that name.
     for (allowed, _) in ALLOWED_SILENT {
         assert!(
             found.iter().any(|(name, _, _)| name == allowed),
@@ -399,14 +324,7 @@ fn every_handshake_adapter_answers_who_a_token_belongs_to() {
     }
 }
 
-/// `client_id_for_token` is derived from `caller_for_token` and not implemented
-/// beside it.
-///
-/// This is what makes the default above survivable. The two lookups answer
-/// questions about the same `session_tokens` row; implemented separately they
-/// can drift into disagreeing about which client a token belongs to, and — more
-/// to the point — an adapter that drops the `caller_for_token` override would
-/// keep answering client ids and lose only the device, which is the silent half.
+/// A separate `client_id_for_token` could disagree, and would hide a lost device override.
 #[test]
 fn the_client_id_lookup_rides_on_the_caller_lookup() {
     assert!(
@@ -431,8 +349,7 @@ fn the_client_id_lookup_rides_on_the_caller_lookup() {
 
 // ── The turn is threaded ───────────────────────────────────────────────────
 
-/// `resolve_turn_scope` feeds the resolver from the device rung, and takes the
-/// device as a type only the auth layer can produce.
+/// The device arrives as a `ProvenDevice`, which only the auth layer can produce.
 #[test]
 fn the_turn_resolver_is_fed_from_the_device_rung() {
     assert!(
@@ -453,15 +370,9 @@ fn the_turn_resolver_is_fed_from_the_device_rung() {
     );
 }
 
-/// Every call site passes one. A handler that quietly passes
-/// `ProvenDevice::none()` because it was the shortest way to compile is a turn
-/// that cannot identify its speaker — and it is invisible.
 #[test]
 fn every_turn_resolution_is_handed_a_device() {
-    // The definition's own `(` matches too. It is excluded by what precedes it
-    // -- `async fn ` -- rather than by the shape of the line, because the
-    // definition's arguments are one per line and every shape-based filter for
-    // that also filters out a wrapped call.
+    // Exclude the definition by its `async fn ` prefix: shape filters also drop wrapped calls.
     let mut definitions = 0usize;
     let mut call_sites: Vec<String> = Vec::new();
     for (at, _) in ROUTES.match_indices("resolve_turn_scope(") {
@@ -490,10 +401,7 @@ fn every_turn_resolution_is_handed_a_device() {
         call_sites.len()
     );
     for call in &call_sites {
-        // The THIRD argument, exactly, and not "the call mentions a device
-        // somewhere". `&ProvenDevice::none()` is a legal third argument, is the
-        // shortest way to make a handler compile, and switches the rung off for
-        // that route with nothing to see in a diff. That mutation was run.
+        // Exact third argument: `&ProvenDevice::none()` compiles and silently turns the rung off.
         let third = call
             .split_once('(')
             .map(|(_, args)| args)
@@ -511,8 +419,6 @@ fn every_turn_resolution_is_handed_a_device() {
     }
 }
 
-/// The handler-side halves: each route reads the device from its `Principal`,
-/// and there is one function that does it.
 #[test]
 fn handlers_take_the_device_from_the_principal() {
     assert!(
@@ -530,9 +436,6 @@ fn handlers_take_the_device_from_the_principal() {
     );
 }
 
-/// No client-facing request body or query carries a device. This is the
-/// structural half of "a device id supplied by the client is ignored": ignoring
-/// it is not a check somebody remembered to write, there is nowhere to put it.
 #[test]
 fn no_request_dto_on_a_turn_route_has_a_device_field() {
     for dto in [
@@ -560,24 +463,7 @@ fn no_request_dto_on_a_turn_route_has_a_device_field() {
 
 // ── The assembly point, which nothing else can reach ───────────────────────
 
-/// No production site fills the paired-device rung with anything but a bare
-/// `DeviceRung::profile_id()`.
-///
-/// **This overlaps `the_turn_resolver_is_fed_from_the_device_rung` above and is
-/// not a replacement for it.** Worth saying plainly, because the first version
-/// of this comment claimed the seam was uncovered and that was wrong: the
-/// mutation `.profile_id().or(Some("liz".to_string()))` fails that test too. I
-/// had run it against `device_rung_resolves_a_member.rs` alone -- which does
-/// leave the seam open, since it reproduces `resolve_turn_scope` "minus the
-/// `AppState` this crate cannot build" and so tests every PIECE and not the
-/// function that assembles them -- and mis-attributed the gap.
-///
-/// What this adds over the literal check is two things. It is a property rather
-/// than a string, so rustfmt reflowing that line cannot turn the guard off; and
-/// it covers EVERY file, so a second site added somewhere else is caught, which
-/// a `ROUTES.contains` cannot see. The vacuity control is the other half: with
-/// only `None` sites left it fails rather than passing, so un-wiring the rung
-/// is not a way to satisfy it.
+/// Overlaps the literal check above, but survives rustfmt reflows and covers every file.
 #[test]
 fn the_only_thing_that_can_fill_the_paired_device_rung_is_the_device_rung() {
     let mut sites: Vec<(PathBuf, String, String)> = Vec::new();
@@ -600,9 +486,7 @@ fn the_only_thing_that_can_fill_the_paired_device_rung_is_the_device_rung() {
         }
     }
 
-    // Vacuity control: if nothing fills the rung from a device any more, PAI-1
-    // P9's identity half has been un-wired and this test would otherwise pass
-    // by finding only `None`s.
+    // Vacuity control: only `None` sites would pass the check below trivially.
     let from_a_device: Vec<&(PathBuf, String, String)> = sites
         .iter()
         .filter(|(_, _, argument)| argument != "None")
@@ -613,18 +497,7 @@ fn the_only_thing_that_can_fill_the_paired_device_rung_is_the_device_rung() {
          identity half is inert again and the strongest rung of the resolver is unreachable."
     );
 
-    // The property. Every site either declines the rung outright, or hands it a
-    // `DeviceRung`'s own answer with NOTHING appended: `.or(..)`, `.or_else(..)`
-    // and `.unwrap_or(..)` all compile, all look like this line in a diff, and
-    // all mean the strongest rung answers `Some` when the pond knows nothing.
-    //
-    // This exists because the behavioural suite next door cannot see it. That
-    // file says in its own doc comment that it reproduces `resolve_turn_scope`
-    // "minus the `AppState` this crate cannot build", so it tests every PIECE
-    // and not the function that assembles them -- and the mutation
-    // `device_rung.profile_id().or(Some("liz".to_string()))` was applied to
-    // `routes.rs` with all eight of its tests staying green. That is a pond
-    // where an unreadable attribution store silently makes everybody Liz.
+    // Nothing may follow `.profile_id()`: any `.or(..)` lets the top rung answer on no evidence.
     let bad: Vec<&(PathBuf, String, String)> = from_a_device
         .iter()
         .copied()
@@ -639,7 +512,6 @@ fn the_only_thing_that_can_fill_the_paired_device_rung_is_the_device_rung() {
          outranks every one of them, so a default here outranks every proof the pond can make."
     );
 
-    // And the assembly point is where it should be.
     assert!(
         from_a_device
             .iter()

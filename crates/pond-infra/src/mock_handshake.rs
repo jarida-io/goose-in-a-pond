@@ -5,12 +5,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Mock implementation of Handshake for testing and development.
-///
-/// Stores session tokens in memory and validates them.
-/// In production, this would be replaced with a real authentication system.
+/// In-memory `Handshake` for tests and development.
 pub struct MockHandshake {
-    /// Session tokens mapped to their validity
     valid_tokens: Arc<RwLock<HashMap<String, bool>>>,
 }
 
@@ -21,12 +17,10 @@ impl MockHandshake {
         }
     }
 
-    /// Add a valid token for testing
     pub async fn add_valid_token(&self, token: String) {
         self.valid_tokens.write().await.insert(token, true);
     }
 
-    /// Revoke a token for testing
     pub async fn revoke_token_for_testing(&self, token: &str) {
         self.valid_tokens
             .write()
@@ -44,7 +38,6 @@ impl Default for MockHandshake {
 #[async_trait]
 impl Handshake for MockHandshake {
     async fn handshake(&self, request: HandshakeRequest) -> Result<HandshakeResponse> {
-        // Generate a simple token: client_id:timestamp
         let token = format!(
             "{}:{}",
             request.client_id,
@@ -54,7 +47,6 @@ impl Handshake for MockHandshake {
                 .as_secs()
         );
 
-        // Store as valid
         self.valid_tokens.write().await.insert(token.clone(), true);
 
         Ok(HandshakeResponse {
@@ -118,7 +110,6 @@ mod tests {
         let response = hs.handshake(request).await.unwrap();
         let token = response.session_token.unwrap();
 
-        // Token should be valid after handshake
         let is_valid = hs.validate_token(&token).await.unwrap();
         assert!(is_valid);
     }
@@ -143,13 +134,10 @@ mod tests {
         let response = hs.handshake(request).await.unwrap();
         let token = response.session_token.unwrap();
 
-        // Token should be valid
         assert!(hs.validate_token(&token).await.unwrap());
 
-        // Revoke it
         hs.revoke_token(&token).await.unwrap();
 
-        // Token should no longer be valid
         assert!(!hs.validate_token(&token).await.unwrap());
     }
 }

@@ -30,10 +30,7 @@ use std::sync::Arc;
 
 type MatchFn = Box<dyn Fn(&str) -> bool + Send + Sync>;
 
-/// Routes requests to specialist sub-agents based on message content.
-///
-/// Routes are evaluated in insertion order; the first matching sub-agent is
-/// used. If none match, `fallback` handles the request.
+/// Routes each request to the first matching sub-agent, in insertion order, else `fallback`.
 pub struct DelegatingAgent {
     routes: Vec<(MatchFn, Arc<dyn Agent>)>,
     fallback: Arc<dyn Agent>,
@@ -69,8 +66,7 @@ impl DelegatingAgent {
 
 #[async_trait]
 impl Agent for DelegatingAgent {
-    /// Classify and dispatch; the sub-agent receives the original request
-    /// unchanged so `session_id` (shared context) is preserved end-to-end.
+    /// Dispatch the request unchanged, so the shared `session_id` is preserved.
     async fn chat(&self, request: AgentRequest) -> Result<AgentResponse> {
         self.select(&request.message).chat(request).await
     }
@@ -141,8 +137,6 @@ mod tests {
 
     // ── Routing classifier used by both tests ─────────────────────────────────
 
-    /// Returns true if the alert message implies a physical device action
-    /// (motion, presence, temperature, security, flood).
     fn is_device_actionable(msg: &str) -> bool {
         let lower = msg.to_lowercase();
         [
@@ -159,9 +153,6 @@ mod tests {
 
     // ── Concrete use case: alerts-triage agent ────────────────────────────────
 
-    /// Proves that the triage agent delegates device-actionable alerts to the
-    /// DeviceAgent and informational alerts to the AckAgent, with shared
-    /// session_id flowing through unchanged.
     #[tokio::test]
     async fn alerts_triage_delegates_to_device_agent() {
         let session_id = "home-session-42";
@@ -171,7 +162,6 @@ mod tests {
 
         let triage = DelegatingAgent::new(ack_agent).route(is_device_actionable, device_agent);
 
-        // Device-actionable alert → DeviceAgent
         let device_resp = triage
             .chat(make_request(
                 "motion detected in living room — turn on the lights",
@@ -190,7 +180,6 @@ mod tests {
             Some("DeviceAgent")
         );
 
-        // Informational alert → AckAgent (fallback)
         let ack_resp = triage
             .chat(make_request(
                 "storm warning: heavy rain expected this evening",
@@ -210,13 +199,10 @@ mod tests {
         );
     }
 
-    /// Proves that session_id is shared — the sub-agent receives exactly the
-    /// same session_id as the triage agent, enabling a common conversation thread.
     #[tokio::test]
     async fn session_id_is_shared_across_delegation() {
         let session_id = "shared-ctx-99";
 
-        // Use a sub-agent that echoes the session_id in its response text.
         struct SessionEchoAgent;
         #[async_trait]
         impl Agent for SessionEchoAgent {
@@ -256,8 +242,6 @@ mod tests {
         );
     }
 
-    /// Proves the streaming path routes correctly and carries the shared session_id
-    /// through the Done event.
     #[tokio::test]
     async fn stream_routing_carries_session_id() {
         let session_id = "stream-session-7";

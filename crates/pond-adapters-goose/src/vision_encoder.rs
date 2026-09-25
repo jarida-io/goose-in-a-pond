@@ -1,7 +1,5 @@
-//! Vision-encoder (mmproj) resolution for GIAP-registered GGUF models. The engine enables image
-//! input only when a registry entry has `mmproj_path` set; goose's featured lookup never matches
-//! the bare stem `register_gguf_model` registers, so this module fetches the encoder into a
-//! GIAP-owned directory and stamps the entry. The stamp is re-read on every `Provider::stream`.
+//! Vision-encoder (mmproj) resolution: the engine enables images only for a registry entry with
+//! `mmproj_path`, which goose's featured lookup never sets for our bare stems, so we stamp it.
 
 use goose::providers::local_inference::local_model_registry::{
     get_registry, MmprojSpec, FEATURED_MODELS,
@@ -10,10 +8,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-/// Directory holding downloaded vision encoders. Kept outside `models/gguf/` so the `*.gguf`
-/// scans in `resolve_gguf_filename` and `canonical_model_stem` never meet an encoder file. The
-/// leaf is the NORMALISED name: registration passes the collapsed stem while readiness checks
-/// pass the settings spelling, and both must land on one directory or the encoder downloads twice.
+/// Encoder directory: outside `models/gguf/` so `*.gguf` scans never meet an encoder, and keyed
+/// by the NORMALISED name so every spelling of a model shares it.
 #[must_use]
 pub fn mmproj_dir(data_dir: &Path, model_name: &str) -> PathBuf {
     data_dir
@@ -22,9 +18,7 @@ pub fn mmproj_dir(data_dir: &Path, model_name: &str) -> PathBuf {
         .join(normalize_model_name(model_name))
 }
 
-/// The featured vision-encoder spec for a GIAP registry stem, if the model declares one.
-/// Matching is by normalised name, not repo id: the owner prefix, a trailing `-GGUF` and any
-/// quant suffix are stripped from both sides before a case-insensitive comparison.
+/// The featured encoder spec for a stem, matched by normalised name rather than repo id.
 #[must_use]
 pub fn featured_mmproj_for_stem(stem: &str) -> Option<&'static MmprojSpec> {
     let wanted = normalize_model_name(stem);
@@ -36,10 +30,8 @@ pub fn featured_mmproj_for_stem(stem: &str) -> Option<&'static MmprojSpec> {
     })
 }
 
-/// Collapse a model spelling to a comparable key: drops the HF owner, a trailing `-GGUF`, a quant
-/// suffix in either spelling (`:Q4_K_M` or `-Q4_K_M`), a `.gguf` extension, and case. `E2B`, `E4B`
-/// and `E1B` (which has NO encoder) stay distinct. Unlike `canonical_model_stem`, the dash-quant
-/// strip is unconditional because the encoder is a property of the family, not the quant.
+/// Comparable key: drops owner, `-GGUF`, quant suffix (`:Q4_K_M`/`-Q4_K_M`), `.gguf` and case.
+/// Unlike `canonical_model_stem`, always strips the quant: encoders are per family, not quant.
 fn normalize_model_name(raw: &str) -> String {
     let no_owner = raw.rsplit('/').next().unwrap_or(raw);
     let no_colon_quant = no_owner.split(':').next().unwrap_or(no_owner);
@@ -57,23 +49,19 @@ fn normalize_model_name(raw: &str) -> String {
     }
 }
 
-/// `true` when the model declares a vision encoder, whether or not the bytes are on disk yet.
-/// The UI should gate its attach affordance on this rather than on a ~1 GB download having
-/// finished; the turn itself checks for the bytes via [`mmproj_ready`] and says what is missing.
+/// Whether the model declares an encoder, downloaded or not; gate the UI's attach button on this.
 #[must_use]
 pub fn declares_vision(model_name: &str) -> bool {
     featured_mmproj_for_stem(model_name).is_some()
 }
 
-/// `true` when the encoder bytes are present, i.e. the next turn can actually
-/// look at an image.
+/// Whether the encoder bytes are on disk, so the next turn can see images.
 #[must_use]
 pub fn mmproj_ready(data_dir: &Path, stem: &str) -> bool {
     resolved_mmproj_path(data_dir, stem).is_some()
 }
 
-/// The on-disk encoder for a stem, if already downloaded. GIAP's own directory is checked first,
-/// then the path goose's model manager would have used, so an encoder is never fetched twice.
+/// On-disk encoder for a stem: GIAP's directory, then goose's, so none is fetched twice.
 #[must_use]
 pub fn resolved_mmproj_path(data_dir: &Path, stem: &str) -> Option<PathBuf> {
     let spec = featured_mmproj_for_stem(stem)?;
@@ -92,10 +80,7 @@ fn is_nonempty_file(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() > 0)
 }
 
-/// Stamp a resolved encoder onto the registry entry for `stem`.
-///
-/// Idempotent, and cheap enough to call on every provider build. Returns `true`
-/// when the entry ended up with an encoder attached.
+/// Idempotently stamp the encoder onto `stem`'s entry; `true` if it ends up attached.
 pub fn stamp_registry_entry(data_dir: &Path, stem: &str) -> bool {
     let Some(path) = resolved_mmproj_path(data_dir, stem) else {
         return false;
@@ -118,9 +103,7 @@ pub fn stamp_registry_entry(data_dir: &Path, stem: &str) -> bool {
     updated.mmproj_size_bytes = size;
     updated.mmproj_checked = true;
     updated.settings.vision_capable = true;
-    // The engine subtracts this from its context-memory budget before sizing the
-    // KV cache; leaving it at zero would over-allocate context and then OOM when
-    // the encoder loads.
+    // The engine budgets KV around this; zero would over-allocate and OOM on encoder load.
     updated.settings.mmproj_size_bytes = size;
 
     match registry.add_model(updated) {
@@ -140,17 +123,14 @@ pub fn stamp_registry_entry(data_dir: &Path, stem: &str) -> bool {
     }
 }
 
-/// Stems whose encoder download is already running, so repeated provider builds
-/// do not start the same ~1 GB transfer several times over.
+/// Stems with an encoder download running, so provider builds don't start it twice.
 fn in_flight() -> &'static Mutex<HashSet<String>> {
     static IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-/// Ensure the vision encoder for `stem` is available, downloading it in the background if not.
-/// Returns immediately: this runs inside a provider build on the model-switch path, and blocking
-/// on a ~1 GB transfer would stall the first chat for minutes. The turn reports what is missing
-/// via [`mmproj_ready`]; the engine re-reads the registry per generation, so the stamp lands live.
+/// Fetch `stem`'s encoder in the background if missing. Never blocks: it runs on the model-switch
+/// path, and the engine re-reads the registry per generation, so the stamp lands live.
 pub fn ensure_mmproj_available(data_dir: &Path, stem: &str) {
     let Some(spec) = featured_mmproj_for_stem(stem) else {
         return; // text-only model, nothing to fetch
@@ -204,8 +184,7 @@ pub fn ensure_mmproj_available(data_dir: &Path, stem: &str) {
     });
 }
 
-/// Stream a URL to `dest`, via a `.part` file so an interrupted transfer can
-/// never be mistaken for a complete encoder.
+/// Stream a URL to `dest` via a `.part` file, so a partial download never looks complete.
 async fn download_to(url: &str, dir: &Path, dest: &Path) -> anyhow::Result<u64> {
     use futures::StreamExt;
     use tokio::io::AsyncWriteExt;
@@ -213,13 +192,11 @@ async fn download_to(url: &str, dir: &Path, dest: &Path) -> anyhow::Result<u64> 
     tokio::fs::create_dir_all(dir).await?;
     let part = dest.with_extension("part");
 
-    // PAI-2 P6a: the single egress gate for every encoder fetch. It runs inside a spawned task,
-    // so `record_egress`'s `tokio::spawn` has a runtime. The caller logs a failed download and
-    // leaves the model text-only, so a refusal degrades rather than breaks.
+    // Egress gate for every encoder fetch; must run in a task (`record_egress` spawns). A refusal
+    // only leaves the model text-only.
     let call = pond_core::shared::services::egress::begin(url, "GET")?;
     let sent = reqwest::Client::builder()
-        // A ~1 GB transfer on a slow home link must not trip a default timeout;
-        // the read timeout below is what catches a genuinely dead connection.
+        // No total timeout for ~1 GB on a slow link; the read timeout catches dead connections.
         .read_timeout(std::time::Duration::from_secs(120))
         .build()?
         .get(url)
@@ -254,9 +231,6 @@ mod tests {
         assert_eq!(spec.filename, "mmproj-BF16.gguf");
     }
 
-    /// Both quant spellings must resolve: `Settings` stores `chat_model = "gemma-4-E2B-it-Q4_K_M"`
-    /// while the registry key is the collapsed stem `gemma-4-E2B-it`, and both spellings reach
-    /// this module (readiness and capability checks use the settings one, registration the stem).
     #[test]
     fn both_quant_spellings_resolve() {
         assert!(featured_mmproj_for_stem("gemma-4-E2B-it-Q4_K_M").is_some());
@@ -266,13 +240,10 @@ mod tests {
         assert!(featured_mmproj_for_stem("gemma-4-E4B-it-Q5_K_M").is_some());
     }
 
-    /// A quant strip must not eat a real name segment.
     #[test]
     fn a_non_quant_trailing_segment_is_kept() {
-        // "it" is not a quant tag, so the stem survives intact and still matches.
         assert_eq!(normalize_model_name("gemma-4-E2B-it"), "gemma-4-e2b-it");
-        // A hypothetical model whose last segment merely starts with Q but has no
-        // digit after it is not treated as a quant.
+        // A Q-prefixed segment without a digit is not a quant.
         assert_eq!(normalize_model_name("some-model-Queen"), "some-model-queen");
     }
 
@@ -282,8 +253,6 @@ mod tests {
         assert!(featured_mmproj_for_stem("unsloth/gemma-4-E2B-it-GGUF:Q4_K_M").is_some());
     }
 
-    /// The whole reason a name heuristic is not good enough: E1B matches
-    /// `gemma-4` but ships no vision encoder.
     #[test]
     fn e1b_declares_no_vision_even_though_it_is_a_gemma_4() {
         assert!(!declares_vision("gemma-4-E1B-it"));
@@ -325,9 +294,6 @@ mod tests {
         );
     }
 
-    /// Every spelling of one model must resolve to ONE encoder directory,
-    /// otherwise the registration path and the readiness check disagree and the
-    /// encoder is downloaded twice and found neither time.
     #[test]
     fn every_spelling_of_a_model_shares_one_encoder_directory() {
         let d = Path::new("/data");
@@ -347,8 +313,7 @@ mod tests {
     fn an_absent_encoder_is_not_ready() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(!mmproj_ready(tmp.path(), "gemma-4-E2B-it"));
-        // A text-only model is never "ready" either, and must not be reported as
-        // declaring vision.
+        // A text-only model is never "ready" either.
         assert!(!mmproj_ready(tmp.path(), "gemma-4-E1B-it"));
     }
 

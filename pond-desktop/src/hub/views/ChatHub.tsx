@@ -24,18 +24,7 @@ import "./chat.css";
 
 // ── Types ─────────────────────────────────────────────────────
 
-/**
- * One rendered row.
- *
- * The Hub shows fewer things about a turn than the Chat section does -- no
- * thinking disclosure, no per-message actions, one inline card rather than a
- * list of tool chips -- so it renders a PROJECTION of the shared `Message`
- * rather than keeping a parallel model. Keeping two models was how the two
- * surfaces came to disagree about what a frame means.
- *
- * The seed rows below are the other reason this type exists: they are
- * presentation, not conversation, so they never enter the store.
- */
+/** A rendered row: a projection of the shared `Message` (not a parallel model), or a seed row. */
 interface Row {
   id: string;
   who: "user" | "goose";
@@ -45,9 +34,8 @@ interface Row {
   turnStats?: TurnStats;
   /** Set when the agent stopped on its turn budget — renders a Continue action. */
   turnLimit?: number;
-  /** Set when the server said the context window is filling (PAI-4 P7b). */
+  /** Set when the server said the context window is filling. */
   contextWarning?: ContextWarning;
-  /** PAI-6 P6. Delegations this turn started. */
   delegations?: SubagentRun[];
   images?: string[];
 }
@@ -87,9 +75,7 @@ const CHIPS = [
 
 /** Project a stored message into what this surface renders. */
 function toRow(m: Message): Row {
-  // The Hub shows ONE inline card, and the last tool a turn called is the one
-  // its answer is about -- an answer that checked the weather and then the
-  // locks is about the locks.
+  // One inline card: the last tool a turn called is the one its answer is about.
   const lastTool = m.cards?.[m.cards.length - 1]?.tool;
   return {
     id: String(m.id),
@@ -105,7 +91,6 @@ function toRow(m: Message): Row {
   };
 }
 
-// Resolve tool call to an inline card kind
 function toolToCard(toolName: string): CardKind | undefined {
   if (!toolName) return undefined;
   const lower = toolName.toLowerCase();
@@ -121,15 +106,11 @@ export function ChatHubView() {
   const state = useAppState();
   const dispatch = useAppDispatch();
 
-  // The conversation lives in the shared store, so a turn started here keeps
-  // running when the Hub changes route -- which remounts this whole subtree --
-  // and the Chat section shows the same conversation rather than a second one.
+  // In the shared store, so a turn survives the remount on a Hub route change and Chat shows the same one.
   const run = useChatRun();
   const { messages, busy } = run;
 
-  // Presentation, not conversation: an empty pond opens on something to read
-  // rather than a blank pane. The seed is replaced by the first real message
-  // and never enters the store.
+  // Presentation only: shown until the first real message, never stored.
   const [seed, setSeed] = useState<Row[]>(() => makeSeed(""));
 
   // Populate the greeting with the real user name once settings are loaded
@@ -146,12 +127,10 @@ export function ChatHubView() {
   const [showTurnStats, setShowTurnStats] = useState(false);
   const [attachments, setAttachments] = useState<PreparedImage[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
-  // Fail-open: an unknown/failed capabilities fetch never disables attaching —
-  // it only disables once we've SUCCESSFULLY confirmed the model lacks vision.
+  // Fail-open: attaching is disabled only once the model is confirmed to lack vision.
   const [visionCapable, setVisionCapable] = useState(true);
   const [capabilitiesKnown, setCapabilitiesKnown] = useState(false);
 
-  // Load vision capability once the server is reachable.
   useEffect(() => {
     if (!state.serverOnline) return;
     api.getModelCapabilities()
@@ -218,20 +197,12 @@ export function ChatHubView() {
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  // Auto-scroll to bottom on new messages
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, busy]);
 
-  /**
-   * Hand a turn to the store, keeping only what belongs to the composer.
-   *
-   * The stream loop that used to live here is gone: it was a second copy of
-   * the Chat section's, and two copies is how one surface came to handle
-   * frames the other did not. Both now fold the same stream in `chatRunStore`,
-   * and this file decides only what to draw.
-   */
+  /** Hands the turn to `chatRunStore`, which owns the stream; this keeps only the composer's part. */
   const sendMessage = useCallback(
     (raw?: string) => {
       const t = (raw ?? text).trim();
@@ -239,9 +210,7 @@ export function ChatHubView() {
 
       setText("");
 
-      // The bubble keeps its own copy of each previewUrl and the store owns
-      // revoking them, so clear the tray WITHOUT revoking -- doing so would
-      // blank the thumbnail on the message just sent.
+      // The store owns revoking previewUrls; revoking here would blank the sent message's thumbnail.
       sendTurn({
         text: t,
         images: attachments.map((a) => ({ data: a.data, mime_type: a.mime_type })),
@@ -253,8 +222,7 @@ export function ChatHubView() {
     [text, attachments, busy],
   );
 
-  // Take focus back when the model stops -- what the old stream loop's
-  // `finally` did, and the only part of it that belonged to this component.
+  // Take focus back when the model stops.
   const prevBusyRef = useRef(busy);
   useEffect(() => {
     const wasBusy = prevBusyRef.current;
@@ -276,7 +244,6 @@ export function ChatHubView() {
 
   const canSend = (text.trim().length > 0 || attachments.length > 0) && !busy;
 
-  // The seed stands in only until there is a real conversation to show.
   const rows: Row[] = messages.length > 0 ? messages.map(toRow) : seed;
 
   return (

@@ -1,15 +1,5 @@
-//! Which helper model a chat model needs for speculative decoding.
-//!
-//! Speculative decoding runs a second, tiny model beside the chat model: it
-//! proposes tokens, the chat model verifies them, and several can be accepted
-//! per forward pass. Measured on a Jetson Orin Nano, that takes a real turn
-//! from 31 to 49 tok/s.
-//!
-//! This mapping lives in the domain because two layers need it and neither
-//! should own it: the server fetches the file, and the local-inference adapter
-//! decides whether to point the engine at it. A copy in each would drift, and
-//! the failure mode of a drifted copy is a drafter that downloads and is never
-//! used.
+//! The speculative-decoding drafter each chat model needs, shared by the server that fetches it
+//! and the adapter that uses it: a drifted copy downloads a drafter that is never used.
 
 /// The drafter that pairs with a given chat model.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,22 +11,14 @@ pub struct DrafterSpec {
     pub approx_mb: u64,
 }
 
-/// The MTP drafter for `chat_model`, if one exists.
-///
-/// Matched on the model FAMILY rather than the full id, because one family
-/// appears under many spellings -- `gemma-4-E2B-it`, `gemma-4-E2B-it-qat`,
-/// `gemma-4-E2B-it-qat-UD-Q4_K_XL` -- while a drafter is tied to the
-/// architecture and not to the quantisation.
-///
-/// The pairing is not interchangeable: an E4B drafter has a different hidden
-/// size and cannot draft for an E2B target.
+/// The MTP drafter for `chat_model`, matched on family and size, not quantisation. Sizes don't
+/// mix: an E4B drafter has a different hidden size and cannot draft for an E2B target.
 pub fn drafter_for(chat_model: &str) -> Option<DrafterSpec> {
     let m = chat_model.to_ascii_lowercase();
     if !m.contains("gemma-4") && !m.contains("gemma4") {
         return None;
     }
-    // Gemma 4's drafters ship at the root of the same unsloth repositories the
-    // quantised weights come from.
+    // Gemma 4 drafters ship at the root of the unsloth repos the quantised weights come from.
     if m.contains("e2b") {
         Some(DrafterSpec {
             id: "mtp-gemma-4-E2B-it",

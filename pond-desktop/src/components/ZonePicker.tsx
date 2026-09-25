@@ -1,13 +1,5 @@
 // ─── One time-zone picker, everywhere ────────────────────────────────────────
-//
-// There were three <select>s over three different hand-maintained lists — 16
-// zones in Settings, 18 in Schedules, 13 in the wizard — so the same household
-// was offered a different world depending on which screen it was standing in
-// front of, and a zone picked in one could be unofferable in another.
-//
-// This renders the server's IANA catalogue (597 zones), with the offset beside
-// each name because that is how somebody confirms they picked the right one of
-// two similar names.
+// Lists the server's IANA catalogue, with offsets so two similar names can be told apart.
 
 import { useEffect, useState } from "react";
 import { allZones, deviceZone } from "../lib/place";
@@ -26,8 +18,7 @@ export function ZonePicker({ value, onChange, className, id, ...rest }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    // `allZones` falls back to this webview's own catalogue and never rejects,
-    // so there is no error branch to render here.
+    // `allZones` never rejects (it falls back to the webview's catalogue), so no error branch.
     allZones().then((z) => {
       if (!cancelled) setZones(z);
     });
@@ -38,9 +29,7 @@ export function ZonePicker({ value, onChange, className, id, ...rest }: Props) {
 
   const current = value || deviceZone();
   const list = zones ?? [];
-  // A stored zone the catalogue does not list is kept and shown rather than
-  // silently replaced by whatever happens to be first — opening a picker must
-  // never change the value behind it.
+  // Keep and show a stored zone the catalogue lacks: opening the picker must never change it.
   const missing = current && !list.some((z) => z.zone === current);
 
   return (

@@ -20,8 +20,7 @@ vi.mock("../api/PondApiClient", () => ({
   },
 }));
 
-// A commissioned Matter light, as the bridge registers it: stable `matter-<id>`
-// id, a cluster-inferred `device_type`, online.
+// A Matter light as the bridge registers it.
 const matterLight: Device = {
   id: "matter-2",
   name: "Living Room Light",
@@ -73,7 +72,6 @@ describe("Devices section — Matter devices", () => {
 
     render(<Devices />);
 
-    // The device appears by name, and its cluster-inferred type is shown.
     expect(await screen.findByText("Living Room Light")).toBeTruthy();
     expect(screen.getByText("light")).toBeTruthy();
   });
@@ -87,16 +85,12 @@ describe("Devices section — Matter devices", () => {
     const { container } = render(<Devices />);
     await screen.findByText("Living Room Light");
 
-    // lucide-react renders `<svg class="lucide lucide-<name>">`, so a light gets
-    // the bulb and a lock gets the lock — not the generic monitor fallback.
+    // lucide-react renders `<svg class="lucide lucide-<name>">`.
     expect(container.querySelector(".lucide-lightbulb")).toBeTruthy();
     expect(container.querySelector(".lucide-lock")).toBeTruthy();
   });
 
   it("shows a switch icon for a Generic Switch, not the monitor fallback", async () => {
-    // A commissioned Generic Switch arrived typed `matter`, which the table above has
-    // no entry for, so it rendered the generic monitor. The backend now types it
-    // `switch`; this is the half of that fix the user can see.
     (api.listDevices as ReturnType<typeof vi.fn>).mockResolvedValue([
       { id: "matter-6", name: "Generic Switch", device_type: "switch", is_online: true },
     ]);
@@ -109,8 +103,6 @@ describe("Devices section — Matter devices", () => {
   });
 
   it("shows a hub icon for a Matter bridge, not the monitor fallback", async () => {
-    // A bridge appears beside the dozen devices behind it, so it has to be
-    // distinguishable from them at a glance.
     (api.listDevices as ReturnType<typeof vi.fn>).mockResolvedValue([
       { id: "matter-90", name: "Living Room Hub", device_type: "bridge", is_online: true },
     ]);
@@ -123,8 +115,6 @@ describe("Devices section — Matter devices", () => {
   });
 
   it("shows a droplet for a water valve, not the monitor fallback", async () => {
-    // A valve has no On/Off cluster, so it arrived typed `matter` with nothing it
-    // could do — and wearing a monitor.
     (api.listDevices as ReturnType<typeof vi.fn>).mockResolvedValue([
       { id: "matter-60", name: "Garden Valve", device_type: "valve", is_online: true },
     ]);
@@ -151,16 +141,12 @@ describe("Devices section — Matter devices", () => {
 
 describe("Devices section — power button", () => {
   it("labels the button from what the device is, not from whether it is reachable", async () => {
-    // The bug. The label read `is_online`, so a lamp that was reachable and switched
-    // OFF said "Turn off" -- and pressing it wrote the registry's `last_seen` rather
-    // than touching the lamp, which made GIAP forget the lamp instead.
     mocked(api.listDevices).mockResolvedValue([matterLight]);
     mocked(api.invokeTool).mockResolvedValue(stateSaying("matter-2", "off"));
 
     render(<Devices />);
     await screen.findByText("Living Room Light");
 
-    // Reachable, and off. The button offers the thing that is possible.
     await waitFor(() => expect(screen.getByText("Turn on")).toBeTruthy());
   });
 
@@ -182,21 +168,16 @@ describe("Devices section — power button", () => {
         args: { device_id: "matter-2", power: false },
       }),
     );
-    // And the state is read again, because a device that refused should not leave
-    // the card claiming otherwise.
+    // Read back: a device that refused must not leave the card claiming otherwise.
     await waitFor(() =>
       expect(mocked(api.invokeTool).mock.calls.some((c) => c[0].tool === "get_device_state")).toBe(
         true,
       ),
     );
-    // Never the registry's reachability, which is what this button used to write.
     expect(api.markDeviceOffline).not.toHaveBeenCalled();
   });
 
   it("offers no power button to a device that cannot be switched", async () => {
-    // A Contact Sensor and a Humidity Sensor were both showing "Turn on". The card
-    // had nothing to gate on: `capabilities` is on the wire and the client type
-    // dropped it.
     mocked(api.listDevices).mockResolvedValue([contactSensor]);
 
     render(<Devices />);
@@ -204,14 +185,11 @@ describe("Devices section — power button", () => {
 
     expect(screen.queryByText("Turn on")).toBeNull();
     expect(screen.queryByText("Turn off")).toBeNull();
-    // And nothing is asked of a device with nothing to answer.
     expect(api.invokeTool).not.toHaveBeenCalled();
   });
 
   it("moves reachability into Configure, named as what it is", async () => {
-    // Worth keeping -- there is no wake or restart primitive, so marking a device
-    // absent by hand is the only way to age one out. It just is not the device's
-    // power, and sharing a button with it made both illegible.
+    // Manual reachability stays: with no wake/restart primitive it is the only way to age a device out.
     const offlineLight: Device = { ...matterLight, is_online: false };
     mocked(api.listDevices).mockResolvedValue([offlineLight]);
     mocked(api.markDeviceOnline).mockResolvedValue(undefined);
@@ -231,8 +209,7 @@ describe("power state parsing", () => {
 
     expect(powerStateOf("matter-2 is:\n    power: on\n    brightness: 50%")).toBe(true);
     expect(powerStateOf("matter-2 is:\n    power: off")).toBe(false);
-    // A device that reported nothing is not a device that is off. Guessing `false`
-    // here would relabel every unreachable device "Turn on".
+    // No report is not "off": guessing `false` would label every unreachable device "Turn on".
     expect(powerStateOf("matter-2 reports nothing about its state.")).toBeUndefined();
     expect(powerStateOf("matter-2 is:\n    brightness: 50%")).toBeUndefined();
   });
@@ -284,11 +261,7 @@ describe("Devices section — Configure modal", () => {
   });
 
   it("shows an online device as seen now, and an offline one as when it went quiet", async () => {
-    // The pair of bugs behind this: a washer heartbeated a minute ago read
-    // "online" and "3h ago" at the same time, because the timestamp carried no
-    // zone and was parsed as local. With that fixed, an online device still
-    // should not count minutes since its last heartbeat -- it is being vouched
-    // for right now -- while an offline one wants exactly that number.
+    // Online means vouched for now, so no heartbeat age; offline shows exactly that.
     const quiet = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
     mocked(api.listDevices).mockResolvedValue([
       { ...matterLight, is_online: true, last_seen: quiet },

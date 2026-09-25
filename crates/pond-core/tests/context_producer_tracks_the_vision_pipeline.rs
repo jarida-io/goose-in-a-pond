@@ -1,26 +1,5 @@
-//! The on-pond producer's camera rule drops the label `pond-adapters-vision`
-//! emits when nothing classified the frame. This file ties the two together.
-//!
-//! # Why this is a file and not a comment
-//!
-//! `UNCLASSIFIED_CAMERA_EVENT_TYPES` is the only thing standing between a
-//! camera source and 8 640 rows a day. The pipeline's fallback label is a string
-//! literal in another crate that `pond-core` cannot depend on (the dependency
-//! direction is inward), so the coupling is real and invisible: rename
-//! `"motion"` to `"movement"` in `pipeline.rs` and every frame the camera
-//! notices becomes a durable, prompt-injected context item, with no compile
-//! error and no failing test anywhere near the change.
-//!
-//! The failure is SILENT and it is in the expensive direction, which is the pair
-//! of properties this programme has recorded twelve incidents about. So the
-//! constant is asserted against the literal the other crate actually emits, by
-//! reading its source — the same technique
-//! `context_pipeline_is_not_wired_yet.rs` uses, and for the same reason: some
-//! couplings cannot be expressed as types.
-//!
-//! This is a **tripwire, not coverage**. It proves the label this repo emits
-//! today is refused. It cannot prove anything about a third-party camera
-//! adapter, and the `pond-core` unit tests carry the behavioural claims.
+//! Ties `UNCLASSIFIED_CAMERA_EVENT_TYPES` to the fallback label `pond-adapters-vision` emits.
+//! pond-core can't depend on it, and a rename would make every frame a prompt-injected row.
 
 use std::path::{Path, PathBuf};
 
@@ -46,9 +25,7 @@ fn pipeline_source() -> String {
     })
 }
 
-/// Vacuity control, and it is the whole reason this file can be trusted: the
-/// assertions below are about the CONTENT of another crate's source, so a wrong
-/// path or an emptied file would make every one of them pass by reading nothing.
+/// Vacuity control: an emptied or reshaped file would let the assertions below match nothing.
 #[test]
 fn the_tripwire_is_reading_the_vision_pipeline() {
     let body = pipeline_source();
@@ -68,22 +45,12 @@ fn the_tripwire_is_reading_the_vision_pipeline() {
     );
 }
 
-/// Every label the pipeline falls back to when nothing classified the frame is
-/// one the producer refuses.
-///
-/// The pipeline reaches its fallback in three ways — no classifier configured,
-/// the classifier erroring, and the classifier finding nothing above its own
-/// floor — and all three write the same literal. That literal is what a build
-/// without `vision-onnx` emits for EVERY event, at the pipeline's 10-second
-/// minimum interval.
+/// A build without `vision-onnx` emits this fallback for every event, every 10 s.
 #[test]
 fn the_pipelines_unclassified_label_is_one_the_producer_refuses() {
     let body = pipeline_source();
 
-    // The fallback is written as `("motion".to_string(), ...)`. Collect every
-    // string literal the file turns into an owned event_type that way, rather
-    // than looking for one known spelling — if the label is renamed, this finds
-    // the new name and fails on it instead of silently finding nothing.
+    // Collect every `("…".to_string(), …)` literal, not one known spelling, so a rename fails.
     let mut fallbacks: Vec<String> = Vec::new();
     for fragment in body.split("(\"").skip(1) {
         let Some((literal, rest)) = fragment.split_once('"') else {

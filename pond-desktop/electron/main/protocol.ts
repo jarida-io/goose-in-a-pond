@@ -1,20 +1,6 @@
-// Serving the renderer from a custom scheme rather than file://.
-//
-// `dist/index.html` references its bundle as `/assets/index-*.js` -- absolute,
-// from the site root. That works over HTTP (which is how pond-server serves
-// the same bundle on the Jetson) and it worked under `tauri://localhost`,
-// which was a scheme origin with a root. Under `file://` it resolves to the
-// filesystem root and the page loads nothing.
-//
-// The fix is not `base: './'` in vite.config: that would change the artifact
-// pond-api embeds with include_dir!, so the desktop build and the LAN
-// dashboard would stop being the same bytes. Instead we register a privileged
-// standard scheme, which is the structural analogue of what Tauri did.
-//
-// It also gives the renderer a real, stable Origin, which is what the server's
-// CORS allowlist needs to name. `file://` sends `Origin: null`, which cannot
-// be allowlisted meaningfully and would push the server towards allowing any
-// origin -- undoing the scoping that list exists for.
+// Serves the renderer from app://giap, not file://: the bundle uses root-absolute /assets/
+// paths, and `base: './'` would change the bytes pond-api embeds. It also gives a real
+// Origin for the server's CORS allowlist, where file:// sends `Origin: null`.
 
 import { protocol, net } from "electron";
 import { join, resolve, sep } from "node:path";
@@ -27,14 +13,7 @@ export const APP_HOST = "giap";
 /** The page origin, and the string the server's CORS allowlist must carry. */
 export const APP_ORIGIN = `${APP_SCHEME}://${APP_HOST}`;
 
-/**
- * Map a request path onto a file inside `distRoot`, or null if it escapes.
- *
- * The traversal guard is the point. This is the one place a string from the
- * page reaches the filesystem, and `..` segments in a URL survive
- * normalisation often enough to be worth refusing explicitly rather than
- * trusting the URL parser.
- */
+/** Security: map a request path into `distRoot`, or null if `..` would escape it. */
 export function resolveAppPath(
   distRoot: string,
   pathname: string,
@@ -50,12 +29,8 @@ export function resolveAppPath(
 }
 
 /**
- * Declare the scheme's privileges. Must run before the app is ready, which is
- * why it is separate from `serveRendererFrom`.
- *
- * `standard` is what gives the scheme a real origin at all; `secure` puts it
- * in a secure context so the Web Crypto the auth handshake uses is available;
- * `supportFetchAPI` lets the renderer fetch pond-server over HTTP.
+ * Declare the scheme's privileges; must run before the app is ready. `standard` gives a real
+ * origin, `secure` enables the auth handshake's Web Crypto, `supportFetchAPI` allows fetch.
  */
 export function registerAppScheme(): void {
   protocol.registerSchemesAsPrivileged([
@@ -80,9 +55,7 @@ export function serveRendererFrom(distRoot: string): void {
     if (file === null) return new Response("forbidden", { status: 403 });
 
     const res = await net.fetch(pathToFileURL(file).toString());
-    // Single-page app: an unknown path is a client route, not a missing file.
-    // Anything under /assets/ genuinely missing should still 404, or a broken
-    // bundle reference silently returns HTML and fails much later.
+    // SPA fallback to index.html, except /assets/: a missing bundle file must still 404.
     if (res.status === 404 && !pathname.startsWith("/assets/")) {
       const index = resolveAppPath(distRoot, "/");
       if (index !== null) return net.fetch(pathToFileURL(index).toString());

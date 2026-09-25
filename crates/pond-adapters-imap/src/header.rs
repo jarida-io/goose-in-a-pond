@@ -1,18 +1,12 @@
-//! Decoding the header fields this connector keeps. The subject is the title of a mail
-//! context item and `embedding_text` is `title\nbody`, so a subject left as `=?UTF-8?B?...?=`
-//! embeds as line noise to the retriever and reads as line noise to a person.
+//! Header decoding: an undecoded `=?UTF-8?B?...?=` subject is noise to people and retrieval.
 
 use base64::Engine;
 
-/// Decode RFC 2047 encoded-words in a header value. Handles `B` (base64) and `Q`
-/// (quoted-printable), leaves anything it cannot decode exactly as found, and joins adjacent
-/// encoded-words without the separating whitespace the RFC says to drop.
+/// Decode RFC 2047 `B`/`Q` encoded-words; undecodable ones are left exactly as found.
 pub fn decode_rfc2047(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut rest = raw;
-    // Whether the previous token was an encoded-word: RFC 2047 says whitespace
-    // BETWEEN two encoded-words is not part of the text, which is how a subject
-    // split across several words rejoins without gaps.
+    // RFC 2047: whitespace BETWEEN two encoded-words is not part of the text.
     let mut prev_was_encoded = false;
 
     while let Some(start) = rest.find("=?") {
@@ -20,10 +14,7 @@ pub fn decode_rfc2047(raw: &str) -> String {
         if !(prev_was_encoded && before.trim().is_empty()) {
             out.push_str(before);
         }
-        // An encoded-word is `=?charset?encoding?text?=`, and the terminator must be looked
-        // for AFTER the encoding field: quoted-printable text begins with `=` constantly, so
-        // `?Q?=E2…` contains `?=` at the encoding separator and a search from the start cuts
-        // the word before its text begins, handing the whole subject back raw.
+        // Find `?=` only AFTER the encoding field: in `?Q?=E2…` the separator itself reads as `?=`.
         let after_marker = &tail[2..];
         let Some(charset_end) = after_marker.find('?') else {
             out.push_str(tail);
@@ -36,7 +27,6 @@ pub fn decode_rfc2047(raw: &str) -> String {
             out.push_str(tail);
             return out;
         };
-        // Only now is it safe to look for the terminator.
         let Some(text_end) = after_marker[enc_end + 1..]
             .find("?=")
             .map(|i| enc_end + 1 + i)
@@ -56,12 +46,11 @@ pub fn decode_rfc2047(raw: &str) -> String {
             _ => None,
         };
         match decoded {
-            // An encoded-word this pond cannot read is left verbatim rather
-            // than dropped: a subject somebody can squint at beats a blank one.
             Some(text) => {
                 out.push_str(&text);
                 prev_was_encoded = true;
             }
+            // Undecodable: keep verbatim; a subject somebody can squint at beats a blank one.
             None => {
                 out.push_str(&tail[..end + 2]);
                 prev_was_encoded = false;
@@ -129,8 +118,6 @@ mod tests {
         assert_eq!(decode_rfc2047("=?utf-8?Q?caf=C3=A9?="), "café");
     }
 
-    /// RFC 2047: whitespace between two encoded-words is not part of the text.
-    /// Without this a long subject comes back with gaps in the middle of words.
     #[test]
     fn adjacent_encoded_words_rejoin_without_the_separating_space() {
         assert_eq!(
@@ -147,9 +134,6 @@ mod tests {
         );
     }
 
-    /// Quoted-printable text begins with `=` constantly, so `?Q?=E2…` contains `?=` at the
-    /// encoding separator. A terminator search that starts from the charset finds that one,
-    /// cuts the word before its text begins, and hands the whole subject back raw.
     #[test]
     fn text_that_starts_with_an_equals_sign_does_not_end_the_word_early() {
         assert_eq!(
@@ -160,8 +144,6 @@ mod tests {
         assert_eq!(decode_rfc2047("=?UTF-8?B?4pqhIHRlc3Q=?="), "\u{26a1} test");
     }
 
-    /// A subject somebody can squint at beats a blank one, so anything
-    /// undecodable is left exactly as it arrived.
     #[test]
     fn an_unreadable_encoded_word_is_left_verbatim() {
         assert_eq!(

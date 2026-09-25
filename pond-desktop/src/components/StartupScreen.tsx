@@ -10,12 +10,7 @@ interface Props {
 
 type StartupPhase = "starting" | "connecting" | "ready" | "error";
 
-// 120 polls × 500 ms = 60 s. Cold start with face recognition + Whisper +
-// TTS warming the GGUF cache can easily take 30-45 s the very first time
-// (model auto-downloads, ONNX runtime init, sqlite migrations). The old
-// 30 s budget timed out before the parent server was ready, leaving the
-// WebView blank ("nothing shows; close-and-reopen fixes it" — by then the
-// parent server had finished booting in the background).
+// 120 × 500 ms = 60 s: a first cold start (downloads, ONNX init, migrations) can take 30-45 s.
 const MAX_POLLS = 120;
 const POLL_INTERVAL_MS = 500;
 
@@ -31,14 +26,9 @@ export function StartupScreen({ onReady }: Props) {
     const inShell = isDesktopShell();
 
     if (inShell) {
-      // Deliberately NOT awaited. A cold start loading face recognition,
-      // Whisper and TTS routinely takes over a minute, and this call does not
-      // resolve until the server answers -- awaiting it held this screen blank
-      // for the whole budget before the poll below even began. Kick it and
-      // poll concurrently; the polling is what decides when we are ready.
+      // Not awaited: it resolves only once the server answers; the poll below decides readiness.
       void invoke("ensure_server_running").catch((e: unknown) => {
-        // May fail when no binary is found. We still poll, in case the user
-        // has a server running by hand.
+        // Fails when no binary is found; keep polling in case a server was started by hand.
         console.warn("[GIAP] ensure_server_running error:", e);
       });
     }
@@ -46,8 +36,7 @@ export function StartupScreen({ onReady }: Props) {
     setPhase("connecting");
 
     if (!inShell) {
-      // Browser dev mode: poll the health endpoint directly via fetch.
-      // This lets Playwright and web browser testing work without Tauri.
+      // Browser dev mode (Playwright, no Tauri): poll the health endpoint with fetch.
       const serverUrl = defaultServerUrl();
       for (let i = 0; i < MAX_POLLS; i++) {
         await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
@@ -94,7 +83,6 @@ export function StartupScreen({ onReady }: Props) {
     setError("Could not connect to pond-server within 60 seconds.");
   }, [onReady]);
 
-  // Animated dots
   useEffect(() => {
     const id = setInterval(() => {
       setDots((d) => (d.length >= 3 ? "." : d + "."));
@@ -102,7 +90,6 @@ export function StartupScreen({ onReady }: Props) {
     return () => clearInterval(id);
   }, []);
 
-  // Start on mount
   useEffect(() => {
     tryStartup();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps

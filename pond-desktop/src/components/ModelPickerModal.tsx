@@ -56,7 +56,6 @@ export function ModelPickerModal({
     );
   }, [models, search]);
 
-  // Group by provider
   const grouped = useMemo(() => {
     const map = new Map<string, ModelEntry[]>();
     for (const m of filtered) {

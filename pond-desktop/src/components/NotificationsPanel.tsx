@@ -67,12 +67,10 @@ interface Props {
 export function NotificationsPanel({ onOpenDebrief }: Props) {
   const state = useAppState();
   const dispatch = useAppDispatch();
-  const [open, setOpen] = useState(false);        // accordion open/closed
-  const [showAll, setShowAll] = useState(false);   // show all vs limited
+  const [open, setOpen] = useState(false);
+  const [showAll, setShowAll] = useState(false);
 
-  // If panel mounts with no runs but server is online, fetch them.
-  // Covers the race where AppContext's initial fetch fired before the
-  // handshake completed (Tauri) or before schedules existed.
+  // Refetch if mounted with no runs: AppContext's first fetch may have beaten the handshake.
   useEffect(() => {
     if (!state.serverOnline || state.scheduleRuns.length > 0) return;
     let cancelled = false;
@@ -98,7 +96,6 @@ export function NotificationsPanel({ onOpenDebrief }: Props) {
         })
         .catch(() => {});
     };
-    // Try immediately, then retry once after 2s (handshake may still be in-flight)
     load();
     const retryId = setTimeout(load, 2000);
     return () => { cancelled = true; clearTimeout(retryId); };

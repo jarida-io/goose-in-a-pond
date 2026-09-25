@@ -1,7 +1,4 @@
-//! Geocoding via [Open-Meteo Geocoding API](https://geocoding-api.open-meteo.com).
-//!
-//! Resolves place names to latitude and longitude; free, no API key. Requests go to
-//! `https://geocoding-api.open-meteo.com/v1/search?name=Kisumu&count=1&language=en`.
+//! Place name → coordinates via the free, keyless Open-Meteo Geocoding API.
 
 use anyhow::{Context, Result};
 use std::time::Duration;
@@ -20,15 +17,12 @@ struct GeoResult {
     longitude: f64,
     country: Option<String>,
     admin1: Option<String>,
-    /// Open-Meteo reports the zone it believes this point is in. Worth having:
-    /// it is a second opinion on the one piece of setup a household is most
-    /// likely to get wrong when it has moved and the laptop has not caught up.
+    /// Open-Meteo's zone for this point: a second opinion on a stale system timezone.
     timezone: Option<String>,
 }
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
-/// A resolved geographic location.
 #[derive(Debug, Clone)]
 pub struct GeoLocation {
     pub name: String,
@@ -95,7 +89,6 @@ impl Geocoder {
             })
             .context(format!("no location found for '{query}'"))?;
 
-        // Build a readable display name: "Kisumu, Kenya" or "Kisumu, Kisumu County, Kenya"
         let display_name = match (&result.admin1, &result.country) {
             (Some(admin), Some(country)) if admin != &result.name => {
                 format!("{}, {}", result.name, country)
@@ -184,9 +177,6 @@ mod tests {
 // ── The port ─────────────────────────────────────────────────────────────────
 
 /// This geocoder as the core's [`PlaceLookup`].
-///
-/// The trait lives in `pond-core` and knows nothing about Open-Meteo; this is the
-/// one place the two meet, so detection can be tested against a `&dyn PlaceLookup`.
 #[async_trait::async_trait]
 impl pond_core::user_data::ports::place_lookup::PlaceLookup for Geocoder {
     async fn by_name(

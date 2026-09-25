@@ -1,7 +1,4 @@
 //! SQLite-backed implementation of `ProfileRepository`.
-//!
-//! Uses the `profiles` table in `pond_system.db` (created by migration 0003_profiles).
-//! Preferences are stored as a JSON object in the `preferences TEXT` column.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;

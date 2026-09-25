@@ -1,14 +1,11 @@
-// Theme bootstrap: reads localStorage and applies data-theme/data-density/--pp
-// to <html> before React renders, preventing flash of unstyled content.
+// Must stay first: applies the stored theme to <html> before React renders (no flash).
 import "./hub/state/themeBootstrap";
 
 import React, { useState } from "react";
 import ReactDOM from "react-dom/client";
 
 import "./styles/design-tokens.css";
-// The Ink component styles. Structure only — every value in it reads a custom
-// property that `themeStore` has already written to <html>, so it agrees with
-// the stylesheets below by construction rather than by luck.
+// Ink styles are structure only; every value reads a property `themeStore` set on <html>.
 import "@jarida/ink/css";
 import "./styles/base.css";
 import "./styles/sections.css";
@@ -22,10 +19,7 @@ import { AppContextProvider } from "./state/AppContext";
 import { ConfirmProvider } from "./components/shared";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { App } from "./App";
-// One-time lift of member preferences out of this browser's localStorage. The
-// wizard used to save them there while the server read them from SQLite, so
-// anyone who already onboarded has a preferred name and birthday the assistant
-// has never seen. Fire-and-forget: it never throws and never blocks render.
+// One-time move of member preferences from localStorage to the server; never throws or blocks.
 import { migrateLocalProfileToServer } from "./api/migrateLocalProfile";
 
 void migrateLocalProfileToServer();
@@ -37,10 +31,7 @@ function Root() {
     return <StartupScreen onReady={() => setReady(true)} />;
   }
 
-  // ErrorBoundary wraps the entire app so any render-time exception in a
-  // section (Voice mode, Chat, etc.) shows a readable error card with a
-  // "Try again" button instead of leaving the user with a blank window
-  // and no way out except force-quitting.
+  // A render-time exception anywhere shows a recoverable error card, not a blank window.
   return (
     <ErrorBoundary>
       <ConfirmProvider>

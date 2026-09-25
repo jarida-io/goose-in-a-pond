@@ -1,14 +1,8 @@
-//! Tool context formatting, shared by the parallel-prep path in routes.rs and the ToolAgent port.
-//!
-//! Pre-fetched output carries a dedup hint telling the LLM not to call the same MCP tool again
-//! through Goose's agentic loop, which would cost a duplicate round trip.
+//! Formats pre-fetched tool output for the LLM, with a hint not to re-call the same MCP tool.
 
 use pond_core::mcp::domain::tool_result::ToolResult;
 
-/// Map an internal tool name to the MCP tool names that Goose exposes.
-///
-/// Returns a comma-separated string of MCP tool names the LLM should avoid
-/// re-calling. If no mapping exists, falls back to the raw tool name.
+/// Goose's MCP tool names for an internal tool, comma-separated; `""` when unmapped.
 fn mcp_tool_names(tool: &str) -> &'static str {
     match tool {
         "weather" => "giap__get_current_weather",
@@ -22,9 +16,6 @@ fn mcp_tool_names(tool: &str) -> &'static str {
     }
 }
 
-/// Build the dedup hint line for the pre-fetched result block.
-///
-/// Example: `"(do not call giap__get_current_weather again for this query)"`
 fn dedup_hint(tool: &str) -> String {
     let mcp_names = mcp_tool_names(tool);
     if mcp_names.is_empty() {
@@ -34,10 +25,7 @@ fn dedup_hint(tool: &str) -> String {
     }
 }
 
-/// Format tool results into attributed context for the main LLM.
-///
-/// Each tool type gets its own compact template, plus a dedup hint so the LLM does not re-call an
-/// MCP tool the ToolAgent has already pre-fetched.
+/// Format one tool result as attributed context for the main LLM, with a dedup hint.
 pub fn format_tool_context(tool: &str, query: &str, message: &str, info: &str) -> String {
     let hint = dedup_hint(tool);
 
@@ -61,7 +49,6 @@ pub fn format_tool_context(tool: &str, query: &str, message: &str, info: &str) -
                 message, hint, tool, query_line, info
             )
         }
-        // Weather: compact context.
         "weather" => {
             format!(
                 "{}\n\n\
@@ -74,7 +61,6 @@ pub fn format_tool_context(tool: &str, query: &str, message: &str, info: &str) -
                 message, hint, tool, query_line, info
             )
         }
-        // Memory recall: present recalled memories.
         "recall_memory" => {
             format!(
                 "{}\n\n\
@@ -87,8 +73,7 @@ pub fn format_tool_context(tool: &str, query: &str, message: &str, info: &str) -
                 message, hint, tool, query_line, info
             )
         }
-        // Wikipedia / knowledge lookups: truncate to ~2000 chars to
-        // stay within small-model context budgets.
+        // Knowledge lookups: truncated to fit small-model context budgets.
         _ => {
             let truncated = if info.len() > 2000 {
                 format!("{}...", &info[..2000])
@@ -109,8 +94,7 @@ pub fn format_tool_context(tool: &str, query: &str, message: &str, info: &str) -
     }
 }
 
-/// Format a tool failure notice for the main LLM: names the tool and query that returned nothing,
-/// so the LLM answers from its own knowledge rather than assuming the data arrived.
+/// Tool-failure notice, so the LLM answers from its own knowledge instead of assuming data.
 pub fn format_tool_failure(tool: &str, query: &str, message: &str) -> String {
     let label = if query.is_empty() {
         format!("[Tool: {} | Status: no result]", tool)
@@ -125,23 +109,18 @@ pub fn format_tool_failure(tool: &str, query: &str, message: &str) -> String {
     )
 }
 
-/// Format multiple tool results into a combined context string, one labeled section per source.
-///
-/// Used by the parallel dispatch pipeline when `multi_tool_enabled` is true; carries a dedup hint
-/// per tool so the LLM does not re-call an MCP tool that was already pre-fetched.
+/// Format several tool results, one labeled section each, with a combined dedup hint.
 pub fn format_multi_tool_context(message: &str, results: &[ToolResult]) -> String {
     if results.is_empty() {
         return String::new();
     }
 
-    // Single result — delegate to the existing single-tool formatter
-    // for consistent formatting with the non-multi path.
+    // Same output as the single-tool path.
     if results.len() == 1 {
         let r = &results[0];
         return format_tool_context(&r.tool_name, "", message, &r.content);
     }
 
-    // Collect all MCP tool names to build a combined dedup hint.
     let all_mcp_names: Vec<&str> = results
         .iter()
         .map(|r| mcp_tool_names(&r.tool_name))
@@ -156,7 +135,6 @@ pub fn format_multi_tool_context(message: &str, results: &[ToolResult]) -> Strin
         )
     };
 
-    // Multiple results — labeled sections with tool attribution.
     let mut sections = String::new();
     for result in results {
         if !sections.is_empty() {
@@ -293,7 +271,6 @@ mod tests {
         assert!(output.contains("Address each part"));
         assert!(output.contains("Pre-fetched results"));
         assert!(output.contains("do not call"));
-        // Should include MCP names for both tools
         assert!(output.contains("giap__get_current_weather"));
         assert!(output.contains("giap__list_schedules"));
     }

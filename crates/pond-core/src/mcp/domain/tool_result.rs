@@ -1,20 +1,12 @@
-//! Domain type for tool execution results.
-//!
-//! Used by the multi-tool parallel dispatch pipeline to represent
-//! the output of each individual tool invocation.
-
-/// Result of a single tool execution, returned by `ToolAgent::process_multi()` for each tool in a
-/// multi-tool dispatch.
+/// One tool's output from a multi-tool dispatch (`ToolAgent::process_multi()`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolResult {
     /// Name of the tool that produced this result (e.g. "weather", "schedules").
     pub tool_name: String,
-    /// The tool's output content.
     pub content: String,
 }
 
 impl ToolResult {
-    /// Create a new tool result.
     pub fn new(tool_name: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             tool_name: tool_name.into(),

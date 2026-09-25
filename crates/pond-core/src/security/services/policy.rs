@@ -1,19 +1,14 @@
-//! Default [`SecurityPolicy`]: allow everything, the production default while the
-//! privacy boundary is a hook and not a gate. [`AllowAllPolicy::allow`] returns
-//! `Ok(true)` for every principal and scope; [`AllowAllPolicy::audit`] logs and keeps
-//! no state. A pond-infra adapter can replace it without changing any consumer.
+//! The default allow-all [`SecurityPolicy`].
 
 use crate::security::ports::policy::{PolicyDecision, Principal, SecurityPolicy};
 use anyhow::Result;
 use async_trait::async_trait;
 
-/// Permissive [`SecurityPolicy`]: every access is allowed; audit is a no-op
-/// beyond a `tracing::debug!` line.
+/// Allows every access; audit only emits a `tracing::debug!` line.
 #[derive(Debug, Default, Clone)]
 pub struct AllowAllPolicy;
 
 impl AllowAllPolicy {
-    /// Construct the default allow-all policy.
     pub fn new() -> Self {
         Self
     }
@@ -25,9 +20,7 @@ impl SecurityPolicy for AllowAllPolicy {
         Ok(true)
     }
 
-    /// Logs the verdict, not just the effect. This implementation keeps no
-    /// state, so the line is all there is — and `ok` alone would read
-    /// "permitted" for the would-denies too.
+    /// Logs the verdict, not just the effect: `ok` alone reads "permitted" for would-denies.
     async fn audit(
         &self,
         principal: &Principal,
@@ -82,7 +75,6 @@ mod tests {
     async fn audit_does_not_panic() {
         let policy = AllowAllPolicy::new();
         let principal = Principal::token("client-xyz").with_remote_addr("10.0.0.5:55123");
-        // Should complete without panicking for every verdict.
         policy
             .audit(
                 &principal,

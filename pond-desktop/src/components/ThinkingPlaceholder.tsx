@@ -42,7 +42,6 @@ export function ThinkingPlaceholder({ status, compact = false }: Props) {
 
   useEffect(() => {
     timerRef.current = setInterval(() => {
-      // Fade out…
       setVisible(false);
       fadeRef.current = setTimeout(() => {
         setIndex((i) => (i + 1) % QUIPS.length);

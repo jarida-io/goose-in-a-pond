@@ -66,7 +66,6 @@ export interface AppState {
   latestScheduleResult: ScheduleToast | null;
   /** Persistent schedule run notifications (survives page navigation, unlike toasts). */
   scheduleRuns: ScheduleRunNotification[];
-  /** Number of unread schedule runs. */
   unreadRunCount: number;
   /** When set, Canvas should render a debrief card for this run. */
   debriefContext: DebriefContext | null;
@@ -124,22 +123,14 @@ export function nextCardId(): number {
 
 export function buildInitialState(): AppState {
   const storedMode = normalizeDesktopMode(localStorage.getItem("giap-mode"));
-  // The classic (sections) UI is the default landing surface. The Goose Hub is
-  // still a preview (reachable via Settings > "Preview Goose Hub"), so never
-  // *start* in it even if it was the last-viewed section — a persisted "hub" is
-  // coerced back to the classic UI on launch/reload so the preview is not
-  // sticky. An explicit opt-in (`giap-force-hub`, used by hub E2E tests and
-  // available for dev) bypasses the coercion.
+  // The Hub is still a preview: a persisted "hub" is not restored on launch unless
+  // `giap-force-hub` (hub E2E tests, dev) opts in.
   const rawSection = normalizeGuiSection(localStorage.getItem("giap-section"));
   const forceHub = localStorage.getItem("giap-force-hub") === "1";
   const storedSection: GuiSection =
     rawSection === "hub" && !forceHub ? "dashboard" : rawSection;
-  // In the desktop shell the injected URL wins over anything persisted: the
-  // shell knows which port its own sidecar bound, and a stored value is at best
-  // stale. Anyone who hit the double-spawn bug has 127.0.0.1:4001 saved here,
-  // and without this the fixed build would still talk to a dead port. In a
-  // plain browser the stored value is the point -- that is where a user types
-  // a LAN address.
+  // In the shell the injected URL wins: the shell knows its sidecar's port and a stored one may
+  // be stale. In a browser the stored value is where a user types a LAN address.
   const injectedUrl = defaultServerUrl();
   const storedUrl = isDesktopShell()
     ? injectedUrl
@@ -207,11 +198,7 @@ export function reducer(state: AppState, action: AppAction): AppState {
     case "SET_SESSION_ID":
       return { ...state, sessionId: action.payload };
 
-    // Clearing the error on a state change is right for every state EXCEPT
-    // "error" itself. Every producer dispatches SET_VOICE_ERROR and then
-    // SET_VOICE_STATE("error"), so the unconditional reset wiped the message
-    // the previous action had just set and the UI only ever showed the generic
-    // "Error" label. Entering the error state must preserve the reason.
+    // Keep the error on entering "error": producers dispatch SET_VOICE_ERROR just before it.
     case "SET_VOICE_STATE":
       return {
         ...state,
@@ -244,7 +231,7 @@ export function reducer(state: AppState, action: AppAction): AppState {
         updated.length > TRANSCRIPT_CAP
           ? updated.slice(updated.length - TRANSCRIPT_CAP)
           : updated;
-      void done; // token streaming is complete when done=true, no state change needed
+      void done; // `done` needs no state change
       return { ...state, transcript: trimmed };
     }
 
@@ -269,13 +256,8 @@ export function reducer(state: AppState, action: AppAction): AppState {
         return c;
       });
       if (updated) return { ...state, contextCards: cards };
-      // No matching tool_call card. The tool_call event normally pushes the card
-      // before its result arrives, but if the result is orphaned (the call card
-      // was never pushed, or the transcript was cleared between call and result)
-      // and the event carries a tool name, surface it as its own card instead of
-      // silently dropping the result. Without a tool name there is nothing
-      // meaningful to render, so keep the no-op (and the stable state reference)
-      // to avoid orphan cards and spurious re-renders.
+      // Orphaned result (call card never pushed, or cleared): show it as its own card if it names
+      // a tool; otherwise keep the no-op and the stable state reference.
       if (tool) {
         const card: ContextCard = {
           id: nextCardId(),

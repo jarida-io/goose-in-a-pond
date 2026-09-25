@@ -1,39 +1,12 @@
-//! Scheduling policy for background memory consolidation.
-//!
-//! Consolidation is expensive: on an 8GB Jetson it monopolises the single
-//! on-device inference slot for one (single mode) or three (adversarial mode)
-//! sequential LLM calls. It must therefore only ever run when the machine is
-//! genuinely idle, and never merely because the process has been up a while.
-//!
-//! This module is deliberately pure — it takes plain `bool`s and `Duration`s
-//! and returns a decision — so the two rules that were previously impossible to
-//! test (the startup guard and the interval floor) can be unit-tested without
-//! sleeping or spinning up a server.
-//!
-//! The three rules, in the order they are checked:
-//!
-//! 1. **Enabled.** Read from settings on *every* tick, never from a startup
-//!    snapshot, so the Settings toggle takes effect without a restart.
-//! 2. **Never on startup.** A run requires that real user activity has been
-//!    observed *since this process started*. A freshly booted server that
-//!    nobody has talked to is not "idle", it is unused — consolidating there
-//!    burns power and risks mangling memories with no user present to notice.
-//! 3. **Idle, and not too soon after the last run.** The user must have been
-//!    quiet for `idle_threshold`, and at least `interval_floor` must have
-//!    elapsed since the previous run.
+//! Scheduling policy for background memory consolidation, which monopolises the inference slot.
 
 use chrono::{DateTime, Utc};
 use std::time::{Duration, Instant};
 
-/// How long the user must be quiet before a consolidation may start.
-///
-/// Chosen to be comfortably longer than a natural pause in a conversation
-/// (so consolidation does not steal the inference slot mid-exchange) while
-/// still short enough that an evening of inactivity gets a pass in.
+/// Quiet time before a consolidation may start; outlasts a natural pause in conversation.
 pub const INACTIVITY_THRESHOLD_SECS: u64 = 15 * 60;
 
-/// Below this many scoreable memories there is nothing useful to consolidate:
-/// merges need duplicates to find, and a tiny store is cheaper to leave alone.
+/// Below this many scoreable memories, there are too few duplicates to be worth consolidating.
 pub const MIN_MEMORIES_TO_CONSOLIDATE: usize = 6;
 
 /// Everything the gate needs to decide whether a run may start.
@@ -41,15 +14,13 @@ pub const MIN_MEMORIES_TO_CONSOLIDATE: usize = 6;
 pub struct GateInputs {
     /// Current value of `memory_consolidation_enabled`, re-read per tick.
     pub enabled: bool,
-    /// Whether any real user activity has been observed since process start.
-    /// This is the "never on startup" guard.
+    /// Real user activity seen since process start: the "never on startup" guard.
     pub saw_activity_since_start: bool,
     /// How long since the most recent observed user activity.
     pub idle_for: Duration,
     /// How long the user must be quiet before a run may start.
     pub idle_threshold: Duration,
-    /// How long since the previous run in this process, or `None` if this
-    /// process has not run consolidation yet.
+    /// Time since this process's previous run; `None` if it has not run yet.
     pub since_last_run: Option<Duration>,
     /// Minimum spacing between runs, from `memory_consolidation_interval_hours`.
     pub interval_floor: Duration,
@@ -94,15 +65,11 @@ impl GateDecision {
 }
 
 /// Decide whether a background consolidation run may start now.
-///
-/// Semantics: *at most one run per `interval_floor`, and only after
-/// `idle_threshold` of inactivity following actual user activity.*
 pub fn should_run(inputs: GateInputs) -> GateDecision {
     if !inputs.enabled {
         return GateDecision::Skip(SkipReason::Disabled);
     }
-    // "Never on startup" — an untouched process never consolidates, however
-    // long it has been up.
+    // Never on startup: an untouched process never consolidates, however long it has been up.
     if !inputs.saw_activity_since_start {
         return GateDecision::Skip(SkipReason::NoActivitySinceStart);
     }
@@ -117,21 +84,8 @@ pub fn should_run(inputs: GateInputs) -> GateDecision {
     GateDecision::Run
 }
 
-/// Has real user activity been observed since this process started?
-///
-/// This is the computation the "never on startup" guard rests on, and the exact
-/// spot the old code got wrong: it initialised the activity clock to
-/// `Instant::now()` at boot and then only ever asked "how long since that?",
-/// which is indistinguishable from a genuine idle user.
-///
-/// Two sources, because the terminal voice loop runs in a **separate OS
-/// process** and can never touch the server's in-memory clock:
-///
-/// - `in_process_at` — the shared `last_user_activity` clock, bumped by every
-///   HTTP route. Compared **strictly** against `started_at` (captured after it,
-///   during wiring) so the boot value can never masquerade as activity.
-/// - `db_activity` — newest `sessions.updated_at`, which the voice child bumps
-///   through `ChatService` on every turn it persists.
+/// Has user activity been seen since start? `in_process_at` must be strictly after `started_at`
+/// so the boot stamp never counts; `db_activity` catches the out-of-process voice loop.
 pub fn saw_activity_since_start(
     started_at: Instant,
     in_process_at: Instant,
@@ -141,13 +95,7 @@ pub fn saw_activity_since_start(
     in_process_at > started_at || db_activity.is_some_and(|at| at > started_at_utc)
 }
 
-/// How long the user has been quiet, taking the **most recent** of the two
-/// activity sources.
-///
-/// `min` of the two idle durations, not `max`: if either source saw activity 10
-/// seconds ago then the user has been idle for 10 seconds, whatever the other
-/// source thinks. A `db_activity` timestamp in the future (clock skew) is
-/// discarded rather than trusted.
+/// Idle time since the more recent of the two sources; a future `db_activity` (skew) is ignored.
 pub fn combined_idle_for(
     in_process_at: Instant,
     db_activity: Option<DateTime<Utc>>,
@@ -160,10 +108,7 @@ pub fn combined_idle_for(
     }
 }
 
-/// Convert `memory_consolidation_interval_hours` into a floor duration.
-///
-/// Guards against a stored `0`, which would otherwise disable rate limiting
-/// entirely and let the scheduler re-fire on every tick.
+/// Interval floor from hours, clamped to at least 1 h: a stored `0` would re-fire every tick.
 pub fn interval_floor_from_hours(hours: u32) -> Duration {
     Duration::from_secs(u64::from(hours.max(1)) * 3600)
 }
@@ -197,9 +142,6 @@ mod tests {
         assert_eq!(should_run(inputs), GateDecision::Skip(SkipReason::Disabled));
     }
 
-    /// E1: the whole point of the startup guard. A server that has been idle
-    /// far longer than the threshold, but that nobody has interacted with since
-    /// boot, must never consolidate.
     #[test]
     fn never_runs_on_startup_without_user_activity() {
         let inputs = GateInputs {
@@ -215,7 +157,6 @@ mod tests {
 
     #[test]
     fn startup_guard_outranks_a_long_uptime() {
-        // Even with no previous run and a week of uptime.
         let inputs = GateInputs {
             saw_activity_since_start: false,
             idle_for: Duration::from_secs(7 * 86_400),
@@ -237,9 +178,6 @@ mod tests {
         );
     }
 
-    /// E1: honour `memory_consolidation_interval_hours` as a floor between
-    /// runs. Previously nothing rate-limited repeats, so an idle box
-    /// re-consolidated every ~15 minutes.
     #[test]
     fn interval_floor_blocks_a_repeat_run() {
         let inputs = GateInputs {
@@ -290,11 +228,8 @@ mod tests {
         assert_eq!(should_run(inputs), GateDecision::Run);
     }
 
-    // ── saw_activity_since_start (the E1 bug site) ───────────────────────────
+    // ── saw_activity_since_start ─────────────────────────────────────────────
 
-    /// Reproduces the original defect's setup: the activity clock is stamped at
-    /// boot, *before* the scheduler captures its baseline, and nobody has
-    /// interacted. This must read as "no activity".
     #[test]
     fn boot_stamped_clock_is_not_activity() {
         let in_process_at = Instant::now(); // stamped during wiring
@@ -323,8 +258,6 @@ mod tests {
         ));
     }
 
-    /// The voice child is a separate process: its only visible trace is a
-    /// session row newer than our start stamp.
     #[test]
     fn an_out_of_process_voice_turn_counts_as_activity() {
         let in_process_at = Instant::now();

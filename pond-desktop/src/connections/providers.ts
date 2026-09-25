@@ -1,14 +1,6 @@
 // ─── The accounts a household can connect ───────────────────────────────────
-//
-// Mirrors `CalDavProvider` and `ImapProvider` on the Rust side. The `id` values
-// are what `context_sources.provider` stores, so they are schema rather than
-// display strings: renaming one orphans every source somebody connected.
-//
-// The setup hints are duplicated from `setup_hint()` in those two crates, and
-// that duplication is deliberate rather than an oversight. The server's copy is
-// what an API caller sees; this copy is what somebody staring at a password box
-// sees, and it has to be here because the box renders before any request is
-// made. `providers_match_the_backend.test.ts` fails if the two lists drift.
+// Mirrors `CalDavProvider`/`ImapProvider`. `id` is stored in `context_sources.provider`, so
+// renaming one orphans sources. Hints copy the crates' `setup_hint()`: the form renders first.
 
 export type ConnectionKind = "calendar" | "mail";
 
@@ -25,12 +17,7 @@ export interface ProviderOption {
   serverPlaceholder?: string;
 }
 
-// Google Calendar is deliberately absent.
-//
-// Google's CalDAV guide requires OAuth 2.0 and rejects Basic auth with a 401,
-// so an app password cannot work for it however carefully it is typed. Offering
-// it produced a refusal that read as the household's mistake. Gmail stays,
-// because IMAP app passwords are unaffected.
+// No Google Calendar: its CalDAV requires OAuth 2.0 and 401s Basic auth. Gmail (IMAP) works.
 export const PROVIDERS: ProviderOption[] = [
   {
     id: "gmail",
@@ -80,13 +67,8 @@ export const PROVIDERS: ProviderOption[] = [
   },
 ];
 
-/** How a source's status should read to a person, and how urgently.
- *
- * `lastSync` matters as much as the status here. `connected` is the state a
- * source is CREATED in, before anything has run, so reporting it as "working,
- * checked recently" beside a "not checked yet" line was the card contradicting
- * itself on the one screen where somebody is trying to find out whether their
- * password took. */
+/** How a status reads to a person, and how urgently. Uses `lastSync` too: sources are created
+ *  `connected`, before anything has run. */
 export function describeStatus(
   status: string,
   lastSync?: string | null,
@@ -113,8 +95,6 @@ export function describeStatus(
       return {
         label: "Needs attention",
         tone: "warn",
-        // Says what to do, because an unactionable warning is the failure the
-        // privacy work exists to prevent.
         detail:
           "The password was refused. Usually it was revoked, or an ordinary account password was used. Reconnect to fix it — the pond has stopped trying.",
       };
@@ -147,11 +127,7 @@ export function describeLastSync(iso: string | null, now = Date.now()): string {
   return `Checked ${days} day${days === 1 ? "" : "s"} ago`;
 }
 
-/** What a source has brought in, and whether all of it is findable yet.
- *
- * Two numbers because they answer different worries. "142 things" is the
- * account working; "8 still being read" is why a search for one of them just
- * came up empty. Collapsing them into a percentage would hide the second. */
+/** What a source has brought in and how much is not yet searchable; two numbers, not a %. */
 export function describeHaul(items: number, awaitingIndex: number): string | null {
   if (items === 0) return null;
   const noun = items === 1 ? "1 thing" : `${items} things`;

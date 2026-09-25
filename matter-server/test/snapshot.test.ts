@@ -18,9 +18,7 @@ import {
 
 describe("vendor clusters", () => {
   it("reads manufacturer ownership off the cluster id, as the spec defines it", () => {
-    // A Matter cluster id is 32 bits with the vendor code in the upper 16; a standard
-    // cluster's is zero. Nothing here depends on what the controller happens to name
-    // the cluster, which is what makes it survive a matter.js upgrade.
+    // Cluster ids are 32 bits with the vendor code in the upper 16 (zero for standard ones).
     expect(isVendorCluster(0x0006)).toBe(false); // OnOff
     expect(isVendorCluster(0x0008)).toBe(false); // LevelControl
     expect(isVendorCluster(0x0051)).toBe(false); // LaundryWasherMode, high but standard
@@ -28,9 +26,7 @@ describe("vendor clusters", () => {
   });
 
   it("does not treat a standard cluster GIAP simply ignores as the maker's own", () => {
-    // The snapshot drops identify, groups, powerSource and a dozen more by name. They
-    // are not what the user is looking at in the maker's app, and listing them as
-    // things the device can do would bury the one entry that is.
+    // Listing ignored standard clusters (identify, groups...) would bury the real vendor entry.
     for (const standard of [0x0003, 0x0004, 0x002f, 0x0038]) {
       expect(isVendorCluster(standard)).toBe(false);
     }
@@ -39,11 +35,8 @@ describe("vendor clusters", () => {
 
 describe("a slice's endpoint order", () => {
   it("puts the slice's own endpoint first, not the lowest-numbered one", () => {
-    // Behind a bridge, endpoint numbers are allocated by the HUB in its own
-    // discovery order — so a bridged device can sit ABOVE one of its own parts. Every
-    // lookup downstream resolves ties by taking the first endpoint, and the
-    // justification for that ("whatever its first endpoint claims, which is what its
-    // own UI calls it") holds for a composed device and not for a hub's numbering.
+    // A hub allocates endpoint numbers, so a bridged device can sit above its own parts,
+    // and every downstream lookup breaks ties by taking the first endpoint.
     const bridged = {
       ...node(90, [
         endpoint(0, {}),
@@ -57,7 +50,6 @@ describe("a slice's endpoint order", () => {
   });
 
   it("is plain ascending order for a node that is not a slice", () => {
-    // The property that makes this change inert until slices exist.
     const plain = node(2, [endpoint(0, {}), endpoint(13, {}), endpoint(4, {})]);
 
     expect(applicationEndpoints(plain).map(e => e.number)).toEqual([4, 13]);
@@ -75,8 +67,7 @@ describe("a slice's endpoint order", () => {
 
 describe("device ids", () => {
   it("leaves an ordinary node's id exactly as it was", () => {
-    // Existing registry rows and fabric state key off this string, so a node that is
-    // not a bridge must not acquire an endpoint component.
+    // Registry rows and fabric state key off this string, so it must never change.
     expect(deviceIdForNode(18n)).toBe("matter-18");
     expect(partsOfDeviceId("matter-18")).toEqual({ nodeId: 18n });
   });
@@ -87,9 +78,8 @@ describe("device ids", () => {
   });
 
   it("accepts only the canonical spelling", () => {
-    // `BigInt("01")` is `1n`, so without the round-trip check `matter-01` and
-    // `matter-1` would be two ids for one device — and the registry keys rows on the
-    // string. The Rust side refuses the same spellings for the same reason.
+    // `BigInt("01")` is `1n`, so a non-canonical spelling would be a second id for one
+    // device. The Rust side refuses the same spellings.
     expect(partsOfDeviceId("matter-01")).toBeUndefined();
     expect(partsOfDeviceId("matter-1-02")).toBeUndefined();
     expect(partsOfDeviceId("matter-1-")).toBeUndefined();
@@ -108,9 +98,6 @@ function covered(slice: { endpoints: { number: number }[] }): number[] {
 
 describe("cutting a node into devices", () => {
   it("leaves an ordinary node whole, and identical", () => {
-    // The property that makes this safe to ship: a device that is not a bridge is
-    // its own single slice, with no `rootEndpoint`, so its id and its every mapping
-    // answer exactly as before.
     const light = lightNode();
     expect(deviceSlices(light)).toEqual([light]);
   });
@@ -127,8 +114,7 @@ describe("cutting a node into devices", () => {
   });
 
   it("keeps a bridged device's own parts with it", () => {
-    // And this is why the parts have to travel: the speaker at endpoint 3 is the
-    // player's, and a slice without it describes a television with no volume.
+    // The speaker at endpoint 3 is the player's; without it the TV would have no volume.
     const slices = deviceSlices(bridgedComposedNode());
 
     expect(slices.map(s => s.rootEndpoint)).toEqual([undefined, 7]);
@@ -138,8 +124,7 @@ describe("cutting a node into devices", () => {
   });
 
   it("keeps the hub's own endpoints on the hub", () => {
-    // A node can bridge AND expose something itself — a thermostat hub that bridges
-    // valves. Those endpoints are the hub's, not a child's.
+    // A node can bridge and expose something itself, e.g. a thermostat hub bridging valves.
     const hybrid = node(92, [
       named("Thermostat Hub"),
       endpoint(1, {}, [0x000e], [], [4]),
@@ -153,16 +138,14 @@ describe("cutting a node into devices", () => {
   });
 
   it("stays one device for a hub with nothing paired to it", () => {
-    // An Aggregator and no children. Slicing on the Aggregator would produce zero
-    // devices and the user would see a successful pairing and an empty list.
+    // Slicing a childless Aggregator would yield zero devices after a successful pairing.
     const empty = node(93, [named("New Hub"), endpoint(1, {}, [0x000e])]);
 
     expect(deviceSlices(empty)).toEqual([empty]);
   });
 
   it("does not recurse forever on a parts list that points at itself", () => {
-    // Inside `subscribe`. A stack overflow here is a bridge that reconnect-loops
-    // permanently, from one badly-behaved hub.
+    // This runs inside `subscribe`: a stack overflow would reconnect-loop the bridge forever.
     const cyclic = node(94, [
       named("Odd Hub"),
       endpoint(1, {}, [0x000e], [], [2]),
@@ -175,8 +158,7 @@ describe("cutting a node into devices", () => {
   });
 
   it("never lets a parts list drag endpoint 0 into a child", () => {
-    // A lazy implementation lists it. Without the guard every bridged device would
-    // inherit the HUB's Basic Information as its own identity.
+    // Lazy hubs list it; every child would then inherit the hub's Basic Information.
     const greedy = node(95, [
       endpoint(0, { basicInformation: { nodeLabel: "The Hub" } }, [0x0016]),
       endpoint(1, {}, [0x000e], [], [2]),
@@ -187,9 +169,7 @@ describe("cutting a node into devices", () => {
   });
 
   it("does not let one bridged device swallow another", () => {
-    // The spec makes an Aggregator's PartsList full-family — every descendant — so a
-    // hub may legitimately list a sibling under a child. Absorbing it would report
-    // that sibling's readings under two device ids at once.
+    // PartsList is full-family (every descendant), so a hub may list a sibling under a child.
     const family = node(96, [
       named("Full Family Hub"),
       endpoint(1, {}, [0x000e], [], [2, 3]),

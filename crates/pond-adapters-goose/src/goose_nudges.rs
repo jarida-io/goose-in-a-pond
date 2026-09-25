@@ -1,20 +1,15 @@
-//! Pins the wording of the user nudges goose appends last in the context (completeness check,
-//! grind, `/goal` kickoff): on gemma-4 E2B/E4B a bolded `**Goal:**` there leaked into answers
-//! despite the prompt's ban (`every_style_forbids_narrating_the_harness` covers that half). Lives
-//! here, not in `pond-core`: `include_str!` over the goose submodule would cost it CI's fast set.
+//! Pins the wording of the nudges goose appends last in context: a bolded `**Goal:**` there
+//! leaked into small-model answers. Here, not in `pond-core`, which must not read the submodule.
 
 #![cfg(test)]
 
 /// The fork file that builds the engine's steering messages.
 const AGENT_RS: &str = include_str!("../../../goose/crates/goose/src/agents/agent.rs");
 
-/// Below this the extractor has broken, not the nudges vanished. There are three
-/// goal/grind/kickoff injections plus the stop-hook one.
+/// Fewer means the extractor broke: three goal/grind/kickoff injections plus the stop hook.
 const FLOOR_NUDGES: usize = 4;
 
-/// The source with `//` line comments removed, string literals intact. Load-bearing: comments
-/// in `agent.rs` quote the old wording verbatim, so without the strip this guard would fail
-/// on the documentation of its own fix.
+/// Strip `//` comments (strings intact): `agent.rs` comments quote the banned wording.
 fn strip_line_comments(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
     for line in src.lines() {
@@ -40,14 +35,10 @@ fn strip_line_comments(src: &str) -> String {
     out
 }
 
-/// The text of every message the engine appends to the model's context, returned as
-/// `(anchor, literal_text)` with `{...}` interpolations removed (`{goal}` is a value, not a word).
-/// Anchored on the bindings, not `Message::user()`: the text is built one statement earlier,
-/// and a window around the constructor would miss it or drag in the neighbouring notification.
+/// `(anchor, literal_text)` for every message the engine injects, `{...}` removed. Anchored on
+/// the bindings, not `Message::user()`, whose text is built a statement earlier.
 fn injected_message_texts(src: &str) -> Vec<(String, String)> {
-    // `fn goal_nudge` is anchored because the fork moved the completeness nudge's text into
-    // that helper; its body is a single `format!`, so the statement-to-first-semicolon walk
-    // below captures exactly its string.
+    // `goal_nudge` builds the completeness nudge in a single `format!`, so the walk captures it.
     const ANCHORS: &[&str] = &[
         "let nudge = format!(",
         "let kickoff = Message::user()",
@@ -58,8 +49,7 @@ fn injected_message_texts(src: &str) -> Vec<(String, String)> {
 
     for anchor in ANCHORS {
         for (at, _) in code.match_indices(anchor) {
-            // Take the statement: from the anchor to the first `;` that is not
-            // inside a string literal.
+            // The statement ends at the first `;` outside a string literal.
             let tail = &code[at..];
             let mut in_string = false;
             let mut end = tail.len();
@@ -79,9 +69,7 @@ fn injected_message_texts(src: &str) -> Vec<(String, String)> {
             }
             let stmt = &tail[..end];
 
-            // Concatenate every string literal in the statement, then drop the
-            // `{...}` interpolations so a variable named `goal` is not mistaken
-            // for the word.
+            // Join the string literals and drop `{...}`, so a variable named `goal` isn't the word.
             let mut text = String::new();
             for (n, piece) in stmt.split('"').enumerate() {
                 if n % 2 == 1 {
@@ -104,7 +92,6 @@ fn injected_message_texts(src: &str) -> Vec<(String, String)> {
     found
 }
 
-/// No injected message hands the model a label to read back.
 #[test]
 fn no_injected_nudge_carries_a_quotable_label() {
     let nudges = injected_message_texts(AGENT_RS);
@@ -136,8 +123,6 @@ fn no_injected_nudge_carries_a_quotable_label() {
     }
 }
 
-/// The exact string that produced the measured leak, pinned by itself so the specific
-/// regression has a test that names it rather than one that catches it as a side effect.
 #[test]
 fn the_bolded_goal_label_is_gone_from_the_whole_file() {
     let code = strip_line_comments(AGENT_RS);

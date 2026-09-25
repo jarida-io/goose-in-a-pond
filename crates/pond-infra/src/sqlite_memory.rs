@@ -1,8 +1,4 @@
-//! SQLite-backed implementation of `MemoryRepository`.
-//!
-//! Uses the `memory_fragments` table in `pond_system.db`.
-//! Migration 0005 creates the base table; 0015 adds segment/importance/decay fields.
-//! Embeddings are stored as raw little-endian f32 BLOBs.
+//! SQLite-backed `MemoryRepository`; embeddings are stored as little-endian f32 BLOBs.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -20,14 +16,9 @@ use std::sync::Arc;
 
 pub struct SqliteMemoryRepository {
     pool: Pool<Sqlite>,
-    /// The shared personal-context index (phase B write-through).
-    ///
-    /// Optional so the adapter still constructs in tests and in a pond with the
-    /// index unavailable; when absent, memories are stored exactly as before and
-    /// the index sweep picks them up later.
+    /// Optional; without it memories are still stored and the sweep indexes them later.
     index: Option<Arc<dyn VectorIndex>>,
-    /// Which embedder produced the vectors this adapter stores. Held beside the
-    /// index because the fragment does not carry it and the index must record it.
+    /// The embedder behind stored vectors; fragments don't carry it but the index needs it.
     model_id: Option<String>,
 }
 
@@ -40,27 +31,9 @@ impl SqliteMemoryRepository {
         }
     }
 
-    /// Mirror every stored vector into the shared index.
-    ///
-    /// # Why this lives in the ADAPTER rather than in a decorator
-    ///
-    /// A decorator is the more hexagonal answer and it was the first design.
-    /// Three facts moved it here, all of them found by reading the write sites
-    /// rather than by reasoning about layers:
-    ///
-    /// 1. `RedactingMemoryRepository::add` sets `fragment.embedding = None` when
-    ///    the content held a secret, precisely because the vector is a durable
-    ///    derivative of the unredacted text. An index decorator stacked ABOVE it
-    ///    would index that vector — the exact thing that line exists to prevent.
-    ///    Here, the fragment has already been through the redactor.
-    /// 2. Eighteen of the port's twenty-two methods have default bodies, so a
-    ///    decorator that forgets one compiles and silently no-ops.
-    /// 3. `SqliteMemoryRepository::new` has four production construction sites
-    ///    and one of them, `pond memories add`, is a SEPARATE PROCESS with its
-    ///    own `Database`. Anything hung off the server's `AppState` misses it.
-    ///
-    /// Nothing else in the workspace issues SQL against `memory_fragments`, so
-    /// `add` and `update_embedding` below are a true 100% chokepoint.
+    /// Mirror every stored vector into the shared index. Here, not in a decorator: fragments
+    /// arrive already redacted (secret vectors dropped), a decorator could miss defaulted
+    /// port methods, and `pond memories add` runs in its own process. Sole SQL writer.
     pub fn with_vector_index(
         mut self,
         index: Arc<dyn VectorIndex>,
@@ -71,13 +44,7 @@ impl SqliteMemoryRepository {
         self
     }
 
-    /// Mirror one fragment's vector into the index, or remove the entry when the
-    /// fragment has none.
-    ///
-    /// **Never fails the caller.** The index is derived data: a failed write is
-    /// recoverable by the sweep, whereas failing the memory write would lose
-    /// something a member actually said. This matches how `IngestPipeline`
-    /// already treats a failed embed.
+    /// Never fails the caller: the index is derived and the sweep repairs it.
     async fn mirror(&self, id: &str, embedding: Option<&[f32]>) {
         let Some(index) = &self.index else { return };
         let outcome = match (embedding, self.model_id.as_deref()) {
@@ -86,27 +53,19 @@ impl SqliteMemoryRepository {
                     .upsert(&VectorEntry {
                         corpus: Corpus::Memory,
                         row_id: id.to_string(),
-                        // A memory is a sentence or two. Chunking one would
-                        // split a fact in half.
+                        // Never chunked: a memory is a sentence or two.
                         chunk_ix: 0,
                         chunk_span: None,
                         model_id: model_id.to_string(),
                         vector: vector.to_vec(),
-                        // A memory's content is stable once extracted —
-                        // consolidation supersedes rather than edits — so there
-                        // is no revision to track.
+                        // No revision tracked: consolidation supersedes rather than edits.
                         source_rev: None,
                     })
                     .await
             }
-            // A vector we cannot attribute to a model: leave the index alone
-            // and let the sweep handle it. Removing would be actively wrong --
-            // a process with no embedder configured (the `pond memories add`
-            // CLI) would strip entries the server had correctly written.
+            // No model id (e.g. the CLI): leave the entry to the sweep rather than strip it.
             (Some(vector), None) if !vector.is_empty() => return,
-            // No vector at all: make sure a stale entry does not survive. This
-            // is what keeps the redactor's secret-dropping honest -- it hands us
-            // a fragment whose embedding is gone, and the index must follow.
+            // No vector: remove any stale entry (the redactor drops secret-bearing vectors).
             _ => index.remove(Corpus::Memory, id).await,
         };
         if let Err(e) = outcome {
@@ -194,24 +153,11 @@ fn row_to_fragment(row: FragmentRow) -> MemoryFragment {
     }
 }
 
-/// SQL predicate and optional bind value for a [`ProfileScope`].
+/// `AND …` fragment (or empty) for a [`ProfileScope`]; every scoped read goes through it.
 ///
-/// Every scoped read funnels through this so the three variants cannot drift
-/// apart across five query builders — which is exactly what happened to the old
-/// `Option<&str>` filter, duplicated as a `match` in each method.
-///
-/// The returned fragment is always appended to an existing `WHERE`, so it
-/// begins with `AND` or is empty.
-///
-/// - `Owner(id)` — the person's own rows **plus unattributed ones**. A row with
-///   `profile_id IS NULL` predates per-profile attribution or is genuinely
-///   shared; hiding it would make the assistant forget household facts the
-///   moment identity landed.
-/// - `Household` — no predicate at all. Byte-identical to the pre-PAI-1 `None`
-///   branch, which is what makes phase P1 a behaviour-preserving refactor.
-/// - `Guest` — matches nothing. Callers short-circuit before running the query,
-///   but the predicate is correct on its own so a missed short-circuit fails
-///   closed rather than leaking the household's memory.
+/// - `Owner(id)`: own rows plus unattributed (shared) ones, so household facts stay visible.
+/// - `Household`: no predicate.
+/// - `Guest`: matches nothing, so a missed caller short-circuit fails closed.
 fn scope_sql(scope: &ProfileScope) -> (&'static str, Option<&str>) {
     match scope {
         ProfileScope::Owner(id) => (
@@ -223,7 +169,6 @@ fn scope_sql(scope: &ProfileScope) -> (&'static str, Option<&str>) {
     }
 }
 
-/// All columns selected by all queries.
 const SELECT_ALL: &str = "\
     id, profile_id, session_id, content, embedding, source, tags, created_at, \
     segment, importance, tier, decay_rate, access_count, last_accessed_at, \
@@ -303,11 +248,7 @@ impl MemoryRepository for SqliteMemoryRepository {
         .execute(&self.pool)
         .await?;
 
-        // Write-through to the shared index, AFTER the row is durable. The
-        // fragment has already passed the redactor by this point, and that
-        // decorator DROPS the vector when it finds a secret -- so mirroring what
-        // the row actually holds is what keeps a secret's durable derivative out
-        // of the index. Indexing at the caller instead would defeat it.
+        // Write-through after the row is durable, mirroring what the row holds (post-redaction).
         self.mirror(&fragment.id, fragment.embedding.as_deref())
             .await;
         Ok(())
@@ -371,14 +312,8 @@ impl MemoryRepository for SqliteMemoryRepository {
             .map(row_to_fragment)
             .filter_map(|f| {
                 let emb = f.embedding.clone()?;
-                // A vector of a different WIDTH came from a different embedding
-                // model, and is not comparable to this query. Drop it from the
-                // candidate set rather than scoring it: `cosine_similarity`
-                // answers 0.0 for a mismatch, which is a valid score, so scoring
-                // it would fill every result slot with rows that are merely
-                // incomparable, rank them as if judged, and — because the list
-                // is then not empty — skip the recency fallback below. Dropping
-                // is what lets that fallback fire.
+                // Other width = other model: its 0.0 cosine looks valid and would crowd out
+                // results and stop the recency fallback below from firing.
                 if emb.len() != query_embedding.len() {
                     return None;
                 }
@@ -388,9 +323,7 @@ impl MemoryRepository for SqliteMemoryRepository {
             .collect();
 
         if scored.is_empty() {
-            // Either nothing was embedded, or everything stored was embedded by
-            // a different model (e.g. the pond switched embedding_provider).
-            // Keyword recency is the honest answer; silent 0.0-ranked rows are not.
+            // Nothing comparable (e.g. embedding_provider changed): fall back to keyword recency.
             if candidates > 0 {
                 tracing::warn!(
                     incomparable = candidates,
@@ -417,8 +350,7 @@ impl MemoryRepository for SqliteMemoryRepository {
     }
 
     async fn count_for_profile(&self, profile_id: &str) -> Result<u64> {
-        // Deliberately no `OR profile_id IS NULL`. See the port doc: those rows
-        // are shared household context and they outlive the member.
+        // No `OR profile_id IS NULL`: shared rows outlive the member.
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM memory_fragments WHERE profile_id = ?")
                 .bind(profile_id)
@@ -432,19 +364,14 @@ impl MemoryRepository for SqliteMemoryRepository {
             .bind(id)
             .execute(&self.pool)
             .await?;
-        // Best-effort, and it cannot be atomic with the row delete -- different
-        // database files, and cross-file transactions are not atomic under WAL.
-        // `prune_orphans` is the reconciliation; this just makes the common case
-        // immediate. Nothing leaks either way, because the index holds no text
-        // and an orphan resolves to nothing on the join.
+        // Best effort, not atomic with the delete (separate DB files; WAL makes cross-file
+        // transactions non-atomic). `prune_orphans` reconciles; orphans hold no text.
         self.mirror(id, None).await;
         Ok(())
     }
 
     async fn search_unembedded(&self, limit: usize) -> Result<Vec<MemoryFragment>> {
-        // Oldest first: the backfill then walks the store in insertion order,
-        // so an interrupted run resumes where it stopped instead of re-reading
-        // the newest rows every restart.
+        // Oldest first, so an interrupted backfill resumes where it stopped.
         let sql = format!(
             "SELECT {SELECT_ALL} FROM memory_fragments \
              WHERE embedding IS NULL AND (lifecycle IS NULL OR lifecycle = 'active') \
@@ -462,14 +389,9 @@ impl MemoryRepository for SqliteMemoryRepository {
         expected_dims: usize,
         limit: usize,
     ) -> Result<Vec<MemoryFragment>> {
-        // The vector is stored as a packed f32 BLOB by `vec_to_blob`, so its
-        // width is `length(embedding) / 4` and SQLite can filter on it without
-        // deserialising a single row. `length()` on a BLOB is byte length (it is
-        // character length only for TEXT), which is why this is exact rather than
-        // an approximation.
+        // `length()` of a BLOB counts bytes (of TEXT, chars), so this filters width exactly.
         let expected_bytes = (expected_dims * std::mem::size_of::<f32>()) as i64;
-        // Oldest first, matching `search_unembedded`: an interrupted sweep
-        // resumes where it stopped rather than re-reading the newest rows.
+        // Oldest first, as in `search_unembedded`.
         let sql = format!(
             "SELECT {SELECT_ALL} FROM memory_fragments \
              WHERE embedding IS NOT NULL AND length(embedding) != ? \
@@ -490,8 +412,7 @@ impl MemoryRepository for SqliteMemoryRepository {
             .bind(id)
             .execute(&self.pool)
             .await?;
-        // The backfill and the dimension repair both land here, so this is what
-        // brings an older store into the index without a second sweep.
+        // Backfill and dimension repair both land here, so this also populates the index.
         self.mirror(id, Some(embedding)).await;
         Ok(())
     }
@@ -506,8 +427,6 @@ impl MemoryRepository for SqliteMemoryRepository {
             return Ok(vec![]);
         }
 
-        // Build a WHERE clause with OR'd LIKE conditions for each keyword.
-        // e.g. (content LIKE '%cat%' OR content LIKE '%dog%')
         let like_clauses: Vec<String> = keywords
             .iter()
             .map(|_| "LOWER(content) LIKE ?".to_string())
@@ -527,7 +446,6 @@ impl MemoryRepository for SqliteMemoryRepository {
 
         let mut query = sqlx::query_as::<_, FragmentRow>(&sql);
 
-        // Bind each keyword as '%keyword%'
         for kw in keywords {
             query = query.bind(format!("%{}%", kw.to_lowercase()));
         }
@@ -559,10 +477,7 @@ impl MemoryRepository for SqliteMemoryRepository {
     }
 
     async fn update_content(&self, id: &str, content: &str) -> Result<()> {
-        // The vector goes with the words it described. Keeping it would leave a
-        // row that still scores against the OLD text -- worse than no vector,
-        // because nothing would notice. `search_unembedded` picks it up next
-        // sweep.
+        // Drop the stale vector; `search_unembedded` re-embeds the row next sweep.
         sqlx::query("UPDATE memory_fragments SET content = ?, embedding = NULL WHERE id = ?")
             .bind(content)
             .bind(id)
@@ -791,20 +706,12 @@ mod tests {
         assert_eq!(results[0].content, "Hello from chat");
     }
 
-    // ── PAI-1: ProfileScope semantics against real SQL ───────────────────
-    //
-    // These are the tests that make ProfileScope more than a type. Each asserts
-    // one of the three variants against a fixture holding rows owned by two
-    // different people plus one unattributed row.
+    // ── ProfileScope semantics against real SQL ──────────────────────────
 
     async fn repo_with_two_owners_and_a_shared_row() -> (SqliteMemoryRepository, tempfile::TempDir)
     {
         let (repo, tmp) = make_repo().await;
-        // memory_fragments.profile_id REFERENCES profiles(id) ON DELETE CASCADE
-        // (migration 0005), so a fragment cannot be attributed to a profile that
-        // does not exist. Found by this test failing with SQLite error 787; the
-        // design doc had not recorded the constraint, and it means PAI-1's
-        // cascade-delete phase is already half built.
+        // `profile_id` references `profiles(id)`, so the owners must exist first.
         for id in ["alice", "bob"] {
             sqlx::query("INSERT INTO profiles (id, display_name, avatar_emoji) VALUES (?, ?, ?)")
                 .bind(id)
@@ -841,7 +748,6 @@ mod tests {
         (repo, tmp)
     }
 
-    /// The whole point of the workstream: alice must not see bob's memories.
     #[tokio::test]
     async fn owner_sees_their_own_rows_and_shared_ones_but_never_another_persons() {
         let (repo, _tmp) = repo_with_two_owners_and_a_shared_row().await;
@@ -858,8 +764,6 @@ mod tests {
         assert!(!ids.contains(&"b"), "alice must NOT see bob's row");
     }
 
-    /// Household is the migration-safe scope: identical to the pre-PAI-1
-    /// unfiltered behaviour, which is what makes phase P1 a no-op refactor.
     #[tokio::test]
     async fn household_sees_everything() {
         let (repo, _tmp) = repo_with_two_owners_and_a_shared_row().await;
@@ -870,8 +774,6 @@ mod tests {
         assert_eq!(rows.len(), 3);
     }
 
-    /// An unidentified speaker gets nothing at all. Asserted across every
-    /// scoped read, because one unguarded method is all it takes.
     #[tokio::test]
     async fn guest_sees_nothing_through_any_read() {
         let (repo, _tmp) = repo_with_two_owners_and_a_shared_row().await;
@@ -895,8 +797,6 @@ mod tests {
         assert!(repo.search_scoreable(&g).await.unwrap().is_empty());
     }
 
-    /// Keyword search must honour the scope too -- it builds its SQL
-    /// separately, which is exactly where a filter gets forgotten.
     #[tokio::test]
     async fn keyword_search_is_scoped_like_the_others() {
         let (repo, _tmp) = repo_with_two_owners_and_a_shared_row().await;
@@ -941,13 +841,6 @@ mod tests {
         assert_eq!(results.len(), 1);
     }
 
-    /// Switching `embedding_provider` changes the vector WIDTH, and every stored
-    /// vector from the old model becomes incomparable. Those rows must not be
-    /// scored: `cosine_similarity` answers 0.0 for a width mismatch, which is a
-    /// legitimate score, so scoring them would return a full page of rows ranked
-    /// as if they had been judged -- and, being non-empty, would suppress the
-    /// recency fallback entirely. That is the silent-degradation mode this test
-    /// exists to prevent.
     #[tokio::test]
     async fn search_similar_falls_back_when_every_vector_is_from_another_model() {
         let (repo, _tmp) = make_repo().await;
@@ -956,11 +849,7 @@ mod tests {
         // 384-dim, as fastembed would have written.
         stale.embedding = Some(vec![0.5f32; 384]);
         repo.add(stale).await.unwrap();
-        // An UNEMBEDDED row is what makes this test discriminate. The semantic
-        // query selects `embedding IS NOT NULL`, so it can never return this row;
-        // only `search_recent` can. Asserting on the stale row alone would pass
-        // either way -- scoring it 0.0 also returns exactly one row -- which is
-        // how the first version of this test was vacuous.
+        // Only `search_recent` can return this unembedded row, which makes the test discriminate.
         let plain = MemoryFragment::from_chat(
             "plain".to_string(),
             None,
@@ -989,8 +878,6 @@ mod tests {
         );
     }
 
-    /// The repair selector must find exactly the rows the backfill cannot: a
-    /// stale-width vector is NOT NULL, so `search_unembedded` steps over it.
     #[tokio::test]
     async fn search_stale_dimension_finds_wrong_width_rows_and_only_those() {
         let (repo, _tmp) = make_repo().await;
@@ -1016,16 +903,12 @@ mod tests {
              backfill and a 768-dim row is already correct"
         );
 
-        // The complement: the backfill still sees only the never-embedded row,
-        // which is exactly why the stale one needed its own selector.
+        // The backfill sees only the never-embedded row, hence the separate selector.
         let unembedded = repo.search_unembedded(10).await.unwrap();
         let ids: Vec<&str> = unembedded.iter().map(|f| f.id.as_str()).collect();
         assert_eq!(ids, vec!["never"]);
     }
 
-    /// A mixed store must not let incomparable rows crowd out the comparable
-    /// ones: with one 768-dim row and many 384-dim rows, a limit-1 search must
-    /// return the row it could actually judge.
     #[tokio::test]
     async fn incomparable_vectors_do_not_crowd_out_the_comparable_one() {
         let (repo, _tmp) = make_repo().await;
@@ -1048,10 +931,7 @@ mod tests {
 
         let mut query = vec![0.0f32; 768];
         query[0] = 1.0;
-        // A GENEROUS limit is what makes this discriminate. At limit 1 the
-        // comparable row wins on score alone (1.0 beats 0.0), so the test passed
-        // with the filter removed. With limit 10, the filter is the only thing
-        // that keeps the five incomparable rows out of the result.
+        // Limit 10, not 1: at 1 the comparable row wins on score even without the filter.
         let results = repo
             .search_similar(&query, &ProfileScope::Household, 10)
             .await
@@ -1151,7 +1031,6 @@ mod tests {
         repo.update_lifecycle("arch1", MemoryLifecycle::Archived)
             .await
             .unwrap();
-        // Archived memories should not appear in search_recent
         let results = repo
             .search_recent(&ProfileScope::Household, 10)
             .await
@@ -1193,7 +1072,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Search for "cats" — should find cat1
         let results = repo
             .search_by_content(&["cats".to_string()], &ProfileScope::Household, 10)
             .await
@@ -1201,7 +1079,6 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "cat1");
 
-        // Search for "dog" — should find dog1
         let results = repo
             .search_by_content(&["dog".to_string()], &ProfileScope::Household, 10)
             .await
@@ -1209,7 +1086,6 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "dog1");
 
-        // Search for "cats" + "dog" — should find both
         let results = repo
             .search_by_content(
                 &["cats".to_string(), "dog".to_string()],
@@ -1220,7 +1096,6 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 2);
 
-        // Empty keywords — no results
         let results = repo
             .search_by_content(&[], &ProfileScope::Household, 10)
             .await
@@ -1349,18 +1224,14 @@ mod tests {
             .await
             .unwrap();
 
-        // All events
         let all = repo.get_events(None, 100).await.unwrap();
         assert_eq!(all.len(), 3);
 
-        // Filtered by memory_id
         let mem1_events = repo.get_events(Some("mem-1"), 100).await.unwrap();
         assert_eq!(mem1_events.len(), 2);
-        // Both events should be for mem-1
         let kinds: Vec<_> = mem1_events.iter().map(|e| &e.event_kind).collect();
         assert!(kinds.contains(&&MemoryEventKind::Extracted));
         assert!(kinds.contains(&&MemoryEventKind::Written));
-        // The extracted event should carry the session_id
         let extracted = mem1_events
             .iter()
             .find(|e| e.event_kind == MemoryEventKind::Extracted)
@@ -1368,16 +1239,8 @@ mod tests {
         assert_eq!(extracted.session_id.as_deref(), Some("sess-1"));
     }
 
-    // ── Legacy-row semantics (PAI-1 P8) ──────────────────────────────────
+    // ── Legacy-row semantics ─────────────────────────────────────────────
 
-    /// P8 as designed called for a backfill migration. It is not needed: the
-    /// semantics it wanted are already what `scope_sql` does, and writing an
-    /// UPDATE would only stamp a value into rows whose meaning is already
-    /// correct without one.
-    ///
-    /// The rule is that a `profile_id IS NULL` row is **shared household
-    /// context**, not "unclassified, attribute it to somebody". So an owner
-    /// reads it, and nobody owns it.
     #[tokio::test]
     async fn a_legacy_unattributed_row_is_shared_not_owned() {
         let (repo, _tmp) = repo_with_two_owners_and_a_shared_row().await;
@@ -1394,18 +1257,14 @@ mod tests {
             );
         }
 
-        // ...and neither of them owns it. This is what makes deleting a member
-        // safe: the count reported to the user, and the CASCADE that follows,
-        // both leave shared context alone.
+        // ...and neither owns it, so member deletion's count and CASCADE leave it alone.
         for who in ["alice", "bob"] {
             let owned = repo.count_for_profile(who).await.unwrap();
             let all = repo
                 .search_recent(&ProfileScope::Household, 50)
                 .await
                 .unwrap();
-            // Exact, not `<`. A count that wrongly included the shared row
-            // would be 2 of 3 and still satisfy a `<` check, so the weaker
-            // assertion could not detect the bug it names.
+            // Exact, not `<`: a count wrongly including the shared row (2 of 3) would pass `<`.
             assert_eq!(
                 owned, 1,
                 "{who} owns exactly their own row -- not the shared one, which survives them"
@@ -1414,8 +1273,6 @@ mod tests {
         }
     }
 
-    /// The count that member deletion reports must exclude shared rows, or the
-    /// number shown at the one moment it matters most is a lie.
     #[tokio::test]
     async fn the_per_member_count_excludes_shared_rows() {
         let (repo, _tmp) = repo_with_two_owners_and_a_shared_row().await;

@@ -16,9 +16,7 @@ describe("hhmm", () => {
   });
 
   it("rejects what would silence the pond all day", () => {
-    // The server's failure mode for an unparseable time is `quiet_hours_cover`
-    // failing closed — silence, with nothing explaining why. These are the
-    // shapes someone actually types.
+    // Shapes people actually type.
     bad(hhmm("10pm"));
     bad(hhmm("22"));
     bad(hhmm("22:0"));
@@ -122,8 +120,6 @@ describe("speechCategories", () => {
   });
 
   it("rejects empty, because empty means permanent silence", () => {
-    // Server-side a blank entry matches no category, so an empty box means the
-    // pond never speaks — the opposite of what someone typing here wants.
     bad(speechCategories(""));
     bad(speechCategories("   "));
     bad(speechCategories(","));

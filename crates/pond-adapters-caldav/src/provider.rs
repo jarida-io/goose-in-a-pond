@@ -1,32 +1,26 @@
-//! Where a household's calendar lives. CalDAV is one protocol with four commercially important
-//! dialects that differ only in setup, so the household picks a name from a list instead of
-//! finding a URL. Every preset needs an app-specific password, not the account password (all
-//! four require it once two-factor is on, two unconditionally), so the instruction lives here.
+//! CalDAV provider presets, so a household picks a name instead of finding a URL. Each needs
+//! an app-specific password, not the account password.
 
-/// A calendar host this pond knows how to reach.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CalDavProvider {
-    /// Google Calendar over CalDAV. **Cannot be connected by this pond**: Google's CalDAV v2 guide
-    /// allows only HTTPS with OAuth 2.0; an app password IS Basic auth, hence a 401 that reads
-    /// like a wrong password. The variant stays so stored rows stay readable and disconnectable;
-    /// [`is_connectable`](Self::is_connectable) refuses new ones. Gmail over IMAP is unaffected.
+    /// Google Calendar. Not connectable: its CalDAV requires OAuth 2.0 and rejects Basic auth.
+    /// Kept so stored rows can still be read and disconnected.
     Google,
-    /// iCloud. `SourceKind::Calendar` over CalDAV is the honest ceiling here --
-    /// there is no general iCloud API, so this is not a stepping stone to one.
+    /// iCloud (CalDAV only; there is no general iCloud API).
     ICloud,
-    /// Fastmail. The cleanest of the four: real CalDAV, documented, stable.
     Fastmail,
-    /// Nextcloud, or anything else self-hosted, where the base URL is the
-    /// household's own.
-    Nextcloud { base_url: String },
+    /// Nextcloud or another self-hosted server at the household's own URL.
+    Nextcloud {
+        base_url: String,
+    },
     /// A server named by URL, for everything this list does not cover.
-    Custom { base_url: String },
+    Custom {
+        base_url: String,
+    },
 }
 
 impl CalDavProvider {
-    /// The URL discovery starts from: the well-known entry point rather than a calendar, since
-    /// RFC 6764 discovers the principal, then the calendar home; a hard-coded calendar path breaks
-    /// the first time somebody has two calendars.
+    /// RFC 6764 discovery entry point (not a calendar path: a household may have several).
     pub fn discovery_url(&self) -> String {
         match self {
             Self::Google => "https://apidata.googleusercontent.com/caldav/v2/".to_string(),
@@ -38,10 +32,7 @@ impl CalDavProvider {
         }
     }
 
-    /// Stable identifier written to `context_sources.provider`.
-    ///
-    /// Part of the schema, not a display string: it is read back to rebuild the
-    /// adapter, so renaming one orphans every source a household connected.
+    /// Persisted in `context_sources.provider`; renaming a value orphans connected sources.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Google => "google",
@@ -52,8 +43,7 @@ impl CalDavProvider {
         }
     }
 
-    /// What the household has to go and do before this can work. Carried in the type so the
-    /// connect surface can show it at the moment it is needed, next to the password box.
+    /// Setup steps the household must do first, shown next to the password box.
     pub fn setup_hint(&self) -> &'static str {
         match self {
             Self::Google => {
@@ -80,16 +70,12 @@ impl CalDavProvider {
         }
     }
 
-    /// Whether a NEW source may be connected. Separate from the variant existing at all: a pond
-    /// that already stored a Google source must still read and disconnect it, so the variant
-    /// stays and only new connections are refused.
+    /// Whether a NEW source may be connected; existing ones must still load to be disconnected.
     pub fn is_connectable(&self) -> bool {
         !matches!(self, Self::Google)
     }
 
-    /// Rebuild a provider from what was stored, for a source being re-synced. `base_url` is only
-    /// consulted for the two variants that carry one, so a stored `google` row cannot be turned
-    /// into a custom host by editing a column.
+    /// Rebuild from storage; `base_url` can't redirect a preset, only Nextcloud/Custom read it.
     pub fn from_stored(provider: &str, base_url: Option<&str>) -> Option<Self> {
         match provider {
             "google" => Some(Self::Google),
@@ -112,8 +98,6 @@ mod tests {
 
     #[test]
     fn every_preset_has_a_discovery_url_and_a_setup_hint() {
-        // A preset with an empty hint is worse than no preset: the household
-        // reaches a password box with nothing telling them where to get one.
         for p in [
             CalDavProvider::Google,
             CalDavProvider::ICloud,
@@ -139,8 +123,6 @@ mod tests {
         assert_eq!(p.discovery_url(), "https://cloud.example.org/dav");
     }
 
-    /// The round trip a re-sync depends on. A stored row that cannot rebuild
-    /// its provider is a source that silently stops syncing.
     #[test]
     fn stored_providers_round_trip() {
         for p in [
@@ -164,9 +146,7 @@ mod tests {
         }
     }
 
-    /// A self-hosted variant with no stored URL must refuse rather than invent
-    /// one: guessing a host is how a pond ends up authenticating somewhere the
-    /// household never named.
+    /// Guessing a host would send credentials somewhere the household never named.
     #[test]
     fn a_self_hosted_provider_without_its_url_is_not_rebuilt() {
         assert_eq!(CalDavProvider::from_stored("nextcloud", None), None);
@@ -179,9 +159,6 @@ mod tests {
 mod connectability_tests {
     use super::*;
 
-    /// Google's own CalDAV guide: Basic auth gets a 401, OAuth 2.0 is required.
-    /// Offering it with a password box produced a refusal that read like the
-    /// household had typed the wrong thing.
     #[test]
     fn google_calendar_is_not_connectable_with_a_password() {
         assert!(!CalDavProvider::Google.is_connectable());
@@ -209,8 +186,6 @@ mod connectability_tests {
         }
     }
 
-    /// A stored Google row must still resolve, or a household cannot disconnect
-    /// the thing this change stops them creating.
     #[test]
     fn a_stored_google_source_can_still_be_rebuilt() {
         assert_eq!(

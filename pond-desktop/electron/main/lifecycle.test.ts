@@ -5,17 +5,7 @@ import {
   type HealthLoopDeps,
 } from "./lifecycle";
 
-// These two behaviours lived inside index.ts, the one main-process module with
-// no tests, and both were wrong. The health loop could respawn the sidecar
-// during teardown, and only one of the four quit paths killed it at all.
-
-/**
- * A timer that fires when told rather than when time passes.
- *
- * Deliberately not vitest's fake timers: the loop interleaves timers with
- * awaited promises, and driving the two by hand is what makes "a quit lands in
- * the gap after an await" expressible at all.
- */
+/** Timers fired by hand, not vi's fake timers, so a quit can land in the gap after an await. */
 function manualTimers() {
   const pending = new Map<number, () => void>();
   let next = 1;
@@ -83,9 +73,6 @@ describe("createHealthLoop", () => {
     expect(deps.onStarting).toHaveBeenCalled();
   });
 
-  // The loop kept no handle on its own timer, so nothing could stop it. A tick
-  // queued before quit would land after the server was shut down and start a
-  // replacement that nothing would ever take down again.
   it("stops scheduling once it has been stopped, so a queued tick cannot respawn the server", async () => {
     const { deps, timers } = loopDeps({
       healthCheck: vi.fn().mockResolvedValue(false),
@@ -106,8 +93,6 @@ describe("createHealthLoop", () => {
     expect(timers.cleared).toHaveLength(1);
   });
 
-  // A quit can land in the gap between the health check and the recovery, not
-  // only at the top of a tick.
   it("abandons a tick when the shell quits mid-check, rather than recovering into a teardown", async () => {
     let quit = () => {};
     const { deps, timers } = loopDeps({
@@ -147,8 +132,6 @@ function teardownDeps() {
 }
 
 describe("createTeardown", () => {
-  // The health loop must be stopped before the server it would otherwise
-  // restart, and the microphone released before the server that outlives it.
   it("stops the health loop, then the voice child, then the server", () => {
     const { deps, order } = teardownDeps();
     createTeardown(deps).releaseChildren();
@@ -165,8 +148,6 @@ describe("createTeardown", () => {
     expect(deps.shutdownServer).toHaveBeenCalledTimes(1);
   });
 
-  // process.on("exit") calls releaseChildren alone, because the Electron APIs
-  // behind releaseUi are not safe that late.
   it("kills both children without touching the UI, for the exit hook", () => {
     const { deps } = teardownDeps();
     createTeardown(deps).releaseChildren();

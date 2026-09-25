@@ -1,10 +1,6 @@
 // ─── Connecting a calendar or mailbox ───────────────────────────────────────
-//
-// One panel, rendered by both the sections UI and the settings hub, because the
-// alternative is two forms that agree until somebody changes one of them.
-//
-// The password never leaves this component except in the connect request: it is
-// not put in app state, not logged, and cleared as soon as the request returns.
+// Shared by the sections UI and the settings hub. The password leaves only in the connect
+// request: never in app state or logs, and cleared as soon as it returns.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { CalendarDays, Mail, Trash2, RefreshCw } from "lucide-react";
@@ -25,17 +21,8 @@ interface Props {
   sessionId: string | null;
 }
 
-/**
- * What to send when no conversation is open.
- *
- * The owner is resolved server-side from the session, the paired device and the
- * household size — and in a one-member pond the answer does not depend on the
- * session at all. Demanding a conversation before somebody can connect a
- * calendar made them establish something the pond already knew.
- *
- * A real session id is still preferred when there is one: in a household with
- * two members it is what says whose account this is.
- */
+/** Sent when no conversation is open (the server resolves the owner). A real session id is
+ *  preferred: in a multi-member household it says whose account this is. */
 const NO_CONVERSATION = "context-setup";
 
 export function ConnectionsPanel({ sessionId }: Props) {
@@ -57,8 +44,7 @@ export function ConnectionsPanel({ sessionId }: Props) {
     setLoading(true);
     try {
       const result = await api.listContextSources(scopeId);
-      // `request` returns undefined cast to T for an empty body, so a method
-      // typed as returning an object can hand back nothing at all.
+      // `request` returns undefined (cast to T) for an empty body.
       setSources((result?.sources ?? []).filter((s) => s.needs_credentials));
       setError(null);
     } catch (e) {
@@ -120,8 +106,7 @@ export function ConnectionsPanel({ sessionId }: Props) {
     setNotice(null);
     try {
       const r = await api.syncContextSources();
-      // Named results before the summary sentence, because with two accounts
-      // "read 3 new things" does not say which one they came from.
+      // Per-account results first: a total can't say which account things came from.
       setLastRun(
         Object.fromEntries(
           (r.per_source ?? []).map((o) => [
@@ -130,9 +115,7 @@ export function ConnectionsPanel({ sessionId }: Props) {
           ]),
         ),
       );
-      // Every outcome gets its own sentence. "Done" would be the one answer
-      // that tells somebody nothing, and this button exists precisely because
-      // they could not tell whether it had worked.
+      // Every outcome gets its own sentence; a bare "Done" says nothing.
       if (r.sources === 0) {
         setNotice("Nothing to check yet — no accounts are connected.");
       } else if (r.needs_reauth > 0) {

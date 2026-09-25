@@ -2,11 +2,7 @@ use crate::user_data::domain::skill::UserSkill;
 use anyhow::Result;
 use async_trait::async_trait;
 
-/// Driven Port: user skill persistence.
-///
-/// Each active skill's name + description are injected into the agent's
-/// system prompt on every turn; the full `content` is loaded on demand via
-/// the `load_skill` tool (see `get_by_name`).
+/// User skills: active ones' names and descriptions enter every prompt, `content` via `load_skill`.
 #[async_trait]
 pub trait UserSkillRepository: Send + Sync {
     /// Return all active skills, ordered by name.
@@ -18,9 +14,7 @@ pub trait UserSkillRepository: Send + Sync {
     /// Fetch a skill by its UUID.
     async fn get(&self, id: &str) -> Result<Option<UserSkill>>;
 
-    /// Fetch an active skill by its name. Used by `load_skill` to pull a
-    /// skill's full content into context on demand; inactive skills are
-    /// invisible to it, matching `list_active`.
+    /// Fetch an active skill by name for `load_skill`; inactive skills stay invisible to it.
     async fn get_by_name(&self, name: &str) -> Result<Option<UserSkill>>;
 
     /// Insert a new skill. The `id` field must be a UUID set by the caller.

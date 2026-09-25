@@ -11,12 +11,7 @@ afterEach(cleanup);
 
 const SRC_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
-/**
- * A `subagent_progress` frame verbatim as `routes.rs` serialises it — the keys
- * are copied from the `json!` literal in `TurnAccumulator::absorb`, not
- * invented here. A fixture that drifts from the wire tests a system that does
- * not exist, which this programme has paid for more than once.
- */
+/** A `subagent_progress` frame exactly as `routes.rs` serialises it (`TurnAccumulator::absorb`). */
 function frame(
   status: SubagentStatus,
   extra: Partial<ChatEvent> = {},
@@ -43,10 +38,7 @@ describe("applySubagentProgress", () => {
   });
 
   it("takes a tool frame as a tool, not as where the run has got to", () => {
-    // The frames a real delegation produces, in order. A `tool` frame must add
-    // to the tool list and leave `detail` alone -- `detail` is the reason a run
-    // ENDED, and a tool name landing there captions a finished delegation with
-    // the name of something it did on the way.
+    // A real delegation's frames, in order; `detail` is why a run ended, so tools must not set it.
     const runs = fold([
       frame("queued"),
       frame("running"),
@@ -88,10 +80,7 @@ describe("applySubagentProgress", () => {
   });
 
   it("clears a run's reason when a later frame gives it none", () => {
-    // There is no second gate on the render, deliberately: this clearing is the
-    // only thing standing between a finished run and the caption from an
-    // earlier state, so `detail: ev.detail ?? existing.detail` -- the obvious
-    // "don't lose information" version -- is the mutation this catches.
+    // Catches the `detail: ev.detail ?? existing.detail` mutation; the render has no second gate.
     const runs = fold([
       frame("running"),
       frame("failed", { detail: "subagent produced no answer" }),
@@ -128,8 +117,7 @@ describe("SubagentTree", () => {
     const text = document.querySelector(".subagent-tree")!.textContent ?? "";
     expect(text).toContain("researcher");
     expect(text).toContain("working");
-    // The bare name, which is what a person reads. `giap-weather__` is the
-    // extension prefix the model sees.
+    // The extension prefix (`giap-weather__`) is stripped for display.
     expect(text).toContain("get forecast");
   });
 
@@ -151,24 +139,8 @@ describe("SubagentTree", () => {
   });
 });
 
-/**
- * A CHEAP TRIPWIRE, not coverage — the same distinction `ContextPressureNote`'s
- * suite draws, and for the same reason: neither chat surface has a mount
- * harness that drives a whole SSE stream, so for the wiring a grep is all there
- * is and saying so is better than implying otherwise.
- *
- * It does catch the one mutation that matters most here, because that mutation
- * is a substring. Every other note on a message is gated on `!streaming`, so
- * the natural thing for the next person to do is make this one match — and
- * that ships the tree invisible for exactly the minutes it exists to cover, a
- * turn parked inside a `delegate` tool call. `PAI-6` is in the same breath in
- * both files so the gate cannot be re-added without reading why.
- *
- * Folding the frame and rendering the tree are checked separately, because
- * they live separately: the fold moved to `state/chatRunStore.ts` when the turn
- * was hoisted out of the components so it could survive leaving the section,
- * and the `!streaming` mutation this guard exists for is a render-side one.
- */
+/** A cheap grep tripwire, not coverage: neither chat surface can mount a whole SSE stream. It
+ *  catches gating the tree on `!streaming`, which would hide it during a `delegate` call. */
 describe("subagent_progress has a consumer", () => {
   it("the shared turn driver folds the frame through the one reducer", () => {
     const src = readFileSync(join(SRC_DIR, "state/chatRunStore.ts"), "utf8");
@@ -215,8 +187,7 @@ describe("subagent_progress has a consumer", () => {
     ).toBe(true);
 
     const statuses = src.match(/export type SubagentStatus =[^;]+;/)?.[0] ?? "";
-    // The seven `SubagentStatus` variants in pond-core. A status the client
-    // cannot name renders as a raw string in the tree.
+    // pond-core's seven variants; one the client can't name renders raw in the tree.
     for (const status of [
       "queued",
       "running",

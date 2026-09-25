@@ -1,15 +1,5 @@
-// ────────────────────────────────────────────────────────────
-// Home (classic surface).
-//
-// The screen itself lives in `hub/views/DashboardGrid`, shared with
-// `hub/views/Home.tsx`. See that file and `hub/state/dashboardLayout.ts` for
-// the design reasoning; what remains here is this surface's routing.
-//
-// Still exported as `Dashboard` and still on the `dashboard` section id: that
-// id is persisted in localStorage as `giap-section`, so renaming it would
-// strand anyone whose app reopens on the screen they left. What people see is
-// "Home"; what the router remembers is unchanged.
-// ────────────────────────────────────────────────────────────
+// Home's classic-surface routing; the screen is `hub/views/DashboardGrid`. Still `Dashboard` on the
+// `dashboard` section id: it's persisted as `giap-section`, so renaming it strands anyone reopening there.
 
 import { useAppState, useAppDispatch } from "../state/AppContext";
 import { DashboardGrid } from "../hub/views/DashboardGrid";

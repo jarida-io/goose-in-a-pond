@@ -11,15 +11,8 @@ function optionsFor(code: string) {
 
 describe("commissioning options", () => {
   it("decodes a QR payload here, because matter.js cannot", () => {
-    // Google's Matter Virtual Device shows exactly this payload under its QRCode
-    // button, and commissioning it failed in TWO MILLISECONDS -- before anything
-    // reached the network -- with "Invalid pairing code". matter.js's
-    // `commission({pairingCode})` runs `ManualPairingCodeCodec.decode`
-    // unconditionally, and that codec strips every non-digit before checking the
-    // length, so this payload arrives as twelve stray digits and is rejected.
-    //
-    // The values are the ones the payload really carries: vendor 0xfff1, product
-    // 0x8000, long discriminator 3840, passcode 20202021.
+    // MVD's QR payload. matter.js's `commission({pairingCode})` always runs the manual-code codec,
+    // which strips non-digits. The payload carries discriminator 3840, passcode 20202021.
     expect(optionsFor("MT:Y.K9042C00KA0648G00")).toEqual({
       passcode: 20202021,
       discriminator: 3840,
@@ -27,18 +20,14 @@ describe("commissioning options", () => {
   });
 
   it("takes the long discriminator, which the manual form cannot carry", () => {
-    // Worth asserting separately: the manual code for the same device carries only a
-    // SHORT discriminator (the top 4 bits), so a QR payload narrows the mDNS browse
-    // to one device where the manual form cannot. Passing `pairingCode` through would
-    // have thrown away the difference even if the decoder had accepted it.
+    // A manual code has only the short (top 4 bits) discriminator; the long one pins mDNS to one device.
     const options = optionsFor("MT:Y.K9042C00KA0648G00");
     expect(options).toHaveProperty("discriminator", 3840);
     expect(options).not.toHaveProperty("pairingCode");
   });
 
   it("accepts a QR payload typed in lower case", () => {
-    // The base-38 alphabet is uppercase, and the QR codec matches `MT:`
-    // case-sensitively, so normalising is lossless and spares the user a retype.
+    // Base-38 is uppercase and the codec matches `MT:` case-sensitively, so upcasing is lossless.
     expect(optionsFor("mt:y.k9042c00ka0648g00")).toEqual({
       passcode: 20202021,
       discriminator: 3840,
@@ -54,10 +43,7 @@ describe("commissioning options", () => {
   });
 
   it("calls a malformed QR payload an invalid code, not a failed commission", () => {
-    // `commission_failed` means pairing was attempted and did not complete. A payload
-    // that cannot be decoded never leaves this process, and reporting it as a failed
-    // commission is what produced "commissioning failed: Invalid pairing code:
-    // commission_failed" -- three layers, none of them the actionable one.
+    // `commission_failed` means pairing was attempted; an undecodable payload never leaves this process.
     let raised: unknown;
     try {
       optionsFor("MT:...");

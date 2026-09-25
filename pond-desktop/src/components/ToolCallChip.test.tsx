@@ -26,9 +26,6 @@ describe("ToolCallChip — MCP-UI cards in the conversation", () => {
     render(<ToolCallChip card={card({ renderHint: "wolfram" })} />);
     expand();
 
-    // The card, not the JSON dump the chip used to show. Every card in
-    // mcp-ui/cards rendered in Canvas and nowhere in chat, which is the one
-    // place the result is actually read.
     expect(screen.getByText("4.828 km")).toBeTruthy();
     expect(screen.queryByText(/"primary"/)).toBeNull();
   });
@@ -42,8 +39,7 @@ describe("ToolCallChip — MCP-UI cards in the conversation", () => {
   });
 
   it("shows the text rather than an empty card when the hint has no data yet", () => {
-    // `renderHint` only arrives on tool_result. A card asked to render {} draws
-    // its own loading state, which is worse than the text we already have.
+    // `renderHint` only arrives with tool_result; an empty card would draw its loading state.
     const c = card({ renderHint: undefined, data: { result: "partial output" } });
     render(<ToolCallChip card={c} />);
     expand();
@@ -68,11 +64,7 @@ describe("ToolCallChip — MCP-UI cards in the conversation", () => {
     render(<ToolCallChip card={c} />);
     expand();
 
-    // Plain content with no handler of its own — reading the result, selecting
-    // a number. The chip's outer onClick toggles the panel, so without the
-    // guard the card would shut the moment anyone touched it. Deliberately not
-    // a suggestion chip: those stop propagation themselves, so clicking one
-    // would pass whether or not this guard existed.
+    // Plain content: a suggestion chip stops propagation itself, so it would pass anyway.
     fireEvent.click(screen.getByText("87.97 days"));
 
     expect(screen.getByText("Mercury (planet)")).toBeTruthy();
@@ -92,9 +84,7 @@ describe("ToolCallChip — MCP-UI cards in the conversation", () => {
     expand();
     fireEvent.click(screen.getByRole("button", { name: /a chemical element/i }));
 
-    // Nothing resolves an id any more (explore_computation was removed on
-    // 2026-09-10), so the wording has to carry the whole request — and must
-    // NOT smuggle an id the model would try to quote back.
+    // Nothing resolves ids, so the prompt must carry the whole request and no id to quote back.
     const sent = onAction.mock.calls[0][0] as string;
     expect(sent).toContain("a chemical element");
     expect(sent).not.toContain("w2");

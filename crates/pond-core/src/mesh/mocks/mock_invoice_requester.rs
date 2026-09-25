@@ -8,9 +8,7 @@ use crate::mesh::domain::millisats::Millisats;
 use crate::mesh::domain::peer_id::PeerId;
 use crate::mesh::ports::invoice_requester::{InvoiceRequester, InvoiceRequesterError};
 
-/// In-memory invoice requester for testing. A peer not given a response via
-/// `set_invoice`/`set_error` answers with `Timeout` — mirrors a real peer
-/// that never responds, rather than fabricating an invoice.
+/// In-memory invoice requester; an unscripted peer answers `Timeout`, like one that never replies.
 pub struct MockInvoiceRequester {
     responses: Arc<RwLock<HashMap<PeerId, Result<String, String>>>>,
 }

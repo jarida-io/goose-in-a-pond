@@ -2,11 +2,7 @@ use crate::user_data::domain::prompt_extra::PromptExtra;
 use anyhow::Result;
 use async_trait::async_trait;
 
-/// Driven Port: system prompt extras persistence.
-///
-/// Extras are keyed instruction blocks injected into every agent turn via
-/// `agent.extend_system_prompt(key, instruction)`. They are ordered by
-/// `sort_order ASC, key ASC`.
+/// Driven Port: keyed system-prompt extras, injected every turn by `sort_order`, then `key`.
 #[async_trait]
 pub trait PromptExtraRepository: Send + Sync {
     /// Return all active extras, in injection order.

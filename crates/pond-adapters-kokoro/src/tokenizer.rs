@@ -1,24 +1,13 @@
-//! Text → phonemes → token ids, the way Kokoro expects them. Kokoro was trained on misaki
-//! G2P, but espeak IPA (stress kept) lands inside its vocab on ordinary English chat text, so
-//! anything outside the vocab is dropped and counted by [`Vocab::encode`] to keep regressions
-//! measurable. The vocab is read from `tokenizer.json` beside the weights, never hand-embedded.
+//! Text -> espeak IPA -> Kokoro token ids. Kokoro was trained on misaki G2P; espeak IPA mostly
+//! fits its vocab, and [`Vocab::encode`] drops and counts whatever doesn't.
 
 use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
-/// espeak-ng is one global C library, and it is not thread-safe.
-///
-/// `espeak_SetVoiceByName` mutates process-wide state and `espeak_TextToPhonemes`
-/// walks a cursor through it, so two threads phonemizing at once corrupt each
-/// other. It shows up as a SIGSEGV with `N_VOICES_LIST` warnings before it,
-/// which reads like a bad build rather than a data race — the reason it is
-/// worth a comment this long.
-///
-/// The lock is here, at the only place this crate touches espeak, rather than
-/// in a caller: a caller that forgets is a crash, and there is no type that
-/// would remind it.
+/// espeak-ng keeps process-wide state and is not thread-safe: concurrent phonemizing segfaults
+/// (after `N_VOICES_LIST` warnings). Every espeak call in this crate takes this lock.
 static ESPEAK: Mutex<()> = Mutex::new(());
 
 /// Kokoro's hard context limit, including the pad token at each end.
@@ -76,8 +65,7 @@ impl Vocab {
 
         let mut map = HashMap::with_capacity(obj.len());
         for (sym, id) in obj {
-            // Every Kokoro vocab entry is a single char; anything else would
-            // silently never match during encoding, so reject it loudly.
+            // Entries are single chars; a multi-char one could never match, so it is skipped.
             let mut chars = sym.chars();
             let (Some(c), None) = (chars.next(), chars.next()) else {
                 continue;
@@ -105,16 +93,8 @@ impl Vocab {
         self.map.contains_key(&c)
     }
 
-    /// Encode a phoneme string, dropping anything outside the vocab.
-    ///
-    /// Returns the ids, the phonemes that survived, and how many characters
-    /// were dropped. The drop count is the R2 canary: on English it should be
-    /// zero, and a non-zero count means espeak has started emitting something
-    /// this model was never trained to read.
-    ///
-    /// It is also what keeps [`PROSODY_PUNCT`] honest. Every mark in that list
-    /// is in the vocab, so preserving them adds nothing to this count; a mark
-    /// that is not would show up here rather than going quietly missing.
+    /// Encode phonemes, dropping and counting anything outside the vocab. On English the count
+    /// should be zero; non-zero means espeak emits something the model never learned.
     pub fn encode(&self, phonemes: &str) -> (Vec<i64>, String, usize) {
         let mut ids = Vec::with_capacity(phonemes.len());
         let mut kept = String::with_capacity(phonemes.len());
@@ -132,17 +112,8 @@ impl Vocab {
     }
 }
 
-/// The punctuation Kokoro was trained to read.
-///
-/// Exactly the intersection of "is punctuation" and "is in the model's vocab"
-/// (`tokenizer.json`), which is not an accident: Kokoro's reference G2P is
-/// misaki, and misaki leaves these in the phoneme string. They are prosody —
-/// a comma is a short pause, a question mark bends the pitch up at the end of
-/// the clause. Feeding the model none of them is why synthesis reads flat and
-/// runs sentences together.
-///
-/// `$` is in the vocab too and is deliberately not here: currency is spelled
-/// out long before this point, by `normalize_for_speech`.
+/// Punctuation in Kokoro's vocab, kept because misaki (its reference G2P) keeps it as prosody.
+/// `$` is omitted: `normalize_for_speech` spells out currency first.
 const PROSODY_PUNCT: &[char] = &['.', ',', '!', '?', ';', ':', '"', '(', ')'];
 
 /// Phonemize `text`, keeping the punctuation espeak throws away.
@@ -183,8 +154,7 @@ pub fn phonemize(text: &str) -> Result<String> {
                 leading_space,
             } => {
                 let spoken = {
-                    // Poisoning is not meaningful here: espeak holds no state
-                    // of ours, so a panicking sibling leaves nothing to repair.
+                    // Ignore poisoning: the lock guards no data of ours.
                     let _guard = ESPEAK.lock().unwrap_or_else(|e| e.into_inner());
                     espeak_rs::text_to_phonemes(run, "en-us", None)
                         .map_err(|e| anyhow!("espeak phonemization failed: {e}"))?
@@ -194,10 +164,7 @@ pub fn phonemize(text: &str) -> Result<String> {
                 if spoken.is_empty() {
                     continue;
                 }
-                // espeak trims, so a space between two runs has to be restored
-                // from the source or the words either side fuse — which is the
-                // bug this function exists to fix, and it would come straight
-                // back one layer up.
+                // espeak trims, so restore the source's space between runs or the words fuse.
                 if leading_space && !out.is_empty() && !out.ends_with(' ') {
                     out.push(' ');
                 }
@@ -216,12 +183,7 @@ enum Segment<'a> {
     Punct(char),
 }
 
-/// Cut `text` into alternating speech and punctuation runs.
-///
-/// Only [`PROSODY_PUNCT`] breaks a run. Everything else — apostrophes inside
-/// contractions, hyphens inside compounds — stays in the speech run, because
-/// espeak pronounces those as part of the word and the vocab has no token for
-/// them anyway.
+/// Split into speech and `PROSODY_PUNCT` runs; apostrophes and hyphens stay in the word.
 fn segments(text: &str) -> Vec<Segment<'_>> {
     let mut out = Vec::new();
     let mut run_start: Option<usize> = None;
@@ -236,8 +198,7 @@ fn segments(text: &str) -> Vec<Segment<'_>> {
                 });
             }
             out.push(Segment::Punct(c));
-            // The next speech run is separated from this mark by whatever
-            // whitespace follows it, which the loop below will record.
+            // Whitespace after the mark, if any, sets this again below.
             leading_space = false;
         } else if run_start.is_none() {
             if c.is_whitespace() {
@@ -257,8 +218,7 @@ fn segments(text: &str) -> Vec<Segment<'_>> {
     out
 }
 
-/// Phonemize and tokenize `text` into forward-pass-sized chunks. Sentences are the unit; a
-/// sentence longer than [`MAX_PHONEME_TOKENS`] is split further at a phoneme-space boundary.
+/// Tokenize `text` into chunks of at most [`MAX_PHONEME_TOKENS`], split at phoneme spaces.
 pub fn chunk(text: &str, vocab: &Vocab) -> Result<(Vec<Chunk>, usize)> {
     let mut out = Vec::new();
 
@@ -270,18 +230,7 @@ pub fn chunk(text: &str, vocab: &Vocab) -> Result<(Vec<Chunk>, usize)> {
 
     for (tokens, phonemes) in split_to_limit(&ids, &kept) {
         out.push(Chunk {
-            // The source, not the phonemes. The field is documented as being
-            // for logging and UI, and it was being handed the IPA — nothing
-            // has noticed because nothing reads it yet, which is exactly how
-            // long a field can hold the wrong thing when the only check is
-            // that it compiles.
-            //
-            // Every chunk of one input carries that whole input. The split
-            // below is by token count, not at a sentence boundary, so there is
-            // no substring of the source that corresponds to a chunk. In the
-            // streaming path this is moot: `chat.rs` calls `split_sentences`
-            // first and hands over one sentence at a time, so a second chunk
-            // only exists for a single sentence past the phoneme limit.
+            // The whole input: a token-count split has no matching source substring.
             text: text.to_string(),
             phonemes,
             tokens,
@@ -290,10 +239,7 @@ pub fn chunk(text: &str, vocab: &Vocab) -> Result<(Vec<Chunk>, usize)> {
     Ok((out, dropped))
 }
 
-/// Split an over-long token run at the last space before the limit.
-///
-/// `ids` and `phonemes` are index-aligned — `encode` keeps exactly the
-/// characters it emitted ids for — so one split point serves both.
+/// Split at the last space before the limit. `encode` keeps `ids` and `phonemes` index-aligned.
 fn split_to_limit(ids: &[i64], phonemes: &str) -> Vec<(Vec<i64>, String)> {
     let chars: Vec<char> = phonemes.chars().collect();
     debug_assert_eq!(chars.len(), ids.len());
@@ -306,8 +252,7 @@ fn split_to_limit(ids: &[i64], phonemes: &str) -> Vec<(Vec<i64>, String)> {
     let mut start = 0usize;
     while start < ids.len() {
         let hard_end = (start + MAX_PHONEME_TOKENS).min(ids.len());
-        // Prefer a word boundary; fall back to the hard cut when a single
-        // "word" somehow runs the whole window.
+        // Prefer a word boundary; hard-cut a "word" that fills the whole window.
         let end = if hard_end == ids.len() {
             hard_end
         } else {
@@ -331,7 +276,7 @@ fn split_to_limit(ids: &[i64], phonemes: &str) -> Vec<(Vec<i64>, String)> {
 mod tests {
     use super::*;
 
-    /// The real vocab, as shipped. Kept tiny but structurally identical.
+    /// A tiny vocab in the shipped `tokenizer.json` shape.
     fn vocab() -> Vocab {
         Vocab::from_json(
             r#"{"model":{"vocab":{"$":0," ":16,"a":43,"b":44,"ð":81,"ə":82,"ˈ":156}}}"#,
@@ -362,8 +307,6 @@ mod tests {
         assert_eq!(dropped, 2, "the two ʒ are outside this vocab");
     }
 
-    /// The drop count is the whole point of tracking it — an unknown phoneme
-    /// must never silently become a shorter word.
     #[test]
     fn encode_reports_zero_drops_when_everything_is_known() {
         let (_, _, dropped) = vocab().encode("ðəbaˈ");
@@ -388,8 +331,6 @@ mod tests {
         assert_eq!(out[0].0.len(), 10);
     }
 
-    /// A sentence past the model's context must be split, and every chunk must
-    /// fit — a chunk at the cap is a truncated word in the user's ear.
     #[test]
     fn over_long_input_splits_at_word_boundaries() {
         // 200 three-char "words" separated by spaces = 800 chars, well over 510.
@@ -407,14 +348,12 @@ mod tests {
             );
             assert_eq!(tokens.len(), text.chars().count(), "ids and text drifted");
         }
-        // Nothing lost in the split.
         let total: usize = out.iter().map(|(t, _)| t.len()).sum();
         assert_eq!(total, ids.len());
         let rejoined: String = out.iter().map(|(_, t)| t.as_str()).collect();
         assert_eq!(rejoined, phonemes);
     }
 
-    /// A pathological run with no spaces still has to terminate and fit.
     #[test]
     fn unbroken_run_falls_back_to_a_hard_cut() {
         let phonemes = "a".repeat(MAX_PHONEME_TOKENS * 2 + 7);
@@ -429,8 +368,6 @@ mod tests {
 
     #[test]
     fn punctuation_reaches_the_model() {
-        // Kokoro's vocab has these tokens because it was trained to read them.
-        // Sending none of them is what made every utterance flat.
         let out = phonemize("Hello, world! Are you sure? Yes; really.").unwrap();
         for mark in ['.', ',', '!', '?', ';'] {
             assert!(out.contains(mark), "{mark:?} missing from {out:?}");
@@ -439,10 +376,6 @@ mod tests {
 
     #[test]
     fn words_either_side_of_a_mark_stay_separate() {
-        // The bug underneath the missing prosody: espeak returns every clause
-        // concatenated with no separator, so "Hello, world" arrived as one
-        // fused word. This is the regression test for that, and it would fail
-        // even if punctuation were dropped again but spacing kept.
         let out = phonemize("Hello, world!").unwrap();
         let (before, after) = out.split_once(',').expect("comma survived");
         assert!(!before.is_empty(), "nothing before the comma in {out:?}");
@@ -454,8 +387,6 @@ mod tests {
 
     #[test]
     fn quotes_and_parens_survive_without_fusing_their_neighbours() {
-        // These are in the vocab and in PROSODY_PUNCT, so they have to behave
-        // like the other marks: kept, and not gluing the words either side.
         let quoted = phonemize("She said \"stop\" and left.").unwrap();
         assert_eq!(quoted.matches('"').count(), 2, "{quoted:?}");
         assert!(quoted.ends_with('.'));
@@ -473,9 +404,6 @@ mod tests {
 
     #[test]
     fn leading_and_repeated_marks_do_not_produce_stray_spaces() {
-        // "Wait... what?" is three dots in a row and a mark at position zero
-        // once the first run is consumed — the two shapes most likely to emit a
-        // leading space or an empty run.
         let out = phonemize("Wait... what?").unwrap();
         assert!(!out.starts_with(' '), "leading space in {out:?}");
         assert!(out.contains("..."), "ellipsis collapsed: {out:?}");
@@ -483,15 +411,8 @@ mod tests {
         assert!(!out.contains("  "), "double space in {out:?}");
     }
 
-    // The claim "every mark in PROSODY_PUNCT is in the model's alphabet" is
-    // NOT tested here, and cannot be: `vocab_for` builds its table by adding
-    // PROSODY_PUNCT, so asking it whether it contains those marks answers
-    // itself. A tautology in the shape of a guarantee is worse than no test —
-    // it is the one somebody points at when the canary starts firing.
-    //
-    // It lives in `tests/live_synthesis.rs`
-    // (`every_preserved_mark_is_in_the_real_vocab`), against the real
-    // `tokenizer.json`, which is the only table that can answer it.
+    // Whether every PROSODY_PUNCT mark is in the real vocab is tested in `tests/live_synthesis.rs`;
+    // `vocab_for` adds them, so it can't answer that.
 
     #[test]
     fn preserved_punctuation_is_not_counted_as_dropped() {
@@ -505,9 +426,6 @@ mod tests {
 
     #[test]
     fn a_contraction_keeps_its_apostrophe_inside_the_word() {
-        // The apostrophe is not in PROSODY_PUNCT on purpose: espeak pronounces
-        // it as part of the word, and splitting there would phonemize "don" and
-        // "t" separately.
         let out = phonemize("Don't stop.").unwrap();
         assert!(
             !out.contains('\''),
@@ -534,15 +452,7 @@ mod tests {
         assert_ne!(chunks[0].text, chunks[0].phonemes);
     }
 
-    /// A vocab holding exactly the symbols a test uses, plus every mark.
-    ///
-    /// Built from the input rather than hand-listed: a hand-listed phoneme
-    /// vocab is how you write a test that passes because the character it
-    /// meant to check was never in the table.
-    ///
-    /// It adds `PROSODY_PUNCT` unconditionally, so nothing built on it can be
-    /// used to ask whether those marks are in the *model's* vocab — see the
-    /// note above `preserved_punctuation_is_not_counted_as_dropped`.
+    /// A vocab of exactly the symbols in `samples`, plus every `PROSODY_PUNCT` mark.
     fn vocab_for(samples: &[&str]) -> Vocab {
         let mut symbols: Vec<char> = samples.iter().flat_map(|s| s.chars()).collect();
         symbols.extend_from_slice(PROSODY_PUNCT);

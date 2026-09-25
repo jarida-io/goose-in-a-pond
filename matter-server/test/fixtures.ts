@@ -1,12 +1,4 @@
-/**
- * Recorded devices, carried over from the Rust adapter's own fixtures.
- *
- * These are what the mappings were calibrated against — the Matter Virtual Device's
- * fan and light as commissioned on 2026-08-05, and the plug/bulb pair whose
- * indistinguishability is the reason device typing reads the Descriptor at all. They
- * moved here with the cluster logic so the coverage moved with it rather than being
- * lost in the port.
- */
+/** Recorded devices the cluster mappings were calibrated against. */
 
 import type {
   ClusterState,
@@ -34,10 +26,7 @@ export function named(name: string): EndpointSnapshot {
   return endpoint(0, { basicInformation: { nodeLabel: name } }, [0x0016]);
 }
 
-/**
- * The Matter Virtual Device's fan: Fan Control on endpoint 1 and NO On/Off cluster at
- * all, which is what left it with no capabilities and unreachable by "turn on the fan".
- */
+/** The Matter Virtual Device's fan: Fan Control on endpoint 1 and no On/Off cluster. */
 export function fanNode(): NodeSnapshot {
   return node(18, [
     named("Living Room Fan"),
@@ -45,8 +34,7 @@ export function fanNode(): NodeSnapshot {
   ]);
 }
 
-/** OnOff + LevelControl on endpoint 13, as commissioned in the live session and
- *  identical for real bulbs. */
+/** A real bulb: OnOff + LevelControl on endpoint 13. */
 export function lightNode(): NodeSnapshot {
   return node(2, [
     endpoint(0, {}),
@@ -54,12 +42,7 @@ export function lightNode(): NodeSnapshot {
   ]);
 }
 
-/**
- * Google's Matter Virtual Device 1.7.0 as it ships: a dimmable light, plus the custom
- * cluster its Controller tab shows as a Flip-Flop toggle and an Emoticon field.
- * Neither of those names appears anywhere on the wire, and neither does a count of
- * them, which is the whole reason this fixture is one bare id.
- */
+/** Matter Virtual Device 1.7.0 light plus a vendor cluster; the wire carries only its id. */
 export function customLightNode(): NodeSnapshot {
   return node(31, [
     named("Virtual Custom OnOff Light"),
@@ -69,12 +52,7 @@ export function customLightNode(): NodeSnapshot {
   ]);
 }
 
-/**
- * Google's Virtual Door Lock as its Controller tab shows it: a door state, a lock
- * state, and a PIN requirement for remote operation. Both DoorPositionSensor and
- * PinCredential are optional DoorLock features, so a lock without them has neither
- * attribute — which is why the bare-lock fixture below exists beside this one.
- */
+/** Google's Virtual Door Lock: lock state plus optional door state and PIN requirement. */
 export function doorLockNode(): NodeSnapshot {
   return node(44, [
     named("Virtual Door Lock"),
@@ -89,11 +67,7 @@ export function bareLockNode(): NodeSnapshot {
   return node(45, [named("Deadbolt"), endpoint(1, { doorLock: { lockState: 1 } }, [0x000a])]);
 }
 
-/**
- * Google's Virtual Extended Color Light: hue/saturation, XY and colour temperature, the
- * three modes its Color mode dropdown offers. `colorCapabilities` bit 0 is
- * HueSaturation, bit 3 Xy, bit 4 ColorTemperature.
- */
+/** Google's Virtual Extended Color Light (`colorCapabilities` bits 0 HueSat, 3 Xy, 4 ColorTemp). */
 export function extendedColorLightNode(): NodeSnapshot {
   return node(51, [
     named("Virtual Extended Color Light"),
@@ -113,12 +87,7 @@ export function extendedColorLightNode(): NodeSnapshot {
   ]);
 }
 
-/**
- * Google's Extended Color Light as it actually reports itself: every colour mode
- * offered in its Controller tab, and a `colorCapabilities` bitmap claiming none of
- * them. Non-conformant, and shipped — describing this device as having no colour is
- * the regression the claims-then-evidence order exists to prevent.
- */
+/** Google's Extended Color Light as shipped: colour modes in its UI, `colorCapabilities` of none. */
 export function mvdColorLightNode(): NodeSnapshot {
   return node(56, [
     named("Virtual Extended Color Light"),
@@ -144,11 +113,7 @@ export function mvdColorLightNode(): NodeSnapshot {
   ]);
 }
 
-/**
- * A tunable-white bulb: ColorControl with colour temperature and NO hue at all
- * (`colorCapabilities` bit 4 only). Very common, and the reason colour is gated on what
- * the device claims — offered a hue, this device rejects it.
- */
+/** A tunable-white bulb: ColorControl with colour temperature only (`colorCapabilities` bit 4). */
 export function tunableWhiteNode(): NodeSnapshot {
   return node(52, [
     named("Reading Lamp"),
@@ -165,12 +130,7 @@ export function tunableWhiteNode(): NodeSnapshot {
   ]);
 }
 
-/**
- * A Room Air Conditioner as one really reports itself: cooling only, stated through the
- * mandatory `controlSequenceOfOperation`, with a cooling setpoint and NO heating one —
- * verified against a live commissioned device. `systemMode` arrives as the enum NAME
- * here, which is the encoding that made every numeric comparison miss.
- */
+/** A Room Air Conditioner as one really reports: cooling only, and `systemMode` as an enum name. */
 export function airConditionerNode(): NodeSnapshot {
   return node(61, [
     named("Room Air Conditioner"),
@@ -190,15 +150,7 @@ export function airConditionerNode(): NodeSnapshot {
   ]);
 }
 
-/**
- * A Smoke CO Alarm as one really reports itself, verified against a live commissioned
- * device: a mandatory `expressedState` summary, separate smoke and CO readings, and the
- * three health attributes that say whether it can still sound at all.
- *
- * Set the way the reported device was: sounding for CARBON MONOXIDE while its smoke
- * reading also sits at Critical. Only the smoke reading was mapped, so the one attribute
- * naming which danger it is was the one GIAP could not see.
- */
+/** A Smoke CO Alarm as one really reports, sounding for CO while its smoke reading is Critical. */
 export function smokeCoAlarmNode(): NodeSnapshot {
   return node(71, [
     named("Smoke CO Alarm"),
@@ -216,16 +168,7 @@ export function smokeCoAlarmNode(): NodeSnapshot {
   ]);
 }
 
-/**
- * Google's Matter Virtual Device Generic Switch: a latching switch whose whole screen
- * is a "Current position" dropdown reading "Position #1".
- *
- * The device that arrived typed `matter` with no capabilities and answered "cannot be
- * controlled, and does not measure any data" -- because 0x000f was not a device type
- * GIAP mapped, `switch` was not a cluster the snapshot admitted, and nothing described
- * it. Two positions, so a bound of 0..1 is a real statement rather than the spec's
- * default repeated back.
- */
+/** Google's Matter Virtual Device Generic Switch: latching, with two stated positions. */
 export function genericSwitchNode(): NodeSnapshot {
   return node(6, [
     named("Generic Switch"),
@@ -239,15 +182,7 @@ export function genericSwitchNode(): NodeSnapshot {
   ]);
 }
 
-/**
- * A momentary switch -- a pushbutton -- which says nothing about how many positions
- * it has.
- *
- * Two things this pins. No `numberOfPositions`, so no bound is stated rather than the
- * spec's default of 2 being invented for it. And `momentarySwitch`, so a reader is
- * told the position is fleeting: the presses themselves are Matter events, which the
- * controller does not subscribe to.
- */
+/** A momentary pushbutton that states no `numberOfPositions`. */
 export function momentarySwitchNode(): NodeSnapshot {
   return node(7, [
     named("Button"),
@@ -266,9 +201,7 @@ export function coOnlyAlarmNode(): NodeSnapshot {
     named("CO Alarm"),
     endpoint(1, {
       smokeCoAlarm: {
-        // The feature map is what says the smoke sensor is absent. Value presence
-        // cannot: an unsupported attribute and one that has not reported yet are both
-        // undefined.
+        // The feature map, not value presence, says smoke is absent (unreported is undefined too).
         featureMap: { smokeAlarm: false, coAlarm: true },
         expressedState: 0,
         coState: 0,
@@ -278,12 +211,7 @@ export function coOnlyAlarmNode(): NodeSnapshot {
   ]);
 }
 
-/**
- * A Basic Video Player as one really reports itself, verified against a live commissioned
- * device: the player on endpoint 1 (type 0x28) and a SPEAKER on endpoint 2 (type 0x22),
- * which is where Level Control lives. Searching the node for that cluster found the
- * speaker's level and called it brightness.
- */
+/** A Basic Video Player (endpoint 1) whose Level Control is on its speaker endpoint (2). */
 export function videoPlayerNode(): NodeSnapshot {
   return node(81, [
     named("Basic Video Player"),
@@ -309,8 +237,7 @@ export function videoPlayerNode(): NodeSnapshot {
   ]);
 }
 
-/** A node that states its type the way every real one does: a Descriptor
- *  DeviceTypeList on the application endpoint. */
+/** A node typed by a Descriptor DeviceTypeList on its application endpoint, like real ones. */
 export function describedNode(
   nodeId: number,
   deviceType: number,
@@ -322,12 +249,7 @@ export function describedNode(
   ]);
 }
 
-/**
- * The Matter Virtual Device's Laundry Washer: On/Off, a wash mode, a temperature
- * level, spin speed and rinse count, and an operational state. Four of its five
- * clusters had no verb, so `describe` could only offer power — which is what sent
- * "set the spin speed to high" back as "this device only turns on and off".
- */
+/** The Matter Virtual Device's Laundry Washer. */
 export function laundryWasherNode(): NodeSnapshot {
   return node(50, [
     named("Virtual Laundry Washer"),
@@ -356,8 +278,7 @@ export function laundryWasherNode(): NodeSnapshot {
         },
         operationalState: {
           operationalState: 0,
-          // A real washer publishes the states it has; the spec ties those to the
-          // commands it accepts.
+          // The spec ties the published states to the commands a washer accepts.
           operationalStateList: [
             { operationalStateId: 0, operationalStateLabel: "Stopped" },
             { operationalStateId: 1, operationalStateLabel: "Running" },
@@ -371,12 +292,7 @@ export function laundryWasherNode(): NodeSnapshot {
   ]);
 }
 
-/**
- * A Hue-shaped hub: an Aggregator with three bridged devices behind it.
- *
- * One commissioned node, four GIAP devices — the hub plus its children. The endpoint
- * numbers are the hub's to allocate, which is why they are not tidy.
- */
+/** A Hue-shaped hub: an Aggregator with three bridged devices, on hub-allocated endpoints. */
 export function bridgeNode(): NodeSnapshot {
   return node(90, [
     endpoint(0, { basicInformation: { nodeLabel: "Living Room Hub" } }, [0x0016]),
@@ -410,14 +326,7 @@ export function bridgeNode(): NodeSnapshot {
   ]);
 }
 
-/**
- * A composed device BEHIND a bridge: a video player at endpoint 7 whose Speaker part
- * the hub happened to put at endpoint 3.
- *
- * The case that breaks "the lowest endpoint carrying this cluster wins". Built and
- * run for real against the virtual-device rig, which is where the numbering came
- * from.
- */
+/** A bridged video player at endpoint 7 with its Speaker at 3: lowest-endpoint-wins picks wrong. */
 export function bridgedComposedNode(): NodeSnapshot {
   return node(91, [
     named("Media Hub"),
@@ -437,13 +346,7 @@ export function bridgedComposedNode(): NodeSnapshot {
 }
 
 
-/**
- * A water valve with a level: open, shut, and how far.
- *
- * Valve Configuration and Control's LVL feature is optional, so this and
- * `plainValveNode` are the two shapes that behave differently — one takes a
- * percentage and the other has nothing to take it with.
- */
+/** A water valve with the optional LVL feature: open, shut, and how far. */
 export function levelValveNode(): NodeSnapshot {
   return node(60, [
     named("Garden Valve"),

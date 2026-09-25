@@ -80,13 +80,11 @@ async fn live_memory_extraction_from_conversation() {
                     f.segment, f.importance, f.content
                 );
             }
-            // Should extract at least 1 fact (name, location, or profession)
             assert!(
                 !extracted.is_empty(),
                 "should extract at least one fact from rich input"
             );
 
-            // At least one should be Identity segment
             let has_identity = extracted
                 .iter()
                 .any(|f| f.segment == MemorySegment::Identity);
@@ -120,7 +118,6 @@ async fn live_memory_extraction_skips_trivial_input() {
                 "[live-test] trivial input extracted {} facts",
                 extracted.len()
             );
-            // Greetings should produce 0 or very few facts
             assert!(
                 extracted.len() <= 1,
                 "trivial greeting should not produce many facts"
@@ -158,9 +155,7 @@ async fn live_extraction_stores_to_sqlite() {
             "I prefer dark mode and I'm allergic to peanuts",
             "I'll remember that! Dark mode it is, and I'll keep the peanut allergy in mind.",
             Some("test-session"),
-            // The scope the live voice/CLI path actually carries. Not `Guest`:
-            // `run` returns early on `excludes_everything`, which is correct
-            // behaviour but a different assertion from the one below.
+            // Not `Guest`: `run` returns early for a scope that excludes everything.
             &ProfileScope::Household,
         )
         .await;
@@ -182,13 +177,11 @@ async fn live_extraction_stores_to_sqlite() {
         );
     }
 
-    // Should have stored at least 1 memory
     assert!(
         !memories.is_empty(),
         "extraction should store at least one memory"
     );
 
-    // All stored memories should have segment metadata
     for m in &memories {
         assert!(
             m.segment.is_some(),
@@ -221,7 +214,6 @@ async fn live_extraction_then_cleanup_cycle() {
     let service =
         pond_core::user_data::services::memory_extraction::MemoryExtractionService::new(1);
 
-    // Extract from a conversation
     service
         .run(
             &extractor,
@@ -272,7 +264,6 @@ async fn live_consolidation_merges_duplicates() {
     let db = Database::init(tmp.path()).await.unwrap();
     let repo = SqliteMemoryRepository::new(db.system);
 
-    // Insert duplicate-ish memories
     for (id, content) in [
         ("d1", "User's name is Jerry"),
         ("d2", "The user is called Jerry"),
@@ -325,8 +316,7 @@ async fn live_consolidation_merges_duplicates() {
         println!("  [{}] {}", m.id, m.content);
     }
 
-    // The 3 "name" memories should have been merged
-    // (exact behavior depends on model, so we just check something happened)
+    // Model-dependent, so only check that something happened.
     if merged > 0 || pruned > 0 {
         assert!(after.len() < 5, "consolidation should reduce memory count");
     } else {

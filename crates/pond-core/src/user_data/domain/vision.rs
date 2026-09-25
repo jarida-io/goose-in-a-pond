@@ -1,9 +1,4 @@
-//! Vision domain types (#130) — pure Rust, no framework imports.
-//!
-//! A [`Frame`] is one captured camera image in packed RGB24; a [`Detection`]
-//! is one classifier verdict about a frame ("pet", "package", …). The capture
-//! and detection machinery lives in `pond-adapters-vision`; these types are
-//! the seam between it and the Core.
+//! Vision types: the seam between `pond-adapters-vision` capture/detection and the Core.
 
 use chrono::{DateTime, Utc};
 
@@ -18,12 +13,10 @@ pub struct Frame {
 }
 
 impl Frame {
-    /// The byte length a well-formed RGB24 frame of `width`×`height` must have.
     pub fn expected_len(width: u32, height: u32) -> usize {
         width as usize * height as usize * 3
     }
 
-    /// `true` when the pixel buffer matches the declared dimensions.
     pub fn is_well_formed(&self) -> bool {
         self.rgb.len() == Self::expected_len(self.width, self.height)
     }

@@ -61,7 +61,7 @@ function defaultConfig(): ScheduleConfig {
 function buildCron(repeat: RepeatPattern, cfg: ScheduleConfig): string {
   switch (repeat) {
     case "once":
-      // "Once" fires at a specific time — daily cron the user can disable after first run
+      // A daily cron at that time; `once: true` makes the server fire only its next occurrence.
       return `0 ${cfg.minute} ${cfg.hour} * * *`;
     case "hourly":
       return `0 ${cfg.startMinute} */${cfg.everyNHours} * * *`;
@@ -163,9 +163,7 @@ function parseCronToConfig(cron: string): { repeat: RepeatPattern; config: Sched
   return { repeat: "custom", config: { ...cfg, customCron: cron } };
 }
 
-/** Resolve a schedule's repeat pattern + picker config, honoring `fire_at` — a
- *  one-shot's cron is the "@once" sentinel, which `parseCronToConfig` cannot
- *  parse into anything meaningful. */
+/** Picker state for a schedule; one-shots come from `fire_at`, as their cron is the "@once" sentinel. */
 function scheduleToConfig(s: Schedule): { repeat: RepeatPattern; config: ScheduleConfig } {
   if (!s.fire_at) return parseCronToConfig(s.cron);
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -230,8 +228,7 @@ export function Schedules() {
             } else throw e;
           } else throw e;
         }
-        // Use the routine's does[] as the displayed result — the LLM output is
-        // discarded until real MCP tool integrations are wired up (Option B).
+        // Shows the routine's does[]: the LLM output is discarded until MCP tool integrations exist.
         const result = detail ? JSON.stringify(detail.does) : name;
         dispatch({
           type: "SCHEDULE_RESULT",
@@ -281,9 +278,6 @@ export function Schedules() {
         setRunningRoutine(null);
       }
     })();
-    // NB: the IIFE's `finally` already clears runningRoutine when the run settles.
-    // A trailing setTimeout(…, 8000) used to also fire, but it would clear a
-    // *different* routine started within 8s of this one finishing — removed.
   }
   const [schedules, setSchedules]         = useState<Schedule[]>([]);
   const [visibleCount, setVisibleCount]   = useState(SCHED_PAGE);
@@ -295,7 +289,6 @@ export function Schedules() {
   const [runningIds, setRunningIds]       = useState<Set<string>>(new Set());
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
 
-  // View toggle: list vs calendar
   const [view, setView] = useState<"list" | "calendar">(() => {
     try {
       return (localStorage.getItem("schedules-view") as "list" | "calendar") || "list";
@@ -309,7 +302,6 @@ export function Schedules() {
     setView(v);
   }
 
-  // New routine form
   const [showRoutineForm, setShowRoutineForm] = useState(false);
 
   // New schedule form
@@ -375,11 +367,9 @@ export function Schedules() {
     }
   }
 
-  // Keep cron in sync with picker whenever picker state changes
   const pickerCron = useMemo(() => buildCron(repeat, schedCfg), [repeat, schedCfg]);
 
-  // Sync the legacy `cron` state variable with the picker output so the API
-  // call always uses the latest value without any additional wiring.
+  // Mirror the picker into the legacy `cron` state the API calls read.
   useEffect(() => {
     setCron(pickerCron);
   }, [pickerCron]);

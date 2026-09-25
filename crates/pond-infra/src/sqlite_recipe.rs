@@ -1,6 +1,4 @@
-//! SQLite-backed implementation of `AgentRecipeRepository`.
-//!
-//! Uses the `agent_recipes` table in `pond_system.db` (migration 0012).
+//! SQLite `AgentRecipeRepository` over the `agent_recipes` table in `pond_system.db`.
 
 use anyhow::Result;
 use async_trait::async_trait;

@@ -9,7 +9,6 @@ interface ScenesProps {
   layout?: SceneLayout;
 }
 
-// Maps icon key to either a compound element or a path string
 function getSceneIcon(iconKey: string): string | React.ReactNode {
   switch (iconKey) {
     case "sun":   return sunEl;

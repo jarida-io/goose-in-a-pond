@@ -1,5 +1,4 @@
-//! Integration tests for LlamafileProvider. Mocks the llamafile HTTP server with wiremock, so
-//! no real binary is needed: `cargo test -p pond-adapters-llamafile`.
+//! LlamafileProvider against a wiremock llamafile server; no real binary needed.
 
 use futures::StreamExt;
 use pond_adapters_llamafile::{LlamafileProvider, DEFAULT_MODEL};
@@ -40,9 +39,7 @@ async fn complete_with_mock(response: ResponseTemplate) -> anyhow::Result<ChatMe
         .await
 }
 
-// ═══════════════════════════════════════════════════════════════════
-//  complete() — Chat & Think role (single-shot, non-streaming)
-// ═══════════════════════════════════════════════════════════════════
+// ── complete(): single-shot, non-streaming ─────────────────────────
 
 #[tokio::test]
 async fn complete_returns_assistant_message_on_success() {
@@ -114,7 +111,6 @@ async fn complete_system_prompt_is_first_message_in_request() {
 
 #[tokio::test]
 async fn complete_multi_turn_conversation_preserves_order() {
-    // Simulates a chat/think multi-turn: user → assistant → user
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -174,7 +170,6 @@ async fn complete_request_body_includes_temperature_and_max_tokens() {
 
 #[tokio::test]
 async fn complete_strips_stop_tokens_from_response() {
-    // Models like Gemma append <end_of_turn> — should be stripped
     let reply = complete_with_mock(
         ResponseTemplate::new(200).set_body_json(success_body("Hello there<end_of_turn>")),
     )
@@ -199,11 +194,9 @@ async fn complete_no_choices_returns_error() {
     );
 }
 
-// ═══════════════════════════════════════════════════════════════════
-//  stream_complete() — Chat & Think role (token-by-token streaming)
-// ═══════════════════════════════════════════════════════════════════
+// ── stream_complete(): token-by-token streaming ────────────────────
 
-/// Helper: mount an SSE mock and collect all text tokens from stream_complete().
+/// Collect the text tokens `stream_complete()` yields from `server`.
 async fn stream_tokens(server: &MockServer, messages: Vec<ChatMessage>) -> Vec<String> {
     use pond_core::models::ports::provider::StreamToken;
     let provider = LlamafileProvider::new(Some(&server.uri()));
@@ -213,7 +206,7 @@ async fn stream_tokens(server: &MockServer, messages: Vec<ChatMessage>) -> Vec<S
     while let Some(result) = stream.next().await {
         match result {
             Ok(StreamToken::Text(tok)) => tokens.push(tok),
-            Ok(StreamToken::Usage(_)) => {} // ignore usage items
+            Ok(StreamToken::Usage(_)) => {}
             Err(e) => panic!("unexpected stream error: {e}"),
         }
     }
@@ -254,7 +247,6 @@ async fn stream_complete_request_body_has_stream_true() {
 
     let provider = LlamafileProvider::new(Some(&server.uri()));
     let mut stream = provider.stream_complete("sys", vec![ChatMessage::user("test")]);
-    // drain
     while stream.next().await.is_some() {}
 
     let requests = server.received_requests().await.unwrap();
@@ -298,7 +290,6 @@ async fn stream_complete_system_prompt_first_in_messages() {
 
 #[tokio::test]
 async fn stream_complete_multi_turn_history_included() {
-    // Think-role use-case: multi-turn reasoning conversation
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -319,7 +310,6 @@ async fn stream_complete_multi_turn_history_included() {
     let tokens = stream_tokens(&server, history).await;
     assert!(!tokens.is_empty());
 
-    // Verify the full history was sent
     let requests = server.received_requests().await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
     let messages = body["messages"].as_array().unwrap();
@@ -368,7 +358,6 @@ async fn stream_complete_returns_error_when_offline() {
 async fn stream_complete_skips_deltas_with_no_content_field() {
     let server = MockServer::start().await;
 
-    // Some delta chunks (e.g. role announcement) have no "content" key — should be skipped
     let sse = [
         r#"data: {"choices":[{"delta":{"role":"assistant"}}]}"#, // no content → skip
         r#"data: {"choices":[{"delta":{"content":"Hello"}}]}"#,
@@ -396,10 +385,9 @@ async fn stream_complete_skips_deltas_with_no_content_field() {
 async fn stream_complete_strips_stop_tokens_from_each_chunk() {
     let server = MockServer::start().await;
 
-    // A model might emit the stop token as a trailing chunk
     let sse = [
         r#"data: {"choices":[{"delta":{"content":"The answer is 42"}}]}"#,
-        r#"data: {"choices":[{"delta":{"content":"<end_of_turn>"}}]}"#, // stop token chunk
+        r#"data: {"choices":[{"delta":{"content":"<end_of_turn>"}}]}"#,
         "data: [DONE]",
     ]
     .join("\n");
@@ -416,7 +404,6 @@ async fn stream_complete_strips_stop_tokens_from_each_chunk() {
 
     let tokens = stream_tokens(&server, vec![ChatMessage::user("hi")]).await;
 
-    // The stop-token chunk should be dropped (empty after stripping → not yielded)
     assert!(
         !tokens.iter().any(|t| t.contains("<end_of_turn>")),
         "stop token should be stripped; got: {tokens:?}"
@@ -455,16 +442,10 @@ async fn stream_complete_request_includes_temperature_and_max_tokens() {
     assert_eq!(body["stream"], true);
 }
 
-// ═══════════════════════════════════════════════════════════════════
-//  Task-role: tool-use dispatch — LlamafileProvider as ModelRouter's `task`
-//  provider for agentic/tool-use prompts.
-// ═══════════════════════════════════════════════════════════════════
+// ── Task role: tool-use prompts ────────────────────────────────────
 
 #[tokio::test]
 async fn task_role_complete_sends_correct_messages() {
-    // Task prompts (reminders, schedules, device control) go through
-    // complete() on the task-role provider — same path as chat but with
-    // a task-oriented system prompt.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -486,7 +467,6 @@ async fn task_role_complete_sends_correct_messages() {
 
     assert_eq!(reply.content, "Reminder set for 9am.");
 
-    // Verify task system prompt was sent
     let requests = server.received_requests().await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
     let messages = body["messages"].as_array().unwrap();
@@ -497,7 +477,6 @@ async fn task_role_complete_sends_correct_messages() {
 
 #[tokio::test]
 async fn task_role_stream_complete_yields_action_tokens() {
-    // Task-role streaming: same SSE protocol, action-oriented content
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -526,13 +505,10 @@ async fn task_role_stream_complete_yields_action_tokens() {
     assert_eq!(tokens.join(""), "Scheduling reminder for 9am.");
 }
 
-// ═══════════════════════════════════════════════════════════════════
-//  Think-role: deep reasoning via stream_complete
-// ═══════════════════════════════════════════════════════════════════
+// ── Think role: long reasoning via stream_complete ─────────────────
 
 #[tokio::test]
 async fn think_role_stream_complete_handles_long_reasoning_response() {
-    // Think prompts generate longer, analytical responses
     let server = MockServer::start().await;
     let reasoning_tokens = [
         "First, ",
@@ -573,13 +549,11 @@ async fn think_role_stream_complete_handles_long_reasoning_response() {
         full.contains("gravitational") && full.contains("Newton"),
         "expected reasoning tokens, got: {full}"
     );
-    // Verify 8 tokens came through (all non-empty)
     assert_eq!(tokens.len(), reasoning_tokens.len());
 }
 
 #[tokio::test]
 async fn think_role_complete_multi_turn_reasoning() {
-    // Simulate a think-role multi-turn where previous reasoning is in context
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -603,7 +577,6 @@ async fn think_role_complete_multi_turn_reasoning() {
 
     assert!(reply.content.contains("entropy"));
 
-    // Verify full conversation history was sent
     let requests = server.received_requests().await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
     let messages = body["messages"].as_array().unwrap();
@@ -615,19 +588,14 @@ async fn think_role_complete_multi_turn_reasoning() {
     assert_eq!(messages[3]["content"], "continue");
 }
 
-// ═══════════════════════════════════════════════════════════════════
-//  Token usage tracking
-// ═══════════════════════════════════════════════════════════════════
+// ── Token usage ────────────────────────────────────────────────────
 
-/// The final SSE chunk from llamafile (finish_reason = "stop") may include a
-/// `usage` object with prompt_tokens and completion_tokens.  stream_complete()
-/// must parse it and emit a StreamToken::Usage item as the last stream item.
+/// `usage` rides on llamafile's final (`finish_reason: "stop"`) chunk and must come out last.
 #[tokio::test]
 async fn stream_complete_parses_usage_from_final_chunk() {
     use pond_core::models::ports::provider::StreamToken;
 
     let server = MockServer::start().await;
-    // Body: one text token + a final chunk with usage, then [DONE]
     let body = concat!(
         "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
         "data: {\"choices\":[{\"delta\":{\"content\":\"\"},\"finish_reason\":\"stop\"}],",
@@ -664,8 +632,6 @@ async fn stream_complete_parses_usage_from_final_chunk() {
     assert_eq!(usage.completion_tokens, 47, "completion_tokens mismatch");
 }
 
-/// When the final SSE chunk does NOT include a usage object, stream_complete()
-/// must NOT emit a StreamToken::Usage item — just yield the text tokens and stop.
 #[tokio::test]
 async fn stream_complete_no_usage_when_chunk_omits_it() {
     use pond_core::models::ports::provider::StreamToken;

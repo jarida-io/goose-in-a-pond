@@ -1,16 +1,9 @@
 import { useEffect, useState } from "react";
 
-// A GIAP dashboard is normally left open indefinitely (wall panel, kiosk, a
-// desktop window nobody closes), so anything derived from `new Date()` at
-// render time silently rots — the greeting stays on "Good afternoon" all
-// evening and the date survives midnight. Components that show the current
-// time derive it from this hook instead of reading the clock once.
+// Dashboards stay open indefinitely, so a render-time `new Date()` goes stale;
+// components that show the time use this hook instead.
 
-/**
- * Current time, re-read every `periodMs` and whenever the document becomes
- * visible again. Ticks are aligned to the next `periodMs` boundary so a
- * minute-resolution clock flips at the top of the minute rather than drifting.
- */
+/** Current time, re-read every `periodMs` (aligned to its boundary) and when the page becomes visible. */
 export function useNow(periodMs = 60_000): Date {
   const [now, setNow] = useState(() => new Date());
 
@@ -25,9 +18,7 @@ export function useNow(periodMs = 60_000): Date {
       intervalId = setInterval(tick, periodMs);
     }, msToBoundary);
 
-    // A machine that slept (lid closed, kiosk display off) freezes its timers,
-    // so the first thing on screen after a wake would otherwise be the stale
-    // pre-sleep time until the next tick.
+    // Timers freeze while the machine sleeps, so re-read on wake rather than wait for the next tick.
     const onVisibility = () => {
       if (document.visibilityState === "visible") tick();
     };

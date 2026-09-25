@@ -1,6 +1,4 @@
 //! SQLite-backed implementation of the ModelRepository port.
-//!
-//! Uses `pond_system.db`. Tables created by migrations 0007 and 0008.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -363,7 +361,6 @@ mod tests {
     #[tokio::test]
     async fn is_custom_preserved_on_upsert() {
         let (repo, _dir) = make_repo().await;
-        // Insert with is_custom=true
         let mut m = gguf_record("custom-model");
         m.is_custom = true;
         repo.upsert(&m).await.unwrap();
@@ -373,7 +370,6 @@ mod tests {
         assert!(!m2.is_custom);
         repo.upsert(&m2).await.unwrap();
 
-        // is_custom should still be true
         let fetched = repo.get_by_id("gguf/custom-model").await.unwrap().unwrap();
         assert!(fetched.is_custom, "is_custom should be preserved");
     }

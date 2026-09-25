@@ -1,27 +1,5 @@
-//! PAI-1 P9's identity half, end to end, through the writers production uses.
-//!
-//! `device_rung_wiring.rs` next door asserts the wiring is present. This asserts
-//! what it does: a phone paired with a member-bound code makes that member the
-//! speaker on every turn it sends, at `IdentificationSource::PairedDevice`
-//! strength — which outranks face and explicit identification.
-//!
-//! # Why nothing here writes a column by hand
-//!
-//! `ProfileScope::Owner` was a no-op in production for a whole phase because
-//! every fixture that produced an owned row set `profile_id` directly, which no
-//! code path did. So the pairing code is issued through
-//! `Handshake::issue_pairing_code_for`, the pair goes through
-//! `init_handshake`/`verify_handshake` with a MAC computed the way a phone
-//! computes it, the device id comes back out of `Handshake::caller_for_token`,
-//! and the member comes out of `DeviceAttribution::device_profile`. The only
-//! step written by hand is the `Principal`, and it is written exactly as
-//! `auth_middleware` writes it — a guard in `device_rung_wiring.rs` asserts that
-//! line is still the one the middleware runs, and that it is the only one in the
-//! workspace that may.
-//!
-//! The two household members are inserted with SQL because there is no profile
-//! *port* in this crate's dependency graph to insert them with, and a profile
-//! row is not the thing under test.
+//! A phone paired with a member-bound code makes that member the speaker on every turn.
+//! Device rows come only from the real pairing path; hand-set columns would mask a dead writer.
 
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -58,8 +36,7 @@ async fn pond_with_two_members() -> Pond {
             .await
             .unwrap();
     }
-    // Keep the tempdir alive for the test, else the sqlite file vanishes under
-    // the pool.
+    // Keep the tempdir alive, else the sqlite file vanishes under the pool.
     std::mem::forget(tmp);
     Pond {
         handshake: SqliteHandshakeAdapter::new(db.system.clone()),
@@ -107,19 +84,15 @@ async fn pair(pond: &Pond, code: &str, client_id: &str) -> String {
         .expect("an accepted pair mints a session token")
 }
 
-/// Exactly what `auth_middleware` does with the lookup's answer, and the only
-/// hand-written step in this file.
+/// Mirrors `auth_middleware`; the only hand-written step in this file.
 async fn principal_for(pond: &Pond, token: &str) -> Principal {
     match pond.handshake.caller_for_token(token).await {
         Ok(Some(caller)) => Principal::token(caller.client_id).with_device(caller.device_id),
-        // The middleware's narrowing branches: a token that names nobody, and a
-        // lookup that failed, both produce a principal with no device.
         Ok(None) | Err(_) => Principal::token("unknown"),
     }
 }
 
-/// And what `resolve_turn_scope` does with it, minus the `AppState` this crate
-/// cannot build.
+/// Mirrors `resolve_turn_scope`, minus the `AppState` this crate cannot build.
 async fn turn_scope(
     pond: &Pond,
     principal: &Principal,
@@ -139,9 +112,6 @@ async fn turn_scope(
     (resolved.scope, resolved.source)
 }
 
-/// The whole rung: operator issues Liz a code, Liz's phone pairs with it, and
-/// every turn that phone sends is Liz's — with nobody having said so in a
-/// request body.
 #[tokio::test]
 async fn a_paired_device_makes_its_member_the_speaker() {
     let pond = pond_with_two_members().await;
@@ -164,8 +134,7 @@ async fn a_paired_device_makes_its_member_the_speaker() {
         &pond,
         &principal,
         &SessionIdentity::unknown(),
-        // Two members, so an unidentified speaker would be a Guest. This is the
-        // pond where the rung is worth having.
+        // Two members: an unidentified speaker would be a Guest.
         true,
     )
     .await;
@@ -182,14 +151,7 @@ async fn a_paired_device_makes_its_member_the_speaker() {
     );
 }
 
-/// The vacuity control for the test above, and the one this programme has an
-/// incident about: prove the fixture is what production produces.
-///
-/// If `verify_handshake` stopped writing `devices.profile_id`, or the token
-/// stopped carrying a device id, the test above would still pass against a
-/// hand-written row. Nothing here writes a column: the assertion is that the
-/// production pairing path, on its own, leaves a database in which the token
-/// names a device and that device names a member.
+/// Vacuity control for the test above: the pairing flow alone links token, device and member.
 #[tokio::test]
 async fn nothing_but_the_pairing_flow_wrote_any_of_this() -> Result<()> {
     let pond = pond_with_two_members().await;
@@ -219,8 +181,6 @@ async fn nothing_but_the_pairing_flow_wrote_any_of_this() -> Result<()> {
     assert_eq!(caller.device_id, "device-liz");
     assert_eq!(caller.client_id, "device-liz");
 
-    // The derived lookup rides on the same read, so it cannot answer while the
-    // device answer is missing.
     assert_eq!(
         pond.handshake.client_id_for_token(&token).await?.as_deref(),
         Some("device-liz"),
@@ -230,9 +190,7 @@ async fn nothing_but_the_pairing_flow_wrote_any_of_this() -> Result<()> {
     Ok(())
 }
 
-/// An unattributed device falls THROUGH. Migration 0043's header: NULL is "no
-/// household member has claimed this", never "everybody", and never "whoever
-/// paired last".
+/// `devices.profile_id` NULL means unclaimed: never everybody, never whoever paired last.
 #[tokio::test]
 async fn an_unattributed_device_resolves_nobody() {
     let pond = pond_with_two_members().await;
@@ -257,8 +215,6 @@ async fn an_unattributed_device_resolves_nobody() {
     assert_eq!(source, IdentificationSource::Unknown);
 }
 
-/// And the fall-through is a fall-through, not a veto: an unattributed device
-/// leaves whatever the session already knew standing.
 #[tokio::test]
 async fn an_unattributed_device_leaves_an_explicit_identification_alone() {
     let pond = pond_with_two_members().await;
@@ -280,14 +236,7 @@ async fn an_unattributed_device_leaves_an_explicit_identification_alone() {
     assert_eq!(source, IdentificationSource::Explicit);
 }
 
-/// A device id the CLIENT chose reaches nothing.
-///
-/// The pairing client's own `client_id` is self-reported, and it is what
-/// `verify_handshake` derives the device id from — so this test pairs an
-/// UNATTRIBUTED phone whose client id is the same string as Liz's device, and
-/// checks it does not thereby become Liz. The structural half (there is no
-/// signature a header or body field can satisfy) is in
-/// `device_rung_wiring.rs`; this is the half that a type cannot state.
+/// `verify_handshake` derives the device id from the client's self-reported `client_id`.
 #[tokio::test]
 async fn a_client_that_names_liz_s_device_does_not_become_liz() {
     let pond = pond_with_two_members().await;
@@ -311,10 +260,7 @@ async fn a_client_that_names_liz_s_device_does_not_become_liz() {
          refusal and not a resolver that never resolves anybody"
     );
 
-    // A second client pairs claiming to be the same install, with an ordinary
-    // code it obtained honestly. `verify_handshake` re-registers the device with
-    // `profile_id = excluded.profile_id`, so the attribution is RELEASED rather
-    // than inherited.
+    // Re-pairing sets `profile_id = excluded.profile_id`, releasing Liz's attribution.
     let plain = pond.handshake.issue_pairing_code().await.unwrap();
     let impostor_token = pair(&pond, &plain.code, "device-liz").await;
 
@@ -335,7 +281,6 @@ async fn a_client_that_names_liz_s_device_does_not_become_liz() {
     assert_eq!(source, IdentificationSource::Unknown);
 }
 
-/// A revoked token names nobody, so the rung goes with it.
 #[tokio::test]
 async fn a_revoked_token_carries_no_device() {
     let pond = pond_with_two_members().await;
@@ -359,12 +304,7 @@ async fn a_revoked_token_carries_no_device() {
     assert_eq!(scope, ProfileScope::Guest);
 }
 
-/// A failed attribution read identifies nobody.
-///
-/// The store is broken for real — the `devices` table is dropped out from under
-/// a live pool — rather than simulated with a stub, because the thing under test
-/// is what a `sqlx` error does to the resolution, and a stub would be asserting
-/// that my own `Err` reaches my own match arm.
+/// Breaks the real store (drops `devices`): the point is what a `sqlx` error does here.
 #[tokio::test]
 async fn a_failed_attribution_read_narrows_instead_of_assuming_a_member() {
     let pond = pond_with_two_members().await;
@@ -416,9 +356,7 @@ async fn a_failed_attribution_read_narrows_instead_of_assuming_a_member() {
     assert_eq!(resolved.scope, ProfileScope::Guest);
 }
 
-/// The loopback dev bypass inserts `Principal::loopback()` and returns before a
-/// token is read. That principal carries no device, so the rung is unreachable
-/// on that path — which is the narrowing answer and deliberately so.
+/// The loopback dev bypass returns before any token is read, so its principal has no device.
 #[tokio::test]
 async fn a_loopback_principal_resolves_no_member_however_many_phones_are_paired() {
     let pond = pond_with_two_members().await;

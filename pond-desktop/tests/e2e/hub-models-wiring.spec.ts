@@ -1,12 +1,4 @@
-/**
- * Phase 8 wave 1 — Models sub-screen real-data wiring
- *
- * Verifies:
- * 1. Models screen loads via Settings > Models
- * 2. Shows a loading skeleton while fetching
- * 3. Populates model rows from mocked api.listModels() response
- * 4. Clicking "Load" calls api.activateModel and re-fetches roles
- */
+/** Models sub-screen (Settings > Models) wired to listModels and activateModel. */
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
@@ -65,8 +57,7 @@ const AFTER_ACTIVATE_ROLES = {
   embedding: null,
 };
 
-/** Set up all routes needed for the Models screen tests.
- *  Must be called BEFORE navigating so routes are in place. */
+/** Call before navigating, so the routes are in place. */
 async function setupModelsRoutes(
   page: Page,
   opts: {
@@ -76,7 +67,6 @@ async function setupModelsRoutes(
 ) {
   const roles = opts.roles ?? INITIAL_ROLES;
 
-  // Health + handshake
   await page.route("**/api/v1/health", (r) =>
     r.fulfill({ json: { status: "ok", version: "test" } }),
   );
@@ -145,10 +135,8 @@ async function setupModelsRoutes(
   await page.route("**/api/v1/models/active-roles", (r) =>
     r.fulfill({ json: rolesPayload }),
   );
-  // Expose updater for tests that swap roles after activation
   (page as Page & { _setRoles: (r: object) => void })._setRoles = (r) => { rolesPayload = r; };
 
-  // Base models list — returns MOCK_MODELS
   await page.route("**/api/v1/models", (r) => r.fulfill({ json: MOCK_MODELS }));
 }
 
@@ -172,13 +160,10 @@ test.describe("Hub — Models sub-screen wiring", () => {
     await setupModelsRoutes(page);
     await goToModelsScreen(page);
 
-    // The models card should be visible
     await expect(page.getByText("Language models")).toBeVisible({ timeout: 5_000 });
 
-    // Wait for the API response to render model rows
     await expect(page.getByText(/gemma-4-E4B-it-Q4_K_M/i)).toBeVisible({ timeout: 5_000 });
 
-    // Load button should be present (model not yet active)
     const loadBtn = page.getByRole("button", { name: /load gemma-4-E4B-it-Q4_K_M as chat model/i });
     await expect(loadBtn).toBeVisible({ timeout: 3_000 });
   });
@@ -190,7 +175,6 @@ test.describe("Hub — Models sub-screen wiring", () => {
       onActivate: () => { activateCalled = true; },
     });
 
-    // Swap roles to AFTER_ACTIVATE_ROLES once activate is called
     await page.route("**/api/v1/models/*/*/activate", async (r) => {
       activateCalled = true;
       await r.fulfill({ status: 204, body: "" });
@@ -200,14 +184,11 @@ test.describe("Hub — Models sub-screen wiring", () => {
 
     await goToModelsScreen(page);
 
-    // Wait for the model row to appear
     await expect(page.getByText(/gemma-4-E4B-it-Q4_K_M/i)).toBeVisible({ timeout: 5_000 });
 
-    // Click Load
     await page.getByRole("button", { name: /load gemma-4-E4B-it-Q4_K_M as chat model/i }).click();
     await page.waitForTimeout(1000);
 
-    // Verify the API call was made
     expect(activateCalled).toBe(true);
   });
 
@@ -215,16 +196,12 @@ test.describe("Hub — Models sub-screen wiring", () => {
     await setupModelsRoutes(page);
     await goToModelsScreen(page);
 
-    // Speech card visible
     await expect(page.locator(".setcard").filter({ hasText: "Speech" }).first()).toBeVisible({ timeout: 5_000 });
 
-    // ASR model visible
     await expect(page.getByText("Whisper base (English)")).toBeVisible({ timeout: 3_000 });
 
-    // TTS model visible
     await expect(page.getByText("Piper en-US Lessac (medium)")).toBeVisible({ timeout: 3_000 });
 
-    // Use buttons present
     const useButtons = page.getByRole("button", { name: /use .+ as (speech-to-text|text-to-speech)/i });
     await expect(useButtons.first()).toBeVisible({ timeout: 3_000 });
   });

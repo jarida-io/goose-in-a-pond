@@ -1,20 +1,6 @@
 /**
- * Selectable settings and operational commands — the vocabulary appliances speak.
- *
- * A washer has a wash mode, a spin speed, a rinse count and a temperature level; a
- * dishwasher and a robot vacuum have their own. Adding a verb per appliance would
- * mean twenty-eight of them, each obsolete the moment a device offers something
- * slightly different.
- *
- * Matter already solved this: most appliance controls are ModeBase derivatives,
- * which all publish `supportedModes` — a list of `{label, mode}` the device chose —
- * and a writable `currentMode`. So settings are found **structurally**, by shape
- * rather than by a list of cluster names, and a cluster nobody has heard of works
- * the day a device ships it.
- *
- * The two that are not ModeBase are handled explicitly because their shape differs,
- * not because they are special: Temperature Control names its levels in a parallel
- * array, and Laundry Washer Controls keeps spin speeds and rinses side by side.
+ * Appliance settings and operations. ModeBase clusters are found by shape (`supportedModes` +
+ * `currentMode`), not name; Temperature Control and Laundry Washer Controls differ, so are explicit.
  */
 
 import type { EndpointSnapshot, NodeSnapshot } from "./snapshot.js";
@@ -25,12 +11,7 @@ export type SettingWrite =
   | { kind: "command"; command: string; field: string }
   | { kind: "attribute"; attribute: string };
 
-/**
- * One thing a user can choose on a device, in the device's own words.
- *
- * `values` are the labels the device published, so "Heavy" is offered because the
- * washer said "Heavy" — not because GIAP has a list of wash cycles.
- */
+/** One thing a user can choose on a device; `values` are the labels the device itself published. */
 export interface Setting {
   /** What to call it in a sentence: "laundry washer mode", "spin speed". */
   name: string;
@@ -38,14 +19,7 @@ export interface Setting {
   cluster: string;
   values: string[];
   write: SettingWrite;
-  /**
-   * The attribute holding the live choice, where it is not the conventional one.
-   *
-   * ModeBase keeps it in `currentMode` and an attribute-written setting keeps it in the
-   * attribute it writes, which covered every setting until media arrived: MediaInput
-   * uses `currentInput` and AudioOutput `currentOutput`. Naming it here beats a second
-   * special case in the reader, which is how the first one got hardcoded.
-   */
+  /** Where the live choice is, if not `currentMode` or the written attribute (e.g. `currentInput`). */
   current?: string;
   /** The number to send for a label, or undefined if the device never offered it. */
   valueFor: (choice: string) => number | undefined;
@@ -72,15 +46,7 @@ const PLAYBACK_STATES: Record<number, string> = {
   3: "buffering",
 };
 
-/**
- * A media device's input or output list, as a chooseable setting.
- *
- * These are exactly the shape `mode` was built for and nothing was reading them: a named
- * setting whose values are labels the DEVICE published, chosen by sending an index back.
- * `inputList` gives "HDMI 1", "HDMI 2" because the television said so, the same way a
- * washer's cycles are its own. Without this a TV's inputs were invisible and "switch to
- * HDMI 2" had nothing to aim at.
- */
+/** A media device's input or output list as a setting: device-published labels, chosen by index. */
 function mediaListSetting(
   endpoint: EndpointSnapshot,
   cluster: string,
@@ -123,17 +89,8 @@ const THERMOSTAT = "thermostat";
 const LAUNDRY_WASHER_CONTROLS = "laundryWasherControls";
 
 /**
- * Every cluster this module reads BY NAME, for the snapshot allowlist.
- *
- * Mirrors `sensorClusters()`, and for the reason that helper exists: the allowlist in
- * `controller.ts` drops any cluster it does not name, so a mapping added here and not
- * added there is invisible at runtime while every unit test passes — the fixtures build
- * snapshots by hand and never cross the filter. That is exactly how the three media
- * clusters below shipped dead: they were declared here as module-private constants that
- * `controller.ts` could not have referenced even if someone had thought to.
- *
- * The ModeBase derivatives are deliberately absent — `settingsOf` finds those by shape,
- * and the `*Mode` suffix rule is what admits them without anyone writing a list.
+ * Clusters read BY NAME, for `controller.ts`'s allowlist, which drops unnamed ones (unit fixtures
+ * bypass it, so a miss passes tests). ModeBase clusters get in via its `*Mode` suffix rule.
  */
 export function settingClusters(): ReadonlySet<string> {
   return new Set([
@@ -186,12 +143,7 @@ function indexSetting(
   };
 }
 
-/**
- * A ModeBase cluster: `supportedModes` of `{label, mode}` plus a `currentMode`.
- *
- * Detected by that shape rather than by name, so laundry washers, dishwashers,
- * ovens, vacuums and whatever ships next are all read by the same code.
- */
+/** A ModeBase cluster, detected by shape (`supportedModes` of `{label, mode}` + `currentMode`), not name. */
 function modeSetting(endpoint: EndpointSnapshot, cluster: string): Setting | undefined {
   const state = endpoint.clusters[cluster];
   const supported = state?.["supportedModes"];
@@ -211,27 +163,15 @@ function modeSetting(endpoint: EndpointSnapshot, cluster: string): Setting | und
     endpoint: endpoint.number,
     cluster,
     values: entries.map(e => e.label),
-    // ModeBase changes by command, not by writing currentMode: the device may
-    // refuse a transition, and the command is how it says so.
+    // By command, not a currentMode write: the command is how the device refuses a transition.
     write: { kind: "command", command: "changeToMode", field: "newMode" },
     valueFor: choice => entries.find(e => looseEquals(e.label, choice))?.mode,
   };
 }
 
 /**
- * A thermostat's system mode: what it is willing to do at all.
- *
- * Not ModeBase -- it is a plain enum8 on the Thermostat cluster -- so it is read
- * explicitly, the same way Temperature Control is. It is also the only thermostat
- * control a person sees on the device itself, where a setpoint change may show
- * nowhere: setting one while the mode is Off asks a thermostat that is not running
- * to aim at something.
- *
- * The values are Matter's, with their codes: the list is fixed by the spec rather
- * than published by the device, which is why this cannot be found by shape. Emergency
- * heat, precooling and fan-only are omitted -- they are optional, rarely implemented,
- * and offering a mode a device will reject is the failure this whole area exists to
- * stop.
+ * Thermostat SystemMode: a spec-fixed enum8, not ModeBase. Emergency heat, precooling and
+ * fan-only are omitted: optional and rarely implemented, so likely rejected.
  */
 const SYSTEM_MODES: readonly { label: string; code: number }[] = [
   { label: "off", code: 0 },
@@ -335,40 +275,24 @@ export function settingsOf(node: NodeSnapshot): Setting[] {
   return settings;
 }
 
-/**
- * The setting matching a name the user said, if exactly one does.
- *
- * Widening from exact match to shared words, in that order, because a device's own
- * vocabulary is not the one people use for it: "temperature control" is what the
- * cluster is called, but the setting reads "temperature level", and a caller that
- * says the former has still named it unambiguously. "Exactly one" is the guard
- * throughout — a name matching two settings is answered as unknown rather than
- * guessed at, since guessing puts a wash on the wrong cycle.
- */
+/** The one setting a spoken name matches (exact, then partial, then shared words); ambiguous = none. */
 export function settingNamed(node: NodeSnapshot, name: string): Setting | undefined {
   const settings = settingsOf(node);
   const exact = settings.find(s => looseEquals(s.name, name));
   if (exact !== undefined) return exact;
 
-  // "washer mode" for "laundry washer mode": a user names the part that
-  // distinguishes it, not the cluster's full title.
+  // e.g. "washer mode" for "laundry washer mode".
   const wanted = name.trim().toLowerCase();
   const partial = settings.filter(s => s.name.includes(wanted) || wanted.includes(s.name));
   if (partial.length === 1) return partial[0];
 
-  // "temperature control" for "temperature level": the caller named it by its
-  // cluster rather than by the setting, which is a reasonable thing to do.
+  // e.g. "temperature control" for "temperature level": named by its cluster.
   const words = new Set(wanted.split(/\s+/).filter(w => w !== ""));
   const shared = settings.filter(s => s.name.split(" ").some(w => words.has(w)));
   return shared.length === 1 ? shared[0] : undefined;
 }
 
-/**
- * Which operational states this device says it has, lowercased.
- *
- * `operationalStateList` entries are `{operationalStateId, operationalStateLabel}`;
- * a device may add its own beyond Stopped / Running / Paused / Error.
- */
+/** The device's `operationalStateList`, id → lowercased label; it may add states of its own. */
 function operationalStates(endpoint: EndpointSnapshot): Map<number, string> {
   const list = endpoint.clusters[OPERATIONAL_STATE]?.["operationalStateList"];
   const states = new Map<number, string>();
@@ -385,25 +309,13 @@ function operationalStates(endpoint: EndpointSnapshot): Map<number, string> {
 }
 
 /**
- * The operations this device actually accepts.
- *
- * Every one of these commands is optional — the spec says Start "shall be supported
- * if the device supports remotely starting the operation" — so offering all four to
- * every appliance advertises things a device will refuse.
- *
- * They are derived from `operationalStateList` because the spec ties the two
- * together: a device "shall, at a minimum, expose the set of states matching the
- * commands that are also supported". So a washer that lists Running accepts Start,
- * one that lists Paused accepts Pause and Resume, and one that lists neither is not
- * remotely startable however much we would like it to be.
+ * The operations this device accepts, derived from `operationalStateList`: the spec requires the
+ * states matching its supported commands (Running → Start, Paused → Pause/Resume).
  */
 export function operationsOf(node: NodeSnapshot): Operations | undefined {
   const endpoint = applicationEndpoints(node).find(e => OPERATIONAL_STATE in e.clusters);
   if (endpoint === undefined) {
-    // A video player runs playback the way an appliance runs a cycle, and MediaPlayback
-    // names its commands play/pause/stop. The verb already sends whatever it is given on
-    // whichever cluster it is pointed at, so a television needs no new vocabulary --
-    // only somewhere for `operation` to aim.
+    // No Operational State: a video player's MediaPlayback play/pause/stop serves `operation`.
     const media = applicationEndpoints(node).find(e => MEDIA_PLAYBACK in e.clusters);
     if (media === undefined) return undefined;
     return { endpoint: media.number, cluster: MEDIA_PLAYBACK, values: ["play", "pause", "stop"] };
@@ -415,8 +327,7 @@ export function operationsOf(node: NodeSnapshot): Operations | undefined {
   if (states.has("stopped")) values.push("stop");
   if (states.has("paused")) values.push("pause", "resume");
 
-  // A device that publishes no state list at all has told us nothing, which is not
-  // the same as telling us "no". Offer the standard four and let it refuse.
+  // No state list says nothing, not "no": offer the standard four and let the device refuse.
   return {
     endpoint: endpoint.number,
     cluster: OPERATIONAL_STATE,
@@ -424,18 +335,10 @@ export function operationsOf(node: NodeSnapshot): Operations | undefined {
   };
 }
 
-/**
- * The state the device reports being in, in its own words.
- *
- * This is what an operation reports back, rather than the verb that was asked for.
- * Echoing the request is how GIAP told a user a washer was running while the washer
- * sat there saying Stopped.
- */
+/** The state the device reports, in its own words: what an operation reports back, not the request. */
 export function observedOperation(node: NodeSnapshot): string | undefined {
   const endpoint = applicationEndpoints(node).find(e => OPERATIONAL_STATE in e.clusters);
   if (endpoint === undefined) {
-    // The media half, so a television's `operation` is settled against what it reports
-    // rather than the verb that was sent -- the same rule, for the same reason.
     const media = applicationEndpoints(node).find(e => MEDIA_PLAYBACK in e.clusters);
     if (media === undefined) return undefined;
     const state = media.clusters[MEDIA_PLAYBACK]?.["currentState"];

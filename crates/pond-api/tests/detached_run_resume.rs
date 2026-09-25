@@ -1,7 +1,5 @@
-//! A turn that outlives the connection that asked for it, driven through the real
-//! router against a tempdir database. `SlowAgent` is local because the shared
-//! `MockAgent` yields with no delay and some thirty suites depend on that timing.
-//! Run: cargo test -p pond-api --test detached_run_resume
+//! Turns that outlive their connection, through the real router. `SlowAgent` is local because
+//! ~30 suites depend on the shared `MockAgent` yielding with no delay.
 
 use std::sync::Arc;
 
@@ -37,10 +35,7 @@ impl OnboardingRepository for CompletedOnboarding {
     async fn reset(&self) -> anyhow::Result<()> {
         Ok(())
     }
-    // PAI-2 P7 made this a required trait method rather than a defaulted one:
-    // a default would have to answer from `get_current_step`, and a stub that
-    // answers "not onboarded" makes every onboarding write route public
-    // wherever it is used. The name of this stub is the answer.
+    // Answering "not onboarded" would make every onboarding write route public.
     async fn is_complete(&self) -> anyhow::Result<bool> {
         Ok(true)
     }
@@ -197,10 +192,7 @@ struct SlowAgent {
     gap: Duration,
     /// Says nothing at all before finishing. For the orphan-repair case.
     silent: bool,
-    /// Quiet time AFTER the last chunk, before `Done`, which makes "cancel it
-    /// mid-turn" a window rather than a race: SSE frames batch, so a test reading
-    /// two payloads can already be most of the way through a turn whose only
-    /// delays sit between chunks.
+    /// Quiet time before `Done`, so "cancel mid-turn" is a window, not a race (SSE frames batch).
     tail: Duration,
 }
 
@@ -317,8 +309,7 @@ async fn drain(body: Body) -> Vec<String> {
     out
 }
 
-/// Read only the first `n` payloads, then DROP the body — the reader walking
-/// away mid-turn, which is the event under test in most of this file.
+/// Read the first `n` payloads, then drop the body: the reader walking away mid-turn.
 async fn read_then_drop(body: Body, n: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut stream = body.into_data_stream();
@@ -394,7 +385,7 @@ async fn await_terminal(app: &axum::Router, session_id: &str) -> serde_json::Val
     panic!("run never reached a terminal state");
 }
 
-// ── The point of the whole change ─────────────────────────────────────────────
+// ── Resuming a detached turn ──────────────────────────────────────────────────
 
 #[tokio::test]
 async fn a_resumable_turn_finishes_after_its_reader_walks_away() {
@@ -500,8 +491,7 @@ async fn a_client_that_only_knows_its_session_can_find_the_run() {
     let seen = read_then_drop(res.into_body(), 1).await;
     let run_id = parse(&seen)[0]["run_id"].as_str().unwrap().to_string();
 
-    // This is the whole restart story: the app came back knowing only the
-    // session, and has to be handed the run id before it can reattach.
+    // A restarted app knows only the session and must be handed the run id to reattach.
     let res = app
         .clone()
         .oneshot(get(&format!("/api/v1/sessions/{session}/active-run")))
@@ -517,9 +507,7 @@ async fn a_client_that_only_knows_its_session_can_find_the_run() {
 
 #[tokio::test]
 async fn a_turn_that_did_not_ask_to_be_resumable_still_dies_with_its_reader() {
-    // The voice path's speculative pre-fire depends on exactly this. If it ever
-    // goes green by detaching anyway, a false pause persists an answer to a
-    // half-sentence nobody finished saying.
+    // Voice's speculative pre-fire depends on this: never persist an answer to a half-sentence.
     let (app, _tmp) = make_app(SlowAgent::new(&["never ", "arrives"], 60)).await;
     let session = "sess-ephemeral";
 
@@ -554,8 +542,6 @@ async fn a_turn_that_did_not_ask_to_be_resumable_still_dies_with_its_reader() {
 
 // ── Stopping on purpose ───────────────────────────────────────────────────────
 
-/// Long enough to clear the thought filter's safe-emit threshold, so it is on
-/// the wire before the cancel rather than in a buffer.
 const SPOKEN: &str = "The pond keeps its own counsel about most things, but when \
 asked directly it will tell you that the geese arrived on a Tuesday, that the \
 water was higher that year than anyone remembered, and that nobody thought to \
@@ -563,10 +549,6 @@ write any of it down until much later, which is how most records begin.";
 
 #[tokio::test]
 async fn cancelling_keeps_what_was_already_said() {
-    // The answer must be long enough to pass the thought filter's safe-emit
-    // threshold, or it is still buffered when the cancel lands: a cancelled turn
-    // keeps what it STREAMED. `cancelling_a_run_that_never_spoke...` below covers
-    // the other side of that line.
     let (app, _tmp) = make_app(SlowAgent::with_tail(&[SPOKEN], 50, 3_000)).await;
     let session = "sess-cancel";
 
@@ -578,10 +560,7 @@ async fn cancelling_keeps_what_was_already_said() {
         ))
         .await
         .unwrap();
-    // Read only the opening frame: the thought filter holds short text back until
-    // the turn ends, so waiting for two payloads waits for the whole turn and
-    // cancels nothing. Cancel on elapsed time instead, inside the three-second
-    // quiet window that opens once the agent has spoken at 50ms.
+    // Cancel on elapsed time, inside the 3s quiet window after the agent speaks at 50ms.
     let seen = read_then_drop(res.into_body(), 1).await;
     let run_id = parse(&seen)[0]["run_id"].as_str().unwrap().to_string();
     tokio::time::sleep(Duration::from_millis(300)).await;

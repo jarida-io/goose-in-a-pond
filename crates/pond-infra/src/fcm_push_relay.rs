@@ -1,28 +1,8 @@
-//! Real FCM-v1 push relay (#99 Phase 2) — replaces [`crate::stub_push_relay`]
-//! when a Firebase service-account key is present on disk.
+//! FCM-v1 push relay; replaces [`crate::stub_push_relay`] when a service-account key exists.
 //!
-//! Privacy design: GIAP sends **data-only wake pings** — an opaque
-//! `{notification_id, category, wake}` payload with NO title or body — so
-//! notification content never transits Google's servers. The phone wakes and
-//! pulls the actual content from GIAP over its authenticated channel.
-//!
-//! Credentials: the service-account JSON is read from
-//! `<data_dir>/secrets/fcm-service-account.json` (override with
-//! `POND_FCM_KEY_PATH`). It is a SECRET — it lives outside the repo, is never
-//! logged, and only its `client_email`/`project_id` identifiers appear in
-//! logs. Auth is the standard OAuth2 JWT-bearer flow: sign a short-lived
-//! RS256 assertion with the key, exchange it for an access token (cached
-//! until shortly before expiry), and call
-//! `https://fcm.googleapis.com/v1/projects/<id>/messages:send`.
-//!
-//! Every outbound call (token exchange + send) is recorded through the #113
-//! egress tracker, so pushes appear in the activity feed like any other
-//! network traffic — a local-first assistant that tells you when it talked
-//! to Google.
-//!
-//! APNs (iOS) is not implemented yet: it needs an Apple Developer membership
-//! for the signing key. Tokens registered with platform `apns`/`expo` are
-//! skipped with a log line.
+//! Sends data-only wake pings (no title/body) so notification content never transits Google;
+//! the phone pulls it from GIAP. The key is a secret: only `client_email`/`project_id` may be
+//! logged. Every outbound call is recorded as egress. APNs/Expo tokens are skipped.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -41,13 +21,10 @@ use std::sync::Arc;
 
 use crate::push_token_log::token_log_prefix;
 
-/// OAuth scope for FCM v1 sends.
 const FCM_SCOPE: &str = "https://www.googleapis.com/auth/firebase.messaging";
 /// Refresh the cached access token this long before its stated expiry.
 const TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(60);
-/// Ceiling on each outbound Google call. The relay is awaited inline in
-/// `BroadcastNotificationSender::send`, so an unbounded request would stall
-/// notification delivery behind a hung socket.
+/// Per-call ceiling: the relay is awaited inline, so a hung socket would stall delivery.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The fields GIAP needs from a Firebase service-account key file.
@@ -59,23 +36,18 @@ pub struct ServiceAccount {
     pub token_uri: String,
 }
 
-/// Parse a service-account JSON (no key validation here — that happens when
-/// the signing key is constructed at startup).
+/// Parses structure only; the key is validated when the signing key is built.
 pub fn parse_service_account(raw: &str) -> Result<ServiceAccount> {
     serde_json::from_str(raw).context("service-account JSON missing required fields")
 }
 
-/// Google's FCM v1 host. Overridable only so tests can point the send at a
-/// local mock; production always uses this.
 const FCM_BASE_URL: &str = "https://fcm.googleapis.com";
 
-/// The FCM v1 send endpoint for a project, under `base`.
 pub fn fcm_send_url(base: &str, project_id: &str) -> String {
     format!("{base}/v1/projects/{project_id}/messages:send")
 }
 
-/// Build the data-only wake message for a device token. Deliberately carries
-/// NO `notification` block and NO title/body: content stays on the Pond.
+/// Data-only wake message: no `notification` block or title/body; content stays on the Pond.
 pub fn wake_message(device_token: &str, notification: &Notification) -> Value {
     json!({
         "message": {
@@ -117,8 +89,7 @@ pub struct FcmPushRelay {
 }
 
 impl FcmPushRelay {
-    /// Load and validate the service-account key file. Fails fast (bad path,
-    /// malformed JSON, non-RSA key) so the caller can fall back to the stub.
+    /// Load the key file, failing fast (bad path/JSON, non-RSA key) so the caller can use the stub.
     pub fn from_key_file(path: &Path, push_tokens: Arc<dyn PushTokenRepository>) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("reading FCM service-account key at {}", path.display()))?;
@@ -144,8 +115,7 @@ impl FcmPushRelay {
         })
     }
 
-    /// A valid OAuth access token, from cache or via a fresh JWT-bearer
-    /// exchange.
+    /// Cached OAuth access token, or a fresh JWT-bearer exchange.
     async fn access_token(&self) -> Result<String> {
         if let Some((token, refresh_after)) = self
             .cached_token
@@ -176,10 +146,7 @@ impl FcmPushRelay {
         )
         .context("signing FCM auth assertion")?;
 
-        // PAI-2 P5: `oauth2.googleapis.com` classifies Sensitive, so both
-        // restrictive modes refuse it -- an offline pond does not exchange a
-        // signed assertion with Google, which is the visible half of the
-        // promise the setting makes.
+        // Sensitive host: both restrictive egress modes refuse the token exchange.
         check_egress(&self.account.token_uri)?;
 
         let started = Instant::now();
@@ -259,9 +226,7 @@ impl NotificationRelay for FcmPushRelay {
         let url = fcm_send_url(&self.fcm_base, &self.account.project_id);
         let body = wake_message(&stored.token, notification);
 
-        // PAI-2 P5: gate the send too, not only the token exchange -- a token
-        // cached before the mode was tightened would otherwise keep pushing for
-        // the rest of its lifetime.
+        // Gate the send too: a token cached before the mode was tightened would keep pushing.
         check_egress(&url)?;
 
         let started = Instant::now();
@@ -309,19 +274,14 @@ mod tests {
     use super::*;
     use pond_core::user_data::domain::push_token::PushToken;
 
-    /// A relay whose signing key is deliberately NOT an RSA key. Every test
-    /// using it exercises a branch that returns before anything is signed, so
-    /// reaching `encode` would fail the test loudly rather than silently pass.
-    /// This keeps the suite free of a committed PEM — gitleaks scans the full
-    /// history, and a private key put there could not be taken back.
+    /// Deliberately non-RSA key: these tests must return before signing, or `encode` fails.
     fn relay_with(tokens: Arc<dyn PushTokenRepository>) -> FcmPushRelay {
         FcmPushRelay {
             account: ServiceAccount {
                 project_id: "goose-test".into(),
                 private_key: "unused".into(),
                 client_email: "svc@goose-test.iam.gserviceaccount.com".into(),
-                // Unroutable by design: if a test ever reached the network,
-                // it would hang or fail rather than quietly talk to Google.
+                // Unroutable: reaching the network fails the test instead of calling Google.
                 token_uri: "http://127.0.0.1:1/token".into(),
             },
             signing_key: jsonwebtoken::EncodingKey::from_secret(b"not-an-rsa-key"),
@@ -381,16 +341,12 @@ mod tests {
         tokens
     }
 
-    /// A device with no registered token is a normal, silent no-op — the phone
-    /// simply has no background channel yet.
     #[tokio::test]
     async fn relay_without_a_registered_token_is_a_no_op() {
         let relay = relay_with(Arc::new(StubTokens::default()));
         relay.relay(&notif()).await.unwrap();
     }
 
-    /// APNs and Expo tokens are skipped by design (no Apple signing key yet;
-    /// Expo is not on this delivery path). Both must return before signing.
     #[tokio::test]
     async fn non_fcm_platforms_are_skipped_without_touching_the_network() {
         for platform in [PushPlatform::Apns, PushPlatform::Expo] {
@@ -403,14 +359,9 @@ mod tests {
     }
 
     // ── Signing + HTTP path ─────────────────────────────────────────────────
-    //
-    // These drive the real OAuth2 JWT-bearer exchange and FCM send against a
-    // local mock. The RSA key is generated at run time and never touches disk:
-    // gitleaks scans the full history, so a committed PEM could not be
-    // withdrawn even after deletion.
+    // The RSA key is generated at run time: gitleaks scans history, so never commit a PEM.
 
-    /// A 2048-bit RSA key in PKCS#8 PEM, generated once per test binary.
-    /// Key generation costs a second or so, so it is shared across tests.
+    /// Generated once per test binary: RSA keygen takes about a second.
     fn test_signing_key() -> &'static jsonwebtoken::EncodingKey {
         use rsa::pkcs8::EncodePrivateKey;
         static KEY: std::sync::OnceLock<jsonwebtoken::EncodingKey> = std::sync::OnceLock::new();
@@ -425,8 +376,6 @@ mod tests {
         })
     }
 
-    /// A relay that can genuinely sign, pointed at `base` for sends and at
-    /// `token_uri` for the OAuth exchange.
     fn signing_relay_with_token_uri(
         base: &str,
         token_uri: &str,
@@ -459,23 +408,10 @@ mod tests {
             .set_body_json(json!({ "access_token": "test-access-token", "expires_in": 3600 }))
     }
 
-    /// Held by every test below that makes a real outbound call.
-    ///
-    /// The #113 egress sink is process-global and set through a `OnceLock`, so
-    /// the moment one test installs a capturing sink it is installed for the
-    /// whole binary and every concurrently running test writes into the same
-    /// buffer. Serialising is what lets `both_outbound_calls_are_recorded_as_egress`
-    /// assert an exact event count. Do not remove these guards as redundant.
-    ///
-    /// A `tokio::sync::Mutex` because the guard is held across `.await`. An
-    /// in-module lock rather than the `serial_test` crate, following the
-    /// precedent in `pond-adapters-face-onnx/src/antispoof_onnx.rs`.
+    /// Serialises outbound-call tests: the egress sink is process-global, so counts would mix.
     static EGRESS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    /// The shared egress capture buffer, installing the sink on first use.
-    ///
-    /// `set_egress_sink` is first-wins, so the buffer has to be created once
-    /// and handed back to every caller — a per-test sink is not possible.
+    /// Shared capture buffer: `set_egress_sink` is first-wins, so a per-test sink is impossible.
     fn captured_egress() -> Arc<Mutex<Vec<pond_core::security::domain::event::Event>>> {
         use async_trait::async_trait;
         use pond_core::security::domain::event::{Event, EventQuery};
@@ -508,11 +444,8 @@ mod tests {
             .clone()
     }
 
-    /// The happy path end to end: sign an assertion, exchange it for an access
-    /// token, then send the wake ping bearing that token.
     #[tokio::test]
     async fn signs_exchanges_and_sends() {
-        // Serialised: the egress sink is process-global (see EGRESS_LOCK).
         let _egress_guard = EGRESS_LOCK.lock().await;
         use wiremock::matchers::{body_string_contains, header, method, path};
         use wiremock::{Mock, MockServer};
@@ -547,12 +480,9 @@ mod tests {
         // `expect(...)` on both mocks is verified when the server drops.
     }
 
-    /// The access token is cached: a second push in the same window must not
-    /// re-run the exchange. Google rate-limits token issuance, and this is
-    /// also what keeps a burst of notifications from doubling our egress.
+    /// Google rate-limits token issuance, so a burst of pushes must share one token.
     #[tokio::test]
     async fn the_access_token_is_reused_across_sends() {
-        // Serialised: the egress sink is process-global (see EGRESS_LOCK).
         let _egress_guard = EGRESS_LOCK.lock().await;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer};
@@ -579,11 +509,8 @@ mod tests {
         relay.relay(&notif()).await.unwrap();
     }
 
-    /// A rejected exchange must surface as an error rather than a send with no
-    /// credentials attached.
     #[tokio::test]
     async fn a_rejected_token_exchange_fails_without_sending() {
-        // Serialised: the egress sink is process-global (see EGRESS_LOCK).
         let _egress_guard = EGRESS_LOCK.lock().await;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer};
@@ -609,12 +536,8 @@ mod tests {
         );
     }
 
-    /// 404/410 from FCM means a stale token (app reinstalled). It must be
-    /// reported, not swallowed — the sender logs it, and a swallowed failure
-    /// would look like successful delivery.
     #[tokio::test]
     async fn a_rejected_send_is_reported() {
-        // Serialised: the egress sink is process-global (see EGRESS_LOCK).
         let _egress_guard = EGRESS_LOCK.lock().await;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer};
@@ -639,26 +562,14 @@ mod tests {
         assert!(err.to_string().contains("404"), "unexpected error: {err}");
     }
 
-    /// Both Google calls must appear in the activity feed (#113).
-    ///
-    /// This guards a promise, not a feature: the module docs say GIAP tells you
-    /// when it talked to Google. Drop either `record_egress` call and every
-    /// other test still passes while that promise quietly stops holding.
-    ///
-    /// The send is mocked to 404 on purpose. It makes the two events tellable
-    /// apart by status — `extract_host` strips the port, so both wiremock
-    /// servers are host `127.0.0.1` and host cannot distinguish them (harmless
-    /// in production, where real hosts differ; do not "fix" this by asserting
-    /// on host). It also pins the more important half of the guarantee: a push
-    /// that *failed* must still show up, or a silent failure looks exactly like
-    /// a push that was never attempted.
+    /// The send 404s on purpose: `extract_host` drops the port, so only status tells the two
+    /// events apart, and a failed push must still be recorded.
     #[tokio::test]
     async fn both_outbound_calls_are_recorded_as_egress() {
         use pond_core::security::domain::event::{EventCategory, PrivacySensitivity};
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer};
 
-        // Serialised: the egress sink is process-global (see EGRESS_LOCK).
         let _egress_guard = EGRESS_LOCK.lock().await;
 
         let server = MockServer::start().await;
@@ -701,8 +612,7 @@ mod tests {
             assert_eq!(ev.category, EventCategory::Network);
             assert_eq!(ev.attributes.get("method"), Some(&"POST".into()));
             assert_eq!(ev.attributes.get("host"), Some(&"127.0.0.1".into()));
-            // Loopback, because the mock is local — real runs classify
-            // googleapis.com as Sensitive.
+            // Loopback mock; real googleapis.com traffic classifies as Sensitive.
             assert_eq!(ev.privacy_sensitivity, PrivacySensitivity::Internal);
         }
         let statuses = events
@@ -719,13 +629,9 @@ mod tests {
         );
     }
 
-    /// A token whose 8th byte falls inside a multi-byte character reaches the
-    /// redaction path only after a successful send — the case the earlier
-    /// tests could not get to. This is the panic guard on this relay's own
-    /// logging.
+    /// The token's 8th byte is mid-character; redaction only runs after a successful send.
     #[tokio::test]
     async fn a_multi_byte_token_survives_the_send_path() {
-        // Serialised: the egress sink is process-global (see EGRESS_LOCK).
         let _egress_guard = EGRESS_LOCK.lock().await;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer};
@@ -775,8 +681,6 @@ mod tests {
         );
     }
 
-    /// Production must never be pointed anywhere but Google. The override
-    /// exists for the mock server below and nothing else.
     #[test]
     fn the_default_base_is_googles() {
         let relay = signing_relay("http://unused", Arc::new(StubTokens::default()));
@@ -784,8 +688,6 @@ mod tests {
         assert!(relay.fcm_base.starts_with("http://")); // test override in effect
     }
 
-    /// The privacy contract: wake pings are data-only — no `notification`
-    /// block, no title, no body anywhere in the payload.
     #[test]
     fn wake_messages_carry_no_notification_content() {
         let n = Notification {
@@ -804,7 +706,6 @@ mod tests {
         assert_eq!(msg["message"]["data"]["category"], "alert");
         assert_eq!(msg["message"]["data"]["wake"], "1");
         assert_eq!(msg["message"]["android"]["priority"], "HIGH");
-        // The content-free guarantee.
         assert!(msg["message"].get("notification").is_none());
         let serialized = msg.to_string();
         assert!(!serialized.contains("Failed pairing attempt"));

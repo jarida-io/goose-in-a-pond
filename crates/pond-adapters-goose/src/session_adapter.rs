@@ -9,10 +9,7 @@ use rmcp::model::Role as GooseRole;
 use std::path::PathBuf;
 use uuid::Uuid;
 
-/// Adapter: GooseSessionAdapter
-///
-/// Thin bridge that delegates to Goose's real SessionManager.
-/// Maps between Pond's simple domain types and Goose's richer types.
+/// Pond `SessionStorage` over Goose's `SessionManager`.
 pub struct GooseSessionAdapter {
     manager: SessionManager,
 }
@@ -25,7 +22,6 @@ impl GooseSessionAdapter {
         }
     }
 
-    /// Create an adapter with a custom data directory.
     pub fn with_data_dir(data_dir: PathBuf) -> Self {
         Self {
             manager: SessionManager::new(data_dir),
@@ -210,8 +206,7 @@ impl SessionStorage for GooseSessionAdapter {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<SessionMessage>, SessionStorageError> {
-        // Goose has no native pagination — fetch all and slice in memory.
-        // Acceptable for thin bridge; can be optimized later if needed.
+        // Goose has no pagination, so slice in memory.
         let all = self.get_messages(session_id).await?;
         let paginated = all.into_iter().skip(offset).take(limit).collect();
         Ok(paginated)

@@ -2,32 +2,22 @@ use crate::models::domain::message::ChatMessage;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// A single message within a session, including metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMessage {
     pub id: String,
     pub session_id: String,
     pub message: ChatMessage,
     pub created_at: DateTime<Utc>,
-    /// Real prompt-token count for the turn this message completed
-    /// (assistant rows only; None for user/tool rows and old rows).
+    /// Real prompt tokens for the turn this message completed (assistant rows only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_tokens: Option<u32>,
     /// Real completion-token count for this assistant message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_tokens: Option<u32>,
-    /// Tokens the turn spent on reasoning the user never saw (assistant rows).
-    ///
-    /// The COUNT only. The reasoning text is not persisted here and is not
-    /// replayed into context — PAI-5 P6 owns that decision and it has not
-    /// landed. `None` means nobody counted (every row written before this
-    /// column existed, and every row written by a path that does not carry
-    /// reasoning through); it is not the same as `Some(0)`.
+    /// Hidden reasoning-token count (the text is not stored); `None` = not counted, not zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u32>,
-    /// Training-feedback signal from the chat UI's like/dislike controls.
-    /// `None` = no vote, `Some(true)` = liked (keep as training data),
-    /// `Some(false)` = disliked (excluded from training data).
+    /// Training feedback from the like/dislike UI; `Some(false)` excludes the row from training.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liked: Option<bool>,
 }
@@ -53,24 +43,14 @@ impl SessionMessage {
         self
     }
 
-    /// Attach the turn's GIAP-derived reasoning-token count (assistant rows).
-    ///
-    /// Separate from `with_token_counts` on purpose: those two come from the
-    /// provider and this one does not, and a single setter would invite a
-    /// caller to pass all three from the same source.
+    /// Attach the GIAP-derived (not provider-reported) reasoning-token count.
     pub fn with_reasoning_tokens(mut self, reasoning: Option<u32>) -> Self {
         self.reasoning_tokens = reasoning;
         self
     }
 }
 
-/// Metadata for one persisted image attachment (phase F2).
-///
-/// The bytes themselves live outside the database — `pond_system.db` is read on
-/// every turn and every session listing, and a megabyte-per-row BLOB would bloat
-/// its page cache for data that is only ever fetched whole and rarely. The
-/// storage adapter owns the file layout; nothing above it should parse
-/// `file_path`, which exists for operators debugging a session by hand.
+/// Image attachment metadata; the bytes live outside `pond_system.db`, which every turn reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageAttachment {
     pub id: String,
@@ -84,16 +64,7 @@ pub struct MessageAttachment {
     pub created_at: DateTime<Utc>,
 }
 
-/// How a session came to be attributed to a household member.
-///
-/// The profile id alone is not enough to authorise anything. "This is Liz
-/// because her paired phone signed the request" and "this is Liz because a
-/// camera frame matched her face at 0.62" are different claims, and a policy
-/// that cannot distinguish them will either refuse the phone or trust the
-/// camera. Recording the source is what keeps that decision available later.
-///
-/// The order of the variants is the strength order, strongest first. That is
-/// load-bearing -- see [`rank`](Self::rank).
+/// Evidence behind an attribution (variants strongest first); the id alone authorises nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IdentificationSource {
@@ -101,16 +72,14 @@ pub enum IdentificationSource {
     PairedDevice,
     /// The member said so, or picked themselves in the UI. Deliberate.
     Explicit,
-    /// A face match above the per-profile threshold, anti-spoof passed.
-    /// Probabilistic, and the only source that carries a confidence.
+    /// Above-threshold face match, anti-spoof passed; the only source with a confidence.
     Face,
     /// Nobody has been identified. The default, and never an error.
     Unknown,
 }
 
 impl IdentificationSource {
-    /// The stored representation. Matches the values named in migration
-    /// `0037_session_identification.sql`.
+    /// Stored form; must match the values in migration `0037_session_identification.sql`.
     pub fn as_str(&self) -> &'static str {
         match self {
             IdentificationSource::PairedDevice => "paired_device",
@@ -120,13 +89,7 @@ impl IdentificationSource {
         }
     }
 
-    /// Read back a stored value.
-    ///
-    /// An unrecognised string is [`Unknown`](Self::Unknown), not an error. A
-    /// row written by a newer version, or corrupted, must degrade to the
-    /// weakest claim rather than fail a session read -- but it must never
-    /// degrade to a *strong* one, which is why there is no fallible variant to
-    /// get this wrong in the other direction.
+    /// An unrecognised value is [`Unknown`](Self::Unknown), the weakest claim, not an error.
     pub fn parse(raw: &str) -> Self {
         match raw {
             "paired_device" => IdentificationSource::PairedDevice,
@@ -136,11 +99,7 @@ impl IdentificationSource {
         }
     }
 
-    /// Every source paired with its rank, strongest first.
-    ///
-    /// Exists so an adapter can push the comparison into a query without
-    /// re-deciding the ordering. The ranking is policy and stays here; the
-    /// adapter transports numbers.
+    /// Stored form and rank of every source, for adapters that compare ranks in SQL.
     pub const ALL_RANKED: &'static [(&'static str, u8)] = &[
         ("paired_device", 0),
         ("explicit", 1),
@@ -179,38 +138,22 @@ impl SessionIdentity {
         }
     }
 
-    /// Whether this identification should replace `existing`.
-    ///
-    /// The case this exists for: a household member's paired phone opens a
-    /// session, then the camera in the room sees whoever walked past. Without
-    /// this check the face match silently overwrites a cryptographic binding
-    /// with a probabilistic one, and every later decision is made on the weaker
-    /// evidence. A weaker source may not take over a session it did not bind.
-    ///
-    /// Equal strength does supersede -- a fresh face match replacing an older
-    /// one is a re-identification, which is the whole point of the endpoint.
+    /// Whether this replaces `existing`: a weaker source never overrides a stronger one, but equal
+    /// strength does, so a fresh face match can re-identify.
     pub fn supersedes(&self, existing: &SessionIdentity) -> bool {
         self.source.rank() <= existing.source.rank()
     }
 }
 
-/// Represents a conversation session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
     pub title: Option<String>,
-    /// The household member this session is attributed to, if any.
-    ///
-    /// The column has existed since migration `0003_profiles.sql`; this field
-    /// is what finally reads it. `None` is the overwhelmingly common value and
-    /// means unattributed -- read [`SessionIdentity`] for the evidence behind a
-    /// `Some`, because the id on its own does not say how much to trust it.
+    /// `None` = unattributed; see [`SessionIdentity`] for how far to trust a `Some`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<String>,
-    /// Cumulative prompt tokens across all messages in this session.
     #[serde(default)]
     pub total_prompt_tokens: u32,
-    /// Cumulative completion tokens across all messages in this session.
     #[serde(default)]
     pub total_completion_tokens: u32,
     /// The model most recently used in this session.
@@ -252,9 +195,6 @@ mod session_identity_tests {
         }
     }
 
-    /// A row written by a newer version, or one corrupted in place, must not
-    /// be readable as a strong claim. Degrading to Unknown is the only safe
-    /// direction, so this pins it.
     #[test]
     fn an_unrecognised_stored_source_degrades_to_unknown() {
         assert_eq!(
@@ -295,10 +235,6 @@ mod session_identity_tests {
         }
     }
 
-    /// The scenario this method exists for: a paired phone binds the session,
-    /// then the room camera sees somebody walk past. If the face match wins,
-    /// every later authorisation decision is made on the weaker evidence --
-    /// and, here, about the wrong person.
     #[test]
     fn a_face_match_cannot_take_over_a_paired_device_session() {
         let phone = identity(IdentificationSource::PairedDevice, "jerry");
@@ -320,8 +256,6 @@ mod session_identity_tests {
         }
     }
 
-    /// Re-identification is the endpoint's normal case -- a second face match
-    /// in the same session must be allowed to correct the first.
     #[test]
     fn equal_strength_supersedes_so_re_identification_works() {
         let first = identity(IdentificationSource::Face, "jerry");
@@ -339,10 +273,7 @@ mod session_identity_tests {
 mod ranked_table_tests {
     use super::*;
 
-    /// `ALL_RANKED` is transported into SQL, so it has to agree with `rank()`
-    /// exactly. If they drift, a conditional write enforces one ordering while
-    /// every in-memory check enforces another -- and the disagreement would
-    /// only ever surface as an occasional, unreproducible downgrade.
+    /// SQL uses `ALL_RANKED` and memory uses `rank()`; drift would cause silent downgrades.
     #[test]
     fn the_ranked_table_agrees_with_rank_and_covers_every_source() {
         for source in [

@@ -1,15 +1,5 @@
-//! Driven Port: in-process event bus (#91).
-//!
-//! Publish/subscribe for the reactive domain events the Core produces — sensor
-//! readings, camera events, and device-state changes — so anything (the rules
-//! engine in Q2-15, live dashboards, …) can react without `record_*` knowing
-//! its consumers.
-//!
-//! The port surface is deliberately framework-free: subscription is a
-//! `futures::Stream`, never a `tokio::sync::broadcast::Receiver`, so the Core
-//! and its consumers don't couple to the broadcast implementation. The
-//! in-process tokio-broadcast adapter lives in
-//! `crate::shared::services::in_process_event_bus`.
+//! Driven port: in-process pub/sub for reactive domain events.
+//! Subscriptions are `futures::Stream`s, not broadcast receivers, to stay framework-free.
 
 use std::pin::Pin;
 
@@ -23,37 +13,24 @@ use crate::user_data::domain::device::{DeviceStateChanged, DeviceStateValue};
 use crate::user_data::domain::schedule::{TriggerEventView, TriggerSourceKind};
 use crate::user_data::domain::sensor::{CameraEvent, SensorReading};
 
-/// A typed reactive event carried on the bus. A closed enum (rather than the
-/// generic [`Event`]) so consumers like the rules engine can pattern-match
-/// ergonomically instead of parsing an attribute map.
-///
-/// The first three variants are *device-shaped*: something in the house
-/// reported a reading. The last three are not — they are the pond noticing
-/// time passing, a household member arriving or leaving, and the user going
-/// quiet (PAI-7 P1 and P2). That split is what
-/// [`trigger_view`](BusEvent::trigger_view) returns an `Option` for.
+/// A typed reactive event carried on the bus.
+/// Only the first three variants are device-shaped; the rest have no `trigger_view`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "data")]
 pub enum BusEvent {
     Sensor(SensorReading),
     Camera(CameraEvent),
     Device(DeviceStateChanged),
-    /// A wall-clock boundary the pond crossed (PAI-7 P1).
+    /// A wall-clock boundary the pond crossed.
     Time(TimeTick),
-    /// A named household member arrived or left (PAI-7 P2).
-    ///
-    /// The variant tag this serialises under is `"presence"`, which is the
-    /// `kind` string `BusEventRef` in the proposal domain was written to
-    /// carry.
+    /// A named household member arrived or left; tag `"presence"` is what `BusEventRef` expects.
     Presence(ProfilePresence),
-    /// The user's interaction started, went idle, or resumed (PAI-7 P1).
+    /// The user's interaction started, went idle, or resumed.
     Session(SessionLifecycle),
 }
 
 impl BusEvent {
-    /// Project this bus event onto the unified observability [`Event`] so bus
-    /// traffic can also be appended to the durable event log (#108). Sensor and
-    /// camera data are behavioral, so they're classified `Sensitive`.
+    /// Project onto an [`Event`] for the durable log. Behavioral data is `Sensitive`.
     pub fn to_event(&self) -> Event {
         match self {
             BusEvent::Sensor(r) => Event::new(EventCategory::Sensor, "sensor.reading")
@@ -69,34 +46,14 @@ impl BusEvent {
             BusEvent::Device(d) => Event::new(EventCategory::Device, "device.state_changed")
                 .attr("device_id", d.device_id.as_str())
                 .attr("key", d.key.as_str()),
-            // A clock reading is about nobody, so it is `Public` — the one
-            // classification in this match that is not behavioral.
+            // A clock reading is about nobody, so it is `Public`.
             BusEvent::Time(t) => Event::new(EventCategory::System, "time.tick")
                 .attr("boundary", t.boundary.as_str())
                 .attr("local_hour", i64::from(t.local_hour))
                 .sensitivity(PrivacySensitivity::Public),
-            // Who is home and when is the most behavioral data this house
-            // holds, so it takes the same classification as a session
-            // transition and for the same reason: `Sensitive` is what puts it
-            // on the seven-day retention sweep rather than the thirty-day one.
-            //
-            // What `Sensitive` does NOT do is hide it from the audit MCP
-            // tools. That used to mean `recent_activity` surfaced a
-            // `presence.profile` row to any member, kept from a visitor only
-            // by `giap-audit` being in `groups_denied_to_guests`.
-            //
-            // `giap-audit` was deleted on 2026-09-10, so nothing reads the
-            // event log back through a tool at all now and the exposure is
-            // closed -- by the reader going away, not by this classification
-            // changing. If a reporting surface is ever rebuilt, the leak comes
-            // back with it: the row is `Sensitive`, the renderer prints the
-            // timestamp and the action without the `profile_id`, and what
-            // leaks is the timing of an arrival rather than whose.
-            //
-            // `Agent` rather than `Sensor` because this is the pond's own
-            // conclusion about a person, not a reading off a device -- filing
-            // it under `Sensor` would put "Jerry arrived" in the sensor feed
-            // as though something measured it.
+            // `Sensitive` puts it on the 7-day retention sweep; it does not hide it from
+            // log readers, so any rebuilt reporting surface would leak arrival times.
+            // `Agent`, not `Sensor`: the pond's conclusion about a person, not a reading.
             BusEvent::Presence(p) => {
                 let event = Event::new(EventCategory::Agent, "presence.profile")
                     .attr("profile_id", p.profile_id.as_str())
@@ -105,20 +62,12 @@ impl BusEvent {
                     .sensitivity(PrivacySensitivity::Sensitive)
                     .session(p.session_id.as_str());
                 match p.confidence {
-                    // Recorded so an audit can tell a 0.95 match from a 0.61
-                    // one after the fact. Invariant 3's reason, one layer out.
+                    // Recorded so an audit can tell a 0.95 match from a 0.61 one after the fact.
                     Some(c) => event.attr("confidence", f64::from(c)),
                     None => event,
                 }
             }
-            // When somebody is talking to the pond is behavioral data, exactly
-            // like a motion reading: `Sensitive`, which shortens its retention
-            // to the sensitivity sweep's seven days.
-            //
-            // This comment used to say `Sensitive` also "keeps it out of the
-            // audit MCP reads". It does not, and never did -- see the presence
-            // arm above for where that claim goes wrong and what actually
-            // bounds who can read these rows.
+            // Behavioral data, like a motion reading: `Sensitive`, i.e. seven-day retention.
             BusEvent::Session(s) => {
                 let event = Event::new(EventCategory::Agent, "session.lifecycle")
                     .attr("phase", s.phase.as_str())
@@ -220,8 +169,7 @@ pub type BusStream = Pin<Box<dyn Stream<Item = BusEvent> + Send>>;
 
 /// Driven Port: in-process publish/subscribe for reactive domain events.
 pub trait EventBus: Send + Sync {
-    /// Publish an event to all current subscribers. Non-blocking and infallible
-    /// from the caller's view — having no subscribers is normal, not an error.
+    /// Publish to all current subscribers; non-blocking, and no subscribers is not an error.
     fn publish(&self, event: BusEvent);
 
     /// Subscribe to events published *after* this call returns.
@@ -307,10 +255,7 @@ mod tests {
         })
     }
 
-    /// The widest rule the API will accept: a family with no device filter, no
-    /// signal filter, no condition. It matches every event in its family, so
-    /// it is the rule a clock-driven event would fire if these events were
-    /// ever given a device-shaped view.
+    /// The widest rule the API accepts: it matches every event in its family.
     fn catch_all_rule(kind: TriggerSourceKind) -> SensorTriggerSpec {
         SensorTriggerSpec {
             source: TriggerSource {
@@ -327,10 +272,7 @@ mod tests {
         }
     }
 
-    /// Half the point of this test, and the reason it is not vacuous: in every
-    /// family there really is a rule the API accepts that fires on *anything*
-    /// in that family. That is what a placeholder view for a clock event would
-    /// be handed to.
+    /// Vacuity control for the next test: a catch-all rule really exists in every family.
     #[test]
     fn a_catch_all_rule_fires_on_anything_in_its_family() {
         for (kind, event) in [
@@ -348,14 +290,6 @@ mod tests {
         }
     }
 
-    /// PAI-7 P1's and P2's whole scope discipline: the new events are
-    /// published, and no rule the user wrote can be fired by them — because
-    /// there is nothing for a rule to match against at all.
-    ///
-    /// Read this together with the test above. Alone, "has no view" is a claim
-    /// about a function; with it, it is the claim that an hourly tick — or a
-    /// household member walking in — cannot run the automations somebody wrote
-    /// about their house.
     #[test]
     fn a_clock_presence_or_session_event_has_no_view_for_a_rule_to_match() {
         for event in [
@@ -398,14 +332,7 @@ mod tests {
         );
     }
 
-    /// When somebody is at the pond is behavioral data. Classifying it below
-    /// `Sensitive` would take it off the seven-day sensitivity sweep in
-    /// `pond-infra/src/pruning.rs` and leave it in the log for thirty.
-    ///
-    /// It would **not** change who can read it, and this doc-comment claimed
-    /// it would until 2026-08-11: `audit.rs :: MAX_SURFACEABLE` is
-    /// `Sensitive`, so the audit MCP tools surface everything below `Secret`
-    /// either way. Retention is the whole of what this assertion buys.
+    /// `Sensitive` buys seven-day retention (`pond-infra/src/pruning.rs`), not read protection.
     #[test]
     fn a_session_transition_is_classified_sensitive_and_carries_its_session() {
         let event = session_event(SessionPhase::Started, Some("sess-42")).to_event();
@@ -425,28 +352,13 @@ mod tests {
             ))
         );
 
-        // An activity-clock transition belongs to no session, and must not
-        // borrow one.
+        // An activity-clock transition belongs to no session and must not borrow one.
         let idle = session_event(SessionPhase::Idle, None).to_event();
         assert_eq!(idle.session_id, None);
         assert_eq!(idle.privacy_sensitivity, PrivacySensitivity::Sensitive);
     }
 
-    /// Where a household member is, and when, is the most personal thing this
-    /// house records, so below `Sensitive` it would outlive its usefulness in
-    /// the log -- thirty days rather than seven.
-    ///
-    /// **What this test does not buy, and was written believing it did.**
-    /// `Sensitive` does not keep the row away from the audit MCP tools:
-    /// `audit.rs :: MAX_SURFACEABLE` is `Sensitive`, so `recent_activity`
-    /// surfaces `presence.profile` today and would surface it at `Internal`
-    /// too. Guests cannot reach those tools (`groups_denied_to_guests`), so
-    /// the exposure is member-to-member, and the renderer omits `profile_id` --
-    /// what an Owner turn learns is that somebody arrived at 19:04, not who.
-    /// Withholding it properly is a change to `audit.rs`, and it is not this
-    /// phase's; recorded in PAI-7 section 3.1 rather than fixed here, because
-    /// `audit.rs` is outside this change's footprint and the fix is a policy
-    /// decision about the audit surface, not about a classification.
+    /// `Sensitive` buys seven-day rather than thirty-day retention, not read protection.
     #[test]
     fn a_presence_transition_is_sensitive_and_names_the_member_and_the_rung() {
         use crate::security::domain::event::AttributeValue;
@@ -491,16 +403,7 @@ mod tests {
         );
     }
 
-    /// The bus is serialised (it crosses a broadcast channel and is the shape
-    /// the event log records), so the new variants must round-trip.
-    ///
-    /// **Compared whole, not by discriminant.** The first version of this test
-    /// asserted only that a `Time` came back a `Time`, which is true of a
-    /// payload with every field dropped — and `session_id` carries
-    /// `skip_serializing_if`, so silently dropping a field is exactly the
-    /// mistake available here. Comparing the payload also means a field added
-    /// to either struct tomorrow is covered without anyone remembering to
-    /// extend this.
+    /// Compares whole payloads: `skip_serializing_if` makes silently dropping a field easy.
     #[test]
     fn the_new_variants_round_trip_with_their_payloads_intact() {
         let tick = TimeTick {
@@ -513,8 +416,7 @@ mod tests {
             other => panic!("a Time came back as {other:?}"),
         }
 
-        // Both shapes of presence: the face rung, whose confidence must not be
-        // dropped in transit, and a rung that carries none.
+        // Face (confidence must survive transit) and a rung with no confidence.
         for source in [IdentificationSource::Face, IdentificationSource::Explicit] {
             let BusEvent::Presence(sent) = presence(PresenceTransition::Arrived, source) else {
                 unreachable!("the helper builds a presence event")
@@ -530,9 +432,7 @@ mod tests {
             }
         }
 
-        // Both shapes of `session_id`: the one that serialises and the one
-        // `skip_serializing_if` omits, which must come back `None` rather
-        // than failing to deserialise for want of the field.
+        // Present and omitted `session_id`; the omitted one must deserialize as `None`.
         for lifecycle in [
             SessionLifecycle {
                 phase: SessionPhase::Started,
@@ -557,10 +457,7 @@ mod tests {
         }
     }
 
-    /// Vacuity control for the round-trip above: an event whose payload is
-    /// altered does *not* compare equal, so the assertions there are about the
-    /// wire format and not about a `PartialEq` that answers `true` to
-    /// everything.
+    /// Vacuity control for the round-trip test above.
     #[test]
     fn the_round_trip_comparison_can_actually_fail() {
         let at = chrono::Utc::now();

@@ -1,9 +1,3 @@
-/**
- * MCP Server Card Data Verification Tests
- *
- * Verifies that the card registry, mock data, and parseResult pipeline
- * produce valid data for each card type. No backend required.
- */
 import { describe, it, expect, beforeAll } from "vitest";
 
 // Trigger all card registrations

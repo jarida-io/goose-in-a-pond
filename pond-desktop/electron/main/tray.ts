@@ -1,8 +1,4 @@
-// The system tray icon and its menu.
-//
-// Four items, matching the Tauri shell: Open, Summon, Canvas, Quit. The
-// tooltip reflects whether pond-server is reachable, which is the only place
-// that state is visible when the window is hidden.
+// Tray icon and menu; its tooltip is the only server status shown while the window is hidden.
 
 import { Tray, Menu, nativeImage, app } from "electron";
 import type { ShellEvent } from "../../src/shell/contract";
@@ -16,18 +12,13 @@ export interface TrayTargets {
 let tray: Tray | null = null;
 
 export function createTray(t: TrayTargets): Tray {
-  // createFromPath picks up the @2x file sitting beside this one on its own,
-  // so only the @1x path is named.
+  // createFromPath finds the @2x file beside it, so only the @1x path is named.
   const image = nativeImage.createFromPath(t.iconPath);
   if (image.isEmpty()) {
-    // Worth saying out loud rather than showing a blank slot: this is what a
-    // packaging mistake looks like, and the tray is otherwise silent about it.
+    // A packaging mistake; the tray itself would silently show a blank slot.
     console.warn(`[giap] tray icon missing or unreadable at ${t.iconPath}`);
   }
-  // A template image carries shape only -- macOS discards the colour and
-  // re-tints the alpha to suit the menu bar, so it stays legible in light
-  // mode, dark mode and when highlighted. An opaque coloured image here draws
-  // as a solid block.
+  // macOS re-tints a template image's alpha for the menu bar; an opaque image draws as a block.
   image.setTemplateImage(true);
 
   tray = new Tray(image);
@@ -54,8 +45,7 @@ export function createTray(t: TrayTargets): Tray {
     ]),
   );
 
-  // Left-click shows the window, matching the Tauri behaviour. On macOS a
-  // left-click opens the context menu by default, so this is additive.
+  // Left-click shows the window (on macOS, in addition to opening the menu).
   tray.on("click", () => t.showWindow());
   return tray;
 }

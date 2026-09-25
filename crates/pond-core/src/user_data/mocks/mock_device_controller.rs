@@ -1,11 +1,4 @@
-//! In-memory [`DeviceController`] test double (#84).
-//!
-//! Records control commands against an in-memory state map so Core tests (and,
-//! later, the rules engine) can exercise device control without a real
-//! protocol adapter. Capabilities are declared up front via [`with_device`];
-//! control calls auto-create an entry so simple tests need no setup.
-//!
-//! [`with_device`]: MockDeviceController::with_device
+//! In-memory [`DeviceController`] test double; control calls auto-create unknown devices.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -24,7 +17,6 @@ struct MockDevice {
     state: DeviceState,
 }
 
-/// Test double for [`DeviceController`]. Thread-safe; cheap to clone via `Arc`.
 pub struct MockDeviceController {
     devices: Mutex<HashMap<DeviceId, MockDevice>>,
 }

@@ -6,13 +6,7 @@ import type {
 } from "../../api/types";
 import { DEFAULT_HEADROOM_MB, modelFitFor, modelResidencyMb } from "../../api/modelFit";
 
-/**
- * The arithmetic behind the Models page, kept out of the component.
- *
- * Everything here is a pure function of data the pond already reports, so the
- * numbers on screen can be tested without a browser — and the page can be read
- * without working out what a percentage is measuring.
- */
+// Pure arithmetic behind the Models page, kept out of the component so it tests without a browser.
 
 /** The four jobs a pond needs filled, in the order they matter to a household. */
 export const ROLES = [
@@ -24,7 +18,6 @@ export const ROLES = [
 
 export type RoleKey = (typeof ROLES)[number]["key"];
 
-/** Which model currently holds a job, or `null` when nothing does. */
 export function roleHolder(roles: ModelActiveRoles | null, key: RoleKey): string | null {
   const slot = roles?.[key];
   if (!slot) return null;
@@ -32,12 +25,7 @@ export function roleHolder(roles: ModelActiveRoles | null, key: RoleKey): string
   return name?.trim() ? name : null;
 }
 
-/**
- * A size, in the largest unit that keeps it readable.
- *
- * Megabytes past a few thousand stop being a quantity anybody pictures — "4.1
- * GB" is a size, "4198 MB" is a number you have to divide.
- */
+/** A size, in the largest unit that keeps it readable. */
 export function formatSize(mb: number | null | undefined): string {
   if (mb == null || mb <= 0) return "";
   if (mb < 1024) return `${Math.round(mb)} MB`;
@@ -57,7 +45,6 @@ export function formatBytes(bytes: number | null | undefined): string {
   return formatSize(mb) || "0 MB";
 }
 
-/** A transfer that has finished, one way or another, is not in flight. */
 export function isInFlight(d: Pick<DownloadEntry, "status">): boolean {
   return d.status === "downloading" || d.status === "paused";
 }
@@ -70,17 +57,8 @@ export interface FitReading {
   label: string;
 }
 
-/**
- * Will this model run on this device, and how much of the budget does it take?
- *
- * The page's one real claim. A model list that does not answer it makes you
- * download several gigabytes to find out, which on a home device is the whole
- * evening.
- *
- * `unknown` is reported honestly rather than guessed: the memory budget is
- * absent on desktop dev machines and on any build without the scheduler, and a
- * confident bar drawn from nothing is worse than no bar.
- */
+/** Will this model fit this device's model budget? `unknown`, never a guess, when the budget
+ *  is absent (desktop dev machines, builds without the scheduler). */
 export function fitReading(
   m: Pick<ModelEntry, "size_mb" | "ram_estimate_mb">,
   memory: ModelMemoryStatus | null | undefined,
@@ -93,13 +71,7 @@ export function fitReading(
     return { verdict: "unknown", percent: null, label: "Size unknown on this device" };
   }
 
-  // Measured against what a model can ACTUALLY have, not the raw figure.
-  //
-  // `modelFit` reserves headroom on top of the weights for the KV cache and
-  // activation buffers, so a model at 88% of the raw budget is already over.
-  // Drawing the bar against the raw figure put a bar at 88% under the words
-  // "larger than" — the picture and the sentence disagreeing about the same
-  // model. Both now use the number that decides the verdict.
+  // Same usable budget as `modelFit`'s verdict: raw minus headroom for KV cache and activations.
   const usable = Math.max(1, raw - DEFAULT_HEADROOM_MB);
   const percent = Math.round((size / usable) * 100);
 
@@ -118,25 +90,12 @@ export function downloadedOnly(models: ModelEntry[]): ModelEntry[] {
   return models.filter((m) => m.downloaded);
 }
 
-/**
- * Everything the catalogue knows about that is not here yet.
- *
- * This is where speech models come from. The catalogue ships whisper builds
- * and piper voices with download URLs already attached, and the page was
- * dropping every one of them on the floor by showing only what was already
- * downloaded — so a pond could add a chat model from Hugging Face but had no
- * route at all to a second voice or a better transcriber.
- */
+/** Everything the catalogue knows about that is not here yet. */
 export function availableToDownload(models: ModelEntry[]): ModelEntry[] {
   return models.filter((m) => !m.downloaded);
 }
 
-/**
- * Which roles a model can be given.
- *
- * Driven by the category the catalog put it in rather than its name: a name
- * heuristic is a copy of a backend rule that has already moved on.
- */
+/** Roles a model can take, by catalogue category: a name heuristic would copy a backend rule. */
 export function rolesFor(m: Pick<ModelEntry, "provider" | "recommended_role">): RoleKey[] {
   if (m.recommended_role && ROLES.some((r) => r.key === m.recommended_role)) {
     return [m.recommended_role as RoleKey];
@@ -154,15 +113,7 @@ export function rolesFor(m: Pick<ModelEntry, "provider" | "recommended_role">): 
   }
 }
 
-/**
- * Descriptions the catalogue writes when it has nothing to say.
- *
- * The filesystem scan stamps every file it discovers with "(detected on disk)".
- * The client maps a model's description to its display name, so those arrived
- * on screen as a card called "(detected on disk)" — a name that identifies
- * nothing, on the very models a person is least likely to recognise, while the
- * filename that WOULD identify them sat unused.
- */
+/** Descriptions the disk scan writes when it has nothing to say; never shown as a name. */
 const PLACEHOLDER_DESCRIPTIONS = ["(detected on disk)"];
 
 /** A model's name as a person would read it. */
@@ -172,24 +123,12 @@ export function modelLabel(m: Pick<ModelEntry, "display_name" | "name">): string
   return shown;
 }
 
-/** 131072 → "131,072". A context window is long enough that the grouping is
- *  what makes it readable at a glance. */
+/** 131072 → "131,072". */
 function thousands(n: number): string {
   return n.toLocaleString("en-US");
 }
 
-/**
- * The facts worth showing beside a model's name.
- *
- * Read from the structured fields the catalogue persists — which, for a model
- * discovered on disk, the server now fills from the file's own GGUF header
- * rather than leaving empty. Built here from those fields rather than from the
- * description string, so the page lays them out instead of re-parsing a
- * sentence somebody else formatted.
- *
- * Absent facts are simply absent. A row reading "unknown · unknown" is worse
- * than a row with a name and a size.
- */
+/** Facts beside a model's name, from the structured (GGUF-header) fields; absent ones are omitted. */
 export function modelFacts(
   m: Pick<ModelEntry, "quantization" | "context_length" | "asr_size" | "asr_language">,
 ): string[] {
@@ -207,13 +146,7 @@ export interface JobGroup {
   models: ModelEntry[];
 }
 
-/**
- * Downloaded models, gathered under the job each one can do.
- *
- * The same four words the Jobs band uses, so "Listening" means one thing on
- * this page rather than "ASR" up top and "Whisper" further down. Empty groups
- * are dropped — a heading over nothing is a question the page cannot answer.
- */
+/** Models grouped by job, in `ROLES` order and wording; empty groups dropped. */
 export function groupByJob(models: ModelEntry[]): JobGroup[] {
   return ROLES.map((role) => ({
     key: role.key,

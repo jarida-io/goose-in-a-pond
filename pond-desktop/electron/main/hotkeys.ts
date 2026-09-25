@@ -1,12 +1,5 @@
-// Global shortcuts.
-//
-// Two, matching the Tauri shell: Cmd/Ctrl+Shift+G toggles the Canvas section
-// and Cmd/Ctrl+Shift+V summons the window for voice. Both are global -- they
-// fire while another app has focus, which is the whole point of a summon key.
-//
-// On macOS this needs Accessibility/Input Monitoring permission. Without it
-// `register` still returns true and the shortcut simply never fires, which is
-// why the caller logs what it registered rather than assuming.
+// Global shortcuts. On macOS without Accessibility/Input Monitoring permission `register`
+// still returns true but the shortcut never fires, so callers log rather than assume.
 
 import { globalShortcut } from "electron";
 import type { ShellEvent } from "../../src/shell/contract";

@@ -1,13 +1,4 @@
-/**
- * Phase 8 wave 4 — Rooms sub-screen real-data wiring
- *
- * Verifies:
- * 1. Rooms screen loads via Settings > Rooms, groups devices by room,
- *    and shows a device count badge per room card.
- * 2. The toggle for a device calls the MCP tool
- *    "giap-device__set_device_state" via api.callTool().
- * 3. Falls back gracefully when the API is offline (mock data rendered).
- */
+/** Rooms sub-screen (Settings > Rooms): devices grouped by room, toggles via tools/invoke. */
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
@@ -104,7 +95,6 @@ test.describe("Hub — Rooms sub-screen wiring", () => {
 
     await goToRoomsScreen(page);
 
-    // Wait for real data to render — device names confirm grouping worked
     await expect(page.getByText("Jetson Orin Nano")).toBeVisible({ timeout: 5_000 });
     await expect(page.getByText("Living Room Hub")).toBeVisible({ timeout: 3_000 });
     await expect(page.getByText("Front Door Camera")).toBeVisible({ timeout: 3_000 });
@@ -112,12 +102,9 @@ test.describe("Hub — Rooms sub-screen wiring", () => {
     // Device count badges — Office has 2, Living Room has 2, Outdoor has 1
     const countBadges = page.locator(".room-count");
     await expect(countBadges.first()).toBeVisible({ timeout: 3_000 });
-    // At least one badge should show "2 devices"
     await expect(page.locator(".room-count").filter({ hasText: "2 devices" }).first()).toBeVisible({ timeout: 3_000 });
-    // Outdoor card shows "1 device"
     await expect(page.locator(".room-count").filter({ hasText: "1 device" })).toBeVisible({ timeout: 3_000 });
 
-    // Individual device names present
     await expect(page.getByText("Jetson Orin Nano")).toBeVisible({ timeout: 3_000 });
     await expect(page.getByText("Living Room Hub")).toBeVisible({ timeout: 3_000 });
     await expect(page.getByText("Front Door Camera")).toBeVisible({ timeout: 3_000 });
@@ -128,8 +115,6 @@ test.describe("Hub — Rooms sub-screen wiring", () => {
 
     await setupBaseRoutes(page);
     await page.route("**/api/v1/devices", (r) => r.fulfill({ json: MOCK_DEVICES }));
-    // Device control now goes through POST /api/v1/tools/invoke (bypasses the LLM)
-    // → giap-device-control set_device_state, replacing the old /mcp/tools/call path.
     await page.route("**/api/v1/tools/invoke", async (r) => {
       const body = (await r.request().postDataJSON()) as Record<string, unknown>;
       toolCallPayload = body;
@@ -140,15 +125,12 @@ test.describe("Hub — Rooms sub-screen wiring", () => {
 
     await goToRoomsScreen(page);
 
-    // Wait for devices to render
     await expect(page.getByText("Jetson Orin Nano")).toBeVisible({ timeout: 5_000 });
 
-    // Click the first toggle (aria-pressed button)
     const toggles = page.locator(".htoggle");
     await toggles.first().click();
     await page.waitForTimeout(500);
 
-    // The device-control tool call should have been made via /tools/invoke
     expect(toolCallPayload).not.toBeNull();
     expect(toolCallPayload?.server).toBe("giap-device-control");
     expect(toolCallPayload?.tool).toBe("set_device_state");
@@ -157,17 +139,14 @@ test.describe("Hub — Rooms sub-screen wiring", () => {
 
   test("shows offline mock fallback when API returns error", async ({ page }) => {
     await setupBaseRoutes(page);
-    // Override devices route to return an error
     await page.route("**/api/v1/devices", (r) =>
       r.fulfill({ status: 500, json: { error: "server error" } }),
     );
 
     await goToRoomsScreen(page);
 
-    // Should show the offline error banner
     await expect(page.getByText(/could not reach the server/i)).toBeVisible({ timeout: 5_000 });
 
-    // Offline mock data should still render at least one room
     await expect(page.locator(".setcard").first()).toBeVisible({ timeout: 3_000 });
   });
 });

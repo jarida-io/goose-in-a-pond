@@ -46,9 +46,7 @@ impl DraftAuthority for RepoDraftAuthority {
     async fn policy_mode(&self) -> PolicyMode {
         match self.settings.get().await {
             Ok(s) => PolicyMode::parse(&s.security_policy_mode),
-            // Audit, not Enforce and not Off. A transient settings read must not
-            // start blocking, and must not silently disable the audit trail --
-            // the same reasoning as PolicyMode::parse's fallback.
+            // A failed settings read must neither start blocking nor silently disable auditing.
             Err(e) => {
                 tracing::warn!(error = %e, "could not read security_policy_mode; assuming audit");
                 PolicyMode::Audit
@@ -93,8 +91,7 @@ impl DraftAuthority for RepoDraftAuthority {
 
         let household_has_multiple_members = match self.profiles.list().await {
             Ok(p) => p.len() > 1,
-            // Assume more than one: that is the more restrictive answer, because
-            // it turns an unidentified speaker into Guest rather than Household.
+            // Assume >1: an unidentified speaker then resolves to Guest, not Household.
             Err(e) => {
                 tracing::warn!(error = %e, "could not count household members; assuming >1");
                 true
@@ -114,10 +111,8 @@ impl DraftAuthority for RepoDraftAuthority {
         let Some(policy) = &self.policy else {
             return;
         };
-        // A model tool call is in-process work on a session's behalf. Principal
-        // has no "agent turn" kind, so the session rides the action string;
-        // adding `PrincipalKind::AgentTurn` belongs with the P1 follow-up that
-        // finally populates `proven_profile_id`, not here.
+        // A model tool call is in-process work on a session's behalf; `Principal` has no
+        // agent-turn kind, so the session rides the action string.
         let principal = Principal::internal();
         policy
             .audit(

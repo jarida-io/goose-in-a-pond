@@ -1,7 +1,4 @@
-//! PAI-7 P3b: a person can see and dispose of a proposal over HTTP, against a
-//! real database. All four claims are refusals: addressed to one profile, so
-//! `Household` and `Guest` see none; it expires on the read path; and a draft id
-//! 404s, since deciding one here would skip the policy tally and audit entry.
+//! Proposals over HTTP: owner-only, expired on read, and never a back door for deciding drafts.
 
 use std::sync::Arc;
 
@@ -207,16 +204,13 @@ async fn member(h: &Harness, name: &str) -> String {
         .id
 }
 
-/// A session that nobody has identified. Resolves to `Household` on a
-/// one-member pond and `Guest` once there are two — the posture PAI-1 P3 chose,
-/// reached the way production reaches it.
+/// An unidentified session: `Household` on a one-member pond, `Guest` with two or more.
 async fn unidentified_session(h: &Harness, id: &str) -> String {
     h.storage.create_session(id.to_string()).await.unwrap();
     id.to_string()
 }
 
-/// A session bound to a member, at `Explicit` strength — what
-/// `PUT /sessions/{id}/user` writes.
+/// A session bound at `Explicit` strength, as `PUT /sessions/{id}/user` writes it.
 async fn session_of(h: &Harness, id: &str, profile_id: &str) -> String {
     h.storage.create_session(id.to_string()).await.unwrap();
     h.storage
@@ -258,9 +252,7 @@ async fn save_proposal(h: &Harness, id: &str, owner: &str, ttl: Duration) -> Str
     id.to_string()
 }
 
-/// An ordinary user-staged draft: `origin` NULL, no expiry. This is what
-/// `save_draft` writes, and it must not be decidable through the proposal
-/// route.
+/// A user-staged draft as `save_draft` writes it (`origin` NULL, no expiry).
 async fn save_plain_draft(h: &Harness, id: &str, owner: &str) {
     h.drafts
         .save(Draft {
@@ -348,8 +340,7 @@ async fn a_member_sees_their_own_live_proposals_and_no_one_elses() {
     save_proposal(&h, "p-liz-1", &liz, Duration::hours(2)).await;
     save_proposal(&h, "p-liz-2", &liz, Duration::hours(3)).await;
     save_proposal(&h, "p-jerry", &jerry, Duration::hours(2)).await;
-    // Invariant 7, enforced on the read with no sweeper anywhere: born live,
-    // already dead. `MAX_PROPOSAL_TTL` forbids the year 3000 at the other end.
+    // Invariant 7: expiry is enforced on read, with no sweeper.
     save_proposal(&h, "p-liz-stale", &liz, Duration::seconds(1)).await;
     tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
 
@@ -390,8 +381,7 @@ async fn a_member_sees_their_own_live_proposals_and_no_one_elses() {
     }
 }
 
-/// Invariant 5. Two members and an unidentified session is how production
-/// produces a `Guest`.
+/// Invariant 5; two members plus an unidentified session make a `Guest`.
 #[tokio::test]
 async fn a_guest_receives_nothing_and_is_told_why() {
     let h = make_app().await;
@@ -416,10 +406,7 @@ async fn a_guest_receives_nothing_and_is_told_why() {
     );
 }
 
-/// Invariant 4's other half, and the deliberate cliff. `Household` is the
-/// broadcast, so it cannot hold a proposal, even on a one-member pond where an
-/// unidentified session resolves to it. On a default install nothing binds a
-/// session to a member yet, so this surface answers 403 until something does.
+/// `Household` is the broadcast, so it cannot hold a proposal even on a one-member pond.
 #[tokio::test]
 async fn an_unidentified_session_on_a_one_member_pond_is_still_refused() {
     let h = make_app().await;
@@ -442,9 +429,7 @@ async fn an_unidentified_session_on_a_one_member_pond_is_still_refused() {
         "the refusal must name the broadcast it refused; body: {body}"
     );
 
-    // The vacuity control for both refusals above: the very same proposal IS
-    // visible to the very same pond once the session names its member. Without
-    // this, a route that answered 403 to everything would pass them both.
+    // Vacuity control: the same proposal is visible once the session names its member.
     let bound = session_of(&h, "s-liz", &liz).await;
     let (status, body) = get_json(&h.app, &format!("/api/v1/proposals?session_id={bound}")).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
@@ -508,8 +493,7 @@ async fn a_member_disposes_of_their_own_proposal_and_nothing_is_executed() {
     }
 }
 
-/// The ownership rule, inherited from `is_draft_decision_permitted` rather than
-/// re-implemented here, so a change to it reaches this route too.
+/// Ownership comes from `is_draft_decision_permitted`, not a local copy.
 #[tokio::test]
 async fn one_member_may_not_dispose_of_anothers_proposal() {
     let h = make_app().await;
@@ -542,9 +526,7 @@ async fn one_member_may_not_dispose_of_anothers_proposal() {
     );
 }
 
-/// The claim that keeps this from becoming a second, unaudited draft-decision
-/// path. `DraftRepository::get` would answer for this id; `get_live` does not,
-/// because the row is not proactive.
+/// Not an unaudited draft-decision path: `get_live` ignores rows that are not proactive.
 #[tokio::test]
 async fn a_user_staged_draft_is_not_decidable_through_the_proposal_route() {
     let h = make_app().await;
@@ -572,9 +554,7 @@ async fn a_user_staged_draft_is_not_decidable_through_the_proposal_route() {
         "and the draft is untouched"
     );
 
-    // Vacuity control: the same call against a real proposal, in the same pond
-    // and the same session, succeeds. Otherwise the 404 above could be a route
-    // that decides nothing at all.
+    // Vacuity control: the same call on a real proposal succeeds.
     let id = save_proposal(&h, "p-1", &liz, Duration::hours(2)).await;
     let (status, body) = decide(
         &h.app,
@@ -638,9 +618,7 @@ async fn an_unreadable_decision_is_refused_rather_than_guessed() {
     );
 }
 
-/// The sentinel session a proposal is stored under is namespaced so it cannot
-/// collide with an engine session id. If it ever did, `list_drafts` — which
-/// scopes by session — would put a proposal in a stranger's draft list.
+/// A collision would let `list_drafts`, which scopes by session, leak a proposal to a stranger.
 #[test]
 fn the_proposal_sentinel_session_cannot_be_an_engine_session_id() {
     assert!(

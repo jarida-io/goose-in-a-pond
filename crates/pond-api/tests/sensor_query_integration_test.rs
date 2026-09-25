@@ -1,7 +1,4 @@
-//! #90 acceptance: the sensor read-out surface answers correctly, and readings
-//! produced by an adapter rather than POSTed over HTTP become queryable. Wires a
-//! real `SqliteSensorStorage` into `AppState` so the aggregate SQL and the
-//! time-range bounds run for real rather than through an in-memory mock.
+//! Sensor queries over real `SqliteSensorStorage`, including readings an adapter published.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,8 +30,6 @@ use serde_json::Value;
 use sqlx::{Pool, Sqlite};
 use tower::ServiceExt;
 
-/// Everything a test needs to drive the sensor surface: the router, the live
-/// bus, the logs pool for seeding rows at chosen times, and the tempdir guard.
 struct Harness {
     router: axum::Router,
     bus: Arc<InProcessEventBus>,
@@ -88,8 +83,7 @@ async fn make_harness() -> Harness {
         vector_index: None,
         index_reindex: None,
         account_sync: None,
-        // The real store, so the aggregate SQL and the TEXT range comparison
-        // are what the assertions actually exercise.
+        // Real store, so the aggregate SQL and TEXT range comparison are exercised.
         sensor_storage: Arc::new(SqliteSensorStorage::new(logs.clone())),
         camera_storage: Arc::new(MockCameraStorage::new()),
         face_recognition: None,
@@ -115,8 +109,7 @@ async fn make_harness() -> Harness {
         recipe_repo: Some(Arc::new(SqliteRecipeRepository::new(pool.clone()))),
         llamafile_manager: None,
         operational_log: None,
-        // The plain bus, exactly as shipped: record_sensor persists inline, so
-        // wrapping it here would double-write every POST.
+        // The plain bus, as shipped: record_sensor persists inline, so wrapping it double-writes.
         event_bus: Some(bus.clone() as Arc<dyn EventBus>),
         event_log: None,
         push_token_repo: None,
@@ -201,8 +194,7 @@ async fn malformed_since_returns_400() {
     )
     .await;
 
-    // The bug this guards: an unparseable bound used to widen the query to all
-    // of history and return a confident average over the wrong window.
+    // An unparseable bound must not widen the query to all of history.
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap().contains("since"));
 }
@@ -247,8 +239,7 @@ async fn agg_over_empty_window_is_null_with_zero_count() {
     .await;
 
     assert_eq!(status, StatusCode::OK);
-    // Previously an empty window folded to infinity and serialized as null with
-    // no way to tell it from a real reading; count makes the absence explicit.
+    // `count: 0` makes the empty window explicit.
     assert!(body["min"].is_null());
     assert_eq!(body["count"], 0);
     assert!(body["unit"].is_null());
@@ -356,9 +347,7 @@ async fn bus_published_reading_becomes_queryable() {
         recorded_at: chrono::Utc::now(),
     }));
 
-    // #90's acceptance criterion: "what is the temperature in the bedroom?"
-    // answered from a reading no one POSTed. Persistence is asynchronous, so
-    // poll rather than assume the drain has run.
+    // Persistence is asynchronous, so poll rather than assume the drain has run.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
         let (status, body) = get(
@@ -401,9 +390,7 @@ async fn http_post_is_written_exactly_once() {
     let response = h.router.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
 
-    // The standing guard on the double-write question: AppState holds the plain
-    // bus precisely so the decorator does not also persist what the handler
-    // already wrote.
+    // AppState holds the plain bus so no decorator re-persists what the handler wrote.
     let storage = SqliteSensorStorage::new(h.logs.clone());
     let rows = storage
         .get_history("bedroom", "temperature", None, None)
@@ -412,10 +399,7 @@ async fn http_post_is_written_exactly_once() {
     assert_eq!(rows.len(), 1, "POSTed reading should be stored once");
 }
 
-/// An aggregate without a `sensor_type` is refused, not silently downgraded.
-/// `agg`, `since` and `until` are parsed before the no-`sensor_type` branch and
-/// have nowhere to go on it, so the request would answer 200 with an
-/// unaggregated, unbounded list a caller cannot tell from a real answer.
+/// Otherwise `agg`/`since`/`until` would be dropped for a 200 with an unbounded raw list.
 #[tokio::test]
 async fn an_aggregate_without_a_sensor_type_is_refused() {
     let h = make_harness().await;
@@ -442,8 +426,7 @@ async fn an_aggregate_without_a_sensor_type_is_refused() {
         );
     }
 
-    // ...and a bare request still answers, so the guard is not simply refusing
-    // everything on this branch.
+    // ...and a bare request still answers.
     let (status, body) = get(&h.router, "/api/v1/sensors/bedroom").await;
     assert_eq!(status, StatusCode::OK);
     assert!(body["readings"].is_array(), "{body}");

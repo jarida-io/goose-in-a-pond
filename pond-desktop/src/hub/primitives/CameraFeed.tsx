@@ -15,11 +15,7 @@ export function CameraFeed({ cam, h = 120, big = false, interactive = true }: Ca
     }
   }
 
-  // When `big` renders its own "Expand camera" button below, the outer tile
-  // must not ALSO be a focusable role="button" — that nests a focusable
-  // element inside a focusable element, which axe (and screen readers)
-  // rightly flag. The inner button already provides the same action via
-  // keyboard; the outer onClick remains as a mouse-only convenience.
+  // `big` has its own Expand button, so the tile must not be a nested role="button" (axe flags it).
   const tileIsButton = interactive && !big;
 
   return (

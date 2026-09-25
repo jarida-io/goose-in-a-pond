@@ -1,6 +1,4 @@
-//! SQLite-backed implementation of `UserSkillRepository`.
-//!
-//! Uses the `user_skills` table in `pond_system.db` (migrations 0011, 0050, 0051).
+//! SQLite `UserSkillRepository` over the `user_skills` table in `pond_system.db`.
 
 use anyhow::Result;
 use async_trait::async_trait;

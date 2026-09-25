@@ -1,7 +1,5 @@
-//! [`FrameSource`] over an ffmpeg subprocess (#130). Spawns `ffmpeg` on an RTSP
-//! URL or a V4L2 device emitting raw RGB24 frames on stdout, which `next_frame`
-//! consumes one fixed-size chunk at a time. The CLI (argv, no shell) keeps GIAP
-//! free of native libav/GStreamer linkage.
+//! [`FrameSource`] reading raw RGB24 frames from an `ffmpeg` child (RTSP or V4L2); using the CLI
+//! keeps GIAP free of native libav/GStreamer linkage.
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
@@ -12,8 +10,7 @@ use std::process::Stdio;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::{Child, ChildStdout, Command};
 
-/// Capture configuration. Frames are scaled down by ffmpeg before they cross
-/// the pipe — the motion grid needs nothing near full resolution.
+/// Capture config; ffmpeg downscales before the pipe, as the motion grid needs little resolution.
 #[derive(Debug, Clone)]
 pub struct CaptureConfig {
     /// RTSP/HTTP URL, or a V4L2 device path (`/dev/videoN`).
@@ -35,9 +32,7 @@ impl Default for CaptureConfig {
     }
 }
 
-/// Build the ffmpeg argv for `cfg`. Pure, so the shape is unit-testable.
-/// The input is passed as a single argv element (never through a shell) and
-/// must not start with `-` (rejects option injection via a malicious setting).
+/// ffmpeg argv for `cfg`; the input is one argv element (no shell) and may not start with `-`.
 fn build_args(cfg: &CaptureConfig) -> Result<Vec<String>> {
     let input = cfg.input.trim();
     if input.is_empty() {
@@ -70,9 +65,7 @@ fn build_args(cfg: &CaptureConfig) -> Result<Vec<String>> {
     Ok(args)
 }
 
-/// Frame source backed by a spawned ffmpeg process. The child is killed when
-/// the source is dropped (`kill_on_drop`), so an ended pipeline never leaks a
-/// capture process.
+/// Frame source over an ffmpeg child, killed on drop so an ended pipeline leaks no process.
 pub struct FfmpegFrameSource {
     // Held for its Drop (kill_on_drop) — never polled directly.
     _child: Child,
@@ -83,8 +76,7 @@ pub struct FfmpegFrameSource {
 }
 
 impl FfmpegFrameSource {
-    /// Spawn ffmpeg for `cfg`. Fails fast when the binary is missing or the
-    /// config is invalid; stream errors surface from `next_frame`.
+    /// Spawn ffmpeg; a missing binary or bad config fails here, stream errors in `next_frame`.
     pub fn spawn(cfg: &CaptureConfig) -> Result<Self> {
         let args = build_args(cfg)?;
         let mut child = Command::new("ffmpeg")

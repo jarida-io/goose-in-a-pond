@@ -18,21 +18,17 @@ import { RoomsDetail } from "./views/settings/Rooms";
 import { CamerasDetail } from "./views/settings/Cameras";
 import { ConnectionsDetail } from "./views/settings/Connections";
 import { NotificationsDetail } from "./views/settings/Notifications";
-// Appearance owns its own state via useTheme(); it does not navigate, so the
-// wrapper below silently drops the `go` prop.
 import { AppearanceView } from "./views/settings/Appearance";
 import { AccountDetail } from "./views/settings/Account";
 import { HubOverlay } from "./overlays/HubOverlay";
 import type { SettingsRowId } from "./data/settingsConfig";
 
 // ─── Route types ──────────────────────────────────────────────
-// "notifications" is intentionally NOT in the IconRail nav list —
-// it is accessed via BellShortcut in the rail foot + the Home header bell.
+// "notifications" is not in the IconRail list; the rail-foot and Home bells open it.
 type HubRoute = "home" | "chat" | "canvas" | "routines" | "settings" | "notifications";
 const TOP_NAV: HubRoute[] = ["home", "chat", "canvas", "routines", "settings", "notifications"];
 
 // ─── Detail screen registry ───────────────────────────────────
-// ComponentType<{ go: (r: string) => void }> — each detail screen receives go()
 type DetailComponent = ComponentType<{ go: (r: string) => void }>;
 
 const SETTINGS_VIEWS: Record<SettingsRowId, DetailComponent> = {
@@ -77,17 +73,14 @@ function writeStoredRoute(route: string): void {
 export function Hub() {
   const [route, setRoute] = useState<string>(readStoredRoute);
 
-  // hub:device / hub:camera / hub:category CustomEvents are now handled by
-  // <HubOverlay /> below, which mounts the appropriate modal (DeviceControl,
-  // CameraModal, CategorySheet).
+  // <HubOverlay /> below handles the hub:device / hub:camera / hub:category events.
 
   function go(r: string) {
     setRoute(r);
     writeStoredRoute(r);
   }
 
-  // When on a sub-screen the rail's active indicator maps to "settings".
-  // "notifications" keeps its own active key so BellShortcut lights up.
+  // Sub-screens light "settings" in the rail; "notifications" keeps its own key for BellShortcut.
   const railActive: HubRoute = TOP_NAV.includes(route as HubRoute)
     ? (route as HubRoute)
     : "settings";
@@ -107,7 +100,6 @@ export function Hub() {
       return <Detail go={go} />;
     }
 
-    // Fallback
     return <HomeView go={go} />;
   }
 

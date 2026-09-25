@@ -1,7 +1,5 @@
-//! Mesh inference (#132 Milestone 3): borrow and lend compute over the private
-//! mesh in `pond-adapters-mesh-libp2p`. The client (`MeshInferenceProvider`) and
-//! server roles share one `MeshInferenceService` because `MeshTransport::recv()`
-//! is one flat queue with a single consumer. v1 is single-peer and text-only.
+//! Borrow and lend compute over the private libp2p mesh; single-peer, text-only. Both roles share
+//! one `MeshInferenceService` because `MeshTransport::recv()` is a single-consumer queue.
 
 mod provider;
 mod service;
@@ -28,14 +26,12 @@ fn to_wire_message(message: &ChatMessage) -> ChatMessageWire {
     }
 }
 
-/// Unrecognized role strings degrade to `Role::User` rather than failing the
-/// whole request — a future harness version adding a role this one doesn't
-/// know about shouldn't refuse mesh inference outright.
+/// Unknown roles degrade to user rather than failing, so a newer peer's roles don't break it.
 fn from_wire_message(message: &ChatMessageWire) -> ChatMessage {
     match message.role.as_str() {
         "system" => ChatMessage::system(message.content.clone()),
         "assistant" => ChatMessage::assistant(message.content.clone()),
-        "tool" => ChatMessage::user(message.content.clone()), // no tool_call_id on the wire (v1 drops tool_calls) — can't reconstruct a real tool_result
+        "tool" => ChatMessage::user(message.content.clone()), // no tool_call_id on the wire
         _ => ChatMessage::user(message.content.clone()),
     }
 }

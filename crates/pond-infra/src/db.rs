@@ -1,11 +1,4 @@
-//! Database initialization for Goose In A Pond
-//!
-//! GIAP uses two SQLite databases:
-//! - `pond_system.db` — Sessions, devices, onboarding, settings
-//! - `pond_logs.db`   — Event log, telemetry, system info
-//!
-//! Migrations live in `migrations/system/` and `migrations/logs/` and are
-//! applied automatically on startup via `sqlx::migrate!()`.
+//! Opens and migrates `pond_system.db`, `pond_logs.db` and the derived `pond_vectors.db`.
 
 use anyhow::Result;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -16,14 +9,8 @@ use std::str::FromStr;
 pub struct Database {
     pub system: Pool<Sqlite>,
     pub logs: Pool<Sqlite>,
-    /// The personal-context vector index. **Derived data**, not authoritative:
-    /// every row in it can be recomputed from `system`, which is what lets the
-    /// file be deleted and rebuilt. It is a third file rather than a table in
-    /// `system` so it never syncs to a phone and keeps any future native vector
-    /// extension out of the authoritative database's blast radius.
-    ///
-    /// Its connections `ATTACH` `system` as `sys` — see
-    /// [`crate::sqlite_vector_index::SqliteVectorIndex::connect`].
+    /// Derived personal-context vector index, rebuildable from `system`; a separate file so it
+    /// never syncs to a phone. Its connections `ATTACH` `system` as `sys`.
     pub vectors: Pool<Sqlite>,
 }
 
@@ -38,9 +25,7 @@ impl Database {
         sqlx::migrate!("migrations/system").run(&system).await?;
         sqlx::migrate!("migrations/logs").run(&logs).await?;
 
-        // After the system migrations, deliberately: the vector pool ATTACHes
-        // that database on every connection, and a sweep joins against tables
-        // those migrations create.
+        // Must follow the system migrations: vector connections ATTACH it and join its tables.
         let vectors = crate::sqlite_vector_index::SqliteVectorIndex::connect(
             &data_dir.join("pond_vectors.db"),
             &system_path,
@@ -59,11 +44,7 @@ impl Database {
     pub async fn connect(path: &Path) -> Result<Pool<Sqlite>> {
         let opts = SqliteConnectOptions::from_str(&format!("sqlite:{}?mode=rwc", path.display()))?
             .create_if_missing(true)
-            // Enforce foreign keys on every pooled connection. SQLite defaults this
-            // OFF per-connection, so without it the ON DELETE CASCADE constraints
-            // declared across the schema (push_tokens/notifications tie their
-            // lifecycle to the owning device, plus profiles/memory/model roles/…)
-            // are silently no-ops and rows outlive their parents. (#160/#164)
+            // SQLite defaults foreign keys OFF per connection, making ON DELETE CASCADE a no-op.
             .foreign_keys(true)
             .pragma("journal_mode", "WAL")
             .pragma("synchronous", "NORMAL")
@@ -136,14 +117,7 @@ mod tests {
         Database::init(tmp.path()).await.unwrap(); // second run must not fail
     }
 
-    /// Two migrations sharing a version number is a merge hazard, not a
-    /// theoretical one: `_sqlx_migrations.version` is the primary key, so the
-    /// second of a colliding pair fails its bookkeeping insert and every
-    /// startup against a fresh database dies with a bare UNIQUE-constraint
-    /// error. Nothing catches it on either contributing branch — the collision
-    /// only exists once both are merged — so it is asserted here, where the
-    /// failure names the culprits instead of taking the whole suite down with
-    /// it.
+    /// Colliding versions appear only after a merge and kill fresh-DB startup with a UNIQUE error.
     #[test]
     fn migration_versions_are_unique_within_each_database() {
         for (name, migrator) in [

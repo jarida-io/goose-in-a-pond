@@ -1,5 +1,3 @@
-//! In-memory mock implementation of `ModelRepository` for tests.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -11,8 +9,6 @@ use crate::models::domain::model_record::{ModelCategory, ModelRecord, ModelRoleA
 use crate::models::ports::model_repository::ModelRepository;
 
 /// In-memory model catalog and role assignment store.
-///
-/// Suitable for unit tests in pond-core and integration tests in pond-server.
 pub struct MockModelRepository {
     models: Arc<RwLock<HashMap<String, ModelRecord>>>,
     assignments: Arc<RwLock<HashMap<String, String>>>, // role → model_id
@@ -170,7 +166,6 @@ mod tests {
         custom.is_custom = true;
         repo.upsert(&custom).await.unwrap();
 
-        // Try to overwrite with is_custom=false
         let mut registry_version = gguf_record("custom-model");
         registry_version.is_custom = false;
         repo.upsert(&registry_version).await.unwrap();

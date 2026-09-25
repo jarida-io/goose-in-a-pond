@@ -1,9 +1,6 @@
 // ─── Settings IA config ────────────────────────────────────────
-// Ported from goose-hub-settings.jsx SETTINGS constant (lines 70-91).
-// Icon path strings come from icons.ts (HP_PATHS) or HX_PATHS defined here.
 
 // ─── HX icon dictionary (extra icons used across settings screens) ─────────
-// Ported from goose-hub-home.jsx HX constant.
 export const HX_PATHS = {
   chat:      "M21 12a8 8 0 0 1-11.5 7.2L4 21l1.8-5.4A8 8 0 1 1 21 12z",
   user:      "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM5 21a8 8 0 0 1 14 0",

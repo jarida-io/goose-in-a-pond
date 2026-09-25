@@ -1,6 +1,4 @@
-// ────────────────────────────────────────────────────────────
-// Onboarding Wizard — Type Definitions
-// ────────────────────────────────────────────────────────────
+// Onboarding wizard types.
 
 export interface StepMeta {
   id: string;

@@ -31,7 +31,6 @@ pub struct AgentRecipe {
     pub description: String,
     /// Goose Recipe YAML content.
     pub yaml: String,
-    /// Whether this recipe is enabled.
     pub active: bool,
     /// ISO datetime when this recipe was created.
     pub created_at: String,

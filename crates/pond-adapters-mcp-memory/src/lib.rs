@@ -1,7 +1,5 @@
-//! Flat-file persistent memory adapter for GIAP: [`McpKnowledgePort`] over the same storage format
-//! as Goose's built-in `MemoryServer`, so memories are portable between the two. One file per
-//! category under `memory_dir/` (`preferences.txt`, `devices.txt`, ...); entries are separated by
-//! blank lines, each starting with optional `#tag` lines followed by content lines.
+//! [`McpKnowledgePort`] over Goose `MemoryServer`'s file format, so memories are portable: one
+//! `<category>.txt` per category, blank-line-separated entries, optional `#tag` lines first.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -17,10 +15,7 @@ pub struct GooseMcpMemoryAdapter {
 }
 
 impl GooseMcpMemoryAdapter {
-    /// Create (or reuse) the memory store at `memory_dir`.
-    ///
-    /// The directory is created on first use; it is safe to call `new()` even
-    /// if the directory does not yet exist.
+    /// Create (or reuse) the store at `memory_dir`, which need not exist yet.
     pub fn new(memory_dir: impl Into<PathBuf>) -> Self {
         Self {
             memory_dir: Arc::new(memory_dir.into()),
@@ -38,9 +33,7 @@ impl GooseMcpMemoryAdapter {
             .context("failed to create memory directory")
     }
 
-    /// Load all entries from a category file.
-    ///
-    /// Returns a map of `{ first_line_of_entry → all_lines_of_entry }`.
+    /// Load a category file as `{ first line of entry → all its lines }`.
     fn read_category(path: &Path) -> Result<HashMap<String, Vec<String>>> {
         if !path.exists() {
             return Ok(HashMap::new());
@@ -52,7 +45,6 @@ impl GooseMcpMemoryAdapter {
 
         for line in content.lines() {
             if line.is_empty() {
-                // Blank line = entry separator
                 if !current.is_empty() {
                     let key = current[0].clone();
                     map.entry(key).or_default().extend(current.drain(..));
@@ -61,7 +53,6 @@ impl GooseMcpMemoryAdapter {
                 current.push(line.to_string());
             }
         }
-        // Flush last entry (file may not end with blank line)
         if !current.is_empty() {
             let key = current[0].clone();
             map.entry(key).or_default().extend(current.drain(..));
@@ -69,7 +60,6 @@ impl GooseMcpMemoryAdapter {
         Ok(map)
     }
 
-    /// Write a map of entries back to the category file.
     fn write_category(path: &Path, entries: &HashMap<String, Vec<String>>) -> Result<()> {
         let mut parts: Vec<String> = entries.values().map(|lines| lines.join("\n")).collect();
         parts.sort(); // stable order
@@ -77,7 +67,6 @@ impl GooseMcpMemoryAdapter {
         std::fs::write(path, content).context("failed to write memory file")
     }
 
-    /// List all category names (file stems) in the memory directory.
     fn list_categories(&self) -> Result<Vec<String>> {
         if !self.memory_dir.exists() {
             return Ok(vec![]);
@@ -118,7 +107,6 @@ impl McpKnowledgePort for GooseMcpMemoryAdapter {
 
             let mut entries = Self::read_category(&path)?;
 
-            // Build the entry text: optional #tags + data
             let mut lines = Vec::new();
             for tag in &tags {
                 if !tag.is_empty() {
@@ -233,7 +221,6 @@ impl McpKnowledgePort for GooseMcpMemoryAdapter {
                     for lines in entries.values() {
                         for line in lines {
                             if !line.starts_with('#') {
-                                // Skip tag lines, only show content
                                 parts.push(format!("- {}", line));
                             }
                         }

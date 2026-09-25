@@ -1,20 +1,4 @@
-//! CLI smoke tests — every user-facing subcommand.
-//!
-//! Run: `cargo test -p pond-server --test cli_test`
-//!
-//! Each test uses a fresh temp directory via the `POND_DATA_DIR` env var
-//! so tests are fully isolated from each other and from the real data store.
-//!
-//! ## Commands NOT tested here (require real hardware / network):
-//! - `serve`        — runs forever; just validate with `--help`
-//! - `chat`         — requires a running LLM or whisper server
-//! - `setup`        — downloads large binary+model files (~300+ MB)
-//! - `agent chat`   — requires a running Goose agent + configured LLM
-//! - `agent tools`  — requires a live Goose session
-//! - `models download` — downloads real files from the internet
-//! - `models delete`   — requires a file on disk
-//! - `models activate` — requires a model already in the catalog
-//! - `onboard`      — interactive wizard (reads from stdin)
+//! CLI smoke tests, each in a fresh `POND_DATA_DIR`; network/hardware/stdin commands are skipped.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -22,15 +6,13 @@ use tempfile::TempDir;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Return a `Command` for `pond-server` with `POND_DATA_DIR` pointing at `tmp`.
 fn pond(tmp: &TempDir) -> Command {
     let mut cmd = Command::cargo_bin("pond-server").unwrap();
     cmd.env("POND_DATA_DIR", tmp.path());
     cmd
 }
 
-/// Extract the first whitespace-separated token from the first line of `stdout`
-/// that contains `keyword`. Used to pull UUIDs out of tabular output.
+/// First token of the first line containing `keyword` (pulls UUIDs out of tables).
 fn extract_first_col(stdout: &str, keyword: &str) -> String {
     stdout
         .lines()
@@ -157,14 +139,13 @@ fn prompts_show_after_reset() {
         .args(["prompts", "show", "balanced"])
         .assert()
         .success()
-        .stdout(predicate::str::is_empty().not()); // content is non-empty
+        .stdout(predicate::str::is_empty().not());
 }
 
 #[test]
 fn prompts_list_shows_seeded_template() {
     let tmp = TempDir::new().unwrap();
 
-    // Seed all four built-ins.
     for name in &["balanced", "concise", "technical", "warm"] {
         pond(&tmp)
             .args(["prompts", "reset", name])
@@ -188,7 +169,7 @@ fn prompts_reset_invalid_name_exits_nonzero() {
     pond(&tmp)
         .args(["prompts", "reset", "does-not-exist"])
         .assert()
-        .failure(); // exit code != 0
+        .failure();
 }
 
 #[test]
@@ -255,14 +236,12 @@ fn skills_full_crud_cycle() {
         .success()
         .stdout(predicate::str::contains("disabled"));
 
-    // Active-only list is now empty
     pond(&tmp)
         .args(["skills", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("No skills"));
 
-    // --all still shows it (inactive)
     pond(&tmp)
         .args(["skills", "list", "--all"])
         .assert()
@@ -416,7 +395,6 @@ fn memories_add_multiple_and_list() {
         .stdout(predicate::str::contains("Second memory"))
         .stdout(predicate::str::contains("Third memory"));
 
-    // limit=2 should show only 2 (the 2 newest)
     let out = pond(&tmp)
         .args(["memories", "list", "--limit", "2"])
         .output()
@@ -445,7 +423,6 @@ fn recipes_list_empty() {
 fn recipes_full_crud_cycle() {
     let tmp = TempDir::new().unwrap();
 
-    // Create a minimal Goose recipe YAML file.
     let recipe_yaml = tmp.path().join("morning_brief.yaml");
     std::fs::write(
         &recipe_yaml,
@@ -536,7 +513,6 @@ fn models_list_empty_catalog() {
         .args(["models", "list"])
         .assert()
         .success()
-        // Either shows the header row or the "catalog empty" message
         .stdout(predicate::str::contains("Category").or(predicate::str::contains("catalog empty")));
 }
 

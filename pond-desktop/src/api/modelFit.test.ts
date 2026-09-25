@@ -10,7 +10,6 @@ import type { ModelMemoryStatus } from "./types";
 describe("modelFit", () => {
   // Budget mirrors the Jetson-class E2E mock: 4096 MB available for the LLM.
   const AVAIL = 4096;
-  // With the default 1024 MB headroom, the effective budget is 3072 MB.
   const EFFECTIVE = AVAIL - DEFAULT_HEADROOM_MB;
 
   it("fits when the model is well under the effective budget", () => {
@@ -23,7 +22,7 @@ describe("modelFit", () => {
   });
 
   it("spills when the model exceeds the budget", () => {
-    // gemma3n:e2b real download (~5600 MB) — the root-cause slow model.
+    // gemma3n:e2b as actually downloaded (~5600 MB).
     expect(modelFit(5600, AVAIL)).toBe("spills");
   });
 
@@ -51,13 +50,11 @@ describe("modelFit", () => {
   });
 
   it("respects a custom headroom margin", () => {
-    // A 3500 MB model fits with no headroom but spills with 1 GB reserved.
     expect(modelFit(3500, AVAIL, 0)).toBe("fits");
     expect(modelFit(3500, AVAIL, 1024)).toBe("spills");
   });
 
   it("clamps a negative headroom to zero", () => {
-    // Negative headroom must not inflate the budget above availableForLlmMb.
     expect(modelFit(AVAIL, AVAIL, -500)).toBe("fits");
     expect(modelFit(AVAIL + 1, AVAIL, -500)).toBe("spills");
   });

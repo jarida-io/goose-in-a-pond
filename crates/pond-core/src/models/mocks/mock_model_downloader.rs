@@ -1,8 +1,3 @@
-//! Spy implementation of `ModelDownloader` for tests.
-//!
-//! Records every download call so tests can assert which URLs were requested.
-//! Optionally writes a placeholder file to disk so `path.exists()` returns true.
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,10 +16,6 @@ pub struct MockModelDownloader {
 }
 
 impl MockModelDownloader {
-    /// Create a new spy.
-    ///
-    /// Set `write_placeholder = true` when tests need `dest.exists()` to return `true`
-    /// after the download (e.g. for `ModelService::ensure_downloaded`).
     pub fn new(write_placeholder: bool) -> Self {
         Self {
             downloads: Arc::new(RwLock::new(Vec::new())),
@@ -32,17 +23,14 @@ impl MockModelDownloader {
         }
     }
 
-    /// Returns true if `url` was passed to any `download()` call.
     pub async fn was_downloaded(&self, url: &str) -> bool {
         self.downloads.read().await.iter().any(|(u, _)| u == url)
     }
 
-    /// Returns true if any `download()` call occurred at all.
     pub async fn was_downloaded_any(&self) -> bool {
         !self.downloads.read().await.is_empty()
     }
 
-    /// Returns the number of completed downloads.
     pub async fn download_count(&self) -> usize {
         self.downloads.read().await.len()
     }
@@ -106,7 +94,6 @@ mod tests {
         dl.download("https://example.com/model.gguf", &dest, 0)
             .await
             .unwrap();
-        // Should be a no-op — not recorded
         assert_eq!(dl.download_count().await, 0);
     }
 }

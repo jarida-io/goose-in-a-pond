@@ -1,19 +1,5 @@
-//! Network-egress tracker (#113) — shared, cross-crate.
-//!
-//! Records every outbound HTTP call built-in tools make into the unified event
-//! store and classifies its privacy sensitivity, so the activity API (#114) can
-//! answer "what did the system phone home to, and when?".
-//!
-//! This lives in `pond-core` (rather than `pond-mcp-server`) so that *any*
-//! adapter — the MCP servers AND outboard adapters like `pond-adapters-weather`
-//! — can report egress into one place without depending on each other. Adapters
-//! report; core owns the policy.
-//!
-//! ## Request context
-//! `current_session_id` / `current_tool` are process-global, set by the engine
-//! before/around each turn and tool call; the recorder reads them so every
-//! egress event is correlated to the turn and attributed to the tool that
-//! triggered it. (Same shape as the rest of GIAP's per-turn context.)
+//! Network-egress tracker: records and privacy-classifies outbound HTTP calls, and gates them.
+//! Lives in `pond-core` so any adapter can report here; adapters report, core owns the policy.
 
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -54,13 +40,10 @@ pub fn current_tool() -> String {
 
 // ── Sink ─────────────────────────────────────────────────────────────────────
 
-/// The unified event store every outbound call is recorded into. Set once at
-/// startup; when unset (tests, standalone adapter use) the tracker is a silent
-/// no-op.
+/// Where egress is recorded; while unset (tests, standalone adapters) recording is a no-op.
 static EGRESS_SINK: OnceLock<Arc<dyn EventLog>> = OnceLock::new();
 
-/// Install the durable sink the egress tracker writes to. Call once at startup;
-/// later calls are ignored (the first wins).
+/// Install the egress sink; the first call wins, later ones are ignored.
 pub fn set_egress_sink(sink: Arc<dyn EventLog>) {
     let _ = EGRESS_SINK.set(sink);
 }
@@ -69,18 +52,12 @@ fn egress_sink() -> Option<Arc<dyn EventLog>> {
     EGRESS_SINK.get().cloned()
 }
 
-// -- Network mode (PAI-2 P5) --------------------------------------------------
+// ── Network mode ─────────────────────────────────────────────────────────────
 
-/// How hard egress is gated. Parsed from `settings.network_mode`.
-///
-/// The tiers reuse [`classify_host`] rather than inventing a second notion of
-/// "allowed": `Allowlist` refuses exactly what is already classified
-/// `Sensitive`, and `Offline` permits only what is already `Internal`. That is
-/// deliberate -- one classification, one place to audit, and the fail-Sensitive
-/// default does the work in both directions.
+/// How hard egress is gated, from `settings.network_mode`; tiers reuse [`classify_host`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkMode {
-    /// Record every outbound call, refuse none. What every install has today.
+    /// Record every outbound call, refuse none.
     Open,
     /// Refuse hosts that classify as `Sensitive`.
     Allowlist,
@@ -89,18 +66,8 @@ pub enum NetworkMode {
 }
 
 impl NetworkMode {
-    /// Parse, defaulting to [`NetworkMode::Open`] for anything unrecognised.
-    ///
-    /// This does NOT follow `PolicyMode::parse`, and the difference is the
-    /// point. `PolicyMode` has a tier (`audit`) that is wrong in neither
-    /// direction, so an unreadable value can land there safely. This setting has
-    /// no such tier: its middle value refuses real traffic, so absorbing a typo
-    /// into `allowlist` would take a home assistant off the internet with no
-    /// diagnostic anyone could act on. The narrowing happens at the edge
-    /// instead -- `PUT /api/v1/settings` refuses an unrecognised `network_mode`
-    /// with 422 -- so a typo cannot reach the store through the supported path,
-    /// and one that arrives some other way is loud rather than quietly
-    /// restrictive.
+    /// Parse, defaulting to [`NetworkMode::Open`]: a typo must not silently cut the pond off.
+    /// Unknown values are refused with 422 at `PUT /api/v1/settings` instead.
     pub fn parse(raw: &str) -> Self {
         match raw.trim().to_ascii_lowercase().as_str() {
             "allowlist" => Self::Allowlist,
@@ -129,9 +96,7 @@ impl NetworkMode {
 
 static NETWORK_MODE: RwLock<NetworkMode> = RwLock::new(NetworkMode::Open);
 
-/// Install the network mode. Called at startup and again on every
-/// `PUT /api/v1/settings` that changes it -- a privacy control the user has to
-/// restart the pond to apply is not one.
+/// Install the network mode; also called on every settings change, so no restart is needed.
 pub fn set_network_mode(mode: NetworkMode) {
     if let Ok(mut guard) = NETWORK_MODE.write() {
         *guard = mode;
@@ -148,7 +113,6 @@ pub fn network_mode() -> NetworkMode {
 pub struct EgressDenied {
     /// The destination host, as [`extract_host`] saw it.
     pub host: String,
-    /// The mode that refused it.
     pub mode: NetworkMode,
     /// Why, in words the user can act on.
     pub reason: &'static str,
@@ -168,12 +132,7 @@ impl std::fmt::Display for EgressDenied {
 
 impl std::error::Error for EgressDenied {}
 
-/// The gate itself: pure and total, so every mode x classification cell is
-/// testable with no client, no sink and no runtime.
-///
-/// Note the polarity. A URL whose host cannot be parsed becomes `"unknown"`,
-/// which [`classify_host`] calls `Sensitive`, which both restrictive modes
-/// refuse. Failure narrows.
+/// The pure gate. An unparseable host becomes `"unknown"`, which is `Sensitive`: failure narrows.
 pub fn egress_verdict(host: &str, mode: NetworkMode) -> Result<(), &'static str> {
     let sensitivity = classify_host(host);
     match mode {
@@ -197,12 +156,7 @@ pub fn egress_verdict(host: &str, mode: NetworkMode) -> Result<(), &'static str>
 }
 
 /// Check one outbound URL against the network mode BEFORE the request is made.
-///
-/// A refusal is recorded as an `egress.denied` event carrying the same host /
-/// tool / session attribution a permitted call gets, because an unexplained
-/// refusal is worse than no refusal (PAI-2 invariant 1). The event keeps the
-/// host's own sensitivity, so a refused `Sensitive` destination is still
-/// visible as one in the activity feed.
+/// Refusals are recorded as `egress.denied`, fully attributed, keeping the host's sensitivity.
 pub fn check_egress(url: &str) -> Result<(), EgressDenied> {
     let mode = network_mode();
     let host = extract_host(url);
@@ -231,11 +185,7 @@ pub fn check_egress(url: &str) -> Result<(), EgressDenied> {
     }
 }
 
-/// Build the `Network` event describing one refusal. Takes the tool and session
-/// as arguments rather than reading the process-globals itself, for the same
-/// two reasons [`egress_event`] does: it stays pure and total, and a test of it
-/// does not have to write a process-global that another test in the same binary
-/// is concurrently reading.
+/// Build the `Network` event for one refusal; takes tool and session so it stays pure.
 pub fn denied_event(denied: &EgressDenied, tool: &str, session_id: &str) -> Event {
     let mut event = Event::new(EventCategory::Network, "egress.denied")
         .attr("host", denied.host.as_str())
@@ -251,12 +201,7 @@ pub fn denied_event(denied: &EgressDenied, tool: &str, session_id: &str) -> Even
     event
 }
 
-/// Append fire-and-forget, and only when a runtime is actually running.
-///
-/// [`record_egress`] reaches `tokio::spawn` directly because it always runs
-/// after an awaited request. The gate cannot: it runs BEFORE the request and is
-/// callable from a synchronous caller, where `spawn` panics. Losing an audit
-/// line is bad; panicking inside a privacy check is worse.
+/// Append fire-and-forget, only if a runtime is running: the gate may be called from sync code.
 fn append_event(event: Event) {
     let Some(sink) = egress_sink() else {
         return;
@@ -275,12 +220,8 @@ fn append_event(event: Event) {
     });
 }
 
-/// One gated outbound call: the gate, then the timer, then the record.
-///
-/// New outbound adapters use this instead of copying `traced_send`. Building it
-/// IS the gate -- an `Err` means the request must not be made -- and dropping it
-/// without [`EgressCall::finish`] records nothing, which is why `finish`
-/// consumes `self`.
+/// One gated outbound call for new adapters: the gate, then the timer, then the record.
+/// An `Err` from `begin` means the request must not be made; dropping it records nothing.
 #[must_use = "an EgressCall that is never finished records no egress"]
 pub struct EgressCall {
     url: String,
@@ -308,10 +249,7 @@ impl EgressCall {
 
 // ── Recording ──────────────────────────────────────────────────────────────--
 
-/// Record one outbound HTTP call (any caller, any built-in tool). Reads the
-/// in-flight tool + session from the request context, classifies the host, and
-/// appends a `Network` event to the sink fire-and-forget so a slow observability
-/// write never adds latency to the call. No-op when no sink is installed.
+/// Record one outbound call against the in-flight tool/session; appends fire-and-forget.
 pub fn record_egress(url: &str, method: &str, status: Option<u16>, latency_ms: u64) {
     let Some(sink) = egress_sink() else {
         return;
@@ -327,8 +265,7 @@ pub fn record_egress(url: &str, method: &str, status: Option<u16>, latency_ms: u
     });
 }
 
-/// Build the `Network` event describing one outbound call. Pure and total so the
-/// classification + shape can be unit-tested without a live client or sink.
+/// Build the `Network` event for one outbound call; pure, so it is testable without a sink.
 pub fn egress_event(
     host: &str,
     tool: &str,
@@ -356,10 +293,7 @@ pub fn egress_event(
 
 // ── Privacy classification ─────────────────────────────────────────────────--
 
-/// Curated allowlist of public, read-only informational APIs the built-in tools
-/// call. Matched as exact host or sub-domain. Kept narrow on purpose: anything
-/// not on it (including user-configured search backends) is treated as
-/// privacy-`Sensitive` by default.
+/// Public, read-only APIs the built-in tools call; matched as exact host or subdomain.
 const KNOWN_PUBLIC_SUFFIXES: &[&str] = &[
     "wikipedia.org",
     "wikimedia.org",
@@ -380,9 +314,7 @@ const KNOWN_PUBLIC_SUFFIXES: &[&str] = &[
     "open-meteo.com",
 ];
 
-/// Classify a destination host's privacy sensitivity:
-/// loopback → `Internal`, known public API → `Public`, anything else →
-/// `Sensitive` (the safe default for unknown third parties).
+/// Privacy class of a host: loopback `Internal`, known public API `Public`, else `Sensitive`.
 pub fn classify_host(host: &str) -> PrivacySensitivity {
     let h = host.trim().to_ascii_lowercase();
     if is_loopback(&h) {
@@ -418,17 +350,9 @@ pub fn extract_host(url: &str) -> &str {
 mod tests {
     use super::*;
 
-    // ── Network mode (PAI-2 P5) ─────────────────────────────────────────────
+    // ── Network mode ────────────────────────────────────────────────────────
 
-    /// Loopback is CLASSIFIED as internal but is still RECORDED.
-    ///
-    /// Suppressing internal hosts inside `record_egress` was tried and undone.
-    /// It read well — an in-machine hop is not egress — but it made every
-    /// loopback call invisible, which is a loss for a feed whose job is showing
-    /// what the pond is doing, and it silently broke the guard asserting that
-    /// the push relay records its two calls at all (they run against a
-    /// loopback mock). Volume, if it becomes a problem, is the consumer's to
-    /// filter: the sensitivity is on every event for exactly that purpose.
+    /// Keep recording loopback: the push-relay guard's calls go to a loopback mock.
     #[test]
     fn loopback_is_classified_internal_and_still_recorded() {
         assert_eq!(classify_host("127.0.0.1"), PrivacySensitivity::Internal);
@@ -444,8 +368,7 @@ mod tests {
 
     #[test]
     fn network_mode_matrix_covers_every_mode_and_classification() {
-        // (host, expected classification) -- real hosts, so a change to
-        // KNOWN_PUBLIC_SUFFIXES moves this test rather than sliding past it.
+        // Real hosts, so a KNOWN_PUBLIC_SUFFIXES change fails this test rather than sliding past.
         let internal = "127.0.0.1";
         let public = "en.wikipedia.org";
         let sensitive = "tracker.example.com";
@@ -504,10 +427,7 @@ mod tests {
             "an unparseable host must not be permitted under offline"
         );
 
-        // Bracketed IPv6 is a known extract_host limitation: it splits on ':'
-        // and yields "[". Failure narrows -- the call is refused, not permitted.
-        // If extract_host is ever taught IPv6, this assertion flips to is_ok
-        // and that is a deliberate change, not a silent one.
+        // Known limitation: bracketed IPv6 yields host "[", so it is refused (fails closed).
         let v6 = extract_host("http://[::1]:8080/health");
         assert!(
             egress_verdict(v6, NetworkMode::Offline).is_err(),
@@ -522,9 +442,6 @@ mod tests {
         assert_eq!(NetworkMode::parse("offline"), NetworkMode::Offline);
         assert_eq!(NetworkMode::parse("  OFFLINE "), NetworkMode::Offline);
 
-        // The whole point: unrecognised widens, and the 422 at PUT /settings is
-        // what stops an unrecognised value ever being stored. Absorbing a typo
-        // into `allowlist` would break a working pond with no diagnostic.
         assert_eq!(
             NetworkMode::parse("offlien"),
             NetworkMode::Open,
@@ -561,9 +478,7 @@ mod tests {
         assert_eq!(ev.attributes.get("reason"), Some(&denied.reason.into()));
         assert_eq!(ev.attributes.get("tool"), Some(&"search_web".into()));
         assert_eq!(ev.session_id.as_deref(), Some("sess-denied"));
-        // A refused Sensitive destination is still Sensitive. Recording it as
-        // Internal because "it never happened" would hide it from the retention
-        // rules that exist for exactly this class of event.
+        // Still `Sensitive`, so the retention rules for this class still apply to it.
         assert_eq!(ev.privacy_sensitivity, PrivacySensitivity::Sensitive);
         // The message a user actually sees has to name the setting and the host.
         let rendered = denied.to_string();
@@ -665,7 +580,6 @@ mod tests {
         use async_trait::async_trait;
         use std::sync::Mutex;
 
-        // Capturing sink.
         struct CapturingLog(Arc<Mutex<Vec<Event>>>);
         #[async_trait]
         impl EventLog for CapturingLog {

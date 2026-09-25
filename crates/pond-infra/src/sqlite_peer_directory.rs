@@ -1,7 +1,4 @@
-//! SQLite-backed implementation of the PeerDirectory port (#132 Milestone 4).
-//!
-//! Wraps `Pool<Sqlite>` pointing at `pond_system.db`. Table created by
-//! `migrations/system/0046_mesh_ledger.sql`.
+//! SQLite-backed implementation of the PeerDirectory port.
 
 use async_trait::async_trait;
 use pond_core::mesh::domain::peer_id::PeerId;

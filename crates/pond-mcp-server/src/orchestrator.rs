@@ -1,55 +1,5 @@
-//! Orchestrator MCP Server — the `delegate` tool (PAI-6 P5).
-//!
-//! One tool. It is the first and only caller of
-//! [`Orchestrator::spawn`](pond_core::shared::ports::orchestrator::Orchestrator::spawn),
-//! which means it is what makes PAI-6 P1's authority, P2's child loop and P3's
-//! registry do anything at all. Until this existed they were three correct
-//! mechanisms with no path into them.
-//!
-//! # The resolution, which is the whole substance
-//!
-//! An MCP tool handler has no access to the adapter's per-turn locals. What it
-//! has is the caller's ENGINE session id, stamped into `_meta` by the engine
-//! itself (see [`crate::session_meta`]) and un-forgeable by the model. PAI-6 P3
-//! put a registry behind exactly that key, so:
-//!
-//! 1. `_meta` gives the engine session id.
-//! 2. [`TurnAuthorityRegistry::authority_for_engine_session`] gives the live
-//!    turn's [`DelegationAuthority`], or `None`.
-//! 3. `None` means refuse. **Four different inputs produce it** — a session GIAP
-//!    never chatted in, a subagent's own session, a turn that has already ended,
-//!    and a call carrying no `_meta` at all — and all four get the same refusal
-//!    text, because a caller that could tell them apart would eventually treat
-//!    one of them as benign.
-//! 4. The role comes from an ordinary `agent_recipes` row through
-//!    [`AgentRole::from_recipe_yaml`]. `Ok(None)` is an ordinary routine and
-//!    `Err` is a role block that will not parse; **both refuse**, and the `Err`
-//!    direction is the one that matters. Substituting a default role on the
-//!    exact input a human got wrong would hand a child whatever the default tool
-//!    set is.
-//! 5. [`DelegationAuthority::delegate`] does the narrowing. Nothing here decides
-//!    what a child may do; this module decides only whether to ask.
-//!
-//! # Why the deps arrive through a global installer
-//!
-//! `pond-mcp-server` is built BEFORE `pond-adapters-goose` in the dependency
-//! order, so the orchestrator — which is a Goose adapter — cannot be a direct
-//! dependency. [`init_orchestrator_deps`] is the same shape as
-//! [`crate::toolkit::init_toolkit_deps`], which exists for the same reason and
-//! for the sharper version of it: the implementor is the agent adapter, and the
-//! adapter does not exist until after extension registration has run.
-//!
-//! # What this module deliberately does NOT do
-//!
-//! Decide whether a child should be offered this tool. That is answered by
-//! WITHHOLDING, in [`groups_denied_to_subagents`], for the reason PAI-6 P3
-//! records: a tool a small model cannot see costs nothing, and a tool it can see
-//! but whose every call is refused costs turns off a budget of six. The depth
-//! check below is the enforcement; the denylist is what stops the question being
-//! asked.
-//!
-//! [`TurnAuthorityRegistry::authority_for_engine_session`]: pond_core::shared::services::turn_authority::TurnAuthorityRegistry::authority_for_engine_session
-//! [`groups_denied_to_subagents`]: pond_core::mcp::domain::tool_group::groups_denied_to_subagents
+//! Orchestrator MCP server: `delegate` and `check_task`. A caller is identified only by the
+//! engine session id the engine stamps into `_meta`, which the model cannot forge.
 
 use pond_core::mcp::domain::tool_group::ORCHESTRATOR_EXTENSION;
 use pond_core::shared::domain::orchestration::{
@@ -93,16 +43,8 @@ pub struct DelegateParams {
     pub inputs: Option<serde_json::Value>,
     /// Run without waiting for the answer. Only on a pond whose model runs
     /// somewhere else; on this device it is refused. Default false.
-    //
-    // **Typed as a `Value` and schema'd as a boolean, on purpose.** Declaring
-    // it `Option<bool>` would make `{"background": "true"}` — which small
-    // models emit constantly — an rmcp deserialization failure of the whole
-    // call, and an MCP protocol error is precisely what this module avoids: it
-    // makes a small model retry the identical bad call. As a `Value` every
-    // spelling reaches [`into_request`], the common ones are recovered like the
-    // aliases beside them, and anything else is refused by [`TaskRequest`] with
-    // a sentence naming the field. (Plain comments: maintainer rationale must
-    // not ship to the model inside the schema.)
+    // Plain `//` so it stays out of the schema. A `Value` schema'd as bool: as `Option<bool>`,
+    // `"true"` fails the whole call in rmcp, and a small model retries a protocol error verbatim.
     #[serde(default)]
     #[schemars(with = "Option<bool>")]
     pub background: Option<serde_json::Value>,
@@ -112,22 +54,13 @@ pub struct DelegateParams {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
-/// Argument names a small model invents for `role` and `instructions`.
-///
-/// Recovered because the alternative is a wasted turn off a budget of six.
-/// **Every entry here must be a synonym for one of the two fields a caller is
-/// allowed to supply.** Nothing that names a scope, a tool set, a depth or a
-/// session may ever appear: those are not fields a caller has, and adding one
-/// here would turn `TaskRequest`'s `deny_unknown_fields` from a boundary into a
-/// spelling check. `a_widening_field_is_refused_under_every_spelling` is the
-/// guard.
+/// Names a small model invents for `role` and `instructions`. Only synonyms of those two: an
+/// alias for a scope, tool set, depth or session would bypass `deny_unknown_fields`.
 const ROLE_ALIASES: [&str; 4] = ["name", "agent", "role_name", "agent_name"];
 const INSTRUCTION_ALIASES: [&str; 4] = ["task", "instruction", "prompt", "request"];
 
-/// Rebuild the payload and let [`TaskRequest`] parse it.
-///
-/// Aliases are MOVED out of the extras bag, so anything left there is genuinely
-/// unrecognised and reaches `deny_unknown_fields`.
+/// Rebuild the payload for [`TaskRequest`] to parse. Aliases are MOVED out of the extras, so
+/// whatever is left is truly unknown and hits `deny_unknown_fields`.
 fn into_request(mut params: DelegateParams) -> Result<TaskRequest, Refusal> {
     let mut obj = serde_json::Map::new();
 
@@ -152,9 +85,7 @@ fn into_request(mut params: DelegateParams) -> Result<TaskRequest, Refusal> {
         obj.insert("inputs".into(), inputs);
     }
     if let Some(background) = params.background.take() {
-        // Refused HERE rather than by `TaskRequest`, because serde's own type
-        // error for a struct field does not name the field: "invalid type:
-        // string, expected a boolean" tells a 2-4B model nothing it can act on.
+        // Refused here, not by `TaskRequest`: serde's type error doesn't name the field.
         let Some(background) = coerce_bool(&background) else {
             return Err(Refusal::Malformed(format!(
                 "`background` must be true or false, not `{background}`"
@@ -162,8 +93,7 @@ fn into_request(mut params: DelegateParams) -> Result<TaskRequest, Refusal> {
         };
         obj.insert("background".into(), serde_json::Value::Bool(background));
     }
-    // Everything the model sent that is not one of the three. Left in so
-    // `TaskRequest` refuses it rather than this function dropping it.
+    // The rest goes in so `TaskRequest` refuses it rather than this dropping it.
     for (k, v) in params.extra {
         obj.insert(k, v);
     }
@@ -184,18 +114,10 @@ pub struct CheckTaskParams {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
-/// Argument names a small model invents for `task_id`.
-///
-/// Unlike [`ROLE_ALIASES`] there is nothing here that could widen anything —
-/// the id names a run, and [`authorise_task`] decides whether the caller may see
-/// it whatever the id turned out to be.
+/// Names a small model invents for `task_id`. Harmless: [`authorise_task`] gates every id.
 const TASK_ID_ALIASES: [&str; 4] = ["id", "task", "taskId", "task-id"];
 
-/// Pull the task id out of a `check_task` call, or refuse.
-///
-/// A blank or missing id is refused rather than defaulted to anything — there is
-/// no sensible "the last one", and inventing one would answer a question the
-/// caller did not ask.
+/// The task id of a `check_task` call; blank or missing refuses, never defaults to "the last".
 pub fn check_task_id(mut params: CheckTaskParams) -> Result<String, Refusal> {
     let id = params
         .task_id
@@ -210,12 +132,7 @@ pub fn check_task_id(mut params: CheckTaskParams) -> Result<String, Refusal> {
     })
 }
 
-/// The spellings of `true` and `false` a small model actually emits.
-///
-/// Recovery, not tolerance: anything NOT recognised answers `None`, and the
-/// caller refuses with a sentence naming the field. Coercing an unrecognised
-/// value to `false` would be the silent default this programme treats as a bug —
-/// the caller asked for something and was told nothing.
+/// Recover a small model's spellings of true/false; anything else is `None`, never `false`.
 fn coerce_bool(value: &serde_json::Value) -> Option<bool> {
     match value {
         serde_json::Value::Bool(b) => Some(*b),
@@ -244,18 +161,11 @@ fn take_alias(extra: &mut HashMap<String, serde_json::Value>, aliases: &[&str]) 
 
 // ── Refusals ────────────────────────────────────────────────────────────────
 
-/// Why a `delegate` call did not produce a child.
-///
-/// Split from the handler so every decision in this module is testable without
-/// a live engine, a Goose session store or a database — the same split PAI-6 P2
-/// made for `build_child_plan` and `classify_outcome`.
+/// Why a `delegate` or `check_task` call was refused.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Refusal {
-    /// No live turn holds an authority for this caller.
-    ///
-    /// Carries a trace label that is deliberately NOT part of
-    /// [`message`](Self::message): the four inputs that land here must be
-    /// indistinguishable to the model, and distinguishable in the log.
+    /// No live turn holds an authority for this caller. `trace` is kept out of the message:
+    /// the four inputs landing here must look identical to the model, but not in the log.
     Unauthorised { trace: &'static str },
     /// The caller is an unidentified speaker.
     Guest,
@@ -275,14 +185,8 @@ pub enum Refusal {
     Narrowing(String),
     /// The orchestrator refused or failed to start the run.
     SpawnFailed(String),
-    /// `check_task` was given an id this conversation has no task by.
-    ///
-    /// **Two inputs land here and they must be indistinguishable**, for the same
-    /// reason [`Unauthorised`](Self::Unauthorised)'s four are: an id that no run
-    /// ever had, and an id belonging to ANOTHER conversation's run. A caller
-    /// that could tell those apart could enumerate the ids of delegations it was
-    /// not party to and learn that they exist. The trace separates them; the
-    /// message does not.
+    /// No task by that id in this conversation. A foreign id and a never-issued one must read
+    /// the same, or a caller could probe which ids exist; only `trace` separates them.
     UnknownTask {
         task_id: String,
         trace: &'static str,
@@ -292,10 +196,7 @@ pub enum Refusal {
 }
 
 impl Refusal {
-    /// The text the model reads.
-    ///
-    /// Every branch ends by telling the model what to do next, because a refusal
-    /// a 2-4B model cannot act on is a refusal it will retry verbatim.
+    /// The model-facing text; each ends with what to do next, or a small model retries verbatim.
     pub fn message(&self) -> String {
         match self {
             // ONE string for all four unauthorised inputs. See the type's doc.
@@ -368,25 +269,8 @@ impl Refusal {
 
 // ── The decision, as pure functions ─────────────────────────────────────────
 
-/// May this caller delegate at all?
-///
-/// Called BEFORE the recipe is looked up, and that ordering is the point rather
-/// than an optimisation: an unauthorised caller must not be able to make this
-/// pond read its database, and a caller that is refused should be told the
-/// reason it was actually refused for rather than "no such role".
-///
-/// Three refusals, three mechanisms, none of them the same as another's:
-///
-/// - **`None`.** The lease behind the entry is gone, or there never was one.
-/// - **Guest.** Second enforcement. The first is
-///   `groups_denied_to_guests`, which keeps `giap-orchestrator__delegate` out of
-///   an unidentified speaker's allow-set in both selection modes. That layer is
-///   the one that works today; this one is what still refuses if a future change
-///   moves, reorders or bypasses it — which is exactly what happened to PAI-1 P5.
-/// - **Depth.** [`DelegationAuthority::may_delegate`] answers it. Note honestly
-///   that deleting this line does not open a hole: `delegate` refuses again with
-///   `DepthExceeded`. What it changes is that the refusal arrives after a
-///   database read and reads as "no such role" when the role is missing too.
+/// May this caller delegate at all? Runs BEFORE the recipe lookup, so an unauthorised caller
+/// cannot make the pond read its database; the guest check backs up `groups_denied_to_guests`.
 pub fn authorise(authority: Option<DelegationAuthority>) -> Result<DelegationAuthority, Refusal> {
     let Some(authority) = authority else {
         return Err(Refusal::Unauthorised {
@@ -402,12 +286,8 @@ pub fn authorise(authority: Option<DelegationAuthority>) -> Result<DelegationAut
     Ok(authority)
 }
 
-/// What reading the named recipe produced.
-///
-/// Four outcomes rather than an `Option`, because the two failure directions are
-/// not the same refusal and must not collapse into one:
-/// [`Unreadable`](Self::Unreadable) is a human's mistake in a role block, and
-/// answering it with a default role is the widening path.
+/// What reading the named recipe produced. [`Unreadable`](Self::Unreadable) must refuse:
+/// answering a broken role block with a default role is the widening path.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RoleLookup {
     /// No recipe by that name.
@@ -433,11 +313,8 @@ impl RoleLookup {
     }
 }
 
-/// Turn an authorised caller, a role lookup and a request into a [`TaskSpec`].
-///
-/// Every narrowing decision belongs to
-/// [`DelegationAuthority::delegate`] — this function's whole job is to refuse
-/// the four ways the role can fail to exist and then get out of the way.
+/// Turn an authorised caller, a role lookup and a request into a [`TaskSpec`]; all narrowing
+/// is [`DelegationAuthority::delegate`]'s.
 pub fn decide(
     authority: &DelegationAuthority,
     lookup: RoleLookup,
@@ -459,18 +336,8 @@ pub fn decide(
         .map_err(|e| Refusal::Narrowing(e.to_string()))
 }
 
-/// Whose task is this, and may this caller see it? — PAI-6 P8.
-///
-/// **The scoping is the substance and it is not incidental.**
-/// `Orchestrator::poll` is keyed by task id alone, and a task id is a v4 UUID
-/// the model was told — so without this, a `check_task` call could read back the
-/// result of a delegation started in ANOTHER conversation, which on this pond
-/// means another household member's. `TaskRun.parent_session_id` is the GIAP
-/// session, and the caller's is the one PAI-6 P3 resolved from the engine's own
-/// `_meta`; a match is the only thing that permits an answer.
-///
-/// A foreign task and a nonexistent one produce the same refusal, deliberately:
-/// see [`Refusal::UnknownTask`].
+/// The run, only if it belongs to the caller's session. `Orchestrator::poll` is keyed by id
+/// alone, so without this `check_task` could read another household member's delegation.
 pub fn authorise_task(
     run: Option<TaskRun>,
     caller_session_id: &str,
@@ -491,14 +358,8 @@ pub fn authorise_task(
     Ok(run)
 }
 
-/// What the parent is told about a finished run.
-///
-/// Reads the answer through [`TaskRun::result_for_parent`] and never through
-/// `result` directly. That is not defensive style: Goose's child loop returns
-/// `Ok(partial_text)` when a child is cancelled and returns the literal
-/// max-turns sentence as its "answer" when the budget runs out, so a run that
-/// was stopped can carry text that reads exactly like a result. Handing it to
-/// the parent would report an abandoned run as a finding.
+/// What the parent is told about a run. Only via [`TaskRun::result_for_parent`]: Goose hands
+/// back partial text on cancel and the max-turns sentence on budget exhaustion as "answers".
 pub fn describe_run(run: &TaskRun) -> String {
     if let Some(answer) = run.result_for_parent() {
         return format!("The `{}` agent reports:\n\n{answer}", run.role);
@@ -534,10 +395,7 @@ pub fn describe_run(run: &TaskRun) -> String {
 
 #[derive(Clone)]
 pub struct OrchestratorMcpServer {
-    /// `None` in tests and in any entry point that never built an agent. Every
-    /// call then refuses as unauthorised rather than proceeding — the same
-    /// direction `DraftMcpServer` takes for a missing authority, and the
-    /// opposite of the direction that made the direct dispatcher a bypass.
+    /// `None` where no agent was built (tests, some entry points): every call then refuses.
     deps: Option<OrchestratorDeps>,
     #[allow(dead_code)] // accessed by rmcp's generated tool_handler code
     tool_router: ToolRouter<Self>,
@@ -545,12 +403,7 @@ pub struct OrchestratorMcpServer {
 
 #[tool_router]
 impl OrchestratorMcpServer {
-    /// Every tool this server exposes, without constructing it or its deps.
-    ///
-    /// `tool_router()` is generated private to this module, so inventory code
-    /// outside it could not reach the real definitions and resorted to scanning
-    /// source text for `#[tool(` instead. This is the enumeration that scan was
-    /// standing in for.
+    /// All tools, without constructing the server; the generated `tool_router()` is private.
     pub(crate) fn tool_defs() -> Vec<rmcp::model::Tool> {
         Self::tool_router().list_all()
     }
@@ -586,10 +439,7 @@ and is refused when the model runs on this device (one agent at a time).")]
                 refusal.message()
             }
         };
-        // A refusal comes back as tool SUCCESS carrying the explanation, the
-        // same as `giap-toolkit` and `giap-draft`: an MCP protocol error makes
-        // small models retry the identical bad call, whereas a sentence naming
-        // what to do instead lets them self-correct.
+        // Refusals are tool SUCCESS text: a protocol error makes small models retry verbatim.
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
@@ -604,9 +454,7 @@ and is refused when the model runs on this device (one agent at a time).")]
                 trace: "deps_not_installed",
             });
         };
-        // A missing `_meta` is the fourth unauthorised input, and it gets the
-        // same message as the other three by construction: there is one
-        // `Unauthorised` variant and one string on it.
+        // No `_meta` is the fourth unauthorised input; same variant, so the same message.
         let Some(session) = crate::session_from_meta(meta) else {
             return Err(Refusal::Unauthorised {
                 trace: "no_engine_session",
@@ -668,12 +516,7 @@ finished. Only tasks started in this conversation.")]
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    /// The whole of `check_task`, with the one I/O step in the middle.
-    ///
-    /// It authorises the CALLER exactly as `delegate` does before it looks
-    /// anything up — a guest, a subagent and a caller with no live turn are
-    /// refused here too, and for the same reasons — and then authorises the
-    /// TASK, which is the part that is this tool's own.
+    /// All of `check_task`: authorise the CALLER exactly as `delegate` does, then the TASK.
     async fn run_check(
         &self,
         meta: &rmcp::model::Meta,
@@ -726,8 +569,7 @@ impl ServerHandler for OrchestratorMcpServer {
 use std::sync::OnceLock;
 use tokio::io::DuplexStream;
 
-/// Everything the `delegate` tool needs, none of which exists at registration
-/// time.
+/// What `delegate` needs; none of it exists at registration time.
 #[derive(Clone)]
 pub struct OrchestratorDeps {
     orchestrator: Arc<dyn Orchestrator>,
@@ -761,46 +603,21 @@ impl OrchestratorDeps {
 
 static ORCHESTRATOR_DEPS: OnceLock<OrchestratorDeps> = OnceLock::new();
 
-/// Install the orchestrator, the turn-authority registry and the recipe store.
-///
-/// Call once at startup, AFTER the agent adapter exists — it owns both the
-/// child runner and the registry, and neither exists when
-/// `register_giap_extensions` runs. **The registry must be the SAME one the
-/// adapter publishes into** (`GooseAdapter::turn_authorities()`); a second
-/// registry would answer `None` to every lookup, and every delegation would be
-/// refused as unauthorised.
-///
-/// Absent, the tool refuses every call. That is the correct direction and the
-/// one the direct dispatcher got wrong for `giap-draft`: a missing authority
-/// must refuse, never proceed.
+/// Install the deps once, AFTER the agent adapter exists. The registry must be the SAME one
+/// the adapter publishes into (`GooseAdapter::turn_authorities()`), or every call refuses.
 pub fn init_orchestrator_deps(deps: OrchestratorDeps) {
     let _ = ORCHESTRATOR_DEPS.set(deps);
 }
 
-/// What was installed, for a caller that must delegate without a tool call.
-///
-/// PAI-7 P4's reviewer is the one such caller: it is a background loop, not a
-/// model, so it never reaches the `delegate` tool. Reading it back out of the
-/// same `OnceLock` rather than being handed its own instance is the point —
-/// `init_orchestrator_deps`'s own doc warns that a second
-/// `TurnAuthorityRegistry` compiles and then answers `None` to every lookup,
-/// and the reviewer needs the registry the adapter publishes into for exactly
-/// the same reason the tool does. There is only one to get.
-///
-/// `None` when Goose init failed and the mock agent is serving, which is the
-/// correct direction: no orchestrator means no review, not a review that skips
-/// the authority check.
+/// The installed deps, for a caller that delegates without a tool call (the proactive
+/// reviewer), so it shares the one registry. `None` (mock agent) means no review at all.
 pub fn installed_orchestrator_deps() -> Option<OrchestratorDeps> {
     ORCHESTRATOR_DEPS.get().cloned()
 }
 
 /// Spawn function compatible with Goose's `SpawnServerFn` type.
 pub fn spawn_orchestrator_server(reader: DuplexStream, writer: DuplexStream) {
-    // Like `giap-toolkit` and unlike the rest, this does NOT expect(): the
-    // extension is registered before the adapter that supplies its deps is
-    // built, so a missing handle is a legitimate transient state. Unlike
-    // `giap-toolkit`, the degraded behaviour is refusal rather than a truthful
-    // "nothing to do".
+    // Deps may be absent (installed after registration); the server then refuses every call.
     let server = OrchestratorMcpServer::new(ORCHESTRATOR_DEPS.get().cloned());
     crate::serve_builtin("giap-orchestrator", server, reader, writer);
 }
@@ -836,14 +653,7 @@ mod tests {
 
     // ── authorise ──────────────────────────────────────────────────────────
 
-    /// PAI-6 P1's contract: a session that never chatted, a subagent's own
-    /// session and a turn that has ended all answer `None`, and **all three must
-    /// refuse identically**. The fourth input — a call with no `_meta` at all —
-    /// is folded into the same variant for the same reason.
-    ///
-    /// Asserted on the exact strings rather than on the variant, because the
-    /// variant being shared is an implementation detail and the property is
-    /// about what the model can distinguish.
+    /// Asserted on the strings, not the variant: the property is what the model can tell apart.
     #[test]
     fn every_unauthorised_input_is_refused_with_the_same_words() {
         let from_registry = authorise(None).unwrap_err();
@@ -855,8 +665,7 @@ mod tests {
         };
         assert_eq!(from_registry.message(), no_meta.message());
         assert_eq!(from_registry.message(), no_deps.message());
-        // ... and the log can still tell them apart, which is the whole reason
-        // the trace is a separate accessor.
+        // ... while the log can still tell them apart.
         assert_ne!(from_registry.trace(), no_meta.trace());
         assert_ne!(no_meta.trace(), no_deps.trace());
     }
@@ -864,9 +673,7 @@ mod tests {
     #[test]
     fn a_guest_turn_is_refused_even_though_its_authority_is_a_root_one() {
         let guest = root(ProfileScope::Guest);
-        // Vacuity control: the guest's authority is depth 0 and non-empty, so
-        // the refusal below is about the SCOPE and not about there being
-        // nothing to delegate with.
+        // Vacuity control: the guest could otherwise delegate, so the refusal is about SCOPE.
         assert!(guest.may_delegate());
         assert!(!guest.tool_groups().is_empty());
         assert_eq!(authorise(Some(guest)).unwrap_err(), Refusal::Guest);
@@ -913,9 +720,7 @@ mod tests {
         );
     }
 
-    /// The other half of "do not offer a tool whose every call is refused":
-    /// the depth check above is the enforcement, and this is what stops a child
-    /// ever seeing the tool. Both, because neither implies the other.
+    /// Withholding and refusal are both needed; neither implies the other.
     #[test]
     fn the_delegation_group_is_withheld_from_subagents_as_well_as_refused() {
         assert!(
@@ -956,14 +761,7 @@ mod tests {
         }
     }
 
-    /// **The guard on the alias list.** `TaskRequest` is `deny_unknown_fields`
-    /// so that a model cannot name its own scope, tools, depth or session; that
-    /// property survives only while no alias is a synonym for one of them.
-    ///
-    /// Quantified over the field names the domain deliberately does not have,
-    /// under both a bare spelling and the spelling of a real field, so that
-    /// adding `"session_id"` to either alias list fails here rather than in
-    /// production.
+    /// Guards the alias lists: adding e.g. "session_id" to either must fail here.
     #[test]
     fn a_widening_field_is_refused_under_every_spelling() {
         for widening in [
@@ -1025,8 +823,6 @@ mod tests {
         assert_eq!(spec.role(), "researcher");
         assert_eq!(spec.depth().get(), 1);
         assert!(spec.grants_tool("giap-weather__get_forecast"));
-        // The narrowing really happened: the child did not inherit the parent's
-        // ability to delegate, and holds nothing the denylist names.
         assert!(!spec.child_authority("c").may_delegate());
         for denied in groups_denied_to_subagents() {
             assert!(!spec.tool_groups().contains(*denied));
@@ -1054,16 +850,11 @@ mod tests {
         ));
     }
 
-    /// **The direction that matters.** A `giap_role` block that will not parse
-    /// or will not validate must refuse, never fall back to a default role: the
-    /// fallback would hand a child whatever the default tool set is, on exactly
-    /// the input a human got wrong.
     #[test]
     fn an_unreadable_role_refuses_instead_of_substituting_a_default() {
         let authority = root(ProfileScope::Household);
         for (label, yaml) in [
-            // `deny_unknown_fields` inside the block: a typo on the one required
-            // field is a parse error, not an absent narrowing.
+            // `deny_unknown_fields` makes a typo'd required field a parse error.
             (
                 "misspelled tool_groups",
                 "giap_role:\n  toolgroups: [giap-weather]\n  instructions: go\n",
@@ -1091,9 +882,7 @@ mod tests {
         }
     }
 
-    /// Vacuity control for the test above: the same reader accepts the valid
-    /// role, so "unreadable" is a property of those documents rather than of a
-    /// parser that rejects everything.
+    /// Vacuity control for the test above.
     #[test]
     fn the_same_reader_accepts_a_valid_role() {
         assert!(matches!(
@@ -1117,9 +906,6 @@ mod tests {
         }
     }
 
-    /// Goose returns `Ok(partial_text)` on cancellation and the literal max-turns
-    /// sentence on budget exhaustion, so a stopped run carries text that reads
-    /// like an answer. It must not reach the parent.
     #[test]
     fn only_a_completed_run_hands_its_text_to_the_parent() {
         const SECRET: &str = "the bins go out on Thursday";
@@ -1136,14 +922,12 @@ mod tests {
                 "{status:?} leaked the child's partial text to the parent: {described}"
             );
         }
-        // Vacuity control: the text DOES come through when the run completed,
-        // so the assertions above are about the status rather than about
-        // describe_run never quoting anything.
+        // Vacuity control: a completed run's text does come through.
         let completed = describe_run(&run_with(TaskStatus::Completed, Some(SECRET)));
         assert!(completed.contains(SECRET));
     }
 
-    // ── background + check_task (PAI-6 P8) ─────────────────────────────────
+    // ── background + check_task ────────────────────────────────────────────
 
     #[test]
     fn a_delegation_is_synchronous_unless_the_caller_asks_otherwise() {
@@ -1158,10 +942,6 @@ mod tests {
         );
     }
 
-    /// The spellings a 2-4B model actually emits. Declaring the field
-    /// `Option<bool>` would make every one of these an rmcp deserialization
-    /// failure of the whole call — a protocol error, which is the thing this
-    /// module exists to avoid.
     #[test]
     fn the_boolean_spellings_a_small_model_emits_are_recovered() {
         for (spelling, expected) in [
@@ -1184,17 +964,7 @@ mod tests {
         }
     }
 
-    /// The other direction, and the one that matters: an unrecognised value is
-    /// REFUSED with a sentence naming the field, never coerced to `false`. A
-    /// caller that asked for something and was silently given the opposite has
-    /// no way to find out.
-    ///
-    /// **The acceptance case is a `match`, not `.unwrap_err()`.** With the
-    /// `unwrap_err` this used to open with, the mutation this test exists to
-    /// catch — `coerce_bool(..).unwrap_or(false)` — panicked with serde's
-    /// rendering of the accepted `TaskRequest` and never reached the sentence
-    /// below, so the message the phase record attributed to that mutation was
-    /// one the test could not emit.
+    /// A `match`, not `unwrap_err()`: the `unwrap_or(false)` mutation must reach the message below.
     #[test]
     fn an_unreadable_background_value_refuses_rather_than_defaulting() {
         for nonsense in [
@@ -1240,10 +1010,6 @@ mod tests {
         }
     }
 
-    /// **The scoping, which is what stops `check_task` being a read of anyone
-    /// else's delegation.** `Orchestrator::poll` is keyed by task id alone, and
-    /// an id is a UUID the model was told — so on a household pond, without
-    /// this, one member's conversation could read back another's result.
     #[test]
     fn a_task_belonging_to_another_conversation_is_not_readable() {
         const SECRET: &str = "the bins go out on Thursday";
@@ -1260,8 +1026,7 @@ mod tests {
         );
     }
 
-    /// Vacuity control: the caller's OWN task is readable, so the test above is
-    /// about the session and not about `authorise_task` refusing everything.
+    /// Vacuity control for the test above.
     #[test]
     fn a_task_of_this_conversation_is_readable() {
         let mine = run_of("my-session", "task-1");
@@ -1270,9 +1035,6 @@ mod tests {
         assert!(describe_run(&run).contains("the bins go out on Thursday"));
     }
 
-    /// The same words for both, so a caller cannot probe which task ids exist —
-    /// the same property `every_unauthorised_input_is_refused_with_the_same_words`
-    /// asserts for the four unauthorised inputs, and for the same reason.
     #[test]
     fn a_missing_task_and_somebody_elses_are_indistinguishable_to_the_caller() {
         let missing = authorise_task(None, "my-session", "task-1").unwrap_err();
@@ -1306,10 +1068,6 @@ mod tests {
         }
     }
 
-    /// A background run comes back non-terminal, and `describe_run` must tell
-    /// the model it is running and hand it no answer — the same path
-    /// `only_a_completed_run_hands_its_text_to_the_parent` covers, said for the
-    /// state P8 made reachable.
     #[test]
     fn a_running_background_task_is_reported_with_its_id_and_no_answer() {
         let mut run = run_of("my-session", "task-7");
@@ -1331,23 +1089,8 @@ mod tests {
     }
 
     // ── check_task at its CALL SITE ────────────────────────────────────────
-    //
-    // `authorise_task` is a pure function and the three tests above cover it as
-    // one. That is not the same claim as "`check_task` authorises", and the
-    // difference is a whole vacuity shape: deleting the `authorise_task(...)`
-    // line from `run_check` — the natural refactor regression, and the one that
-    // turns this tool into a read of any household member's delegation result by
-    // task id — left all 213 tests in this crate green, because nothing built an
-    // `OrchestratorMcpServer` with deps and therefore nothing ran `run_check` at
-    // all.
-    //
-    // The fakes below are the cheapest thing that closes it. A source tripwire
-    // over `run_check`'s body was the alternative; it would catch a textual
-    // revert and nothing else, and this programme has recorded that shape as
-    // nearly worthless. `check_task` itself needs a `RequestContext<RoleServer>`
-    // that a test cannot build, so these drive `run_check`, which is its entire
-    // body — the handler adds a `set_current_tool` call, a `tracing::warn!` and
-    // the wrap into `CallToolResult`.
+    // Drives `run_check` (all of `check_task` but the wrapper; a `RequestContext` can't be
+    // built in a test) so dropping its `authorise_task` call fails a test.
 
     struct FakeOrchestrator {
         run: Option<TaskRun>,
@@ -1358,8 +1101,7 @@ mod tests {
         async fn spawn(&self, _spec: TaskSpec) -> anyhow::Result<TaskRun> {
             unreachable!("check_task does not spawn")
         }
-        /// Keyed by task id alone, exactly as the real registry is — which is
-        /// why the ownership check cannot live here.
+        /// Keyed by task id alone, like the real one, so ownership can't be checked here.
         async fn poll(&self, _task_id: &str) -> anyhow::Result<Option<TaskRun>> {
             Ok(self.run.clone())
         }
@@ -1415,13 +1157,8 @@ mod tests {
         m
     }
 
-    /// A server whose one live turn belongs to GIAP session `my-session`, and
-    /// whose orchestrator will answer `poll` with `run` whatever id it is asked
-    /// for.
-    ///
-    /// The lease is returned with it: dropping it revokes the authority, and a
-    /// revoked authority refuses as unauthorised long before the task check —
-    /// which would make every assertion below pass for the wrong reason.
+    /// A server with one live turn in session `my-session` whose `poll` always returns `run`.
+    /// Hold the lease: dropping it revokes the authority, and every check would pass vacuously.
     fn server_with(
         run: Option<TaskRun>,
     ) -> (
@@ -1442,9 +1179,7 @@ mod tests {
         let lease = authorities.publish(
             "engine-session-1",
             DelegationAuthority::root("my-session", scope, groups(&["giap-weather"])),
-            // `Default::default()` rather than a named constructor: the token
-            // type belongs to `tokio-util`, which this crate does not depend on
-            // and does not need to, since `publish`'s signature names it.
+            // `Default::default()` because the token type is from `tokio-util`, not a dependency.
             Default::default(),
         );
         let deps = OrchestratorDeps::new(
@@ -1462,10 +1197,6 @@ mod tests {
         }
     }
 
-    /// **The call site, not the pure function.** `run_check` must put the
-    /// caller's own session id between `poll` and `describe_run`; a version that
-    /// hands the polled run straight to `describe_run` reads back another
-    /// household member's delegation result from an id the model was told.
     #[tokio::test]
     async fn check_task_does_not_read_a_task_belonging_to_another_conversation() {
         const SECRET: &str = "the bins go out on Thursday";
@@ -1495,11 +1226,7 @@ mod tests {
         }
     }
 
-    /// Vacuity control for the test above, and it is doing two jobs: it proves
-    /// the refusal is about the SESSION rather than about `run_check` refusing
-    /// everything, and it proves the fixture reaches `describe_run` at all — the
-    /// authority is live, the deps are installed, the meta carries a session and
-    /// the id resolves.
+    /// Vacuity control for the test above; also proves the fixture reaches `describe_run`.
     #[tokio::test]
     async fn check_task_answers_a_task_of_this_conversation() {
         let (server, _lease) = server_with(Some(run_of("my-session", "task-1")));
@@ -1514,11 +1241,6 @@ mod tests {
         );
     }
 
-    /// The third input the call site owns: a task id nothing knows. It must
-    /// refuse in the same words as the foreign one — the caller cannot be
-    /// allowed to probe which ids exist — which is asserted on the pure function
-    /// in `a_missing_task_and_somebody_elses_are_indistinguishable_to_the_caller`
-    /// and reached from here.
     #[tokio::test]
     async fn check_task_refuses_an_id_nothing_knows_in_the_same_words() {
         let (server, _lease) = server_with(None);
@@ -1542,10 +1264,7 @@ mod tests {
         );
     }
 
-    /// And the caller check, at the same call site: a tool call carrying an
-    /// engine session no live turn is published under is refused before any task
-    /// is looked up. Without this, the three tests above would still pass
-    /// against a `run_check` that had dropped `authorise` instead.
+    /// Without this, the tests above would pass against a `run_check` that dropped `authorise`.
     #[tokio::test]
     async fn check_task_refuses_a_caller_with_no_live_turn() {
         let (server, lease) = server_with(Some(run_of("my-session", "task-1")));
@@ -1572,19 +1291,12 @@ mod tests {
         );
     }
 
-    /// The rest of what `authorise` decides, reached from the call site: a GUEST
-    /// turn owns its task by session id and still may not read it back.
-    ///
-    /// Without this, replacing `authorise(...)` in `run_check` with a bare
-    /// `.ok_or(Refusal::Unauthorised { .. })` passes — the missing-turn case
-    /// refuses identically either way, and a guest and a subagent would quietly
-    /// gain a tool neither is allowed.
+    /// Catches `authorise(...)` in `run_check` being swapped for a bare `.ok_or(Unauthorised)`.
     #[tokio::test]
     async fn check_task_refuses_a_guest_turn_that_owns_the_task() {
         let (server, _lease) = server_with_scope(
             ProfileScope::Guest,
-            // The guest's OWN task, so what is refused is the caller and not the
-            // ownership check next door.
+            // The guest's OWN task, so the refusal is the caller's, not the ownership check's.
             Some(run_of("my-session", "task-1")),
         );
         let refusal = server

@@ -1,10 +1,4 @@
-//! Source-specific model catalog providers.
-//!
-//! Three types are defined here:
-//! - [`CompositeModelCatalogProvider`] — aggregates all sub-providers
-//! - [`StaticModelCatalogProvider`]   — curated static lists for Whisper, Piper TTS, Llamafile, GGUF, Embedding
-//! - [`OllamaCatalogProvider`]        — queries the local Ollama instance (`/api/tags` for the
-//!   list, then `/api/show` per model for its declared context window)
+//! Model catalog providers: static curated lists, local Ollama, and a composite of both.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -13,11 +7,7 @@ use pond_core::models::ports::model_catalog_provider::ModelCatalogProvider;
 
 // ── Composite ─────────────────────────────────────────────────────────────────
 
-/// Aggregates multiple `ModelCatalogProvider` implementations.
-///
-/// Each sub-provider is called in sequence. Failures from any individual
-/// provider are logged as warnings and skipped — the remaining providers
-/// still contribute their records.
+/// Aggregates `ModelCatalogProvider`s; one failing is logged and skipped, not fatal.
 pub struct CompositeModelCatalogProvider {
     providers: Vec<Box<dyn ModelCatalogProvider>>,
 }
@@ -45,10 +35,7 @@ impl ModelCatalogProvider for CompositeModelCatalogProvider {
                     all_models.extend(models);
                     all_binaries.extend(binaries);
                 }
-                // Debug, not warn: the usual cause is Ollama simply not
-                // running, which is the normal state for a local-GGUF
-                // install. It was putting a warning on the voice console
-                // on every start.
+                // Debug, not warn: usually Ollama is just not running, which is normal.
                 Err(e) => tracing::debug!("catalog sub-provider failed: {e}"),
             }
         }
@@ -58,9 +45,7 @@ impl ModelCatalogProvider for CompositeModelCatalogProvider {
 
 // ── Static curated catalog ────────────────────────────────────────────────────
 
-/// Returns a static curated list of models for Whisper, Piper TTS, Llamafile, GGUF, and Embedding.
-///
-/// Ollama models are handled by [`OllamaCatalogProvider`] at runtime.
+/// Curated static catalog: Whisper, Kokoro TTS, Llamafile, GGUF and embedding models.
 pub struct StaticModelCatalogProvider;
 
 #[async_trait]
@@ -135,20 +120,8 @@ fn whisper_models() -> Vec<ModelRecord> {
 const KOKORO_BASE: &str =
     "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/voices/";
 
-/// Every voice Kokoro publishes.
-///
-/// All of them, not just the English ones: the picker groups by accent, so a
-/// household that wants a Japanese voice finds it behind its own tab instead
-/// of being told to copy a file in by hand, and nobody choosing an English
-/// voice ever sees the rest.
-///
-/// A row here costs nothing until it is chosen — the `.bin` is fetched on
-/// selection, which is why offering all of them is not the same as shipping
-/// 28 MB of style tables.
-///
-/// Ids are Kokoro's own: `<lang><gender>_<name>`. The desktop derives the
-/// display name and grouping from that, so there is nothing to keep in step
-/// here beyond the id itself.
+/// Every voice Kokoro publishes; a `.bin` is fetched only when chosen. Ids are Kokoro's own
+/// `<lang><gender>_<name>`, which the desktop parses for display name and grouping.
 const KOKORO_VOICES: &[(&str, &str)] = &[
     ("af_heart", "American female — Heart"),
     ("af_alloy", "American female — Alloy"),
@@ -206,12 +179,7 @@ const KOKORO_VOICES: &[(&str, &str)] = &[
     ("pm_santa", "Portuguese male — Santa"),
 ];
 
-/// One catalogue row per Kokoro voice.
-///
-/// A voice is a 522 KB style table, not a model — every voice shares the same
-/// engine weights. `size_mb: 1` is that half-megabyte rounded up, and it is why
-/// switching voice is cheap enough for the settings screen to preview on every
-/// change.
+/// One row per Kokoro voice: a 522 KB style table over shared weights, hence `size_mb: 1`.
 fn kokoro_tts_voices() -> Vec<ModelRecord> {
     KOKORO_VOICES
         .iter()
@@ -250,8 +218,7 @@ struct LlamafileEntry {
     mozilla_repo: &'static str,
     size_mb: u64,
     ram_estimate_mb: u64,
-    /// The base model's declared maximum, matching the GGUF row for the same
-    /// weights. See `every_chat_capable_entry_declares_a_context_window`.
+    /// The base model's declared maximum; must match the GGUF row for the same weights.
     context_length: u32,
     recommended_role: &'static str,
     description: &'static str,
@@ -700,12 +667,7 @@ fn embedding_models() -> Vec<ModelRecord> {
 
 // ── Ollama (local) ────────────────────────────────────────────────────────────
 
-/// Lists models installed in the local Ollama instance.
-///
-/// Queries `http://localhost:11434/api/tags` for the list, then `/api/show`
-/// per model for its declared context window. Returns an empty vec (not an
-/// error) if Ollama is not running or the request fails — the composite
-/// provider continues with the static list.
+/// Models installed in local Ollama; errs when it is not running (the composite skips it).
 pub struct OllamaCatalogProvider {
     client: reqwest::Client,
 }
@@ -715,22 +677,8 @@ impl OllamaCatalogProvider {
         Self { client }
     }
 
-    /// The model's declared context window, from `POST /api/show`.
-    ///
-    /// `/api/tags` does not carry one. That is why every Ollama row has held
-    /// `context_length: None` since the column was added, and why
-    /// `WindowSource::CatalogRecord` — precedence rung 3 of the context
-    /// governor — has never been reachable in production: Ollama is the
-    /// provider class that rung exists for.
-    ///
-    /// `/api/show` answers with a `model_info` map keyed by architecture
-    /// (`gemma4.context_length`, `llama.context_length`, `qwen3.context_length`
-    /// …), so the key is matched by suffix. An architecture allowlist would
-    /// return `None` for every model family added after this was written, and
-    /// silently — the rung would go dead again with nothing to notice it.
-    ///
-    /// Every failure is `None`, not an error: a missing context length must
-    /// cost the catalog row, not the whole refresh.
+    /// Declared context window from `POST /api/show` (`/api/tags` has none). Keys are per
+    /// architecture, so match the `.context_length` suffix; any failure is `None`, not an error.
     async fn declared_context_length(&self, model: &str) -> Option<u32> {
         let resp = self
             .client
@@ -773,11 +721,7 @@ impl ModelCatalogProvider for OllamaCatalogProvider {
             .filter_map(ollama_entry_to_record)
             .collect();
 
-        // One extra loopback call per installed model, on the catalog-refresh
-        // path only — never on a turn. Sequential rather than joined: the
-        // daemon is local, the timeout is 3 s, and a refresh that hammers
-        // Ollama with N concurrent requests is a worse neighbour than one that
-        // takes a second longer.
+        // Catalog refresh only, never per turn; sequential so N models don't hammer Ollama.
         for m in &mut models {
             m.context_length = self.declared_context_length(&m.name).await;
         }
@@ -830,15 +774,6 @@ fn ollama_entry_to_record(m: &serde_json::Value) -> Option<ModelRecord> {
 mod tests {
     use super::*;
 
-    /// `ModelRecord.context_length` is precedence rung 3 of the context
-    /// governor (`WindowSource::CatalogRecord`). It sat unread for so long
-    /// that two whole categories were shipping `None` and the entire Gemma 4
-    /// family was carrying 8192 — copy-pasted from the Gemma 2 rows above it —
-    /// against a declared 131,072. Nothing noticed, because nothing read the
-    /// field.
-    ///
-    /// This asserts the field is populated for every category a chat model can
-    /// come from. It is the check that would have caught both defects.
     #[test]
     fn every_chat_capable_entry_declares_a_context_window() {
         let chat_capable: Vec<ModelRecord> = static_models()
@@ -865,12 +800,6 @@ mod tests {
         }
     }
 
-    /// The same weights must not declare two different windows.
-    ///
-    /// The llamafile and GGUF tables list several of the same base models, and
-    /// the llamafile numbers were transcribed from the GGUF rows. If a future
-    /// edit corrects one table and not the other, the governor's answer starts
-    /// depending on which category the user happened to install from.
     #[test]
     fn the_same_base_model_declares_the_same_window_in_both_tables() {
         let by_base = |needle: &str| -> Vec<(String, u32)> {

@@ -19,8 +19,7 @@ function formatMillisats(msats: number): string {
   return `${(msats / 1000).toLocaleString()} sats`;
 }
 
-/// Parses either a bare peer-id hex string or a `pond-mesh://invite?...` URL
-/// pasted from another Pond, so "Add trusted peer" accepts both.
+/** Accepts a bare peer-id hex string or a `pond-mesh://invite?...` URL from another Pond. */
 function parseInvite(input: string): { peerId: string; address?: string } {
   const trimmed = input.trim();
   if (!trimmed.startsWith("pond-mesh://")) {
@@ -55,24 +54,15 @@ export function Mesh() {
   const [topUpSubmitting, setTopUpSubmitting] = useState(false);
   const [topUpError, setTopUpError] = useState<string | null>(null);
 
-  // Live, on-demand — queried per connected peer, not part of the peer list
-  // response (see MeshPeerCapabilities' own doc comment on why).
+  // Queried live per connected peer; not in the peer list (see MeshPeerCapabilities).
   const [capabilities, setCapabilities] = useState<Record<string, MeshPeerCapabilities>>({});
 
-  // The *persisted* setting, distinct from `self.mesh_enabled` (what's
-  // actually live right now). `PUT /settings` hot-builds the real mesh
-  // transport synchronously when this flips on (#132 follow-up — no restart
-  // needed any more), so `toggleMesh` re-fetches `self` right after the
-  // setting saves and the two converge within that one round trip. If they
-  // still disagree after that refresh, it isn't a pending restart — it means
-  // the transport failed to come up (wrong build, or a real startup error;
-  // see the server logs).
+  // The persisted setting; `self.mesh_enabled` is what is live. `PUT /settings` builds the
+  // transport synchronously, so once `toggleMesh` re-fetches `self` the two should agree.
   const [meshEnabledSetting, setMeshEnabledSetting] = useState<boolean | null>(null);
   const [meshToggling, setMeshToggling] = useState(false);
 
-  // Read-only settlement-job status — fetched best-effort alongside
-  // everything else; a failure here shouldn't block the rest of the screen,
-  // since it's informational, not something the user acts on directly.
+  // Settlement-job status: informational and best-effort; a failure must not block the screen.
   const [settlementStatus, setSettlementStatus] = useState<MeshSettlementStatus | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -95,12 +85,8 @@ export function Mesh() {
     load();
   }, [load]);
 
-  // `connected` is a live snapshot of this Pond's own swarm state (see
-  // list_mesh_peers), not a cached DB flag — it goes stale the instant the
-  // underlying connection changes, and `load()` only ever ran once, on
-  // mount. Poll quietly (no `loading`/`error` toggle, so the screen doesn't
-  // flicker to a spinner every tick) so a peer flipping online/offline
-  // between visits to this screen actually shows up.
+  // `connected` is a live swarm snapshot, not a DB flag, so poll; quietly (no loading/error
+  // toggles) so the screen doesn't flicker to a spinner every tick.
   useEffect(() => {
     const interval = setInterval(() => {
       Promise.all([api.listMeshPeers(), api.getMeshSelf()])
@@ -122,9 +108,7 @@ export function Mesh() {
     }).catch((e) => console.error("QR render failed", e));
   }, [self?.invite_url]);
 
-  // Only query connected peers — an offline peer would just time out. 404s
-  // (untrusted) and 503s (mesh disabled) are both plausible here too; either
-  // way the card simply shows no capability chips rather than an error.
+  // Connected peers only (offline ones time out); a 404 (untrusted) or 503 (mesh off) shows no chips.
   useEffect(() => {
     for (const p of peers) {
       if (!p.connected || capabilities[p.peer_id]) continue;
@@ -141,10 +125,7 @@ export function Mesh() {
     try {
       const settings = await api.updateSettings({ mesh_enabled: next });
       setMeshEnabledSetting(settings.mesh_enabled ?? next);
-      // The PUT above already blocked on building the real transport when
-      // turning mesh on (server-side hot-reload, #132 follow-up) — re-fetch
-      // `self` now so `self.mesh_enabled`/peer_id/invite_url reflect that
-      // immediately, instead of waiting for a manual reload of this screen.
+      // The PUT blocks until the transport is built, so `self` is current now.
       const fresh = await api.getMeshSelf();
       setSelf(fresh);
     } catch (e) {

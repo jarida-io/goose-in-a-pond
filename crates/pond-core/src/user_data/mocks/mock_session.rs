@@ -5,24 +5,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// In-memory session storage implementation for testing.
-///
-/// This mock implementation stores sessions and messages in memory using
-/// a HashMap protected by RwLock for thread-safe concurrent access.
+/// In-memory session storage for tests.
 pub struct InMemorySessionStorage {
     sessions: Arc<RwLock<HashMap<String, Session>>>,
     messages: Arc<RwLock<HashMap<String, Vec<SessionMessage>>>>,
     rolling_summaries: Arc<RwLock<HashMap<String, (String, String)>>>,
     /// GIAP session id -> agent-engine session id.
     engine_sessions: Arc<RwLock<HashMap<String, String>>>,
-    /// GIAP session id -> selected tool groups (Phase D2).
+    /// GIAP session id -> selected tool groups.
     tool_groups: Arc<RwLock<HashMap<String, Vec<String>>>>,
-    /// GIAP session id -> (title_source, title_through_message_id).
-    ///
-    /// Modelled here rather than left to the trait defaults because the
-    /// re-titling gate's whole job is telling these apart, and a mock that
-    /// always answered "unknown" would make the one rule worth testing —
-    /// never overwrite a name a person typed — untestable.
+    /// GIAP session id -> (title_source, title_through_message_id). Not left to the trait
+    /// defaults, or "never overwrite a name a person typed" would be untestable.
     title_provenance: Arc<RwLock<HashMap<String, (Option<String>, Option<String>)>>>,
 }
 
@@ -38,11 +31,8 @@ impl InMemorySessionStorage {
         }
     }
 
-    /// Write a title the machine chose, recording who wrote it.
-    ///
-    /// Deliberately does NOT touch `updated_at`, matching the SQLite adapter:
-    /// that column is one of the two activity sources the idle gate reads, so
-    /// a background rename that stamped it would read as a person coming back.
+    /// Write a machine-chosen title and its provenance. Leaves `updated_at` alone, as SQLite
+    /// does: the idle gate reads that column as a person's activity.
     async fn write_machine_title(
         &self,
         session_id: &str,
@@ -100,10 +90,8 @@ impl SessionStorage for InMemorySessionStorage {
         session_id: String,
         message: SessionMessage,
     ) -> Result<SessionMessage, SessionStorageError> {
-        // Ensure session exists
         self.get_session(&session_id).await?;
 
-        // Add message to the session
         let mut messages = self.messages.write().await;
         if let Some(msgs) = messages.get_mut(&session_id) {
             msgs.push(message.clone());
@@ -118,7 +106,6 @@ impl SessionStorage for InMemorySessionStorage {
         &self,
         session_id: &str,
     ) -> Result<Vec<SessionMessage>, SessionStorageError> {
-        // Ensure session exists
         self._get_session(session_id).await?;
 
         Ok(self
@@ -284,8 +271,7 @@ impl SessionStorage for InMemorySessionStorage {
         session_id: &str,
         engine_session_id: &str,
     ) -> Result<(), SessionStorageError> {
-        // Upsert, like the SQLite impl — and deliberately WITHOUT a session
-        // existence guard, matching the port contract.
+        // Upsert; no session-existence guard, per the port contract.
         self.engine_sessions
             .write()
             .await
@@ -305,8 +291,7 @@ impl SessionStorage for InMemorySessionStorage {
         session_id: &str,
         groups: &[String],
     ) -> Result<(), SessionStorageError> {
-        // Replaces the list wholesale and skips the session-existence guard,
-        // matching the SQLite impl and the port contract.
+        // Replace wholesale; no session-existence guard, per the port contract.
         self.tool_groups
             .write()
             .await
@@ -314,14 +299,8 @@ impl SessionStorage for InMemorySessionStorage {
         Ok(())
     }
 
-    // ── Image attachments (phase F2) ────────────────────────────────────────
-    //
-    // The mock keeps whole `SessionMessage`s, so images are already in memory —
-    // but a mock that hands them back through `get_messages` while the SQLite
-    // adapter does not would make any attachment test pass vacuously. So these
-    // methods project them out of the stored messages, and `get_messages` is
-    // left alone: callers must go through the attachment methods, exactly as
-    // they must against a real database.
+    // ── Image attachments ───────────────────────────────────────────────────
+    // Callers must fetch images through these, not `get_messages`, as with SQLite.
 
     async fn list_session_attachments(
         &self,
@@ -382,8 +361,7 @@ impl SessionStorage for InMemorySessionStorage {
             for m in msgs {
                 if m.id == message_id {
                     if let Some(img) = m.message.images.get(ordinal) {
-                        // The mock keeps base64; decoding here keeps the port's
-                        // "raw bytes out" contract honest.
+                        // Stored as base64, but the port contract is decoded bytes out.
                         let bytes = img.data.as_bytes().to_vec();
                         return Ok(Some((img.mime_type.clone(), bytes)));
                     }
@@ -395,7 +373,6 @@ impl SessionStorage for InMemorySessionStorage {
 }
 
 impl InMemorySessionStorage {
-    /// Internal helper method to check session existence without exposing get_session
     async fn _get_session(&self, session_id: &str) -> Result<(), SessionStorageError> {
         self.sessions
             .read()
@@ -439,8 +416,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// D2: tool groups round-trip, replace wholesale, and — matching the port
-    /// contract and the SQLite impl — do NOT require a `sessions` row.
     #[tokio::test]
     async fn tool_groups_round_trip_without_a_session_row() {
         let storage = InMemorySessionStorage::new();
@@ -564,7 +539,6 @@ mod tests {
                 .unwrap();
         }
 
-        // Get first 3 messages
         let page1 = storage
             .get_messages_paginated(&session_id, 3, 0)
             .await
@@ -573,7 +547,6 @@ mod tests {
         assert_eq!(page1[0].message.content, "Message 0");
         assert_eq!(page1[2].message.content, "Message 2");
 
-        // Get next 3 messages
         let page2 = storage
             .get_messages_paginated(&session_id, 3, 3)
             .await
@@ -581,7 +554,6 @@ mod tests {
         assert_eq!(page2.len(), 3);
         assert_eq!(page2[0].message.content, "Message 3");
 
-        // Offset past end
         let empty = storage
             .get_messages_paginated(&session_id, 3, 100)
             .await
@@ -597,11 +569,9 @@ mod tests {
             .await
             .unwrap();
 
-        // Title starts as None
         let session = storage.get_session("session-1").await.unwrap();
         assert_eq!(session.title, None);
 
-        // Update title
         storage
             .update_title("session-1", "My Chat".to_string())
             .await
@@ -609,7 +579,6 @@ mod tests {
         let session = storage.get_session("session-1").await.unwrap();
         assert_eq!(session.title, Some("My Chat".to_string()));
 
-        // Update title on nonexistent session fails
         let result = storage
             .update_title("nonexistent", "Nope".to_string())
             .await;
@@ -688,7 +657,6 @@ mod tests {
         let session_id = "session-1".to_string();
         storage.create_session(session_id.clone()).await.unwrap();
 
-        // First iteration: add a user message
         let user_msg = ChatMessage::user("First message");
         let session_msg1 = SessionMessage::new("msg-1".to_string(), session_id.clone(), user_msg);
         storage
@@ -696,7 +664,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Second iteration: add an assistant response
         let assistant_msg = ChatMessage::assistant("First response");
         let session_msg2 =
             SessionMessage::new("msg-2".to_string(), session_id.clone(), assistant_msg);
@@ -705,7 +672,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Verify both messages persist
         let messages = storage.get_messages(&session_id).await.unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].message.content, "First message");

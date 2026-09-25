@@ -1,7 +1,5 @@
-//! Unified append-only observability event (#108) the whole pipeline emits into.
-//!
-//! Attributes are typed, not an opaque blob, and every event carries a
-//! [`PrivacySensitivity`] so retention and export (Q2-40) can mask by policy.
+//! Unified append-only observability event. Attributes are typed, and every event carries a
+//! [`PrivacySensitivity`] so retention and export can mask by policy.
 
 use std::collections::BTreeMap;
 
@@ -24,8 +22,7 @@ pub enum EventCategory {
 }
 
 impl EventCategory {
-    /// Every variant, for exhaustive iteration (e.g. per-category retention).
-    /// Adding a variant breaks this array's length and forces an update.
+    /// Every variant, for exhaustive iteration; keep it in step by hand when adding one.
     pub const ALL: [EventCategory; 9] = [
         EventCategory::Agent,
         EventCategory::Tool,
@@ -39,8 +36,7 @@ impl EventCategory {
     ];
 }
 
-/// How sensitive an event's contents are. Drives retention and export policy
-/// (Q2-40); defaults to the most permissive only where explicitly chosen.
+/// How sensitive an event's contents are; drives retention and export policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrivacySensitivity {
@@ -108,8 +104,7 @@ pub struct Event {
 }
 
 impl Event {
-    /// Start a new event for `category`/`action`, stamped `now`, classified
-    /// `Internal` by default. Chain `.attr()` / `.session()` / `.sensitivity()`.
+    /// New event stamped now and classified `Internal`; chain `.attr()`, `.session()`, etc.
     pub fn new(category: EventCategory, action: impl Into<String>) -> Self {
         Self {
             category,
@@ -153,14 +148,9 @@ pub struct EventQuery {
     pub since: Option<DateTime<Utc>>,
     /// Exclusive upper bound on `timestamp`.
     pub until: Option<DateTime<Utc>>,
-    /// Minimum sensitivity (inclusive): match events whose `privacy_sensitivity`
-    /// is `>=` this on the `Public < Internal < Sensitive < Secret` ordering.
-    /// Used by sensitivity-aware retention to target sensitive activity.
+    /// Inclusive minimum on `Public < Internal < Sensitive < Secret`; used by retention.
     pub min_sensitivity: Option<PrivacySensitivity>,
-    /// Maximum sensitivity (inclusive): match events whose `privacy_sensitivity`
-    /// is `<=` this. Used by the audit/activity read paths to exclude `Secret`
-    /// events at the store, so a row `limit` counts only surfaceable events
-    /// (#157 review follow-up).
+    /// Inclusive maximum; excluding `Secret` in the store keeps `limit` to surfaceable rows.
     pub max_sensitivity: Option<PrivacySensitivity>,
     /// Cap on returned rows (newest first).
     pub limit: Option<usize>,

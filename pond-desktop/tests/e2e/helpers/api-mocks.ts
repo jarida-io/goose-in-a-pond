@@ -5,30 +5,19 @@ export function mockSseStream(events: Array<Record<string, unknown>>): string {
   return `${events.map((ev) => `data: ${JSON.stringify(ev)}`).join("\n\n")}\n\n`;
 }
 
-/**
- * Intercept all pond-api calls and return sensible mock data.
- * This prevents tests from requiring a running pond-server.
- *
- * Call `await mockAllApiRoutes(page)` in each test's beforeEach.
- */
+/** Mocks every pond-api route so no pond-server is needed; call it in each test's beforeEach. */
 export async function mockAllApiRoutes(page: Page): Promise<void> {
-  // Pin the API base to the conventional local server. In a real browser the
-  // app now defaults to window.location.origin (so the single-executable works
-  // same-origin over the LAN); in tests that origin is the Vite dev server,
-  // whose SPA fallback returns index.html for any UNMOCKED /api/* path, which
-  // would make the app's res.json() throw. Pinning a distinct cross-origin base
-  // keeps unmocked calls failing fast/gracefully, as they did before.
+  // Pin a cross-origin API base: same-origin would hit Vite's SPA fallback, which answers any
+  // unmocked /api/* path with index.html and breaks res.json().
   await page.addInitScript(() => {
     (window as unknown as { __GIAP_SERVER_URL__?: string }).__GIAP_SERVER_URL__ =
       "http://127.0.0.1:4000";
   });
 
-  // Health
   await page.route("**/api/v1/health", (route) =>
     route.fulfill({ json: { status: "ok", version: "test" } }),
   );
 
-  // Handshake
   await page.route("**/api/v1/handshake", (route) =>
     route.fulfill({ json: { token: "e2e-test-token", session_id: "e2e-session" } }),
   );
@@ -41,15 +30,13 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     });
   });
 
-  // Onboarding
   await page.route("**/api/v1/onboard/status", (route) =>
     route.fulfill({ json: { onboarded: true, current_step: "Completed", steps_completed: 10, total_steps: 10 } }),
   );
   await page.route("**/api/v1/onboard/complete", (route) =>
     route.fulfill({ json: { status: "completed" } }),
   );
-  // Per-step progress tracking (POST /onboard/step/:name) — echoes the reached
-  // step back in status shape.
+  // Echoes the reached step back in status shape.
   await page.route("**/api/v1/onboard/step/*", (route) => {
     const name = route.request().url().split("/").pop() ?? "Welcome";
     return route.fulfill({ json: { onboarded: false, current_step: name, steps_completed: 1, total_steps: 10 } });
@@ -59,7 +46,6 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     route.fulfill({ json: { onboarded: false, current_step: "Welcome", steps_completed: 1, total_steps: 10 } }),
   );
 
-  // Settings
   await page.route("**/api/v1/settings", (route) => {
     if (route.request().method() === "PUT") {
       return route.fulfill({ json: { assistant_name: "Pond", user_name: "Jerry", chat_provider: "llamafile", chat_model: "llama3.2", agent_memory_inject: false, prompt_style: "balanced", llm_temperature: 0.7, llm_max_tokens: 1024 } });
@@ -67,7 +53,6 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     return route.fulfill({ json: { assistant_name: "Pond", user_name: "Jerry", chat_provider: "llamafile", chat_model: "llama3.2", agent_memory_inject: false, prompt_style: "balanced", llm_temperature: 0.7, llm_max_tokens: 1024 } });
   });
 
-  // Schedules
   await page.route("**/api/v1/schedules", (route) => {
     if (route.request().method() === "POST") {
       const body = route.request().postDataJSON() as Record<string, string>;
@@ -82,19 +67,15 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     route.fulfill({ json: { status: "ok" } }),
   );
 
-  // Sessions. The list carries `message_count` so the sidebar badge renders.
-  // Individual tests override `**/api/v1/sessions` with populated data.
+  // Specs override this with populated sessions.
   await page.route("**/api/v1/sessions", (route) =>
     route.fulfill({ json: { sessions: [] } }),
   );
   await page.route("**/api/v1/sessions/*/messages", (route) =>
     route.fulfill({ json: { messages: [] } }),
   );
-  // Manual compaction (PAI-4 P7b). Defaults to the refusal a real install hits
-  // most often — the endpoint does not bypass the pressure axis's rate limiter,
-  // so "not under pressure" is the ordinary answer. Registered before the
-  // `/sessions/*` catch-all below so a spec can still override it (page.route
-  // is last-registered-wins, and that catch-all falls through for this path).
+  // Manual compaction: defaults to the common "not under pressure" refusal. Registered before
+  // the `/sessions/*` catch-all (last-registered wins; the catch-all falls through for it).
   await page.route("**/api/v1/sessions/*/compact", (route) =>
     route.fulfill({
       json: {
@@ -112,11 +93,7 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
       },
     }),
   );
-  // Rename (PATCH) and delete (DELETE) on an individual session. This pattern
-  // also matches `/sessions/:id/messages`, so fall through for those to let the
-  // more specific messages route above handle them. Echoes the body for PATCH
-  // and returns 204 for DELETE; specs that need stateful behaviour route these
-  // themselves before calling into the app.
+  // Session rename/delete. Also matches /messages and /compact, so those fall through.
   await page.route("**/api/v1/sessions/*", (route) => {
     const url = route.request().url();
     if (url.includes("/messages") || url.includes("/compact")) return route.fallback();
@@ -131,17 +108,13 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     return route.fulfill({ json: {} });
   });
 
-  // Models
   await page.route("**/api/v1/models/active-roles", (route) =>
     route.fulfill({ json: { chat: { provider: "llamafile", model: "llama3.2" }, think: {}, task: {}, asr: {}, tts: {}, router_name: "llamafile" } }),
   );
   await page.route("**/api/v1/models/memory-status", (route) =>
     route.fulfill({ json: { total_mb: 8192, available_for_llm_mb: 4096, loaded_model: null } }),
   );
-  // Prefix warm-up. Unmocked, this is the one request that still reached a real
-  // server during e2e — `ERR_CONNECTION_REFUSED` on 127.0.0.1:4000/api/v1/warmup
-  // — which failed the console-error assertion in hub-visual-verify. Mirrors
-  // `WarmupStatus::default()`: skipped, never run.
+  // Mirrors WarmupStatus::default(); unmocked, it hits the network and fails console checks.
   await page.route("**/api/v1/warmup", (route) =>
     route.fulfill({
       json: {
@@ -167,28 +140,21 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     route.fulfill({ json: { status: "ok" } }),
   );
 
-  // Devices
   await page.route("**/api/v1/devices", (route) =>
     route.fulfill({ json: { devices: [] } }),
   );
-  // The Devices tab reads this on mount for its Matter section. Off is the
-  // default a fresh Pond is in.
+  // Read by the Devices tab on mount; off is a fresh Pond's default.
   await page.route("**/api/v1/matter/status", (route) =>
     route.fulfill({ json: { enabled: false, url: "ws://127.0.0.1:5580/ws", state: "disabled" } }),
   );
 
-  // Music. `now-playing` is POLLED by the hub, so leaving it unmocked does not
-  // fail the music tests — it fails whichever unrelated test happens to assert
-  // a clean console. The request leaves the browser for 127.0.0.1:4000 and hits
-  // whatever is really listening: on a developer machine usually a live
-  // pond-server (CORS errors), in CI nothing at all (connection refused).
-  // That is what took out the hub state test.
+  // The hub polls now-playing; unmocked, it breaks unrelated clean-console assertions.
   await page.route("**/api/v1/music/now-playing", (route) =>
     route.fulfill({ json: { playing: false, track: null } }),
   );
   await page.route("**/api/v1/music/**", (route) => route.fulfill({ json: { status: "ok" } }));
 
-  // Mesh (#132) — no peers, mesh disabled by default in tests.
+  // Mesh: no peers, disabled by default in tests.
   await page.route("**/api/v1/mesh/peers", (route) => {
     if (route.request().method() === "POST") {
       const body = route.request().postDataJSON() as {
@@ -223,17 +189,14 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     route.fulfill({ json: { enabled: false } }),
   );
 
-  // Memories
   await page.route("**/api/v1/memories", (route) =>
     route.fulfill({ json: [] }),
   );
 
-  // Skills
   await page.route("**/api/v1/skills", (route) =>
     route.fulfill({ json: [] }),
   );
 
-  // Prompts
   await page.route("**/api/v1/prompts", (route) =>
     route.fulfill({ json: [] }),
   );
@@ -241,7 +204,6 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     route.fulfill({ json: { name: "balanced", content: "You are a helpful assistant.", is_system: true } }),
   );
 
-  // Agent
   await page.route("**/api/v1/agent/extras", (route) =>
     route.fulfill({ json: [] }),
   );
@@ -249,17 +211,14 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     route.fulfill({ json: [] }),
   );
 
-  // Recipes
   await page.route("**/api/v1/recipes", (route) =>
     route.fulfill({ json: [] }),
   );
 
-  // Transcribe (for voice pipeline)
   await page.route("**/api/v1/transcribe", (route) =>
     route.fulfill({ json: { text: "hello from transcription" } }),
   );
 
-  // Chat stream
   await page.route("**/api/v1/chat/stream", (route) =>
     route.fulfill({
       status: 200,
@@ -272,17 +231,14 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     }),
   );
 
-  // TTS
   await page.route("**/api/v1/tts", (route) =>
     route.fulfill({ status: 503, json: { error: "TTS not configured in tests" } }),
   );
 
-  // Profiles
   await page.route("**/api/v1/profiles", (route) =>
     route.fulfill({ json: [] }),
   );
 
-  // Extensions
   await page.route("**/api/v1/extensions", (route) => {
     if (route.request().method() === "POST") {
       const body = route.request().postDataJSON() as Record<string, unknown>;
@@ -308,7 +264,6 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     return route.fulfill({ json: { status: "ok" } });
   });
 
-  // Marketplace
   await page.route("**/api/v1/marketplace", (route) =>
     route.fulfill({
       json: {
@@ -398,7 +353,6 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     }),
   );
 
-  // Secrets
   await page.route("**/api/v1/secrets/*/exists", (route) =>
     route.fulfill({ json: { exists: false } }),
   );
@@ -408,26 +362,19 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     }
     return route.fulfill({ json: { keys: [] } });
   });
-  // The COLLECTION route. `secrets/**` above has a literal slash before the
-  // wildcard, so it does not match the bare `/api/v1/secrets` the Tools tab
-  // calls on mount (PAI-2 P2). Registered last on purpose: page.route is
-  // last-registered-wins, and this pattern is the more specific of the two.
+  // The bare collection path the Tools tab reads on mount; `secrets/**` doesn't match it.
   await page.route("**/api/v1/secrets", (route) =>
     route.fulfill({ json: { keys: [] } }),
   );
 
-  // Extensions secrets endpoint
   await page.route("**/api/v1/extensions/*/secrets", (route) => {
     if (route.request().method() === "POST") {
-      // Matches the documented contract: the route reports whether the running
-      // extension picked the new credentials up. A 204 here would exercise the
-      // undefined-body path rather than the one users hit.
+      // The documented response shape; a 204 would test the undefined-body path users never hit.
       return route.fulfill({ json: { stored: 1, restarted: false, restart_error: null } });
     }
     return route.fulfill({ json: { requirements: [], fulfilled: {} } });
   });
 
-  // Logs
   await page.route("**/api/v1/logs", (route) =>
     route.fulfill({
       json: [
@@ -438,7 +385,6 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     }),
   );
 
-  // Usage
   await page.route("**/api/v1/usage", (route) =>
     route.fulfill({
       json: {
@@ -456,8 +402,7 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
   await page.route("**/api/v1/oauth/**", (route) =>
     route.fulfill({ json: { auth_url: "https://accounts.spotify.com/authorize?test=1", state: "test-state" } }),
   );
-  // The sign-in modal polls this for the outcome of the flow it started; it no
-  // longer infers success from the token key existing.
+  // The sign-in modal polls this for the flow's outcome.
   await page.route("**/api/v1/oauth/status/**", (route) =>
     route.fulfill({ json: { status: "completed" } }),
   );

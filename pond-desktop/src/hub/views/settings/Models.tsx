@@ -20,7 +20,6 @@ const SICN = {
 // ─── Role tile definitions ────────────────────────────────────
 interface RoleTile {
   role: string;
-  /** Key in ModelActiveRoles */
   key: keyof ModelActiveRoles;
   icon: string;
   c: string;
@@ -262,7 +261,6 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
               const active = isChatActive(m);
               const activateKey = `${m.provider}/${m.name}/chat`;
               const isActivating = activating === activateKey;
-              // Derive tags from recommended_role and model name
               const tags: string[] = [];
               if (m.recommended_role === "chat" || (!m.recommended_role && isLlmModel(m))) tags.push("chat");
               if (/gemma.?4|qwen3|qwq|deepseek.?r1/.test(m.name.toLowerCase())) tags.push("think");

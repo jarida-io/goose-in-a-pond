@@ -1,11 +1,5 @@
-//! Voice-loop control phrases — the things you say to the assistant *about*
-//! the conversation rather than to be answered.
-//!
-//! In the leaf crate because three surfaces have to agree on the list: the
-//! terminal loop that intercepts them, the speculative gate that must not
-//! fire the LLM on one, and the desktop shell — a separate cargo workspace
-//! that cannot see `pond-core`. It existed twice before, and a phrase added
-//! to one copy simply did not work on the other surface.
+//! Voice-loop control phrases, kept in this leaf crate so the terminal loop, the speculative
+//! gate and the desktop shell (a separate workspace) share one list.
 
 /// What a spoken phrase means to the loop itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,11 +12,7 @@ pub enum VoiceCommand {
     Normal,
 }
 
-/// Classify a transcript as a control phrase or ordinary speech.
-///
-/// Matches the WHOLE utterance, never a substring: "stop" ends the session,
-/// but "stop the kitchen timer" is a request and must reach the model.
-/// Trailing `.`/`!` are whisper's, not the speaker's.
+/// Matches the whole utterance, never a substring: "stop the kitchen timer" is a request.
 pub fn classify(text: &str) -> VoiceCommand {
     let lower = text.trim().to_lowercase();
     let lower = lower.trim_end_matches(|c: char| c == '.' || c == '!');
@@ -36,16 +26,12 @@ pub fn classify(text: &str) -> VoiceCommand {
     }
 }
 
-/// Whether `text` is any control phrase, dismissal or exit.
-///
-/// The speculative path uses this to avoid firing inference on a phrase the
-/// loop is going to intercept anyway.
+/// Any control phrase; the speculative path skips inference on these.
 pub fn is_control_phrase(text: &str) -> bool {
     !matches!(classify(text), VoiceCommand::Normal)
 }
 
-/// The farewell to speak for a control phrase, and whether it ends the
-/// process. `None` for ordinary speech.
+/// Farewell text and whether it ends the process; `None` for ordinary speech.
 pub fn farewell_for(text: &str) -> Option<(&'static str, bool)> {
     match classify(text) {
         VoiceCommand::Dismissal => {
@@ -75,8 +61,6 @@ mod tests {
         assert_eq!(farewell_for("bye").unwrap().1, false, "dismissal sleeps");
     }
 
-    /// The important one. These contain a control word but are requests, and
-    /// a substring match would swallow them instead of answering.
     #[test]
     fn a_request_containing_a_control_word_is_not_a_control_phrase() {
         for phrase in [

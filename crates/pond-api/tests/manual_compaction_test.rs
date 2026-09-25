@@ -1,15 +1,4 @@
-//! `POST /api/v1/sessions/:id/compact` — the manual press, after C4.
-//!
-//! What this file used to test is gone with its subject. The press had to
-//! coexist with an automatic pressure axis: claim without starving it, refuse
-//! mid-pass, spend no second model call. Since C4 the engine owns compaction,
-//! there is no GIAP-side pass to collide with, and the press simply asks goose
-//! to compact.
-//!
-//! What remains is wiring, which is all this file was ever for: the endpoint
-//! refuses an unsaturated session and reports its real utilisation, 404s an
-//! unknown session, names the switch when the monitor is off, and — the one
-//! inverted assertion — no longer refuses because a GIAP setting is off.
+//! Wiring for `POST /api/v1/sessions/:id/compact`, which asks the engine (goose) to compact.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -86,10 +75,7 @@ impl DeviceRegistry for MockDeviceRegistry {
     }
 }
 
-/// A summariser that counts its calls and can be held open on demand. Counting is the only
-/// honest assertion of the through-pointer bound, since a pass that answered `NothingToDo`
-/// and one that ran are both reported `skipped`. Holding makes the `already_running` guard
-/// deterministic: the second request goes out once the first is provably in the model call.
+/// A summariser that counts its calls and can be held open on demand.
 struct CountingProvider {
     calls: Arc<AtomicUsize>,
     entered: Arc<tokio::sync::Notify>,
@@ -105,9 +91,7 @@ impl pond_core::models::ports::provider::LlmProvider for CountingProvider {
         _messages: Vec<ChatMessage>,
     ) -> anyhow::Result<ChatMessage> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        // `notify_one`, not `notify_waiters`: it stores a permit when nobody is
-        // waiting yet, so the test cannot lose the signal by polling late. That
-        // race is exactly how a deterministic test degrades into a timed one.
+        // `notify_one` stores a permit if nobody waits yet, so a late poll cannot miss it.
         self.entered.notify_one();
         if let Some(release) = &self.release {
             release.notified().await;
@@ -150,8 +134,7 @@ async fn make_app_with_provider(
         session_storage,
         http_client: ReqwestClient::new(),
         agent: Arc::new(MockAgent::new()),
-        // The summariser the pass runs on. Without one the endpoint answers
-        // `no_summariser` and every assertion below would be about that branch.
+        // Without a summariser the endpoint answers `no_summariser`.
         llm_provider: Arc::new(tokio::sync::RwLock::new(Some(provider))),
         llamafile_url: "http://127.0.0.1:8080".to_string(),
         tts: None,
@@ -247,8 +230,7 @@ fn compact_request(session_id: &str) -> Request<Body> {
         .unwrap()
 }
 
-/// Status code first, then the body — a body predicate read off an error payload
-/// reports the opposite of the truth.
+/// Asserts the status before returning the body: an error payload can fool a body predicate.
 async fn compact(app: &axum::Router, session_id: &str) -> Value {
     let resp = app
         .clone()
@@ -266,8 +248,7 @@ async fn compact(app: &axum::Router, session_id: &str) -> Value {
     serde_json::from_slice(&bytes).expect("compact response is not JSON")
 }
 
-/// Seed enough history that the rolling-summary refresh has something to fold:
-/// it keeps the newest 6 messages verbatim and needs at least 4 older ones.
+/// Seed history the rolling-summary refresh can fold: it keeps 6 verbatim and needs 4 older.
 async fn seed_history(state: &Arc<AppState>, session_id: &str, count: usize) {
     for i in 0..count {
         let msg = if i % 2 == 0 {
@@ -286,7 +267,7 @@ async fn seed_history(state: &Arc<AppState>, session_id: &str, count: usize) {
     }
 }
 
-/// Put the session where the pressure axis would already be firing.
+/// Record a turn that saturates the session's context window.
 fn saturate(state: &Arc<AppState>, session_id: &str) {
     state.context_monitor.record_turn(session_id, 7000, 8192);
     let health = state.context_monitor.check_context_health(session_id);
@@ -301,9 +282,7 @@ fn saturate(state: &Arc<AppState>, session_id: &str) {
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
-/// A refusal has to say why. A control that silently does nothing is
-/// indistinguishable from a broken one, and this is the refusal a user will hit
-/// most: pressing the button on a conversation that is nowhere near full.
+/// A refusal must say why: a silent no-op is indistinguishable from a broken button.
 #[tokio::test]
 async fn an_unsaturated_session_is_refused_with_its_real_utilisation() {
     let (app, state, _tmp) = make_app().await;
@@ -326,8 +305,7 @@ async fn an_unsaturated_session_is_refused_with_its_real_utilisation() {
         "the report did not carry the session's real utilisation: {body}",
     );
 
-    // And it must not have burned the claim on the way to refusing: the session
-    // is still eligible the moment it does come under pressure.
+    // Refusing must not spend the compaction claim.
     state.context_monitor.record_turn(&session.id, 7000, 8192);
     assert!(
         state.context_monitor.claim_compaction(&session.id),
@@ -347,17 +325,7 @@ async fn compacting_an_unknown_session_is_a_404() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-/// Turning the GIAP-side context features off does NOT disable the button.
-///
-/// It used to: the manual axis read the same switch as the time and pressure
-/// axes, and acting would have resurrected half a feature the user turned off.
-/// Those axes are gone — the press asks the ENGINE to compact, and the engine
-/// compacts on its own threshold whatever this setting says. Refusing here
-/// while automatic compaction carries on regardless would tell the user
-/// compaction is off while they watch it happen.
-///
-/// Inverted rather than deleted: a test that asserted the old gate and was
-/// simply removed leaves nothing saying the gate went on purpose.
+/// The engine compacts regardless of the GIAP-side setting, so refusing here would mislead.
 #[tokio::test]
 async fn the_hybrid_compaction_switch_no_longer_disables_the_manual_axis() {
     let (app, state, _tmp) = make_app().await;
@@ -382,17 +350,12 @@ async fn the_hybrid_compaction_switch_no_longer_disables_the_manual_axis() {
         body["reason"], "compaction_disabled",
         "the setting still gates the press: {body}"
     );
-    // The MockAgent has no manual compaction, so the press reaches the engine
-    // and is honestly reported as having nothing to do — which is the point.
-    // What must NOT happen is a refusal that names the setting.
+    // MockAgent has no manual compaction: "nothing to do", not a refusal naming the setting.
     assert_eq!(body["status"], "skipped", "{body}");
     assert_eq!(body["reason"], "nothing_to_summarise", "{body}");
 }
 
-/// With the monitor off, nothing ever calls `record_turn`, so every utilisation
-/// number the endpoint could report is a zero that means "not measured". Saying
-/// `not_under_pressure` there would be a confident lie about a session nobody
-/// measured; the reason has to name the switch instead.
+/// With the monitor off utilisation is never measured, so the reason must name the switch.
 #[tokio::test]
 async fn a_disabled_monitor_is_reported_as_such_not_as_an_empty_window() {
     let (app, state, _tmp) = make_app().await;

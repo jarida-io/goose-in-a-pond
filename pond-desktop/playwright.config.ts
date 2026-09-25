@@ -1,16 +1,8 @@
 import { defineConfig, devices } from "@playwright/test";
 
 /**
- * Playwright E2E configuration for pond-desktop.
- *
- * Tests run against the Vite dev server (npm run dev → http://localhost:5173).
- * In non-Tauri context, AppContext.tsx marks server online immediately so
- * all sections render without requiring a running pond-server process.
- *
- * API calls are intercepted via page.route() mocks in each test.
- *
- * Run: npx playwright test
- * Run with UI: npx playwright test --ui
+ * E2E against the Vite dev server; each test mocks the API with page.route(). Outside the
+ * desktop shell AppContext.tsx marks the server online, so no pond-server is needed.
  */
 
 export default defineConfig({
@@ -43,9 +35,7 @@ export default defineConfig({
       },
     },
   ],
-  // Automatically start the Vite dev server before running tests.
-  // Use dev:vite (Vite only) rather than dev (Vite + pond-server) so that
-  // the --port flag is not forwarded to pond-server, which rejects it.
+  // dev:vite, not dev: dev would forward --port to pond-server, which rejects it.
   webServer: {
     command: "npm run dev:vite -- --port 5173",
     url: "http://localhost:5173",

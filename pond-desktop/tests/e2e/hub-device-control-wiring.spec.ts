@@ -1,8 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
 
-// Verifies the Hub device surfaces actuate through the backend device-control
-// MCP tool via POST /api/v1/tools/invoke (bypassing the LLM), with optimistic UI.
+// Hub device tiles actuate via POST /api/v1/tools/invoke (no LLM), with optimistic UI.
 
 async function openHubHome(page: import("@playwright/test").Page) {
   await mockAllApiRoutes(page);
@@ -44,7 +43,6 @@ test("device tile click fires POST /tools/invoke with the device-control tool", 
 
 test("optimistic state reverts when the backend call fails", async ({ page }) => {
   await mockAllApiRoutes(page);
-  // Override the invoke route to fail.
   await page.route("**/api/v1/tools/invoke", (route) =>
     route.fulfill({ status: 500, json: { error: "device offline" } }),
   );
@@ -60,6 +58,5 @@ test("optimistic state reverts when the backend call fails", async ({ page }) =>
   await expect(tile.locator(".dtile__status")).toHaveText("Off", { timeout: 5000 });
   await tile.click({ position: { x: 60, y: 80 } });
 
-  // Optimistic flips to On, then reverts to Off after the 500 response.
   await expect(tile.locator(".dtile__status")).toHaveText("Off", { timeout: 5000 });
 });

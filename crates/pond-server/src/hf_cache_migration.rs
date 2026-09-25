@@ -1,27 +1,5 @@
-//! One-shot migration of pre-existing flat model files into the HF-compatible
-//! content-addressed cache layout.
-//!
-//! Walks well-known flat directories (`models/gguf/*.gguf`, `models/ggml-*.bin`,
-//! `models/llm/*.llamafile`, `models/tts/*.{onnx,onnx.json}`,
-//! `models/embedding/**`). For each regular file (skipping symlinks):
-//!
-//! 1. Stream-hash the file with sha256, take the first 40 hex chars as the
-//!    synthetic etag (matches HF's LFS encoding for non-LFS migrations).
-//! 2. Construct a path under a synthetic repo `giap-local/{stem}` so the cache
-//!    layout matches every other HF-sourced file:
-//!    `{cache_root}/hub/models--giap-local--{stem}/blobs/{hash}`.
-//! 3. Move the flat file to the blob path (atomic rename on same fs; copy +
-//!    remove on cross-fs failure). If a blob already exists with matching size,
-//!    just remove the flat file.
-//! 4. Replace the original flat path with a unix symlink to the blob.
-//!
-//! Idempotency is filesystem-marker based: after one full attempt we write
-//! `{cache_root}/.migrated`; subsequent calls return an empty report fast.
-//! Per-file errors do NOT halt the migration — they are accumulated into
-//! `MigrationReport::errors` so the caller can log and move on.
-//!
-//! Non-unix builds compile to a no-op (symlinks are not supported uniformly on
-//! Windows; PR scope is unix-first per the design plan).
+//! One-shot move of flat model files into the HF cache as `giap-local/{stem}` blobs, leaving
+//! symlinks behind. `{cache_root}/.migrated` makes it run once; no-op off unix.
 
 use std::path::{Path, PathBuf};
 
@@ -52,12 +30,7 @@ fn marker_path(data_dir: &Path) -> PathBuf {
     HfCache::new(data_dir).root().join(".migrated")
 }
 
-/// Run the migration once. Idempotent: subsequent calls return an empty report
-/// without walking the filesystem.
-///
-/// Errors during individual file migrations are collected into
-/// `MigrationReport::errors`; only catastrophic failures (e.g. unable to write
-/// the marker file) are returned via the outer `Result`.
+/// Run the migration once (later calls are no-ops); per-file failures go to `errors`.
 pub async fn migrate_flat_files_to_blobs(data_dir: &Path) -> anyhow::Result<MigrationReport> {
     let marker = marker_path(data_dir);
     if tokio::fs::metadata(&marker).await.is_ok() {
@@ -73,10 +46,7 @@ pub async fn migrate_flat_files_to_blobs(data_dir: &Path) -> anyhow::Result<Migr
         MigrationReport::default()
     };
 
-    // Always write the marker after one attempt — even on per-file failures.
-    // The plan biases toward "run once, log errors, move on"; surfacing the
-    // errors via the report lets the caller decide whether to surface them
-    // further, but we don't want to re-walk the filesystem every boot.
+    // Write the marker even after per-file failures: never re-walk the filesystem every boot.
     if let Some(parent) = marker.parent() {
         tokio::fs::create_dir_all(parent).await.ok();
     }
@@ -94,7 +64,6 @@ async fn unix_migrate(data_dir: &Path) -> MigrationReport {
     let mut report = MigrationReport::default();
     let models_root = data_dir.join("models");
     if tokio::fs::metadata(&models_root).await.is_err() {
-        // No models dir at all — nothing to do.
         return report;
     }
 
@@ -164,8 +133,7 @@ async fn walk_dir(
     while let Some(entry) = rd.next_entry().await? {
         let path = entry.path();
 
-        // symlink_metadata to avoid following links — we want to detect
-        // pre-existing symlinks and skip them.
+        // symlink_metadata: detect existing symlinks instead of following them.
         let meta = match tokio::fs::symlink_metadata(&path).await {
             Ok(m) => m,
             Err(e) => {
@@ -175,8 +143,7 @@ async fn walk_dir(
         };
 
         if meta.file_type().is_symlink() {
-            // Only count symlinks that match our accept filter — random
-            // dotfiles in models/ shouldn't show up in the report.
+            // Count only accepted symlinks, so stray dotfiles stay out of the report.
             if accept(&path) {
                 report.skipped_symlinks += 1;
             }
@@ -248,7 +215,6 @@ async fn migrate_one(flat_path: &Path, file_size: u64, data_dir: &Path) -> anyho
         }
     }
 
-    // Replace flat path with a symlink to the blob.
     let blob_owned = blob_path.clone();
     let flat_owned = flat_path.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -265,9 +231,7 @@ async fn migrate_one(flat_path: &Path, file_size: u64, data_dir: &Path) -> anyho
     Ok(())
 }
 
-/// Compute the sha256 of `path` and return the first 40 hex chars. Runs the
-/// blocking I/O + hashing on a `spawn_blocking` thread to avoid stalling the
-/// tokio runtime on multi-GB GGUF files.
+/// First 40 hex chars of `path`'s sha256, HF etag length; hashed on a blocking thread.
 #[cfg(unix)]
 async fn sha256_first_40(path: &Path) -> anyhow::Result<String> {
     use sha2::{Digest, Sha256};

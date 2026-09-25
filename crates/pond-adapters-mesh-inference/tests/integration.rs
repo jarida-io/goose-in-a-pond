@@ -1,7 +1,4 @@
-//! In-process, loopback-only integration tests for mesh inference (#132
-//! Milestone 3): two real `Libp2pMeshTransport` nodes on `127.0.0.1` with mocked
-//! `PeerDirectory`/`CreditLedger`/`UsageTally`. No real hardware or public
-//! network is touched, so no test is `#[ignore]`d.
+//! Mesh inference between two real loopback `Libp2pMeshTransport` nodes, with mocked ports.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,10 +37,7 @@ fn model() -> ModelHash {
     ModelHash::from([2u8; 32])
 }
 
-/// The transport's own connection-level `PeerDirectory`, separate from any
-/// `MeshInferenceService`'s (application-level trust) — returned alongside
-/// the transport so a test can grant trust once both sides' peer ids are
-/// known (`connect` does this).
+/// Also returns the transport's own connection-level `PeerDirectory`, which `connect` fills.
 async fn spawn_transport() -> (Arc<Libp2pMeshTransport>, Arc<MockPeerDirectory>) {
     let directory = Arc::new(MockPeerDirectory::new());
     let config = Libp2pMeshTransportConfig {
@@ -59,9 +53,7 @@ async fn spawn_transport() -> (Arc<Libp2pMeshTransport>, Arc<MockPeerDirectory>)
     )
 }
 
-/// Poll `listen_addresses()` until at least one address is confirmed —
-/// binding to `tcp/0` resolves the actual port asynchronously. Mirrors
-/// `pond-adapters-mesh-libp2p`'s own integration test helper.
+/// Poll until a listen address is confirmed: `tcp/0` resolves its port asynchronously.
 async fn wait_for_listen_address(node: &Libp2pMeshTransport) -> String {
     for _ in 0..200 {
         let addrs = node.listen_addresses().await.unwrap();
@@ -73,10 +65,7 @@ async fn wait_for_listen_address(node: &Libp2pMeshTransport) -> String {
     panic!("node never reported a listen address");
 }
 
-/// Grants `a` and `b` mutual transport-level trust, connects `a` to `b`, and
-/// waits until both `connected_peers()` agree — the listener only learns about
-/// `a` once the handshake arrives. Trust is not symmetric, so both directions
-/// are stated (mirrors `pond-adapters-mesh-libp2p`'s own test helper).
+/// Trust both ways (trust is not symmetric), dial `a` → `b`, and wait until both sides see it.
 async fn connect(
     a: &Libp2pMeshTransport,
     a_dir: &MockPeerDirectory,
@@ -114,8 +103,6 @@ async fn a_low_power_pond_is_served_by_a_trusted_peer_and_gets_correct_output() 
     let (b_transport, b_dir) = spawn_transport().await; // the borrower
     connect(&b_transport, &b_dir, &a_transport, &a_dir).await;
 
-    // A serves with MockProvider (its own already-active local model, stood
-    // in for a real ollama/llamafile/local instance).
     let a_service = MeshInferenceService::spawn(
         a_transport.clone(),
         Arc::new(MockPeerDirectory::new()),
@@ -129,8 +116,7 @@ async fn a_low_power_pond_is_served_by_a_trusted_peer_and_gets_correct_output() 
     );
     let _ = &a_service; // keeps the responder alive for the duration of the test
 
-    // B only ever borrows in this test — its own backing provider is never
-    // invoked, but the service still needs one to construct.
+    // B only borrows; its backing provider is required but never invoked.
     let b_peer_directory = Arc::new(MockPeerDirectory::new());
     let b_credit_ledger = Arc::new(MockCreditLedger::new());
     b_peer_directory
@@ -166,9 +152,7 @@ async fn a_low_power_pond_is_served_by_a_trusted_peer_and_gets_correct_output() 
     .expect("request timed out")
     .expect("request failed");
 
-    // Exactly what MockProvider's canned response produces — proves the
-    // request really crossed the mesh to A and the reply really came back,
-    // not a local echo.
+    // MockProvider's canned reply: the request crossed the mesh and came back.
     assert_eq!(response.content, "Mock response to: What's the weather?");
 }
 
@@ -234,9 +218,7 @@ async fn stream_complete_yields_a_terminal_usage_token() {
     assert!(saw_usage, "expected a terminal usage token");
 }
 
-/// Streams far more chunks than any reasonable `max_tokens` cap —
-/// `MockProvider` only yields a single Text chunk, which can never
-/// exercise a mid-stream cutoff.
+/// Streams far past any `max_tokens` cap, to exercise a mid-stream cutoff.
 struct LongWindedProvider;
 
 #[async_trait::async_trait]
@@ -266,7 +248,6 @@ impl LlmProvider for LongWindedProvider {
     }
 }
 
-/// The lender must stop at `request.max_tokens`, not stream unbounded.
 #[tokio::test]
 async fn lender_stops_at_max_tokens_instead_of_streaming_the_whole_response() {
     let (a_transport, a_dir) = spawn_transport().await; // the lender
@@ -342,9 +323,6 @@ async fn lender_stops_at_max_tokens_instead_of_streaming_the_whole_response() {
     );
 }
 
-/// Borrowing must actually spend the credit balance down, at the fixed
-/// `MESH_SETTLEMENT_MILLISATS_PER_TOKEN` rate — always, not conditionally on
-/// a per-Pond setting (there is no such setting to turn it off any more).
 #[tokio::test]
 async fn borrowing_always_debits_the_credit_ledger_at_the_fixed_rate() {
     let (a_transport, a_dir) = spawn_transport().await; // the lender
@@ -412,8 +390,6 @@ async fn borrowing_always_debits_the_credit_ledger_at_the_fixed_rate() {
     );
 }
 
-/// Lending refuses once the ceiling is crossed, then allows again once the
-/// (short, test-only) window rolls over.
 #[tokio::test]
 async fn lend_window_refuses_once_the_ceiling_is_crossed_then_resets() {
     let (a_transport, a_dir) = spawn_transport().await; // the lender
@@ -434,8 +410,7 @@ async fn lend_window_refuses_once_the_ceiling_is_crossed_then_resets() {
         a_settings,
         Arc::new(MockProvider::new()),
         PRODUCTION_LIKE_TIMEOUT,
-        // Short test window, but longer than MockProvider's 100ms per-request
-        // delay so two requests don't roll it over on their own.
+        // Longer than MockProvider's 100ms delay, so two requests don't roll it over.
         Duration::from_secs(2),
         None,
     );
@@ -473,19 +448,16 @@ async fn lend_window_refuses_once_the_ceiling_is_crossed_then_resets() {
         )
     };
 
-    // First reply is under the ceiling of 5 on its own — succeeds.
     ask().await.expect("request timed out").expect(
         "first request should be within the ceiling — MockProvider's reply is far under 5 tokens",
     );
 
-    // Second pushes the window total over 5 — must be refused.
     let refused = ask().await.expect("request timed out");
     assert!(
         refused.is_err(),
         "expected the second request to be refused once the window's ceiling was crossed"
     );
 
-    // A rolling throttle, not a permanent ban — succeeds again once the window rolls over.
     tokio::time::sleep(Duration::from_millis(2_200)).await;
     ask()
         .await
@@ -526,9 +498,7 @@ async fn insufficient_balance_is_refused_before_any_network_call() {
         .await;
 
     let err = result.expect_err("zero-balance request must be refused");
-    // NoPeerAvailable (not Timeout/Transport) proves peer selection failed
-    // before any frame was ever sent — the hot-path budget has no network
-    // round trip in it.
+    // NoPeerAvailable, not Timeout/Transport: selection failed before any frame was sent.
     assert!(
         err.to_string().contains("no trusted, connected, funded"),
         "unexpected error: {err}"
@@ -584,8 +554,7 @@ async fn a_malformed_inbound_frame_does_not_crash_the_service() {
     let (b_transport, b_dir) = spawn_transport().await;
     connect(&b_transport, &b_dir, &a_transport, &a_dir).await;
 
-    // B's service is the one whose recv loop / dispatch must survive this —
-    // it's the side about to receive garbage.
+    // B receives the garbage; its recv loop must survive it.
     let b_peer_directory = Arc::new(MockPeerDirectory::new());
     let b_credit_ledger = Arc::new(MockCreditLedger::new());
     b_peer_directory
@@ -620,16 +589,14 @@ async fn a_malformed_inbound_frame_does_not_crash_the_service() {
         None,
     );
 
-    // Bypass the wire encoding entirely — MeshTransport::send takes opaque
-    // bytes, so this reaches B's MeshFrame::decode with garbage.
+    // `send` takes opaque bytes, so this hands B's `MeshFrame::decode` garbage.
     a_transport
         .send(b_transport.local_peer_id(), vec![0xff, 0x00, 0x01])
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // A subsequent, well-formed request still works — proves the garbage
-    // frame was logged and dropped, not a panic that killed B's recv loop.
+    // A well-formed request still works, so the garbage did not kill B's recv loop.
     let response = tokio::time::timeout(
         Duration::from_secs(5),
         b_service.provider().complete(
@@ -649,8 +616,7 @@ async fn stream_times_out_if_the_peer_never_replies() {
     let (b_transport, b_dir) = spawn_transport().await;
     connect(&b_transport, &b_dir, &a_transport, &a_dir).await;
 
-    // Deliberately no service spawned on A's side — nothing will ever answer
-    // B's InferenceRequest, so the chunk timeout has to fire.
+    // No service on A, so nothing answers and the chunk timeout must fire.
     let b_peer_directory = Arc::new(MockPeerDirectory::new());
     let b_credit_ledger = Arc::new(MockCreditLedger::new());
     b_peer_directory
@@ -788,8 +754,7 @@ async fn querying_capabilities_reflects_the_peers_real_payment_rail_state() {
     let (b_transport, b_dir) = spawn_transport().await; // the peer asking
     connect(&b_transport, &b_dir, &a_transport, &a_dir).await;
 
-    // A has a payment rail configured — inference is always available (a
-    // backing_provider is mandatory to construct the service at all).
+    // A has a payment rail; inference is always available.
     let a_service = MeshInferenceService::spawn(
         a_transport.clone(),
         Arc::new(MockPeerDirectory::new()),
@@ -827,9 +792,7 @@ async fn querying_capabilities_reflects_the_peers_real_payment_rail_state() {
     assert!(capabilities.lightning_available);
 }
 
-/// Yields pure `<think>...</think>` on its first `fail_first_n` calls, then a
-/// real answer. `calls` counts every `stream_complete` invocation, so a test can
-/// assert the lender retried locally rather than shipping the empty attempt.
+/// Yields only `<think>...</think>` for the first `fail_first_n` calls, then a real answer.
 struct EmptyThenRealProvider {
     fail_first_n: usize,
     calls: std::sync::atomic::AtomicUsize,
@@ -875,10 +838,6 @@ impl LlmProvider for EmptyThenRealProvider {
     }
 }
 
-/// The exact case #2 exists for: a lender whose bare completion produces
-/// only reasoning on its first attempt must retry locally and ship the
-/// borrower the real answer once it gets one — never the empty attempt, and
-/// never surfacing the retry as a failure.
 #[tokio::test]
 async fn a_lend_side_empty_completion_is_retried_and_the_real_answer_reaches_the_borrower() {
     let (a_transport, a_dir) = spawn_transport().await; // the lender
@@ -943,10 +902,7 @@ async fn a_lend_side_empty_completion_is_retried_and_the_real_answer_reaches_the
         "expected exactly one retry: the first (empty) attempt plus the real one"
     );
 
-    // The whole point of `charged_tokens`: the lender's bill (which includes
-    // the discarded empty attempt) and the borrower's own record of what it
-    // owes must be the exact same number — not the borrower silently
-    // under-counting because it only ever saw the real attempt's tokens.
+    // Lender's bill (incl. the discarded attempt) and borrower's debt must be equal.
     let a_lent = a_usage_tally
         .pending_lent(b_transport.local_peer_id())
         .await
@@ -965,9 +921,7 @@ async fn a_lend_side_empty_completion_is_retried_and_the_real_answer_reaches_the
     );
 }
 
-/// A lender that never produces visible text must still terminate with a usage
-/// chunk, bounded at `MAX_EMPTY_COMPLETION_ATTEMPTS` calls, so an unproductive
-/// backing provider cannot become runaway local spend or a stuck borrower.
+/// Bounded at `MAX_EMPTY_COMPLETION_ATTEMPTS` calls, ending in a usage chunk.
 #[tokio::test]
 async fn a_lend_side_completion_that_never_produces_visible_text_still_terminates() {
     let (a_transport, a_dir) = spawn_transport().await; // the lender

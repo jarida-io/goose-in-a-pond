@@ -8,10 +8,7 @@ use crate::mesh::domain::peer_id::PeerId;
 use crate::mesh::domain::token_count::TokenCount;
 use crate::mesh::ports::usage_tally::{UsageTally, UsageTallyError};
 
-/// In-memory usage tally for testing. A peer with no recorded usage has a
-/// zero pending tally rather than a missing entry. Borrowed and lent are
-/// tracked in separate maps so a test can never accidentally read one
-/// direction back as the other.
+/// In-memory usage tally; an unrecorded peer has zero pending, not a missing entry.
 pub struct MockUsageTally {
     borrowed: Arc<RwLock<HashMap<PeerId, TokenCount>>>,
     lent: Arc<RwLock<HashMap<PeerId, TokenCount>>>,

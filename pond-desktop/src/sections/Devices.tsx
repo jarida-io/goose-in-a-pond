@@ -11,14 +11,12 @@ import { api } from "../api/PondApiClient";
 import { ApiError, type Device, type MatterStatus } from "../api/types";
 import { refreshHomeData } from "../hub/state/hubDataStore";
 
-/** The server's own message, without the `ApiError:` prefix `String(e)` adds.
- *  Users were being shown the exception class name alongside the advice. */
+/** The server's own message, without the `ApiError:` prefix `String(e)` adds. */
 function errorText(e: unknown): string {
   return e instanceof ApiError ? e.message : String(e);
 }
 
-/** How the Matter section reads in each state. Kept as data so the chip, the
- *  hint, and the commission gate cannot drift apart. */
+/** Matter state labels, kept as data so the chip, hint and commission gate agree. */
 const MATTER_STATE_LABEL: Record<MatterStatus["state"], string> = {
   disabled:    "Off",
   connecting:  "Starting…",
@@ -34,16 +32,13 @@ function DeviceIcon({ kind }: { kind: string | undefined }) {
   if (kind === "host")   return <Cpu size={22} />;
   if (kind === "gotg")   return <Smartphone size={22} />; // the mobile companion
   if (kind === "sensor") return <Activity size={22} />;
-  // Matter device types (inferred from clusters by the backend), so a
-  // commissioned bulb / lock / thermostat / fan / blind reads as what it is.
+  // Matter device types the backend infers from clusters.
   if (kind === "light")      return <Lightbulb size={22} />;
   if (kind === "lock")       return <Lock size={22} />;
   if (kind === "thermostat") return <Thermometer size={22} />;
   if (kind === "fan")        return <Fan size={22} />;
   if (kind === "covering")   return <Blinds size={22} />;
-  // Types the node states for itself via its Matter Descriptor. Without these a
-  // dishwasher arrives wearing a lightbulb, because On/Off is all a cluster can
-  // say about it.
+  // Types the node declares in its Matter Descriptor; by clusters alone a dishwasher looks like a light.
   if (kind === "plug")       return <PlugZap size={22} />;
   if (kind === "appliance")  return <WashingMachine size={22} />;
   if (kind === "pump")       return <Waves size={22} />;
@@ -51,15 +46,11 @@ function DeviceIcon({ kind }: { kind: string | undefined }) {
   if (kind === "media")      return <MonitorPlay size={22} />;
   if (kind === "vacuum")     return <Bot size={22} />;
   if (kind === "alarm")      return <BellRing size={22} />;
-  // A Generic Switch reports which way it is thrown and takes no orders, so it is
-  // its own type rather than a light with the controls missing. Until it had one it
-  // fell to the fallback below and arrived wearing a monitor.
+  // A Generic Switch reports its position and takes no commands, so it is not a light.
   if (kind === "switch")     return <ToggleLeft size={22} />;
-  // A hub that speaks for other devices — a Hue, Aqara or Tuya bridge. It appears
-  // beside the devices behind it and drives nothing itself.
+  // A hub (Hue, Aqara, Tuya) that speaks for other devices and drives nothing itself.
   if (kind === "bridge")     return <Router size={22} />;
-  // A valve is opened and shut, not switched on: it has no On/Off cluster at all,
-  // and before it had a type it arrived as an unknown device that could do nothing.
+  // A valve opens and shuts; it has no On/Off cluster.
   if (kind === "valve")      return <Droplet size={22} />;
   return <Monitor size={22} />;
 }
@@ -85,38 +76,17 @@ function timeSince(iso: string | null | undefined): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-/**
- * When a device was last heard from.
- *
- * A device that is online is being vouched for right now — "online" is derived
- * from having been heard from recently — so it reads "now" rather than counting
- * the minutes since the last heartbeat, which would tick 1, 2, 3 for a device
- * that never went anywhere. An offline one shows when it actually went quiet,
- * which is the number worth having then.
- */
+/** "now" while online (online means heard from recently); otherwise when it went quiet. */
 function lastSeen(device: Pick<Device, "is_online" | "last_seen">): string {
   return device.is_online ? "now" : timeSince(device.last_seen);
 }
 
-/** Can this device be told to turn on and off at all? */
 function canPower(d: Device): boolean {
   return d.capabilities?.includes("power") ?? false;
 }
 
-/**
- * Whether the device says it is on, from `get_device_state`'s text.
- *
- * `undefined` means it did not say — a device that is unreachable, or one whose
- * reply this cannot read. That is deliberately different from `false`: labelling a
- * button "Turn on" because a read failed is the mistake this whole change exists to
- * undo, only with a different wrong input.
- *
- * The format is a declared contract, not a guess: `state_line` in
- * `crates/pond-mcp-server/src/device_control.rs` writes these lines, and a test
- * there fails if their shape drifts. A dispatched MCP tool answers with text and
- * nothing else — `ToolCallResult` is `{content, success}` — so text is the channel
- * there is.
- */
+/** On/off from `get_device_state`'s text; `undefined`, not `false`, when it did not say.
+ *  Format: `state_line` in `crates/pond-mcp-server/src/device_control.rs` (a test pins it). */
 export function powerStateOf(content: string): boolean | undefined {
   const line = content.split("\n").find((l) => /^\s*power:/.test(l));
   if (line === undefined) return undefined;
@@ -147,9 +117,7 @@ export function Devices() {
   const [busyId, setBusyId]           = useState<string | null>(null);
   const [detail, setDetail]           = useState<Device | null>(null);
 
-  // What each power-capable device says it is: on, off, or (absent) it did not say.
-  // Read from the device rather than inferred from reachability, which is a different
-  // fact and was labelling the button before.
+  // Power as each device reports it; absent means it did not say (never inferred from reachability).
   const [powerOn, setPowerOn]         = useState<Record<string, boolean>>({});
 
   // Configure-modal edit state
@@ -170,13 +138,7 @@ export function Devices() {
       .finally(() => setLoading(false));
   }
 
-  /**
-   * Ask each device that can be switched what it currently is.
-   *
-   * Only those: a sensor has no power state to read, and asking would be a fabric
-   * round-trip for a device that has nothing to answer. A read that fails leaves the
-   * device absent from the map, and the button says so rather than guessing.
-   */
+  /** Ask each switchable device its power state; a failed read leaves it absent, not "off". */
   async function loadPowerStates(list: Device[]) {
     const switchable = list.filter(canPower);
     if (switchable.length === 0) return;
@@ -201,8 +163,7 @@ export function Devices() {
     );
   }
 
-  /** Read the Matter runtime's actual state — what it is doing, not what was
-   *  saved. "Starting" and "unreachable" need different words from the user. */
+  /** The Matter runtime's live state: what it is doing, not what was saved. */
   function loadMatter() {
     return api.getMatterStatus()
       .then((s) => {
@@ -214,26 +175,20 @@ export function Devices() {
 
   useEffect(() => { load(); void loadMatter(); }, []);
 
-  // Enabling installs and starts a controller, which the settings save does not
-  // wait for — so the panel watches it come up rather than claiming it is done.
+  // The settings save does not wait for the controller to start, so poll while connecting.
   useEffect(() => {
     if (matter?.state !== "connecting") return;
     const timer = setInterval(() => { void loadMatter(); }, MATTER_POLL_MS);
     return () => clearInterval(timer);
   }, [matter?.state]);
 
-  /** Ask the runtime to try again.
-   *
-   *  Re-sending the current settings is what reconnects a failed controller —
-   *  the reconciler treats an unchanged request while unreachable as a retry,
-   *  which is precisely what this button means. */
+  /** Retry: the reconciler treats re-sent unchanged settings while unreachable as a reconnect. */
   async function retryMatter() {
     setMatterBusy(true);
     setMatterError(null);
     try {
       await api.updateSettings({ matter_ws_url: matter?.url ?? "" });
-      // Optimistic, so the chip moves the moment the button is pressed; the
-      // poll above replaces this with whatever actually happened.
+      // Optimistic; the poll replaces it with the real state.
       setMatter((m) => (m ? { ...m, state: "connecting", error: undefined } : m));
       await loadMatter();
     } catch (e) {
@@ -252,8 +207,7 @@ export function Devices() {
 
   function closeForm() { setShowForm(false); setFormError(null); }
 
-  /// Commission a Matter device: GIAP pairs it onto the fabric, then the bridge
-  /// registers it from the controller's own report — so we just reload the list.
+  /** GIAP pairs the device and the bridge registers it from the controller's report, so just reload. */
   async function handleCommission() {
     if (!setupCode.trim()) { setFormError("Enter the device's setup code."); return; }
     setSubmitting(true);
@@ -269,19 +223,7 @@ export function Devices() {
     }
   }
 
-  /**
-   * Turn the device on or off — the device's own power, not GIAP's opinion of it.
-   *
-   * This used to call `markDeviceOffline` / `markDeviceOnline`, which write the
-   * registry's `last_seen` and nothing else, and took its label from `is_online`. So
-   * the card offered "Turn on" to a contact sensor, and "Turn off" on a lamp made
-   * GIAP forget the lamp rather than switching it off. Reachability is a real thing
-   * worth being able to set by hand, and it moved to the Configure modal where it is
-   * named as what it is.
-   *
-   * Read back afterwards rather than assumed: a device that refused, or took a moment,
-   * should not leave the card claiming otherwise.
-   */
+  /** Switch the device's own power, then read it back rather than assume it took. */
   async function handlePower(d: Device) {
     const next = !(powerOn[d.id] ?? false);
     setBusyId(d.id);
@@ -300,14 +242,8 @@ export function Devices() {
     }
   }
 
-  /**
-   * Mark the device reachable or unreachable in the registry.
-   *
-   * A different question from whether it is switched on, which is why it is here and
-   * not on the card. `is_online` is derived from `last_seen` being fresher than five
-   * minutes, so "go offline" means backdating that -- there is no wake or restart
-   * primitive to offer instead.
-   */
+  /** Registry reachability, not power. `is_online` means `last_seen` < 5 min old, so
+   *  "offline" backdates it; there is no wake/restart primitive. */
   async function handleReachability(d: Device) {
     setBusyId(d.id);
     try {

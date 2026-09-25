@@ -1,7 +1,4 @@
-//! POST /api/v1/chat/stream, the SSE endpoint driving pond-desktop's voice
-//! pipeline: every event carries both the `type`/`content` and `token` fields, a
-//! final `done` event names the session and model role, the session and its
-//! messages persist, and PUT /api/v1/settings returns the whole Settings object.
+//! `POST /api/v1/chat/stream`, the SSE endpoint behind pond-desktop's voice pipeline.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -37,10 +34,6 @@ impl OnboardingRepository for CompletedOnboarding {
     async fn reset(&self) -> anyhow::Result<()> {
         Ok(())
     }
-    // PAI-2 P7 made this a required trait method rather than a defaulted one:
-    // a default would have to answer from `get_current_step`, and a stub that
-    // answers "not onboarded" makes every onboarding write route public
-    // wherever it is used. The name of this stub is the answer.
     async fn is_complete(&self) -> anyhow::Result<bool> {
         Ok(true)
     }
@@ -192,7 +185,7 @@ fn stream_request(body: serde_json::Value) -> Request<Body> {
         .unwrap()
 }
 
-// ── Helper: collect all SSE events from the response body ───────────��─────────
+// ── SSE helper ─────────────────────────────────────────────────────────────────
 
 async fn collect_sse_events(body: axum::body::Body) -> Vec<serde_json::Value> {
     use axum::body::to_bytes;
@@ -208,8 +201,7 @@ async fn collect_sse_events(body: axum::body::Body) -> Vec<serde_json::Value> {
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
-/// Canonical event shape: each token event must have BOTH type/content AND token fields.
-/// This ensures the desktop voice pipeline and the browser one both work.
+/// Both field sets are required so the desktop and browser voice pipelines both work.
 #[tokio::test]
 async fn stream_events_have_type_text_and_token_fields() {
     let (app, _tmp) = make_app().await;
@@ -224,7 +216,6 @@ async fn stream_events_have_type_text_and_token_fields() {
     let events = collect_sse_events(resp.into_body()).await;
     assert!(!events.is_empty(), "expected at least one SSE event");
 
-    // Find token/text events (not the done event)
     let text_events: Vec<&serde_json::Value> = events
         .iter()
         .filter(|e| e.get("type").and_then(|t| t.as_str()) == Some("text"))
@@ -250,7 +241,6 @@ async fn stream_events_have_type_text_and_token_fields() {
     }
 }
 
-/// The final event in every stream must be done=true with session_id and model_role.
 #[tokio::test]
 async fn stream_final_event_is_done_with_session_id() {
     let (app, _tmp) = make_app().await;
@@ -283,7 +273,6 @@ async fn stream_final_event_is_done_with_session_id() {
     );
 }
 
-/// Passing a session_id reuses the existing session; the done event echoes it back.
 #[tokio::test]
 async fn stream_uses_provided_session_id() {
     let (app, _tmp) = make_app().await;
@@ -312,14 +301,12 @@ async fn stream_uses_provided_session_id() {
     );
 }
 
-/// Messages are persisted — a follow-up GET /sessions/:id/messages should return them.
 #[tokio::test]
 async fn stream_persists_messages_to_session() {
     let (app, _tmp) = make_app().await;
 
     let session_id = uuid::Uuid::new_v4().to_string();
 
-    // Send a chat
     let resp = app
         .clone()
         .oneshot(stream_request(serde_json::json!({
@@ -332,7 +319,6 @@ async fn stream_persists_messages_to_session() {
     // drain the body so the stream completes and messages are persisted
     collect_sse_events(resp.into_body()).await;
 
-    // Fetch the session messages
     let messages_req = Request::builder()
         .method("GET")
         .uri(format!("/api/v1/sessions/{}/messages", session_id))

@@ -1,14 +1,4 @@
-// ────────────────────────────────────────────────────────────
-// WarmupBanner — one hairline strip while the pond precompiles its prompt.
-//
-// Chrome, not content: hairline border, slate meta text, no ink offset (the
-// edge marks content — DESIGN.md rule 3). It names the model and counts the
-// seconds in mono, because "Warming up gemma-4-E2B-it · 12s" says what is
-// happening; a bare spinner only says that something is. Renders nothing
-// outside the warming state — ready needs no announcement here (voice mode
-// speaks it), and a failed warm-up changes nothing the user can act on: the
-// first turn simply pays the prefill it always used to.
-// ────────────────────────────────────────────────────────────
+// WarmupBanner: a hairline strip naming the model and elapsed seconds; renders only while warming.
 
 import { useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";

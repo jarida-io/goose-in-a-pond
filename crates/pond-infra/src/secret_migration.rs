@@ -1,32 +1,15 @@
-//! One-time move of API-key material off the `settings` table (PAI-2 P2).
+//! One-time move of `api_key_*` values off the `settings` table into the `SecretRepository`.
 //!
-//! Four `api_key_*` fields lived on `Settings`, which `GET /api/v1/settings`
-//! serialises wholesale, so every configured key was in the response body — and
-//! the value sat in plaintext in `pond_system.db`. The fields are gone. This
-//! moves whatever a real pond already stored into the `SecretRepository`, which
-//! returns key names and existence only.
-//!
-//! Ordering is deliberate and is the reason a hard migration is defensible:
-//! write the secret, PROVE it landed in the file store, and only then delete the
-//! settings row. A migration that strands a configured key is worse than the
-//! exposure it closes.
+//! Write the secret, prove it landed in the file store, and only then delete the settings row,
+//! so a configured key is never stranded.
 
 use anyhow::Result;
 use pond_core::security::ports::secret::SecretRepository;
 use pond_core::user_data::ports::settings::SettingsRepository;
 use std::sync::Arc;
 
-/// `(settings key it used to live in, secret key it moves to)`.
-///
-/// The secret names follow the repository's existing convention — the
-/// SCREAMING_SNAKE environment-variable spelling used throughout
-/// `marketplace_registry.json` (`BRAVE_API_KEY`, `SPOTIFY_ACCESS_TOKEN`) —
-/// because `FileSecretRepository::get` reads `std::env::var(key)` first, so the
-/// name is also the container/CI override.
-///
-/// `api_key_coingecko` is included even though nothing reads it: it was a
-/// write-only field, and a user who pasted a key into that box must not lose it
-/// just because the read side was never built.
+/// `(old settings key, secret name)`. Names use env-var spelling, since `get` reads env first.
+/// `api_key_coingecko` has no reader but is kept so a pasted key is not lost.
 pub const MIGRATED_API_KEYS: &[(&str, &str)] = &[
     ("api_key_guardian", "GUARDIAN_API_KEY"),
     ("api_key_gnews", "GNEWS_API_KEY"),
@@ -34,8 +17,6 @@ pub const MIGRATED_API_KEYS: &[(&str, &str)] = &[
     ("api_key_coingecko", "COINGECKO_API_KEY"),
 ];
 
-/// What one run did. Returned rather than only logged, so a test can assert on
-/// it instead of scraping tracing output.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SecretMigrationReport {
     /// Rows whose value was copied into the secret store this run.
@@ -69,19 +50,14 @@ pub async fn migrate_api_keys_to_secret_repository(
         let Some(value) = stored else { continue };
 
         if value.trim().is_empty() {
-            // The old upsert wrote "" for a `None` field, so an empty row is
-            // "no key configured". Nothing to preserve; just drop it.
+            // Empty means no key configured (`None` was written as ""); nothing to preserve.
             if settings_repo.delete_key(settings_key).await.is_err() {
                 report.left_in_place.push((*settings_key).to_string());
             }
             continue;
         }
 
-        // `has()` is the WRONG predicate here: it consults the environment
-        // first, so an env var of the same name would report "already stored"
-        // and we would delete the row without ever copying it — losing the
-        // user's key the moment that variable went away. `list_keys()` reports
-        // the file store only.
+        // Not `has()`: a same-named env var would pass for a copy and we'd drop an uncopied row.
         let already = secret_repo
             .list_keys()
             .await
@@ -129,10 +105,7 @@ pub async fn migrate_api_keys_to_secret_repository(
         }
 
         if already {
-            // A value was already in the secret store under this name. The
-            // secret store wins: after this ships it is the only place the user
-            // can edit the key, so preferring the settings row would resurrect
-            // whatever was there before they moved.
+            // The secret store wins: it is where the user edits keys, so the row is stale.
             report.already_present.push((*settings_key).to_string());
         } else {
             report.moved.push((*settings_key).to_string());
@@ -183,9 +156,7 @@ mod tests {
             .await
             .unwrap();
 
-        // The POSITIVE case first: the values actually arrived. Asserting only
-        // "the settings row is gone" would pass just as well if the migration
-        // had deleted the user's key without copying it.
+        // Positive case first: "row gone" alone would pass if the key were deleted uncopied.
         assert_eq!(
             secrets.get("GUARDIAN_API_KEY").await.unwrap().as_deref(),
             Some("guardian-live-key")
@@ -268,9 +239,7 @@ mod tests {
         );
     }
 
-    /// `has()` consults the environment; `list_keys()` reports the file store.
-    /// This double reports `has() == true` for a key the store has never seen,
-    /// which is exactly what an env var of the same name does.
+    /// Reports `has() == true` for unstored keys, as a same-named env var would.
     #[derive(Default)]
     struct EnvShadowSecrets {
         stored: std::sync::Mutex<Vec<(String, String)>>,

@@ -52,17 +52,13 @@ use pond_core::shared::services::chat::ChatService;
 use pond_core::user_data::domain::session::{Session, SessionMessage};
 use pond_core::user_data::ports::session_storage::{SessionStorage, SessionStorageError};
 
-/// Provider-reported counts, distinct from each other and from the reasoning
-/// count so a mutation that copies the wrong field cannot pass by coincidence.
+/// Distinct from each other and the reasoning count, so a wrong-field copy can't pass.
 const PROMPT_TOKENS: u32 = 11;
 const COMPLETION_TOKENS: u32 = 7;
 /// The GIAP-derived reasoning count under test.
 const REASONING_TOKENS: u32 = 37;
 
-/// Stores every `SessionMessage` exactly as it was handed over.
-///
-/// No normalisation, no defaulting, no dropping of `None` fields — a store
-/// that "helpfully" filled anything in would be asserting about itself.
+/// Stores each `SessionMessage` verbatim, so the test asserts on what `ChatService` built.
 struct CapturingStorage {
     msgs: Mutex<Vec<SessionMessage>>,
 }
@@ -142,8 +138,7 @@ impl SessionStorage for CapturingStorage {
     }
 }
 
-/// An agent whose `Done` event mirrors `GooseAdapter`'s: text first, then a
-/// `UsageStats` carrying all three counters.
+/// Its `Done` mirrors `GooseAdapter`'s: text, then `UsageStats` with all three counters.
 struct CountingAgent {
     reasoning: Option<u32>,
 }
@@ -179,13 +174,7 @@ impl Agent for CountingAgent {
     }
 }
 
-/// Runs one real turn through `ChatService` and returns what was persisted.
-///
-/// The default `voice_output` is `PrintOutput` and the default `speech_energy`
-/// is `NoEnergy`, so nothing here opens an audio device and
-/// `watch_for_barge_in` returns `None` on `is_inert()` — no background task,
-/// no hardware. `chat_stream_once_sets_voice_mode_true` in `chat.rs` already
-/// relies on exactly that.
+/// Runs one real turn and returns what was persisted; the default I/O opens no audio device.
 async fn run_one_turn(reasoning: Option<u32>) -> Vec<SessionMessage> {
     let storage = Arc::new(CapturingStorage::new());
     let agent = Arc::new(CountingAgent { reasoning });
@@ -232,9 +221,6 @@ async fn counted_reasoning_tokens_reach_the_persisted_row() {
         assistant.reasoning_tokens
     );
 
-    // The provider-reported pair must be undisturbed and must not be the
-    // source of the reasoning number. Three distinct values, so a builder that
-    // wired the wrong field cannot pass.
     assert_eq!(
         (assistant.prompt_tokens, assistant.completion_tokens),
         (Some(PROMPT_TOKENS), Some(COMPLETION_TOKENS)),
@@ -243,8 +229,7 @@ async fn counted_reasoning_tokens_reach_the_persisted_row() {
         (assistant.prompt_tokens, assistant.completion_tokens)
     );
 
-    // Reasoning is an assistant-turn property. A change that set it on every
-    // row written during the turn would still satisfy the assertion above.
+    // A count stamped on every row of the turn would still pass the assertion above.
     assert_eq!(
         msgs[0].reasoning_tokens, None,
         "the user row must carry no reasoning count; it carries {:?}, which \
@@ -260,11 +245,6 @@ async fn nobody_counted_is_not_counted_zero() {
 
     let assistant = &msgs[1];
 
-    // Stated as its own assertion, because this is the distinction PAI-5 P5's
-    // `output_reserve_tokens` will read: `Some(0)` means "this turn produced
-    // no reasoning" and is a fact about the turn; `None` means nobody counted
-    // and is a fact about the pipeline. A path that flattened the absent case
-    // to zero would look correct in every other test in the workspace.
     assert_ne!(
         assistant.reasoning_tokens,
         Some(0),

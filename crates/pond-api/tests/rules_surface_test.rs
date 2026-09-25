@@ -1,7 +1,5 @@
-//! `/api/v1/rules` drives the same store as `/api/v1/schedules` (PAI-7 P8). A rule
-//! id is not a schedule id: `find_rule`'s `rule_view` filter is the only thing
-//! stopping `DELETE /rules/{id}` reaching the household's nightly backup. An
-//! unfireable rule is refused by the handler, proved with a scheduler validating nothing.
+//! `/api/v1/rules` shares the schedules store; only `find_rule`'s `rule_view` filter keeps
+//! `DELETE /rules/{id}` off a schedule such as the nightly backup.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -42,10 +40,7 @@ impl OnboardingRepository for CompletedOnboarding {
     async fn reset(&self) -> anyhow::Result<()> {
         Ok(())
     }
-    // PAI-2 P7 made this a required trait method rather than a defaulted one:
-    // a default would have to answer from `get_current_step`, and a stub that
-    // answers "not onboarded" makes every onboarding write route public
-    // wherever it is used. The name of this stub is the answer.
+    // Answering "not onboarded" would make every onboarding write route public.
     async fn is_complete(&self) -> anyhow::Result<bool> {
         Ok(true)
     }
@@ -347,9 +342,7 @@ fn valid_rule(name: &str) -> serde_json::Value {
     })
 }
 
-/// The nightly backup: a cron schedule, created through the route that has
-/// existed all along, so its id is one a caller can already learn from
-/// `GET /schedules`.
+/// The nightly backup, a cron schedule whose id any caller can learn from `GET /schedules`.
 async fn create_backup(app: &axum::Router) -> String {
     let resp = app
         .clone()
@@ -414,8 +407,7 @@ async fn schedule_by_id(app: &axum::Router, id: &str) -> Option<serde_json::Valu
 async fn the_rules_surface_is_not_a_second_door_onto_the_schedules_store() {
     let (app, _tmp) = make_app().await;
     let backup = create_backup(&app).await;
-    // The control is created FIRST, so "404" below cannot be the router, the
-    // auth, or an empty store.
+    // Created first, so the 404s below cannot mean an empty store.
     let rule = create_rule(&app, "Backyard motion").await;
 
     let doors: Vec<(&str, Request<Body>)> = vec![
@@ -457,9 +449,7 @@ async fn the_rules_surface_is_not_a_second_door_onto_the_schedules_store() {
         );
     }
 
-    // A 404 that acted anyway is the failure that matters, so the store is
-    // asked separately: the backup is still there, still a cron schedule on
-    // its original cadence, and still running.
+    // A 404 that acted anyway is the real failure, so ask the store directly.
     let after = schedule_by_id(&app, &backup)
         .await
         .expect("the nightly backup was DELETED through /rules despite the 404");
@@ -471,8 +461,7 @@ async fn the_rules_surface_is_not_a_second_door_onto_the_schedules_store() {
          fires the caller's actions on the backup's schedule. {after}"
     );
 
-    // Vacuity control: the same five doors on a REAL rule answer, so the 404s
-    // above are about the kind and not about this fixture.
+    // Vacuity control: the same five doors answer for a real rule.
     let resp = app
         .clone()
         .oneshot(auth_get(&format!("/api/v1/rules/{rule}")))
@@ -499,10 +488,7 @@ async fn the_rules_surface_is_not_a_second_door_onto_the_schedules_store() {
 #[tokio::test]
 async fn every_door_that_stores_a_rule_refuses_one_that_can_never_fire() {
     let (app, _tmp) = make_app().await;
-    // The scheduler behind this router stores whatever it is given, so a 400
-    // here is the HANDLER refusing. A check whose result is discarded — the
-    // shape the source-order guard cannot see — stores the rule and answers
-    // 201, or 200, or 404, but never this.
+    // The scheduler here stores anything, so a 400 can only come from the handler.
     let rule = create_rule(&app, "Backyard motion").await;
 
     let actionless = {
@@ -533,8 +519,7 @@ async fn every_door_that_stores_a_rule_refuses_one_that_can_never_fire() {
             "after",
         ),
         (
-            // The older door. A rule arrives here by naming the kind, so a
-            // check on the new surface alone is one anybody can walk around.
+            // The older door: a rule can arrive here by naming the kind.
             "POST /schedules (no actions)",
             auth_post(
                 "/api/v1/schedules",
@@ -551,8 +536,7 @@ async fn every_door_that_stores_a_rule_refuses_one_that_can_never_fire() {
     ];
     for (name, req, must_name) in doors {
         let resp = app.clone().oneshot(req).await.unwrap();
-        // Status first: every lookup on an error body answers `None`, so a
-        // body predicate on its own reports the opposite of the truth.
+        // Status first: every lookup on an error body answers `None`.
         assert_eq!(
             resp.status(),
             StatusCode::BAD_REQUEST,
@@ -567,8 +551,7 @@ async fn every_door_that_stores_a_rule_refuses_one_that_can_never_fire() {
         );
     }
 
-    // And nothing was stored on the way past. One rule, the control, with the
-    // action and the empty condition it was created with.
+    // Nothing was stored on the way past: only the control rule, unchanged.
     let resp = app
         .clone()
         .oneshot(auth_get("/api/v1/rules"))
@@ -595,8 +578,7 @@ async fn every_door_that_stores_a_rule_refuses_one_that_can_never_fire() {
         rules[0]
     );
 
-    // Vacuity control: the same PUT with a VALID spec is accepted, so the 400s
-    // are about the spec and not about the route, the id or the body shape.
+    // Vacuity control: the same PUT with a valid spec is accepted.
     let resp = app
         .clone()
         .oneshot(auth_put(

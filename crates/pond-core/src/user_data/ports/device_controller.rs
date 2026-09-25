@@ -1,17 +1,11 @@
-//! Driven Port: device control (#84).
-//!
-//! The protocol-agnostic seam between the Core and any device-control adapter
-//! (MQTT/zigbee2mqtt, HTTP/Shelly, IR blaster, …). Per the hexagonal rules,
-//! control must cross this port before any protocol adapter exists — so the
-//! mock + tests land first and the adapters (Q2-09…Q2-12) implement this trait.
+//! Driven port: protocol-agnostic device control (MQTT, HTTP, IR, …).
 
 use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::user_data::domain::device::{DeviceCapability, DeviceId, DeviceState, DeviceStateValue};
 
-/// Driven Port: control a device and read back its state, independent of the
-/// underlying transport/protocol.
+/// Driven port: control a device and read back its state, whatever the transport.
 #[async_trait]
 pub trait DeviceController: Send + Sync {
     /// Turn a device on or off (the canonical `power` capability).

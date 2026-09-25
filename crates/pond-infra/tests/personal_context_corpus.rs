@@ -1,24 +1,5 @@
-//! Drives the synthetic household corpus through the REAL ingest path.
-//!
-//! Why this exists before any host-device connector does: PAI-8's open work is
-//! a set of numbers nobody has measured. What does a household's context cost
-//! in prompt tokens on a Jetson-class budget? Does the redactor fire on a
-//! Kenyan phone number, and does it stay silent on an IP address and a git
-//! SHA? How many of the eight `SourceKind`s can the pipeline even accept today?
-//! All three are answerable from a corpus and none of them need an OS API.
-//!
-//! The redactor and the pipeline are the production ones -- `RuleRedactor` is
-//! the only `Redactor` in production, and `IngestPipeline` is the only writer of
-//! `context_items`. Only the repository is a mock, which costs the storage
-//! round-trip and buys a hermetic test that runs in `ci.yml`'s fast-crate list
-//! (`pond-infra` is in it; `pond-server` is not).
-//!
-//! `include_str!` rather than a runtime read, deliberately: a fixture that
-//! moves must fail the build, not silently produce an empty corpus that passes
-//! every assertion below.
-//!
-//! Run the report with:
-//!     cargo test -p pond-infra --test personal_context_corpus -- --nocapture
+//! Drives the synthetic household corpus through the real ingest path; only the repo is mocked.
+//! `include_str!` so a moved fixture fails the build instead of yielding an empty, passing corpus.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -41,9 +22,7 @@ const EXPECTATIONS: &str = include_str!("../../../fixtures/personal-context/expe
 const MANIFEST: &str = include_str!("../../../fixtures/personal-context/manifest.json");
 const QUERIES: &str = include_str!("../../../fixtures/personal-context/queries.jsonl");
 
-/// The corpus's anchored moment, not the wall clock. Every recency score below
-/// would drift with the calendar otherwise, and a fixture whose measurements
-/// change daily is not a fixture.
+/// The corpus's anchored time, not the wall clock, so recency scores don't drift daily.
 fn corpus_now() -> DateTime<Utc> {
     let m: Value = serde_json::from_str(MANIFEST).expect("manifest");
     m["corpus_now"]
@@ -81,10 +60,7 @@ fn sources() -> Vec<ContextSource> {
         .collect()
 }
 
-/// One JSONL line to a `RawItem` plus its routing key.
-///
-/// Note what is NOT read here, because there is nothing to read: no line carries
-/// a `profile_id`. The owner comes from the source, per the ingest invariant.
+/// JSONL lines as `(source id, RawItem)`; no line has a `profile_id`, the source sets the owner.
 fn items() -> Vec<(String, RawItem)> {
     ITEMS
         .lines()
@@ -145,16 +121,14 @@ fn expectations() -> Vec<Expectation> {
         .collect()
 }
 
-/// Ingest the whole corpus once. Returns the stored items and the per-kind
-/// tally of accepted vs refused.
+/// Ingests the corpus; returns the stored items and a per-kind `(accepted, refused)` tally.
 async fn ingest_corpus() -> (Vec<ContextItem>, BTreeMap<&'static str, (usize, usize)>) {
     let repo = Arc::new(MockContextRepository::new());
     let pipeline = IngestPipeline::new(repo.clone(), Arc::new(RuleRedactor::new()));
     let srcs = sources();
     let now = corpus_now();
 
-    // Keyed by the stable string rather than the enum: `SourceKind` is not `Ord`,
-    // and deriving it in core to sort a test's report would be the tail wagging.
+    // Keyed by string: `SourceKind` isn't `Ord`, and core shouldn't derive it for a test.
     let mut tally: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
     for (source_id, raw) in items() {
         let source = srcs
@@ -170,12 +144,6 @@ async fn ingest_corpus() -> (Vec<ContextItem>, BTreeMap<&'static str, (usize, us
     (repo.all_items(), tally)
 }
 
-/// Which of the eight source kinds the pipeline can accept today, counted
-/// rather than asserted from the doc comment.
-///
-/// This is the measurement that turns "the ingest route is not built" into a
-/// number: every `Mobile` and `Chat` item in the corpus is refused, and the
-/// refusal count is exactly what PAI-8 P3 and the Files connector would unblock.
 #[tokio::test]
 async fn every_landed_kind_ingests_and_every_gated_kind_is_refused() {
     let (stored, tally) = ingest_corpus().await;
@@ -224,20 +192,14 @@ async fn every_landed_kind_ingests_and_every_gated_kind_is_refused() {
     );
 }
 
-/// The redactor's accuracy on household prose, in both directions.
-///
-/// The false-negative half is easy and everyone writes it. The false-POSITIVE
-/// half is the one that matters and the one nobody had: an ordinary sentence
-/// wrongly matched is silently rewritten in the text the model reads, and for
-/// the three Secret-class kinds the original is gone.
+/// False positives matter most: they silently rewrite text, and Secret-class originals are lost.
 #[tokio::test]
 async fn the_redactor_finds_what_the_corpus_plants_and_nothing_more() {
     let (stored, _) = ingest_corpus().await;
     let by_ext: BTreeMap<&str, &ContextItem> =
         stored.iter().map(|i| (i.external_id(), i)).collect();
 
-    // Which source each item was routed to, so an expectation the pipeline never
-    // reached can be told apart from one it got wrong.
+    // Item -> source kind, to tell an unreached expectation from a wrong one.
     let srcs = sources();
     let source_of: BTreeMap<String, SourceKind> = items()
         .into_iter()
@@ -257,10 +219,7 @@ async fn the_redactor_finds_what_the_corpus_plants_and_nothing_more() {
         let item = match by_ext.get(exp.external_id.as_str()) {
             Some(i) => i,
             None => {
-                // Not a failure when the item's source kind is one the pipeline
-                // refuses: the expectation is about the redactor, and the redactor
-                // was never reached. Recorded, because an unexercised rule is worth
-                // knowing about -- see the note on `env-file-doc`.
+                // A refused source kind never reached the redactor: record it, don't fail.
                 let kind = source_of
                     .get(&exp.external_id)
                     .copied()
@@ -327,13 +286,7 @@ async fn the_redactor_finds_what_the_corpus_plants_and_nothing_more() {
     );
 }
 
-/// What `INGEST_REDACTION_LEVEL` actually does, made explicit.
-///
-/// At `RedactionLevel::Secrets` only the three Secret-class kinds are REPLACED.
-/// Email, phone and postcode are detected, reported in `findings`, and left in
-/// the stored text. That is a deliberate posture and not a bug -- but it is not
-/// what "the corpus is redacted" sounds like, so it gets an assertion rather
-/// than a sentence in a design document.
+/// At the ingest level (`Secrets`), contact details are reported but kept, by design.
 #[tokio::test]
 async fn secret_class_findings_are_replaced_and_contact_details_are_not() {
     use pond_core::security::domain::redaction::RedactionKind;
@@ -403,19 +356,7 @@ async fn secret_class_findings_are_replaced_and_contact_details_are_not() {
     let _ = RedactionKind::ALL;
 }
 
-/// The number this whole exercise exists to produce: what fraction of a real
-/// household's context can be in the prompt at once.
-///
-/// The budget is not a free parameter -- `CompactionProfile::from_context_window`
-/// sets `memory_token_budget`, `split_preamble_budget` gives the context corpus
-/// a third of it, and `select_within_budget` spends that third. So the answer on
-/// the Orin's pinned 16,384 window is arithmetic, and it is small.
-///
-/// Ranking here runs with `similarity: None` for every item, which is not a
-/// limitation of the harness: it is the state of the deployed pond. The only
-/// production `EmbeddingProvider` does not initialise on the Orin, so
-/// `relevance_score` falls back to proximity and ingest recency -- exactly what
-/// this measures.
+/// Ranks with `similarity: None`, as on the Orin, whose only `EmbeddingProvider` won't initialise.
 #[tokio::test]
 async fn a_households_context_does_not_fit_a_jetson_preamble() {
     use pond_core::models::services::context::context_budget::CompactionProfile;
@@ -459,8 +400,6 @@ async fn a_households_context_does_not_fit_a_jetson_preamble() {
         );
     }
 
-    // The Jetson tier, printed in full, because "eleven items" is abstract and
-    // the eleven lines are not. This is what the model would actually see.
     let jetson = CompactionProfile::from_context_window(16_384);
     let split = split_preamble_budget(jetson.memory_token_budget, true);
     let kept = select_within_budget(&ranked, split.context_tokens);
@@ -480,9 +419,7 @@ async fn a_households_context_does_not_fit_a_jetson_preamble() {
         stored.len() - kept.len()
     );
 
-    // Guards the premise, not the number: if a whole household fits the
-    // preamble, retrieval is not the problem PAI-3 says it is and this corpus
-    // is too small to be evidence of anything.
+    // Guards the premise: if a household fits the preamble, the corpus proves nothing.
     assert!(
         kept.len() * 4 < stored.len(),
         "the corpus is too small to exercise a budget: {} of {} items fit",
@@ -491,17 +428,7 @@ async fn a_households_context_does_not_fit_a_jetson_preamble() {
     );
 }
 
-/// The punchline, and the reason the labelled query set exists.
-///
-/// `queries.jsonl` names, for twenty-five plausible household questions, the
-/// items that actually answer them. Recency ordering is what a pond with no
-/// working embedder has -- so this asks the only question that matters about
-/// the current block: if the user asked one of these, would the answer be in
-/// the prompt?
-///
-/// No embedder is needed to measure it, which is the point. When
-/// `EmbeddingProvider` works on the target hardware, recall@k over this same
-/// query set is the number to compare against, and it has to beat this one.
+/// Baseline for a future embedder: its recall@k on `queries.jsonl` must beat this recency slice.
 #[tokio::test]
 async fn the_recency_slice_answers_almost_none_of_the_labelled_queries() {
     use pond_core::models::services::context::context_budget::CompactionProfile;
@@ -532,8 +459,7 @@ async fn the_recency_slice_answers_almost_none_of_the_labelled_queries() {
             .map(|r| r.as_str().unwrap())
             .collect();
 
-        // A query whose every relevant item sits behind a gated source kind is
-        // not a retrieval failure; it is unanswerable at any budget today.
+        // Queries answerable only from gated source kinds can't be answered at any budget.
         let reachable: Vec<&&str> = relevant
             .iter()
             .filter(|r| ingestible.contains(**r))
@@ -561,10 +487,7 @@ async fn the_recency_slice_answers_almost_none_of_the_labelled_queries() {
         stored.len()
     );
 
-    // Guards the premise rather than the number. If a recency slice ever answers
-    // most of this query set, either the corpus stopped being realistic or the
-    // budget stopped being tight -- and in both cases the retrieval argument
-    // this fixture exists to support would need re-making from scratch.
+    // Guards the premise: recency answering most queries means the corpus or budget isn't real.
     assert!(
         hits * 2 < answerable,
         "a recency-ordered slice answered {hits} of {answerable} labelled queries; \

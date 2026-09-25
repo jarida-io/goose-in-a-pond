@@ -1,33 +1,8 @@
-//! PAI-7 P4's loop exists and **production reaches it**. This file is the proof
-//! of the second half.
-//!
-//! It is the mirror image of `device_profile_rung_is_not_wired_yet.rs`, which
-//! asserts an absence and fails the day a caller lands. This asserts a presence
-//! and fails the day one goes away — and the reason it is needed is specific:
-//! `ci.yml` runs `cargo check -p pond-server` and never `cargo test -p
-//! pond-server`, so every line of wiring in `main.rs` is verified to COMPILE and
-//! nothing verifies it is still called. Deleting the `tokio::spawn` below leaves
-//! the whole workspace green and switches the feature off.
-//!
-//! `include_str!` creates no dependency edge and needs no link, so this runs in
-//! CI's fast pass (PAI-2 P3's lesson).
-//!
-//! # What this is not
-//!
-//! It is a tripwire, not coverage. It cannot tell you the reviewer works; it can
-//! only tell you the two lines that make it reachable are still there. The
-//! behaviour is tested in `pond-core`'s `proactive_review` module, where it is
-//! pure functions over plain values. This programme has one recorded incident of
-//! a source tripwire that caught only a textual revert while the arguments
-//! silently changed underneath it, so the assertions below are about the
-//! ARGUMENTS wherever a wrong one would be silent.
+//! Tripwire: `main.rs` still spawns the proactive reviewer with the right arguments.
+//! CI only `cargo check`s pond-server, so deleting that wiring would otherwise stay green.
 
 const MAIN: &str = include_str!("../../pond-server/src/main.rs");
 
-/// Guard against the guard. If `include_str!` stops pointing at the file this
-/// test believes it points at, every assertion below passes by matching
-/// nothing — four of this programme's recorded vacuous-test incidents were
-/// exactly that shape.
 #[test]
 fn the_file_this_test_reads_is_the_one_it_thinks_it_is() {
     assert!(
@@ -41,8 +16,6 @@ fn the_file_this_test_reads_is_the_one_it_thinks_it_is() {
     );
 }
 
-/// The loop is spawned. Without this line the function compiles, the tests
-/// pass, and the pond never has a thought of its own.
 #[test]
 fn the_reviewer_loop_is_actually_spawned() {
     assert!(
@@ -55,15 +28,7 @@ fn the_reviewer_loop_is_actually_spawned() {
     );
 }
 
-/// The bus subscriber that fills the reviewer's ring must filter through
-/// `reviewable`.
-///
-/// This is the assertion that is about an ARGUMENT rather than a presence, and
-/// it is here because pushing the raw event is the natural simplification and
-/// its symptom is invisible: the reviewer keeps running, the brief fills with
-/// hourly clock ticks and session-lifecycle rows, and the twenty-four-line cap
-/// evicts the camera event that was the only thing worth a suggestion. Nothing
-/// errors. The pond just gets duller.
+/// Raw events would fill the 24-event brief cap with clock ticks and evict the ones that matter.
 #[test]
 fn only_reviewable_events_reach_the_reviewers_ring() {
     assert!(
@@ -72,8 +37,7 @@ fn only_reviewable_events_reach_the_reviewers_ring() {
          `proactive_review::reviewable`. `Time` and `Session` events would then fill the ring \
          and crowd out the household facts a review is for"
     );
-    // And the brief is built from what `brief_events` returns, not from the raw
-    // ring: that is where a presence event about ANOTHER member is dropped.
+    // `brief_events` is where presence events about another member are dropped.
     assert!(
         MAIN.contains("review::brief_events(&audience, &drained)"),
         "the brief is no longer built through `brief_events`, which is the only place a \
@@ -82,13 +46,7 @@ fn only_reviewable_events_reach_the_reviewers_ring() {
     );
 }
 
-/// The reviewer must publish its authority into the registry the `delegate`
-/// tool uses, not one of its own.
-///
-/// `GooseOrchestrator::spawn` looks the parent turn up there and refuses when it
-/// finds nothing. A second registry compiles and answers `None` to every lookup,
-/// so the failure mode is every review refused with "no live turn holds the
-/// authority" — which reads like a guard working correctly.
+/// A second registry makes `GooseOrchestrator::spawn` refuse every review, which looks correct.
 #[test]
 fn the_reviewer_uses_the_installed_orchestrator_and_not_one_of_its_own() {
     assert!(
