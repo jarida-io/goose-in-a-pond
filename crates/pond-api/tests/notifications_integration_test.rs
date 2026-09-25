@@ -20,7 +20,9 @@ use pond_core::user_data::mocks::mock_settings::MockSettingsRepository;
 use pond_core::user_data::ports::device_registry::{DeviceRegistry, RegisterDeviceRequest};
 use pond_infra::broadcast_notification_sender::BroadcastNotificationSender;
 use pond_infra::db::Database;
-use pond_infra::mock_handshake::MockHandshake;
+#[path = "support/device_handshake.rs"]
+mod device_handshake;
+use device_handshake::DeviceHandshake;
 use pond_infra::onboarding::SqlxOnboardingRepository;
 use pond_infra::sqlite_device_registry::SqliteDeviceRegistry;
 use pond_infra::sqlite_notification_queue::SqliteNotificationQueue;
@@ -69,8 +71,7 @@ async fn make_app() -> Harness {
     ));
 
     let db = Arc::new(db);
-    let mock_hs = MockHandshake::new();
-    mock_hs.add_valid_token("test-token".to_string()).await;
+    let mock_hs = DeviceHandshake(device_id.clone());
 
     let state = Arc::new(AppState {
         warmup: Default::default(),
@@ -223,7 +224,7 @@ async fn stream_requires_device_id() {
 }
 
 #[tokio::test]
-async fn stream_unknown_device_404() {
+async fn stream_other_device_is_forbidden_without_disclosing_existence() {
     let h = make_app().await;
     assert_eq!(
         status_of(
@@ -232,7 +233,7 @@ async fn stream_unknown_device_404() {
             true
         )
         .await,
-        StatusCode::NOT_FOUND
+        StatusCode::FORBIDDEN
     );
 }
 

@@ -120,28 +120,25 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // see PUBLIC_ROUTES for what each of the two exposes.
         .route("/time/zones", get(list_time_zones))
         .route("/location/detect", post(detect_location))
-        // TTS synthesis is public so the onboarding voice-preview can play a
-        // sample before onboarding completes. Text→audio via local Piper is not
-        // privileged and leaks no user data.
+        // Local voice preview can synthesize before pairing. The allowlist
+        // grants this compatibility exemption only to actual loopback peers.
         .route("/tts", post(tts_synthesise))
-        // Transcription proxy (public — local test tool)
-        .route("/transcribe", post(transcribe))
         // Wake-word phrase calibration (public — used during onboarding WakeWord step)
         .route("/voice/tts/apply", post(apply_tts_settings))
         .route("/voice/calibrate", post(calibrate_wake_word))
         .route("/voice/calibrate", delete(reset_wake_word_calibration))
         .route("/system/info", get(system_info))
-        // Service connectivity test (public — diagnostic tool)
+        // Local diagnostics; network peers must authenticate.
         .route("/test", get(test_services))
         .route("/test/speak", post(test_speak))
-        // Goose agent status (public — dev diagnostic)
-        .route("/dev/goose", get(goose_status))
         // Profile create/patch are public so onboarding steps can write before completion
         .route("/profiles", post(create_profile))
         .route("/profiles/{id}", patch(update_profile_prefs));
 
     // ───────────── Protected routes (require onboarding) ─────────────
     let protected_routes = Router::new()
+        .route("/transcribe", post(transcribe))
+        .route("/dev/goose", get(goose_status))
         .route("/chat", post(chat))
         // Phase F1: raise the body ceiling for the ONE route that carries image
         // attachments. Axum's 2 MiB default is smaller than a legal attachment
@@ -764,22 +761,40 @@ async fn handshake_refresh(
     Ok(Json(resp))
 }
 
-#[derive(Deserialize)]
-struct RevokeRequest {
-    token: String,
-}
-
-/// Revoke a session token — i.e. log the device out (public).
+/// Revoke only the authenticated session and its associated refresh credential.
+/// Legacy clients may still send a JSON token field; it never selects the target.
+/// Kept outside the onboarding guard so a paired client can always log out.
 async fn handshake_revoke(
     State(state): State<Arc<AppState>>,
-    body: Result<Json<RevokeRequest>, JsonRejection>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let Json(request) = body.map_err(|_| bad_body())?;
+    let token = crate::middleware::extract_bearer_token(&headers).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "authentication_required"})),
+        )
+    })?;
+    // Explicit validation also covers the opt-in development loopback bypass.
+    if !state
+        .handshake
+        .validate_token(&token)
+        .await
+        .map_err(|e| handshake_error("revoke", e))?
+    {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "invalid_token"})),
+        ));
+    }
     state
         .handshake
-        .revoke_token(&request.token)
+        .revoke_token(&token)
         .await
         .map_err(|e| handshake_error("revoke", e))?;
+    tracing::info!(
+        operation = "session_revoke",
+        "session and refresh credential revoked"
+    );
     Ok(Json(json!({"revoked": true})))
 }
 
@@ -4910,9 +4925,11 @@ const MAX_PUSH_TOKEN_LEN: usize = 4096;
 /// known; replaces any prior token for that device.
 async fn register_push_token(
     State(state): State<Arc<AppState>>,
+    axum::Extension(principal): axum::Extension<pond_core::security::ports::policy::Principal>,
     Path(id): Path<String>,
     Json(req): Json<RegisterPushTokenRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_own_device(&principal, &id, "register_push_token")?;
     let Some(repo) = state.push_token_repo.as_ref() else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -4983,8 +5000,10 @@ async fn register_push_token(
 /// (logout / unpair). Idempotent.
 async fn delete_push_token(
     State(state): State<Arc<AppState>>,
+    axum::Extension(principal): axum::Extension<pond_core::security::ports::policy::Principal>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_own_device(&principal, &id, "delete_push_token")?;
     let Some(repo) = state.push_token_repo.as_ref() else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -10405,6 +10424,29 @@ async fn resume_rule(
     }
 }
 
+/// Check device-scoped delivery against the identity resolved from the session.
+/// This is bearer authorization, not device-key proof of possession. Neither
+/// network addresses nor arbitrary smart-home device targets establish ownership.
+fn require_own_device(
+    principal: &pond_core::security::ports::policy::Principal,
+    claimed: &str,
+    operation: &'static str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if principal.device_id.as_deref() != Some(claimed) {
+        tracing::warn!(
+            operation,
+            reason = "device_mismatch",
+            "device authorization refused"
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "device_mismatch"})),
+        ));
+    }
+    tracing::debug!(operation, "device authorization accepted");
+    Ok(())
+}
+
 #[derive(serde::Deserialize)]
 struct NotificationStreamParams {
     device_id: Option<String>,
@@ -10418,6 +10460,7 @@ struct NotificationStreamParams {
 /// dedupe by it. Bounded by `notification_sse_semaphore`.
 async fn notifications_stream(
     State(state): State<Arc<AppState>>,
+    axum::Extension(principal): axum::Extension<pond_core::security::ports::policy::Principal>,
     axum::extract::Query(params): axum::extract::Query<NotificationStreamParams>,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)>
 {
@@ -10425,6 +10468,8 @@ async fn notifications_stream(
         StatusCode::BAD_REQUEST,
         Json(json!({ "error": "`device_id` query param required" })),
     ))?;
+
+    require_own_device(&principal, &device_id, "notifications_stream")?;
 
     let Some(queue) = state.notification_queue.clone() else {
         return Err((

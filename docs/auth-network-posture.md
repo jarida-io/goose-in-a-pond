@@ -1,4 +1,4 @@
-# Auth & network-exposure posture (Phase 0)
+# Authentication and network exposure
 
 How `pond-server` authenticates clients and what it exposes on the network.
 Covers issues #4, #8, #93, #94.
@@ -7,23 +7,72 @@ Covers issues #4, #8, #93, #94.
 
 `pond-server` binds `0.0.0.0:<API_SERVER>` (default 4000), so it is reachable
 from the **local network**, not just loopback. Everything below assumes that
-LAN reachability — the server must be safe to expose to other devices on the
-same network (e.g. a GOTG phone).
+LAN reachability. W3 restricts unauthenticated diagnostics and device-scoped
+notification delivery; it does not encrypt this listener. Do not expose a
+plaintext listener through a tailnet or the internet. The separate pinned-HTTPS
+work in [PR #375](https://github.com/jarida-io/goose-in-a-pond/pull/375) supplies
+loopback-only HTTP and an API-only HTTPS listener. These authorization checks
+apply independently of transport.
 
 ## Authentication
 
 - All `/api/v1/*` routes require `Authorization: Bearer <session_token>` and are
   rejected with **401** otherwise, **except** the public allowlist: `/health`,
-  `/handshake`, `/handshake/{init,verify,refresh,revoke,pairing-code}`,
+  `/handshake`, `/handshake/{init,verify,refresh,pairing-code}`,
   onboarding routes, and a few local dev/test pages
   (`crates/pond-api/src/middleware/mod.rs::route_exposure`). The allowlist is
   state-scoped rather than flat: each entry in `PUBLIC_ROUTES` carries an
-  `Exposure` of `Always`, `UntilOnboarded`, or `UntilOnboardedThenHostOnly`, so a
-  route open during onboarding can close afterwards.
+  `Exposure` of `Always`, `HostOnly`, `Authenticated`, `UntilOnboarded`, or
+  `UntilOnboardedThenHostOnly`. `Authenticated` keeps revocation available before
+  onboarding finishes without making it public. `HostOnly` requires a token from
+  network peers; only the actual loopback connection gets the compatibility
+  exemption. Missing connection metadata is treated as remote, and forwarding
+  headers do not change this classification.
 - Tokens are validated against the DB-backed `SqliteHandshakeAdapter`
   (`validate_token`): only unrevoked, unexpired session tokens pass.
 - Session tokens expire after 24h; refresh tokens after 30d. Clients rotate via
   `POST /api/v1/handshake/refresh` (rotation revokes the old session).
+
+### Revocation and device-scoped delivery
+
+`POST /api/v1/handshake/revoke` requires the current session bearer token. It
+revokes that session row, including the associated refresh credential. The
+request body does not choose a token: older GOTG clients may continue sending
+`{token: ...}`, but only the bearer is used. Missing, expired and revoked bearer
+credentials return 401. The endpoint works before and after onboarding.
+
+`GET /api/v1/notifications/stream?device_id=...` and
+`POST/DELETE /api/v1/devices/{id}/push-token` require the target device to match
+`Principal.device_id`, obtained by the middleware from `caller_for_token`.
+A mismatch (including absent token attribution) returns 403 `device_mismatch`
+before queue access, device lookup or push-token mutation. A caller cannot use
+these routes to discover whether someone else's device exists. Claims are not
+copied into the principal, and smart-home device targets are not confused with
+the identity of a companion phone. No IP address binding is added; an issued
+session can roam and refresh remotely.
+
+This is bearer authorization, not device-key proof of possession. A stolen
+session can still act as its recorded device until expiry or revocation. Refresh
+is possession-based; an already open SSE connection is not reauthenticated per
+event. Closing active streams on credential revocation and addressing concurrent
+refresh/revoke races require a separate session-lifecycle change. A client with
+an expired session must refresh before server-side logout; local credential
+removal alone is not a server revocation guarantee.
+
+### Diagnostics and bootstrap
+
+Transcription (`POST /transcribe`) and agent status (`GET /dev/goose`) require
+authentication and completed onboarding. `/tts`, `/test`, `/test/speak`, and
+non-API dashboard/development pages allow anonymous **loopback** callers only;
+remote callers need a valid token. This preserves local desktop/CLI speech.
+Health, onboarding status and `/system/info` remain public for connection and
+pairing bootstrap; discovery information must never establish trust in a new TLS
+key. Existing onboarding and OAuth-specific guards remain in place.
+
+Denials emit a structured `device_mismatch` warning with the operation name;
+accepted device checks emit debug events, and successful revocation emits an
+info event. Tokens, notification contents and claimed identifiers are excluded
+from those events. The API error code is stable for client localization.
 
 ## Pairing (how a client gets a token)
 

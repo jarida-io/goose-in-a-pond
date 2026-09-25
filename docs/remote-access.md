@@ -112,3 +112,14 @@ tailnet can see the Pond exactly as a device on your wifi can, including the
 unauthenticated dashboard. Tailscale ACLs are the right tool if you want that
 narrower; see `docs/auth-network-posture.md` for what is and is not behind
 authentication.
+
+
+## Authorization work (2026-09-20)
+
+W3 restricts notification streams and push-token changes to the device recorded
+on the session token, authenticates session revocation, and closes anonymous
+network access to transcription and diagnostics. It does not bind a session to
+an IP address, so roaming remains possible. See
+[the security posture](auth-network-posture.md#revocation-and-device-scoped-delivery)
+for the contract and remaining bearer-token risks. W1 address discovery alone
+still does not make plaintext remote access safe; deploy pinned HTTPS separately.

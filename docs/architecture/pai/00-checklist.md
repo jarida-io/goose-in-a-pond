@@ -2043,3 +2043,15 @@ gate is gone.**
   old prompt, the old prefill metric and all 41 tools. Every number above is a Mac measurement or a
   character count; the PAI-3 / PAI-4 re-verification the engine work owes is unaffected but still
   outstanding.
+
+
+### 2026-09-20 — W3 companion authorization (not a PAI milestone completion)
+
+The remote-authorization branch reuses the PAI-1 token-derived device principal
+for notification streams and push-token mutation; client claims cannot supply a
+new principal or profile attribution. It also authenticates revocation and
+narrows anonymous diagnostic access. Existing PAI identity and policy behavior
+is unchanged. Local verification and remaining target acceptance are recorded in
+[remote authorization verification](../../remote-authorization-verification.md).
+These changes do not satisfy the deferred PAI-2 enforce-mode or egress phases,
+and do not establish device-key proof of possession or encrypted transport.
