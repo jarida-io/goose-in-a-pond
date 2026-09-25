@@ -1,67 +1,8 @@
-//! The proactive reviewer — PAI-7 P4 — and what its feedback teaches — P7.
+//! Pure decision half of the proactive reviewer: when a review runs, what its child may reach,
+//! how its answer becomes proposals, and which ones the member already declined.
 //!
-//! Section 3.3: a `proactive-reviewer` role that runs in idle time over what
-//! has happened and emits **proposals, never actions**. This module is the
-//! decision half of that: when a review may start, what the child is allowed to
-//! be, how its answer becomes proposals, and which proposals the member has
-//! already said no to.
-//!
-//! # Nothing here performs I/O, and since 2026-08-11 all of it runs
-//!
-//! Pure functions over plain values, in the same shape as
-//! [`consolidation_schedule`](super::consolidation_schedule) and for the same
-//! reason: the three rules that broke consolidation were untestable while they
-//! lived inside a loop. The loop that calls this is
-//! `pond-server`'s `run_proactive_reviewer`, and **it exists** — this paragraph
-//! said it did not for one phase, which was true and had to stop being true for
-//! the workstream to mean anything.
-//!
-//! That the loop is reached is asserted rather than assumed:
-//! `pond-infra/tests/proactive_reviewer_is_wired.rs` fails if the `tokio::spawn`
-//! goes away. It has to be, because `ci.yml` runs `cargo check -p pond-server`
-//! and never `cargo test -p pond-server`, and because a `pub` item in a library
-//! crate never earns a `dead_code` warning — the blind spot PAI-1 P5 shipped
-//! inert behind for a whole phase.
-//!
-//! # The reviewer cannot write its own proposal, and that shapes everything
-//!
-//! PAI-6's `groups_denied_to_subagents` withholds the actuating groups from every
-//! child, because nothing in a subagent's turn can resolve it as an actor with
-//! the household's authority. So the reviewer **cannot act**, and no amount of
-//! role configuration would let it: the groups are subtracted after the role's
-//! request, not from it.
-//!
-//! This paragraph used to argue the point through `giap-draft`, the staging
-//! group — a proposal was a `drafts` row and the child could not write one.
-//! That group is gone; the property is unchanged and now rests directly on the
-//! actuating groups, which is what it always actually rested on.
-//!
-//! That is not a limitation to work around — it is the safety property. The
-//! subagent produces *words*; the loop that spawned it — which holds the
-//! `ProposalRepository`, runs with the household's authority, and is not a
-//! model — turns those words into rows through [`interpret_answer`], which
-//! validates every one of them. A model cannot name the member a proposal is
-//! addressed to (it never sees a `ProposalAudience`), cannot set an expiry,
-//! cannot exceed the daily cap, and cannot propose anything but a prompt.
-//!
-//! # Invariants this module is answerable for
-//!
-//! - **1, GIAP proposes and the user disposes.** The only [`TaskKind`] an
-//!   impulse can become is [`TaskKind::AgentPrompt`] — see
-//!   [`impulse_action`]. There is no path from model output to a webhook or a
-//!   sensor rule, and the child holds no actuating group.
-//! - **2, every proposal carries a rationale.** `Proposal::from_parts` refuses
-//!   a blank one; an impulse without one never becomes a proposal.
-//! - **3, proactive work never runs mid-turn and is cancelled by activity.**
-//!   [`should_review`] delegates the timing to `consolidation_schedule`;
-//!   [`cancelled_by_activity`] delegates the interruption to the same module's
-//!   `saw_activity_since_start`. Neither rule is re-implemented here.
-//! - **4 and 5, addressed to one member, never a broadcast and never a guest.**
-//!   [`plan_review`] takes a [`ProposalAudience`], which cannot hold `Guest` or
-//!   `Household`. A review for an unidentified speaker is not refused at run
-//!   time; it is unaskable.
-//! - **7, a proposal expires.** [`PROPOSAL_TTL`], applied by this module rather
-//!   than by the model.
+//! The child holds no actuating group, so it only produces words; [`interpret_answer`] validates
+//! them into proposals whose audience, expiry, cap and kind the model cannot choose.
 
 use crate::shared::domain::orchestration::{
     AgentRole, DelegationAuthority, DelegationRefused, RoleError, TaskRequest, TaskRun, TaskSpec,
@@ -88,19 +29,8 @@ use std::time::Instant;
 /// The role name a review runs under.
 pub const PROACTIVE_REVIEWER_ROLE: &str = "proactive-reviewer";
 
-/// The shipped recipe for that role.
-///
-/// It is a `const` rather than a row seeded into `agent_recipes`, and the
-/// difference matters: a role read from the database is one a user can edit,
-/// and the thing they would edit first is `tool_groups`. This one is read
-/// through the same door as a stored recipe — [`AgentRole::from_recipe_yaml`],
-/// which is `deny_unknown_fields` inside the `giap_role` block — so it is
-/// validated by the same code, but it cannot be widened at run time.
-///
-/// **The instructions carry the schema because the child has no other way to
-/// learn it.** They also carry the date, via the brief, because
-/// `groups_denied_to_subagents` withholds `giap-system` and with it
-/// `get_current_time`: a subagent has no clock at all.
+/// The shipped recipe: a `const`, not an `agent_recipes` row, so nobody can widen its
+/// `tool_groups` at run time. The date comes via the brief: subagents lack `get_current_time`.
 pub const REVIEWER_ROLE_RECIPE: &str = r#"
 version: 1.0.0
 title: Proactive reviewer
@@ -142,11 +72,7 @@ giap_role:
     Never repeat a suggestion the brief says was already declined.
 "#;
 
-/// Build the shipped reviewer role.
-///
-/// Fallible rather than a `lazy_static` unwrap: the recipe is text, the parser
-/// is `deny_unknown_fields`, and a typo in it should surface as a refusal at
-/// the call site rather than a panic inside a background loop.
+/// Build the shipped reviewer role; fallible so a recipe typo is a refusal, not a loop panic.
 pub fn proactive_reviewer_role() -> Result<AgentRole, RoleError> {
     AgentRole::from_recipe_yaml(PROACTIVE_REVIEWER_ROLE, REVIEWER_ROLE_RECIPE)?.ok_or(
         RoleError::Yaml {
@@ -156,19 +82,8 @@ pub fn proactive_reviewer_role() -> Result<AgentRole, RoleError> {
     )
 }
 
-/// The ceiling on what a review may reach, before the role has asked for
-/// anything.
-///
-/// This is the `tool_groups` of the synthetic root authority in
-/// [`plan_review`], and it is the honest answer to a question the design does
-/// not otherwise have one for: a delegation's ceiling is normally "what the
-/// parent turn actually got", and a background review has no parent turn.
-///
-/// Every entry **reads**. None of them decides, actuates, schedules, writes a
-/// file or sends anything, and that is not a coincidence to be preserved by
-/// memory — `no_group_the_reviewer_may_reach_can_change_anything` fails on a
-/// name that is not on the read-only list next to it. Widening this constant is
-/// the single easiest way to turn a proposer into an actor.
+/// Tool-group ceiling for a review, which has no parent turn to inherit one from.
+/// Read-only groups only: widening this is the easiest way to turn a proposer into an actor.
 pub const PROACTIVE_ROOT_GROUPS: &[&str] = &[
     "giap-memory",
     "giap-device",
@@ -179,18 +94,8 @@ pub const PROACTIVE_ROOT_GROUPS: &[&str] = &[
 
 // ── When it runs ────────────────────────────────────────────────────────────
 
-/// The session id prefix a review run is opened under.
-///
-/// It starts with the scheduler's `sched-` **on purpose**, because that is what
-/// `SessionOrigin::of` classifies as pond-authored. PAI-7 P1's sharpest defect
-/// was a background job whose session row made the pond believe somebody was
-/// home; a reviewer that minted `proactive-...` would reproduce it exactly —
-/// the session activity observer would publish `Started`, presence would follow,
-/// and the reviewer would then be reasoning about a person its own run invented.
-///
-/// `session_origin_covers_every_minted_session` cannot catch that for us: it
-/// classifies files that call `create_session`, and this module calls nothing.
-/// [`a_review_never_looks_like_somebody_being_at_the_pond`] is the guard.
+/// Starts with `sched-` on purpose, so `SessionOrigin::of` treats review sessions as the pond's
+/// own and they never read as somebody being home.
 pub const REVIEW_SESSION_PREFIX: &str = "sched-proactive-review-";
 
 /// The parent session id for one review run.
@@ -201,32 +106,16 @@ pub fn review_session_id(run_id: &str) -> String {
 /// At most this many proposals may be made for one member in a day.
 pub const MAX_PROPOSALS_PER_DAY: usize = 6;
 
-/// At most this many may come out of a single review.
-///
-/// Lower than the daily cap so one talkative run cannot spend the whole day's
-/// budget in one breath, which is what makes the difference between an
-/// assistant and a notification feed.
+/// Max proposals from one review; below the daily cap so one run can't spend the day's budget.
 pub const MAX_PROPOSALS_PER_RUN: usize = 3;
 
-/// How long a proposal from a review stays live.
-///
-/// Half of `MAX_PROPOSAL_TTL`. A proactive suggestion is about something
-/// happening now; the ceiling is a ceiling, not a target.
+/// How long a review's proposal stays live: half of `MAX_PROPOSAL_TTL`, since it's about now.
 pub const PROPOSAL_TTL: Duration = Duration::hours(12);
 
-/// Below this confidence an impulse is not worth a member's attention.
-///
-/// The wire field defaults to `0.0`, so an impulse that omits it is refused
-/// here rather than admitted at full confidence. That direction is the whole
-/// point: a defaulted field must narrow.
+/// Minimum impulse confidence; the wire field defaults to `0.0`, so omitting it is refused.
 pub const MIN_PROPOSAL_CONFIDENCE: f32 = 0.5;
 
-/// Everything [`should_review`] needs, in one value.
-///
-/// Fields are private and [`for_tick`](ReviewInputs::for_tick) is the only
-/// constructor, so a caller in another crate cannot assemble a partly-filled
-/// one — the shape `PresenceInputs` was repaired into for the same reason, one
-/// phase earlier in this workstream.
+/// Everything [`should_review`] needs; private fields so no caller builds a partial one.
 #[derive(Debug, Clone, Copy)]
 pub struct ReviewInputs {
     schedule: GateInputs,
@@ -236,14 +125,7 @@ pub struct ReviewInputs {
 }
 
 impl ReviewInputs {
-    /// Assemble one tick's inputs.
-    ///
-    /// `orchestrator_enabled` is separate from `schedule.enabled` rather than
-    /// folded into it, because they are different facts and the reviewer needs
-    /// both: `ext_orchestrator_enabled` ships **off**, and with it off there is
-    /// no `delegate` machinery to run a child at all. Passing it explicitly is
-    /// what makes the reviewer inherit PAI-6's off-by-default posture
-    /// structurally instead of by comment.
+    /// Keeps `orchestrator_enabled` apart from `schedule.enabled`: without it no child can run.
     pub fn for_tick(
         schedule: GateInputs,
         orchestrator_enabled: bool,
@@ -273,8 +155,7 @@ pub enum ReviewSkip {
 }
 
 impl ReviewSkip {
-    /// Short, stable label for structured logs, in the same shape as
-    /// [`SkipReason::as_str`].
+    /// Short, stable label for structured logs, like [`SkipReason::as_str`].
     pub fn as_str(self) -> &'static str {
         match self {
             ReviewSkip::OrchestratorDisabled => "orchestrator_disabled",
@@ -298,14 +179,7 @@ impl ReviewDecision {
     }
 }
 
-/// May a review start now?
-///
-/// The timing rules are **not** restated here. `should_run` already encodes *at
-/// most once per interval, only after real user activity in this process
-/// lifetime, never at startup*, and it was written to fix precisely the failure
-/// a second copy would reintroduce: a background loop firing fifteen minutes
-/// after every boot on a machine nobody has touched. What this adds is the
-/// three refusals that are the reviewer's own.
+/// May a review start now? Timing is delegated to `should_run`; don't restate it here.
 pub fn should_review(inputs: &ReviewInputs) -> ReviewDecision {
     if !inputs.orchestrator_enabled {
         return ReviewDecision::Skip(ReviewSkip::OrchestratorDisabled);
@@ -325,18 +199,8 @@ pub fn should_review(inputs: &ReviewInputs) -> ReviewDecision {
     ReviewDecision::Run
 }
 
-/// Invariant 3's second half: must a review already in flight be cancelled?
-///
-/// Delegates to `consolidation_schedule::saw_activity_since_start` with the
-/// **run's** start rather than the process's. That is the same question in a
-/// different frame — "has anybody touched the pond since this moment?" — and
-/// the function already answers it correctly for both sources, including the
-/// voice child, which is a separate OS process whose only visible trace is a
-/// session row. A second implementation here would be one more place to forget
-/// the out-of-process half.
-///
-/// On the Orin this is correctness rather than politeness: the review is
-/// holding the only GPU the household's next turn needs.
+/// Must an in-flight review be cancelled? Reuses `saw_activity_since_start` from the run's
+/// start, which also sees the out-of-process voice child; on an Orin the review holds the GPU.
 pub fn cancelled_by_activity(
     run_started_at: Instant,
     in_process_activity: Instant,
@@ -353,25 +217,8 @@ pub fn cancelled_by_activity(
 
 // ── What the child is allowed to be ─────────────────────────────────────────
 
-/// The root authority one review run stands on.
-///
-/// **Separate from [`plan_review`] because the loop needs the same value, and
-/// two constructions of it would be two ceilings.** `GooseOrchestrator::spawn`
-/// refuses any spec whose `parent_session_id` has no live turn in the
-/// `TurnAuthorityRegistry` — which is right, and which a background reviewer
-/// fails by construction, because a review has no user turn behind it. So the
-/// loop publishes *this* authority for the duration of the run and the review
-/// becomes its own parent turn.
-///
-/// That is not a workaround for the check; it is what the check was asking for.
-/// The registry entry is keyed to a cancellation token, and cancelling that
-/// token is what invariant 3 needs — a review interrupted by the user coming
-/// back must take its child down with it, and PAI-6 invariant 5 already makes
-/// that cascade work for anything the registry knows about.
-///
-/// `a_review_publishes_the_same_authority_the_orchestrator_will_look_for` pins
-/// the pairing, because the failure mode if they drift is not a wrong scope —
-/// it is every review being refused, silently, forever.
+/// The root authority for one review, shared with [`plan_review`]. The loop registers it as the
+/// run's parent turn: `GooseOrchestrator::spawn` refuses a spec with no live turn behind it.
 pub fn review_authority(audience: &ProposalAudience, session_id: &str) -> DelegationAuthority {
     DelegationAuthority::root(
         session_id,
@@ -383,24 +230,8 @@ pub fn review_authority(audience: &ProposalAudience, session_id: &str) -> Delega
     )
 }
 
-/// Authorise one review run.
-///
-/// Takes a [`ProposalAudience`] and not a `ProfileScope`, which is how
-/// invariants 4 and 5 stop being run-time checks: there is no value of that
-/// type meaning "the household" or "an unidentified speaker", so a review for
-/// one cannot be requested. The audience's scope becomes the root authority's,
-/// the role's `personal_data: inherit` keeps it, and PAI-6's clamp keeps it
-/// from widening.
-///
-/// The ceiling is [`PROACTIVE_ROOT_GROUPS`] rather than a turn's real allow-set
-/// because there is no turn. `delegate` then intersects the role's request with
-/// it and subtracts `groups_denied_to_subagents`, so the child ends up with
-/// less than both lists, never more.
-///
-/// `background: false`: PAI-6 P8 refuses a background child outright on any
-/// provider that runs on this device, which is the default deployment. The
-/// review is already off the user's turn — it *is* the background — so asking
-/// for the flag would buy nothing and fail on a Jetson.
+/// Authorise one review run; a [`ProposalAudience`] can't be the household or a guest.
+/// `background: false`: on-device providers refuse background children.
 pub fn plan_review(
     role: &AgentRole,
     audience: &ProposalAudience,
@@ -421,60 +252,18 @@ pub fn plan_review(
 
 // ── Who a review is for, and what it may be told ────────────────────────────
 
-/// How far back a review may look for the member it addresses.
-///
-/// **It must be longer than the idle threshold that starts the review, and
-/// that is not a tuning choice.** A review runs after
-/// `INACTIVITY_THRESHOLD_SECS` of quiet, so by the time it starts, every
-/// conversation is by definition at least that stale — and
-/// [`attribution_candidates`], which the presence observer uses to decide who
-/// is *here*, is bounded by exactly that same threshold. Reusing it to decide
-/// who a review is *for* would return the empty list on every tick, forever,
-/// and the reviewer would look like a feature nobody had enabled rather than
-/// like one whose window was a quarter of an hour too short.
-///
-/// [`the_audience_window_outlives_the_idle_that_starts_a_review`] is the guard.
-/// Six hours is a judgement — long enough to survive an afternoon out, short
-/// enough that a suggestion is not addressed to whoever last used the pond
-/// yesterday.
-///
-/// [`attribution_candidates`]: crate::shared::domain::session_activity::attribution_candidates
-/// [`the_audience_window_outlives_the_idle_that_starts_a_review`]: #
+/// How far back a review looks for its member: past the idle threshold that starts a review
+/// (or nobody is ever addressed), but not back to yesterday's user.
 pub const AUDIENCE_WINDOW: Duration = Duration::hours(6);
 
-/// At most this many events go into one brief.
-///
-/// A quarter of an hour of a chatty temperature sensor is thousands of
-/// readings, and the child's window on the target hardware is 4 096 tokens
-/// **including** its role instructions. An unbounded brief does not degrade
-/// gracefully here — it evicts the schema the answer has to match.
-///
-/// The cap applies after [`brief_events`] has collapsed repeats, so it bites on
-/// twenty-four *distinct* things having happened, which is a different and much
-/// rarer event than a sensor reporting twenty-four times.
+/// Max distinct events (after [`brief_events`] collapses repeats) in one brief: the child's
+/// 4096-token window includes its role instructions, and overflow evicts the answer schema.
 pub const MAX_BRIEF_EVENTS: usize = 24;
 
-/// Project one bus event onto the reference a proposal can carry, or refuse it.
-///
-/// The match is exhaustive with no wildcard arm **on purpose**: a seventh
-/// `BusEvent` variant must not silently join the reviewer's diet, and the
-/// compiler is a better guard than a test for that particular mistake.
-///
-/// Two families are refused, and both refusals are load-bearing:
-///
-/// - **`Time`.** The hourly tick is a heartbeat, not a household fact. The
-///   brief already states the time, from the clock rather than from an event,
-///   so admitting these would spend the cap on "it is now 3am" and teach the
-///   model that the passage of time is something to have opinions about.
-/// - **`Session`.** A session lifecycle event is the pond noticing *itself*.
-///   Worse, `Idle` is the very transition that lets a review start, so feeding
-///   it back would hand the child its own trigger as evidence and invite a
-///   proposal about the user having stopped talking — which they had, to go to
-///   bed.
+/// Project a bus event onto a proposal's reference, or refuse it; no wildcard arm on purpose.
+/// Refused: `Time` (the brief states the time) and `Session` (`Idle` is the review's own trigger).
 pub fn reviewable(event: &BusEvent) -> Option<BusEventRef> {
-    // `BusEventRef::new` is fallible only for a blank `kind`, and every kind
-    // below is a literal. `.ok()` rather than an `expect` so a future arm that
-    // computes one cannot panic inside a background loop.
+    // `.ok()` not `expect`: a future computed kind must not panic inside a background loop.
     match event {
         BusEvent::Sensor(r) => BusEventRef::new(
             "sensor",
@@ -508,23 +297,8 @@ pub fn reviewable(event: &BusEvent) -> Option<BusEventRef> {
     }
 }
 
-/// The member one review is addressed to, or nobody.
-///
-/// Invariant 4 says a proposal is addressed to a profile and never broadcast,
-/// and this is where that gets decided. The answer is the most recently active
-/// conversation that (a) a person held — [`SessionOrigin::is_human`], so the
-/// pond's own `sched-` rows can never nominate an audience, which matters
-/// doubly here because a review's own session id starts with `sched-` — and
-/// (b) carries an attribution, inside [`AUDIENCE_WINDOW`].
-///
-/// **`None` is a first-class answer and the loop must treat it as "no review".**
-/// On a pond with no profiles, or one where nobody has been identified in six
-/// hours, there is no member to address, and the alternative to skipping is a
-/// suggestion sent to the household — which is the broadcast this workstream
-/// exists to avoid. [`ProposalAudience`] cannot express one, so a caller that
-/// ignored this would have nothing to pass.
-///
-/// [`SessionOrigin::is_human`]: crate::shared::domain::session_activity::SessionOrigin::is_human
+/// The member of the most recent attributed human session in [`AUDIENCE_WINDOW`], or `None`,
+/// which means no review: the alternative is a household broadcast.
 pub fn audience_for_review(sessions: &[Session], now: DateTime<Utc>) -> Option<ProposalAudience> {
     let cutoff = now - AUDIENCE_WINDOW;
     sessions
@@ -536,23 +310,8 @@ pub fn audience_for_review(sessions: &[Session], now: DateTime<Utc>) -> Option<P
         .and_then(|(_, profile_id)| ProposalAudience::for_member(profile_id).ok())
 }
 
-/// The events a review addressed to `audience` may actually be shown.
-///
-/// Three things happen here, in this order, and the first is the only one that
-/// is about safety:
-///
-/// 1. **A presence event naming somebody else is dropped.** The child's scope
-///    is `Owner(audience)` and PAI-6's clamp holds it there, but the brief is
-///    prose handed straight to the model — it goes around the scope, not
-///    through it. "Ada arrived at 18:04" in a review addressed to Liz is a
-///    disclosure the tool layer would have refused. Device, sensor and camera
-///    events are household facts and stay; a `presence` row is the one family
-///    whose `source_id` is a person.
-/// 2. **Repeats collapse to the newest.** [`TriggerIdentity`] is the same
-///    projection the feedback ledger suppresses on, so "the same thing, again"
-///    means here exactly what it means when the member says no to it.
-/// 3. **Newest first, then [`MAX_BRIEF_EVENTS`].** If the cap has to bite, it
-///    should drop the oldest, not whatever the bus happened to deliver last.
+/// The events a review for `audience` may see. Presence naming anyone else is dropped: the
+/// brief is prose straight to the model, so the tool-layer scope can't protect it.
 pub fn brief_events(audience: &ProposalAudience, observed: &[BusEventRef]) -> Vec<BusEventRef> {
     let mut newest: BTreeMap<TriggerIdentity, BusEventRef> = BTreeMap::new();
     for event in observed {
@@ -573,17 +332,8 @@ pub fn brief_events(audience: &ProposalAudience, observed: &[BusEventRef]) -> Ve
     events
 }
 
-/// The brief a review is given.
-///
-/// It states the time because the child cannot ask for it — `giap-system`, and
-/// with it `get_current_time`, is withheld from every subagent — and it states
-/// how many proposals are left today so the model is not asked to produce three
-/// and then have two silently dropped.
-///
-/// Rejections are listed in words as well as being enforced in
-/// [`interpret_answer`]. Both halves are wanted: the words save a turn of the
-/// child's four-turn budget, and the enforcement is what holds when the model
-/// ignores them, which it will.
+/// The brief a review is given. States the time since subagents lack `get_current_time`; lists
+/// declines to save a turn, though [`interpret_answer`] enforces them regardless.
 pub fn review_brief(now: DateTime<Utc>, recent: &[BusEventRef], ledger: &FeedbackLedger) -> String {
     let mut brief = format!(
         "The current time is {} (UTC). Review what has happened and answer with the JSON array.\n",
@@ -613,44 +363,8 @@ pub fn review_brief(now: DateTime<Utc>, recent: &[BusEventRef], ledger: &Feedbac
 
 // ── What the child said, and what becomes of it ─────────────────────────────
 
-/// One suggestion, as the model is asked to write it.
-///
-/// Note what is **absent**. There is no audience, no expiry, no profile, no
-/// task kind and no id. Every one of those is decided by [`interpret_answer`]
-/// and [`build_proposal`] from values the model never sees — the audience comes
-/// from the caller, `now` from the caller's clock, and the action from
-/// [`impulse_action`], which can only ever return `TaskKind::AgentPrompt`.
-///
-/// # Why this is NOT `deny_unknown_fields`
-///
-/// It was, copied from `TaskRequest` on the reasoning that a field this struct
-/// does not have is either a typo or an attempt to name something the model may
-/// not name. The second half of that is false here, and it cost the whole
-/// feature.
-///
-/// Measured on an Orin 2026-08-12: the review loop fired, resolved its
-/// audience, spawned a child that answered in 32 s — and **every** impulse was
-/// refused, because a 2B model wrote a `type` field alongside the ones asked
-/// for. Zero proposals, one DEBUG line each, a GPU spent per interval for
-/// nothing, and on a household pond nobody would ever see the reason. PAI-7 was
-/// recorded as COMPLETE while yielding nothing, twice.
-///
-/// The safety property never depended on the attribute. Nothing in this struct
-/// is a capability: an unknown key cannot widen an audience, choose a task
-/// kind, set an expiry or name a profile, because none of those are read from
-/// here. What actually holds the line is unchanged and is worth stating,
-/// because a later reader will be tempted to put the attribute back:
-///
-/// * `rationale`, `suggestion` and `trigger_kind` have **no** `#[serde(default)]`,
-///   so a misspelt key is still a hard refusal — the typo case is covered by
-///   requiredness, not by strictness.
-/// * `confidence` defaults to `0.0`, below [`MIN_PROPOSAL_CONFIDENCE`], so an
-///   impulse that misspells it is refused rather than admitted at full trust.
-/// * [`impulse_action`] is the only route to a `TaskKind`, and it returns one
-///   variant.
-///
-/// So the attribute bought strictness against a field that could do nothing,
-/// and charged for it with every suggestion the pond would ever have made.
+/// One suggestion as the model writes it; nothing here is a capability. Deliberately not
+/// `deny_unknown_fields`: small models add stray keys, and required fields already catch typos.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ReviewerImpulse {
     /// The bus event family this is about.
@@ -659,24 +373,16 @@ pub struct ReviewerImpulse {
     pub source_id: Option<String>,
     #[serde(default)]
     pub signal: Option<String>,
-    /// Invariant 2. Refused when blank, by `Proposal::from_parts`.
+    /// Required; `Proposal::from_parts` refuses a blank one.
     pub rationale: String,
     /// What to ask the member about. Becomes a prompt and nothing else.
     pub suggestion: String,
-    /// Defaults to `0.0` — below [`MIN_PROPOSAL_CONFIDENCE`] — so an impulse
-    /// that omits it is refused rather than admitted.
+    /// Defaults below [`MIN_PROPOSAL_CONFIDENCE`], so omitting it is a refusal.
     #[serde(default)]
     pub confidence: f32,
 }
 
-/// The one action an impulse may become.
-///
-/// A free function with a return type rather than an inline expression, so the
-/// claim "a proposal from a review is always a prompt" has somewhere to be
-/// tested. `TaskKind::Webhook` would be a network egress chosen by a model
-/// (PAI-2's concern, not a preference), and `TaskKind::SensorTrigger` would be
-/// a standing rule that keeps firing long after the member forgot approving it.
-/// Neither is reachable from here.
+/// The one action an impulse may become: always a prompt, never a model-chosen webhook or rule.
 pub fn impulse_action(suggestion: &str) -> TaskKind {
     TaskKind::AgentPrompt {
         prompt: suggestion.trim().to_string(),
@@ -686,8 +392,7 @@ pub fn impulse_action(suggestion: &str) -> TaskKind {
 /// Why one impulse did not become a proposal.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ImpulseRefused {
-    /// The run did not produce an answer the parent may read: cancelled, out of
-    /// turns, or failed.
+    /// No answer the parent may read: cancelled, out of turns, or failed.
     NoAnswer,
     /// The answer contained no JSON array at all.
     NotAJsonArray,
@@ -697,7 +402,7 @@ pub enum ImpulseRefused {
     LowConfidence { index: usize, confidence: f32 },
     /// The domain refused it — a blank rationale, an unusable trigger.
     Invalid { index: usize, error: ProposalError },
-    /// The member has already said no to this — PAI-7 P7.
+    /// The member has already said no to this.
     Suppressed {
         index: usize,
         suppression: Suppression,
@@ -711,12 +416,9 @@ pub enum ImpulseRefused {
 /// What one review produced.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReviewYield {
-    /// Validated, addressed, expiring proposals, ready for
-    /// `ProposalRepository::save`.
+    /// Validated, addressed, expiring proposals, ready for `ProposalRepository::save`.
     pub proposals: Vec<Proposal>,
-    /// Everything that did not make it, and why. Kept rather than logged and
-    /// dropped: a reviewer that silently produces nothing is indistinguishable
-    /// from a reviewer nobody wired up.
+    /// Everything that did not make it, and why; kept so a silent reviewer can be diagnosed.
     pub refusals: Vec<ImpulseRefused>,
 }
 
@@ -729,19 +431,8 @@ impl ReviewYield {
     }
 }
 
-/// Turn a finished run's answer into proposals.
-///
-/// **This is the writer the subagent cannot be.** See the module docs: a child
-/// holds no actuating group, so the words come from the model and every fact
-/// about the resulting row comes from here — the audience, the id, the expiry,
-/// the action kind and the cap.
-///
-/// `run.result_for_parent()`, not `run.result`: PAI-6 records that Goose
-/// returns `Ok(partial_text)` for a cancelled child and the literal max-turns
-/// message for an exhausted one, so reading the field directly would turn an
-/// interrupted review into proposals. Invariant 3 says a review is cancelled by
-/// activity; cancelling it and then acting on what it had managed to say is not
-/// a cancellation.
+/// Turn a finished run's answer into proposals; every fact but the words comes from here.
+/// Reads `result_for_parent()`: Goose returns partial text for a cancelled or exhausted child.
 pub fn interpret_answer(
     run: &TaskRun,
     audience: &ProposalAudience,
@@ -772,9 +463,7 @@ pub fn interpret_answer(
             refusals.push(ImpulseRefused::OverCap { index, allowance });
             continue;
         }
-        // Per element, not per array: one malformed suggestion must not cost
-        // the other two. A 3B model gets one of three elements wrong far more
-        // often than it gets all three wrong.
+        // Per element, so one malformed suggestion doesn't cost the others.
         let impulse = match serde_json::from_value::<ReviewerImpulse>(element) {
             Ok(impulse) => impulse,
             Err(e) => {
@@ -822,9 +511,7 @@ fn build_proposal(
     audience: &ProposalAudience,
     now: DateTime<Utc>,
 ) -> Result<Proposal, ProposalError> {
-    // `now`, never a timestamp from the model. A subagent has no clock, so any
-    // time it quotes is copied out of its own prompt or invented, and an
-    // observed_at in the future would outlive the proposal it belongs to.
+    // `now`, never the model's timestamp: a subagent has no clock.
     let trigger = BusEventRef::new(
         impulse.trigger_kind.as_str(),
         impulse.source_id.clone(),
@@ -843,12 +530,7 @@ fn build_proposal(
     )
 }
 
-/// The first balanced `[...]` in the text, or `None`.
-///
-/// Small models wrap JSON in prose and fences however they feel, and an answer
-/// that is 95% correct should not be discarded whole. String-aware, because a
-/// suggestion containing a bracket is ordinary English ("check the meter [it
-/// reads high]") and counting brackets naively would cut the array in half.
+/// The first balanced `[...]` in the text, ignoring brackets inside JSON strings.
 fn first_json_array(text: &str) -> Option<&str> {
     let bytes = text.as_bytes();
     let mut start = None;
@@ -888,23 +570,12 @@ fn first_json_array(text: &str) -> Option<&str> {
     None
 }
 
-// ── P7: what the member already said ────────────────────────────────────────
+// ── What the member already said ────────────────────────────────────────────
 
-/// How long a rejection keeps suppressing.
-///
-/// Not forever. A household changes, and a rejection from a year ago is a fact
-/// about a life somebody was living then. Thirty days is long enough that a
-/// suppression is felt as "it stopped bringing that up" rather than as a
-/// missing feature.
+/// How long a rejection keeps suppressing: long enough to feel heard, not forever.
 pub const SUPPRESSION_WINDOW: Duration = Duration::days(30);
 
-/// How many *different* rejected suggestions about one trigger silence the
-/// trigger itself.
-///
-/// Distinct shapes, not repeats: the same shape rejected three times means the
-/// suppression below was not applied, which is a bug rather than a preference.
-/// Three different suggestions about the garage door, all declined, is the
-/// member saying something about the garage door.
+/// How many *distinct* rejected suggestions about one trigger silence the trigger itself.
 pub const REJECTIONS_THAT_SILENCE_A_TRIGGER: usize = 3;
 
 /// Why a proposal was not made.
@@ -912,23 +583,12 @@ pub const REJECTIONS_THAT_SILENCE_A_TRIGGER: usize = 3;
 pub enum Suppression {
     /// This exact suggestion, about this exact trigger, was rejected.
     AlreadyRejected,
-    /// Enough different suggestions about this trigger were rejected that the
-    /// trigger is no longer worth raising.
+    /// Enough distinct suggestions about this trigger were rejected to stop raising it.
     TriggerSilenced { rejections: usize },
 }
 
-/// What the member's past decisions mean for the next review — PAI-7 P7.
-///
-/// **This is deliberately not a learning system**, and section 6 defers the one
-/// that would be: inferring new rules from behaviour is a much larger claim
-/// than this earns. What it is: a rejected proposal is a fact about a
-/// preference, and the useful version of that fact is that the same suggestion
-/// stops coming back.
-///
-/// It answers on the shape rather than on the words, so a model rephrasing a
-/// declined suggestion does not get a second hearing — and it errs toward
-/// silence in both of its rules, because proactivity's failure direction is to
-/// say less.
+/// What the member's past decisions forbid the next review; deliberately not a learning system.
+/// Matches on shape, not words, so a rephrased decline gets no second hearing.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FeedbackLedger {
     rejected: BTreeSet<ProposalShape>,
@@ -936,17 +596,12 @@ pub struct FeedbackLedger {
 }
 
 impl FeedbackLedger {
-    /// A ledger that suppresses nothing — a pond where nobody has decided
-    /// anything yet, which is every pond today.
+    /// A ledger that suppresses nothing.
     pub fn empty() -> Self {
         Self::default()
     }
 
-    /// Fold the member's decisions into what the next review may not say.
-    ///
-    /// Only rejections count and only recent ones: see
-    /// [`ProposalDecision::silences_a_repeat`] for why an expiry is not a no,
-    /// and [`SUPPRESSION_WINDOW`] for why a rejection is not forever.
+    /// Fold recent rejections (not expiries) into what the next review may not say.
     pub fn from_decisions(decisions: &[ProposalDecision], now: DateTime<Utc>) -> Self {
         let mut rejected: BTreeSet<ProposalShape> = BTreeSet::new();
         for decision in decisions {
@@ -997,14 +652,8 @@ impl FeedbackLedger {
     }
 }
 
-/// Groups no reviewer may reach, written out independently of
-/// [`PROACTIVE_ROOT_GROUPS`] and of `groups_denied_to_subagents`.
-///
-/// Iterating either of those would shrink with them: PAI-6 recorded that
-/// deleting an entry from `groups_denied_to_subagents` left the whole suite
-/// green, because every guard looped the source of truth. This is the other
-/// direction — a list of names with the reason each one would turn a proposer
-/// into an actor.
+/// Groups no reviewer may reach, listed independently of [`PROACTIVE_ROOT_GROUPS`] and
+/// `groups_denied_to_subagents` so the guard can't shrink along with them.
 #[cfg(test)]
 const GROUPS_A_PROPOSER_MAY_NOT_HOLD: [(&str, &str); 5] = [
     (
@@ -1097,10 +746,6 @@ mod tests {
         assert!(role.requested_model().is_none(), "no model is named");
     }
 
-    /// The claim that matters about the ceiling, and it is a claim about the
-    /// MECHANISM rather than about the constant: a role asking for the groups
-    /// that would let a proposer act gets none of them, whether they were
-    /// withheld by the root grant or by `groups_denied_to_subagents`.
     #[test]
     fn a_reviewer_asking_to_act_is_given_nothing_it_asked_for() {
         let greedy = AgentRole::new(
@@ -1135,10 +780,7 @@ mod tests {
                 "a review may call a tool in `{group}`, which {reason}"
             );
         }
-        // Vacuity control: the narrowing is not "deny everything". A group the
-        // role asked for that IS on the read-only ceiling survives, or the
-        // sweep above would pass against a reviewer with no tools at all --
-        // which is a reviewer that cannot see anything to propose about.
+        // Vacuity control: a requested group on the read-only ceiling survives.
         assert!(
             spec.tool_groups().contains("giap-memory"),
             "the narrowing removed everything, so the sweep above proves nothing"
@@ -1170,10 +812,6 @@ mod tests {
 
     // ── Where it runs ──────────────────────────────────────────────────────
 
-    /// PAI-7 P1's sharpest defect, in the shape this phase could reproduce it:
-    /// a background run whose session id reads as a person's conversation makes
-    /// the pond publish presence for nobody, and the reviewer then reasons
-    /// about a member its own run invented.
     #[test]
     fn a_review_never_looks_like_somebody_being_at_the_pond() {
         for run_id in ["run-1", "", "  ", "42"] {
@@ -1185,10 +823,7 @@ mod tests {
             );
             assert!(!SessionOrigin::of(&id).is_human());
         }
-        // Vacuity control: the classifier is not answering Machine for
-        // everything. A real conversation id must still read as a person, or
-        // the assertions above hold for a reason that has nothing to do with
-        // the prefix.
+        // Vacuity control: a real conversation id still reads as a person.
         assert_eq!(
             SessionOrigin::of("f47ac10b-58cc-4372-a567-0e02b2c3d479"),
             SessionOrigin::Human
@@ -1202,9 +837,6 @@ mod tests {
         assert_eq!(should_review(&inputs()), ReviewDecision::Run);
     }
 
-    /// The reviewer is off on a stock install, and that is structural rather
-    /// than documented: with `ext_orchestrator_enabled` off there is no
-    /// machinery to run a child at all.
     #[test]
     fn the_orchestrator_being_off_outranks_every_other_reason_to_run() {
         let off = ReviewInputs::for_tick(idle_schedule(), false, 0, false);
@@ -1214,9 +846,6 @@ mod tests {
         );
     }
 
-    /// Invariant 3's first half is not re-implemented here, so the test that
-    /// matters is that the shared gate's refusals are the reviewer's refusals.
-    /// Quantified over the three failures that broke consolidation.
     #[test]
     fn every_refusal_the_shared_gate_makes_is_a_refusal_here() {
         let cases = [
@@ -1271,8 +900,7 @@ mod tests {
                 cap: MAX_PROPOSALS_PER_DAY
             })
         );
-        // One under the cap still runs, so the comparison is a cap and not an
-        // off-by-one that silences the last proposal of the day.
+        // One under the cap still runs: no off-by-one.
         let nearly =
             ReviewInputs::for_tick(idle_schedule(), true, MAX_PROPOSALS_PER_DAY - 1, false);
         assert_eq!(should_review(&nearly), ReviewDecision::Run);
@@ -1287,9 +915,6 @@ mod tests {
         );
     }
 
-    /// Invariant 3's second half. The out-of-process case is the one a second
-    /// implementation would miss: the voice child is a separate OS process and
-    /// its only visible trace is a session row.
     #[test]
     fn any_activity_after_a_review_starts_cancels_it() {
         let started = Instant::now();
@@ -1398,10 +1023,6 @@ mod tests {
         assert!(matches!(p.proposed_action(), TaskKind::AgentPrompt { .. }));
     }
 
-    /// Invariant 1 at the type level: there is no route from model output to
-    /// anything that acts. A webhook would be a network egress a model chose,
-    /// and a sensor rule would keep firing long after the member forgot
-    /// approving it.
     #[test]
     fn a_proposal_from_a_review_is_always_a_prompt_and_never_a_webhook() {
         for suggestion in [
@@ -1415,10 +1036,7 @@ mod tests {
         }
     }
 
-    /// The recorded failure this guards is PAI-6's: Goose returns
-    /// `Ok(partial_text)` for a cancelled child, so a reader that took
-    /// `run.result` would turn an interrupted review into proposals — and
-    /// invariant 3 says a review is cancelled by activity.
+    /// Goose returns `Ok(partial_text)` for a cancelled child, so `run.result` is not an answer.
     #[test]
     fn a_run_that_was_cancelled_or_ran_out_of_turns_yields_nothing() {
         use crate::shared::domain::orchestration::TaskStatus;
@@ -1438,8 +1056,7 @@ mod tests {
             );
             assert_eq!(out.refusals, vec![ImpulseRefused::NoAnswer]);
         }
-        // Vacuity control: the same body under Completed does produce one, so
-        // the sweep above is about the status and not about the fixture.
+        // Vacuity control: the same body under `Completed` does produce one.
         let out = interpret_answer(
             &answer(&one_impulse("front-door", "ask about the delivery", 0.9)),
             &audience(),
@@ -1450,18 +1067,7 @@ mod tests {
         assert_eq!(out.proposals.len(), 1);
     }
 
-    /// A field the model may not name is IGNORED, and naming it changes
-    /// nothing — which is a stronger claim than refusing the whole impulse, and
-    /// the one that survives contact with a 2B model.
-    ///
-    /// This test used to assert the refusal, under `deny_unknown_fields`. On an
-    /// Orin that made the entire feature yield zero: the model wrote a `type`
-    /// key next to the ones it was asked for and every suggestion the pond
-    /// would have made was discarded, with the reason at DEBUG. Strictness
-    /// against a field that can do nothing is not a safety property, it is a
-    /// tax — so the test now pins what actually matters. `audience` is the
-    /// sharpest case available: it is the one thing a model naming it would
-    /// most want to control, and PAI-1's boundary depends on it.
+    /// Stray keys are ignored rather than refused, and none of them reaches a decision.
     #[test]
     fn naming_the_audience_does_not_let_a_model_choose_one() {
         let body = r#"[{"trigger_kind":"camera","rationale":"why","suggestion":"ask",
@@ -1480,8 +1086,7 @@ mod tests {
         assert_eq!(out.proposals.len(), 1);
         let p = &out.proposals[0];
 
-        // Every one of the four keys above was ignored, and the values below
-        // came from the caller.
+        // The four keys above were ignored; these values came from the caller.
         assert_eq!(
             p.audience().profile_id(),
             EXEMPLAR_OWNER_ID,
@@ -1500,13 +1105,7 @@ mod tests {
         );
     }
 
-    /// The typo case, which is what `deny_unknown_fields` was actually being
-    /// relied on for — and which requiredness covers on its own.
-    ///
-    /// Worth its own test because removing the attribute makes it tempting to
-    /// believe nothing is enforced any more. A misspelt `suggestion` is still a
-    /// hard refusal, because the field has no `#[serde(default)]`; if a later
-    /// change ever adds one "for robustness", this fails and says so.
+    /// Requiredness refuses typos: this fails if `suggestion` ever gains `#[serde(default)]`.
     #[test]
     fn a_misspelt_required_field_is_still_refused_without_the_strict_attribute() {
         let body = r#"[{"trigger_kind":"camera","rationale":"why",
@@ -1529,9 +1128,6 @@ mod tests {
         ));
     }
 
-    /// A defaulted field must narrow. `confidence` is absent far more often
-    /// than it is wrong, and a serde default of `0.0` with a floor above it is
-    /// what makes the absence a refusal instead of a full-confidence proposal.
     #[test]
     fn an_impulse_with_no_confidence_is_refused_rather_than_believed() {
         let body = r#"[{"trigger_kind":"camera","rationale":"why","suggestion":"ask about it"}]"#;
@@ -1619,13 +1215,7 @@ mod tests {
         assert!(out.refusals.is_empty(), "silence is a valid review");
     }
 
-    /// A balanced pair inside a string proves nothing about the string
-    /// tracking — the depth goes up and comes back down, so a scanner that
-    /// cannot see strings gets the same answer. Verified by mutation: deleting
-    /// the `in_string` branch left the balanced case green. The cases that
-    /// discriminate are the UNBALANCED ones, which is also the shape a model
-    /// actually produces: `:]` closes the array early, and a lone `[` means it
-    /// never closes at all.
+    /// Only the unbalanced cases test string tracking; a balanced pair passes without it.
     #[test]
     fn a_bracket_inside_a_suggestion_does_not_cut_the_array_in_half() {
         let cases = [
@@ -1724,7 +1314,7 @@ mod tests {
         );
     }
 
-    // ── P7: the feedback loop ──────────────────────────────────────────────
+    // ── The feedback loop ──────────────────────────────────────────────────
 
     fn decision_about(
         source: &str,
@@ -1752,11 +1342,7 @@ mod tests {
         ProposalDecision::recorded(ProposalShape::of(&proposal), status, decided_at).unwrap()
     }
 
-    /// The whole of P7's useful claim: the reviewer stops proposing the thing
-    /// that was rejected. Driven through `interpret_answer`, not through the
-    /// ledger's own method, because a suppression that holds in the ledger and
-    /// is never consulted by the interpreter is the failure this programme has
-    /// recorded most often.
+    /// Driven through `interpret_answer`, not the ledger, so an unconsulted ledger fails it.
     #[test]
     fn a_rejected_suggestion_does_not_come_back() {
         use crate::user_data::domain::draft::DraftStatus;
@@ -1785,9 +1371,7 @@ mod tests {
                 suppression: Suppression::AlreadyRejected
             }]
         );
-        // Vacuity control: the same ledger does not silence everything. A
-        // different suggestion about the same door still gets through, or this
-        // is a mute button rather than a feedback loop.
+        // Vacuity control: a different suggestion about the same door still gets through.
         let other = interpret_answer(
             &answer(&one_impulse("front-door", "close the garage", 0.9)),
             &audience(),
@@ -1798,8 +1382,7 @@ mod tests {
         assert_eq!(other.proposals.len(), 1, "refusals: {:?}", other.refusals);
     }
 
-    /// Rephrasing is not a second hearing. The shape compares normalised text,
-    /// so capitalising and adding a full stop does not get past a rejection.
+    /// The shape compares normalised text, so case and a trailing full stop change nothing.
     #[test]
     fn rephrasing_a_rejected_suggestion_does_not_get_past_it() {
         use crate::user_data::domain::draft::DraftStatus;
@@ -1853,8 +1436,7 @@ mod tests {
                 ..
             }]
         ));
-        // One fewer decline leaves the trigger audible, so the threshold is a
-        // threshold and not "any rejection silences the source".
+        // One fewer decline leaves the trigger audible.
         let ledger = FeedbackLedger::from_decisions(
             &decisions[..REJECTIONS_THAT_SILENCE_A_TRIGGER - 1],
             now,
@@ -1869,9 +1451,6 @@ mod tests {
         assert_eq!(out.proposals.len(), 1, "refusals: {:?}", out.refusals);
     }
 
-    /// The same suggestion rejected three times is a bug in the suppression,
-    /// not three opinions about the trigger. Counting repeats would silence a
-    /// whole camera on the strength of one preference.
     #[test]
     fn the_same_decline_recorded_three_times_silences_only_itself() {
         use crate::user_data::domain::draft::DraftStatus;
@@ -1936,8 +1515,7 @@ mod tests {
             FeedbackLedger::from_decisions(&[stale.clone()], now).rejected_count(),
             0
         );
-        // Inside the window it still suppresses, so the comparison is a window
-        // and not a switch that discards everything.
+        // Inside the window it still suppresses.
         let fresh = decision_about(
             "front-door",
             "ask about the delivery",
@@ -1986,15 +1564,8 @@ mod tests {
         );
     }
 
-    /// The refusal this phase would otherwise have hit on every single tick.
-    ///
-    /// `GooseOrchestrator::spawn` starts by asking the registry for the live
-    /// turn behind `spec.parent_session_id()` and errors when there is none —
-    /// and `parent_turn_token` matches on `authority.session_id()`, not on the
-    /// key the entry was published under. A reviewer that published under one
-    /// id and planned under another would compile, run, and refuse every
-    /// review with "no live turn holds the authority", which reads like a
-    /// correctly-working guard rather than like broken wiring.
+    /// `parent_turn_token` matches on `authority.session_id()`, not the publish key, so a mismatch
+    /// here would refuse every review while looking like a working guard.
     #[test]
     fn a_review_publishes_the_same_authority_the_orchestrator_will_look_for() {
         use crate::shared::services::turn_authority::TurnAuthorityRegistry;
@@ -2025,8 +1596,7 @@ mod tests {
             "the orchestrator looks the parent turn up by the spec's parent_session_id; \
                  without a match it refuses the spawn and no review ever runs",
         );
-        // Not merely "a token": cancelling the loop's own token must be what
-        // reaches the child, which is invariant 3's interruption path.
+        // It must be the loop's own token: cancelling it is how activity reaches the child.
         assert!(!found.is_cancelled());
         cancel.cancel();
         assert!(
@@ -2035,8 +1605,7 @@ mod tests {
              never cancel a run in flight"
         );
 
-        // The lease revokes on drop, so a review that has ended cannot be
-        // delegated from — the same property a user's finished turn has.
+        // The lease revokes on drop, so an ended review can't be delegated from.
         drop(_lease);
         assert!(registry.parent_turn_token(&session_id).is_none());
     }
@@ -2056,16 +1625,7 @@ mod tests {
         }
     }
 
-    /// The defect this phase would otherwise have shipped: a reviewer that can
-    /// never address anybody, on every pond, forever, looking exactly like a
-    /// feature nobody switched on.
-    ///
-    /// A review starts after `INACTIVITY_THRESHOLD_SECS` of quiet. The presence
-    /// observer's `attribution_candidates` is bounded by that *same* constant,
-    /// so at the moment a review becomes eligible, its answer is guaranteed
-    /// empty. Reusing it here was the obvious move and it is wrong; this pins
-    /// the relationship rather than the number, so raising the idle threshold
-    /// tomorrow fails here instead of silently switching the reviewer off.
+    /// Pins the relationship, not the number, so raising the idle threshold fails here.
     #[test]
     fn the_audience_window_outlives_the_idle_that_starts_a_review() {
         let idle = i64::try_from(INACTIVITY_THRESHOLD_SECS).unwrap();
@@ -2078,10 +1638,7 @@ mod tests {
         );
     }
 
-    /// Exhaustiveness is the compiler's job; what this pins is the *disposition*
-    /// — which families feed a review and which are refused — and the field
-    /// mapping, because a `source_id` and a `signal` that swap places make the
-    /// feedback ledger suppress the wrong thing.
+    /// Swapped `source_id`/`signal` would make the feedback ledger suppress the wrong thing.
     #[test]
     fn two_bus_families_are_refused_and_the_other_four_map_to_their_source_and_signal() {
         use crate::shared::domain::session_activity::{
@@ -2191,9 +1748,7 @@ mod tests {
         );
     }
 
-    /// A review's own session id starts with `sched-`, so this is not a
-    /// hypothetical: without the origin filter, the first review would nominate
-    /// itself as the audience for the second.
+    /// A review's own session is `sched-`: unfiltered, one review would address the next.
     #[test]
     fn the_ponds_own_conversations_never_nominate_an_audience() {
         let now = Utc::now();
@@ -2209,8 +1764,7 @@ mod tests {
              talking to itself"
         );
 
-        // Vacuity control: the same row under a human id DOES address them, so
-        // the assertion above is the origin filter and not some other refusal.
+        // Vacuity control: the same row under a human id does address them.
         let theirs = session(
             "chat-1",
             Some(EXEMPLAR_OWNER_ID),
@@ -2236,9 +1790,6 @@ mod tests {
         assert!(audience_for_review(&[], now).is_none());
     }
 
-    /// The brief goes around the scope, not through it: it is prose handed to
-    /// the model, so PAI-6's clamp cannot see it. A presence row is the one
-    /// event family whose `source_id` is a person.
     #[test]
     fn a_presence_event_about_another_member_never_reaches_the_brief() {
         let now = Utc::now();
@@ -2271,9 +1822,7 @@ mod tests {
              would have refused",
             EXEMPLAR_OWNER_ID
         );
-        // Two vacuity controls, because "the list is empty" would also satisfy
-        // the assertion above: the addressed member's own presence survives,
-        // and so does a household fact that names no one.
+        // Vacuity controls: the member's own presence and a household fact both survive.
         assert!(
             shown.contains(&mine),
             "the audience's own presence is theirs"

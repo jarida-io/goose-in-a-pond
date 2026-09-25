@@ -1,53 +1,7 @@
-//! Session-activity lifecycle on the reactive event spine (PAI-7 P1).
+//! Session lifecycle and presence events: tells the proactive phase whether the user is around.
 //!
-//! Tells a later proactive phase whether the user is *available*: the
-//! difference between a helpful nudge and an interruption
-//! (`docs/architecture/pai/07-proactive-intelligence.md` section 3.1).
-//!
-//! Two sources feed it, and neither is new -- both already carry the pond's
-//! notion of "the user is here":
-//!
-//! - **The session store**, whose `created_at` says a conversation began.
-//! - **The activity clock**, `last_user_activity` plus the newest
-//!   `sessions.updated_at`, combined by
-//!   [`crate::user_data::services::consolidation_schedule::combined_idle_for`]
-//!   so an out-of-process voice turn counts as activity too.
-//!
-//! **Both sources are filtered through [`SessionOrigin`] first.** The pond
-//! creates conversations for its own background work -- a cron line firing
-//! `AgentPrompt` at 3am mints `sched-{task}-{ts}` and calls `create_session`
-//! -- and those rows are byte-identical in shape to a person's. Reading them
-//! as presence tells a proposer somebody is home when the house is empty,
-//! which is worse than publishing no presence signal at all, because the
-//! reviewer that consumes it will act on it with confidence.
-//!
-//! Idle is defined by the same threshold background consolidation uses. One
-//! definition of "the user has gone quiet" per pond, not two: the phase that
-//! will consume these events is gated by that module's `should_run`, and a
-//! second, disagreeing threshold would mean the bus says the user left while
-//! the gate says they are still here.
-//!
-//! Pure domain: [`ActivityObserver::poll`] is a function of the session rows
-//! and the clock reading it is handed plus its own recorded phase, so every
-//! transition -- and every one of the wiring decisions that used to live in
-//! `pond-server`'s polling loop -- is unit-testable without a clock, a
-//! database, or a bus.
-//!
-//! # Presence (PAI-7 P2)
-//!
-//! [`PresenceObserver`] lives here rather than in a module of its own because
-//! it is the *same observation*: the same poll of the same store, the same
-//! [`SessionOrigin`] filter, and the same idle threshold deciding when the
-//! evidence has gone stale. Splitting it would have created the one thing
-//! `human_activity` was written to prevent -- two call sites where one gets
-//! fixed and the other does not.
-//!
-//! The difference is what it answers. Session lifecycle says *somebody* is
-//! here; presence says *who*, and it only speaks when it can name a household
-//! member ([PAI-7](../../../../../docs/architecture/pai/07-proactive-intelligence.md)
-//! invariants 4 and 5). Naming is delegated wholesale to PAI-1's
-//! [`identity_resolution::resolve`], so presence and authorisation cannot
-//! disagree about whose turn it is.
+//! Pond-authored sessions are filtered out via [`SessionOrigin`]: they look like a person's, and
+//! false presence is worse than none. Idle reuses consolidation's threshold so the two agree.
 
 use std::collections::{BTreeMap, HashSet};
 use std::time::{Duration, Instant};
@@ -83,32 +37,11 @@ impl SessionPhase {
     }
 }
 
-/// Prefixes the pond puts on session ids it mints for **its own** background
-/// work.
-///
-/// One entry, and it is the scheduler's: `AgentScheduleExecutor::run_agent_prompt`
-/// (`pond-server/src/schedule_executors.rs`) builds `sched-{task_id}-{unix_ts}`
-/// for every `AgentPrompt` schedule fire and every `TriggerAction::AgentPrompt`
-/// a sensor rule performs, then calls `create_session` on it.
-///
-/// **A deny-list, not an allow-list of human shapes**, because there is no
-/// human shape to require: a person's session id is whatever client opened the
-/// conversation chose -- the dashboard's UUID (`routes.rs`), the CLI's
-/// `--session-id`, the voice child's. Requiring a shape would silently drop the
-/// voice turns that are the main presence signal on a Jetson.
-///
-/// A deny-list is only as complete as the audit behind it, so the audit is
-/// itself a test: `pond-core/tests/session_origin_covers_every_minted_session.rs`
-/// fails when a source file that mints a session row is not one of the files
-/// this list was written against.
+/// Id prefixes of sessions the pond mints for its own work (the scheduler's `sched-…`).
+/// Deny-list: human ids take any form. Audited by `session_origin_covers_every_minted_session`.
 pub const POND_AUTHORED_SESSION_PREFIXES: &[&str] = &["sched-"];
 
-/// Who caused a session row to exist.
-///
-/// The `sessions` table has no origin column and PAI-7 P1 may not add one (the
-/// schema lives in `pond-infra`), so this is decided from the id. See
-/// [`POND_AUTHORED_SESSION_PREFIXES`] for why the predicate is shaped as a
-/// deny-list and what keeps it complete.
+/// Who caused a session row to exist, inferred from the id: `sessions` has no origin column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionOrigin {
@@ -119,7 +52,6 @@ pub enum SessionOrigin {
 }
 
 impl SessionOrigin {
-    /// Classify a session id.
     pub fn of(session_id: &str) -> Self {
         if POND_AUTHORED_SESSION_PREFIXES
             .iter()
@@ -131,7 +63,6 @@ impl SessionOrigin {
         }
     }
 
-    /// True when this session is somebody's conversation.
     pub fn is_human(self) -> bool {
         matches!(self, SessionOrigin::Human)
     }
@@ -141,14 +72,7 @@ impl SessionOrigin {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionLifecycle {
     pub phase: SessionPhase,
-    /// The conversation this transition is attributed to, when one is known.
-    ///
-    /// [`Started`](SessionPhase::Started) always carries an id.
-    /// [`Idle`](SessionPhase::Idle) and [`Resumed`](SessionPhase::Resumed)
-    /// describe the pond's activity clock, which is not per-session, and carry
-    /// `None` rather than guessing at the most recent conversation -- a guess
-    /// there would attribute one household member's silence to another
-    /// member's session.
+    /// Set for `Started`; `None` for `Idle`/`Resumed`, which track the pond-wide activity clock.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     pub at: DateTime<Utc>,
@@ -161,15 +85,11 @@ pub struct SessionLifecycle {
 pub struct SessionStart<'a> {
     pub id: &'a str,
     pub created_at: DateTime<Utc>,
-    /// Carried rather than re-derived so a list handed to the observer says
-    /// what it contains. [`ActivityObserver`] refuses to announce anything but
-    /// [`SessionOrigin::Human`], so this is the second gate behind
-    /// [`human_activity`]'s filter and not a hint.
+    /// [`ActivityObserver`] announces only human starts: a second gate behind [`human_activity`].
     pub origin: SessionOrigin,
 }
 
 impl<'a> SessionStart<'a> {
-    /// Project one stored session.
     pub fn of(session: &'a Session) -> Self {
         Self {
             id: &session.id,
@@ -179,19 +99,13 @@ impl<'a> SessionStart<'a> {
     }
 }
 
-/// The session store as the observer is allowed to see it: the pond's own
-/// conversations removed from **both** halves.
-///
-/// One function returning both projections on purpose. Filtering the arrival
-/// list while leaving the activity clock unfiltered would still let a 3am cron
-/// fire open the never-at-startup gate, and two call sites is exactly how one
-/// of them gets fixed and the other does not.
+/// The session store minus the pond's own sessions, in **both** arrivals and the activity clock:
+/// an unfiltered clock would let a 3am cron fire open the never-at-startup gate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HumanActivity<'a> {
     /// Conversations a person opened, in store order.
     pub starts: Vec<SessionStart<'a>>,
-    /// Newest `updated_at` among those conversations -- the out-of-process
-    /// activity source (a voice turn persisted by another process).
+    /// Newest `updated_at` among them, so activity persisted by another process (voice) counts.
     pub newest_activity: Option<DateTime<Utc>>,
 }
 
@@ -215,15 +129,7 @@ pub fn human_activity(sessions: &[Session]) -> HumanActivity<'_> {
 /// Everything one observation needs from outside.
 #[derive(Debug, Clone, Copy)]
 pub struct ActivityInputs {
-    /// Whether real user activity has been observed since this process
-    /// started, from
-    /// [`saw_activity_since_start`](crate::user_data::services::consolidation_schedule::saw_activity_since_start).
-    ///
-    /// Until it is true the activity clock still holds its boot value, which
-    /// is indistinguishable from a genuinely idle user -- the exact confusion
-    /// that made background consolidation fire on untouched machines. An
-    /// `Idle` event published from it would tell a proposer the user has gone
-    /// away when in truth nobody has ever arrived.
+    /// False until real activity is seen; before that the clock's boot value would read as idle.
     pub saw_activity_since_start: bool,
     /// How long since the most recent activity from any source.
     pub idle_for: Duration,
@@ -232,34 +138,21 @@ pub struct ActivityInputs {
     pub now: DateTime<Utc>,
 }
 
-/// One reading of the clocks the polling loop owns.
-///
-/// This is the whole of what `pond-server`'s observer task decides per poll:
-/// it reads these five values and hands them over. The gate, the idle
-/// arithmetic and the machine-session filter all happen in [`poll_inputs`],
-/// where they are tested, rather than at a call site inside a timer loop where
-/// nothing can see them.
+/// One reading of the clocks the polling loop owns; every decision on them is in [`poll_inputs`].
 #[derive(Debug, Clone, Copy)]
 pub struct PollClock {
-    /// `Instant` captured during startup wiring, before any request could be
-    /// served. The baseline the never-at-startup guard measures against.
+    /// Captured before any request could be served: the never-at-startup guard's baseline.
     pub started_at: Instant,
     /// The same moment in UTC, for comparing against database timestamps.
     pub started_at_utc: DateTime<Utc>,
     /// The shared `last_user_activity` clock, bumped by every HTTP route.
     pub in_process_at: Instant,
     pub now: DateTime<Utc>,
-    /// How long the pond must be quiet before the user counts as away
-    /// (`INACTIVITY_THRESHOLD_SECS`).
+    /// Quiet time before the user counts as away (`INACTIVITY_THRESHOLD_SECS`).
     pub idle_threshold: Duration,
 }
 
-/// What one poll of the session store means, before any transition is derived.
-///
-/// Public so the never-at-startup gate is assertable directly: whether a
-/// scheduled run counts as the user being here is the single most consequential
-/// bit on this path, and observing it only through the events it eventually
-/// produces makes the test depend on a wall clock it cannot move.
+/// What one poll means, before transitions; public so the never-at-startup gate is testable.
 pub fn poll_inputs(sessions: &[Session], clock: PollClock) -> ActivityInputs {
     let db_activity = human_activity(sessions).newest_activity;
     ActivityInputs {
@@ -275,50 +168,25 @@ pub fn poll_inputs(sessions: &[Session], clock: PollClock) -> ActivityInputs {
     }
 }
 
-/// What the observer last saw. Not published: it is the baseline transitions
-/// are measured against.
+/// What the observer last saw; the baseline for transitions, never published.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Observed {
     Active,
     Idle,
 }
 
-/// Turns the pond's session list and activity clock into
-/// [`SessionLifecycle`] transitions.
-///
-/// Owned by the publisher task, which polls; every decision it makes is in
-/// [`poll`](ActivityObserver::poll).
+/// Turns the pond's session list and activity clock into [`SessionLifecycle`] transitions.
 #[derive(Debug, Clone)]
 pub struct ActivityObserver {
     phase: Option<Observed>,
-    /// Every conversation already accounted for: the ones that existed when
-    /// the baseline was taken, plus every one announced since. `None` means no
-    /// baseline has been taken yet.
-    ///
-    /// **Ids, not a timestamp watermark.** The store's timestamps come from
-    /// SQLite's `datetime('now')`, which has no fractional part, so a
-    /// watermark comparison drops any conversation that begins in the same
-    /// wall-clock second as the previous one -- silently, and forever. Ids
-    /// also make announcement idempotent: a row whose `created_at` cannot be
-    /// parsed reads as *now* on every poll (`sqlite_session_storage.rs ::
-    /// parse_dt` invents `Utc::now()` rather than failing), and against a
-    /// watermark that is an unbounded stream of "the user just arrived".
-    ///
-    /// Not pruned when a session is deleted: the store is read whole on every
-    /// poll, so this set is the same order of memory as one poll already
-    /// costs, and forgetting an id is the direction that re-announces.
+    /// Ids already seen (`None` = no baseline yet). Not a time watermark: SQLite times are whole
+    /// seconds and unparseable ones read as now. Never pruned, since forgetting re-announces.
     known: Option<HashSet<String>>,
 }
 
 impl ActivityObserver {
-    /// Begin observing a pond whose existing conversations are `sessions`.
-    ///
-    /// Seeding is what stops a restart announcing the pond's entire chat
-    /// history as newly started. **A failed read is not an empty pond**: it is
-    /// "I do not know what is there", and the honest response is to take the
-    /// baseline from the first poll that does succeed
-    /// ([`awaiting_baseline`](ActivityObserver::awaiting_baseline)) rather than
-    /// to announce a hundred conversations that were already there.
+    /// Take existing sessions as the baseline so a restart announces nothing; a failed read is
+    /// not an empty pond, so it defers the baseline to the first successful poll.
     pub fn seeded_from<E>(sessions: Result<Vec<Session>, E>) -> Self {
         match sessions {
             Ok(sessions) => Self {
@@ -329,8 +197,7 @@ impl ActivityObserver {
         }
     }
 
-    /// Begin observing without knowing what the pond already holds. The first
-    /// poll records what it finds and announces none of it.
+    /// Start with no baseline: the first poll records what it finds and announces none of it.
     pub fn awaiting_baseline() -> Self {
         Self {
             phase: None,
@@ -338,22 +205,13 @@ impl ActivityObserver {
         }
     }
 
-    /// Fold one poll of the session store in and return the transitions it
-    /// produced, in the order they happened.
-    ///
-    /// Usually empty: most polls see the same phase as the last one. A poll
-    /// can produce several `Started` events when several conversations began
-    /// inside one polling interval, and at most one activity-clock transition.
+    /// Fold in one poll, returning any `Started` events then at most one activity-clock edge.
     pub fn poll(&mut self, sessions: &[Session], clock: PollClock) -> Vec<SessionLifecycle> {
         let inputs = poll_inputs(sessions, clock);
         self.observe(&human_activity(sessions).starts, inputs)
     }
 
-    /// The transition rules, over inputs that have already been projected.
-    ///
-    /// Private: [`poll`](ActivityObserver::poll) is the only way in, so the
-    /// machine-session filter and the never-at-startup gate cannot be routed
-    /// around by a caller assembling its own inputs.
+    /// The transition rules. Private so nobody bypasses `poll`'s filter and startup gate.
     fn observe(
         &mut self,
         sessions: &[SessionStart<'_>],
@@ -362,15 +220,8 @@ impl ActivityObserver {
         let mut out = Vec::new();
 
         // ── New conversations ────────────────────────────────────────────
-        // A *person's* session row appearing is itself evidence of activity,
-        // so this half is not gated on `saw_activity_since_start`: the only
-        // production paths that create a row with an id outside
-        // `POND_AUTHORED_SESSION_PREFIXES` are an HTTP request and the voice
-        // CLI, and both mean somebody is at the pond. A pond-authored row
-        // means only that a cron line fired, so it is filtered out here as
-        // well as in `human_activity` -- one gate at the projection and one at
-        // the decision, because this is the claim P4 will interrupt a person
-        // on.
+        // Not gated on `saw_activity_since_start`: a person's session row is itself presence.
+        // Machine rows are filtered again here, a second gate after `human_activity`.
         let taking_baseline = self.known.is_none();
         let known = self.known.get_or_insert_with(HashSet::new);
         let mut fresh: Vec<&SessionStart<'_>> = sessions
@@ -392,9 +243,7 @@ impl ActivityObserver {
             }
         }
         if !out.is_empty() {
-            // Starting a conversation is arriving. Recording it here is what
-            // keeps the clock below from saying `Resumed` about the same
-            // arrival one line later: one event per thing that happened.
+            // Mark active so the clock below doesn't also report this arrival as `Resumed`.
             self.phase = Some(Observed::Active);
         }
 
@@ -404,9 +253,7 @@ impl ActivityObserver {
         }
         let quiet = inputs.idle_for >= inputs.idle_threshold;
         match (self.phase, quiet) {
-            // First observation of a pond that has seen real activity: record
-            // the baseline, publish nothing. There is no transition yet, and
-            // inventing one would fire on every restart.
+            // First observation: baseline only; an event here would fire on every restart.
             (None, _) => {
                 self.phase = Some(if quiet {
                     Observed::Idle
@@ -438,25 +285,15 @@ impl ActivityObserver {
     }
 }
 
-// ── Presence (PAI-7 P2) ──────────────────────────────────────────────────
+// ── Presence ─────────────────────────────────────────────────────────────
 
-/// Which way a household member's presence changed.
-///
-/// Edges, not levels. "Jerry is here" is a level and the pond re-derives it on
-/// every poll; a proposer must not be told it four hundred times a day.
+/// Which way a household member's presence changed: edges only, never the re-derived level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PresenceTransition {
     /// The pond gained fresh evidence naming this member, having had none.
     Arrived,
-    /// The evidence the pond was holding went stale, or was released.
-    ///
-    /// **Nothing observes somebody leaving.** There is no departure signal in
-    /// this house: no geofence, no door sensor bound to a person, no camera
-    /// that reports an empty room. So absence is *decided*, by the evidence
-    /// ageing past [`PresenceInputs::presence_window`], and the honest reading
-    /// of this variant is "the pond stopped being able to say this member is
-    /// here" rather than "this member walked out".
+    /// The evidence went stale or was released: inferred, as nothing observes anyone leaving.
     Departed,
 }
 
@@ -471,35 +308,17 @@ impl PresenceTransition {
 }
 
 /// A household member arrived or left, as far as the pond can tell.
-///
-/// **[`profile_id`](Self::profile_id) is a `String` and not an `Option`, and
-/// there is no anonymous variant.** That is invariant 4 made structural: a
-/// presence event that cannot name a member is not a presence event, it is a
-/// motion sensor, and this type cannot express one. The observer's only exit
-/// with a member's name is [`ProfileScope::Owner`] -- `Household` and `Guest`
-/// both leave through the same door as an unattributed session, which is
-/// invariant 5.
+/// Only a resolved [`ProfileScope::Owner`] qualifies: no anonymous, `Household` or `Guest` event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProfilePresence {
     pub profile_id: String,
     pub transition: PresenceTransition,
-    /// The rung of PAI-1's chain the belief rests on.
-    ///
-    /// Carried because a proposer must be able to weigh it. "Liz is home
-    /// because her paired phone signed a request" and "Liz is home because a
-    /// camera frame matched at 0.61" are different claims, and the second is
-    /// the one a photograph can make.
+    /// Which identification rung the belief rests on, so a proposer can weigh it.
     pub source: IdentificationSource,
-    /// Set only for [`IdentificationSource::Face`], straight off the session
-    /// row. A second threshold here would be a second definition of a good
-    /// match; the per-profile one at the identification edge is the definition.
+    /// Set only for [`IdentificationSource::Face`]; the match threshold lives at identification.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
-    /// The conversation the belief rests on -- for [`Arrived`] the one that
-    /// named them, for [`Departed`] the one that went quiet.
-    ///
-    /// [`Arrived`]: PresenceTransition::Arrived
-    /// [`Departed`]: PresenceTransition::Departed
+    /// For `Arrived` the conversation that named them; for `Departed` the one that went quiet.
     pub session_id: String,
     pub at: DateTime<Utc>,
 }
@@ -508,64 +327,27 @@ pub struct ProfilePresence {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PresenceEvidence<'a> {
     pub session_id: &'a str,
-    /// Carried rather than re-derived, for the same reason as
-    /// [`SessionStart::origin`]: a list handed to an observer should say what
-    /// it contains.
     pub origin: SessionOrigin,
-    /// When somebody last *said* something here (`sessions.updated_at`).
-    ///
-    /// **Not when the attribution was written**, and the difference is the
-    /// whole freshness rule. `set_session_identity` deliberately does not touch
-    /// `updated_at` (it would reorder the user's history because a camera
-    /// recognised somebody), so binding a face to a conversation that has been
-    /// quiet for three hours leaves this timestamp three hours old and produces
-    /// no presence at all. That is what stops a photograph uploaded to an old
-    /// session reading as a person in the room.
+    /// When somebody last spoke here (`sessions.updated_at`), not when attribution was written.
     pub last_activity: DateTime<Utc>,
-    /// What the session row says about who is speaking, from
-    /// [`SessionStorage::get_session_identity`].
-    ///
-    /// [`SessionStorage::get_session_identity`]: crate::user_data::ports::session_storage::SessionStorage::get_session_identity
+    /// Who the session row says is speaking (`SessionStorage::get_session_identity`).
     pub identity: &'a SessionIdentity,
 }
 
-/// The column presence treats as the activity clock.
-///
-/// One function, because two call sites now need the answer -- the projection
-/// below and [`attribution_candidates`] -- and the choice between the two
-/// columns is the phase's headline safety property. `sessions.created_at` says
-/// when a conversation *began*; `updated_at` says when somebody last *spoke*
-/// in it, which is the only one of the two that is about a person.
-///
-/// `set_session_identity` deliberately leaves `updated_at` alone (bumping it
-/// would reorder the user's history because a camera recognised somebody), so
-/// binding a face to a conversation quiet for three hours leaves this three
-/// hours old and produces no presence at all. That is what stops a photograph
-/// uploaded to an old session reading as somebody in the room.
+/// Presence's activity clock: when somebody last spoke. Binding an identity doesn't bump it,
+/// so a face tagged on a long-quiet session produces no presence.
 fn last_spoken_at(session: &Session) -> DateTime<Utc> {
     session.updated_at
 }
 
 /// Whether evidence this old still counts as somebody being here.
-///
-/// Named for the same reason as [`last_spoken_at`]: the comparison is shared
-/// by [`present_members`], which refuses, and [`attribution_candidates`], which
-/// skips a read. Two spellings of "recently" would be two definitions of it.
-///
-/// Closed at the far end -- evidence exactly as old as the window is stale --
-/// because the pond publishes [`SessionPhase::Idle`] at that same instant, and
-/// the two must not disagree.
+/// Evidence exactly window-old is stale: [`SessionPhase::Idle`] fires at that same instant.
 fn is_fresh(last_activity: DateTime<Utc>, presence_window: Duration, now: DateTime<Utc>) -> bool {
     let window = i64::try_from(presence_window.as_secs()).unwrap_or(i64::MAX);
     now.signed_duration_since(last_activity).num_seconds() < window
 }
 
 impl<'a> PresenceEvidence<'a> {
-    /// Project one stored session and its identity.
-    ///
-    /// Which column is the activity clock and which is not is a domain
-    /// decision, so it is made in [`last_spoken_at`] rather than at the
-    /// polling loop.
     pub fn of(session: &'a Session, identity: &'a SessionIdentity) -> Self {
         Self {
             session_id: &session.id,
@@ -576,34 +358,11 @@ impl<'a> PresenceEvidence<'a> {
     }
 }
 
-/// How stale a conversation may be before the member it names stops counting
-/// as here.
-///
-/// The same `INACTIVITY_THRESHOLD_SECS` that decides [`SessionPhase::Idle`].
-/// One pond, one definition of "gone quiet": two would have the bus saying a
-/// member is still here after it had already said the pond went idle.
-///
-/// **Bound here rather than at the publisher.** It was a field the polling
-/// loop filled in, which meant the freshness rule the whole phase rests on
-/// could be set to twenty-four hours in `main.rs` with the workspace green.
+/// Staleness at which a member stops counting as here; shares `Idle`'s threshold so they agree.
 pub const PRESENCE_WINDOW: Duration = Duration::from_secs(sched::INACTIVITY_THRESHOLD_SECS);
 
-/// The conversations whose attribution is worth a point read.
-///
-/// The publisher issues one `get_session_identity` per row it hands to the
-/// observer, and `list_sessions` has no `LIMIT` and no time bound -- it returns
-/// every conversation the pond has ever held. Three of the observer's refusals
-/// need no identity at all, so the read is skipped for the rows they would
-/// discard: a conversation the pond opened for itself, one nobody has spoken in
-/// inside [`PRESENCE_WINDOW`], and one whose `sessions.profile_id` is NULL
-/// (`get_session_identity` reads that same column, so it would answer with no
-/// profile, which resolves to `Household` or `Guest` and publishes nothing
-/// either way).
-///
-/// **Read-avoidance, not a gate.** [`present_members`] still applies origin and
-/// freshness to whatever it is handed, through the same [`is_fresh`], so a
-/// caller that ignores this function gets identical events for more money. That
-/// is what `skipping_a_read_never_changes_who_is_published` pins.
+/// Sessions worth a `get_session_identity` read; skips rows the observer would discard anyway.
+/// Read-avoidance, not a gate: [`present_members`] still checks origin and freshness itself.
 pub fn attribution_candidates(sessions: &[Session], now: DateTime<Utc>) -> Vec<&Session> {
     sessions
         .iter()
@@ -613,22 +372,8 @@ pub fn attribution_candidates(sessions: &[Session], now: DateTime<Utc>) -> Vec<&
         .collect()
 }
 
-/// Whether this pond has more than one household member, from the read that
-/// answers it.
-///
-/// **A failed read answers `true`.** That is the value which makes an
-/// unidentified speaker a `Guest` rather than the whole household: on failure,
-/// access narrows. The publisher used to decide this inside its own `match`
-/// arm, where the direction could be flipped with nothing to notice.
-///
-/// Stated plainly, because a guard that claims more than it holds is worse than
-/// none: **this cannot change a presence event today.** `identity_resolution`
-/// consults it only in the fallback that answers `Household` or `Guest`, and
-/// presence publishes for neither, so both values produce the same events. It
-/// is pinned anyway because the direction is the resolver's contract and
-/// because the day presence grows a `Household` path is not the day to
-/// rediscover it -- see
-/// `the_household_count_cannot_change_a_published_presence_event`.
+/// Whether the pond has more than one household member; a failed read answers `true` so an
+/// unidentified speaker narrows to `Guest`, not the whole household.
 pub fn household_has_multiple_members<T, E>(profiles: &Result<Vec<T>, E>) -> bool {
     match profiles {
         Ok(members) => members.len() > 1,
@@ -636,30 +381,17 @@ pub fn household_has_multiple_members<T, E>(profiles: &Result<Vec<T>, E>) -> boo
     }
 }
 
-/// Everything one presence observation needs from outside.
-///
-/// **The fields are private and [`for_poll`](PresenceInputs::for_poll) is the
-/// only way in from another crate.** Every one of them is an input to a claim
-/// about where a person is, and the freshness window in particular is not a
-/// caller's to choose -- when it was, the publisher named it, and a publisher
-/// naming it is a publisher that can get it wrong unobserved.
+/// Everything one presence observation needs; fields are private so no caller picks the window.
 pub struct PresenceInputs<'a> {
     sessions: &'a [PresenceEvidence<'a>],
-    /// Whether this pond has more than one household member. See
-    /// [`household_has_multiple_members`] for what a failed read must answer.
     household_has_multiple_members: bool,
-    /// Always [`PRESENCE_WINDOW`]. Kept as a field rather than read from the
-    /// constant at the comparison so this module's own tests can place a
-    /// fixture either side of a window they name.
+    /// Always [`PRESENCE_WINDOW`]; a field only so this module's tests can name their own window.
     presence_window: Duration,
     now: DateTime<Utc>,
 }
 
 impl<'a> PresenceInputs<'a> {
-    /// Build the inputs for one poll of the publisher.
-    ///
-    /// Takes what the polling loop actually holds and supplies the rest, so
-    /// the loop has no window to name.
+    /// Inputs for one publisher poll; the window is supplied here so the loop has none to name.
     pub fn for_poll(
         sessions: &'a [PresenceEvidence<'a>],
         household_has_multiple_members: bool,
@@ -684,12 +416,7 @@ struct Believed {
 }
 
 impl Believed {
-    /// Whether this evidence should replace `held` for the same member.
-    ///
-    /// Two conversations can name one person in the same poll. The stronger
-    /// rung wins, and on a tie the more recent one -- the same ordering
-    /// `SessionIdentity::supersedes` applies within a single session, so the
-    /// two cannot disagree about which claim is better.
+    /// Stronger rung wins, then the newer one; the same order as `SessionIdentity::supersedes`.
     fn beats(&self, held: &Believed) -> bool {
         match self.source.rank().cmp(&held.source.rank()) {
             std::cmp::Ordering::Less => true,
@@ -717,21 +444,10 @@ impl Believed {
 }
 
 /// Turns attributed conversations into [`ProfilePresence`] edges.
-///
-/// Owned by the publisher task, which polls. Every decision it makes is in
-/// [`observe`](PresenceObserver::observe).
 #[derive(Debug, Clone, Default)]
 pub struct PresenceObserver {
-    /// Who the pond believes is here, and on what. `None` means no baseline
-    /// has been taken yet.
-    ///
-    /// **A restart is not everybody arriving.** The pond restarts on every
-    /// deploy, and a member whose conversation is still fresh would otherwise
-    /// be announced as walking in each time -- an edge nobody crossed. The
-    /// first observation records the level and publishes nothing, exactly as
-    /// [`ActivityObserver::seeded_from`] does for conversations. The cost is
-    /// real and worth stating: a member who genuinely arrives during the first
-    /// poll after boot is recorded rather than announced.
+    /// Who the pond believes is here, and on what; `None` until the first poll sets the baseline,
+    /// which publishes nothing so a restart isn't everybody arriving.
     believed: Option<BTreeMap<String, Believed>>,
 }
 
@@ -741,16 +457,7 @@ impl PresenceObserver {
         Self::default()
     }
 
-    /// Fold one poll in and return the transitions it produced.
-    ///
-    /// Arrivals first, then departures, each in profile-id order, so the
-    /// output is deterministic for a consumer and for a test.
-    ///
-    /// Usually empty. Somebody continuing to be here is not an event; neither
-    /// is a re-identification of somebody already present, nor the same member
-    /// opening a second conversation, nor their evidence being upgraded from a
-    /// face match to an explicit "this is Liz". All four are the same person,
-    /// still here.
+    /// Fold one poll in; returns arrivals then departures, each in profile-id order.
     pub fn observe(&mut self, inputs: PresenceInputs<'_>) -> Vec<ProfilePresence> {
         let present = present_members(&inputs);
         let Some(previous) = self.believed.replace(present.clone()) else {
@@ -771,18 +478,7 @@ impl PresenceObserver {
         out
     }
 
-    /// Fold one poll in, where reading the store may have failed.
-    ///
-    /// `Err` publishes nothing **and leaves the belief exactly as it was**, and
-    /// the second half is the one that matters. Treating an unreadable row as
-    /// unattributed would publish a departure nobody performed; taking the
-    /// failure as a fresh start would announce everybody arriving again when
-    /// the read recovered. A failed read is "I do not know", not "the house is
-    /// empty" -- the same answer [`ActivityObserver::seeded_from`] gives, and
-    /// for the same reason.
-    ///
-    /// This lives here rather than as a `continue` in the polling loop because
-    /// a `continue` in a timer loop is a decision no test can reach.
+    /// Fold in a possibly failed read: `Err` publishes nothing and leaves the belief untouched.
     pub fn observe_read<E>(&mut self, read: Result<PresenceInputs<'_>, E>) -> Vec<ProfilePresence> {
         match read {
             Ok(inputs) => self.observe(inputs),
@@ -792,21 +488,11 @@ impl PresenceObserver {
 }
 
 /// Who the evidence says is here, right now.
-///
-/// The three refusals, in order, are the whole safety surface of this phase:
-/// a conversation the pond opened for itself is not a person; a conversation
-/// nobody has spoken in recently is not evidence of anybody's whereabouts; and
-/// a speaker the resolver cannot name is not a member, whether it called them
-/// `Guest` or `Household`.
 fn present_members(inputs: &PresenceInputs<'_>) -> BTreeMap<String, Believed> {
     let mut present: BTreeMap<String, Believed> = BTreeMap::new();
 
     for evidence in inputs.sessions {
-        // A cron line at 3am creates a session row, and `PUT /sessions/{id}/user`
-        // will bind any session id it is given -- including that one. P1's
-        // filter is therefore not theoretical here: without it, attributing a
-        // scheduled run to a member makes the pond believe they are home
-        // whenever the schedule fires.
+        // `PUT /sessions/{id}/user` binds any id, cron sessions included: skip machine rows.
         if !evidence.origin.is_human() {
             continue;
         }
@@ -814,17 +500,9 @@ fn present_members(inputs: &PresenceInputs<'_>) -> BTreeMap<String, Believed> {
             continue;
         }
 
-        // PAI-1's resolver, not a second opinion. It owns the one-member
-        // `Household` fallback, the refusal to trust a profile id with no
-        // provenance, and the guest boundary -- and if any of those changes,
-        // presence follows without anyone remembering it exists.
+        // The authorisation resolver, not a second opinion: presence must agree with access.
         let resolved = identity_resolution::resolve(&identity_resolution::ResolutionInputs {
-            // A background poll holds no request token, so the strongest rung
-            // cannot be supplied here even now that PAI-1 P9 has built it: the
-            // token belongs to an HTTP request and this is a timer. The rung
-            // still reaches presence -- through the session row, the moment a
-            // handler binds one at `PairedDevice` strength -- and the `source`
-            // this event carries is what says which rung it was.
+            // A timer has no request token; the paired-device rung arrives via the session row.
             paired_device_profile: None,
             session: evidence.identity,
             household_has_multiple_members: inputs.household_has_multiple_members,
@@ -832,9 +510,7 @@ fn present_members(inputs: &PresenceInputs<'_>) -> BTreeMap<String, Believed> {
         let ProfileScope::Owner(profile_id) = resolved.scope else {
             continue;
         };
-        // "" is not a name. The type's promise is that a presence event names
-        // a member, and a blank id would keep the promise textually while
-        // addressing nobody -- the shape a defaulted field lands on.
+        // A blank id (a defaulted field) names nobody.
         if profile_id.trim().is_empty() {
             continue;
         }
@@ -869,8 +545,7 @@ mod tests {
 
     const THRESHOLD: Duration = Duration::from_secs(15 * 60);
 
-    /// A session id the scheduler really mints: `sched-{task_id}-{unix_ts}`,
-    /// straight out of `AgentScheduleExecutor::run_agent_prompt`.
+    /// Shaped like `AgentScheduleExecutor::run_agent_prompt`'s `sched-{task_id}-{unix_ts}` ids.
     const A_CRON_FIRE: &str = "sched-morning-summary-1700000300";
 
     fn inputs(idle_secs: u64) -> ActivityInputs {
@@ -905,8 +580,6 @@ mod tests {
         ActivityObserver::seeded_from::<()>(Ok(sessions))
     }
 
-    /// A clock reading for a pond nobody has touched in this process: the
-    /// in-process activity clock still holds its boot value.
     fn untouched_clock(now: DateTime<Utc>) -> PollClock {
         let started_at = Instant::now();
         PollClock {
@@ -920,16 +593,12 @@ mod tests {
 
     // ── Origin ───────────────────────────────────────────────────────────
 
-    /// The defect this classification exists for. A cron line running at 3am
-    /// creates a session row, and a session row read as presence is the pond
-    /// fabricating a person.
     #[test]
     fn the_scheduler_s_own_conversations_are_not_a_person() {
         assert_eq!(SessionOrigin::of(A_CRON_FIRE), SessionOrigin::Machine);
         assert!(!SessionOrigin::of(A_CRON_FIRE).is_human());
 
-        // The ids the human paths produce: a dashboard UUID, the CLI's own
-        // name, and the id shape the voice child is started with.
+        // Human-path ids: a dashboard UUID, the CLI's name, the voice child's id.
         for human in [
             "9f0c3f4e-6b1a-4a1e-9a6f-0c1d2e3f4a5b",
             "cli-chat",
@@ -946,9 +615,6 @@ mod tests {
 
     // ── Projection ───────────────────────────────────────────────────────
 
-    /// Both halves, from one call. The arrival list *and* the activity clock
-    /// have to lose the pond's own conversations, because the gate the second
-    /// one opens is what lets an `Idle` be published at all.
     #[test]
     fn a_scheduled_run_reaches_neither_the_arrival_list_nor_the_activity_clock() {
         let rows = vec![session(A_CRON_FIRE, t(300), t(300))];
@@ -963,9 +629,7 @@ mod tests {
             "a cron fire bumped the activity clock, so the pond believes the user is here"
         );
 
-        // Vacuity control: the same two rows with a person's id are kept, so
-        // the assertions above are about the origin and not about a projection
-        // that drops everything.
+        // Vacuity control: the same row with a person's id is kept.
         let human = vec![session("sess-human", t(300), t(300))];
         let activity = human_activity(&human);
         assert_eq!(activity.starts.len(), 1);
@@ -993,11 +657,6 @@ mod tests {
 
     // ── The never-at-startup gate ────────────────────────────────────────
 
-    /// The second half of the same defect: the cron fire's INSERT also bumps
-    /// `max(sessions.updated_at)`, which is one of the two things that decide
-    /// whether the pond has seen a user at all in this process lifetime. With
-    /// the gate open, fifteen minutes later the bus says the user went quiet
-    /// -- a complete synthetic presence cycle on an empty house.
     #[test]
     fn a_scheduled_run_does_not_open_the_never_at_startup_gate() {
         let clock = untouched_clock(t(600));
@@ -1008,9 +667,7 @@ mod tests {
              next quiet period will be published as the user going away"
         );
 
-        // Vacuity control: the identical row with a person's id does open it,
-        // so the assertion above is about the origin and not about a gate that
-        // is wired shut.
+        // Vacuity control: the same row with a person's id opens it.
         let human = vec![session("sess-human", t(300), t(300))];
         assert!(
             poll_inputs(&human, clock).saw_activity_since_start,
@@ -1018,9 +675,6 @@ mod tests {
         );
     }
 
-    /// In-process activity is the other half of the same gate and must be
-    /// unaffected by any of this: an HTTP route bumping the shared clock is a
-    /// person whatever the session store holds.
     #[test]
     fn an_http_route_still_opens_the_gate_with_no_sessions_at_all() {
         let started_at = Instant::now();
@@ -1045,10 +699,6 @@ mod tests {
         assert_eq!(events[0].session_id.as_deref(), Some("sess-new"));
     }
 
-    /// End to end through the public entry point: the pond's own conversation
-    /// produces nothing at all, and the same poll with a person's id produces
-    /// the arrival. This is the event `notes_for_next` tells P4 to read as a
-    /// household member walking in.
     #[test]
     fn a_cron_fire_is_never_announced_as_somebody_arriving() {
         let mut obs = observer_over(vec![]);
@@ -1067,9 +717,6 @@ mod tests {
         );
     }
 
-    /// The observer refuses a machine row even when it is handed one directly,
-    /// so the filter in `human_activity` is not the only thing standing
-    /// between a cron tick and a fabricated presence event.
     #[test]
     fn the_observer_itself_refuses_a_machine_session() {
         let mut obs = observer_over(vec![]);
@@ -1079,18 +726,13 @@ mod tests {
             "a machine-origin start reached the transition rules and was announced: {announced:?}"
         );
 
-        // Vacuity control for the line above: the same call with a person's
-        // row does announce, so this is the origin check and not an observer
-        // that has stopped announcing anything.
+        // Vacuity control: a person's row does announce.
         assert_eq!(
             phases(&obs.observe(&[start("sess-human", t(300))], inputs(0))),
             vec![SessionPhase::Started]
         );
     }
 
-    /// Every install after the first is a restart with history. Announcing it
-    /// would hand P4 a hundred "the user just started a conversation" events
-    /// on boot.
     #[test]
     fn a_restart_does_not_announce_the_existing_history() {
         let existing = vec![
@@ -1109,16 +751,11 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
-        // Vacuity control: the same list *without* the seed is announced, so
-        // the assertion above is about the seed and not about an observer that
-        // never announces anything.
+        // Vacuity control: without the seed, the same list is announced.
         let mut unseeded = observer_over(vec![]);
         assert_eq!(unseeded.poll(&existing, untouched_clock(t(0))).len(), 2);
     }
 
-    /// The direction the seed exists to fail in. A read error is not the same
-    /// claim as "this pond has no conversations", and confusing the two
-    /// announces every session the pond has ever held as newly started.
     #[test]
     fn a_failed_read_takes_its_baseline_from_the_first_poll_that_works() {
         let existing = vec![
@@ -1131,9 +768,7 @@ mod tests {
             "a failed startup read replayed the pond's history as arrivals"
         );
 
-        // And the baseline really was taken: the conversation that begins
-        // after it is still announced, so the failure path is quiet rather
-        // than deaf.
+        // The baseline was taken: a later conversation is still announced.
         let mut later = existing.clone();
         later.push(session("sess-new", t(60), t(60)));
         assert_eq!(
@@ -1142,10 +777,7 @@ mod tests {
         );
     }
 
-    /// Two conversations opened inside the same wall-clock second. SQLite's
-    /// `datetime('now')` has no fractional part, so both rows carry the
-    /// *identical* timestamp -- under a `created_at > watermark` comparison the
-    /// second one is dropped, silently and forever.
+    /// SQLite's `datetime('now')` has no fractional part, so same-second rows share a timestamp.
     #[test]
     fn two_conversations_in_the_same_second_are_both_announced() {
         let mut obs = observer_over(vec![session("first", t(0), t(0))]);
@@ -1167,10 +799,7 @@ mod tests {
         );
     }
 
-    /// `sqlite_session_storage :: parse_dt` invents `Utc::now()` for any
-    /// timestamp it cannot parse, so a corrupt `created_at` reads as *now* on
-    /// every poll. Against a timestamp watermark that is an unbounded stream
-    /// of "the user just arrived", once a minute, forever.
+    /// `parse_dt` turns an unparseable `created_at` into `Utc::now()`, so it moves every poll.
     #[test]
     fn a_conversation_whose_timestamp_keeps_moving_is_announced_once() {
         let mut obs = observer_over(vec![]);
@@ -1209,16 +838,8 @@ mod tests {
 
     // ── The activity clock ───────────────────────────────────────────────
 
-    /// The failure this whole gate exists to prevent: a pond that booted and
-    /// was never touched is not an idle user, it is an unused machine. It must
-    /// stay silent however long it sits, and however many times it is polled.
-    ///
-    /// **The polling window has to cross the idle threshold, and this is the
-    /// third version of this test.** The first stepped `idle_for` by a minute
-    /// over ten polls, topping out well short of the threshold -- so it passed
-    /// with the `saw_activity_since_start` gate DELETED. The second crossed the
-    /// threshold but passed `&[]` for the sessions, a fixture production does
-    /// not produce: a pond with a schedule has rows, and they were the defect.
+    /// The polls must cross the idle threshold over realistic cron rows, or this passes with the
+    /// `saw_activity_since_start` gate deleted.
     #[test]
     fn an_untouched_pond_publishes_nothing() {
         let mut obs = observer_over(vec![]);
@@ -1226,19 +847,14 @@ mod tests {
         for poll in 0..10 {
             let idle_for = Duration::from_secs(10 * 60 * poll);
             crossed_the_threshold |= idle_for >= THRESHOLD;
-            // The rows a pond with one morning-summary schedule accumulates
-            // while nobody is home: one per fire, none of them a person.
+            // One row per cron fire, none of them a person.
             let cron_fires: Vec<Session> = (0..=poll)
                 .map(|n| {
                     let id = format!("sched-morning-summary-{n}");
                     session(&id, t(n as i64 * 600), t(n as i64 * 600))
                 })
                 .collect();
-            // The gate is computed by production code over those rows; only
-            // `idle_for` is stepped by hand, because a monotonic `Instant`
-            // cannot be moved into the past on a machine that booted a minute
-            // ago and the threshold has to be crossed for this to prove
-            // anything.
+            // `idle_for` is stepped by hand: an `Instant` can't be moved into the past.
             let gate = poll_inputs(&cron_fires, untouched_clock(t(poll as i64 * 600)))
                 .saw_activity_since_start;
             let events = obs.observe(
@@ -1262,13 +878,8 @@ mod tests {
         );
     }
 
-    /// Vacuity control for the test above: the same observer, given activity,
-    /// does publish. Without this the silence assertion would also pass
-    /// against an observer that can never say anything at all.
-    ///
-    /// The first poll is deliberately past the threshold. Ungated, it would
-    /// record an `Idle` baseline from the boot clock and the next poll would
-    /// announce a `Resumed` nobody performed.
+    /// Vacuity control for the test above; the first poll is past the threshold on purpose, so an
+    /// ungated observer would baseline `Idle` and then announce a false `Resumed`.
     #[test]
     fn the_same_observer_does_publish_once_activity_is_real() {
         let mut obs = observer_over(vec![]);
@@ -1349,9 +960,6 @@ mod tests {
         );
     }
 
-    /// One arrival, one event. Opening a conversation after a gap is a
-    /// `Started`, not a `Started` plus a `Resumed` describing the same person
-    /// walking back to the same machine.
     #[test]
     fn a_new_conversation_while_idle_says_started_not_resumed() {
         let mut obs = observer_over(vec![]);
@@ -1377,32 +985,20 @@ mod tests {
 mod presence_tests {
     use super::*;
 
-    /// Taken from the constant rather than restated, so a fixture placed one
-    /// second inside the window stays one second inside it.
     const WINDOW: Duration = PRESENCE_WINDOW;
 
-    /// A session id the scheduler really mints, and one that
-    /// `PUT /sessions/{id}/user` will happily bind to a household member.
+    /// A real scheduler id, which `PUT /sessions/{id}/user` will still bind to a member.
     const A_CRON_FIRE: &str = "sched-morning-summary-1700000300";
 
     fn t(secs: i64) -> DateTime<Utc> {
         DateTime::from_timestamp(1_700_000_000 + secs, 0).expect("valid timestamp")
     }
 
-    /// A conversation begun and last spoken in at the same moment -- the shape
-    /// a fixture takes when the two clocks are not what it is about.
-    ///
-    /// **Every fixture in this module was once this shape**, which is how the
-    /// one line that picks the activity clock could be pointed at `created_at`
-    /// with the whole suite green. Where the difference is the point, use
-    /// [`long_running`].
+    /// Begun and last spoken at the same moment; use [`long_running`] when the two clocks matter.
     fn session(id: &str, updated_at: DateTime<Utc>) -> Session {
         long_running(id, updated_at, updated_at)
     }
 
-    /// A conversation begun at `created_at` and last spoken in at
-    /// `updated_at` -- the shape of every conversation that outlives its own
-    /// first minute.
     fn long_running(id: &str, created_at: DateTime<Utc>, updated_at: DateTime<Utc>) -> Session {
         let mut session = Session::new(id.to_string());
         session.created_at = created_at;
@@ -1411,11 +1007,7 @@ mod presence_tests {
         session
     }
 
-    /// A conversation the store says is bound to a member.
-    ///
-    /// `sessions.profile_id` is what `set_session_identity` writes and what
-    /// `get_session_identity` reads back, so a `Some` here is the row shape
-    /// that makes an identity read worth issuing.
+    /// A row bound to a member: `Some(profile_id)` is what makes an identity read worth issuing.
     fn attributed(id: &str, updated_at: DateTime<Utc>) -> Session {
         let mut session = session(id, updated_at);
         session.profile_id = Some("jerry".to_string());
@@ -1498,18 +1090,7 @@ mod presence_tests {
 
     // ── The column presence is keyed on ──────────────────────────────────
 
-    /// The phase's headline safety property, and the one every other fixture
-    /// in this module is blind to. `sessions.created_at` says when a
-    /// conversation *began*; `sessions.updated_at` says when somebody last
-    /// *spoke* in it. Presence is a claim about a person, so it reads the
-    /// second: keying it on `created_at` would publish nothing for a member
-    /// talking right now in a conversation older than the window, and then
-    /// `Departed` for them on the poll after.
-    ///
-    /// No mirror fixture (`updated_at` older than `created_at`) is written,
-    /// deliberately -- that is a row no production path can produce, and a
-    /// test whose fixture production cannot produce tests a system that does
-    /// not exist. The vacuity control below is the producible half.
+    /// No mirror fixture (`updated_at` before `created_at`): production can't produce that row.
     #[test]
     fn presence_is_keyed_on_when_somebody_last_spoke_not_on_when_the_conversation_began() {
         let jerry = identity(IdentificationSource::Explicit, Some("jerry"));
@@ -1530,10 +1111,7 @@ mod presence_tests {
              conversation older than the window and reports the member as gone"
         );
 
-        // Vacuity control, and the producible half of the discrimination: the
-        // same long-running conversation, silent for those three hours,
-        // publishes nothing. Without it the assertion above would also pass
-        // against an observer for which any long-running row arrives.
+        // Vacuity control: the same conversation, silent for three hours, publishes nothing.
         let quiet = long_running(
             "sess-long-quiet",
             t(0) - chrono::Duration::hours(3),
@@ -1554,10 +1132,6 @@ mod presence_tests {
 
     // ── The two invariants that decide who may be named ──────────────────
 
-    /// Invariant 4. The tempting wrong move in a one-member pond: the resolver
-    /// answers `Household`, there is exactly one member, so "it must be them".
-    /// It must not be them -- nothing identified anybody, and a proposal
-    /// addressed on that basis is addressed to whoever happened to be talking.
     #[test]
     fn an_unidentified_speaker_in_a_one_member_pond_is_not_presence() {
         let mut observer = seeded(&[], false, t(0));
@@ -1576,9 +1150,7 @@ mod presence_tests {
              Household, which is a scope and not a person"
         );
 
-        // Vacuity control: the same pond, the same poll, an identified speaker.
-        // Without this the assertion above would also pass against an observer
-        // that can never publish in a one-member pond at all.
+        // Vacuity control: the same pond and poll with an identified speaker.
         let mut control = seeded(&[], false, t(0));
         let who = identity(IdentificationSource::Explicit, Some("jerry"));
         assert_eq!(
@@ -1592,8 +1164,7 @@ mod presence_tests {
         );
     }
 
-    /// Invariant 5. An unidentified person in a shared pond is a Guest, and a
-    /// Guest's presence is not the household's presence.
+    /// An unidentified speaker in a shared pond resolves to `Guest`.
     #[test]
     fn a_guest_is_not_presence() {
         let mut observer = seeded(&[], true, t(0));
@@ -1611,8 +1182,6 @@ mod presence_tests {
         );
     }
 
-    /// A profile id whose provenance is missing is not evidence, and presence
-    /// inherits that refusal from the resolver rather than restating it.
     #[test]
     fn a_profile_id_with_no_source_is_not_presence() {
         let mut observer = seeded(&[], true, t(0));
@@ -1630,7 +1199,6 @@ mod presence_tests {
         );
     }
 
-    /// "" keeps the type's promise textually and addresses nobody.
     #[test]
     fn a_blank_profile_id_names_nobody() {
         let mut observer = seeded(&[], true, t(0));
@@ -1650,11 +1218,6 @@ mod presence_tests {
 
     // ── What produces an identification that is not a person arriving ────
 
-    /// P1's trap, in this phase's shape. The scheduler mints a session row at
-    /// 3am, and `PUT /sessions/{id}/user` will bind any id it is handed -- so
-    /// an attributed cron fire is a fixture production can produce, not a
-    /// hypothetical. Without the origin filter the pond would believe a member
-    /// walks in every time their morning summary runs.
     #[test]
     fn a_scheduled_run_attributed_to_a_member_is_not_that_member_being_home() {
         let mut observer = seeded(&[], true, t(0));
@@ -1672,9 +1235,7 @@ mod presence_tests {
              Arrived as a household member walking in"
         );
 
-        // Vacuity control: the identical row and identity under a person's
-        // session id does arrive, so this is the origin filter and not an
-        // observer that has stopped publishing.
+        // Vacuity control: the same identity on a person's session id does arrive.
         let mut control = seeded(&[], true, t(0));
         let human = session("sess-human", t(60));
         assert_eq!(
@@ -1688,11 +1249,6 @@ mod presence_tests {
         );
     }
 
-    /// The other "identification that is not an arrival": a face recognised in
-    /// a picture rather than in the room. Binding an identity does not touch
-    /// `sessions.updated_at`, so a photograph attributed to a conversation
-    /// nobody has spoken in for hours leaves the evidence stale and publishes
-    /// nothing.
     #[test]
     fn a_face_bound_to_a_conversation_that_went_quiet_hours_ago_is_not_a_person_in_the_room() {
         let mut observer = seeded(&[], true, t(0));
@@ -1709,8 +1265,7 @@ mod presence_tests {
             "a face bound to a three-hour-old conversation was published as somebody arriving"
         );
 
-        // Vacuity control: the same identity on a conversation somebody is
-        // actually speaking in does arrive.
+        // Vacuity control: the same face on a live conversation does arrive.
         let mut control = seeded(&[], true, t(0));
         let live = session("sess-now", t(60));
         assert_eq!(
@@ -1724,8 +1279,6 @@ mod presence_tests {
         );
     }
 
-    /// The window's edge, both sides. Reached is stale; one second short of it
-    /// is not.
     #[test]
     fn the_freshness_window_is_closed_at_its_far_end() {
         let jerry = identity(IdentificationSource::Explicit, Some("jerry"));
@@ -1760,7 +1313,6 @@ mod presence_tests {
 
     // ── Departure ────────────────────────────────────────────────────────
 
-    /// Absence is decided, not observed, and it is decided once.
     #[test]
     fn evidence_going_stale_publishes_one_departure() {
         let row = session("sess-jerry", t(0));
@@ -1791,10 +1343,7 @@ mod presence_tests {
         );
     }
 
-    /// Releasing a binding (`DELETE /sessions/{id}/user`) ends the belief. The
-    /// pond has not seen anybody leave -- it has stopped being able to say who
-    /// is there, which for a proposer is the same instruction: stop addressing
-    /// them.
+    /// A release (`DELETE /sessions/{id}/user`) is a departure: the pond can no longer name them.
     #[test]
     fn releasing_a_binding_ends_the_belief() {
         let row = session("sess-jerry", t(0));
@@ -1870,8 +1419,6 @@ mod presence_tests {
         );
     }
 
-    /// Two conversations naming one member in one poll: the stronger rung is
-    /// the one the event reports, whichever order they arrive in.
     #[test]
     fn the_strongest_evidence_wins_when_two_conversations_name_one_member() {
         let weak_row = session("sess-face", t(30));
@@ -1901,16 +1448,7 @@ mod presence_tests {
         }
     }
 
-    /// The other half of that comparison, and the half `beats`'s doc-comment
-    /// states an ordering for: on an equal rung the more recent conversation
-    /// wins. Inverting it used to change nothing any test could see, because
-    /// the only other fixture with two same-rung rows asserts emptiness.
-    ///
-    /// The ordering is not arbitrary. `SessionIdentity::supersedes` is
-    /// `self.source.rank() <= existing.source.rank()`, so an equal-rung write
-    /// replaces what the row held -- newer wins there too. If presence broke
-    /// the tie the other way, the event would name an older conversation than
-    /// the session row itself considers current.
+    /// Must match `SessionIdentity::supersedes`, where an equal-rung write replaces the old one.
     #[test]
     fn on_an_equal_rung_the_conversation_spoken_in_most_recently_wins() {
         let older = session("sess-older", t(0));
@@ -1960,8 +1498,7 @@ mod presence_tests {
              crossed a threshold"
         );
 
-        // The baseline really was taken, so the observer is quiet rather than
-        // deaf: the departure that follows is still published.
+        // The baseline was taken: the departure that follows is still published.
         assert_eq!(
             named(&poll(&mut observer, &live, true, t(30 * 60))),
             vec![
@@ -1971,9 +1508,7 @@ mod presence_tests {
         );
     }
 
-    /// Vacuity control for the baseline above: an observer that already has one
-    /// does publish those same two arrivals. Without it, "a restart announces
-    /// nothing" would also pass against an observer that announces nothing.
+    /// Vacuity control for the restart test above.
     #[test]
     fn the_same_rows_do_arrive_once_a_baseline_exists() {
         let jerry_row = session("sess-jerry", t(0));
@@ -2000,8 +1535,6 @@ mod presence_tests {
         );
     }
 
-    /// Arrivals before departures, so a handover between two members reads in
-    /// the order a consumer would want it: who is here now, then who is not.
     #[test]
     fn one_member_replacing_another_publishes_both_edges_arrival_first() {
         let jerry_row = session("sess-jerry", t(0));
@@ -2033,15 +1566,8 @@ mod presence_tests {
         );
     }
 
-    // ── What the publisher used to decide for itself ─────────────────────
+    // ── PresenceInputs ───────────────────────────────────────────────────
 
-    /// The window the publisher can no longer choose. It was a field the
-    /// polling loop filled in, and setting it to twenty-four hours there left
-    /// the whole workspace green.
-    ///
-    /// Presence and [`SessionPhase::Idle`] have to age out on the same
-    /// threshold, or the bus says a member is still here after it has already
-    /// said the pond went quiet.
     #[test]
     fn the_freshness_window_is_the_one_that_decides_idle() {
         assert_eq!(
@@ -2052,9 +1578,6 @@ mod presence_tests {
         );
     }
 
-    /// [`attribution_candidates`] saves the publisher a point query per row on
-    /// a table that grows forever. It must therefore not be able to change the
-    /// answer: whatever it drops, the observer would have dropped anyway.
     #[test]
     fn skipping_a_read_never_changes_who_is_published() {
         let now = t(0);
@@ -2120,8 +1643,6 @@ mod presence_tests {
         );
     }
 
-    /// On failure, access narrows. The publisher used to decide this inside a
-    /// `match` arm in a timer loop.
     #[test]
     fn a_household_count_that_cannot_be_read_answers_more_than_one() {
         let unreadable: Result<Vec<u8>, ()> = Err(());
@@ -2131,23 +1652,13 @@ mod presence_tests {
              value that turns an unidentified speaker into the whole household"
         );
 
-        // Vacuity control: a successful read still answers honestly, so the
-        // assertion above is about the failure and not about a function that
-        // always says true.
+        // Vacuity control: a successful read answers honestly.
         assert!(!household_has_multiple_members::<u8, ()>(&Ok(vec![])));
         assert!(!household_has_multiple_members::<u8, ()>(&Ok(vec![1])));
         assert!(household_has_multiple_members::<u8, ()>(&Ok(vec![1, 2])));
     }
 
-    /// And what that direction buys presence today: nothing. Saying so is the
-    /// point -- a guard claiming more than it holds is worse than none.
-    ///
-    /// `identity_resolution::resolve` consults the count only in the fallback
-    /// that answers `Household` or `Guest`, and presence publishes for neither,
-    /// so both values produce the same events over the same rows. This is a
-    /// tripwire rather than a guard: the day presence grows a `Household` path
-    /// it fails, and the failure direction above stops being merely correct and
-    /// starts being load-bearing.
+    /// Tripwire: the count only matters for `Household`/`Guest`, which presence never publishes.
     #[test]
     fn the_household_count_cannot_change_a_published_presence_event() {
         let named_row = session("sess-jerry", t(0));
@@ -2178,8 +1689,6 @@ mod presence_tests {
         );
     }
 
-    /// A store that cannot be read is not an empty house, and it is not a
-    /// fresh start either. Both wrong answers publish an edge nobody crossed.
     #[test]
     fn a_failed_read_publishes_nothing_and_leaves_the_belief_standing() {
         let row = session("sess-jerry", t(0));
@@ -2202,8 +1711,7 @@ mod presence_tests {
              departed and then arrived again when the store came back"
         );
 
-        // Direction two: nor may it forget. A reset baseline swallows the
-        // departure that follows, which is the edge P4 acts on.
+        // Direction two: nor may it forget, or the following departure is swallowed.
         let mut departs = seeded(&[], true, t(0));
         assert_eq!(
             named(&poll(&mut departs, &evidence, true, t(10))),
@@ -2217,9 +1725,7 @@ mod presence_tests {
              was never published"
         );
 
-        // Vacuity control: an `Ok` read is still just `observe`, so the two
-        // assertions above are about the `Err` arm and not about a method that
-        // never publishes.
+        // Vacuity control: an `Ok` read is still just `observe`.
         let mut ok = seeded(&[], true, t(0));
         assert_eq!(
             named(&ok.observe_read::<()>(Ok(PresenceInputs::for_poll(&evidence, true, t(10))))),
