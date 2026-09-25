@@ -62,10 +62,7 @@ import {
 } from "./types";
 import { voiceTitle } from "../voice/voiceCatalogue";
 
-// ────────────────────────────────────────────────────────────
-// PondApiClient — single API port for the pond-desktop app.
-// All REST calls MUST go through this class. No fetch() elsewhere.
-// ────────────────────────────────────────────────────────────
+// All REST calls MUST go through PondApiClient; no fetch() elsewhere.
 
 declare global {
   interface Window {
@@ -73,20 +70,11 @@ declare global {
   }
 }
 
-// Resolve the pond-server base URL for the current runtime.
-//   1. Tauri desktop shell injects `window.__GIAP_SERVER_URL__` (a local server).
-//   2. Dashboard served over HTTP by the single-executable → the API lives at
-//      the SAME origin the page was loaded from. Using window.location.origin
-//      makes remote/LAN access work (same-origin, no CORS) instead of every
-//      request hitting the *viewer's* own 127.0.0.1.
-//   3. Fallback (SSR / non-browser / tests): the conventional local server.
+/** Shell-injected URL, else the serving page's origin (LAN access, no CORS), else localhost. */
 export function defaultServerUrl(): string {
   if (typeof window !== "undefined") {
     if (window.__GIAP_SERVER_URL__) return window.__GIAP_SERVER_URL__;
-    // Only an http(s) page origin is a server worth talking to. The desktop
-    // shell serves the renderer from app://giap, which is deliberately not
-    // http -- and it always injects the URL above anyway, so this branch is
-    // the browser's.
+    // The shell's app://giap origin is not a server; only an http(s) page origin is.
     if (window.location?.origin?.startsWith("http")) {
       return window.location.origin;
     }
@@ -94,8 +82,7 @@ export function defaultServerUrl(): string {
   return "http://127.0.0.1:4000";
 }
 
-/** Commissioning budget, kept just above the server's own 180s pairing timeout
- *  so the server's error is what surfaces, not a client-side abort. */
+/** Just above the server's 180s pairing timeout, so the server's error surfaces, not an abort. */
 const COMMISSION_TIMEOUT_MS = 190_000;
 
 export class PondApiClient {
@@ -105,9 +92,7 @@ export class PondApiClient {
   private refreshToken: string | null = null;
   private tokenExpiresAt: number | null = null;
   private refreshPromise: Promise<void> | null = null;
-  // In-flight reactive re-authentication (after a 401). Shared so a burst of
-  // concurrent 401s re-pairs once and reuses the resulting token, instead of
-  // each request running its own handshake (a self-inflicted pairing storm).
+  // In-flight re-auth after a 401, shared so a burst of 401s re-pairs once.
   private reauthPromise: Promise<string | null> | null = null;
 
   private static readonly LS_SESSION = "giap-session-token";
@@ -116,13 +101,8 @@ export class PondApiClient {
   private static readonly LS_CLIENT_ID = "giap-client-id";
 
   /**
-   * A per-install client id, stable across restarts (persisted) but distinct
-   * between separate clients — a browser profile, a second machine, the Tauri
-   * app. Pairing revokes any earlier session for the *same* client id, so a
-   * shared hardcoded id made two clients ping-pong: each pair revoked the
-   * other's token, forcing an endless re-pair. Distinct ids keep distinct
-   * sessions, so they coexist. Tabs in one profile share the id (and the
-   * persisted token), so they reuse one session rather than fighting.
+   * Persisted per-install client id. Pairing revokes earlier sessions for the same id, so separate
+   * clients need distinct ids; tabs in one profile share one (and its session).
    */
   private cachedClientId: string | null = null;
   private clientId(): string {
@@ -156,8 +136,7 @@ export class PondApiClient {
   constructor(base?: string, token?: string | null) {
     this.base = (base ?? defaultServerUrl()).replace(/\/$/, "");
     this.token = token ?? null;
-    // Hydrate persisted tokens so the desktop survives restarts without
-    // re-pairing. An explicit constructor token takes precedence.
+    // Persisted tokens survive restarts without re-pairing; an explicit token wins.
     if (!this.token) this.loadPersistedTokens();
   }
 
@@ -189,23 +168,12 @@ export class PondApiClient {
     }
   }
 
-  /**
-   * Set the active session token. Pass `expiresAt` (RFC3339, the server's
-   * `expires_at`) to (re)arm the proactive refresh timer; omit it to update
-   * only the bearer token while preserving the known expiry (used by callers
-   * that just need the header). Pass `null` to clear the expiry.
-   */
-  /**
-   * Point the client at a different server.
-   *
-   * Every request builder reads `this.base` at call time, so one call here
-   * redirects the whole singleton -- which is why the shell can correct a
-   * fallback port without reloading the renderer or rebuilding the client.
-   */
+  /** Requests read `this.base` per call, so this retargets the whole singleton. */
   setBase(url: string): void {
     this.base = url.replace(/\/$/, "");
   }
 
+  /** `expiresAt` (RFC3339) arms proactive refresh; omit to keep the expiry, `null` to clear it. */
   setToken(token: string | null, expiresAt?: string | null): void {
     this.token = token;
     if (expiresAt !== undefined) {
@@ -220,8 +188,7 @@ export class PondApiClient {
     if (Date.now() < this.tokenExpiresAt - 60_000) return;
     if (!this.refreshToken) return;
     if (this.refreshPromise) return this.refreshPromise;
-    // Use a token-less fetch (handshakeFetch) so this can't recurse back into
-    // ensureTokenFresh via request().
+    // handshakeFetch is token-less, so this cannot recurse into ensureTokenFresh via request().
     this.refreshPromise = this.handshakeFetch<HandshakeResponse>(
       "POST",
       "/api/v1/handshake/refresh",
@@ -250,8 +217,7 @@ export class PondApiClient {
     method: string,
     extra?: Record<string, string>,
   ): Record<string, string> {
-    // Content-Type on a bodyless GET forces an unnecessary CORS preflight on
-    // every read call — omit it there; POST/PUT/PATCH bodies still need it.
+    // Content-Type on a bodyless GET forces a CORS preflight; only bodies need it.
     const h: Record<string, string> =
       method === "GET"
         ? { ...extra }
@@ -279,8 +245,7 @@ export class PondApiClient {
       });
       clearTimeout(timeoutId);
       if (res.status === 401 && !_retry) {
-        // The stored token was rejected (e.g. the server rotated it). Re-pair
-        // once, coalesced, then retry — see reauthenticate().
+        // Token rejected (e.g. rotated): re-pair once, coalesced, then retry.
         await this.reauthenticate();
         return this.request<T>(method, path, body, timeout, true);
       }
@@ -293,7 +258,6 @@ export class PondApiClient {
         }
         throw new ApiError(res.status, msg);
       }
-      // 204 No Content and any other empty body — return undefined cast to T
       const ct = res.headers.get("content-type") ?? "";
       if (res.status === 204 || !ct.includes("json"))
         return undefined as unknown as T;
@@ -331,7 +295,7 @@ export class PondApiClient {
 
   getSystemInfo(): Promise<{
     hostname: string;
-    /** LAN IPv4 a phone should use when it cannot resolve `<hostname>.local`. Null when the host has no LAN route. */
+    /** LAN IPv4 for phones that cannot resolve `<hostname>.local`; null without a LAN route. */
     lan_address: string | null;
     /** Tailscale IPv4, reachable from outside the house. Null unless this Pond is on a tailnet. */
     tailnet_address: string | null;
@@ -354,11 +318,7 @@ export class PondApiClient {
     return this.get("/api/v1/onboard/status");
   }
 
-  /**
-   * Record that the wizard has reached an onboarding step. `step` is a backend
-   * `OnboardingStep` variant name (e.g. "Basics", "WakeWord"). Progress is
-   * monotonic server-side, so re-reporting an earlier step is a safe no-op.
-   */
+  /** `step`: an `OnboardingStep` variant name. Progress is monotonic; an earlier step is a no-op. */
   recordOnboardingStep(
     step: string,
   ): Promise<{
@@ -374,10 +334,7 @@ export class PondApiClient {
     return this.post("/api/v1/onboard/complete");
   }
 
-  /**
-   * Reset onboarding back to the first step ("Start over"). Clears persisted
-   * progress and re-arms the onboarding guard so the wizard shows again.
-   */
+  /** "Start over": clears progress and re-arms the guard so the wizard shows again. */
   resetOnboarding(): Promise<{
     onboarded: boolean;
     current_step: string;
@@ -387,11 +344,7 @@ export class PondApiClient {
     return this.post("/api/v1/onboard/reset");
   }
 
-  /**
-   * Synthesize `text` to speech and return the raw audio bytes (WAV) for
-   * client-side playback. Throws {@link ApiError} (e.g. 503) when no TTS
-   * backend is running — callers should degrade gracefully.
-   */
+  /** WAV bytes for `text`; throws {@link ApiError} (e.g. 503) when no TTS backend runs. */
   async synthesizeSpeech(text: string): Promise<ArrayBuffer> {
     await this.ensureTokenFresh();
     const res = await fetch(`${this.base}/api/v1/tts`, {
@@ -418,29 +371,9 @@ export class PondApiClient {
   }
 
   /**
-   * PATCH the settings the caller actually changed, and return the full merged
-   * result.
-   *
-   * Send ONLY changed keys. The server writes exactly the keys the request
-   * carries and treats that key set as a record of user intent: each one is
-   * marked `is_user_set`, which permanently exempts it from future
-   * default-adoption migrations. A caller that PUTs a whole settings object
-   * therefore marks every setting as deliberately chosen — even on a Save that
-   * changed nothing — and reverts any field another surface (the Models tab,
-   * the phone, wake-word calibration) has written since it loaded.
-   *
-   * See docs/developer/settings-defaults-and-user-intent.md. Callers that
-   * batch edits behind a Save button should diff against the last loaded
-   * snapshot; `diffSettings` in `settings/state.ts` does exactly that.
-   *
-   * The returned object is NOT byte-identical to the patch for a float field.
-   * `Settings` holds these as `f32` and the API serialises through `f64`, so a
-   * sent `0.7` comes back as 0.699999988079071. A caller that keeps a baseline
-   * must fold in the patch it sent alongside this response, or the float looks
-   * permanently edited and every later save re-sends it — which re-marks it and
-   * defeats default adoption for that key. Do not paper over it by comparing
-   * numbers with an epsilon or `Math.fround`: that also collapses distinct
-   * integers above 2^24 and would drop real edits to the count fields.
+   * Send ONLY changed keys (`diffSettings`): each is marked `is_user_set` for good and clobbers
+   * other surfaces' writes (docs/developer/settings-defaults-and-user-intent.md). Floats return
+   * f32-rounded: fold the sent patch into any baseline; epsilon compares break integers > 2^24.
    */
   updateSettings(patch: Partial<Settings>): Promise<Settings> {
     return this.put("/api/v1/settings", patch);
@@ -481,13 +414,7 @@ export class PondApiClient {
     return this.post<Device>("/api/v1/devices", req);
   }
 
-  /** Commission a Matter device onto the fabric with its setup code, optionally
-   *  naming it (written to the device and used as its GIAP name).
-   *
-   *  Given its own timeout: pairing involves discovery, attestation, and fabric
-   *  join, for which the server allows 180s. On the default 30s a real
-   *  commission aborted here as "Request timed out" while it went on to succeed
-   *  on the Pond. */
+  /** `name` is also written to the device. Own timeout: the server allows 180s to pair. */
   commissionDevice(
     code: string,
     name?: string,
@@ -500,8 +427,7 @@ export class PondApiClient {
     );
   }
 
-  /** What the Matter integration is actually doing. Polled by the Devices tab
-   *  while the controller starts up, which the settings save does not wait for. */
+  /** Polled while the Matter controller starts up; the settings save does not wait for it. */
   getMatterStatus(): Promise<MatterStatus> {
     return this.get<MatterStatus>("/api/v1/matter/status");
   }
@@ -528,7 +454,7 @@ export class PondApiClient {
     return this.put<Device>(`/api/v1/devices/${encodeURIComponent(id)}`, req);
   }
 
-  // ── Mesh (#132) ─────────────────────────────────────────────
+  // ── Mesh ──────────────────────────────────────────────────
 
   listMeshPeers(): Promise<MeshPeer[]> {
     return this.get<{ peers: MeshPeer[] }>("/api/v1/mesh/peers").then(
@@ -565,17 +491,14 @@ export class PondApiClient {
     return this.get("/api/v1/mesh/self");
   }
 
-  /** Live "what does this peer offer right now" — queried over the mesh on
-   * every call, not cached (a peer's Lightning wallet or backing model can
-   * flip between two calls). 503s when mesh isn't enabled on this Pond. */
+  /** Queried live, never cached (offers can flip between calls); 503 when mesh is off. */
   getMeshPeerCapabilities(peerId: string): Promise<MeshPeerCapabilities> {
     return this.get(
       `/api/v1/mesh/peers/${encodeURIComponent(peerId)}/capabilities`,
     );
   }
 
-  /** Read-only settlement-job status — see MeshSettlementStatus's own docs
-   * on why there's no matching setter here. */
+  /** Read-only; `MeshSettlementStatus` explains why there is no setter. */
   getMeshSettlementStatus(): Promise<MeshSettlementStatus> {
     return this.get("/api/v1/mesh/settlement");
   }
@@ -718,7 +641,6 @@ export class PondApiClient {
     return res.contents?.[0]?.text ?? "";
   }
 
-  /** Execute an MCP tool by name with arguments. Returns the tool result. */
   async callTool(
     name: string,
     args: Record<string, unknown>,
@@ -729,10 +651,7 @@ export class PondApiClient {
     });
   }
 
-  /**
-   * Invoke an MCP tool directly (bypasses the LLM) via `POST /api/v1/tools/invoke`.
-   * Used by the Hub to actuate devices without a chat turn.
-   */
+  /** Runs an MCP tool directly, bypassing the LLM (the Hub actuates devices without a chat turn). */
   async invokeTool(req: {
     server: string;
     tool: string;
@@ -810,37 +729,20 @@ export class PondApiClient {
     }
   }
 
-  /** Stop an in-progress consolidation. */
   stopConsolidation(): Promise<void> {
     return this.post("/api/v1/memory/consolidate/stop", {});
   }
 
   // ── Semantic index ────────────────────────────────────────
 
-  /**
-   * How much of what the pond knows retrieval can actually reach.
-   *
-   * Never rejects for a pond with no index or no embedder — it answers with
-   * `indexed: false` and a reason, because switching embeddings off is a
-   * working configuration rather than a fault. Branch on `indexed` before
-   * reading any count: they are absent, not zero, in that answer.
-   */
+  /** No index or embedder answers `indexed: false`, not an error; counts are then absent, not 0. */
   getContextIndexHealth(): Promise<ContextIndexHealth> {
     return this.get<ContextIndexHealth>("/api/v1/context/index/health");
   }
 
   /**
-   * Empty the index so the maintenance sweep embeds every row again.
-   *
-   * Answers when the table is cleared, NOT when the re-embed finishes: health
-   * read straight afterwards is near zero and climbs in the background, so a
-   * caller that refreshes immediately has to say so or it looks like the
-   * rebuild broke something. Nothing is lost either way — every vector is
-   * recomputable from the store it was derived from.
-   *
-   * This is the repair for the one-way doors: a changed embedder, width or task
-   * prefix leaves rows that score plausibly and are wrong, and the sweep cannot
-   * notice them on its own because it is driven by a vector being ABSENT.
+   * Empties the index for the sweep to re-embed (the fix after an embedder, width or prefix change).
+   * Answers once cleared, not when re-embedded: health reads near zero and climbs afterwards.
    */
   rebuildContextIndex(): Promise<ContextIndexRebuild> {
     return this.post<ContextIndexRebuild>("/api/v1/context/index/rebuild", {});
@@ -853,12 +755,7 @@ export class PondApiClient {
     return this.get<{ zones: ZoneChoice[] }>("/api/v1/time/zones");
   }
 
-  /**
-   * Work out where this pond is, from several sources, cheapest first.
-   *
-   * Server-side so onboarding and Settings run the SAME cascade — they used to
-   * have one each, and neither produced usable coordinates.
-   */
+  /** Locates the pond, cheapest source first; server-side so onboarding and Settings share it. */
   detectLocation(hints: {
     system_zone?: string;
     typed_name?: string;
@@ -870,25 +767,14 @@ export class PondApiClient {
 
   // ── Connected accounts ────────────────────────────────────
 
-  /**
-   * The sources this session's speaker may see.
-   *
-   * Scoped on the server from the session, not filtered here: one member never
-   * sees another's accounts, and that is decided where the rows are.
-   */
+  /** Sources this session's speaker may see; scoped server-side, never filtered here. */
   listContextSources(sessionId: string): Promise<{ sources: ContextSource[] }> {
     return this.get(
       `/api/v1/context/sources?session_id=${encodeURIComponent(sessionId)}`,
     );
   }
 
-  /**
-   * Connect an account.
-   *
-   * The owner is NOT sent: the server resolves it from the session and the
-   * paired device this request arrived on. A caller-supplied owner would be a
-   * hole, and every item the source ever produces inherits it.
-   */
+  /** Sends no owner: the server derives it from session and device; a client-set owner is a hole. */
   connectContextSource(input: {
     kind: string;
     provider: string;
@@ -913,11 +799,7 @@ export class PondApiClient {
     });
   }
 
-  /** What the pond has read from connected sources, newest first.
-   *
-   * Keyword search, not semantic: somebody scanning this list is looking for a
-   * message they remember the words of, and a cosine ranking would bury an
-   * exact title match under things merely about the same subject. */
+  /** Items read from connected sources, newest first. Keyword search: people recall exact words. */
   listContextItems(
     sessionId: string,
     query?: string,
@@ -934,15 +816,9 @@ export class PondApiClient {
     return this.put(`/api/v1/memories/${encodeURIComponent(id)}`, { content });
   }
 
-  /**
-   * Pull every connected account now, instead of waiting for the half-hourly
-   * sweep. Answers with what the pass did, so a person who just typed in a
-   * password learns whether it worked.
-   */
+  /** Syncs all accounts now rather than at the half-hourly sweep, reporting what the pass did. */
   syncContextSources(): Promise<AccountSyncSummary> {
-    // Longer than the default: a sync is several HTTP round trips to somebody
-    // else's server, and timing out at 30s would report a failure for a pass
-    // that was still going.
+    // Several round trips to third-party servers; the 30s default would fail a pass still running.
     return this.post("/api/v1/context/sync", {}, 120_000);
   }
 
@@ -958,24 +834,12 @@ export class PondApiClient {
 
   // ── Conversation titles ───────────────────────────────────
 
-  /**
-   * Rename conversations now rather than waiting for the pond to be idle.
-   *
-   * Runs to completion before it answers — one model call per conversation
-   * renamed — so callers should expect this to be slow on a small board and
-   * show it. Names typed by hand are never touched.
-   */
+  /** Retitles now; slow (one model call per rename before it answers). Hand-typed names are kept. */
   retitleSessions(): Promise<RetitleResult> {
     return this.post("/api/v1/sessions/retitle", {});
   }
 
-  /**
-   * Rename one named conversation, now.
-   *
-   * Obeys rather than protects: unlike the sweep, this replaces a name that
-   * still fits and one typed by hand, because asking for a specific
-   * conversation is consent about that conversation.
-   */
+  /** Unlike the sweep, replaces even a fitting or hand-typed name: asking is consent. */
   retitleSession(sessionId: string): Promise<RetitleOneResult> {
     return this.post(
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/retitle`,
@@ -1020,10 +884,7 @@ export class PondApiClient {
 
   // ── Auth / Handshake ─────────────────────────────────────────
 
-  /**
-   * Token-less fetch for the public handshake endpoints. Deliberately bypasses
-   * `request()`/`ensureTokenFresh()` so refresh/pairing can't recurse.
-   */
+  /** Token-less, bypassing `request()`, so refresh and pairing cannot recurse. */
   private async handshakeFetch<T>(
     method: string,
     path: string,
@@ -1065,19 +926,10 @@ export class PondApiClient {
       .join("");
   }
 
-  /**
-   * Auto-pair this desktop install with the local server. Because the desktop
-   * and server share a machine, we read the pairing code off the loopback-only
-   * endpoint and run the full two-phase handshake — no operator typing needed.
-   * On success the session+refresh tokens are stored on this client.
-   */
+  /** Auto-pairs via the loopback-only pairing-code endpoint (same machine), storing the tokens. */
   async pair(clientId?: string): Promise<HandshakeResponse> {
     clientId = clientId ?? this.clientId();
-    // Read the current code; if none is active (e.g. the startup code expired
-    // after 10 min), ISSUE a fresh one. Both endpoints are loopback-only, so the
-    // same-host desktop is trusted to mint its own code — this is what makes
-    // silent auto-pair actually reliable instead of failing once the operator's
-    // startup code lapses.
+    // If the startup code (10 min) lapsed, mint one; both endpoints are loopback-only.
     let pc = await this.handshakeFetch<PairingCodeResponse>(
       "GET",
       "/api/v1/handshake/pairing-code",
@@ -1121,22 +973,8 @@ export class PondApiClient {
   }
 
   /**
-   * Establish an authenticated session, reusing a persisted token across app
-   * restarts. Tries, in order: a still-valid stored session token → a refresh
-   * with the stored refresh token (no pairing code needed) → a fresh pair
-   * (needs the server's current pairing code). Returns the active session
-   * token, or `null` if none could be established.
-   */
-  /**
-   * Re-authenticate after a rejected token, coalescing concurrent callers.
-   *
-   * A stale token fails every in-flight request at once (page load fires
-   * several), and without this each one would independently drop the token and
-   * run a full handshake — the burst of pairings seen in the server log. Here
-   * the first caller drops the rejected token and re-pairs; everyone else
-   * awaits the same promise and picks up the one fresh token. The token is
-   * cleared inside the shared body (once), so a late caller can't null a token
-   * a concurrent re-pair just obtained.
+   * Re-auth after a rejected token, coalesced: concurrent 401s share one re-pair. The token is
+   * cleared inside the shared body, so a late caller cannot null a freshly obtained one.
    */
   private reauthenticate(clientId?: string): Promise<string | null> {
     if (this.reauthPromise) return this.reauthPromise;
@@ -1149,9 +987,9 @@ export class PondApiClient {
     return this.reauthPromise;
   }
 
+  /** Valid stored token, else a refresh, else a fresh pair. Resolves to the session token or null. */
   async connect(clientId?: string): Promise<string | null> {
     clientId = clientId ?? this.clientId();
-    // 1. Stored session token still comfortably valid.
     if (
       this.token &&
       this.tokenExpiresAt &&
@@ -1159,8 +997,7 @@ export class PondApiClient {
     ) {
       return this.token;
     }
-    // 2. Refresh with a stored refresh token — survives restarts for 30 days
-    //    without ever needing the pairing code again.
+    // A refresh token lasts 30 days and needs no pairing code.
     if (this.refreshToken) {
       try {
         const r = await this.handshakeFetch<HandshakeResponse>(
@@ -1179,7 +1016,6 @@ export class PondApiClient {
         /* fall through to a fresh pair */
       }
     }
-    // 3. Fresh pairing.
     const res = await this.pair(clientId);
     return res.accepted ? res.session_token : null;
   }
@@ -1205,13 +1041,11 @@ export class PondApiClient {
   // ── Models ────────────────────────────────────────────────
 
   listModels(): Promise<ModelEntry[]> {
-    // Backend returns { gguf: [...], llamafile: [...], tts: [...], whisper: [...] }
-    // each entry has: name, category, active, ram_estimate_mb, recommended_role, description
+    // The backend groups entries by category: { gguf: [...], llamafile: [...], tts: [...], ... }.
     return this.get<ModelEntry[] | Record<string, unknown[]>>(
       "/api/v1/models",
     ).then((r) => {
       if (Array.isArray(r)) return r;
-      // Flatten grouped object into ModelEntry[]
       const entries: ModelEntry[] = [];
       for (const [category, items] of Object.entries(r)) {
         for (const item of items as Record<string, unknown>[]) {
@@ -1219,10 +1053,7 @@ export class PondApiClient {
             id: `${category}/${item.name as string}`,
             provider: category,
             name: item.name as string,
-            // A Kokoro voice's description is a sentence, not a name, so it
-            // must not become the row title the way an LLM's short description
-            // legitimately does. Title from the id instead: `af_heart` →
-            // `Af_Heart`, with the description left for the row's subtitle.
+            // Kokoro descriptions are sentences, so title from the id (af_heart -> Af_Heart).
             display_name:
               ((item.category as string | undefined) ?? category) ===
               "tts_kokoro"
@@ -1253,14 +1084,7 @@ export class PondApiClient {
     });
   }
 
-  /**
-   * Bring the RUNNING speech engine in line with the saved voice settings,
-   * fetching anything missing first.
-   *
-   * Without this, every voice change waited for the next restart — the engine
-   * is built once at boot. Selecting a voice the household does not have is a
-   * download here, not an error telling them to install it elsewhere.
-   */
+  /** Applies saved voice settings to the running engine (built at boot), fetching missing voices. */
   applyTtsSettings(patch?: {
     voice?: string;
     speed?: number;
@@ -1291,8 +1115,7 @@ export class PondApiClient {
   }
 
   getActiveRoles(): Promise<ModelActiveRoles> {
-    // Backend may return { model_id: "provider/name" } for ASR/TTS instead of { provider, model }.
-    // Normalize all roles to { provider, model } | null.
+    // ASR/TTS roles may come as { model_id: "provider/name" } instead of { provider, model }.
     return this.get<Record<string, unknown>>(
       "/api/v1/models/active-roles",
     ).then((raw) => {
@@ -1301,13 +1124,11 @@ export class PondApiClient {
       ): { provider: string; model: string } | null {
         if (!r || typeof r !== "object") return null;
         const obj = r as Record<string, unknown>;
-        // Already has provider + model
         if (obj.provider && obj.model)
           return {
             provider: obj.provider as string,
             model: obj.model as string,
           };
-        // Has model_id like "whisper/base.en" or "gguf/gemma-2b"
         if (typeof obj.model_id === "string" && obj.model_id.includes("/")) {
           const [provider, ...rest] = obj.model_id.split("/");
           return { provider, model: rest.join("/") };
@@ -1332,11 +1153,7 @@ export class PondApiClient {
   }
 
   // ── Suggestions (proactive proposals) ─────────────────────
-  //
-  // Both routes require a session id and neither defaults it: the session is
-  // how the server learns who is asking, and a defaulted one would resolve to
-  // the whole household — so a suggestion meant for one person would be shown
-  // to, and answerable by, anyone.
+  // Session id is required, never defaulted: a default resolves to the whole household.
 
   listProposals(sessionId: string): Promise<ProposalList> {
     return this.get<ProposalList>(
@@ -1367,8 +1184,7 @@ export class PondApiClient {
     );
   }
 
-  /** `limit` with no `offset`: server returns the N most recent messages
-   *  (newest-aware), not an old-first page — see get_session_messages. */
+  /** `limit` without `offset` returns the N most recent messages, not the oldest page. */
   getSessionMessages(
     sessionId: string,
     limit?: number,
@@ -1409,32 +1225,21 @@ export class PondApiClient {
     return this.del(`/api/v1/sessions/${encodeURIComponent(sessionId)}`);
   }
 
-  /**
-   * PAI-4 P7. Ask the server to compact this session now.
-   *
-   * Everything short of a server fault answers 200 with a `status`/`reason`
-   * pair, so a refusal ("cooling_down", "not_under_pressure", …) arrives here
-   * as a normal resolved `CompactionReport` — `request()` only throws on
-   * non-2xx. Callers must render the reason, not treat it as an error: the
-   * endpoint deliberately does not bypass the pressure axis's rate limiter, so
-   * being refused is the common case rather than the exceptional one.
-   */
+  /** Refusals (e.g. "cooling_down") resolve normally and are common: render the reason. */
   compactSession(sessionId: string): Promise<CompactionReport> {
     return this.post(
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/compact`,
     );
   }
 
-  /** Delete a message and every later message in the same session — the
-   *  primitive behind "edit" and "refresh" on a user message. */
+  /** Deletes this message and all later ones: the primitive behind "edit" and "refresh". */
   deleteMessagesFrom(sessionId: string, messageId: string): Promise<void> {
     return this.del(
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}`,
     );
   }
 
-  /** Set (`true`/`false`) or clear (`null`) the like/dislike training-feedback
-   *  flag on one message. */
+  /** Like (`true`), dislike (`false`) or clear (`null`) a message's training feedback. */
   setMessageFeedback(
     sessionId: string,
     messageId: string,
@@ -1456,11 +1261,7 @@ export class PondApiClient {
     return this.get(`/api/v1/prompts/${name}`);
   }
 
-  /**
-   * Omitting `description` preserves the stored one — the server treats an
-   * absent field as "leave it alone" rather than "clear it". Pass it only when
-   * the caller actually means to change it.
-   */
+  /** Omitting `description` keeps the stored one; pass it only to change it. */
   updatePrompt(
     name: string,
     content: string,
@@ -1514,12 +1315,6 @@ export class PondApiClient {
   }
 
   // ── Chat streaming ────────────────────────────────────────
-  //
-  // Returns an AsyncGenerator that yields ChatEvent objects.
-  // Usage:
-  //   for await (const event of client.chatStream("hello")) {
-  //     if (event.type === "text") appendToken(event.content ?? "");
-  //   }
 
   async *chatStream(
     message: string,
@@ -1533,23 +1328,15 @@ export class PondApiClient {
       message,
       session_id: sessionId,
       canvas_mode: canvasMode ?? false,
-      // Only set when non-empty so text-only turns keep today's exact body.
+      // Only when non-empty, so text-only bodies stay unchanged.
       ...(images && images.length > 0 ? { images } : {}),
-      // Only set when asked, so a turn that does not want to outlive its
-      // connection sends exactly the body it always did.
+      // Only when asked, so other bodies stay unchanged.
       ...(resumable ? { resumable: true } : {}),
     };
     yield* this.streamSse("/api/v1/chat/stream", reqBody, token);
   }
 
-  /**
-   * The run driving this session, if the server is still driving one.
-   *
-   * The way back in after a reload: the app knows its session id and nothing
-   * else, so this is what turns that into a run to reattach to. `null` when
-   * there is none — which is also the honest answer after a server restart,
-   * since the run died with the process.
-   */
+  /** Live run to reattach to after a reload; `null` if none, as after a server restart. */
   async getActiveRun(sessionId: string): Promise<ActiveRun | null> {
     try {
       return await this.request<ActiveRun>(
@@ -1562,13 +1349,7 @@ export class PondApiClient {
     }
   }
 
-  /**
-   * Follow a run already in flight, replaying from `afterSeq` first.
-   *
-   * `epoch` is what the run reported when it started. Sending it back is what
-   * earns a 410 with a reason instead of a bare 404 when the server has
-   * restarted underneath the client.
-   */
+  /** Replays from `afterSeq` then follows; with `epoch`, a restarted server answers 410, not 404. */
   async *reattachRun(
     runId: string,
     afterSeq: number,
@@ -1585,7 +1366,7 @@ export class PondApiClient {
     );
   }
 
-  /** Stop a run on purpose — the only way, now that hanging up is not one. */
+  /** The only way to stop a run: hanging up does not. */
   async cancelRun(runId: string): Promise<void> {
     await this.request(
       "POST",
@@ -1606,10 +1387,7 @@ export class PondApiClient {
     return `${this.base}/api/v1/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(attachmentId)}`;
   }
 
-  /**
-   * Execute a recipe by name. Server resolves the recipe's prompt and streams
-   * the agent's response using the same SSE event shape as `chatStream`.
-   */
+  /** Runs a recipe server-side, streaming the same SSE events as `chatStream`. */
   async *runRecipe(
     name: string,
     opts?: {
@@ -1633,10 +1411,7 @@ export class PondApiClient {
     );
   }
 
-  /**
-   * POST a JSON body to an SSE endpoint and yield each parsed event.
-   * Shared by chatStream and runRecipe.
-   */
+  /** POSTs JSON to an SSE endpoint and yields each parsed event. */
   private async *streamSse(
     path: string,
     body: unknown,
@@ -1675,12 +1450,7 @@ export class PondApiClient {
       }
     }
 
-    // A rejected token (the server rotated it, or an app-held token went stale)
-    // must not surface as a chat error. Re-authenticate once — coalesced with
-    // any concurrent 401s — and reconnect with the fresh token. Unlike request(),
-    // this SSE path used to just throw, which is why a chat send could fail with
-    // "Invalid or expired token" while background calls quietly re-paired. This
-    // also stops an SSE reconnect from re-pairing every cycle.
+    // A 401 must not surface as a chat error: re-auth once (coalesced) and reconnect.
     if (res.status === 401) {
       const fresh = await this.reauthenticate();
       if (fresh) {
@@ -1713,10 +1483,7 @@ export class PondApiClient {
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
-    // The server puts a run's frame sequence in the SSE `id:` field rather than
-    // inside the JSON, so no frame shape changed and no per-token parse was
-    // added on a Jetson's hot path. It is what a reattach resumes from, so it
-    // has to be read here rather than thrown away with the rest of the envelope.
+    // The frame sequence rides in the SSE `id:` field, not the JSON; reattach resumes from it.
     let lastSeq: number | undefined;
 
     try {
@@ -1751,17 +1518,8 @@ export class PondApiClient {
         }
       }
     } finally {
-      // Abandoning this generator must CLOSE the body, not merely let go of it.
-      // `releaseLock()` alone leaves the response un-cancelled, so the socket
-      // stays open; the server's SSE generator is never dropped, so its
-      // `sse_semaphore` permit and its `AttachGuard` are both still held. There
-      // are four permits. Measured: four turns abandoned mid-stream (four
-      // conversation switches) and every later send gets
-      // `503 Too many concurrent streams` in under 2 ms, until the browser
-      // happens to garbage-collect the Response.
-      //
-      // `cancel()` on a body already read to EOF is a no-op, so the normal
-      // completion path is unchanged.
+      // Abandoning the generator must cancel the body: releaseLock() alone keeps the server's SSE
+      // permit (one of four) held. cancel() after EOF is a no-op.
       try {
         await reader.cancel();
       } catch {
@@ -1809,14 +1567,7 @@ export class PondApiClient {
     });
   }
 
-  /**
-   * Pause, resume or cancel a transfer in flight.
-   *
-   * Pause and cancel are the same stop, differing in what happens to the
-   * partial file: pause leaves it so resuming continues from there, cancel
-   * throws it away. Resume starts the same transfer again — the Hugging Face
-   * cache finds the partial and re-requests with a range header.
-   */
+  /** Pause keeps the partial file (resume re-requests with a range header); cancel deletes it. */
   controlDownload(
     filename: string,
     action: "pause" | "resume" | "cancel",
@@ -1867,20 +1618,13 @@ export class PondApiClient {
   }
 
   // ── Face Recognition (auto-managed; status only) ──────────
-  //
-  // The desktop Models section binds to this for read-only status of the
-  // ArcFace + SCRFD + Silent-Face PAD models that pond-server downloads
-  // automatically on first boot when built with `--features face-onnx`.
+  // pond-server downloads these models on first boot when built with `--features face-onnx`.
   listFaceModels(): Promise<FaceModelsResponse> {
     return this.get("/api/v1/faces/models");
   }
 
   // ── Face enrollment / identification (Faces section) ──────
-  //
-  // Multipart-form endpoints — bypass the JSON helpers and use fetch
-  // directly so the request body stays a FormData. All calls require the
-  // `face-onnx` cargo feature; without it pond-server returns 503 which
-  // bubbles up as ApiError(503).
+  // Face calls are multipart (postMultipart); without `face-onnx` the server answers 503.
 
   listProfiles(): Promise<{
     profiles: Array<{ id: string; display_name: string; avatar_emoji: string }>;
@@ -1912,20 +1656,8 @@ export class PondApiClient {
   }
 
   /**
-   * Store a household member's preferences on the SERVER.
-   *
-   * The keys are a contract with the prompt builder, which reads
-   * `preferred_name`, `birthday`, `language` and
-   * `accessibility_atypical_speech` out of `profiles.preferences`
-   * (`routes.rs :: particulars_for`). They are snake_case there and camelCase
-   * in this app's own draft types, and a camelCase key sent here returns 200,
-   * populates the row, and reaches the model as nothing at all.
-   *
-   * That is not hypothetical: until 2026-08-12 the onboarding wizard collected
-   * a preferred name and birthday and wrote them to browser `localStorage`,
-   * while the server read them from SQLite. Every piece worked and the
-   * capability did not exist. `PROFILE_PREF_KEYS` is the single spelling of
-   * these names on this side.
+   * Keys must be the snake_case names `particulars_for` (routes.rs) reads, from `PROFILE_PREF_KEYS`:
+   * a camelCase key returns 200 yet never reaches the model.
    */
   updateProfilePrefs(
     profileId: string,
@@ -2065,13 +1797,8 @@ export class PondApiClient {
   }
 
   /**
-   * Stores an extension's credentials and restarts it so the running process
-   * picks them up.
-   *
-   * `restarted` is false with no `restart_error` when there was deliberately
-   * nothing to restart — the extension is not installed, or is disabled.
-   * A non-null `restart_error` means the credentials are stored but the
-   * extension is not running, so callers must surface it.
+   * Stores credentials and restarts the extension. `restarted: false` with no error means nothing to
+   * restart (not installed, or disabled); a `restart_error` means stored but not running: surface it.
    */
   async setExtensionSecrets(
     name: string,
@@ -2219,25 +1946,17 @@ export class PondApiClient {
     });
   }
 
-  /**
-   * How the flow with this `state` nonce ended.
-   *
-   * `pending` while the browser hand-off is in flight, then `completed` /
-   * `failed`. `unknown` means the nonce was never issued by the running server
-   * (it restarted) or its outcome aged out.
-   */
+  /** `unknown`: this server never issued `state` (it restarted) or the outcome aged out. */
   async getOAuthStatus(
     state: string,
   ): Promise<import("./types").OAuthFlowStatus> {
     return this.get(`/api/v1/oauth/status/${encodeURIComponent(state)}`);
   }
 
-  /** Refresh an expired OAuth access token. */
   async refreshOAuth(provider: string): Promise<void> {
     await this.post("/api/v1/oauth/refresh", { provider });
   }
 
-  /** List supported OAuth providers. */
   async listOAuthProviders(): Promise<
     { id: string; display_name: string; scopes: string[] }[]
   > {
@@ -2248,5 +1967,4 @@ export class PondApiClient {
   }
 }
 
-// Singleton — the Tauri backend injects window.__GIAP_SERVER_URL__
 export const api = new PondApiClient();

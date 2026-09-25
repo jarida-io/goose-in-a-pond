@@ -1,8 +1,4 @@
-// The migration's job is to rescue member preferences stranded in a browser
-// WITHOUT ever overwriting what the pond already knows. localStorage is a stale
-// copy from one browser on one machine; the server is the household's record.
-// A migration that wins ties would let an old laptop quietly revert a name
-// somebody corrected on their phone.
+// The server is the household's record; a migration that won ties could revert a corrected name.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
@@ -90,8 +86,7 @@ describe("migrateLocalProfileToServer", () => {
   });
 
   it("retries next boot when there is no member to attach to yet", async () => {
-    // A fresh pond has no primary profile. Marking the migration done here would
-    // strand the data permanently the moment somebody is created later.
+    // Marking done here would strand the data once a member is created.
     getSettings.mockResolvedValue({ primary_profile_id: null });
     localStorage.setItem(LOCAL_KEY, JSON.stringify({ preferredName: "Cap" }));
 

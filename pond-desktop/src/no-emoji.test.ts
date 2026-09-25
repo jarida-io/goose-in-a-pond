@@ -5,11 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-// An allowlist of roots rather than the package root with a denylist. A
-// denylist would have to name node_modules, dist, release, resources,
-// src-tauri, target, tests and playwright-report, and it would rot; this way
-// adding a third root is a one-line, obvious edit, and the scan still cannot
-// wander into node_modules by accident.
+// An allowlist of roots, so the scan can never wander into node_modules, dist, target...
 const SCAN_ROOTS = [HERE, resolve(HERE, "../electron")];
 
 function collectSourceFiles(dir: string): string[] {
@@ -25,7 +21,6 @@ function collectSourceFiles(dir: string): string[] {
   return result;
 }
 
-// Matches any Unicode extended pictographic (covers all emoji and pictographic symbols)
 const EMOJI_RE = /\p{Extended_Pictographic}/u;
 
 describe("no-emoji lint", () => {

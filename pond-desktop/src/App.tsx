@@ -8,15 +8,8 @@ import { api } from "./api/PondApiClient";
 import { useTheme } from "./hub/state/themeStore";
 
 /**
- * Ink, in `context` mode: it hands components the theme and writes nothing.
- *
- * The custom properties are already on `<html>` — `themeStore` puts them there
- * on module load, before React renders, which is what keeps the first paint
- * from flashing. Letting the provider write them too would mean two writers of
- * the same eighty properties, and the second one arriving a frame late.
- *
- * It is given the exact theme object the store built, so what the DOM says and
- * what a component reads can never be two different themes.
+ * Ink in `context` mode (theme only, no CSS writes): `themeStore` already set the properties on
+ * <html> before first paint, and passing its own theme object keeps DOM and components in sync.
  */
 function InkScope({ children }: { children: React.ReactNode }) {
   const { ink } = useTheme();
@@ -31,7 +24,6 @@ export function App() {
   const { mode, needsOnboarding } = useAppState();
   const dispatch = useAppDispatch();
 
-  // Show onboarding wizard when the backend reports the device is not yet onboarded.
   if (needsOnboarding) {
     return (
       <InkScope>

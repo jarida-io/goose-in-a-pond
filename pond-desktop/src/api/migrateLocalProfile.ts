@@ -1,27 +1,5 @@
-// ────────────────────────────────────────────────────────────
-// One-time lift of member preferences out of browser localStorage.
-//
-// The onboarding wizard used to save a preferred name, birthday, avatar and
-// accessibility flags to localStorage under "giap-user-profile", while the
-// server read the same fields from SQLite `profiles.preferences`. Nothing
-// joined the two, so the assistant never learned any of it.
-//
-// The wizard now writes to `PATCH /api/v1/profiles/{id}`. That fixes new
-// installs and does nothing for anyone who already onboarded — they have the
-// data in a browser, will never open the wizard again, and would experience the
-// fix as their details silently staying lost. This lifts what is already there,
-// once.
-//
-// Deliberately conservative:
-//   * NEVER overwrites a value the server already has. The server is the source
-//     of truth the moment it has anything; localStorage is a stale copy from a
-//     single browser on a single machine.
-//   * Leaves localStorage in place. Deleting it would make this irreversible on
-//     the strength of one uncertain API call, and it costs a few bytes to keep.
-//     A marker records that the lift happened so it does not run every boot.
-//   * Never throws. A pond that cannot reach its own API has a bigger problem
-//     than a preferred name, and this must not be what stops the app rendering.
-// ────────────────────────────────────────────────────────────
+// One-time lift of member preferences from localStorage to the server. Never overwrites a
+// server value, keeps localStorage (a marker stops reruns), never throws.
 
 import { api } from "./PondApiClient";
 
@@ -72,8 +50,7 @@ export async function migrateLocalProfileToServer(): Promise<void> {
 
     const settings = await api.getSettings();
     const profileId = settings.primary_profile_id;
-    // No member to attach to. Leave the marker UNSET so a later boot — after
-    // somebody has been created — still gets the chance.
+    // No member yet: leave the marker unset so a later boot can still migrate.
     if (!profileId) return;
 
     const profiles = await api.listProfiles();

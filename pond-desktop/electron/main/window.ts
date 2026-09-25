@@ -1,8 +1,4 @@
-// The main window.
-//
-// One window, labelled `main`. The Tauri capabilities file also declared a
-// `canvas` window, but nothing ever created it -- Canvas is a section inside
-// the renderer, toggled by an event -- so it is not reproduced here.
+// The one main window; Canvas is a renderer section, not a second window.
 
 import { BrowserWindow, screen, shell } from "electron";
 import { join } from "node:path";
@@ -29,15 +25,7 @@ export interface Geometry {
   kiosk: boolean;
 }
 
-/**
- * Size the window to the display it will open on.
- *
- * The case this exists for is the 7-inch 1024x600 panel on the Jetson: a fixed
- * 1280x860 window overflows it and the title bar and top rows are lost, and a
- * 600px minimum height cannot fit under a desktop's top bar. So on a small
- * panel we drop the chrome and take the whole screen; on a roomy desktop we
- * keep a normal window.
- */
+/** Sizes the window to its display; small panels (the Jetson's 1024x600) go chromeless fullscreen. */
 export function windowGeometry(workArea: {
   width: number;
   height: number;
@@ -55,11 +43,7 @@ export interface CreateWindowOptions {
   serverUrl: string;
   /** Where to remember the window's position between runs. */
   userDataDir: string;
-  /**
-   * In dev, the Vite server to load instead of the built bundle, so HMR works.
-   * Its origin (http://localhost:1420) is already in pond-server's CORS
-   * allowlist, which is why that entry stays after the migration.
-   */
+  /** Dev-only Vite server (HMR); pond-server's CORS allowlist must keep http://localhost:1420. */
   devServerUrl?: string | undefined;
   /** Called when the user closes the window, so the caller can hide-to-tray. */
   onCloseRequested(win: BrowserWindow): void;
@@ -69,9 +53,7 @@ export function createMainWindow(opts: CreateWindowOptions): BrowserWindow {
   const workArea = screen.getPrimaryDisplay().workAreaSize;
   const geom = windowGeometry(workArea);
 
-  // A remembered position, but only if some display still covers it. On a
-  // kiosk panel we ignore it entirely -- the window is fullscreen there and a
-  // saved desktop position would be meaningless.
+  // Remembered position only if a display still covers it; ignored on a kiosk (fullscreen).
   const statePath = stateFilePath(opts.userDataDir);
   const remembered = geom.kiosk
     ? null
@@ -97,9 +79,7 @@ export function createMainWindow(opts: CreateWindowOptions): BrowserWindow {
       sandbox: true,
       nodeIntegration: false,
       webSecurity: true,
-      // PondApiClient reads window.__GIAP_SERVER_URL__ at module load, before
-      // any of our code runs, so the preload must already know the URL. Tauri
-      // injected it as a pre-load script; here it rides on argv.
+      // PondApiClient reads __GIAP_SERVER_URL__ at module load, so the preload needs it from argv.
       additionalArguments: [`--giap-server-url=${opts.serverUrl}`],
     },
   });
@@ -107,9 +87,7 @@ export function createMainWindow(opts: CreateWindowOptions): BrowserWindow {
   // Show only once the first paint is ready, so there is no white flash.
   win.once("ready-to-show", () => win.show());
 
-  // Any target=_blank or window.open goes to the real browser, never an in-app
-  // window. Under Tauri the fallback path for opening a link was window.open,
-  // which in a desktop shell is actively wrong rather than merely degraded.
+  // target=_blank and window.open go to the real browser, never an in-app window.
   win.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);
     return { action: "deny" };
@@ -117,8 +95,7 @@ export function createMainWindow(opts: CreateWindowOptions): BrowserWindow {
 
   void win.loadURL(opts.devServerUrl ?? rendererEntryUrl());
 
-  // Save on the events that actually settle a new position, not on every
-  // frame of a drag.
+  // Save on "moved"/"resized" (settled), not on every frame of a drag.
   const remember = () => {
     if (win.isDestroyed() || win.isMinimized() || win.isFullScreen()) return;
     writeState(statePath, win.getNormalBounds());

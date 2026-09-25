@@ -7,11 +7,6 @@ import {
   type LineClass,
 } from "./ndjson";
 
-// Ported from the 21 Rust tests that covered the same logic in
-// src-tauri/src/chat_process.rs. Those never gated a merge -- src-tauri was in
-// no CI job at all -- so this is the first time this behaviour is actually
-// checked by anything.
-
 /** Unwrap a line that must have classified as an event. */
 function event(line: string): Extract<LineClass, { kind: "event" }> {
   const r = classifyLine(line);
@@ -98,9 +93,7 @@ describe("classifyLine: the NDJSON to shell-event mapping", () => {
     expect(ev.payload).toEqual({ rms: 0.42 });
   });
 
-  // A missing field yields an empty payload field rather than rejecting the
-  // line: half an event is still worth showing, and the renderer already
-  // renders empty text as nothing.
+  // Half an event is still worth showing; the renderer shows empty text as nothing.
   it("defaults missing string fields to empty rather than rejecting", () => {
     expect(event('{"event":"transcript"}').payload).toEqual({ text: "" });
     expect(event('{"event":"ready"}').payload).toEqual({ session_id: "" });
@@ -116,8 +109,7 @@ describe("classifyLine: the NDJSON to shell-event mapping", () => {
 });
 
 describe("classifyLine: exit lines", () => {
-  // The reader turns `exit` into voice-session-ended only once stdout closes,
-  // so the reason is carried here rather than emitted.
+  // The reason is held until stdout closes, then reported once as voice-session-ended.
   it("classifies exit as exit, never as an event", () => {
     for (const reason of ["stdin_eof", "dismissed", "error"]) {
       const r = classifyLine(`{"event":"exit","reason":"${reason}"}`);
@@ -132,8 +124,7 @@ describe("classifyLine: exit lines", () => {
     });
   });
 
-  // The child formats this field from a variable, so an unrecognised reason is
-  // possible and must pass through rather than being coerced.
+  // The child formats the reason from a variable, so new values are possible.
   it("passes an unrecognised reason through unchanged", () => {
     const r = classifyLine('{"event":"exit","reason":"something_new"}');
     expect(r).toEqual({
@@ -176,10 +167,7 @@ describe("classifyLine: bad input is an error, never a throw", () => {
 });
 
 describe("classifyEnd", () => {
-  // The bug these cover: a sidecar staged weeks earlier was rejected by a
-  // newer database, exited 1, and emitted zero NDJSON lines. The shell said
-  // "crashed" with an exit code and dropped the one line that explained it,
-  // because the child's banner macro is a no-op under --json-events.
+  // A child that dies before ready (e.g. stale sidecar vs newer DB) explains itself only on stderr.
   it("calls a child that never readied failed_to_start, carrying its stderr", () => {
     const { reason, detail } = classifyEnd(null, false, [
       "  Goose in a Pond 0.1.0 - voice",
@@ -190,8 +178,7 @@ describe("classifyEnd", () => {
   });
 
   it("calls a readied session that dies crashed, and attaches no stderr", () => {
-    // After ready the child reports troubles as NDJSON error events, so stderr
-    // here would duplicate a better signal with noise.
+    // After ready, troubles arrive as NDJSON error events; stderr would only add noise.
     expect(classifyEnd(null, true, ["some later log line"])).toEqual({
       reason: "crashed",
       detail: null,
@@ -199,8 +186,7 @@ describe("classifyEnd", () => {
   });
 
   it("lets a clean exit line win over both", () => {
-    // Sending exit IS the definition of a clean shutdown; a child that says so
-    // before ever readying still exited cleanly, not fatally.
+    // An exit line defines a clean shutdown, even before ready.
     expect(classifyEnd("stdin_eof", false, ["noise"])).toEqual({
       reason: "stdin_eof",
       detail: null,
@@ -208,8 +194,7 @@ describe("classifyEnd", () => {
   });
 
   it("reports no detail rather than an empty string for a silent failure", () => {
-    // The renderer branches on absence to choose its "without reporting a
-    // reason" wording; "" would render as a message with nothing after it.
+    // The renderer branches on absence; "" would render an empty message.
     expect(classifyEnd(null, false, ["   ", ""])).toEqual({
       reason: "failed_to_start",
       detail: null,
@@ -233,8 +218,7 @@ describe("sessionToJoin", () => {
     expect(sessionToJoin("abc-123", newId)).toBe("abc-123");
   });
 
-  // The renderer has more than one way to spell "no session yet", and a blank
-  // --session-id reaching the child names a session nothing can look up.
+  // A blank --session-id would name a session nothing can look up.
   it("treats every blank spelling as absent", () => {
     expect(sessionToJoin(null, newId)).toBe(FRESH);
     expect(sessionToJoin(undefined, newId)).toBe(FRESH);
