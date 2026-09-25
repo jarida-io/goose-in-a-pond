@@ -21,35 +21,23 @@ pub enum ProviderError {
 pub struct UsageStats {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
-    /// Tokens the model spent on reasoning it did not say out loud. GIAP-derived, not
-    /// provider-reported: counted through the
-    /// [`TokenCounter`](crate::models::ports::token_counter::TokenCounter) port, so never exact.
-    /// Not subtracted from `completion_tokens`, and `None` means nobody counted, not zero.
+    /// Hidden reasoning tokens, estimated by GIAP via `TokenCounter` (never exact). Not subtracted
+    /// from `completion_tokens`; `None` means not counted, not zero.
     pub reasoning_tokens: Option<u32>,
 }
 
 /// A single item emitted by [`TokenStream`].
 #[derive(Debug, Clone)]
 pub enum StreamToken {
-    /// A text fragment (token) produced by the model.
     Text(String),
-    /// Final token-usage statistics — emitted once as the **last** stream item
-    /// by providers that support usage tracking (llamafile, Ollama).
-    /// Consumers should skip this when building the response text.
+    /// Emitted once, as the LAST item, by providers that track usage; not part of the text.
     Usage(UsageStats),
 }
 
-/// A pinned, boxed stream of [`StreamToken`] items.
-/// Lifetime `'a` is tied to the provider reference so borrowing-based impls work.
 pub type TokenStream<'a> = Pin<Box<dyn Stream<Item = Result<StreamToken>> + Send + 'a>>;
 
-/// Driven Port: LlmProvider
-///
-/// Abstracts the LLM backend so the domain can request completions
-/// without knowing whether it's OpenAI, Ollama, llama.cpp, or a mock.
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
-    /// Send a conversation and get a completion back.
     async fn complete(
         &self,
         system_prompt: &str,
@@ -59,16 +47,11 @@ pub trait LlmProvider: Send + Sync {
     /// The name of the underlying model (e.g. "llama-3.2-3b", "gpt-4o").
     fn model_name(&self) -> String;
 
-    /// Runtime capabilities of the underlying model. Providers override this to declare what the
-    /// active model supports (thinking, vision, context window); the default is the most
-    /// conservative assumption, so an unknown model still works safely.
+    /// The default is the most conservative assumption, so an unknown model still works.
     fn capabilities(&self) -> ModelCapabilities {
         ModelCapabilities::default()
     }
 
-    /// Stream tokens as they are generated. The default calls `complete()` and yields the whole
-    /// text as one [`StreamToken::Text`]; adapters with native streaming override this and may
-    /// append a final [`StreamToken::Usage`].
     fn stream_complete<'a>(
         &'a self,
         system_prompt: &'a str,
@@ -83,10 +66,7 @@ pub trait LlmProvider: Send + Sync {
     }
 }
 
-/// `complete()` always fails with a clear message — the fallback when a
-/// requested provider is selected but isn't actually available. Not a
-/// silent fallback to a working provider: the user should know their
-/// choice didn't take effect, not get a different model's answer instead.
+/// Stand-in for a selected-but-unavailable provider: fails loudly, never falls back silently.
 pub struct UnavailableProvider {
     message: String,
 }

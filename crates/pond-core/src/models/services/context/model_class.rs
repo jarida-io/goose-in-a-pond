@@ -1,32 +1,18 @@
-//! Which compaction mechanisms a model can afford — the gate PAI-4 dispatches on.
-//! Two axes, not the three rows of `docs/architecture/pai/04-smart-compaction.md` 3.1:
-//! window size, and whether [`runs_on_this_device`]. Only [`ModelClass::Large`] unlocks an
-//! LLM call, so fallbacks resolve downward — an unknown provider above 64K is a fail-open.
+//! Which compaction mechanisms a model can afford, by window size and [`runs_on_this_device`].
+//! Only [`ModelClass::Large`] unlocks an LLM call; an unknown provider above 64K fails open.
 
 use super::context_governor::WindowResolution;
 
-/// Windows at or below this are the small tier.
-///
-/// 12,288 tokens rather than a round 12,000 because it is already a boundary next door:
-/// `CompactionProfile::use_compact_prompt` steps here and `PROFILE_ANCHORS` carries it.
+/// Small tier ceiling (inclusive); matches where `CompactionProfile::use_compact_prompt` steps.
 pub const SMALL_WINDOW_CEILING: usize = 12_288;
 
-/// Windows at or below this stay out of the large tier however they are served.
-///
-/// The design says "large / HTTP (>= 64K)"; 64K in tokens is 65,536, which is
-/// also `PROFILE_ANCHORS`' fifth point and the top of the old tier-3 plateau.
+/// Large-tier floor (inclusive) for hosted windows: the design's ">= 64K", in tokens.
 pub const LARGE_WINDOW_FLOOR: usize = 65_536;
 
-/// Providers whose inference consumes THIS box's compute.
-///
-/// `ollama` and `llamafile` count: on a pond they speak HTTP to `127.0.0.1`, so a call
-/// takes the GPU the next turn needs. A deny-list for the large tier, so too wide is safe.
+/// Providers using THIS box's compute (ollama/llamafile are localhost HTTP); too wide is safe.
 pub const ON_DEVICE_PROVIDERS: [&str; 5] = ["local", "gguf", "ollama", "llamafile", "mistralrs"];
 
-/// Providers this pond knows are served from somebody else's machine.
-///
-/// Not the complement of [`ON_DEVICE_PROVIDERS`]: `chat_provider` is an open settings
-/// string, so "somebody else's to hold" needs positive membership here. Omission is safe.
+/// Providers known to run elsewhere; not the complement of the on-device list. Omission is safe.
 pub const HOSTED_PROVIDERS: [&str; 6] = [
     "anthropic",
     "openai",
@@ -36,19 +22,14 @@ pub const HOSTED_PROVIDERS: [&str; 6] = [
     "snowflake",
 ];
 
-/// Where a provider's inference actually happens — three answers, not two.
-///
-/// An unrecognised name must answer "no" to both opposite questions: not known to be
-/// your GPU, not known to be somebody else's. A `bool` gives one of them a widening else.
+/// Where a provider's inference runs; an unknown name supports neither claim, hence not a `bool`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProviderLocality {
-    /// In [`ON_DEVICE_PROVIDERS`]: a call to it competes with this pond's own
-    /// inference.
+    /// In [`ON_DEVICE_PROVIDERS`]: a call competes with this pond's own inference.
     OnDevice,
     /// In [`HOSTED_PROVIDERS`]: a call to it is somebody else's hardware.
     Hosted,
-    /// In neither list. Nothing may be concluded from it, and every caller must
-    /// take the narrower of its two answers.
+    /// In neither list: every caller must take the narrower answer.
     Unknown,
 }
 
@@ -63,10 +44,7 @@ impl ProviderLocality {
     }
 }
 
-/// Classify `provider` against the two lists.
-///
-/// Trimmed as well as case-folded: `chat_provider` is a settings string a human can
-/// type, and `"ollama "` must not be the thing that escapes the on-device answer.
+/// Trimmed and case-folded: `chat_provider` is human-typed, and `"ollama "` must stay on-device.
 pub fn provider_locality(provider: &str) -> ProviderLocality {
     let provider = provider.trim();
     if ON_DEVICE_PROVIDERS
@@ -84,59 +62,35 @@ pub fn provider_locality(provider: &str) -> ProviderLocality {
     ProviderLocality::Unknown
 }
 
-/// Whether a summarisation call to `provider` would compete with this pond's own
-/// inference. See [`ON_DEVICE_PROVIDERS`]. Its negation is not "runs elsewhere":
-/// a caller whose safe answer is "refuse" wants a positive [`ProviderLocality::Hosted`]
-/// test via [`provider_locality`].
+/// Its negation is NOT "runs elsewhere": to require that, test for [`ProviderLocality::Hosted`].
 pub fn runs_on_this_device(provider: &str) -> bool {
     provider_locality(provider) == ProviderLocality::OnDevice
 }
 
 /// What a compaction path may do for a given [`ModelClass`].
-///
-/// Three flags rather than an opaque enum because the tiers differ by which mechanisms
-/// are added, and asking "may I summarise here?" should not mean matching on a tier name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompactionStrategy {
-    /// The deterministic trimmer (`super::turn_trimmer`). On for every class and
-    /// there is no configuration that turns it off: it is the only mechanism
-    /// that cannot stall anything, which is invariant 1 stated as a default.
+    /// `super::turn_trimmer`; always on, being the only mechanism that cannot stall a turn.
     pub deterministic_trim: bool,
-    /// The idle rolling summary (`SessionSummaryService`). Runs after
-    /// `summary_idle_secs`, never at startup, cancelled by a new turn; turns read
-    /// its result and never wait for it.
+    /// `SessionSummaryService`: idle-only, cancelled by a new turn, never awaited by one.
     pub idle_rolling_summary: bool,
-    /// LLM re-summarisation of the rolling summary itself, once it has grown
-    /// stale. PAI-4 P2 builds it; nothing implements it yet.
+    /// LLM re-summarisation of a stale rolling summary; nothing implements it yet.
     pub llm_resummarisation: bool,
 }
 
-/// How expensive an extra model call is for this model, on this box.
-///
-/// Ordered: a bigger variant is strictly more permissive, so "a local provider can never
-/// reach the top" is checkable as a comparison rather than a match arm kept in sync.
+/// How expensive an extra model call is here; ordered, bigger variants strictly more permissive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ModelClass {
-    /// Window at or below [`SMALL_WINDOW_CEILING`], however it is served.
-    ///
-    /// A small hosted window lands here too: at 12K there is no span worth summarising a
-    /// summary of, so the mechanism the large tier unlocks would reclaim almost nothing.
+    /// Window at or below [`SMALL_WINDOW_CEILING`], even hosted: too little to re-summarise.
     Small,
-    /// Everything between the two boundaries, plus anything above
-    /// [`LARGE_WINDOW_FLOOR`] that is served from this box: a 131K Ollama model on the
-    /// Orin gets the large tier's budgets from `CompactionProfile` and the medium tier's
-    /// strategy, because the window is generous and the compute is not.
+    /// Between the boundaries, plus larger windows on this box (roomy window, scarce compute).
     Medium,
-    /// Window at or above [`LARGE_WINDOW_FLOOR`], served from another box.
-    ///
-    /// The only class that permits an LLM in the compaction path. The call is
-    /// cheap, it is somebody else's hardware, and it is off the critical path.
+    /// At or above [`LARGE_WINDOW_FLOOR`] and served elsewhere; only this may call an LLM.
     Large,
 }
 
 impl ModelClass {
-    /// A short label for logs, tests and the Models UI, matching
-    /// `WindowSource::label`'s shape.
+    /// A short label for logs, tests and the Models UI.
     pub fn label(&self) -> &'static str {
         match self {
             ModelClass::Small => "small",
@@ -145,10 +99,6 @@ impl ModelClass {
         }
     }
 
-    /// Classify from the provider and the window the governor resolved.
-    ///
-    /// Pure, and both arguments are things every budget call site already holds,
-    /// so this needs no new plumbing to reach.
     pub fn classify(provider: &str, resolved_window_tokens: usize) -> Self {
         if resolved_window_tokens <= SMALL_WINDOW_CEILING {
             return ModelClass::Small;
@@ -159,18 +109,12 @@ impl ModelClass {
         ModelClass::Medium
     }
 
-    /// Classify from a [`WindowResolution`] rather than a bare token count.
-    ///
-    /// Preferred entry point: it keeps the governor the single source of the window,
-    /// instead of letting a caller classify against a number it worked out elsewhere.
+    /// Preferred entry point: keeps the governor the single source of the window.
     pub fn from_resolution(provider: &str, resolution: &WindowResolution) -> Self {
         Self::classify(provider, resolution.tokens)
     }
 
-    /// Which compaction mechanisms this class may use. `idle_rolling_summary` stays true
-    /// on the small tier despite the table in `docs/architecture/pai/04-smart-compaction.md`:
-    /// it is idle-only, is cancelled by a new turn, and no turn ever awaits it, so it cannot
-    /// produce the stall that table cites.
+    /// `idle_rolling_summary` stays on for Small (unlike the design table): it cannot stall a turn.
     pub fn strategy(&self) -> CompactionStrategy {
         CompactionStrategy {
             deterministic_trim: true,
@@ -179,10 +123,7 @@ impl ModelClass {
         }
     }
 
-    /// Whether a compaction mechanism for this class may call a model to reshape history
-    /// — the re-summarisation the large tier unlocks, not the idle summary feeding it.
-    /// Hoisted onto the class so PAI-4 P2's gate is one call rather than a match arm it
-    /// has to keep aligned with this table.
+    /// Whether compaction may call a model to reshape history (not the idle summary feeding it).
     pub fn permits_compaction_model_call(&self) -> bool {
         self.strategy().llm_resummarisation
     }
@@ -195,9 +136,6 @@ mod tests {
         ContextGovernor, ContextInputs, EngineWindow, WindowSource,
     };
 
-    /// The design's table, cell by cell, plus the two cells it does not cover.
-    /// This is the phase: everything else in this file is an argument about these
-    /// rows.
     #[test]
     fn the_tier_table_classifies_every_row_the_design_states() {
         let cases: &[(&str, usize, ModelClass)] = &[
@@ -215,11 +153,9 @@ mod tests {
             ("openai", 128_000, ModelClass::Large),
             ("anthropic", 200_000, ModelClass::Large),
             ("google", 65_536, ModelClass::Large),
-            // Cell one the table leaves undefined: a SMALL hosted window. No span
-            // worth re-summarising, so it takes the small strategy.
+            // Undefined in the table: a SMALL hosted window takes the small strategy.
             ("openai", 8_192, ModelClass::Small),
-            // Cell two: a LARGE window served from this box. PAI-3 P3 made this
-            // reachable by teaching OllamaCatalogProvider to read /api/show.
+            // Undefined in the table: a LARGE window served from this box.
             ("ollama", 131_072, ModelClass::Medium),
             ("llamafile", 131_072, ModelClass::Medium),
             ("local", 1_000_000, ModelClass::Medium),
@@ -235,9 +171,7 @@ mod tests {
         }
     }
 
-    /// The guard this phase exists to hold. Only the large tier may spend a model
-    /// call on compaction; on either on-device tier that call competes with the
-    /// prefill of the turn the user is waiting on.
+    /// On-device, that call would compete with the prefill of the turn the user awaits.
     #[test]
     fn the_on_device_tiers_never_permit_an_llm_in_the_compaction_path() {
         for class in [ModelClass::Small, ModelClass::Medium] {
@@ -263,8 +197,6 @@ mod tests {
         assert!(ModelClass::Large.permits_compaction_model_call());
     }
 
-    /// Invariant 1, as the one thing every tier has in common: the mechanism that
-    /// cannot stall a turn is never the one that gets switched off.
     #[test]
     fn every_class_keeps_the_deterministic_trimmer() {
         for class in [ModelClass::Small, ModelClass::Medium, ModelClass::Large] {
@@ -276,10 +208,6 @@ mod tests {
         }
     }
 
-    /// "Today's behaviour preserved for the small and medium tiers": today the
-    /// idle rolling summary runs regardless of tier, and P1 changes nothing about
-    /// that. See `strategy`'s doc comment for why the design's literal wording is
-    /// not followed here.
     #[test]
     fn p1_changes_nothing_for_the_small_and_medium_tiers() {
         assert_eq!(
@@ -297,9 +225,6 @@ mod tests {
         assert_ne!(medium, large);
     }
 
-    /// The safety property, as a range rather than a spot check. No window, and
-    /// no future edit to the boundaries, may put an on-device provider in the one
-    /// class that spends a model call.
     #[test]
     fn an_on_device_provider_can_never_reach_the_large_tier() {
         for provider in ON_DEVICE_PROVIDERS {
@@ -314,9 +239,6 @@ mod tests {
         }
     }
 
-    /// Case is not a classification decision. `chat_provider` is written by the
-    /// settings UI, the onboarding lift and the CLI, and a capitalised spelling
-    /// must not be the thing that unlocks an on-device summarisation call.
     #[test]
     fn provider_matching_ignores_case() {
         assert!(runs_on_this_device("Ollama"));
@@ -328,10 +250,7 @@ mod tests {
         );
     }
 
-    /// The three-way answer: a name in neither list must not be readable as either claim.
-    /// `mock` is a shipped GIAP provider serving in-process; `lmstudio`, `llama_swap` and
-    /// `omlx` are goose declarative providers serving from localhost. All are `Unknown`,
-    /// so a caller needing "somebody else's machine" must ask `Hosted`, not `!OnDevice`.
+    /// `mock` (in-process) and `lmstudio`/`llama_swap`/`omlx` (localhost) are all `Unknown`.
     #[test]
     fn a_provider_in_neither_list_supports_neither_claim() {
         for provider in ON_DEVICE_PROVIDERS {
@@ -369,8 +288,6 @@ mod tests {
         }
     }
 
-    /// The two lists must not disagree, or `provider_locality` would answer by
-    /// whichever `if` was written first.
     #[test]
     fn no_provider_is_in_both_lists() {
         for on_device in ON_DEVICE_PROVIDERS {
@@ -383,10 +300,6 @@ mod tests {
         }
     }
 
-    /// Whitespace is not a classification decision either. `chat_provider` is a
-    /// settings row a human types, and `"ollama "` escaping the on-device answer
-    /// would unlock a summarisation call here and a background delegation in
-    /// PAI-6.
     #[test]
     fn provider_matching_ignores_surrounding_whitespace() {
         assert!(runs_on_this_device(" ollama "));
@@ -399,10 +312,7 @@ mod tests {
         );
     }
 
-    /// A provider nobody has heard of gets the narrowing answer at every window below the
-    /// large floor, and reaches the large tier only once its window clears that floor. The
-    /// last assertion is the fail-open the module doc admits to, pinned here so narrowing
-    /// it is a deliberate edit to a named test rather than a silent behaviour change.
+    /// The last assertion pins the module doc's admitted fail-open.
     #[test]
     fn an_unknown_provider_narrows_below_the_large_floor() {
         assert_eq!(ModelClass::classify("", 4_096), ModelClass::Small);
@@ -417,8 +327,6 @@ mod tests {
         );
     }
 
-    /// Both boundaries are inclusive on the side that keeps the model in the
-    /// smaller tier, which is the narrowing reading of "<= 12K" and ">= 64K".
     #[test]
     fn the_boundaries_step_exactly_where_the_budget_curve_does() {
         assert_eq!(
@@ -439,8 +347,7 @@ mod tests {
         );
     }
 
-    /// A bigger window must never buy a *less* capable strategy, or raising
-    /// `context_window_override` could cost a hosted model its re-summarisation.
+    /// Raising `context_window_override` must never cost a hosted model its re-summarisation.
     #[test]
     fn the_class_is_non_decreasing_in_the_window() {
         for provider in ["local", "ollama", "openai", "unknown"] {
@@ -459,9 +366,7 @@ mod tests {
         }
     }
 
-    /// The classes are not derived from the budget curve, so this pins that they
-    /// still agree with it where they overlap: the small tier is exactly the set
-    /// of windows that also get the compact prompt.
+    /// The classes aren't derived from the budget curve, so pin that they agree.
     #[test]
     fn the_small_tier_is_exactly_the_compact_prompt_tier() {
         use crate::models::services::context::context_budget::CompactionProfile;
@@ -478,9 +383,6 @@ mod tests {
 
     // -- composed with the real governor, not with a hand-written number -------
 
-    /// The classification has to survive being fed by the thing that will
-    /// actually feed it. A fixture that passes a `usize` straight in proves the
-    /// arithmetic and nothing about the composition.
     #[test]
     fn a_registry_pinned_orin_resolves_and_classifies_as_medium() {
         let inputs = ContextInputs {
@@ -497,9 +399,6 @@ mod tests {
         );
     }
 
-    /// The engine's own report is the strongest rung, and a 3K Jetson that
-    /// reports 3,072 must land in the small tier even though the name heuristic
-    /// for an unpinned local provider would have said 32,768.
     #[test]
     fn an_engine_reported_3k_jetson_classifies_as_small() {
         let inputs = ContextInputs {
@@ -515,8 +414,7 @@ mod tests {
             ModelClass::Small
         );
 
-        // Without the report the same pond takes the heuristic ceiling and is
-        // medium -- which is the point of classifying from the RESOLUTION.
+        // Without the report the same pond takes the heuristic ceiling and is Medium.
         let bare = ContextInputs {
             provider: "local",
             model: "gemma-4-e2b",
@@ -528,10 +426,7 @@ mod tests {
         );
     }
 
-    /// The whole reason `runs_on_this_device` is not `is_local_provider`: an on-device
-    /// provider must not unlock a blocking summarisation call however big its window is.
-    /// The fixture uses rung 1 because an engine-reported window is never clamped; through
-    /// rung 3 it would resolve to 32,768 and land in Medium on width alone, proving nothing.
+    /// Uses rung 1 (never clamped): through rung 3 it would land in Medium on width alone.
     #[test]
     fn a_large_window_on_an_on_device_provider_stays_out_of_the_large_tier() {
         let inputs = ContextInputs {
@@ -551,8 +446,6 @@ mod tests {
         );
     }
 
-    /// And the rung-3 half, now that it is bounded: the catalog's declared
-    /// maximum no longer escapes the ceiling for an on-device provider.
     #[test]
     fn an_ollama_catalog_maximum_is_bounded_by_the_governor() {
         let inputs = ContextInputs {
@@ -569,8 +462,7 @@ mod tests {
         assert_eq!(resolution.source, WindowSource::CatalogRecord);
     }
 
-    /// And the hosted counterpart, so the test above is not passing because the
-    /// large tier is unreachable through the governor at all.
+    /// Proves the tests above don't pass merely because Large is unreachable via the governor.
     #[test]
     fn a_hosted_128k_model_reaches_the_large_tier_through_the_governor() {
         let inputs = ContextInputs {

@@ -1,25 +1,15 @@
-//! Driving Port: Wake-word detection. `StreamingWakeWordDetector` is the primary interface and a
-//! blanket impl supplies the deprecated `WakeWordDetector`. Implemented by `InstantActivation`
-//! (stdin and tests) and `WhisperKeywordDetector` (ring buffer plus sliding window, whisper.cpp).
-
 use anyhow::Result;
 use async_trait::async_trait;
 
 // ── StreamingWakeWordDetector (primary interface) ─────────────────────────────
 
-/// Audio captured during and after the wake word, ready to transcribe as a command.
-///
-/// When `captured_audio` is `Some`, the Listen state transcribes this buffer instead of
-/// starting a fresh recording, so "Hey Goose, what's the weather?" is one utterance.
+/// Audio caught with the wake word; Listen transcribes it instead of recording afresh.
 pub struct WakeWordActivation {
-    /// WAV-encoded bytes (16-bit mono 16 kHz) captured after the wake word,
-    /// or `None` if the detector does not support audio hand-off.
+    /// WAV, 16-bit mono 16 kHz; `None` if the detector has no audio hand-off.
     pub captured_audio: Option<Vec<u8>>,
 }
 
-/// **Primary wake-word port.** Returns `WakeWordActivation` alongside the activation signal so
-/// audio captured during the wake word can serve as the command audio. A blanket impl supplies
-/// the deprecated `WakeWordDetector`, so this trait works everywhere the old one was expected.
+/// Primary wake-word port (a blanket impl provides the deprecated `WakeWordDetector`).
 #[async_trait]
 pub trait StreamingWakeWordDetector: Send + Sync {
     /// Block until the wake word is heard, then return any captured command audio.
@@ -30,9 +20,8 @@ pub trait StreamingWakeWordDetector: Send + Sync {
         "Waiting for activation..."
     }
 
-    /// Whether this detector can meaningfully interrupt an in-flight turn. `run_loop` races the
-    /// turn against `wait_for_activation_with_audio()`, so a detector that resolves immediately
-    /// (`InstantActivation`, stdin or fallback) must return `false` or it aborts every turn.
+    /// Whether this detector can interrupt an in-flight turn. `run_loop` races the turn against
+    /// activation, so one that resolves immediately must say `false` or it aborts every turn.
     fn supports_interruption(&self) -> bool {
         true
     }
@@ -40,10 +29,7 @@ pub trait StreamingWakeWordDetector: Send + Sync {
 
 // ── WakeWordDetector (deprecated, provided via blanket impl) ──────────────────
 
-/// Simplified wake-word port: activates but does not capture audio.
-///
-/// **Deprecated** — implement `StreamingWakeWordDetector` instead; retained only for
-/// blanket-impl compatibility.
+/// Wake-word port without audio capture.
 #[async_trait]
 #[deprecated(
     since = "0.2.0",
@@ -60,7 +46,6 @@ pub trait WakeWordDetector: Send + Sync {
     }
 }
 
-/// Blanket impl: every `StreamingWakeWordDetector` is also a `WakeWordDetector`.
 #[async_trait]
 #[allow(deprecated)]
 impl<T: StreamingWakeWordDetector + 'static> WakeWordDetector for T {
@@ -103,7 +88,6 @@ mod tests {
         let activation = det.wait_for_activation_with_audio().await.unwrap();
         assert!(activation.captured_audio.is_none());
         // Empty by contract: it never waits, so it has nothing to prompt for.
-        // See `instant_activation_announces_nothing_because_it_never_waits`.
         assert_eq!(StreamingWakeWordDetector::activation_prompt(&det), "");
     }
 
@@ -112,9 +96,7 @@ mod tests {
     async fn instant_activation_satisfies_legacy_interface_via_blanket() {
         let det: &dyn WakeWordDetector = &InstantActivation;
         assert!(det.wait_for_activation().await.is_ok());
-        // activation_prompt on the WakeWordDetector trait object is unambiguous here.
-        // The blanket impl must forward the streaming trait's value verbatim,
-        // empty included — not substitute a default of its own.
+        // The blanket impl must forward the streaming value verbatim, not its own default.
         assert_eq!(<dyn WakeWordDetector>::activation_prompt(det), "");
     }
 }

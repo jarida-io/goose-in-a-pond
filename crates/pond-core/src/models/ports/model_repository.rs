@@ -1,13 +1,9 @@
-//! Driven port: model catalog and role assignment persistence.
-
 use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::models::domain::model_record::{ModelCategory, ModelRecord, ModelRoleAssignment};
 
-/// Driven port for persisting the model catalog and role assignments, implemented by
-/// `SqliteModelRepository` (pond-infra). Role assignments here are the source of truth: the
-/// settings KV table is a hot cache synced from this on startup.
+/// Source of truth for role assignments; the settings KV table is a cache synced at startup.
 #[async_trait]
 pub trait ModelRepository: Send + Sync {
     // ── Catalog ───────────────────────────────────────────────────────────────
@@ -15,16 +11,12 @@ pub trait ModelRepository: Send + Sync {
     /// Return all models, ordered by category then name.
     async fn list_all(&self) -> Result<Vec<ModelRecord>>;
 
-    /// Return models filtered to a single category.
     async fn list_by_category(&self, category: &ModelCategory) -> Result<Vec<ModelRecord>>;
 
     /// Look up a model by its stable `"{category}/{name}"` id.
     async fn get_by_id(&self, id: &str) -> Result<Option<ModelRecord>>;
 
-    /// Insert or replace a model record.
-    ///
-    /// Uses `INSERT OR REPLACE` semantics. For registry-seeded rows call this;
-    /// for user-added rows set `model.is_custom = true` before calling.
+    /// `INSERT OR REPLACE`; set `model.is_custom = true` first for user-added rows.
     async fn upsert(&self, model: &ModelRecord) -> Result<()>;
 
     /// Update only the `downloaded` flag (and `updated_at`) for a model.
@@ -32,16 +24,11 @@ pub trait ModelRepository: Send + Sync {
 
     // ── Role assignments ──────────────────────────────────────────────────────
 
-    /// Return all current role assignments.
     async fn list_assignments(&self) -> Result<Vec<ModelRoleAssignment>>;
 
-    /// Return the assignment for a specific role, if any.
     async fn get_assignment(&self, role: &str) -> Result<Option<ModelRoleAssignment>>;
 
-    /// Assign a model to a role (INSERT OR REPLACE).
-    ///
-    /// `role` must be one of `"chat"` | `"think"` | `"task"` | `"asr"` | `"tts"`.
-    /// `model_id` must be an existing `models.id`.
+    /// Upsert. `role` is a `ModelRole::as_str()` name; `model_id` must be an existing `models.id`.
     async fn set_assignment(&self, role: &str, model_id: &str) -> Result<()>;
 
     /// Remove the assignment for a role (no-op if not set).

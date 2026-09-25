@@ -1,5 +1,3 @@
-//! ModelScheduler port — driven port for memory-aware model lifecycle management.
-
 use async_trait::async_trait;
 
 /// Snapshot of the LLM memory budget on the current device.
@@ -13,16 +11,11 @@ pub struct MemoryStatus {
     pub loaded_model: Option<String>,
 }
 
-/// Driven port: manages model loading, eviction, and pre-loading hints. `ResourceAwareModelScheduler`
-/// asks Goose's `InferenceRuntime` for live memory and which model is hot; `NoopScheduler` serves
-/// the llamafile and Ollama backends, which manage their own memory externally.
+/// Memory-aware model loading and eviction; a no-op for backends that manage their own memory.
 #[async_trait]
 pub trait ModelScheduler: Send + Sync {
-    /// Hint that the wake word was just detected — the scheduler may
-    /// begin pre-loading the chat model in the background before the
-    /// user has finished speaking.
+    /// Wake word heard: may start preloading the chat model while the user is still speaking.
     async fn notify_wake_word(&self);
 
-    /// Return a snapshot of current memory usage.
     fn memory_status(&self) -> MemoryStatus;
 }

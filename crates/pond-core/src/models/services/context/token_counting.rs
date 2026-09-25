@@ -1,18 +1,11 @@
-//! The chars-per-token fallback, and the per-message envelope constant.
-//!
-//! Used when no model-aware tokenizer is reachable, which is every path that is
-//! not the live Goose adapter. Deliberately the same arithmetic the trimmer uses.
+//! Token-count fallback for every path but the live Goose adapter; same math as the trimmer.
 
 use crate::models::ports::token_counter::TokenCounter;
 
-/// Divisor for the character heuristic. Roughly right for English prose and
-/// roughly wrong for everything else — dense punctuation (JSON, code) packs
-/// more tokens per character, and non-Latin scripts far more.
+/// Right for English prose; JSON, code and non-Latin scripts pack more tokens per char.
 const CHARS_PER_TOKEN: usize = 4;
 
-/// Per-message overhead: role marker and message delimiters the chat template
-/// adds around every message. Counted by the trimmer, not by the counter,
-/// because it is a property of the envelope rather than of the text.
+/// Chat-template role marker and delimiters per message; added by the trimmer, not the counter.
 pub const PER_MESSAGE_TOKEN_OVERHEAD: usize = 4;
 
 /// `text.len() / 4`. Never exact, and says so.
@@ -51,10 +44,7 @@ mod tests {
         assert_eq!(HeuristicTokenCounter.name(), "chars/4");
     }
 
-    /// `len()` is bytes, not characters, so multi-byte text is over-counted.
-    /// Over-counting is the safe direction: it shrinks the history budget rather
-    /// than overflowing the window. Do not "fix" this to `chars().count()`, which
-    /// removes a margin the Jetson relies on.
+    /// Counts bytes: don't "fix" to `chars().count()`, the Jetson relies on the over-count margin.
     #[test]
     fn multibyte_text_is_over_counted_which_is_the_safe_direction() {
         let ascii = HeuristicTokenCounter.count("aaaaaaaa");
