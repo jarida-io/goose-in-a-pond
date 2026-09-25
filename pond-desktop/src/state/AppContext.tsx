@@ -23,6 +23,15 @@ import {
 } from "./reducer";
 import type { ScheduleRunNotification } from "../api/types";
 
+/**
+ * How often this client refreshes its own device row.
+ *
+ * Derived from the registry's five-minute online threshold, not picked: short
+ * enough that a single dropped beat cannot age the row out, long enough to stay
+ * well clear of the per-IP request budget.
+ */
+const SELF_HEARTBEAT_MS = 120_000;
+
 const StateCtx = createContext<AppState | null>(null);
 const DispatchCtx = createContext<React.Dispatch<AppAction> | null>(null);
 
@@ -159,6 +168,36 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
       }),
     [state.sessionToken, state.serverOnline],
   );
+
+  // Tell the registry this machine is still here.
+  //
+  // The desktop registers itself as an ordinary device when it pairs, and the
+  // registry derives `is_online` from `last_seen` against a five-minute
+  // threshold. Pairing was the only write, so the row aged out minutes into a
+  // session and the Devices list reported the machine rendering it as offline,
+  // with a last-seen days old. See jarida-io/goose-in-a-pond#387.
+  //
+  // Two minutes is the server's own threshold with enough margin that one
+  // dropped request cannot age the row out. A missed beat is dropped rather
+  // than retried: the next is already scheduled, and an unbounded retry loop
+  // against a rate-limited Pond is the failure this interval exists to avoid.
+  //
+  // Deliberately not gated on window visibility. The phone gates its beat on
+  // being foregrounded because backgrounding suspends its networking, so
+  // claiming reachability there would be a lie; a minimised desktop window is
+  // not that -- the machine is on the network and the app is running.
+  useEffect(() => {
+    if (!state.serverOnline || !state.sessionToken) return;
+    const beat = () => {
+      void api.heartbeatSelf().catch(() => {
+        // Non-fatal: the next beat is already scheduled, and a failed one only
+        // costs this row the freshness it would have gained.
+      });
+    };
+    beat();
+    const timer = setInterval(beat, SELF_HEARTBEAT_MS);
+    return () => clearInterval(timer);
+  }, [state.serverOnline, state.sessionToken]);
 
   // A turn started before this window existed.
   //

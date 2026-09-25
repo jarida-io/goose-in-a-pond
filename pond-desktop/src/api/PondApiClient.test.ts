@@ -886,6 +886,52 @@ describe("per-instance client id", () => {
   });
 });
 
+/**
+ * The desktop registers itself as an ordinary device row when it pairs, and the
+ * registry derives `is_online` from `last_seen` against a five-minute threshold.
+ * Nothing refreshed that row after pairing wrote it, so the app reported the
+ * machine it was running on as unreachable, with a last-seen days old.
+ */
+describe("heartbeatSelf()", () => {
+  const future = new Date(Date.now() + 3_600_000).toISOString();
+
+  afterEach(() => localStorage.clear());
+
+  it("beats the same device row that pairing registered", async () => {
+    localStorage.clear();
+    let sentClientId: string | undefined;
+    const posted: string[] = [];
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.includes("/handshake/pairing-code"))
+        return okJson({ code: "123456", expires_at: future });
+      if (url.includes("/handshake/init")) {
+        sentClientId = JSON.parse(String(init?.body)).client_id;
+        return okJson({ challenge: "ch", challenge_id: "cid" });
+      }
+      if (url.includes("/handshake/verify"))
+        return okJson({
+          accepted: true,
+          session_token: "t",
+          refresh_token: "r",
+          expires_at: future,
+        });
+      if (url.includes("/heartbeat")) posted.push(url);
+      return okJson({});
+    });
+
+    const api = client();
+    await api.pair();
+    await api.heartbeatSelf();
+
+    // The id is the whole point: a beat against any other row refreshes nothing
+    // and leaves the card saying offline exactly as before.
+    expect(sentClientId).toBeTruthy();
+    expect(posted).toEqual([
+      `http://localhost:4000/api/v1/devices/${sentClientId}/heartbeat`,
+    ]);
+  });
+});
+
 // One call redirects the whole singleton, which is what lets the shell correct
 // a fallback port without reloading the renderer.
 describe("setBase", () => {
