@@ -1,24 +1,6 @@
-//! TTL-based data pruning for high-frequency tables.
+//! TTL-based pruning of high-frequency tables, run as a background task in `pond-server`.
 //!
-//! Runs as a background `tokio::spawn` task inside `pond-server`. Fires every
-//! 6 hours and deletes rows that have exceeded their retention window.
-//!
-//! # Retention defaults
-//!
-//! | Table              | Rule                                       |
-//! |--------------------|--------------------------------------------|
-//! | `event_log`        | Delete rows older than 30 days             |
-//! | `sensor_readings`  | Delete rows older than 7 days              |
-//! | `camera_events`    | Delete *acknowledged* rows older than 14 d |
-//! | `session_messages` | Keep the 500 most recent per session       |
-//! | `face_embeddings`  | Delete orphaned rows (no matching profile) |
-//!
-//! Face embeddings themselves are never auto-expired — they are explicit
-//! biometric data managed by the user.  The orphan sweep defends against
-//! cases where a profile row is deleted without FK cascade (e.g. older
-//! SQLite connections that did not enable `PRAGMA foreign_keys`).
-//!
-//! All constants are configurable via [`PruningConfig`].
+//! Face embeddings are never auto-expired (user-managed biometrics); only orphans are swept.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -35,37 +17,28 @@ use pond_core::user_data::ports::settings::SettingsRepository;
 
 use crate::sqlite_event_log::SqliteEventLog;
 
-/// Maximum retention window we will honour, in days (~100 years). A user-supplied
-/// retention value is clamped to this before it reaches `Utc::now() - Duration`,
-/// which **panics** (rather than returning an error) if the resulting timestamp
-/// falls outside chrono's representable range. 100 years is effectively "keep
-/// forever" for any real deployment, so clamping is safe and never surprises.
+/// Retention ceiling (~100 years): more makes `Utc::now() - Duration` panic in chrono.
 const MAX_RETENTION_DAYS: i64 = 36_500;
 
-/// Clamp a user-configured retention (in days) to a value that can never overflow
-/// chrono's `DateTime` subtraction. See [`MAX_RETENTION_DAYS`].
 fn clamp_retention_days(days: u32) -> i64 {
     (days as i64).min(MAX_RETENTION_DAYS)
 }
 
-/// Retention configuration — all fields have sane defaults via [`Default`].
-/// Built fresh each cycle from the user's [`Settings`] via [`PruningConfig::from_settings`].
+/// Retention configuration, rebuilt each cycle from the user's [`Settings`].
 pub struct PruningConfig {
-    /// Interval between pruning runs (default: 6 hours).
     pub interval: Duration,
-    /// Retain legacy `event_log` rows for this many days (default: 30).
+    /// Days to keep the legacy `event_log` table.
     pub event_log_days: u32,
-    /// Retain `sensor_readings` rows for this many days (default: 7).
     pub sensor_readings_days: u32,
-    /// Retain *acknowledged* `camera_events` rows for this many days (default: 14).
+    /// Applies to *acknowledged* `camera_events` only.
     pub camera_events_days: u32,
-    /// Maximum messages to keep per session in `session_messages` (default: 500).
+    /// Newest messages kept per session.
     pub session_messages_keep: u32,
-    /// Baseline retention for the unified `events` log, in days (default: 30; `0` = forever).
+    /// Baseline `events` retention in days; `0` = forever.
     pub events_days: u32,
     /// Per-category `events` retention override (snake_case category → days).
     pub events_by_category: HashMap<String, u32>,
-    /// Cap (days) for `events` classified `Sensitive`/`Secret` (default: 7; `0` = no cap).
+    /// Cap in days for `Sensitive`/`Secret` `events`; `0` = no cap.
     pub events_sensitive_days: u32,
 }
 
@@ -85,9 +58,7 @@ impl Default for PruningConfig {
 }
 
 impl PruningConfig {
-    /// Build a per-run config from the user's persisted settings, so retention
-    /// honours what the user configured (camera retention keeps its default —
-    /// there is no setting for it). The interval is not user-configurable.
+    /// Per-run config from settings; camera retention and the interval keep their defaults.
     pub fn from_settings(s: &Settings) -> Self {
         let defaults = Self::default();
         Self {
@@ -134,7 +105,6 @@ pub async fn run_pruning(
     }
 }
 
-/// Execute one pruning pass across all tables.
 pub async fn prune_once(logs: &Pool<Sqlite>, system: &Pool<Sqlite>, config: &PruningConfig) {
     prune_event_log(logs, config.event_log_days).await;
     prune_sensor_readings(logs, config.sensor_readings_days).await;
@@ -144,11 +114,7 @@ pub async fn prune_once(logs: &Pool<Sqlite>, system: &Pool<Sqlite>, config: &Pru
     prune_orphan_face_embeddings(system).await;
 }
 
-/// Sensitivity-aware, per-category retention for the unified `events` log (#117).
-/// All deletes go through [`EventLog::purge`] (parameterized). Runs two sweeps:
-/// (1) everything `>= Sensitive` older than the sensitivity cap; (2) each
-/// category older than its effective retention (override, else baseline).
-/// A retention of `0` means "keep forever" and is skipped.
+/// Sweeps `>= Sensitive` past the sensitivity cap, then each category past its retention.
 async fn prune_events(logs: &Pool<Sqlite>, config: &PruningConfig) {
     let log = SqliteEventLog::new(logs.clone());
     let now = Utc::now();
@@ -201,8 +167,7 @@ async fn prune_events(logs: &Pool<Sqlite>, config: &PruningConfig) {
     }
 }
 
-/// The on-disk snake_case key for a category (matches the serde representation
-/// and the keys used in the per-category retention override map).
+/// Serde's snake_case name for a category, as used in `events_by_category`.
 fn category_key(category: EventCategory) -> String {
     serde_json::to_value(category)
         .ok()
@@ -262,12 +227,9 @@ async fn prune_camera_events(pool: &Pool<Sqlite>, days: u32) {
     }
 }
 
-/// Remove face_embeddings rows whose `profile_id` no longer exists in
-/// `profiles`.  Defensive cleanup — relied upon for biometric-data
-/// hygiene if the DB connection ever runs without `PRAGMA foreign_keys=ON`.
+/// Biometric hygiene for connections that ran without `PRAGMA foreign_keys=ON`.
 async fn prune_orphan_face_embeddings(pool: &Pool<Sqlite>) {
-    // Skip silently on schemas that don't yet have the face_embeddings table
-    // (older DBs, tests that mount partial schemas).
+    // Older DBs and partial test schemas may lack the table.
     let exists: Option<(i64,)> =
         sqlx::query_as("SELECT 1 FROM sqlite_master WHERE type='table' AND name='face_embeddings'")
             .fetch_optional(pool)
@@ -337,7 +299,6 @@ mod tests {
     async fn prune_event_log_removes_old_rows() {
         let (logs, system, _tmp) = make_pools().await;
 
-        // Insert 3 old rows and 2 fresh rows
         for _ in 0..3 {
             sqlx::query(
                 "INSERT INTO event_log (timestamp, level, source, message) \
@@ -429,7 +390,6 @@ mod tests {
     async fn prune_session_messages_keeps_most_recent() {
         let (logs, system, _tmp) = make_pools().await;
 
-        // Create a session and insert 10 messages
         sqlx::query("INSERT INTO sessions (id, created_at, updated_at) VALUES ('s1', datetime('now'), datetime('now'))")
             .execute(&system)
             .await

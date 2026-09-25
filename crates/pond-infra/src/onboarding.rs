@@ -1,5 +1,4 @@
 //! SQLx implementation of the OnboardingRepository port.
-//! Connects Core logic to SQLite persistence.
 
 use pond_core::user_data::domain::onboarding::OnboardingStep;
 use pond_core::user_data::ports::onboarding::OnboardingRepository;
@@ -56,15 +55,8 @@ impl OnboardingRepository for SqlxOnboardingRepository {
         Ok(())
     }
 
-    /// The same read as `get_current_step`, minus the `.ok()??` that turns a
-    /// database error into "not started".
-    ///
-    /// PAI-2 P7 keys the public-route allowlist on this answer: while the pond
-    /// is not onboarded, `PUT /settings`, `POST /profiles`,
-    /// `PATCH /profiles/{id}` and the `/onboard/*` writes answer callers with
-    /// no token. Reporting an unreadable table as "not onboarded" would
-    /// therefore re-open all of them on a fully set-up pond, for as long as the
-    /// read kept failing. The error goes to the caller, which closes instead.
+    /// Like `get_current_step` but propagates DB errors: the auth allowlist opens onboarding
+    /// write routes while not onboarded, so a failed read must not look like "not started".
     async fn is_complete(&self) -> anyhow::Result<bool> {
         let row = sqlx::query_as::<_, (String,)>(
             "SELECT current_step FROM onboarding_state WHERE id = 1",
@@ -102,13 +94,6 @@ mod tests {
         assert_eq!(step, Some(OnboardingStep::Basics));
     }
 
-    /// PAI-2 P7. The whole reason the port has `is_complete` at all.
-    ///
-    /// `get_current_step` ends `.ok()??`, so an unreadable table is reported as
-    /// "not started" -- and "not started" is the state in which the auth
-    /// allowlist leaves every onboarding write route public. The precondition
-    /// assertion below is what stops this test reading as vacuous: it proves
-    /// the two methods genuinely disagree about the same broken database.
     #[tokio::test]
     async fn is_complete_reports_a_read_failure_instead_of_answering_not_onboarded() {
         let tmp = tempdir().unwrap();
@@ -118,7 +103,6 @@ mod tests {
         repo.save_step(OnboardingStep::Completed).await.unwrap();
         assert!(repo.is_complete().await.unwrap());
 
-        // Break the read the way a real failure would.
         sqlx::query("DROP TABLE onboarding_state")
             .execute(&db.system)
             .await

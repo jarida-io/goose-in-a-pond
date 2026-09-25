@@ -1,7 +1,4 @@
-//! SQLite-backed implementation of the CreditLedger port (#132 Milestone 4).
-//!
-//! Wraps `Pool<Sqlite>` pointing at `pond_system.db`. Table created by
-//! `migrations/system/0046_mesh_ledger.sql`.
+//! SQLite-backed implementation of the CreditLedger port.
 
 use async_trait::async_trait;
 use pond_core::mesh::domain::millisats::Millisats;
@@ -48,10 +45,7 @@ impl CreditLedger for SqliteCreditLedger {
     }
 
     async fn debit(&self, peer: PeerId, amount: Millisats) -> Result<(), CreditLedgerError> {
-        // Atomic conditional decrement: the `balance_millisats >= ?` guard is
-        // evaluated by SQLite as part of this single UPDATE, so concurrent
-        // debits can't race past a zero balance the way a Rust-side
-        // read-then-write would.
+        // The `>= ?` guard lives in this one UPDATE so concurrent debits cannot overdraw.
         let result = sqlx::query(
             "UPDATE mesh_credit_balances \
              SET balance_millisats = balance_millisats - ?, updated_at = datetime('now') \
@@ -122,7 +116,6 @@ mod tests {
             result,
             Err(CreditLedgerError::InsufficientBalance { .. })
         ));
-        // Balance is unchanged after a failed debit.
         assert_eq!(ledger.balance(peer).await.unwrap(), Millisats::new(100));
     }
 
@@ -147,9 +140,6 @@ mod tests {
         assert_eq!(ledger.balance(a).await.unwrap(), Millisats::new(500));
     }
 
-    /// Stands in for the issue's "property tests on the ledger" note: proves
-    /// the atomic `UPDATE ... WHERE balance >= ?` prevents overdraft/lost
-    /// updates under real concurrent access, not just sequential calls.
     #[tokio::test]
     async fn concurrent_debits_never_overdraw() {
         let (ledger, _tmp) = make_ledger().await;

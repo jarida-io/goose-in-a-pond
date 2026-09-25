@@ -1,9 +1,4 @@
-//! SQLite-backed `McpServerRepository`.
-//!
-//! Stores external MCP server configurations in the `mcp_servers` table of
-//! `pond_system.db`. Loaded at startup by `pond-server` to auto-connect saved
-//! MCP servers, and updated whenever the user adds or removes an extension via
-//! the REST API.
+//! SQLite-backed `McpServerRepository`: saved MCP servers, auto-connected at startup.
 
 use anyhow::Result;
 use async_trait::async_trait;

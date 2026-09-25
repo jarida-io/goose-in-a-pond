@@ -7,27 +7,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::sync::RwLock;
 
-/// Encrypted file-based secret store at `$DATA_DIR/secrets.json`.
+/// Encrypted file-based secret store at `$DATA_DIR/secrets.json`; env vars override it.
 ///
-/// This module was called `keyring_secret_repository` and there has never been
-/// a keyring in it (PAI-2 section 1.2, "There is no keyring"). Renamed in PAI-2
-/// P2 rather than left to imply a protection that did not exist; what does
-/// protect the file is P4's encryption, described below.
-///
-/// The file holds an XChaCha20-Poly1305 envelope (see [`crate::secret_crypto`])
-/// under a 32-byte key at `$DATA_DIR/secrets/master.key`, mode 0600 inside a
-/// 0700 directory, generated on first construction.
-///
-/// **Read the threat model in [`crate::secret_crypto`] before assuming this
-/// protects more than it does.** It protects the file. It does not protect a
-/// running pond, and in the default layout it does not protect a stolen device
-/// either, because the key sits in the same directory as the ciphertext.
-///
-/// Env vars take highest priority: if `std::env::var(key)` succeeds, the file
-/// store is skipped entirely. This matches Goose's 3-tier fallback pattern
-/// (keyring → file → env) but inverts the priority so explicit env overrides
-/// always win — useful for CI and container deployments. Encryption changes
-/// nothing about that ordering: an env-supplied secret was never on disk here.
+/// Protects the file only, not a running pond; see the threat model in [`crate::secret_crypto`].
 pub struct FileSecretRepository {
     path: PathBuf,
     key: Key,
@@ -35,26 +17,9 @@ pub struct FileSecretRepository {
 }
 
 impl FileSecretRepository {
-    /// Open, and on a first run create, the encrypted store.
-    ///
-    /// Three shapes can be on disk. All three are handled explicitly, because
-    /// the convenient default in each case destroys data:
-    ///
-    /// 1. **Nothing.** Generate the key now rather than lazily, so a fresh pond
-    ///    has a key to back up from day one and the first `set` cannot fail for
-    ///    a reason that has nothing to do with the secret being set.
-    /// 2. **An envelope.** Decrypt it. If the key is missing, or does not
-    ///    authenticate, return [`SecretStoreLocked`] and touch nothing. The
-    ///    tempting alternative — start empty and carry on — turns a temporarily
-    ///    misplaced key file into permanent data loss on the next write.
-    /// 3. **A legacy plaintext map.** Migrate it in place. The ordering is
-    ///    load-or-create the key and fsync it *first*, then encrypt into
-    ///    `secrets.json.tmp`, fsync, and rename. An interruption at any point
-    ///    leaves either the intact plaintext file or the complete ciphertext,
-    ///    never a half-written store and never ciphertext without a key. A
-    ///    plaintext file that does not parse is an error, not an empty store:
-    ///    the previous code called `unwrap_or_default()` there, which meant a
-    ///    corrupt file became an empty one on the next `set`.
+    /// Open, creating the key eagerly on first run. A missing/wrong key is [`SecretStoreLocked`]
+    /// and unparsable plaintext is an error, never an empty store (the next write would lose
+    /// data). Legacy plaintext migrates with the key fsynced before any ciphertext is written.
     pub fn new(data_dir: &std::path::Path) -> Result<Self> {
         let path = data_dir.join("secrets.json");
         let key_path = secret_crypto::key_path(data_dir);
@@ -143,11 +108,7 @@ impl FileSecretRepository {
         }
     }
 
-    /// Encrypt and atomically replace the store.
-    ///
-    /// Synchronous on purpose. It is a few kilobytes on a path that runs when a
-    /// human saves an API key or an OAuth callback lands, and `new` needs the
-    /// same routine outside an async context.
+    /// Encrypt and atomically replace the store. Sync on purpose: `new` calls it outside async.
     fn write_store(
         path: &std::path::Path,
         key: &Key,
@@ -164,14 +125,7 @@ impl FileSecretRepository {
     }
 }
 
-/// Hand-written rather than derived, and it must stay that way.
-///
-/// `#[derive(Debug)]` here would print the master key and every secret value
-/// the moment anybody wrote `{:?}` or called `.expect()` on a `Result` holding
-/// one — which is exactly how a secret ends up in a log file or a panic
-/// message. That is not hypothetical: `expect_err` in the tests below prints
-/// this struct, so a derived impl would have put the master key in the test
-/// output. Only the store path is real here; the rest is redacted.
+/// Hand-written so `{:?}` (or a test's `expect_err`) never prints the key or secret values.
 impl std::fmt::Debug for FileSecretRepository {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FileSecretRepository")
@@ -185,7 +139,6 @@ impl std::fmt::Debug for FileSecretRepository {
 #[async_trait]
 impl SecretRepository for FileSecretRepository {
     async fn get(&self, key: &str) -> Result<Option<String>> {
-        // Check env var first (highest priority)
         if let Ok(val) = std::env::var(key) {
             return Ok(Some(val));
         }
@@ -209,11 +162,7 @@ impl SecretRepository for FileSecretRepository {
         self.persist().await
     }
 
-    /// The FILE store only — deliberately does not consult the environment,
-    /// unlike [`SecretRepository::get`] and [`SecretRepository::has`].
-    /// [`crate::secret_migration`] uses this rather than `has()` to decide
-    /// whether a key has really been copied, because an env var of the same
-    /// name would otherwise look like evidence of a copy that never happened.
+    /// File store only (no env): [`crate::secret_migration`] relies on that to verify copies.
     async fn list_keys(&self) -> Result<Vec<String>> {
         let cache = self.cache.read().await;
         Ok(cache.keys().cloned().collect())
@@ -237,12 +186,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = FileSecretRepository::new(tmp.path()).unwrap();
 
-        // Initially empty
         assert!(repo.list_keys().await.unwrap().is_empty());
         assert!(!repo.has("MY_KEY").await.unwrap());
         assert!(repo.get("MY_KEY").await.unwrap().is_none());
 
-        // Set a secret
         repo.set("MY_KEY", "secret_value").await.unwrap();
         assert!(repo.has("MY_KEY").await.unwrap());
         assert_eq!(
@@ -251,7 +198,6 @@ mod tests {
         );
         assert_eq!(repo.list_keys().await.unwrap(), vec!["MY_KEY".to_string()]);
 
-        // Delete it
         repo.delete("MY_KEY").await.unwrap();
         assert!(!repo.has("MY_KEY").await.unwrap());
         assert!(repo.get("MY_KEY").await.unwrap().is_none());
@@ -272,13 +218,11 @@ mod tests {
     async fn persists_to_disk() {
         let tmp = tempfile::tempdir().unwrap();
 
-        // Write with one instance
         {
             let repo = FileSecretRepository::new(tmp.path()).unwrap();
             repo.set("PERSIST_KEY", "persist_val").await.unwrap();
         }
 
-        // Read with a fresh instance
         let repo2 = FileSecretRepository::new(tmp.path()).unwrap();
         assert_eq!(
             repo2.get("PERSIST_KEY").await.unwrap().as_deref(),
@@ -290,7 +234,6 @@ mod tests {
     async fn delete_nonexistent_is_noop() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = FileSecretRepository::new(tmp.path()).unwrap();
-        // Should not error
         repo.delete("DOES_NOT_EXIST").await.unwrap();
     }
 
@@ -308,11 +251,8 @@ mod tests {
         assert_eq!(mode, 0o600, "secrets.json should be owner-only rw");
     }
 
-    // ── PAI-2 P4: encryption at rest ────────────────────────────────────────
-    //
-    // Secret names below are deliberately distinctive: `get` consults the
-    // process environment first, so a test keyed on a plausible name like
-    // `TOKEN` could pass or fail on somebody's shell rather than on this code.
+    // ── Encryption at rest ──────────────────────────────────────────────────
+    // Secret names are distinctive because `get` reads the process environment first.
 
     #[tokio::test]
     async fn the_stored_value_is_not_in_the_file_bytes() {
@@ -323,9 +263,7 @@ mod tests {
             .unwrap();
 
         let raw = std::fs::read(tmp.path().join("secrets.json")).unwrap();
-        // Guard the vacuous pass: an absent or empty file trivially "does not
-        // contain" the value, which is how a test like this reports success
-        // while the feature is missing.
+        // Guard the vacuous pass: an absent or empty file trivially lacks the value.
         assert!(!raw.is_empty(), "secrets.json was never written");
         let text = String::from_utf8_lossy(&raw).into_owned();
         assert!(
@@ -367,21 +305,8 @@ mod tests {
         );
     }
 
-    /// The migration ordering guarantee, with the ciphertext write forced to
-    /// fail so the ordering is observable.
-    ///
-    /// This is the one that prevents unrecoverable loss. If the key were made
-    /// durable *after* the ciphertext, a power cut in between would leave a
-    /// pond holding an envelope nobody can ever open. Every other test here
-    /// passes under that reordering, because on a run that is not interrupted
-    /// both files end up on disk and nothing can tell which was written first.
-    ///
-    /// So the write of `secrets.json` is sabotaged: `write_private` creates
-    /// `secrets.json.tmp` with `create_new(true)`, and a *directory* at that
-    /// path makes the create fail — which is a stand-in for the ENOSPC or EIO
-    /// that would cause this in the field. Construction must then fail with the
-    /// key already on disk and the plaintext store untouched, which is the only
-    /// state from which a retry can succeed.
+    /// A directory at `secrets.json.tmp` makes `create_new` fail (a stand-in for ENOSPC/EIO),
+    /// which makes the key-before-ciphertext ordering observable.
     #[cfg(unix)]
     #[tokio::test]
     async fn the_key_is_durable_before_any_ciphertext_is_written() {
@@ -391,13 +316,11 @@ mod tests {
         let legacy = r#"{"GIAP_TEST_ORDER":"order-value"}"#;
         std::fs::write(&store, legacy).unwrap();
 
-        // Make the ciphertext write fail, and only the ciphertext write.
         std::fs::create_dir(tmp.path().join("secrets.json.tmp")).unwrap();
 
         let err = FileSecretRepository::new(tmp.path())
             .expect_err("the migration must fail when it cannot write the ciphertext");
-        // Not a locked store: this is a write failure, and conflating the two
-        // would send the operator hunting for a key that is right there.
+        // Not `SecretStoreLocked`: that would send the operator hunting for a key that exists.
         assert!(
             err.downcast_ref::<SecretStoreLocked>().is_none(),
             "a failed write was reported as a locked store: {err:#}"

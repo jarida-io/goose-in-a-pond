@@ -1,10 +1,4 @@
-//! Logging stub adapter for `DeviceControlPort`.
-//!
-//! The production default until real backends land (MQTT/HTTP/IR per #134, or a
-//! Home-Assistant MCP-client). It logs every actuation at INFO and echoes the
-//! requested state, so the full agent → MCP tool → port path is exercisable
-//! end-to-end before any device protocol exists. This is the seam real adapters
-//! slot into.
+//! Logging `DeviceControlPort` stub; the production default until a real device backend exists.
 
 use async_trait::async_trait;
 use pond_core::user_data::ports::device_control::{

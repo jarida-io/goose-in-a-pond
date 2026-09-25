@@ -1,24 +1,8 @@
-//! SQLite-backed implementation of `DeviceRegistry`.
+//! SQLite-backed implementation of `DeviceRegistry` over the `devices` table.
 //!
-//! Uses the `devices` table in `pond_system.db`.
-//! Columns `device_type`, `ip_address`, `capabilities`, `last_seen`, `is_online`
-//! are added by migration `0004_devices_enhanced.sql`.
-//!
-//! Timestamps are written as RFC 3339 and read leniently, because older rows hold
-//! naive UTC (`2026-08-17 21:40:55`) from when this file wrote that. Naive is
-//! unambiguous only to a reader who already knows it means UTC, and the desktop's
-//! `new Date(...)` does not: it reads a zoneless string as local time, which showed
-//! a device heartbeated seconds ago as hours stale.
-//!
-//! `is_online` is derived at read-time by comparing `last_seen` to `now - 5 min`
-//! (heartbeat threshold), and nothing else. The stored `is_online` column is
-//! written but never read back — `row_to_device` does not even select it — so a
-//! device is online exactly as long as something keeps saying so.
-//!
-//! That makes the freshness the whole contract, and it is a contract every source
-//! of devices has to keep: a subsystem that only touches `last_seen` when something
-//! happens will show its devices going offline while they sit there working. The
-//! Matter bridge did precisely that until it grew a periodic tick.
+//! Timestamps are written as RFC 3339 and read leniently: older rows hold naive UTC.
+//! Online means `last_seen` within the threshold; the stored `is_online` column is never read,
+//! so every device source must refresh `last_seen` periodically, not only on events.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -30,7 +14,7 @@ use serde_json;
 use sqlx::{Pool, Sqlite};
 use uuid::Uuid;
 
-const ONLINE_THRESHOLD_SECS: i64 = 300; // 5 minutes
+const ONLINE_THRESHOLD_SECS: i64 = 300;
 
 pub struct SqliteDeviceRegistry {
     pool: Pool<Sqlite>,
@@ -57,31 +41,18 @@ struct DeviceRow {
     room: Option<String>,
 }
 
-/// The instant a stored timestamp names, whichever way it was written.
-///
-/// This table holds two formats. `register` and `heartbeat` write naive UTC
-/// (`2026-08-17 21:40:55`); other rows carry RFC 3339 with an offset
-/// (`2026-07-25T01:09:58+00:00`). Reading only the first is what made a desktop
-/// row permanently offline: its timestamp failed to parse, and an unparseable
-/// `last_seen` falls back to "not online" no matter how recently it was touched.
+/// Parses RFC 3339 or legacy naive UTC; an unparseable `last_seen` would pin a device offline.
 fn parse_stored(value: &str) -> Option<chrono::DateTime<Utc>> {
     if let Ok(fixed) = chrono::DateTime::parse_from_rfc3339(value) {
         return Some(fixed.with_timezone(&Utc));
     }
-    // Naive: written by this file, and UTC by construction.
+    // Naive: legacy rows, UTC by construction.
     chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
         .ok()
         .map(|naive| naive.and_utc())
 }
 
-/// A stored timestamp as an instant nothing can misread.
-///
-/// Naive UTC is unambiguous only to a reader who already knows it is UTC. The
-/// desktop reads these with `new Date(...)`, which takes a string with no zone as
-/// LOCAL time -- so a washer heartbeated seconds ago displayed as "3h ago" to a
-/// reader in UTC+3, next to the "online" badge that the same timestamp had just
-/// produced. Emitting an offset removes the guess rather than asking every consumer
-/// to make it correctly.
+/// Always emit an offset: the desktop's `new Date(...)` reads zoneless strings as local time.
 fn as_instant(value: &str) -> String {
     parse_stored(value).map_or_else(|| value.to_string(), |t| t.to_rfc3339())
 }
@@ -89,9 +60,7 @@ fn as_instant(value: &str) -> String {
 fn row_to_device(row: DeviceRow) -> Device {
     let capabilities: Vec<String> = serde_json::from_str(&row.capabilities).unwrap_or_default();
 
-    // Online means something said so recently. An unparseable timestamp is not a
-    // claim, so it reads as offline -- but it must fail to parse because it is
-    // absent or corrupt, not merely because it was written in the other format.
+    // An absent or corrupt timestamp reads as offline.
     let is_online = row
         .last_seen
         .as_deref()
@@ -206,10 +175,7 @@ impl DeviceRegistry for SqliteDeviceRegistry {
     }
 
     async fn set_offline(&self, device_id: &str) -> Result<()> {
-        // `is_online` is derived at read-time from `last_seen` (see module docs),
-        // so "go offline" means backdating `last_seen` past the threshold rather
-        // than flipping a stored flag — this mirrors `heartbeat`, which marks
-        // online the same way (fresh `last_seen`).
+        // Online derives from `last_seen`, so going offline backdates it past the threshold.
         let stale = (Utc::now() - Duration::seconds(ONLINE_THRESHOLD_SECS + 60)).to_rfc3339();
         sqlx::query("UPDATE devices SET last_seen = ?, is_online = 0, updated_at = ? WHERE id = ?")
             .bind(&stale)
@@ -243,8 +209,7 @@ impl DeviceRegistry for SqliteDeviceRegistry {
         device_type: &str,
         capabilities: &[String],
     ) -> Result<()> {
-        // Deliberately does NOT touch name, hostname or room: those belong to
-        // whoever configured the device, and this runs on every bridge sync.
+        // Leaves name/hostname/room alone: they are user-configured, and this runs on every sync.
         let caps_json = serde_json::to_string(capabilities)?;
         let now_str = Utc::now().to_rfc3339();
         sqlx::query(
@@ -310,17 +275,12 @@ mod tests {
         assert!(reg.get_device(&dev.id).await.unwrap().is_none());
     }
 
-    /// Both bugs on the Devices screen came from this one place, in opposite
-    /// directions: a Matter row read as online but displayed hours stale, and a
-    /// desktop row that could never read online at all.
     #[test]
     fn a_timestamp_is_understood_whichever_way_it_was_written() {
-        // What `register` and `heartbeat` used to write. UTC, but it does not say so.
+        // Legacy rows: naive UTC.
         let naive = parse_stored("2026-08-17 21:40:55").expect("naive UTC parses");
         assert_eq!(naive.to_rfc3339(), "2026-08-17T21:40:55+00:00");
 
-        // What other rows already held. Failing this is what pinned a device
-        // offline no matter how recently anything touched it.
         let rfc = parse_stored("2026-07-25T01:09:58.212087+00:00").expect("rfc3339 parses");
         assert_eq!(rfc.to_rfc3339(), "2026-07-25T01:09:58.212087+00:00");
 
@@ -332,16 +292,12 @@ mod tests {
         assert!(parse_stored("whenever").is_none());
     }
 
-    /// The half the reader sees: a zoneless timestamp handed to `new Date(...)` is
-    /// read as local time, so a device heartbeated seconds ago showed as "3h ago"
-    /// beside the "online" badge the same value had just produced.
     #[test]
     fn what_leaves_this_layer_states_its_offset() {
         assert_eq!(
             as_instant("2026-08-17 21:40:55"),
             "2026-08-17T21:40:55+00:00"
         );
-        // Already unambiguous: passed through unchanged.
         assert_eq!(
             as_instant("2026-07-25T01:09:58.212087+00:00"),
             "2026-07-25T01:09:58.212087+00:00"
@@ -360,8 +316,7 @@ mod tests {
         assert!(updated.is_online);
     }
 
-    /// #195: bridge-supplied stable ids are honoured verbatim, so re-syncs
-    /// address the same row instead of accumulating duplicates.
+    /// Stable ids let bridge re-syncs address the same row instead of duplicating it.
     #[tokio::test]
     async fn register_honours_caller_supplied_stable_id() {
         let (reg, _tmp) = make_registry().await;
@@ -402,8 +357,6 @@ mod tests {
         assert!(listed[0].room.is_none());
     }
 
-    /// "Turn off" in the Devices UI: a freshly-registered device (last_seen =
-    /// now, so it would otherwise read online) must flip to offline.
     #[tokio::test]
     async fn set_offline_marks_a_freshly_registered_device_offline() {
         let (reg, _tmp) = make_registry().await;
@@ -415,7 +368,6 @@ mod tests {
         assert!(!updated.is_online);
     }
 
-    /// "Turn on" after "Turn off": heartbeat must bring it back online.
     #[tokio::test]
     async fn heartbeat_reverses_a_previous_set_offline() {
         let (reg, _tmp) = make_registry().await;

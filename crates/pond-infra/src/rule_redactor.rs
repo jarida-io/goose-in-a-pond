@@ -1,12 +1,7 @@
-//! Rule-based [`Redactor`] adapter (PAI-2 P3).
+//! Rule-based [`Redactor`] adapter; no model in the loop, so it is cheap enough to leave on.
 //!
-//! The regexes here are **candidate finders and nothing else**. Every one is
-//! deliberately permissive; `pond_core::security::domain::redaction`'s
-//! validators decide. That split is the point: replace this crate's engine and
-//! not one accept/reject decision moves, because none of them live here.
-//!
-//! No model in the loop. A redactor that costs a 20 tok/s inference call gets
-//! switched off by the first user who notices it.
+//! The regexes only find candidates; the validators in `pond_core::security::domain::redaction`
+//! make every accept/reject decision.
 
 use pond_core::security::domain::redaction::{
     candidate_is_real, Redacted, RedactionKind, RedactionLevel,
@@ -14,9 +9,7 @@ use pond_core::security::domain::redaction::{
 use pond_core::security::ports::redactor::Redactor;
 use regex::Regex;
 
-/// One permissive pattern per [`RedactionKind`]. `every_kind_has_a_pattern`
-/// fails the build if a kind is added to the domain and not to this table —
-/// otherwise core would know about a class the adapter could never find.
+/// One permissive pattern per [`RedactionKind`]; `every_kind_has_a_pattern` enforces coverage.
 const PATTERNS: &[(RedactionKind, &str)] = &[
     (
         RedactionKind::EmailAddress,
@@ -66,16 +59,13 @@ impl RuleRedactor {
                 if start >= end {
                     continue;
                 }
-                // Trimming matters: a pattern that swallows the space before a
-                // number would replace it too, turning "call 020 7946 0958 now"
-                // into "call[redacted:phone]now".
+                // Trimmed, or "call 020 7946 0958 now" would become "call[redacted:phone]now".
                 if candidate_is_real(*kind, &text[start..end]) {
                     found.push((*kind, start, end));
                 }
             }
         }
-        // A secret outranks a contact detail where they overlap, then the
-        // earlier match, then the longer one.
+        // Overlaps: higher sensitivity wins, then the earlier match, then the longer one.
         found.sort_by(|a, b| {
             b.0.sensitivity()
                 .cmp(&a.0.sensitivity())
@@ -142,9 +132,6 @@ mod tests {
         }
     }
 
-    /// The whole bar for this phase: the sentence must still read as a
-    /// sentence. A postcode inside ordinary prose is replaced; nothing on
-    /// either side of it moves.
     #[test]
     fn prose_around_a_match_survives_byte_for_byte() {
         let r = RuleRedactor::new();
@@ -165,9 +152,6 @@ mod tests {
         assert_eq!(out, "call [redacted:phone] now");
     }
 
-    /// The negatives, through the real patterns rather than the validators
-    /// directly -- this is the pairing that proves the adapter is not
-    /// over-matching somewhere the validator never sees.
     #[test]
     fn ordinary_smart_home_prose_is_untouched() {
         let r = RuleRedactor::new();
@@ -191,14 +175,12 @@ mod tests {
         let out = r.redact(text, RedactionLevel::Secrets);
         assert!(out.text.contains("jerry@example.com"), "{}", out.text);
         assert!(out.text.contains("[redacted:api-key]"), "{}", out.text);
-        // Detect reports the same findings and changes nothing.
         let detected = r.redact(text, RedactionLevel::Detect);
         assert_eq!(detected.text, text);
         assert_eq!(detected.findings, out.findings);
         assert!(detected.found(RedactionKind::EmailAddress));
     }
 
-    /// PAI-2 section 7 asks for this by name.
     #[test]
     fn redaction_is_idempotent() {
         let r = RuleRedactor::new();

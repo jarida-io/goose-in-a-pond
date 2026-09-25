@@ -8,8 +8,6 @@ use pond_core::user_data::ports::draft::DraftRepository;
 use sqlx::{Pool, Sqlite};
 
 /// Row shape shared by every SELECT below, so the tuple arity is stated once.
-/// A future column added to one query and not the others would otherwise shift
-/// a tuple field silently rather than failing to compile.
 type DraftRow = (
     String,
     String,
@@ -53,9 +51,7 @@ impl DraftRepository for SqliteDraftRepository {
         .bind(&draft.payload)
         .bind(draft.status.to_string())
         .bind(draft.created_at.to_rfc3339())
-        // Seconds precision and a `Z` suffix, matching `sqlite_proposal.rs`:
-        // migration 0041's triggers compare this column with `datetime()`, so
-        // the two writers must agree on a spelling SQLite can parse.
+        // Seconds + `Z`, as in `sqlite_proposal.rs`: 0041's triggers compare it via `datetime()`.
         .bind(
             draft
                 .expires_at
@@ -67,11 +63,8 @@ impl DraftRepository for SqliteDraftRepository {
     }
 
     async fn list_pending(&self, session_id: &str) -> Result<Vec<Draft>> {
-        // The expiry half is PAI-7 invariant 7 on the shared read path: a
-        // staged action past its expiry is not listed, whether or not anything
-        // ever swept it. `datetime()` on both sides rather than a string
-        // compare, and it fails closed -- an unreadable expiry yields NULL,
-        // NULL is not true, so the row is treated as expired.
+        // Expired drafts are filtered here, not only by a sweeper. Fails closed: an unreadable
+        // expiry makes `datetime()` NULL, so the row counts as expired.
         let sql = format!(
             "SELECT {DRAFT_COLUMNS} FROM drafts WHERE session_id = ? AND status = 'pending' \
              AND (expires_at IS NULL OR datetime(expires_at) > datetime('now')) \
@@ -131,10 +124,7 @@ fn row_to_draft(row: DraftRow) -> Result<Draft> {
     let created_at = chrono::DateTime::parse_from_rfc3339(&created_at)
         .map(|dt| dt.with_timezone(&chrono::Utc))
         .unwrap_or_else(|_| chrono::Utc::now());
-    // An unreadable expiry becomes the UNIX epoch, not `None`. `None` means
-    // "never expires", so degrading to it would turn a corrupt timestamp into
-    // an immortal staged action -- a widening default reached by a parse
-    // failure. The epoch is in the past, so the draft reads as expired.
+    // Unreadable expiry -> epoch (expired), never `None`, which means "never expires".
     let expires_at = expires_at.map(|raw| {
         chrono::DateTime::parse_from_rfc3339(&raw)
             .map(|dt| dt.with_timezone(&chrono::Utc))
@@ -145,8 +135,7 @@ fn row_to_draft(row: DraftRow) -> Result<Draft> {
         id,
         session_id,
         profile_id,
-        // An unreadable stored value degrades to the weakest claim, never a
-        // strong one -- IdentificationSource::parse is total for that reason.
+        // `parse` is total: an unreadable value degrades to the weakest claim.
         identification_source: identification_source
             .as_deref()
             .map(IdentificationSource::parse),
@@ -178,9 +167,7 @@ mod tests {
         }
     }
 
-    /// The 0038 trigger, fired against a real migrated database. A departed
-    /// member's staged shell command must not outlive them, and the other
-    /// member's must be untouched.
+    /// Exercises migration 0038's trigger; the other member's draft must stay untouched.
     #[tokio::test]
     async fn a_deleted_members_pending_draft_is_expired_and_released() {
         let tmp = tempfile::tempdir().unwrap();
@@ -222,8 +209,7 @@ mod tests {
         );
     }
 
-    /// An unowned draft is a real, reachable state (no session identified yet),
-    /// so the columns must round-trip as NULL rather than as "unknown".
+    /// An unowned draft (no session identified yet) round-trips as NULL, not "unknown".
     #[tokio::test]
     async fn an_unowned_draft_round_trips_as_unowned() {
         let tmp = tempfile::tempdir().unwrap();
@@ -245,9 +231,7 @@ mod tests {
             .is_empty());
     }
 
-    /// PAI-7 invariant 7 on the shared read path. An expiry that only a sweeper
-    /// honours stops holding the day the sweeper fails to start, so `list_pending`
-    /// filters it in SQL. Nothing swept anything in this test.
+    /// Nothing sweeps here: `list_pending` itself must filter expired drafts.
     #[tokio::test]
     async fn an_expired_draft_is_not_listed_and_a_live_one_is() {
         let tmp = tempfile::tempdir().unwrap();
@@ -277,8 +261,7 @@ mod tests {
             "an expired draft must not be listed; one with no expiry must be"
         );
 
-        // The row is untouched -- the refusal came from the read filter, not
-        // from a status something had already changed.
+        // Still pending: the read filter, not a status change, hid it.
         let status: String = sqlx::query_scalar("SELECT status FROM drafts WHERE id = 'stale'")
             .fetch_one(&db.system)
             .await
@@ -286,9 +269,6 @@ mod tests {
         assert_eq!(status, "pending");
     }
 
-    /// A corrupt expiry must read as expired, never as "never expires".
-    /// `None` is the widening value here, so the parse failure must not degrade
-    /// to it.
     #[tokio::test]
     async fn an_unreadable_expiry_degrades_to_expired_not_to_immortal() {
         let tmp = tempfile::tempdir().unwrap();

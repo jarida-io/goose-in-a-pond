@@ -1,6 +1,4 @@
 //! Ollama LLM provider adapter.
-//!
-//! Calls a local Ollama instance at `http://localhost:11434`
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -9,10 +7,8 @@ use pond_core::models::ports::provider::LlmProvider;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-/// Default Ollama base URL.
 pub const DEFAULT_HOST: &str = "http://localhost:11434";
 
-/// Default model to use when none is specified.
 pub const DEFAULT_MODEL: &str = "llama3.2";
 
 // ── Ollama /api/chat request/response types ───────────────────────────────────
@@ -44,9 +40,7 @@ pub struct OllamaProvider {
 }
 
 impl OllamaProvider {
-    /// Create a provider targeting the given host (e.g. `http://localhost:11434`).
-    /// Defaults to [`DEFAULT_HOST`] when `host` is `None`.
-    /// The `model` parameter selects the Ollama model (e.g. `"llama3.2"`, `"gemma2"`, `"deepseek"`).
+    /// A `None` host or model falls back to [`DEFAULT_HOST`] / `DEFAULT_MODEL`.
     pub fn new(host: Option<&str>, model: Option<&str>) -> Self {
         let base = host.unwrap_or(DEFAULT_HOST).trim_end_matches('/');
         Self {
@@ -64,7 +58,6 @@ impl LlmProvider for OllamaProvider {
         system_prompt: &str,
         messages: Vec<ChatMessage>,
     ) -> Result<ChatMessage> {
-        // Build message list: system prompt first, then conversation history.
         let mut ollama_messages: Vec<OllamaMessage> = vec![OllamaMessage {
             role: "system".to_string(),
             content: system_prompt.to_string(),
@@ -123,7 +116,6 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    /// Helper: spin up a mock Ollama server, send one turn, return the reply.
     async fn complete_with_mock(response_body: serde_json::Value) -> Result<ChatMessage> {
         let server = MockServer::start().await;
 

@@ -1,6 +1,4 @@
 //! SQLite-backed implementation of `PromptExtraRepository`.
-//!
-//! Uses the `prompt_extras` table in `pond_system.db` (migration 0010).
 
 use anyhow::Result;
 use async_trait::async_trait;

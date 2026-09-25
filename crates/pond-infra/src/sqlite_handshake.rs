@@ -1,17 +1,8 @@
-//! SQLite-backed [`Handshake`] adapter implementing the two-phase pairing
-//! protocol from `pond-core::ports::handshake` (#93).
+//! SQLite-backed [`Handshake`] adapter for the two-phase pairing protocol.
 //!
-//! Tables (see `migrations/system/0023_handshake.sql`):
-//! - `pairing_codes`        — single-use codes (only sha256 hash persisted)
-//! - `handshake_challenges` — short-lived challenges, one per `init`
-//! - `session_tokens`       — issued session + refresh tokens (sha256-hashed)
-//!
-//! Security properties:
-//! - Tokens returned to clients are opaque base64 of 32 random bytes; only
-//!   sha256 hashes are ever stored.
-//! - MAC and hash comparisons are constant-time (`subtle`).
-//! - Pairing codes are never sent over the wire — the client uses the code as
-//!   an HMAC key, and the server only ever sees the resulting MAC.
+//! Only sha256 hashes of codes and tokens are stored; tokens are base64 of 32 random bytes.
+//! MAC and hash comparisons are constant-time. The pairing code never crosses the wire: the
+//! client uses it as the HMAC key and the server only sees the MAC.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -40,15 +31,10 @@ const REFRESH_TTL_DAYS: i64 = 30;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Plaintext pairing codes are kept **process-local**: the operator reads them
-/// off this server's stdout/dashboard, and clients must pair before the process
-/// restarts. On restart, unused codes from a prior run are silently invalidated
-/// (no plaintext is available to verify against), which matches the operator
-/// workflow of reading the code displayed at *this* startup.
+/// Process-local plaintext codes (only hashes persist), so a restart invalidates unused ones.
 static ISSUED_CODE_CACHE: Lazy<RwLock<HashMap<String, String>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
-/// SQLite-backed implementation of the [`Handshake`] port.
 pub struct SqliteHandshakeAdapter {
     pool: Pool<Sqlite>,
     hostname: String,
@@ -73,7 +59,6 @@ impl SqliteHandshakeAdapter {
         }
     }
 
-    /// Wrap as `Arc<dyn Handshake>`.
     pub fn into_dyn(self) -> Arc<dyn Handshake> {
         Arc::new(self)
     }
@@ -94,12 +79,10 @@ impl SqliteHandshakeAdapter {
         buf
     }
 
-    /// Opaque session/refresh token: base64 of 32 random bytes.
     fn random_token() -> String {
         B64.encode(Self::random_bytes(32))
     }
 
-    /// 6-digit numeric pairing code, leading zeros preserved.
     fn random_pairing_code() -> String {
         let mut buf = [0u8; 4];
         OsRng.fill_bytes(&mut buf);
@@ -130,12 +113,7 @@ impl SqliteHandshakeAdapter {
         self.response(false, None, None, None, Some(reason.to_string()))
     }
 
-    /// Mint a new session+refresh pair, persist the hashes, and return the
-    /// plaintext to the caller.
-    ///
-    /// Side effect: revokes any previously-active session for the same
-    /// `device_id`, so re-pairing from the same install supersedes rather than
-    /// accumulates orphaned tokens.
+    /// Mint a session pair, revoking the device's active one so re-pairs don't pile up.
     async fn issue_session_pair(
         &self,
         client_id: &str,
@@ -177,8 +155,7 @@ impl SqliteHandshakeAdapter {
         Ok((session_token, refresh_token, expires))
     }
 
-    /// Match a plaintext pairing code against active (unconsumed, unexpired)
-    /// rows. Returns the matched `code_hash`.
+    /// The `code_hash` of the active row this plaintext code matches.
     async fn match_pairing_code(&self, code: &str) -> Result<Option<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(
             "SELECT code_hash FROM pairing_codes
@@ -217,12 +194,8 @@ impl Handshake for SqliteHandshakeAdapter {
             .await?;
         ISSUED_CODE_CACHE.write().await.remove(&matched);
 
-        // PAI-1: this path writes no `devices` row at all, so there is nothing
-        // to attribute and a legacy pair is always unattributed. That is the
-        // narrowing outcome and it is left alone deliberately -- registering a
-        // device here would be a behaviour change outside this rung. The wart
-        // worth knowing about is that a member-bound code consumed here is
-        // BURNED with its attribution discarded; the operator re-issues.
+        // Writes no `devices` row, so a legacy pair is always unattributed; a member-bound code
+        // consumed here is burned with its attribution discarded (the operator re-issues).
         let device_id = request.client_id.clone();
         let (session, refresh, expires) = self
             .issue_session_pair(&request.client_id, &request.client_type, &device_id)
@@ -236,28 +209,9 @@ impl Handshake for SqliteHandshakeAdapter {
         ))
     }
 
-    /// Same predicate as [`validate_token`](Self::validate_token) — unexpired
-    /// and unrevoked — but returns who the token was issued to rather than a
-    /// bool, so an authenticated request can name its caller and its device.
-    /// Deliberately does NOT touch `last_seen_at`: this is a lookup about a
-    /// request already validated, not a second use of the token.
-    ///
-    /// PAI-1 P9: `device_id` is the row `verify_handshake` registered in
-    /// `devices`, and `devices.profile_id` is the member the operator bound at
-    /// pairing-code issuance. Selecting it here is the only way that member
-    /// reaches a turn — the alternative, a client-supplied device id, would
-    /// outrank every proof the pond can make.
-    ///
-    /// The predicate is repeated rather than shared with `validate_token`
-    /// because the two answer different questions about the same row and
-    /// `validate_token` has the `last_seen_at` side effect. If they ever
-    /// disagree, this one is the stricter place to fix: a token that validates
-    /// but names nobody degrades to `<unknown>`, which is a narrowing.
-    ///
-    /// [`client_id_for_token`](Handshake::client_id_for_token) is NOT
-    /// overridden: the port derives it from this method so the two cannot drift
-    /// into disagreeing, and so an adapter that loses this override visibly
-    /// loses the client id as well.
+    /// Like [`validate_token`](Self::validate_token) but names the caller and device (from the
+    /// `devices` row pairing registered, never the client) and leaves `last_seen_at` alone.
+    /// `client_id_for_token` is deliberately not overridden; the port derives it from this.
     async fn caller_for_token(&self, token: &str) -> Result<Option<TokenCaller>> {
         let token_hash = Self::sha256_hex(token.as_bytes());
         let now = Self::now().to_rfc3339();
@@ -357,13 +311,8 @@ impl Handshake for SqliteHandshakeAdapter {
             return Ok(self.reject("challenge_expired"));
         }
 
-        // 2. Consume the challenge up front — one challenge authorizes exactly
-        //    one verify attempt, success or failure. A wrong guess therefore
-        //    burns the challenge (the client must `init` again, which is
-        //    rate-limited per IP) and never touches the operator's pairing code,
-        //    so there is no remote-triggerable lockout. The `consumed_at IS NULL`
-        //    guard also closes the read→update race if two requests race on the
-        //    same challenge.
+        // 2. Consume the challenge first: one attempt per challenge, so a wrong guess burns it,
+        //    not the pairing code (no remote lockout). `consumed_at IS NULL` settles races.
         let attempt_at = Utc::now().to_rfc3339();
         let consumed = sqlx::query(
             "UPDATE handshake_challenges SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL",
@@ -376,8 +325,7 @@ impl Handshake for SqliteHandshakeAdapter {
             return Ok(self.reject("challenge_used"));
         }
 
-        // 3. Find the active pairing code whose plaintext (process-local)
-        //    reproduces the submitted MAC.
+        // 3. Find the active code whose process-local plaintext reproduces the MAC.
         let mac_bytes = match hex_decode(&request.mac) {
             Some(b) => b,
             None => return Ok(self.reject("bad_mac_hex")),
@@ -412,20 +360,11 @@ impl Handshake for SqliteHandshakeAdapter {
         }
 
         let Some(code_hash) = matched_hash else {
-            // Wrong code/MAC. The challenge is already spent (step 2) and the
-            // pairing code is untouched, so a bad guess can neither be retried
-            // on this challenge nor lock the operator out.
             return Ok(self.reject("invalid_mac"));
         };
 
-        // 4. Consume the matched code (single-use on success), register the
-        //    device, then mint tokens.
-        //
-        //    PAI-1: the code carries the household member the operator issued it
-        //    for, and that is the ONLY thing that attributes the device. Nothing
-        //    in `request` is consulted, deliberately -- see
-        //    `Handshake::issue_pairing_code_for` for why a client-asserted
-        //    profile would outrank every proof the pond can make.
+        // 4. Consume the code, register the device, mint tokens. Only the code attributes the
+        //    device; `request` is deliberately not consulted (see `issue_pairing_code_for`).
         let code_profile: Option<String> =
             sqlx::query_scalar("SELECT profile_id FROM pairing_codes WHERE code_hash = ?")
                 .bind(&code_hash)
@@ -445,13 +384,8 @@ impl Handshake for SqliteHandshakeAdapter {
             .device_name
             .clone()
             .unwrap_or_else(|| format!("gotg-{}", client_id.chars().take(8).collect::<String>()));
-        // `profile_id = excluded.profile_id` on conflict, so a re-pair always
-        // ends at exactly what the code said. An ordinary unattributed code
-        // therefore RELEASES a previous attribution rather than inheriting it:
-        // `device_id` is the client's own self-reported id, so keeping the old
-        // owner would let whoever re-pairs that id become the previous owner.
-        // Losing an attribution is a narrowing and the operator can re-issue;
-        // inheriting one is the impersonation this rung exists to prevent.
+        // On conflict the code's profile wins, so an ordinary code releases an old attribution:
+        // `device_id` is self-reported, and inheriting the owner would allow impersonation.
         let registered = sqlx::query(
             "INSERT INTO devices (id, name, hostname, device_type, ip_address,
                 capabilities, last_seen, is_online, created_at, updated_at, profile_id)
@@ -471,11 +405,7 @@ impl Handshake for SqliteHandshakeAdapter {
         .bind(&code_profile)
         .execute(&self.pool)
         .await;
-        // The result was discarded outright before PAI-1's rung; it still does
-        // not fail the pair (a client with a valid MAC has paired, whatever the
-        // registry did), but it is no longer invisible. The attribution rides on
-        // this statement, so a swallowed error here is a device that is silently
-        // nobody's.
+        // Logged, not fatal: the MAC was valid, but the attribution rides on this statement.
         if let Err(e) = &registered {
             tracing::warn!(
                 error = %e,
@@ -537,18 +467,14 @@ impl Handshake for SqliteHandshakeAdapter {
     }
 
     async fn issue_pairing_code_for(&self, profile_id: Option<&str>) -> Result<PairingCode> {
-        // A blank id is refused rather than stored: it is neither NULL nor a
-        // member, so `ON DELETE SET NULL` could never clear it and the delivery
-        // query would return the device to nobody forever.
+        // A blank id is refused: `ON DELETE SET NULL` could never clear it.
         let profile_id = profile_id.map(checked_profile_id).transpose()?;
         let code = Self::random_pairing_code();
         let code_hash = Self::sha256_hex(code.as_bytes());
         let now = Utc::now();
         let expires = now + Duration::minutes(PAIRING_CODE_TTL_MIN);
 
-        // The foreign key on `profile_id` (migration 0043) does the existence
-        // check: issuing a code for a member who has been deleted fails here
-        // rather than minting a code that would attribute a phone to a ghost.
+        // The `profile_id` foreign key is the existence check for the member.
         sqlx::query(
             "INSERT INTO pairing_codes (code_hash, created_at, expires_at, profile_id) \
              VALUES (?, ?, ?, ?)",
@@ -637,14 +563,12 @@ mod tests {
         let tmp = tempdir().unwrap();
         let db = Database::init(tmp.path()).await.unwrap();
         let adapter = SqliteHandshakeAdapter::new(db.system.clone());
-        // Keep the tempdir alive for the test (else the sqlite file vanishes
-        // under the pool).
+        // Keep the tempdir alive, or the sqlite file vanishes under the pool.
         std::mem::forget(tmp);
         adapter
     }
 
-    /// As `fresh`, plus the pool and two household members, for the PAI-1
-    /// attribution tests below.
+    /// As `fresh`, plus the pool and two household members.
     async fn fresh_with_household() -> (SqliteHandshakeAdapter, Pool<Sqlite>) {
         let tmp = tempdir().unwrap();
         let db = Database::init(tmp.path()).await.unwrap();
@@ -661,9 +585,7 @@ mod tests {
         (adapter, db.system)
     }
 
-    /// Run the two-phase pair for `client_id` against `code`, honestly: the
-    /// client only ever sees the plaintext code and the challenge, exactly as a
-    /// phone does.
+    /// The real two-phase pair: the client sees only the code and the challenge, like a phone.
     async fn pair(hs: &SqliteHandshakeAdapter, code: &str, client_id: &str) -> HandshakeResponse {
         let init = hs
             .init_handshake(InitRequest {
@@ -735,10 +657,6 @@ mod tests {
         assert!(!hs.validate_token(&token).await.unwrap());
     }
 
-    /// Regression for DEF-4: verify_handshake used to hardcode device_type='gotg'
-    /// (and pass "gotg" to issue_session_pair), discarding the real client_type
-    /// sent at init. A desktop client must now persist device_type='desktop' and
-    /// session_tokens.client_type='desktop'.
     #[tokio::test]
     async fn verify_persists_real_client_type_not_hardcoded_gotg() {
         let hs = fresh().await;
@@ -924,7 +842,6 @@ mod tests {
             "fresh token valid"
         );
 
-        // Force the stored expiry into the past, then re-check.
         let past = (Utc::now() - Duration::hours(1)).to_rfc3339();
         sqlx::query("UPDATE session_tokens SET expires_at = ? WHERE token_hash = ?")
             .bind(&past)
@@ -948,9 +865,6 @@ mod tests {
         .unwrap()
     }
 
-    /// Regression for the reported DoS: a LAN attacker spraying bad MACs must
-    /// NOT lock out the operator's pairing code (no global failed-attempt
-    /// counter anymore). The real device still pairs afterwards.
     #[tokio::test]
     async fn bad_mac_attempts_do_not_lock_out_pairing_code() {
         let hs = fresh().await;
@@ -985,8 +899,6 @@ mod tests {
         );
     }
 
-    /// A challenge authorizes exactly one verify attempt: even a *failed*
-    /// attempt burns it, so it can't be reused to keep guessing.
     #[tokio::test]
     async fn challenge_is_single_use_even_on_failure() {
         let hs = fresh().await;
@@ -1040,8 +952,6 @@ mod tests {
         assert_eq!(resp.rejection_reason.as_deref(), Some("challenge_expired"));
     }
 
-    /// After a refresh rotates the pair, the OLD refresh token is revoked and
-    /// must not be replayable.
     #[tokio::test]
     async fn refresh_token_cannot_be_reused_after_rotation() {
         let hs = fresh().await;
@@ -1081,19 +991,9 @@ mod tests {
         );
     }
 
-    // ── PAI-1: the device-to-profile rung ─────────────────────────────────
-    //
-    // These go through the real two-phase flow rather than writing
-    // `devices.profile_id` by hand. `ProfileScope::Owner` was inert for a whole
-    // phase because every fixture that produced an owned row set the column
-    // directly and no production path did; a fixture production cannot produce
-    // tests a system that does not exist.
+    // ── Device-to-profile rung ────────────────────────────────────────────
+    // Through the real two-phase flow: never set `devices.profile_id` by hand in these tests.
 
-    /// The rung, through the writers production uses: a code issued for Liz
-    /// pairs a phone that is Liz's and is not Jerry's. The push-token hop off
-    /// the same column is asserted in
-    /// `sqlite_device_attribution::tests::a_profile_can_be_asked_for_its_devices_and_their_push_tokens`;
-    /// no token is registered here, so this test does not claim it.
     #[tokio::test]
     async fn pairing_with_a_members_code_makes_the_device_theirs() {
         let (hs, pool) = fresh_with_household().await;
@@ -1122,10 +1022,6 @@ mod tests {
         );
     }
 
-    /// The default, and what every shipped caller does today: an unattributed
-    /// code pairs an unattributed device. It works, it is registered, and it is
-    /// nobody's -- which is the truthful answer when nobody said who was
-    /// pairing.
     #[tokio::test]
     async fn pairing_with_an_ordinary_code_leaves_the_device_unattributed() {
         let (hs, pool) = fresh_with_household().await;
@@ -1143,11 +1039,7 @@ mod tests {
             .is_empty());
     }
 
-    /// The security property this design exists for. `PairedDevice` outranks
-    /// every other rung of `identity_resolution::resolve`, so a device that
-    /// could name its own member would outrank every proof the pond can make.
-    /// The pairing client's body is deserialised with the extra field present
-    /// and the device still belongs to whoever the CODE named.
+    /// `PairedDevice` outranks every other identity rung, so the device must not name its member.
     #[tokio::test]
     async fn the_pairing_client_cannot_name_its_own_member() {
         let (hs, pool) = fresh_with_household().await;
@@ -1161,9 +1053,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Exactly the JSON a client would post, with an impersonation attempt
-        // in it. If `VerifyRequest` ever grows a profile field and honours it,
-        // this stops deserialising into "ignored" and the assertion below flips.
+        // A real client body plus an impersonation field `VerifyRequest` must keep ignoring.
         let body = serde_json::json!({
             "challenge_id": init.challenge_id,
             "mac": client_mac(&pc.code, &init.challenge, "device-liz"),
@@ -1189,10 +1079,6 @@ mod tests {
         );
     }
 
-    /// Re-pairing a device id with an ordinary code releases the attribution
-    /// rather than inheriting it. `device_id` is the client's own self-reported
-    /// id, so inheriting would let whoever reuses it become the previous owner.
-    /// Losing an attribution is a narrowing and the operator can re-issue.
     #[tokio::test]
     async fn re_pairing_with_an_ordinary_code_releases_the_previous_member() {
         let (hs, pool) = fresh_with_household().await;
@@ -1213,8 +1099,6 @@ mod tests {
         );
     }
 
-    /// A code outstanding when its member is deleted degrades to an ordinary
-    /// code. It must not fail the deletion and must not pair a phone to a ghost.
     #[tokio::test]
     async fn deleting_a_member_releases_their_outstanding_pairing_code() {
         let (hs, pool) = fresh_with_household().await;
