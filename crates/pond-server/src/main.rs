@@ -1,21 +1,6 @@
-//! Goose In A Pond — Server Entry Point
+//! Goose In A Pond server entry point.
 //!
-//! Usage:
-//!   pond-server setup [--model tiny|base|small]
-//!   pond-server serve [--port PORT] [--open]
-//!   pond-server chat  [--voice] [--provider mock|llamafile|ollama] [--model MODEL]
-//!   pond-server status
-//!
-//! # TODO — Setup Script
-//! - [ ] Create a setup script (`scripts/setup.sh`) that:
-//!   1. Detects whether the device is dedicated (sole GIAP) or shared
-//!   2. If dedicated: configures `http://pond.local/{route}` (port 80)
-//!   3. If shared:    configures `http://pond.<HOSTNAME>.local:<PORT>/{route}`
-//!   4. Preferred port order: 80 → 8080 → 4000 → 5000
-//!   5. Sets up mDNS/Avahi for `.local` hostname resolution
-//!   6. Creates systemd service for auto-start on boot
-//!   7. Initializes databases at a configurable data directory
-//!   8. Prompts for initial onboarding if not yet done
+//! TODO: `scripts/setup.sh`: dedicated vs shared host URL, port 80→8080→4000→5000, mDNS, systemd.
 
 mod asset_root;
 mod composite_model_catalog_provider;
@@ -427,34 +412,17 @@ enum MemoryAction {
 }
 
 fn main() -> Result<()> {
-    // Before the runtime exists, so this is genuinely single-threaded, and
-    // before any child is spawned — which is the only moment it can help. A
-    // GUI-launched process inherits launchd's bare PATH, so nvm's node is
-    // invisible to it and both the Matter controller and the stdio extensions
-    // fail with "not found in PATH". Logged rather than reported: nothing is
-    // wrong yet, and the subsystems that need Node say so themselves if it
-    // turns out not to be there at all.
+    // Before the runtime (env mutation must be single-threaded) and any child spawn: a GUI
+    // launch inherits launchd's bare PATH, which hides nvm's node.
     node_path::ensure_node_on_path();
-    // Name the TLS provider before anything can ask rustls to guess.
-    //
-    // This workspace enables BOTH of rustls' crypto backends without meaning
-    // to: `aws_lc_rs` from the root Cargo.toml and `ring` from hyper-rustls via
-    // reqwest. rustls refuses to pick between them, and every entry point that
-    // infers a provider panics rather than returning an error — on whatever
-    // background worker happened to touch TLS first, which is a crash with no
-    // relationship to the code that caused it.
-    //
-    // Installing one here makes the answer deterministic for the whole process,
-    // including dependencies that will hit the inferring path later. `Err` means
-    // somebody already installed one, which is equally fine and not worth
-    // failing a boot over.
+    // Both rustls backends are on (`aws_lc_rs` from the root Cargo.toml, `ring` via reqwest), so
+    // rustls panics wherever it infers one; pin it. `Err` means one is already installed: fine.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let num_cpus = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    // On Jetson Orin Nano (6 cores), cap at 4 to leave headroom for OS + audio.
-    // On dev machines, use all cores.
+    // ≤6 cores (Jetson Orin Nano): cap at 4 workers to leave headroom for OS + audio.
     let workers = if num_cpus <= 6 {
         num_cpus.min(4)
     } else {
@@ -468,38 +436,14 @@ fn main() -> Result<()> {
     runtime.block_on(async_main())
 }
 
-/// Keep Goose's own on-disk state inside the pond's data directory.
-///
-/// Goose resolves every directory it owns through `Paths::get_dir`, which honours
-/// an absolute `GOOSE_PATH_ROOT` and otherwise falls back to the platform's app
-/// dir for "Block/goose". Nothing in GIAP was setting it, so the engine's
-/// `sessions.db` lived outside `POND_DATA_DIR` entirely, with three consequences:
-///
-///  1. `scripts/live-test.sh` promises a scratch run "can never touch a real
-///     pond". That was true of both pond databases and false of engine state.
-///  2. Two pond-server instances on one machine shared a single session store
-///     and a single `YYYYMMDD_N` id namespace.
-///  3. On a machine that also runs Goose CLI or Desktop, `GooseAdapter::new`
-///     adopts `list_sessions().first()` — ordered by `sort_timestamp DESC`, i.e.
-///     the user's most recent unrelated conversation — repoints its working_dir
-///     at pond-server's cwd and loads 15 `giap-*` extensions onto it.
-///
-/// Must run before anything touches `SESSION_STORAGE`, which is a `LazyLock` over
-/// `Paths::data_dir()` and therefore latches the first answer it gets. Being the
-/// first statement of `async_main` is what guarantees that.
-///
-/// Upgrading an existing pond does not lose history: `pond_system.db` is
-/// authoritative, `resolve_goose_session` re-validates a stored pairing against
-/// the engine store and finds nothing, and `hydrate_goose_session` replays the
-/// conversation from pond history into a fresh engine session.
+/// Sets `GOOSE_PATH_ROOT` so Goose's engine state lives under the pond data dir, not a shared
+/// Goose app dir. Must run before `SESSION_STORAGE` (a `LazyLock`) latches its path.
 fn pin_goose_state_under(data_dir: &std::path::Path) {
-    // `validated_path_root` silently ignores a relative path, which would put us
-    // back on the platform default without saying so.
+    // Goose's `validated_path_root` silently ignores a relative path.
     let root = match std::fs::canonicalize(data_dir) {
         Ok(abs) => abs,
         Err(_) => {
-            // The directory may not exist on a first run; absolute is all Goose
-            // requires, so fall back to making the configured path absolute.
+            // Missing on a first run; Goose only needs the path absolute.
             if data_dir.is_absolute() {
                 data_dir.to_path_buf()
             } else {
@@ -555,16 +499,13 @@ async fn async_main() -> Result<()> {
             session_id,
             json_events,
         }) => {
-            // In --json-events mode, route diagnostics to stderr so stdout is
-            // reserved for NDJSON contract lines only.
+            // --json-events: stdout carries only NDJSON, so diagnostics go to stderr.
             let console = if json_events {
                 tracing_setup::ConsoleSink::Stderr
             } else {
                 tracing_setup::ConsoleSink::Stdout
             };
-            // Interactive voice/text chat: keep the console clean — WARN+ only
-            // for tracing; the curated turn lines + inference summary print via
-            // diag!/out!, and full detail still lands in the rolling log file.
+            // Console: WARN+ only (turn lines use diag!/out!); the log file keeps full detail.
             let _log = tracing_setup::init_tracing_with_console(false, &data_dir, console, true);
             run_chat(
                 provider.as_deref(),
@@ -602,7 +543,7 @@ async fn async_main() -> Result<()> {
         }) => run_calibrate(phrase.as_deref(), samples, whisper_url.as_deref(), reset).await,
         Some(Commands::Pairing { refresh }) => run_pairing(refresh).await,
         None => {
-            // Default: run interactive chat (backward compat) — provider comes from Settings
+            // No subcommand: interactive text chat, provider from Settings.
             let _log = tracing_setup::init_tracing(false, &data_dir);
             run_chat(None, None, false, None, true, Some("none"), None, false).await
         }
@@ -614,15 +555,13 @@ async fn run_setup(model: &str) -> Result<()> {
     println!("  ║   🦆  Goose In A Pond — Setup         ║");
     println!("  ╚═══════════════════════════════════════╝");
 
-    // Before anything loads a model, so the line is above the noise rather than
-    // buried under provider init.
+    // Before any model loads, so this line isn't buried under provider-init noise.
     report_acceleration();
 
     let data_dir = default_data_dir();
 
     println!("\n  📂 Data directory: {}", data_dir.display());
 
-    // Step 1: Check + auto-install system dependencies (Linux/macOS only)
     println!("\n  [1/8] Checking system dependencies...");
     if system_deps::ensure_system_deps().await {
         println!("  ✅ System dependencies OK");
@@ -633,22 +572,12 @@ async fn run_setup(model: &str) -> Result<()> {
         println!("     Continuing setup; some features may not work until deps are installed.");
     }
 
-    // Step 2: Initialize databases + seed model catalog
     println!("\n  [2/8] Initializing databases...");
     let db_setup = Database::init(&data_dir).await?;
     println!("  ✅ Databases ready");
 
-    // PAI-2 P6a: `pond setup` is almost entirely downloads — whisper, piper,
-    // the chat model, the ONNX runtime — and it ran with the egress gate at its
-    // `Open` default because `set_network_mode` was only ever called by
-    // `run_server`. Installed here, before the first fetch in step 3, so a
-    // household that stored `offline` gets refusals it can act on instead of
-    // a setup command that quietly ignores the setting.
-    //
-    // This runs after the DB init because the setting lives in it; on a first
-    // run there are no rows and `Settings::default()` gives `open`, which is
-    // the same answer as before and the right one — nobody has asked for
-    // anything narrower yet.
+    // Install the stored network mode before the first download so `offline` is honoured;
+    // after DB init because the setting lives there.
     pond_core::shared::services::egress::set_network_mode(
         pond_core::shared::services::egress::NetworkMode::parse(
             &SqliteSettingsRepository::new(db_setup.system.clone())
@@ -659,9 +588,7 @@ async fn run_setup(model: &str) -> Result<()> {
         ),
     );
 
-    // One-shot HF cache migration — moves pre-existing flat model files into
-    // the content-addressed blob layout so subsequent downloads dedupe. Errors
-    // are logged but never block startup. Idempotent via filesystem marker.
+    // Moves flat model files into the content-addressed blob layout; idempotent, never fatal.
     match pond_server::hf_cache_migration::migrate_flat_files_to_blobs(&data_dir).await {
         Ok(r) if r.is_empty() => {}
         Ok(r) => {
@@ -685,7 +612,6 @@ async fn run_setup(model: &str) -> Result<()> {
     seed_model_catalog(&setup_model_repo, &data_dir).await;
     ensure_tts_is_set_up(&setup_model_repo, &settings_repo_setup).await;
 
-    // Seed built-in prompt templates (INSERT OR IGNORE — never overwrites user edits)
     {
         use pond_core::prompts::BUILTIN_PROMPT_TEMPLATES;
         use pond_core::user_data::domain::prompt_template::PromptTemplate;
@@ -710,7 +636,6 @@ async fn run_setup(model: &str) -> Result<()> {
         println!("  ✅ Prompt templates seeded");
     }
 
-    // Step 3: Download Whisper ASR model from catalog URL
     let effective_model = if model.is_empty() { "base" } else { model };
     let (expected_path, whisper_dl_url, whisper_dl_mb) = {
         use crate::filesystem_model_storage::FilesystemModelStorage;
@@ -753,12 +678,10 @@ async fn run_setup(model: &str) -> Result<()> {
         );
     }
 
-    // Step 4: Whisper runs in-process via whisper-rs — no binary to fetch.
     {
         println!("\n  [4/8] Whisper runs in-process — no binary download needed.");
     }
 
-    // Step 5: Piper runs in-process via piper-rs — only the voice model is fetched.
     {
         println!("\n  [5/8] Checking Piper TTS voice model...");
         let tts_dir = model_download::tts_models_dir(&data_dir);
@@ -780,7 +703,6 @@ async fn run_setup(model: &str) -> Result<()> {
         }
     }
 
-    // Step 6: ONNX Runtime — detect or auto-download
     println!("\n  [6/8] Checking ONNX Runtime...");
     ensure_onnx_runtime();
     match std::env::var("ORT_DYLIB_PATH") {
@@ -792,14 +714,13 @@ async fn run_setup(model: &str) -> Result<()> {
         }
     }
 
-    // Step 7: espeak-ng-data — required by piper-rs for phonemization
+    // piper-rs needs espeak-ng-data for phonemization.
     println!("\n  [7/8] Checking espeak-ng-data...");
     {
         let espeak_path = data_dir.join("bin").join("espeak-ng-data");
         if espeak_path.exists() {
             println!("  ✅ espeak-ng-data found at {}", espeak_path.display());
         } else {
-            // Check if espeak-ng is installed via Homebrew and create the symlink
             let brew_path = std::path::Path::new("/opt/homebrew/share/espeak-ng-data");
             let usr_path = std::path::Path::new("/usr/share/espeak-ng-data");
             let source = if brew_path.exists() {
@@ -827,7 +748,6 @@ async fn run_setup(model: &str) -> Result<()> {
         }
     }
 
-    // Step 8: Microphone access check
     println!("\n  [8/8] Checking microphone access...");
     {
         use cpal::traits::HostTrait;
@@ -854,7 +774,6 @@ async fn run_setup(model: &str) -> Result<()> {
         }
     }
 
-    // Step 9 (face-onnx feature only): face recognition models
     #[cfg(feature = "face-onnx")]
     {
         println!("\n  [9/9] Setting up face recognition models...");
@@ -863,15 +782,7 @@ async fn run_setup(model: &str) -> Result<()> {
         }
     }
 
-    // Private mesh (mesh feature only): pre-generate the identity keypair.
-    // No download involved — this is compiled-in libp2p, not a model — so it
-    // is not numbered alongside the download steps above. `build_mesh_transport`
-    // would otherwise generate this lazily the first time mesh_enabled flips
-    // on, which is fine on its own but means the very first enable (whether
-    // at startup or hot-reloaded via PUT /api/v1/settings — see
-    // AppState::mesh_rebuild) pays a one-time keypair-generation cost this
-    // step moves here instead, onto a run the operator expects to take a
-    // while anyway.
+    // Pre-generate the mesh keypair so the first enable doesn't pay the generation cost.
     #[cfg(feature = "mesh")]
     {
         use pond_mesh_protocol::identity::MeshKeypair;
@@ -918,20 +829,13 @@ async fn run_setup(model: &str) -> Result<()> {
 
 // ── LlamafileManager implementation ──────────────────────────────────────────
 
-/// Manages the llamafile child process lifecycle.
-///
-/// Implements [`LlamafileManager`] so `pond-api`'s `rebuild_model_router`
-/// can start the process when the user switches to the "llamafile" provider
-/// without `pond-api` having any process-management knowledge.
+/// Owns the llamafile child process so `pond-api` can start it without knowing how.
 struct LlamafileManagerImpl {
     data_dir: std::path::PathBuf,
     model_service: Arc<pond_core::models::services::model_service::ModelService>,
     /// Holds the spawned process guard so it stays alive as long as AppState does.
     guard: Arc<tokio::sync::Mutex<Option<llamafile_process::LlamafileProcess>>>,
-    /// The port the process actually bound to.
-    /// Initialised from the port returned by the startup `try_start` call, or the
-    /// base port as a fallback.  Updated by the background spawn task when
-    /// `ensure_started` starts a new process on a non-base port.
+    /// Port the process bound to; may differ from the base port, updated by the spawn task.
     actual_port: Arc<std::sync::atomic::AtomicU16>,
 }
 
@@ -940,15 +844,11 @@ impl LlamafileManager for LlamafileManagerImpl {
     async fn ensure_started(&self, model_name: Option<&str>) -> String {
         let effective = self.effective_port();
 
-        // Fast path: already answering requests
         if llamafile_process::is_running(effective).await {
             return llamafile_process::url_for(effective);
         }
 
-        // Spawn in background so the settings-save HTTP response is not delayed
-        // by the 5–30 s model-loading time.  The process guard is stored inside
-        // `LlamafileManagerImpl` (via the shared `Arc<Mutex<…>>`) so it lives
-        // for the lifetime of AppState.
+        // Background spawn: model load takes 5–30 s and must not delay the settings-save response.
         let data_dir = self.data_dir.clone();
         let model_service = self.model_service.clone();
         let model_hint = model_name.map(|s| s.to_string());
@@ -956,12 +856,11 @@ impl LlamafileManager for LlamafileManagerImpl {
         let actual_port_arc = Arc::clone(&self.actual_port);
 
         tokio::spawn(async move {
-            // Double-check under the lock to avoid a race where two concurrent
-            // requests both reach the is_running() fast-path as false.
+            // Re-check under the lock: two concurrent callers can both miss the fast path.
             let mut guard = guard_arc.lock().await;
             let cur = actual_port_arc.load(std::sync::atomic::Ordering::Acquire);
             if llamafile_process::is_running(cur).await {
-                return; // someone else already started it
+                return;
             }
             match llamafile_process::try_start(&data_dir, model_service, model_hint.as_deref())
                 .await
@@ -994,16 +893,13 @@ impl LlamafileManager for LlamafileManagerImpl {
         let port = self.effective_port();
         let url = llamafile_process::url_for(port);
 
-        // Fast path: already running
         if llamafile_process::is_running(port).await {
             return (url, true);
         }
 
-        // Kick off background startup (reuses existing spawn+lock logic)
         self.ensure_started(model_name).await;
 
-        // Poll until ready or timeout, re-reading actual_port each iteration
-        // in case a just-started process chose a different port.
+        // Re-read the port each poll: a just-started process may bind a different one.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
         while std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -1017,8 +913,7 @@ impl LlamafileManager for LlamafileManagerImpl {
 }
 
 impl LlamafileManagerImpl {
-    /// Construct the manager, seeding `actual_port` with the port chosen at
-    /// initial startup (or the base port if the process was not started yet).
+    /// Seeds `actual_port` with the startup process's port, or the base port if none started.
     fn new(
         data_dir: std::path::PathBuf,
         model_service: Arc<pond_core::models::services::model_service::ModelService>,
@@ -1033,55 +928,32 @@ impl LlamafileManagerImpl {
         }
     }
 
-    /// Return the port the llamafile process is (or should be) listening on.
     fn effective_port(&self) -> u16 {
         self.actual_port.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
-/// How long after boot the personal-context index first considers a pass.
-///
-/// Not zero: the design's rule is that backfill is deferred to idle rather than
-/// run at startup, because a household's first turn after an upgrade must not be
-/// slow because the pond chose that moment to index itself. Sixty seconds is
-/// enough for a boot to settle and short enough that a pond left alone is
-/// repaired within the minute.
+/// First index pass waits for boot to settle, so backfill never slows the first turn.
 const INDEX_MAINTENANCE_DELAY_SECS: u64 = 60;
 
-/// How often a pass is CONSIDERED after that. The lane decides whether one runs.
-///
-/// This used to be a one-shot: the sweep fired once, sixty seconds after boot,
-/// and never again for the life of the process. A pond left running for a week
-/// indexed nothing it learned during that week, and the only way to repair the
-/// index was to restart the server — which is not something a member of a
-/// household does, or should have to.
+/// How often a pass is considered after that; the lane decides whether one runs.
 const INDEX_MAINTENANCE_POLL_SECS: u64 = 15 * 60;
 
-/// Say so, loudly, when this binary cannot reach the accelerator this host has.
-///
-/// Called at startup for its side effect only. The check is cheap and the case
-/// it catches is otherwise invisible: a CPU build on a Jetson compiles, starts,
-/// loads the model and answers correctly at roughly a thirtieth of the speed,
-/// with no error anywhere. See `pond_core::models::domain::acceleration`.
+/// Logs an error when this build can't use the host's GPU; a CPU build is silently ~30x slower.
 fn report_acceleration() {
     use pond_core::models::domain::acceleration::{classify, host_is_accelerated, warning};
 
-    // `cuda` is a feature of `pond-adapters-local-inference`, so a `cfg!` here
-    // would always be false. Without the feature there is no accelerated build
-    // to have, which is itself the answer.
+    // `cuda` is a feature of `pond-adapters-local-inference`; a `cfg!` here is always false.
     #[cfg(feature = "local-inference")]
     let cuda_build = pond_adapters_local_inference::CUDA_ENABLED;
     #[cfg(not(feature = "local-inference"))]
     let cuda_build = false;
 
-    // A device profile answers for the host when one is active, so a Mac can
-    // reach this table's other cells. Inert unless POND_DEVICE_PROFILE is set,
-    // which nothing in production or in deploy.sh sets.
+    // A device profile stands in for the host only when POND_DEVICE_PROFILE is set (never in prod).
     let profile = pond_core::models::domain::device_profile::active();
 
     let probed = std::fs::read_to_string("/proc/device-tree/model").ok();
-    // The device tree pads with NULs; a trailing NUL would defeat a `contains`
-    // on some readers and costs nothing to strip.
+    // The device tree pads with NULs, which would defeat a `contains`.
     let probed = probed.as_deref().map(|m| m.trim_end_matches('\0').trim());
 
     let (model, tegra_release) = match profile {
@@ -1092,9 +964,7 @@ fn report_acceleration() {
         ),
     };
     let accelerated = host_is_accelerated(model, tegra_release);
-    // An emulated CUDA build is a claim about the binary, not the host, so it is
-    // OR-ed rather than substituted: a real CUDA build must never be talked out
-    // of reporting itself by a profile.
+    // OR-ed, not substituted: a profile must never hide a real CUDA build.
     let cuda_build = cuda_build || profile.is_some_and(|p| p.pretend_cuda);
 
     match warning(classify(accelerated, cuda_build)) {
@@ -1125,24 +995,13 @@ async fn run_server(
     );
     println!("  ╚═══════════════════════════════════════╝");
 
-    // NOTE: `ensure_onnx_runtime()` used to be called here. It moved below the
-    // `set_network_mode` install, because it can DOWNLOAD, and a download
-    // cannot be gated by a setting that has not been read yet. See PAI-2 P6a.
-    //
-    // Bake in the face-recognition runtime defaults so the server Just Works
-    // on a fresh install without the operator having to remember a four-line
-    // env-var incantation.  Every var stays overridable — we only set it
-    // when it is currently *unset*.
+    // Face-recognition env defaults, each set only where unset so it stays overridable.
     apply_face_recognition_defaults();
 
-    // Initialize databases
     let data_dir = default_data_dir();
     let db = Database::init(&data_dir).await?;
 
-    // One-shot HF cache migration — moves pre-existing flat model files into
-    // the content-addressed blob layout. Idempotent via filesystem marker; on
-    // a migrated install the call costs one stat() and returns immediately.
-    // Errors per-file are logged but never block startup.
+    // Idempotent (one stat() once migrated); per-file errors are logged, never fatal.
     match pond_server::hf_cache_migration::migrate_flat_files_to_blobs(&data_dir).await {
         Ok(r) if r.is_empty() => {}
         Ok(r) => {
@@ -1161,48 +1020,30 @@ async fn run_server(
         Err(e) => tracing::warn!(target: "hf_cache_migration", "migration failed: {e}"),
     }
 
-    // Soft system-dep check (non-fatal — just warn if something looks wrong)
     system_deps::warn_if_missing();
 
     // ── Load settings early (drives model selection) ─────────────────────────
     let settings_repo_early = SqliteSettingsRepository::new(db.system.clone());
     let settings = settings_repo_early.get().await.unwrap_or_default();
 
-    // PAI-2 P5: the egress gate reads a process-global, so it must be installed
-    // before any adapter exists to make an outbound call. `PUT /settings`
-    // re-installs it, so a change takes effect without a restart.
+    // The egress gate is process-global: install it before any adapter can call out.
     pond_core::shared::services::egress::set_network_mode(
         pond_core::shared::services::egress::NetworkMode::parse(&settings.network_mode),
     );
 
-    // Ensure the ONNX Runtime shared library is available — check system
-    // paths first, then auto-download from GitHub Releases if needed.
-    // Must run before any ONNX-dependent init (face recognition, embeddings);
-    // those all happen further down, so nothing between here and the old site
-    // (`apply_face_recognition_defaults` sets env vars, `Database::init`, the
-    // HF-cache migration, the system-dep warning) touches ONNX.
-    //
-    // It must run AFTER `set_network_mode`, not before: it downloads ~100 MB
-    // from github.com, and at the old site the process-global was still at its
-    // `Open` default, so a stored `network_mode = "offline"` did not apply to
-    // the single largest outbound transfer `serve` makes. PAI-2 P6a.
+    // After `set_network_mode` (it may download ~100 MB from github.com) and before any
+    // ONNX-dependent init (face recognition, embeddings).
     ensure_onnx_runtime();
 
-    // Override agent_backend from DB settings (UI can change it without CLI restart).
-    // CLI flag takes precedence only when explicitly set to something other than "goose".
+    // The stored setting wins unless the CLI flag names a backend other than the "goose" default.
     let agent_backend = if agent_backend == "goose" && !settings.agent_backend.is_empty() {
         &settings.agent_backend
     } else {
         agent_backend
     };
 
-    // Q2-05: pond-agent is quarantined — experimental backend not ready for production.
-    // Force goose even if the setting was written as "pond", and PERSIST the
-    // correction: a stored "pond" row bricks the desktop Settings page —
-    // the UI saves the full settings object, so every PUT echoes the stored
-    // value back and trips the 422 quarantine guard regardless of what the
-    // user actually edited. Healing the row at startup keeps the guard's job
-    // to its intent (rejecting a genuine switch TO "pond").
+    // pond-agent is quarantined. Heal a stored "pond" too: the UI PUTs the whole settings
+    // object, so that row would trip the 422 quarantine guard on every save.
     let agent_backend: &str = if agent_backend == "pond" {
         tracing::warn!(
             "pond-agent backend is quarantined (not production-ready); \
@@ -1221,16 +1062,10 @@ async fn run_server(
     // ── Component startup: auto-download + wire critical services ────────────
     println!("\n  ── Components ──────────────────────────────────────");
 
-    // STT — whisper ggml model download (the in-process backend reads the
-    // same `.bin` files the legacy subprocess used).
-    // Apply the microphone privacy setting before anything can open a device.
+    // Apply the mic privacy setting before anything can open a device.
     pond_core::models::domain::mic_gate::set_mic_enabled(settings.mic_enabled);
 
-    // Single shared microphone owner (see `pond_audio`). This process only
-    // ever transcribes already-recorded audio via the HTTP `/transcribe`
-    // route below — it never opens the device — but `WhisperRsInput::new`
-    // still requires a handle so there is exactly one code path for every
-    // caller, live capture or not.
+    // Serve never opens the mic (only `/transcribe`), but `WhisperRsInput::new` needs a handle.
     let (mic_handle, _mic_owner_join) = pond_audio::spawn(
         Box::new(pond_audio::CpalCapture::new()),
         pond_audio::CAPTURE_RATE_HZ,
@@ -1279,8 +1114,7 @@ async fn run_server(
         }
     };
 
-    // Transcription is in-process; this URL only reaches an external
-    // whisper.cpp if the user has pointed a setting at one deliberately.
+    // Transcription is in-process; this URL only reaches a deliberately configured whisper.cpp.
     const DEFAULT_WHISPER_URL: &str = "http://127.0.0.1:9000";
     let whisper_url = if settings.voice_whisper_url.is_empty() {
         DEFAULT_WHISPER_URL.to_string()
@@ -1288,9 +1122,7 @@ async fn run_server(
         settings.voice_whisper_url.clone()
     };
 
-    // In-process whisper for the HTTP transcribe route — avoids the external
-    // whisper.cpp subprocess. Built here so AppState can hold the closure without
-    // depending on pond-adapters-whisper.
+    // A closure, so AppState holds in-process whisper without depending on pond-adapters-whisper.
     let transcribe_audio: Option<Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>> =
         whisper_model_path.as_ref().and_then(|p| {
             match WhisperRsInput::new(p.clone(), mic_handle.clone()) {
@@ -1307,17 +1139,10 @@ async fn run_server(
             }
         });
 
-    // espeak-ng-data, unconditionally.
-    //
-    // This used to sit inside a `if piper_is_primary` block. Kokoro phonemizes
-    // through the same espeak-ng, so gating the data on Piper being the engine
-    // would leave the new engine unable to turn text into phonemes at all —
-    // the removal of Piper would have taken the phonemizer with it.
+    // Unconditional: Kokoro phonemizes through espeak-ng too.
     model_download::ensure_espeak_ng_data(&data_dir).await;
 
-    // Where espeak-rs looks for its phoneme tables. The env var keeps its
-    // historical `PIPER_` name because that literal is what the espeak-rs crate
-    // reads — it names the reader, not the engine that used to own it.
+    // espeak-rs phoneme tables; the `PIPER_` env var name is what the espeak-rs crate reads.
     let espeak_data = {
         let p = model_download::piper_espeak_data_path(&data_dir);
         if p.exists() {
@@ -1327,37 +1152,17 @@ async fn run_server(
         }
     };
 
-    // Kept only for the status report's `piper_http_port` field, which is now
-    // always absent. The legacy subprocess and its HTTP wrapper are gone.
+    // Only feeds the status report's `piper_http_port` field, which is always absent.
     let piper_http_port: Option<u16> = None;
 
-    // Shared with the TTS control below, so a voice or tier fetch appears in
-    // the same progress feed as every other download on the Models page.
+    // Shared with the TTS control so voice/tier fetches show in the Models page progress feed.
     let download_tracker: std::sync::Arc<
         tokio::sync::RwLock<std::collections::HashMap<String, pond_api::DownloadEntry>>,
     > = std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
 
     // ── Kokoro: the TTS engine ──
-    //
-    // Constructed BEFORE anything is spoken but WITHOUT loading the weights —
-    // `KokoroOutput::new` reads the vocab and opens the audio device, and the
-    // ~92 MB session is loaded on the first utterance and can be dropped again.
-    // A pond that never speaks never pays for the model.
-    //
-    // There is no second engine any more. A failure here is text-only output,
-    // said out loud in the log rather than left as silence.
-    // Fetch the engine before constructing it. espeak data is already ensured
-    // above for Piper, and Kokoro uses the same phonemizer.
-    //
-    // Resolved before the fetch, not after: a tier that cannot produce audio on
-    // this host should not be downloaded either. Onboarding writes the tier
-    // straight to settings, so a stored value that is silent here is reachable
-    // and has to be handled every start, not only when someone opens the picker.
-    // Adopt the host's tier BEFORE resolving one, or the pond downloads and
-    // runs the wrong engine for a whole session and only picks the right one up
-    // on the next start. This used to live in `ensure_tts_is_set_up`, which
-    // `serve` never calls — it is the `setup` subcommand's — so on a board that
-    // had been through setup once, nothing ever revisited the tier.
+    // Adopt the host's tier, then resolve a usable one, before fetching: an unusable tier must
+    // never be downloaded. The ~92 MB weights load on the first utterance, not in `new`.
     ensure_host_tts_tier(&settings_repo_early).await;
     let tier = settings_repo_early
         .get()
@@ -1380,10 +1185,7 @@ async fn run_server(
                 model_path,
                 voices_dir: kokoro_dir.join("voices"),
                 tokenizer_path,
-                // Still bounded so ONNX Runtime's pool does not take the whole
-                // machine from the language model — but derived rather than
-                // pinned, because the old pin of 2 could not hit real time on
-                // the Jetson at any tier. See `default_intra_threads`.
+                // Bounded so ONNX Runtime doesn't starve the LLM; see `default_intra_threads`.
                 intra_threads: Some(pond_adapters_kokoro::default_intra_threads()),
                 espeak_data: espeak_data.clone(),
             };
@@ -1392,15 +1194,8 @@ async fn run_server(
                     // Voice and pace are hot — neither touches the session.
                     let voice = settings.voice_tts_voice.trim();
                     if !voice.is_empty() && out.set_voice(voice).await.is_err() {
-                        // Heal the setting rather than diverging from it.
-                        //
-                        // An install from before the engine swap holds a Piper
-                        // filename here. The adapter falls back to its default
-                        // and speaks fine, but the stored value never changes —
-                        // so the Voice screen keeps showing a voice that is not
-                        // the one talking, and every restart repeats this
-                        // warning. Writing back what is actually in use makes
-                        // the picker honest and makes this a one-time event.
+                        // Heal a stale (e.g. Piper) name to the voice in use, so the
+                        // picker is honest and this warns only once.
                         let actual = out.voice().await;
                         tracing::warn!(
                             configured = voice,
@@ -1424,8 +1219,6 @@ async fn run_server(
                     Some(Arc::new(out))
                 }
                 Err(e) => {
-                    // No second engine to fall back to — say so plainly, and
-                    // let the `tts: None` path below make it text-only.
                     tracing::warn!("Kokoro TTS unavailable: {e}");
                     None
                 }
@@ -1445,9 +1238,7 @@ async fn run_server(
             }
         };
 
-    // The other half of the engine: reconfiguring it while it runs. Held apart
-    // from `tts` because the chat loop is only ever asked to speak, and has no
-    // business knowing that voices have files behind them.
+    // Runtime reconfiguration, kept apart from `tts`: the chat loop only ever speaks.
     let tts_control: Option<Arc<dyn pond_core::models::ports::tts_control::TtsControl>> =
         kokoro_engine.as_ref().map(|engine| {
             Arc::new(kokoro_control::KokoroTtsControl::new(
@@ -1476,7 +1267,7 @@ async fn run_server(
         ),
     );
 
-    // Seed catalog from upstream sources (idempotent, safe to call every startup)
+    // Idempotent, so safe on every startup.
     if let Err(e) = model_service.seed_catalog().await {
         tracing::warn!("Failed to seed model catalog: {e}. Starting with existing DB records.");
     }
@@ -1488,8 +1279,7 @@ async fn run_server(
     }
     sync_assignments_to_settings(&*model_repo, &settings_repo_early).await;
 
-    // Autonomous background download: any model assigned to a role but missing from disk.
-    // Runs as a detached task so the HTTP server is available immediately.
+    // Detached so the HTTP server comes up without waiting on downloads.
     {
         use crate::filesystem_model_storage::FilesystemModelStorage;
         use crate::reqwest_model_downloader::ReqwestModelDownloader;
@@ -1513,8 +1303,7 @@ async fn run_server(
         });
     }
 
-    // LLM — only start llamafile when at least one role is configured to use it.
-    // ModelService handles downloading autonomously inside try_start.
+    // `try_start` fetches a missing model itself through ModelService.
     let any_role_needs_llamafile = settings.chat_provider == "llamafile";
 
     let active_llm_name: String = settings.chat_model.clone();
@@ -1534,8 +1323,6 @@ async fn run_server(
     };
     let llamafile_url = llamafile_process::url_for(llamafile_port);
 
-    // Build the LlamafileManager — holds the guard so the process stays alive and
-    // can start the process on demand when the user switches to the llamafile provider.
     let llamafile_manager: Arc<dyn LlamafileManager> = Arc::new(LlamafileManagerImpl::new(
         data_dir.clone(),
         model_service.clone(),
@@ -1545,7 +1332,6 @@ async fn run_server(
 
     println!("  ────────────────────────────────────────────────────\n");
 
-    // Build app state
     let onboarding_repo = Arc::new(SqlxOnboardingRepository::new(db.system.clone()));
     let session_storage: Arc<dyn pond_core::user_data::ports::session_storage::SessionStorage> =
         Arc::new(SqliteSessionStorage::new(db.system.clone()));
@@ -1558,24 +1344,12 @@ async fn run_server(
     let device_registry: Arc<
         dyn pond_core::user_data::ports::device_registry::DeviceRegistry + Send + Sync,
     > = Arc::new(SqliteDeviceRegistry::new(db.system.clone()));
-    // PAI-2 P3: the deterministic redactor. Rule-based, no model in the loop.
-    // Built here so it is in scope for both chokepoints below.
+    // Deterministic, rule-based redactor (no model in the loop), shared by both chokepoints below.
     let redactor: Arc<dyn pond_core::security::ports::redactor::Redactor> =
         Arc::new(pond_infra::rule_redactor::RuleRedactor::new());
-    // Built BEFORE the memory and context repositories on purpose: both take
-    // the vector index and the id of the model whose vectors they mirror, and
-    // that id comes from this provider. It reads only `settings` and
-    // `data_dir`, both resolved far above, so moving it up is safe.
     // ── Embedding provider (gguf / fastembed / none) ─────────────────────────
-    // Initialized before the agent backend so it can be wired into the memory
-    // MCP server for semantic search on recall/save.
-    //
-    // `"gguf"` is the on-device path: fastembed's ONNX Runtime does not
-    // initialise on the Jetson Orin (version-incompatible, times out), so a pond
-    // that shipped `"fastembed"` there fell back to keyword matching and PAI-3's
-    // semantic memory never ran. The GGUF provider reuses the llama.cpp this pond
-    // already runs and loads its model LAZILY (first embed, after Goose has
-    // claimed the backend) — see `pond_inference::embedding` for why.
+    // Before the memory/context repos (they need its model id) and the agent (semantic recall).
+    // "gguf" suits the Jetson (fastembed's ORT won't init there); it loads lazily on first embed.
     let embedding_provider: Option<
         Arc<dyn pond_core::models::ports::embedding::EmbeddingProvider + Send + Sync>,
     > = {
@@ -1588,9 +1362,7 @@ async fn run_server(
             #[cfg(feature = "local-inference")]
             "gguf" => {
                 let embedding_dir = data_dir.join("models").join("embedding");
-                // `active_embedding_model` is shared with the fastembed path, so a
-                // stale fastembed name (or a typo) must NOT silently disable
-                // embeddings — fall back to the gguf default rather than to None.
+                // Shared with fastembed: a stale name or typo means the gguf default, never None.
                 let spec =
                     pond_inference::EmbeddingModelSpec::resolve(&settings.active_embedding_model)
                         .unwrap_or_else(|e| {
@@ -1610,22 +1382,8 @@ async fn run_server(
                         size_mb = spec.size_hint_mb,
                         "fetching GGUF embedding model in the background (one-time, egress-gated)"
                     );
-                    // Deliberately NOT awaited. This is a ~146 MB fetch, and awaiting it
-                    // here means the server does not bind its port until it finishes --
-                    // measured on a Mac: /health refused the connection for the whole
-                    // download. On a Jetson behind a slow link that is minutes of a pond
-                    // that looks dead, and with no timeout a hung mirror never starts at
-                    // all. The provider below loads LAZILY, so it tolerates the file
-                    // arriving later; the first embed before it lands reports a clear
-                    // error and retrieval falls back to keyword until then.
-                    //
-                    // Gated by network_mode, but NOT at the chokepoint the obvious
-                    // reading suggests: this is a huggingface.co URL, so
-                    // `download_file` dispatches to `download_via_hf_cache` BEFORE
-                    // reaching its own `egress::begin`. The gate that actually covers
-                    // this fetch lives in `pond_hf_cache` (`egress::begin` on both the
-                    // HEAD and the GET). Naming the wrong chokepoint here would make a
-                    // regression in the real one invisible.
+                    // Not awaited: ~146 MB would keep the port unbound; the provider loads lazily.
+                    // Egress-gated in `pond_hf_cache`; HF URLs bypass `download_file`'s own gate.
                     let url = spec.download_url.clone();
                     let size_hint = spec.size_hint_mb;
                     let model_id = spec.model_id.clone();
@@ -1714,31 +1472,22 @@ async fn run_server(
         }
     };
 
-    // The shared personal-context index (phase A) and the identity of the model
-    // whose vectors go into it. `None` when embeddings are off, in which case
-    // the adapters below store exactly as they always did.
+    // Shared personal-context index; the model id below is `None` when embeddings are off.
     let vector_index: Arc<dyn pond_core::context::vector_index::VectorIndex> = Arc::new(
         pond_infra::sqlite_vector_index::SqliteVectorIndex::new(db.vectors.clone()),
     );
     // A member's first turn must not queue behind the pond indexing itself.
     let index_maintenance_cancel = tokio_util::sync::CancellationToken::new();
-    // Somebody asked for a reindex. Held here rather than inside the sweep so
-    // the route can reach it: clearing the index without a way to refill it on
-    // demand leaves a member staring at an empty panel until the next scheduled
-    // pass, which is the shape of "the button did nothing".
+    // Held here, not in the sweep, so the reindex route can trigger an immediate refill.
     let index_reindex_requested = Arc::new(tokio::sync::Notify::new());
     let vector_model_id = embedding_provider.as_ref().map(|p| p.model_id());
 
-    // Chokepoint 1: every memory write, whatever wrote it. Wrapping the one
-    // construction covers extraction, the giap-memory MCP tool, POST /memories
-    // and consolidation -- and a writer nobody has added yet.
+    // Chokepoint 1: this one construction redacts every memory write, whoever the writer.
     let memory_repo: Arc<
         dyn pond_core::user_data::ports::memory_repository::MemoryRepository + Send + Sync,
     > = Arc::new(
         pond_core::user_data::services::redacting_memory_repository::RedactingMemoryRepository::new(
-            // INSIDE the redactor deliberately: this decorator drops the vector
-            // when it finds a secret, and the index must mirror what the store
-            // actually keeps, not what the caller handed in.
+            // Inside the redactor, which drops a secret's vector: the index must mirror the store.
             Arc::new(
                 SqliteMemoryRepository::new(db.system.clone())
                     .with_vector_index(vector_index.clone(), vector_model_id.clone()),
@@ -1753,9 +1502,7 @@ async fn run_server(
         dyn pond_core::user_data::ports::camera_storage::CameraStorage + Send + Sync,
     > = Arc::new(SqliteCameraStorage::new(db.logs.clone()));
 
-    // Private mesh (#132) — PeerDirectory/CreditLedger/UsageTally are plain
-    // SQLite, no extra dependency, so unlike mesh_transport (below, behind
-    // the `mesh` feature + settings.mesh_enabled) they're always available.
+    // Plain SQLite, so unlike `mesh_transport` these exist without the `mesh` feature.
     let peer_directory: Arc<
         dyn pond_core::mesh::ports::peer_directory::PeerDirectory + Send + Sync,
     > = Arc::new(pond_infra::sqlite_peer_directory::SqlitePeerDirectory::new(
@@ -1771,23 +1518,14 @@ async fn run_server(
         ));
 
     // ── Face recognition (Phase 2) ──────────────────────────────────────────
-    // Built only when the --features face-onnx build flag is enabled AND an
-    // ONNX embedding model is present on disk.  Missing model file → None
+    // Needs the face-onnx feature and the model files on disk; otherwise `None`
     // (server starts normally; /api/v1/faces/* return 503).
-    //
-    // First call the auto-downloader so a fresh `cargo run` brings the
-    // models down on its own, exactly the way whisper / piper do.  We
-    // do this only when the face feature is compiled in, and we let
-    // failures fall through — `build_face_recognition` will simply
-    // return `None` when the files are absent.
     #[cfg(feature = "face-onnx")]
     {
         if let Err(e) = model_download::download_face_models(&data_dir).await {
             tracing::warn!("face model auto-download failed: {e:#}");
         }
-        // Re-apply defaults: the antispoof file may have just appeared on
-        // disk for the first time, in which case the earlier env-default
-        // pass was a no-op.  Idempotent — only sets unset vars.
+        // Again: the antispoof file may only now exist, making the first pass a no-op.
         apply_face_recognition_defaults();
     }
     let face_recognition: Option<
@@ -1806,7 +1544,6 @@ async fn run_server(
         dyn pond_core::user_data::ports::recipe::AgentRecipeRepository + Send + Sync,
     > = Arc::new(SqliteRecipeRepository::new(db.system.clone()));
 
-    // Reseed built-in prompt templates with latest Jinja2 general-purpose content.
     {
         use pond_core::prompts::BUILTIN_PROMPT_TEMPLATES;
         use pond_core::user_data::domain::prompt_template::PromptTemplate;
@@ -1832,26 +1569,14 @@ async fn run_server(
     let effective_chat_provider = settings.chat_provider.clone();
     let effective_chat_model = settings.chat_model.clone();
 
-    // The speculative-decoding drafter, provisioned the way the TTS engine is:
-    // a helper model nobody asked for and nobody should have to think about.
-    // Measured on the Orin, it takes a real turn from 31 to 49 tok/s.
-    //
-    // Before ANY provider is built, because both consumers read the registry
-    // and neither re-reads it: `apply_jetson_settings` sizes the context window
-    // against the models that will be resident and sets `draft_model` from the
-    // registry, and it runs when the local adapter is constructed a few lines
-    // below. Registering after that point costs a restart to converge.
-    //
-    // Failure is silent by design -- decode is simply not accelerated. The
-    // notification further down is the last resort, and it is down there
-    // because the queue to put it on does not exist yet.
+    // Speculative-decoding drafter; on failure, decode is just not accelerated.
+    // Before ANY provider: `apply_jetson_settings` reads the registry once, at adapter build.
     let drafter_wanted = model_download::drafter_for(&settings.chat_model).is_some();
     let drafter_ready = if drafter_wanted {
         let present = model_download::ensure_mtp_drafter(&data_dir, &settings.chat_model)
             .await
             .is_some();
-        // The registry row is what the engine resolves a drafter by name
-        // through, so a downloaded file with no row is invisible.
+        // The engine finds a drafter by its registry row; a file with no row is invisible.
         #[cfg(feature = "goose-agent")]
         if present {
             pond_adapters_goose::mtp_drafter::ensure_drafter_registered(
@@ -1865,15 +1590,7 @@ async fn run_server(
     };
 
     // ── Build per-role LLM providers ────────────────────────────────────────
-    // Each role (Chat / Think / Task) may use a different provider + model.
-    // Token budget and temperature are baked in at startup.
-    //
-    // Async helper so we can await LocalInferenceLlmAdapter::new() for the
-    // "local" (in-process GGUF) provider without blocking the Tokio runtime.
-    // TODO(cloud-fallback): when `settings.cloud_fallback_enabled` is ON, wrap
-    // the selected local provider so a failed local inference spills over to a
-    // cloud model (failure-only, never on success). OFF by default (privacy-first)
-    // — the toggle is persisted but no spill path is wired yet.
+    // TODO(cloud-fallback): wire `cloud_fallback_enabled` (spill to cloud on local failure only).
     async fn build_provider(
         provider: &str,
         model: &str,
@@ -1883,20 +1600,8 @@ async fn run_server(
         temperature: f32,
     ) -> Arc<dyn LlmProvider> {
         match provider {
-            // The mesh stack (mesh_transport/mesh_provider) doesn't exist
-            // yet at this point in startup — it's built later in
-            // `run_server`, and `AppState.mesh_provider`'s lock is what
-            // `PUT /settings` hot-reloads into once it does (see
-            // `AppState::mesh_rebuild`'s own docs). A Pond that restarts
-            // with `chat_provider` already persisted as "mesh" therefore
-            // seeds its INITIAL provider with `UnavailableProvider`, not the
-            // real mesh provider — same as `build_one`'s "mesh" arm falls
-            // back to when mesh isn't available yet, and for the same
-            // stated reason: silently using llamafile instead would leave a
-            // user who picked mesh with no way to tell their choice didn't
-            // take effect. It self-corrects the next time anything saves
-            // `chat_provider`/`chat_model` through `PUT /settings`, which
-            // re-derives this from the (by-then-live) mesh provider.
+            // Mesh isn't built yet at startup; fail visibly rather than silently use llamafile.
+            // The next `PUT /settings` re-derives this from the live mesh provider.
             "mesh" => Arc::new(UnavailableProvider::new(
                 "mesh inference is not ready yet at startup — save any setting via \
                  PUT /api/v1/settings to re-check, or wait for mesh to finish connecting",
@@ -1937,8 +1642,7 @@ async fn run_server(
                 }
             }
 
-            // mistral.rs serves the same OpenAI-compatible surface LlamafileProvider
-            // already speaks, so it needs a URL rather than a new adapter.
+            // OpenAI-compatible like llamafile, so LlamafileProvider only needs the URL.
             "mistralrs" => {
                 let host = std::env::var("GIAP_MISTRALRS_URL")
                     .unwrap_or_else(|_| "http://127.0.0.1:9002".to_string());
@@ -1950,7 +1654,6 @@ async fn run_server(
             }
 
             _ => Arc::new(
-                // Default: llamafile (covers "llamafile" and unknown provider values)
                 LlamafileProvider::new(Some(llamafile_url))
                     .with_max_tokens(max_tokens)
                     .with_temperature(temperature),
@@ -1976,18 +1679,11 @@ async fn run_server(
         chat_provider_arc.clone() as Arc<dyn LlmProvider>
     )));
 
-    // AppState still carries an `inference_pool` slot (pond-api's InferencePool
-    // port), but the only implementation ever built for it, TokioInferencePool,
-    // had zero callers of `submit` — nothing on the serving path ever queued a
-    // task through it, so it did no work beyond printing a concurrency figure
-    // at startup. Removed with that print; leaving the field `None` costs
-    // nothing until a real consumer needs the port.
+    // No `InferencePool` implementation yet: nothing submits work to one.
     let inference_pool: Option<Arc<dyn pond_core::models::ports::inference_pool::InferencePool>> =
         None;
 
-    // Build AnswerReviewer for the HTTP path — adversarial post-inference quality gate.
-    // Always constructed so the user can toggle it on/off at runtime via settings.
-    // The routes.rs handler checks review_mode at request time, not at startup.
+    // Always built: routes.rs checks `review_mode` per request, so it toggles at runtime.
     println!(
         "  Answer Reviewer: ready (mode={}, threshold={}/5, max_rounds={})",
         settings.review_mode, settings.review_pass_threshold, settings.review_max_rounds
@@ -2003,9 +1699,6 @@ async fn run_server(
             dyn pond_core::models::ports::answer_reviewer::AnswerReviewer,
         >);
 
-    // Memory extractor — background extraction of durable facts from conversations.
-    // The service is built here but wrapped in an Arc further down, once the
-    // embedding provider exists, so extracted facts can be embedded at write.
     let (memory_extractor_for_http, memory_extraction_service_unwired) =
         if settings.memory_extraction_enabled {
             let extractor: Arc<dyn pond_core::user_data::ports::memory_extractor::MemoryExtractor> =
@@ -2027,8 +1720,7 @@ async fn run_server(
 
     let db = Arc::new(db);
 
-    // Spawn background TTL pruning task (runs every 6 hours). Reads the user's
-    // retention settings each cycle (per-category + sensitivity-aware, #117).
+    // TTL pruning every 6 h; re-reads retention settings each cycle.
     {
         let logs = db.logs.clone();
         let system = db.system.clone();
@@ -2038,7 +1730,6 @@ async fn run_server(
         });
     }
 
-    // Spawn background memory decay/cleanup task
     if settings.memory_cleanup_enabled {
         let cleanup_repo = memory_repo.clone();
         let cleanup_interval_secs = settings.memory_cleanup_interval_hours as u64 * 3600;
@@ -2075,11 +1766,7 @@ async fn run_server(
     }
 
     // ── Memory consolidation (inactivity-based) ──────────────────────────
-    //
-    // Three shared pieces of state:
-    //   - last_user_activity: reset by every route via AppState::note_user_activity
-    //   - consolidation_cancel: abort mid-run when the user comes back
-    //   - consolidation_event_tx: broadcast channel for SSE + background logs
+    // `last_user_activity` is bumped by every route; the event channel feeds SSE and logs.
     let last_user_activity = Arc::new(tokio::sync::RwLock::new(std::time::Instant::now()));
     let consolidation_cancel: Arc<
         tokio::sync::RwLock<Option<tokio_util::sync::CancellationToken>>,
@@ -2088,20 +1775,11 @@ async fn run_server(
         pond_core::user_data::ports::memory_consolidator::ConsolidationEvent,
     >(64);
 
-    // The single inference slot every background job takes turns on. Each job
-    // keeps its own poll cadence and body; what it no longer keeps is a private
-    // answer to "may I run now?", which could only ever account for the jobs its
-    // author happened to know about. See `inference_lane_runner`.
+    // The one inference slot all background jobs share; the lane decides when each may run.
     let inference_lane = crate::inference_lane_runner::InferenceLane::new();
 
-    // Build the ConsolidationRunner closure that pond-api will call from the
-    // POST /api/v1/memory/consolidate endpoint. Captures repo, provider, and
-    // the broadcast channel so pond-api never imports the consolidator crate.
-    //
-    // Built UNCONDITIONALLY: the enable toggle is a *runtime* decision, read
-    // fresh from the settings DB by the caller and by the loop below. Gating
-    // construction on a startup snapshot meant flipping the switch in Settings
-    // did nothing until the next restart.
+    // For POST /api/v1/memory/consolidate; a closure so pond-api never imports the consolidator.
+    // Built unconditionally: the enable toggle is read fresh from settings at run time.
     let consolidation_runner: Option<pond_api::ConsolidationRunner> = {
         let cr_repo = memory_repo.clone();
         let cr_provider = llm_provider.clone();
@@ -2114,8 +1792,7 @@ async fn run_server(
                 let broadcast_tx = cr_broadcast_tx.clone();
                 let settings_repo = cr_settings_repo.clone();
                 Box::pin(async move {
-                    // Mode + batch size come from the CURRENT settings, so a
-                    // manual run honours whatever the user last chose.
+                    // Read per run, not at startup, so a manual run honours the latest settings.
                     let (mode, batch_size) = match settings_repo.get().await {
                         Ok(s) => (
                             s.memory_consolidation_mode,
@@ -2148,18 +1825,8 @@ async fn run_server(
     };
 
     // ── Inactivity-based consolidation scheduler ─────────────────────────
-    //
-    // Contract, enforced by `pond_core::user_data::services::consolidation_schedule`:
-    // at most one run per `memory_consolidation_interval_hours`, and only after
-    // INACTIVITY_THRESHOLD_SECS of quiet **following real user activity in this
-    // process lifetime**. A freshly booted server nobody has spoken to never
-    // consolidates, however long it idles.
-    //
-    // Activity is a two-source signal, because the terminal voice loop is a
-    // separate OS process that never touches this AppState:
-    //   1. in-process `last_user_activity` (HTTP routes), and
-    //   2. the newest `sessions.updated_at` in pond_system.db, which the voice
-    //      child bumps through ChatService on every turn it persists.
+    // At most one run per interval, only after idling that follows real activity since boot.
+    // Activity = HTTP routes or `sessions.updated_at` (the voice loop is a separate process).
     {
         use pond_core::user_data::services::consolidation_schedule as sched;
         use pond_core::user_data::services::inference_lane::LaneJob;
@@ -2173,8 +1840,7 @@ async fn run_server(
         let inact_storage = session_storage.clone();
         let inact_lane = inference_lane.clone();
 
-        // Baselines for the "never on startup" guard. Captured before the
-        // server binds, so no request can have been served yet.
+        // Baselines for the "never on startup" guard; captured before the server binds.
         let started_at = std::time::Instant::now();
         let started_at_utc = chrono::Utc::now();
 
@@ -2193,8 +1859,7 @@ async fn run_server(
                     }
                 };
 
-                // Out-of-process activity (voice child, GOTG on another
-                // process, anything else writing turns).
+                // Out-of-process activity (voice child, anything else writing turns).
                 let db_activity = newest_session_activity(inact_storage.as_ref()).await;
                 let in_process_at = *inact_activity.read().await;
 
@@ -2208,10 +1873,7 @@ async fn run_server(
                 let idle_for =
                     sched::combined_idle_for(in_process_at, db_activity, chrono::Utc::now());
 
-                // The lane owns the gate now: it applies the same
-                // activity/interval rules this block used to apply alone, but
-                // decides against EVERY registered job rather than this one, and
-                // hands back the slot itself so nothing else can be mid-run.
+                // The lane gates across all jobs; holding `slot` means no other job is mid-run.
                 let Some(slot) = inact_lane
                     .acquire(
                         LaneJob::Consolidation,
@@ -2239,18 +1901,14 @@ async fn run_server(
                 let cancel = tokio_util::sync::CancellationToken::new();
                 *inact_cancel.write().await = Some(cancel.clone());
 
-                // Watcher: abort the moment activity resumes from EITHER source.
-                // Routes cancel this token directly; the DB poll is what lets an
-                // out-of-process voice turn interrupt a run.
+                // Routes cancel directly; the DB poll lets an out-of-process voice turn abort.
                 let watcher_activity = inact_activity.clone();
                 let watcher_storage = inact_storage.clone();
                 let watcher_cancel = cancel.clone();
                 let watcher_baseline_in_process = in_process_at;
                 let watcher_baseline_db = db_activity;
                 let watcher = tokio::spawn(async move {
-                    // The in-process clock is a lock read, so poll it fast. The
-                    // DB check is a query, so sample it every Nth tick instead
-                    // of hammering SQLite for the whole length of a run.
+                    // The clock is a cheap lock read; the DB is queried only every Nth tick.
                     const TICK_MS: u64 = 500;
                     const DB_EVERY_N_TICKS: u32 = 4;
                     let mut tick: u32 = 0;
@@ -2266,8 +1924,7 @@ async fn run_server(
 
                         let resumed_in_db = if tick % DB_EVERY_N_TICKS == 0 {
                             match newest_session_activity(watcher_storage.as_ref()).await {
-                                // A transient read failure reads as None, which
-                                // must not be mistaken for activity.
+                                // A failed read is None, not activity.
                                 Some(latest) => match watcher_baseline_db {
                                     Some(baseline) => latest > baseline,
                                     None => true,
@@ -2299,21 +1956,8 @@ async fn run_server(
                 .await;
                 watcher.abort();
 
-                // The interval floor (not the activity clock) is what prevents a
-                // re-fire. Rewriting last_user_activity here would have faked
-                // user activity and confused the summary loop that shares it.
-                //
-                // Deliberate: an attempt consumes the interval budget even when
-                // it was cancelled or skipped for too few memories. The
-                // alternative — retry after the next 15-minute idle window —
-                // reintroduces exactly the repeated-expensive-attempt churn
-                // this phase set out to remove. Consolidation is a best-effort
-                // background chore, so on a contended device it is better to
-                // miss a pass than to keep trying.
-                //
-                // Dropping the guard is what spends the budget and releases the
-                // slot; every path out of this iteration does it, including the
-                // early returns above.
+                // Dropping the slot spends the interval budget even if cancelled or skipped; that
+                // floor, not the activity clock, stops re-fires (a missed pass beats churn).
                 drop(slot);
             }
         });
@@ -2324,11 +1968,7 @@ async fn run_server(
     }
 
     // ── Idle rolling-summary refresh (hybrid compaction, soft half) ──────
-    // Same contract as memory consolidation: inactivity-based, interruptible,
-    // never at startup. One loop serves every session in pond_system.db —
-    // including voice-child sessions, which share the DB. The refreshed
-    // summary reaches the model via the deterministic turn trimmer's
-    // <conversation-summary> splice.
+    // Same idle contract as consolidation, over every session (the voice child's too).
     if settings.hybrid_compaction_enabled {
         let sum_storage = session_storage.clone();
         let sum_provider = llm_provider.clone();
@@ -2336,8 +1976,7 @@ async fn run_server(
         let idle_secs = settings.summary_idle_secs.max(30) as u64;
 
         tokio::spawn(async move {
-            // "Never at startup": only sessions that saw a message AFTER this
-            // process started are candidates.
+            // "Never at startup": only sessions updated since this process started.
             let started_at = chrono::Utc::now();
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
@@ -2359,9 +1998,7 @@ async fn run_server(
                     if session.updated_at < started_at {
                         continue;
                     }
-                    // Abort the refresh the moment activity resumes — the
-                    // on-device engine is serial and a user turn must never
-                    // wait behind a summary pass.
+                    // Abort on activity: the serial engine must never make a user turn wait.
                     let cancel = tokio_util::sync::CancellationToken::new();
                     let watcher_activity = sum_activity.clone();
                     let watcher_cancel = cancel.clone();
@@ -2409,43 +2046,17 @@ async fn run_server(
     }
 
     // ── Idle conversation re-titling ─────────────────────────────────────
-    //
-    // A conversation's first title is the first six words of the first thing
-    // said in it. That is reliable and unmemorable, and it is what the sidebar
-    // shows for the rest of that conversation's life. This pass replaces those
-    // with a name worth reading, and revisits one once its conversation has
-    // moved substantially past what the name describes.
-    //
-    // Same contract as memory consolidation, for the same reason — there is
-    // one on-device inference slot:
-    //   - never at startup: real user activity must have been seen since boot
-    //   - only after INACTIVITY_THRESHOLD_SECS of quiet, measured from EITHER
-    //     the in-process clock or the newest session row, so a voice turn in
-    //     the separate child process counts as somebody being here
-    //   - abandoned the instant anyone comes back, having written nothing
-    //
-    // It additionally stands down while consolidation holds the slot. Both are
-    // background chores and neither is worth making the other wait; two
-    // concurrent model calls on a six-core Orin is precisely the contention
-    // the speculative-ASR work spent a week measuring.
-    //
-    // Note that the two background title writers deliberately do NOT touch
-    // `sessions.updated_at`. That column is one of the two activity sources
-    // above, so a job that stamped it would read as a person returning:
-    // it would cancel itself partway through its own first pass, and push the
-    // idle clock forward every time it ran.
+    // Renames six-word first-message titles, under consolidation's idle contract. Title writers
+    // must not bump `sessions.updated_at`: it's an activity source, so the job would cancel itself.
     {
         use pond_core::shared::domain::session_activity::SessionOrigin;
         use pond_core::shared::services::session_title::{RetitleOutcome, SessionTitleService};
         use pond_core::user_data::services::consolidation_schedule as sched;
         use pond_core::user_data::services::inference_lane::LaneJob;
 
-        // How often to consider a pass. The gate, not this, decides whether one
-        // actually runs.
+        // How often a pass is considered; the gate decides whether one runs.
         const POLL_SECS: u64 = 5 * 60;
-        // Conversations renamed per pass. A pond with hundreds of them should
-        // not spend a whole idle window on titles, and the next pass is only
-        // five minutes away.
+        // Per-pass cap, so hundreds of conversations can't eat a whole idle window.
         const MAX_PER_PASS: usize = 5;
 
         let title_storage = session_storage.clone();
@@ -2454,8 +2065,7 @@ async fn run_server(
         let title_settings_repo = settings_repo.clone();
         let title_lane = inference_lane.clone();
 
-        // Baselines for the "never on startup" guard, captured before the
-        // server binds so no request can have been served yet.
+        // Baselines for the "never on startup" guard; captured before the server binds.
         let started_at = std::time::Instant::now();
         let started_at_utc = chrono::Utc::now();
 
@@ -2485,22 +2095,12 @@ async fn run_server(
                 );
                 let idle_for = sched::combined_idle_for(in_process_at, db_activity, now);
 
-                // The pairwise "stand down while consolidation is mid-run" check
-                // that used to live here is gone, and deliberately so: it only
-                // ever ran in ONE direction — consolidation never learned to
-                // yield to titling — and every job added after it would have
-                // needed its own check against every existing job. The lane
-                // holds one slot, so exclusion is now a property of asking
-                // rather than a list of jobs to remember.
                 let Some(slot) = title_lane
                     .acquire(
                         LaneJob::Titling,
-                        // Re-read every tick, so the toggle takes effect
-                        // without a restart.
+                        // Re-read every tick, so the toggle is live.
                         settings.session_titling_enabled,
-                        // The tick IS the floor: a pass is bounded and cheap,
-                        // so there is no reason to space passes further apart
-                        // than the poll already does.
+                        // The tick is the floor: a pass is bounded and cheap.
                         std::time::Duration::from_secs(POLL_SECS),
                         saw_activity_since_start,
                         idle_for,
@@ -2524,8 +2124,7 @@ async fn run_server(
                     }
                 };
 
-                // One token for the whole pass: activity resuming should end
-                // the sweep, not just the conversation being named at the time.
+                // One token per pass: resumed activity ends the whole sweep.
                 let cancel = tokio_util::sync::CancellationToken::new();
 
                 let watcher_activity = title_activity.clone();
@@ -2534,9 +2133,7 @@ async fn run_server(
                 let watcher_baseline_in_process = in_process_at;
                 let watcher_baseline_db = db_activity;
                 let watcher = tokio::spawn(async move {
-                    // The in-process clock is a lock read, so poll it fast. The
-                    // DB check is a query, so sample it every Nth tick rather
-                    // than hammering SQLite for the length of the pass.
+                    // The clock is a cheap lock read; the DB is queried only every Nth tick.
                     const TICK_MS: u64 = 500;
                     const DB_EVERY_N_TICKS: u32 = 4;
                     let mut tick: u32 = 0;
@@ -2552,8 +2149,7 @@ async fn run_server(
 
                         let resumed_in_db = if tick % DB_EVERY_N_TICKS == 0 {
                             match newest_session_activity(watcher_storage.as_ref()).await {
-                                // A transient read failure reads as None, which
-                                // must not be mistaken for activity.
+                                // A failed read is None, not activity.
                                 Some(latest) => match watcher_baseline_db {
                                     Some(baseline) => latest > baseline,
                                     None => true,
@@ -2581,10 +2177,7 @@ async fn run_server(
                     if renamed >= MAX_PER_PASS {
                         break;
                     }
-                    // The pond opens conversations for its own background work
-                    // (a cron line firing at 3am mints one). Those are not
-                    // conversations anybody browses, so naming them would spend
-                    // the inference slot on a row nobody reads.
+                    // Skip background sessions (e.g. cron runs): nobody reads their titles.
                     if !SessionOrigin::of(&session.id).is_human() {
                         continue;
                     }
@@ -2612,12 +2205,7 @@ async fn run_server(
 
                 watcher.abort();
 
-                // An attempt consumes the interval budget whether or not it
-                // renamed anything, for the same reason consolidation does:
-                // retrying a fruitless pass every tick is the churn the floor
-                // exists to prevent. Dropping the guard does both, on every
-                // path out — including the two early returns above, which is
-                // what stopped this loop starving the lane.
+                // Dropping the slot releases the lane and spends the budget, renamed or not.
                 drop(slot);
             }
         });
@@ -2628,9 +2216,7 @@ async fn run_server(
         );
     }
 
-    // Debug mode: tail pond_logs.db so new event_log rows are printed to the
-    // terminal in real time. Polls every second and only surfaces rows added
-    // after startup, so existing history is not replayed.
+    // Debug: print new event_log rows live; rows from before startup are not replayed.
     if debug {
         let logs_pool = db.logs.clone();
         tokio::spawn(async move {
@@ -2638,19 +2224,9 @@ async fn run_server(
         });
     }
 
-    // Weather — used by the MCP weather module, not AppState.
-    // The LLM calls giap__get_current_weather when it needs weather data.
+    // For the MCP weather tool (giap__get_current_weather), not AppState.
     let weather: Option<Arc<dyn WeatherProvider>> = {
-        // Build the provider when weather is on and we have *either* explicit
-        // coordinates *or* a location name. Onboarding only stores a name (the
-        // coordinates default to 0), so requiring coordinates here left every
-        // onboarded install with weather permanently "not configured"; the
-        // adapter geocodes the name on demand.
-        // Asked, not read. `Location::weather_target` is the one place that
-        // decides whether this pond knows enough to ask about the weather, and
-        // it is the same answer voice mode gets below — these were two copies
-        // of the same six lines, and both of them missed the time-zone
-        // fallback that `location::resolve` has always applied.
+        // `Location::weather_target` decides: coordinates, or a name the adapter geocodes.
         let place = pond_core::user_data::services::location::resolve(&settings);
         if let (true, Some((lat, lon, loc))) = (settings.weather_enabled, place.weather_target()) {
             tracing::info!("weather enabled: {} ({}, {})", loc, lat, lon);
@@ -2663,23 +2239,15 @@ async fn run_server(
         }
     };
 
-    // Private mesh (#132 Milestone 2) — real libp2p MeshTransport, gated on
-    // settings.mesh_enabled. Wired into AppState below (Milestone 6) so the
+    // libp2p MeshTransport, gated on `mesh_enabled`; wired into AppState so the
     // /api/v1/mesh/* routes can use it.
     let mesh_transport =
         build_mesh_transport(&settings, &settings_repo, peer_directory.clone()).await;
 
-    // Private mesh (#132 Milestone 5) — Lightning settlement rail. Built
-    // before build_mesh_provider so the mesh responder can answer inbound
-    // InvoiceRequests immediately once the transport is up, rather than
-    // racing a later wire-in.
+    // Lightning rail, before build_mesh_provider so InvoiceRequests are answerable at once.
     let payment_rail = build_payment_rail(&settings, &settings_repo, &data_dir).await;
 
-    // Private mesh (#132 Milestones 3-6) — the LlmProvider a trusted peer can
-    // borrow, plus capability-query and invoice-request handles into the same
-    // MeshInferenceService singleton. All three are `None` when
-    // mesh_transport is `None` (mesh disabled or built without the `mesh`
-    // feature).
+    // All three are `None` without a mesh transport (disabled, or built without `mesh`).
     let (mesh_provider, peer_capability_query, invoice_requester) = build_mesh_provider(
         &mesh_transport,
         peer_directory.clone(),
@@ -2689,13 +2257,8 @@ async fn run_server(
         llm_provider.clone(),
         payment_rail.clone(),
     );
-    // Settles at MESH_SETTLEMENT_MILLISATS_PER_TOKEN, the one dev-decided
-    // rate every Pond uses (not a per-install setting — see that constant's
-    // own docs on why). NOTE this closes over whatever `invoice_requester`
-    // was built above — if mesh gets hot-enabled later via `mesh_rebuild`
-    // below, this job does NOT pick up the fresh one. Settlement stays
-    // restart-only for now; only mesh borrowing/lending itself is made
-    // hot-reloadable here.
+    // Captures the startup `invoice_requester`: a hot-enable via `mesh_rebuild` doesn't reach
+    // this job, so settlement stays restart-only.
     spawn_settlement_job(
         peer_directory.clone(),
         usage_tally.clone(),
@@ -2703,29 +2266,13 @@ async fn run_server(
         invoice_requester,
     );
 
-    // Wrapped in locks (not fixed values) so enabling mesh from
-    // PUT /api/v1/settings takes effect immediately instead of requiring a
-    // restart — see `mesh_rebuild` and AppState::mesh_rebuild's own docs.
-    // GooseAdapter's own mesh_provider field shares this exact lock (see
-    // `.with_mesh_provider` below), so a chat turn picks up a freshly-built
-    // provider the moment this fires, with no separate wiring needed.
+    // Locks so `mesh_rebuild` can hot-enable mesh; GooseAdapter shares the `mesh_provider` lock.
     let mesh_transport = Arc::new(tokio::sync::RwLock::new(mesh_transport));
     let mesh_provider = Arc::new(tokio::sync::RwLock::new(mesh_provider));
     let peer_capability_query = Arc::new(tokio::sync::RwLock::new(peer_capability_query));
 
-    // Runtime mesh enable, no restart: `update_settings` calls this after
-    // saving whenever the patch touches `mesh_enabled` and the new value is
-    // true. Re-reads settings itself and is always safe to call — it
-    // no-ops when the stack is already built (MeshInferenceService is a
-    // singleton; see its own docs on why a second one would break
-    // mesh_transport's single `recv()` consumer), when mesh is still
-    // disabled, or when this binary lacks the `mesh` feature.
-    //
-    // Deliberately does not tear anything down on disable: mesh_enabled has
-    // only ever gated construction here, never the behaviour of an
-    // already-built stack (same as build_mesh_transport/build_mesh_provider
-    // always worked), so this keeps that contract rather than inventing a
-    // new one.
+    // Called by `update_settings` when `mesh_enabled` turns true; no-op once built (the
+    // transport allows one `recv()` consumer). Never tears down on disable.
     let mesh_rebuild: Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync> = {
         let settings_repo = settings_repo.clone();
         let peer_directory = peer_directory.clone();
@@ -2748,7 +2295,7 @@ async fn run_server(
             let peer_capability_query = peer_capability_query.clone();
             Box::pin(async move {
                 if mesh_transport.read().await.is_some() {
-                    return; // already built
+                    return;
                 }
                 let settings = match settings_repo.get().await {
                     Ok(s) => s,
@@ -2782,10 +2329,7 @@ async fn run_server(
         })
     };
 
-    // Scheduler — persist task list next to the databases.
-    // Uses a DeferredExecutor so the scheduler can be created before the agent
-    // exists.  The real executor (AgentScheduleExecutor) is injected after the
-    // agent is constructed further below.
+    // DeferredExecutor: the scheduler precedes the agent; AgentScheduleExecutor is injected later.
     let deferred_executor = Arc::new(DeferredExecutor::new());
     let (schedule_result_tx, _) = tokio::sync::broadcast::channel::<
         pond_core::user_data::domain::schedule::ScheduleResultEvent,
@@ -2816,7 +2360,6 @@ async fn run_server(
         }
     };
 
-    // MCP Memory — enabled when --features mcp-memory is passed at build time.
     #[cfg(feature = "mcp-memory")]
     let mcp_memory: Option<
         Arc<dyn pond_core::mcp::ports::mcp_knowledge::McpKnowledgePort + Send + Sync>,
@@ -2831,9 +2374,7 @@ async fn run_server(
         Arc<dyn pond_core::mcp::ports::mcp_knowledge::McpKnowledgePort + Send + Sync>,
     > = None;
 
-    // Finish the extraction service now that the embedder is known — every fact
-    // it stores is embedded at write, so it is searchable on the next turn
-    // instead of waiting for a backfill.
+    // Embed facts at write, so they're searchable next turn rather than after a backfill.
     let memory_extraction_service_for_http = memory_extraction_service_unwired.map(|service| {
         Arc::new(match &embedding_provider {
             Some(provider) => service.with_embedding_provider(provider.clone()),
@@ -2842,11 +2383,7 @@ async fn run_server(
     });
 
     // ── Embedding backfill ───────────────────────────────────────────────────
-    // Extraction stored `embedding: None` before Phase A, and `search_similar`
-    // ignores unembedded rows entirely — so without this pass the semantic
-    // injection path would see only the handful of rows written by the
-    // `save_memory` MCP tool. Batched with a pause between batches: on a Jetson
-    // this competes with inference for CPU.
+    // `search_similar` skips unembedded rows; batched with pauses as it competes with inference.
     if let Some(provider) = embedding_provider.clone() {
         let backfill_repo = memory_repo.clone();
         tokio::spawn(async move {
@@ -2858,16 +2395,8 @@ async fn run_server(
                 relevance::BACKFILL_BATCH_PAUSE_MS,
             )
             .await;
-            // Then repair rows embedded by a DIFFERENT model. The backfill above
-            // cannot see them (it selects `embedding IS NULL` and a stale vector is
-            // not null), and semantic search deliberately EXCLUDES them because a
-            // vector of another width is not comparable -- so without this pass a
-            // pond that changed `embedding_provider` would look fully embedded and
-            // silently retrieve worse forever.
-            //
-            // After the backfill rather than before it: a row with no vector at all
-            // is invisible to search, while a stale one is merely excluded, so the
-            // never-embedded rows are the more urgent repair.
+            // Then re-embed rows from another model: search excludes them and the backfill can't
+            // see them. Second, because a row with no vector at all is the worse miss.
             relevance::run_dimension_repair(
                 backfill_repo.as_ref(),
                 provider.as_ref(),
@@ -2879,18 +2408,7 @@ async fn run_server(
     }
 
     // ── Personal-context index maintenance (phases B + D) ────────────────────
-    // One pass, composed rather than three ad-hoc spawns: adopt existing vectors
-    // (free, pure SQL), embed the summaries that have none (the only step that
-    // costs inference), prune orphans, then REPORT what is still wrong.
-    //
-    // Order matters and is asserted in `run_index_maintenance`: pruning before
-    // adopting would delete rows adoption is about to legitimately re-create.
-    //
-    // Deferred by `index_maintenance_delay_secs` rather than run at boot: a
-    // household's first turn after an upgrade must not be slow because the pond
-    // chose that moment to index itself. It is cancellable for the same reason.
-    // Whether the sweep below exists at all. Read by `AppState` so the rebuild
-    // route can say honestly whether anything will refill what it cleared.
+    // `index_sweep_running` lets the rebuild route say whether anything will refill the index.
     let index_sweep_running = embedding_provider.is_some() && vector_model_id.is_some();
     if let (Some(provider), Some(_)) = (embedding_provider.clone(), vector_model_id.clone()) {
         use pond_core::user_data::services::inference_lane::LaneJob;
@@ -2908,10 +2426,7 @@ async fn run_server(
 
         tokio::spawn(async move {
             use pond_core::context::index_maintenance::{plan_sweep, run_index_maintenance};
-            // Same alias the other three schedule blocks in this file use. The
-            // sweep reads the shared inactivity threshold so it waits on the
-            // same definition of "idle" as consolidation, rather than a second
-            // one that could drift.
+            // Consolidation's idle threshold, so the two definitions of "idle" can't drift.
             use pond_core::user_data::services::consolidation_schedule as sched;
 
             let poll = std::time::Duration::from_secs(INDEX_MAINTENANCE_POLL_SECS);
@@ -2927,9 +2442,6 @@ async fn run_server(
             }
 
             loop {
-                // Woken either by the clock or by somebody asking. Which one it
-                // was changes the gate below, so it is remembered rather than
-                // collapsed into "something happened".
                 let asked = tokio::select! {
                     _ = cancel.cancelled() => return,
                     _ = tokio::time::sleep(poll) => false,
@@ -2947,15 +2459,8 @@ async fn run_server(
                 );
                 let idle_for = sched::combined_idle_for(in_process_at, db_activity, now);
 
-                // A requested pass is not background work, so it does not wait
-                // for quiet. Somebody pressed Reindex and is watching an empty
-                // panel; the idle gate exists to stop chores stealing the slot
-                // from a person, and here the person IS the reason to run.
-                //
-                // Exclusion is untouched by this: the lane holds one slot and
-                // that is what serialises jobs. The floor drops too, or a manual
-                // pass would be refused for the sole reason that the scheduled
-                // one had just happened.
+                // A requested pass skips the idle wait and the floor (a person is waiting on it);
+                // the lane's single slot still serialises jobs.
                 let (floor, idle_threshold) = if asked {
                     (std::time::Duration::ZERO, std::time::Duration::ZERO)
                 } else {
@@ -2968,23 +2473,14 @@ async fn run_server(
                 let Some(_slot) = sweep_lane
                     .acquire(
                         LaneJob::IndexMaintenance,
-                        // No toggle of its own: an index nobody asked to stop
-                        // maintaining is an index quietly going stale, which is
-                        // the failure this whole surface exists to end. Whether
-                        // there is anything to embed is already answered by the
-                        // embedding provider being present at all.
+                        // No toggle of its own: an unmaintained index silently goes stale.
                         true,
                         floor,
-                        // A person asking is itself the activity this guard
-                        // wants to have seen; so is the first pass after boot,
-                        // on a pond that would otherwise refuse forever. See
-                        // `plan_sweep` for why the index needs that exemption
-                        // when the other chores do not.
+                        // A request or the first post-boot pass is exempt; see `plan_sweep`.
                         saw_activity_since_start,
                         idle_for,
                         idle_threshold,
-                        // Per-job, so relaxing the gate for the index does not
-                        // hand the tick to a chore that is still gated.
+                        // Per-job, so other chores stay gated.
                         tick.exempt_from_activity_gate,
                     )
                     .await
@@ -2992,37 +2488,16 @@ async fn run_server(
                     continue;
                 };
 
-                // An exempt pass is exhaustive, so it must be interruptible --
-                // the alternative is a pond that boots, finds a mailbox to
-                // embed, and cannot be told to stop. A CHILD token so that
-                // giving the machine back does not also cancel the sweep task
-                // for the life of the process.
+                // Interruptible per pass; a child token, so cancelling it spares the sweep task.
                 let pass = cancel.child_token();
-                // The baseline is the moment this pass was admitted. The
-                // watcher cancels only on activity NEWER than it — somebody
-                // actually came back — never on activity that merely happened
-                // recently. The previous predicate (`elapsed() < chore_idle`)
-                // judged recency, and for a requested pass that inverted the
-                // gate's own decision: the gate waives idleness because the
-                // person pressing Reindex IS the reason to run, and then the
-                // watcher saw that same person's turn, still under fifteen
-                // minutes old, and killed the pass at its first tick — after
-                // the route had already CLEARED the index. Measured: press
-                // Reindex within 15 minutes of any turn and the pass died at
-                // ~15s with requested=true interrupted=true still_missing=1073.
-                // The same predicate also made the first-post-boot pass a
-                // near-miss: boot initialises the activity clock, and the pass
-                // fires at 16 minutes against a 15-minute threshold — one
-                // slow poll from cancelling itself forever.
+                // Cancel only on activity newer than this pass's admission, not merely recent:
+                // otherwise the turn before a Reindex press kills the pass it asked for.
                 let baseline = *sweep_activity.read().await;
                 let watcher = tokio::spawn({
                     let pass = pass.clone();
                     let activity = sweep_activity.clone();
                     async move {
-                        // Only the in-process timestamp: it is written the
-                        // moment a turn starts, whereas the database one lags
-                        // by however long that turn takes to persist. This is
-                        // the signal that says "somebody is here NOW".
+                        // In-process only: set at turn start, while the DB timestamp lags.
                         loop {
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                             if *activity.read().await > baseline {
@@ -3043,10 +2518,7 @@ async fn run_server(
                 .await;
                 watcher.abort();
 
-                // The exemption is spent only by a pass that finished. One cut
-                // short by a member coming back has not indexed the backlog,
-                // and treating it as done would leave the pond in exactly the
-                // state the exemption exists to prevent.
+                // Only a completed pass spends the exemption: an interrupted one left the backlog.
                 if !pass.is_cancelled() {
                     indexed_since_boot = true;
                 }
@@ -3067,65 +2539,35 @@ async fn run_server(
     }
 
     // ── Agent backend ────────────────────────────────────────────────────────────
-    // pond_agent_active is always false while the backend is quarantined (Q2-05).
-    // agent_backend has already been normalised to "goose" above.
     #[cfg(feature = "pond-agent")]
     let pond_agent_active = agent_backend == "pond"; // stays false: quarantine override above
     #[cfg(not(feature = "pond-agent"))]
     let pond_agent_active = false;
 
-    // The mistral.rs backend is a checkpoint, not a quarantine: unlike "pond" it
-    // is reachable, because nothing rewrites the value and no guard rejects it.
-    // What keeps it out of production is the cargo feature, which is off by
-    // default and which no device build turns on.
+    // Reachable, unlike "pond"; the off-by-default cargo feature keeps it out of production.
     #[cfg(feature = "mistralrs-agent")]
     let mistralrs_active = agent_backend == pond_adapters_mistralrs::BACKEND_NAME;
     #[cfg(not(feature = "mistralrs-agent"))]
     let mistralrs_active = false;
 
-    // Event bus (#91/#109), created here because the Matter runtime below
-    // publishes sensor updates onto it. Its durable log bridge is wired further
-    // down, once the logs DB handle is in scope.
+    // Created before the Matter runtime, which publishes sensor updates onto it.
     let event_bus: Arc<dyn pond_core::shared::ports::event_bus::EventBus> =
         Arc::new(InProcessEventBus::new());
 
-    // Device actuation backend (#195): Matter when it is switched on and a
-    // controller is reachable, else the logging stub.
-    //
-    // Which of the two is live is the runtime's decision and can change at any
-    // moment, because the controller can come and go at runtime rather than being a
-    // boot-time constant. `device_control` is therefore a facade — one `Arc`
-    // that the agent, the MCP server, and the tool wiring hold for the life of
-    // the process while the backend behind it is swapped underneath.
-    //
-    // The runtime also owns the bridge (fabric node sync plus sensor attribute
-    // updates onto the EventBus) and the controller process, so both come and
-    // go with the toggle rather than with the process.
+    // `device_control` is a facade over Matter (when on and reachable) or the logging stub,
+    // swapped at runtime behind one long-lived `Arc`.
     type MatterRuntimeHandle =
         Option<Arc<dyn pond_core::user_data::ports::matter_runtime::MatterRuntimePort>>;
     type DeviceControl = Arc<dyn pond_core::user_data::ports::device_control::DeviceControlPort>;
 
-    // The concrete runtime is kept alongside the trait object because
-    // `attach_notifications` is an adapter concern, not part of `MatterRuntimePort`:
-    // putting it on the port would make every mock and stub in the workspace
-    // answer for a method that only one implementation has any use for.
+    // Concrete runtime kept too: `attach_notifications` is adapter-only, not on the port.
     #[cfg(feature = "goose-agent")]
     let (matter_concrete, device_control): (
         Option<Arc<pond_adapters_matter::MatterRuntime>>,
         DeviceControl,
     ) = {
-        // The bridge holds only a bus handle, so persistence is attached to the
-        // handle (#90): the decorator records each BusEvent::Sensor before
-        // forwarding it, giving Matter readings the same persist-before-publish
-        // ordering `record_sensor` gets by writing inline (#91). Without it
-        // nothing writes adapter-sourced readings, and `giap-sensors` answers
-        // every question about a real Matter device with "none recorded" — a
-        // device that is visibly in the device list and cannot be asked
-        // anything, which reads as broken rather than as unimplemented.
-        //
-        // `AppState` keeps the PLAIN bus: `record_sensor` already persists
-        // inline, and giving it the decorator too would double-write every
-        // reading that arrives over the REST route.
+        // Persists each Matter sensor event before publishing it. `AppState` keeps the plain
+        // bus: `record_sensor` persists inline, so the decorator there would double-write.
         let matter_bus: Arc<dyn pond_core::shared::ports::event_bus::EventBus> = Arc::new(
             pond_core::shared::services::sensor_persisting_event_bus::SensorPersistingEventBus::new(
                 event_bus.clone(),
@@ -3140,9 +2582,7 @@ async fn run_server(
         let control = runtime.device_control(Arc::new(
             pond_infra::logging_device_control::LoggingDeviceControl::new(),
         ));
-        // NOT converged here: `apply` waits until the notification sender exists
-        // further down, so a first-run controller install can tell the user it
-        // has started. See the `matter.attach_notifications` call below.
+        // Not converged yet: `apply` waits for the notification sender, further down.
         (Some(runtime), control)
     };
 
@@ -3157,15 +2597,8 @@ async fn run_server(
         Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
     );
 
-    // Install the sensor MCP server's handles — `spawn_sensor_server` only fires at
-    // chat time, so anywhere before the server serves is early enough.
-    //
-    // Down here, beside its siblings' call sites rather than with them, because it
-    // needs `device_control`, which does not exist until the Matter runtime above is
-    // built. That handle is what lets `get_sensor_reading` ask a reachable device what
-    // it reads NOW instead of serving the newest row in the log — and the newest row
-    // can be hours old, because the controller publishes only CHANGES, so a steady
-    // sensor is written once and never again.
+    // After the Matter runtime: `device_control` lets `get_sensor_reading` ask a live device
+    // (the log only records changes). Anywhere before serving is early enough.
     pond_mcp_server::init_sensor_deps(
         sensor_storage.clone(),
         device_registry.clone(),
@@ -3173,10 +2606,7 @@ async fn run_server(
     );
 
     let (agent, extension_manager, _tool_caller, tool_registry) = if mistralrs_active {
-        // A turn served without goose: pond-core's system prompt, the same MCP
-        // dispatcher PondAgent uses, and an HTTP client. No extension manager
-        // and no tool-calling specialist, because neither exists off the goose
-        // path — the registry below is the empty default for the same reason.
+        // No goose: no extension manager or tool specialist, and an empty registry.
         let default_registry: Arc<
             dyn pond_core::mcp::ports::tools::tool_registry::ToolRegistryPort,
         > = Arc::new(pond_core::mcp::services::tool_registry::InMemoryToolRegistry::new());
@@ -3185,9 +2615,7 @@ async fn run_server(
         let agent: Arc<dyn Agent> = {
             let settings = settings_repo.get().await.unwrap_or_default();
             let base_url = pond_adapters_mistralrs::base_url_from_env();
-            // The window mistral.rs was actually started with is not on its API,
-            // so GIAP's own resolution is the only source. Wrong here means a
-            // history budget the server will refuse, not a slow turn.
+            // mistral.rs doesn't report its window; a wrong value means refused requests.
             let context_tokens =
                 pond_core::models::services::context::context_governor::ContextGovernor::resolve(
                     &pond_core::models::services::context::context_governor::ContextInputs {
@@ -3362,10 +2790,7 @@ async fn run_server(
         tracing::info!("schedule executor initialized — agent-prompt schedules are now active");
     }
 
-    // Secret storage — $DATA_DIR/secrets.json, encrypted with XChaCha20-Poly1305
-    // under $DATA_DIR/secrets/master.key (0600, 0700 directory, overridable with
-    // POND_SECRET_KEY_FILE). Initialized before MCP auto-connect so startup can
-    // resolve OAuth tokens.
+    // Encrypted at rest; before MCP auto-connect, which resolves OAuth tokens from it.
     let secret_repo: Option<
         Arc<dyn pond_core::security::ports::secret::SecretRepository + Send + Sync>,
     > = {
@@ -3379,12 +2804,8 @@ async fn run_server(
                 Some(Arc::new(repo))
             }
             Err(e) => {
-                // A locked store is not the same failure as a broken one, and
-                // the difference decides what the operator should do next. The
-                // repository stays None either way: with no repository the
-                // secret routes answer 503 and nothing in this process can
-                // overwrite the ciphertext, which is still sitting there
-                // recoverable if the key turns up.
+                // Stays None either way, so nothing can overwrite the ciphertext (recoverable if
+                // the key returns); a locked store gets its own operator guidance.
                 if let Some(locked) =
                     e.downcast_ref::<pond_infra::secret_crypto::SecretStoreLocked>()
                 {
@@ -3404,19 +2825,12 @@ async fn run_server(
         }
     };
 
-    // Hand the SAME instance to the MCP tool servers. One instance per process
-    // is a requirement, not tidiness: `FileSecretRepository` caches
-    // secrets.json in memory and rewrites it whole on `set`, so a second
-    // instance would serve a stale cache and clobber this one's writes.
-    // The servers that consume these handles only spawn at chat time, so
-    // installing here (after the agent backend was built) is in time.
+    // The SAME instance: `FileSecretRepository` caches secrets.json and rewrites it whole on
+    // `set`, so a second one would serve stale data and clobber writes.
     if let Some(repo) = &secret_repo {
         pond_mcp_server::init_secret_deps(repo.clone());
 
-        // PAI-2 P2: move any API key an existing pond already had in its
-        // settings table. The fields are gone from `Settings`, so an unmigrated
-        // row is simply ignored by `apply_key` — to the user that looks like
-        // their key vanished.
+        // Move API keys out of the settings table; `Settings` no longer reads them.
         match pond_infra::secret_migration::migrate_api_keys_to_secret_repository(
             &settings_repo,
             repo,
@@ -3441,10 +2855,8 @@ async fn run_server(
         );
     }
 
-    // Marketplace — curated registry of installable extensions.
-    // Initialized before MCP auto-connect so startup can look up required_secrets.
-    // The asset root anchors entries that launch a bundled script, so they no
-    // longer depend on which directory pond-server happened to be started from.
+    // Before MCP auto-connect, which looks up required_secrets. The asset root makes bundled
+    // script paths independent of the launch cwd.
     let asset_root = asset_root::resolve();
     tracing::info!(asset_root = %asset_root.display(), "resolved extension asset root");
     let marketplace: Arc<dyn pond_core::mcp::ports::extension_marketplace::ExtensionMarketplace> =
@@ -3452,10 +2864,8 @@ async fn run_server(
             pond_core::mcp::services::marketplace::BundledMarketplace::with_asset_root(&asset_root),
         );
 
-    // MCP client — load persisted server configs and auto-connect enabled ones.
     let mcp_server_repo: Option<Arc<dyn pond_core::mcp::ports::mcp_server::McpServerRepository>> = {
         let repo = Arc::new(SqliteMcpServerRepository::new(db.system.clone()));
-        // Auto-connect saved external MCP servers if the extension manager is available.
         if let Some(mgr) = &extension_manager {
             match repo.list().await {
                 Ok(servers) => {
@@ -3465,15 +2875,8 @@ async fn run_server(
                     {
                         use pond_core::mcp::ports::extension_manager::AddExtensionRequest;
 
-                        // Start with the persisted env, then overwrite every
-                        // secret from the secret repository.
-                        //
-                        // The repository is authoritative for credentials; the
-                        // env stored on the row is a snapshot taken when the
-                        // extension was installed. Preferring the snapshot
-                        // handed the child an access token that had since been
-                        // rotated, on every restart, for as long as the row
-                        // survived — so overwrite rather than fill the gaps.
+                        // Secrets overwrite the persisted env: the row's copy is an
+                        // install-time snapshot, and tokens rotate.
                         let mut env = srv.env.clone();
                         if let Some(sr) = &secret_repo {
                             if let Ok(Some(ext)) = marketplace.get_by_id(&srv.name).await {
@@ -3485,27 +2888,14 @@ async fn run_server(
                             }
                         }
 
-                        // The internal token is a fresh UUID per process run, so
-                        // the persisted copy is always from a dead process. Left
-                        // alone, the child authenticates to /oauth/refresh with
-                        // it, gets a 401, and can never recover from an expired
-                        // access token — the extension simply stops working an
-                        // hour after every restart.
-                        //
-                        // GIAP_SERVER_URL is deliberately left as persisted:
-                        // auto-connect runs before the listener binds, so the
-                        // port is not known here. Install and the OAuth callback
-                        // both run after binding and write the correct value.
+                        // The internal token is per process run; a persisted one always 401s.
+                        // GIAP_SERVER_URL stays as persisted: the port isn't bound yet.
                         env.insert(
                             pond_api::oauth_callback::INTERNAL_TOKEN_ENV_KEY.to_string(),
                             pond_api::oauth_callback::internal_extension_token().to_string(),
                         );
 
-                        // A config persisted before extension paths were anchored
-                        // still carries a cwd-relative arg, which only resolves
-                        // when the server is launched from the repo root. Re-anchor
-                        // it here so an existing install heals on restart instead
-                        // of needing a manual remove-and-reinstall.
+                        // Old configs may carry cwd-relative args; re-anchor and persist them.
                         let mut args = srv.args.clone();
                         if pond_core::mcp::services::marketplace::anchor_asset_args(
                             &mut args,
@@ -3549,10 +2939,7 @@ async fn run_server(
         Some(repo)
     };
 
-    // Memory-aware model scheduler — only meaningful for in-process GGUF inference.
-    // When the local-inference feature is compiled in, create a ResourceAwareModelScheduler
-    // and spawn a background pre-loader that warms the model slot on wake-word detection.
-    // For llamafile / Ollama those backends manage their own memory; use None there.
+    // Only for in-process GGUF; llamafile/Ollama manage their own memory.
     #[cfg(feature = "local-inference")]
     let model_scheduler: Option<
         Arc<dyn pond_core::models::ports::model_scheduler::ModelScheduler>,
@@ -3563,9 +2950,7 @@ async fn run_server(
         tokio::spawn(async move {
             while wake_rx.changed().await.is_ok() {
                 if *wake_rx.borrow() {
-                    // GooseAdapter's LocalInferenceProvider loads on first complete() call.
-                    // Future: trigger a no-op inference call here to warm the model slot
-                    // before the user finishes speaking.
+                    // Future: warm the model here; it otherwise loads on first complete().
                     tracing::info!("model scheduler: wake word detected — model warm-up hint");
                 }
             }
@@ -3582,15 +2967,8 @@ async fn run_server(
         Arc<dyn pond_core::security::ports::event_log::OperationalLogRepository>,
     > = Some(Arc::new(SqliteOperationalLog::new(db.logs.clone())));
 
-    // Privacy/security boundary hook — audits into the unified event log (#108)
-    // as `Auth` events, so a policy decision is correlatable with the rest of a
-    // session.
-    //
-    // This sink is a SEPARATE Arc from the shared `event_log` below, so it gets
-    // its own chokepoint-2 wrapper. Leaving it raw would have been a bypass by
-    // the one component whose entire job is the audit trail: P1 classifies
-    // these rows `Sensitive` precisely because they carry a `token:<client_id>`
-    // principal label and a remote address.
+    // Audits as `Auth` events. A separate Arc from `event_log`, so it needs its own chokepoint-2
+    // redactor: these rows carry a `token:<client_id>` label and a remote address.
     let security_policy: Option<Arc<dyn pond_core::security::ports::policy::SecurityPolicy>> =
         Some(Arc::new(
             pond_infra::sqlite_security_policy::SqliteSecurityPolicy::new(Arc::new(
@@ -3601,22 +2979,9 @@ async fn run_server(
             )),
         ));
 
-    // PAI-2 P1, second production call site: the draft MCP server is a
-    // process-wide singleton with no principal of its own. What it does get,
-    // per tool call, is the engine session id in the MCP request `_meta`. This
-    // authority is what turns that id into a speaker, reads
-    // `security_policy_mode` fresh, and records the decision. Installed here
-    // rather than in register_giap_extensions because it needs three
-    // repositories that registration does not carry, and after `security_policy`
-    // so draft decisions land in the same audit trail as identity assertions.
-    // The server is not spawned until the first turn, so this is in time.
-    // Start routing WARN+ tracing events into the SQLite event log.
-    // _file_guard must live until run_server returns so the background file
-    // writer keeps flushing log output to disk.
+    // WARN+ tracing into the SQLite log; `_file_guard` must live until run_server returns.
     let _file_guard = drain_handle.drain_into(operational_log.clone());
 
-    // Durable per-turn telemetry persisted to pond_logs.db. Falls back to the
-    // in-memory store if the SQLite-backed adapter cannot be initialised.
     let telemetry: Option<Arc<dyn pond_core::security::ports::telemetry::TelemetryPort>> =
         match SqliteTelemetry::new(db.logs.clone()).await {
             Ok(t) => Some(Arc::new(t)),
@@ -3630,15 +2995,11 @@ async fn run_server(
             }
         };
 
-    // Bind the API port early so we can thread it into AppState (needed for
-    // dynamic OAuth redirect URIs).  The actual `axum::serve()` call that
-    // consumes the listener happens further below.
+    // Bound early: AppState needs the real port for OAuth redirect URIs.
     let (listener, api_port) =
         ports::bind_with_fallback("0.0.0.0", port.unwrap_or(ports::API_SERVER)).await?;
 
-    // Persist the ACTUAL bound port so the standalone `pond pairing` CLI can
-    // build a pairing URL with the real port (bind_with_fallback may have picked
-    // a fallback, or the operator passed --port). Best-effort; ignored on error.
+    // For `pond pairing`, which needs the real port (maybe a fallback, or --port). Best-effort.
     let _ = std::fs::write(data_dir.join(".runtime_api_port"), api_port.to_string());
 
     // Direct MCP tool dispatcher for POST /api/v1/tools/invoke (bypasses the LLM).
@@ -3655,31 +3016,19 @@ async fn run_server(
         device_control.clone(),
     )));
 
-    // Durable event log (#91/#109). The bus (created above, with the Matter
-    // runtime) is shared with AppState for publishing on ingest; a background
-    // bridge subscribes to it and appends every bus event (sensor/camera/device)
-    // into the unified `events` table, so events written in normal operation are
-    // queryable from pond_logs.db.
-    // One shared event store: the bus→log bridge writes to it, and the activity
-    // query API (#114) reads from it via AppState.
-    // Chokepoint 2: attributes are redacted on the way in, and a finding raises
-    // the event's sensitivity -- which excludes it from the audit MCP reads and
-    // shortens its retention. Both narrow. This is also the binding
-    // `set_egress_sink` reads a hundred lines below, so every outbound-call
-    // record goes through the redactor without egress knowing.
+    // Chokepoint 2: attributes are redacted on the way in, and a finding raises sensitivity
+    // (hidden from audit MCP reads, shorter retention). `set_egress_sink` writes through it too.
     let event_log: Arc<dyn pond_core::security::ports::event_log::EventLog> = Arc::new(
         pond_core::security::services::redacting_event_log::RedactingEventLog::new(
             Arc::new(SqliteEventLog::new(db.logs.clone())),
             redactor.clone(),
         ),
     );
-    // Push-token store (#95) — built here, before `db` is moved into AppState.
+    // Before `db` moves into AppState.
     let push_token_repo: Arc<dyn pond_core::user_data::ports::push_token::PushTokenRepository> =
         Arc::new(pond_infra::sqlite_push_token::SqlitePushTokenRepository::new(db.system.clone()));
 
-    // Push-notification path (#99): in-process fan-out to connected
-    // `/notifications/stream` clients + an offline queue + a (stub) FCM/APNs
-    // relay backed by #95's push tokens.
+    // Fan-out to `/notifications/stream` clients, plus an offline queue and a push relay.
     let (notification_tx, _) =
         tokio::sync::broadcast::channel::<pond_core::mcp::ports::notification::Notification>(256);
     let notification_queue: Arc<
@@ -3688,8 +3037,7 @@ async fn run_server(
         pond_infra::sqlite_notification_queue::SqliteNotificationQueue::new(db.system.clone()),
     );
 
-    // Last resort: the pond will go on running slower than it could and nothing
-    // else would ever say so.
+    // Last resort: otherwise nothing would ever report the slower decode.
     if drafter_wanted && !drafter_ready {
         let notice = pond_core::mcp::ports::notification::Notification {
             id: uuid::Uuid::new_v4().to_string(),
@@ -3707,10 +3055,7 @@ async fn run_server(
         let _ = notification_queue.enqueue(notice.clone()).await;
         let _ = notification_tx.send(notice);
     }
-    // Real FCM relay when a service-account key is present (Path B: direct
-    // FCM v1, data-only wake pings — no Expo hop, no content through Google);
-    // otherwise the logging stub. Key location:
-    // `<data_dir>/secrets/fcm-service-account.json`, override POND_FCM_KEY_PATH.
+    // FCM v1 when a service-account key exists (data-only wake pings, no content via Google).
     let fcm_key_path = std::env::var("POND_FCM_KEY_PATH")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| data_dir.join("secrets").join("fcm-service-account.json"));
@@ -3737,27 +3082,14 @@ async fn run_server(
                 push_token_repo.clone(),
             ))
         };
-    // PAI-1 P9's delivery half, and the first production caller the rung has had.
-    //
-    // Until this line `send_to_profile` answered `AttributionUnavailable` for
-    // every member on every pond: the code was correct, tested, and unreachable.
-    // That is the shape PAI-1 P5 shipped in once and PAI-6 P1's clamp shipped in
-    // again, and it is invisible to `dead_code` because every symbol involved is
-    // `pub` in a library crate.
+    // Required: without it `send_to_profile` silently answers `AttributionUnavailable`.
     let device_attribution: Arc<
         dyn pond_core::user_data::ports::device_attribution::DeviceAttribution,
     > = Arc::new(
         pond_infra::sqlite_device_attribution::SqliteDeviceAttribution::new(db.system.clone()),
     );
 
-    // The concrete type is kept alongside the trait object on purpose.
-    // `send_to_profile` is NOT on `NotificationSender` and must not be: the port
-    // is `send` (one target) and `broadcast` (the household), and a third method
-    // meaning "resolve a member to their devices" would put PAI-1's attribution
-    // chain behind a trait every mock and stub in the workspace would have to
-    // answer for. PAI-7 invariant 4 -- addressed to a profile, never broadcast --
-    // is carried by `TargetedDelivery`, which has no variant meaning "everybody",
-    // so the refusal cannot be reached by picking the wrong enum arm.
+    // Concrete type kept: `send_to_profile` (profile-addressed, never broadcast) isn't on the port.
     let targeted_notification_sender = Arc::new(
         pond_infra::broadcast_notification_sender::BroadcastNotificationSender::new(
             notification_tx.clone(),
@@ -3768,17 +3100,11 @@ async fn run_server(
     );
     let notification_sender: Arc<dyn pond_core::mcp::ports::notification::NotificationSender> =
         targeted_notification_sender.clone();
-    // Let the `send_notification` MCP tool reach connected phones too (#99).
+    // Lets the `send_notification` MCP tool reach connected phones too.
     pond_mcp_server::init_notification_sender(notification_sender.clone());
 
-    // Matter can now tell the user things, so converge it (#195). Deferred to
-    // here rather than left beside the runtime's construction because the first
-    // enable on a fresh install downloads and installs a controller, which
-    // legitimately takes minutes: without a sender attached first, the one
-    // notification explaining that wait would be sent into nothing.
-    //
-    // Still returns immediately — serving must not wait on the install, and the
-    // Devices tab shows the progress.
+    // Converge Matter only now: a first enable installs a controller (minutes), and the notice
+    // explaining the wait needs the sender. `apply` returns immediately.
     #[cfg(feature = "goose-agent")]
     if let Some(matter) = &matter_concrete {
         matter
@@ -3789,12 +3115,7 @@ async fn run_server(
             ble: settings.matter_ble_enabled,
         });
 
-        // Bounded, so the Matter lines belong to the startup log rather than
-        // arriving after the "listening" banner as though something had
-        // restarted. Free when Matter is off, a second or two when its
-        // controller is already installed, and abandoned rather than waited out
-        // on a first run — which is the only case that takes minutes, and the
-        // one the Devices tab is already reporting progress for.
+        // Bounded so Matter logs precede the "listening" banner; a first-run install isn't awaited.
         const MATTER_STARTUP_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
         let settled = matter.settle(MATTER_STARTUP_GRACE).await;
         if matches!(
@@ -3809,8 +3130,7 @@ async fn run_server(
         }
     }
 
-    // Bridge schedule completion/failure events to push notifications (#99), so a
-    // reminder/scheduled task surfaces on the phone, not just the dashboard.
+    // Schedule results become push notifications, so reminders reach the phone too.
     {
         let mut rx = schedule_result_tx.subscribe();
         let sender = notification_sender.clone();
@@ -3860,25 +3180,8 @@ async fn run_server(
     }
 
     // ── PAI-7 P4: the proactive reviewer ─────────────────────────────────
-    //
-    // The loop `proactive_review.rs` was written for and has been waiting on.
-    // Everything it decides lives in pond-core: when a review may start, who it
-    // is for, what it may be told, what its answer becomes. What is here is a
-    // clock, four store reads, and the delivery.
-    //
-    // Two structural facts decide the shape:
-    //
-    // 1. **A review is its own parent turn.** `GooseOrchestrator::spawn` refuses
-    //    any spec whose parent session has no live entry in the
-    //    `TurnAuthorityRegistry`, which a background loop fails by construction.
-    //    So the loop publishes `review_authority` for the length of the run.
-    //    That is not a way around the check -- the registry entry carries the
-    //    cancellation token, so publishing is what makes invariant 3's
-    //    interruption cascade to the child at all.
-    // 2. **The orchestrator is read back out of the same `OnceLock` the
-    //    `delegate` tool uses.** A second `GooseOrchestrator` would compile and
-    //    then answer `None` to every authority lookup. There is exactly one, and
-    //    when Goose init failed there is none -- which means no review.
+    // A review is its own parent turn: it publishes a turn authority, whose token cascades
+    // interruption. It reuses the `delegate` tool's orchestrator; no orchestrator, no review.
     {
         let review_settings = settings_repo.clone();
         let review_storage = session_storage.clone();
@@ -3889,11 +3192,7 @@ async fn run_server(
                 db.system.clone(),
             ));
 
-        // The observed-event ring, filled by a bus subscriber and drained by the
-        // reviewer. `brief_events` collapses repeats, so this only has to be big
-        // enough that a burst between two reviews does not lose the one event
-        // that mattered; it is sized off pond-core's own cap rather than a
-        // number here, so the two cannot drift.
+        // Ring drained by the reviewer; sized off pond-core's cap so the two can't drift.
         let observed: Arc<
             tokio::sync::Mutex<
                 std::collections::VecDeque<pond_core::user_data::domain::proposal::BusEventRef>,
@@ -3909,10 +3208,7 @@ async fn run_server(
                 };
                 let ring_capacity = MAX_BRIEF_EVENTS * 16;
                 while let Some(bus_event) = events.next().await {
-                    // `reviewable` refuses the clock tick and the session
-                    // lifecycle. Doing that HERE rather than at review time is
-                    // what stops an idle overnight pond filling the ring with
-                    // its own heartbeat and evicting the evening's camera event.
+                    // Filtered on entry so idle heartbeats can't evict real events from the ring.
                     let Some(reference) = reviewable(&bus_event) else {
                         continue;
                     };
@@ -3936,31 +3232,9 @@ async fn run_server(
     }
 
     // ── PAI-8 P1: the personal-context corpus gets a producer ────────────
-    //
-    // Everything in `pond-core/src/context/` landed on 2026-08-11 with nothing
-    // that could produce a `RawItem`, so `context_items` was empty on every
-    // pond by construction and `context_pipeline_is_not_wired_yet.rs` asserted
-    // it. This block is what that test was written to fail on.
-    //
-    // Three things decide the shape.
-    //
-    // 1. **The redactor is not optional.** `IngestPipeline::new` takes one by
-    //    value rather than as an `Option`, so there is no "no redactor wired"
-    //    fallback to lose invariant 3 through. This is also PAI-2 P3's third
-    //    chokepoint finally getting a call site -- the one the ledger recorded
-    //    as circularly blocked on PAI-8.
-    // 2. **The toggle is answered per event, from the settings the loop last
-    //    read**, not captured at boot. `BusIngest::absorb` reads it before it
-    //    reads any store, so on a default pond the whole cost of this feature
-    //    is a bool per bus event and no query.
-    // 3. **The bus is subscribed once more rather than sharing the reviewer's
-    //    ring.** They want different things: the reviewer wants a bounded
-    //    window of recent household facts to reason over, this wants every
-    //    event exactly once so nothing is silently dropped by a ring that
-    //    wrapped.
-    // Hoisted out of the block below so the router can reach it: the sweep and
-    // the "check now" route must be the SAME syncer, or the button and the
-    // timer become two implementations of one word.
+    // `IngestPipeline::new` takes the redactor by value, so it can't be left out. Own bus
+    // subscription, not the reviewer's ring: every event must be seen once, and rings wrap.
+    // `account_syncer` is hoisted so the "check now" route and the timer share one syncer.
     let mut account_syncer: Option<Arc<dyn pond_core::context::ports::AccountSync>> = None;
     {
         let context_repo: Arc<dyn pond_core::context::ports::ContextRepository> = Arc::new(
@@ -3968,9 +3242,7 @@ async fn run_server(
                 db.system.clone(),
                 redactor.clone(),
             )
-            // A ContextItem cannot exist un-redacted (one constructor, and it
-            // takes the redactor), so mirroring its vector is safe by
-            // construction -- no decorator ordering to get wrong here.
+            // Mirroring is safe: a ContextItem can only be constructed redacted.
             .with_vector_index(vector_index.clone(), vector_model_id.clone()),
         );
         let pipeline = Arc::new(
@@ -3978,12 +3250,8 @@ async fn run_server(
                 .with_embedder(embedding_provider.clone()),
         );
 
-        // PAI-8 P2's read surface. Installed unconditionally, like the other
-        // `init_*_deps`: registration is what the toggle gates, so with the
-        // extension unregistered these handles are simply unused.
-        // Unified retrieval (phase C) behind the `recall` tool. Absent when no
-        // embedder is wired, in which case `recall` answers nothing rather than
-        // quietly degrading to context-only results.
+        // Installed unconditionally: the toggle gates registration. No embedder, no unified
+        // retrieval: `recall` then answers nothing rather than degrading to context-only.
         let unified_retrieval = embedding_provider.clone().map(|emb| {
             Arc::new(
                 pond_core::context::retrieval_service::PersonalContextRetrieval::new(
@@ -3998,14 +3266,7 @@ async fn run_server(
             unified_retrieval,
         );
 
-        // PAI-8's first connector, on a timer.
-        //
-        // Deferred like the index sweep and for the same reason: a household's
-        // first turn after a restart must not wait while the pond talks to a
-        // calendar server. The interval is deliberately unhurried -- a calendar
-        // changes a few times a week, the ctag check makes an unchanged sync
-        // nearly free, and anything faster is load on somebody else's server
-        // for no new information.
+        // Delayed so no first turn waits on a calendar server; calendars rarely change.
         if let Some(secrets) = secret_repo.clone() {
             let syncer = Arc::new(pond_server::account_sync::AccountSyncer::new(
                 context_repo.clone(),
@@ -4028,9 +3289,7 @@ async fn run_server(
                             paused = report.paused,
                             "account sync"
                         ),
-                        // Silent when nothing is connected, which is every pond
-                        // until somebody connects something. A half-hourly line
-                        // saying "nothing" is how a log stops being read.
+                        // Silent when nothing is connected, to keep the log worth reading.
                         Ok(_) => {}
                         Err(e) => tracing::warn!(error = %e, "account sync could not run"),
                     }
@@ -4048,11 +3307,8 @@ async fn run_server(
         tokio::spawn(async move {
             use futures::StreamExt;
             while let Some(bus_event) = events.next().await {
-                // A settings read that fails skips the event rather than
-                // falling back to `Settings::default()`. The default is off, so
-                // both mean "do not ingest" today -- but a default is a value
-                // somebody can change, and a gate that launders an unreadable
-                // store through it would start storing the day that moved.
+                // A failed settings read skips the event, never `Settings::default()`: the gate
+                // must fail closed even if the default ever flips.
                 let Ok(settings) = ingest_settings.get().await else {
                     continue;
                 };
@@ -4077,14 +3333,10 @@ async fn run_server(
         });
     }
 
-    // Egress tracker (#113): record every outbound HTTP call made by built-in
-    // MCP tools into the same event store, so network egress is queryable via
-    // `GET /api/v1/activity?category=network`.
+    // Logs built-in MCP tools' outbound calls; see `GET /api/v1/activity?category=network`.
     pond_mcp_server::set_egress_sink(event_log.clone());
 
-    // Sensor/event-triggered rules engine (#92): fire SensorTrigger schedules
-    // when a matching sensor/camera/device event arrives on the bus. Fires go
-    // through the scheduler's own run_now path (run records + result events).
+    // Fires SensorTrigger schedules on matching bus events via the scheduler's run_now path.
     if let Some(sched) = scheduler.clone() {
         tokio::spawn(pond_infra_scheduler::run_rules_engine(
             event_bus.subscribe(),
@@ -4092,13 +3344,7 @@ async fn run_server(
         ));
     }
 
-    // The other half of the event spine (PAI-7 P1 and P2): the pond's own
-    // clock, whether somebody is at it, and which household member that is.
-    // Spawned here, beside the two consumers, so the whole spine reads in one
-    // place. Both hold the bus weakly — see `run_time_ticker` — and both
-    // publish only; the rules engine skips these events because they have no
-    // device-shaped view, and the bridge above records them in the event log
-    // like any other bus traffic.
+    // Clock and presence publishers; both hold the bus weakly (see `run_time_ticker`).
     tokio::spawn(run_time_ticker(Arc::downgrade(&event_bus)));
     tokio::spawn(run_session_activity_observer(
         Arc::downgrade(&event_bus),
@@ -4107,10 +3353,7 @@ async fn run_server(
         last_user_activity.clone(),
     ));
 
-    // Vision pipeline (#130): camera frames → on-device motion detection →
-    // camera_events + EventBus, so #92 rules and the activity feed react to
-    // what the camera sees. Opt-in (`vision_enabled` + a camera URL) because
-    // it needs a camera and ffmpeg on the device.
+    // On-device motion detection into camera_events + the bus. Opt-in: needs a camera and ffmpeg.
     if settings.vision_enabled && !settings.vision_camera_url.trim().is_empty() {
         let capture = pond_adapters_vision::CaptureConfig {
             input: settings.vision_camera_url.trim().to_string(),
@@ -4123,20 +3366,15 @@ async fn run_server(
                 changed_fraction: settings.vision_motion_threshold.clamp(0.001, 1.0),
                 ..Default::default()
             },
-            // Save the triggering frame per event (bounded per-camera
-            // retention) so the dashboard can show WHAT moved (#175 follow-up).
+            // Triggering frame per event (bounded per camera), so the dashboard shows what moved.
             snapshots: Some(pond_adapters_vision::SnapshotConfig::new(
                 data_dir.join("snapshots"),
             )),
             ..Default::default()
         };
 
-        // Optional ONNX classifier: upgrades "motion" into person/pet/package
-        // on `vision-onnx` builds. An empty `vision_classifier_model` means
-        // "the default YOLOX-Nano", auto-downloaded on first run exactly like
-        // whisper/piper/face models; an explicit value points at an
-        // operator-managed file (no auto-download). Any failure degrades to
-        // unlabelled motion — never blocks the pipeline.
+        // Labels motion as person/pet/package. Empty model = auto-downloaded YOLOX-Nano; a set
+        // one is operator-managed. Any failure degrades to plain "motion".
         #[cfg(feature = "vision-onnx")]
         let classifier: Option<
             std::sync::Arc<dyn pond_core::user_data::ports::vision::VisionClassifier>,
@@ -4201,9 +3439,7 @@ async fn run_server(
         }
     }
 
-    // DB-backed handshake/pairing (#93). Construct before `db` is moved into
-    // AppState, then issue a fresh pairing code the operator reads off the CLI
-    // to pair a GOTG device.
+    // Before `db` moves into AppState.
     let handshake: Arc<dyn pond_core::security::ports::handshake::Handshake> =
         Arc::new(SqliteHandshakeAdapter::new(db.system.clone()));
     let pairing_hostname = hostname::get()
@@ -4252,18 +3488,9 @@ async fn run_server(
         device_registry,
         memory_repo,
         embedding_provider,
-        // The SAME handle the memory and context repositories write through and
-        // the maintenance sweep repairs, cloned rather than constructed again.
-        // A second construction here would be a second place to keep in step:
-        // the day this handle is wrapped in a decorator -- as the memory repo
-        // already is, twice -- the health route would be reporting on something
-        // the writers had stopped using, and would say so in a number that
-        // looked entirely plausible.
+        // Same handle the repos write through and the sweep repairs; never construct a second one.
         vector_index: Some(vector_index.clone()),
-        // Some only when the sweep above actually spawned. Handing the route a
-        // notify with nothing listening would have it answer `refilling: true`
-        // on a pond where nothing is going to refill, which is a lie that reads
-        // as success -- the caller waits for a rebuild that never happens.
+        // Some only if the sweep spawned, or the route would report `refilling: true` forever.
         index_reindex: index_sweep_running.then(|| index_reindex_requested.clone()),
         account_sync: account_syncer.clone(),
         sensor_storage,
@@ -4304,8 +3531,7 @@ async fn run_server(
         face_recognition,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
-        // Long-lived per-device notification streams get their own, larger pool
-        // so connected phones never starve interactive chat SSE (#99 audit).
+        // Own, larger pool so long-lived phone streams never starve interactive chat SSE.
         notification_sse_semaphore: Arc::new(tokio::sync::Semaphore::new(32)),
         answer_reviewer: answer_reviewer_for_http,
         memory_extractor: memory_extractor_for_http,
@@ -4341,11 +3567,7 @@ async fn run_server(
         mesh_rebuild: Some(mesh_rebuild),
     });
 
-    // Spawn OAuth token auto-refresh worker.
-    // Proactively refreshes tokens every 45 minutes so extensions don't hit
-    // 401 errors mid-conversation. This worker only updates the secret store;
-    // it does NOT restart extensions (avoids disrupting active tool calls).
-    // Extensions get restarted on the next 401 retry or server restart.
+    // OAuth refresh updates secrets only; restarting extensions would break in-flight tool calls.
     {
         let refresh_secret_repo = state.secret_repo.clone();
         let refresh_http_client = reqwest::Client::new();
@@ -4361,7 +3583,6 @@ async fn run_server(
                         continue;
                     };
 
-                    // Only refresh if we have a refresh token stored
                     let has_refresh = repo.has(&provider.refresh_key).await.unwrap_or(false);
                     if !has_refresh {
                         continue;
@@ -4379,11 +3600,7 @@ async fn run_server(
                         .flatten()
                         .unwrap_or_else(|| provider.bundled_client_id.clone());
 
-                    // PAI-2 P6a: gate before the token leaves the machine. This
-                    // is a background loop, so a refusal skips THIS provider on
-                    // THIS tick and the loop keeps running -- killing the worker
-                    // would mean tightening network_mode once permanently
-                    // disabled refresh, even after the user loosened it again.
+                    // On refusal skip this tick only; the user may loosen network_mode later.
                     let call = match pond_core::shared::services::egress::begin(
                         &provider.token_url,
                         "POST",
@@ -4445,9 +3662,7 @@ async fn run_server(
         tracing::info!("OAuth auto-refresh worker started — runs every 45 minutes");
     }
 
-    // Advertise _pond._tcp.local. so phones on the LAN can discover this hub.
-    // The handle is kept alive for the duration of the server; dropping it
-    // deregisters the service gracefully.
+    // Named binding, not `_`: dropping the handle deregisters the mDNS service.
     let _mdns_handle =
         match mdns_advertiser::advertise(&pairing_hostname, api_port, env!("CARGO_PKG_VERSION")) {
             Ok(h) => {
@@ -4460,9 +3675,6 @@ async fn run_server(
             }
         };
 
-    // The web UI is normally embedded into this binary (single executable). We
-    // only fall back to `static_dir` when the binary was built without the UI,
-    // so a missing dir is only worth warning about in that case.
     if !pond_api::web_ui_embedded() && !static_dir.exists() {
         tracing::warn!(
             "No web UI embedded and static dir {:?} not found — the dashboard will \
@@ -4472,17 +3684,11 @@ async fn run_server(
         );
     }
 
-    // Build router
-    // Precompile the static prompt prefix before the first message arrives:
-    // the model load and the multi-thousand-token preamble prefill move to
-    // boot, and turn 1 hits the engine's ReusePrefix path. Progress is
-    // mirrored into `state.warmup` for GET /api/v1/warmup (the UI's boot
-    // banner); the settings handler re-runs this on a provider/model change.
+    // Load the model and prefill the static prompt prefix at boot, so turn 1 reuses it.
     pond_api::spawn_prefix_prewarm(state.clone(), false);
 
     let app = pond_api::build_router(state, static_dir);
 
-    // Resolve hostname — strip trailing ".local" if the OS already appended it
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "localhost".to_string());
@@ -4502,11 +3708,6 @@ async fn run_server(
     println!("  📡 API:       {}/api/v1/health", display_url);
     println!();
 
-    // Open the browser when:
-    //   - `--open` is explicitly passed, OR
-    //   - `--debug` is passed and the host has a graphical display.
-    // On Linux a display requires DISPLAY (X11) or WAYLAND_DISPLAY to be set.
-    // On macOS and Windows a display is always assumed to be present.
     if open || (debug && has_display()) {
         let url = format!("http://localhost:{}", api_port);
         if webbrowser::open(&url).is_err() {
@@ -4514,14 +3715,11 @@ async fn run_server(
         }
     }
 
-    // --native: spawn the desktop app after the server is ready (macOS only).
     if native {
         spawn_desktop_app(api_port).await;
     }
 
-    // Serve until a shutdown signal. We race the server against the signal
-    // rather than using graceful shutdown so long-lived SSE streams (chat,
-    // notifications) can't hold shutdown open indefinitely.
+    // Race rather than graceful shutdown: long-lived SSE streams would hold it open forever.
     tokio::select! {
         result = axum::serve(
             listener,
@@ -4534,10 +3732,7 @@ async fn run_server(
         }
     }
 
-    // Stop the matter-server GIAP started, if any. kill_on_drop does not fire on
-    // the signal path (the process exits without unwinding), so the runtime is
-    // asked to kill it here — otherwise the controller orphans and survives the
-    // Pond, including under `systemctl stop`.
+    // kill_on_drop doesn't fire on the signal path; kill matter-server here or it orphans.
     if let Some(matter) = &matter_runtime {
         matter.shutdown().await;
     }
@@ -4545,10 +3740,7 @@ async fn run_server(
     Ok(())
 }
 
-/// Resolves when the process is asked to stop: Ctrl-C on any platform, plus
-/// SIGTERM on Unix (what `systemctl stop` and `docker stop` send). Used to end
-/// serving so shutdown cleanup — notably killing the matter-server child — runs
-/// instead of the process being torn down mid-flight.
+/// Resolves on Ctrl-C, or SIGTERM on Unix (what `systemctl stop` and `docker stop` send).
 async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
@@ -4560,7 +3752,6 @@ async fn shutdown_signal() {
             Ok(mut sig) => {
                 sig.recv().await;
             }
-            // If we can't install the handler, never resolve on this arm.
             Err(_) => std::future::pending::<()>().await,
         }
     };
@@ -4586,7 +3777,6 @@ fn print_pairing_qr(url: &str) {
                 .light_color(unicode::Dense1x2::Dark)
                 .quiet_zone(true)
                 .build();
-            // Indent each line to match the banner style.
             for line in image.lines() {
                 println!("  {line}");
             }
@@ -4595,24 +3785,11 @@ fn print_pairing_qr(url: &str) {
     }
 }
 
-/// Locate and spawn the pond-desktop app.
-///
-/// macOS only: the desktop shell is an Electron app and is not packaged for
-/// Linux. On the Jetson the UI is the dashboard this very server already
-/// serves over HTTP, so there is nothing to spawn and nothing missing.
-///
-/// Search order:
+/// Launches the first desktop shell found, in this order:
 ///   1. `$GIAP_DESKTOP_BIN`                                    — explicit override
 ///   2. `/Applications/Goose In A Pond.app/...`                — installed
 ///   3. `pond-desktop/release/mac-*/Goose In A Pond.app/...`   — local package
 ///   4. `pond-desktop/node_modules/.bin/electron`              — dev, unpackaged
-///
-/// Note there is no debug/release pair to confuse any more. The Tauri version
-/// probed a debug build FIRST, so a stale `cargo build` artifact silently took
-/// precedence over the release one -- a trap documented in four places, and
-/// one that cannot occur here.
-///
-/// The child process is detached (not joined) so the server keeps running.
 #[cfg(target_os = "macos")]
 async fn spawn_desktop_app(server_port: u16) {
     const APP_SUFFIX: &str = "Goose In A Pond.app/Contents/MacOS/Goose In A Pond";
@@ -4639,8 +3816,7 @@ async fn spawn_desktop_app(server_port: u16) {
         return;
     }
 
-    // Unpackaged dev: run Electron against the repo checkout. It needs the
-    // app directory as its argument, which a packaged bundle does not.
+    // Dev Electron, unlike a packaged bundle, needs the app directory as its argument.
     let dev_electron = std::path::PathBuf::from("pond-desktop/node_modules/.bin/electron");
     if dev_electron.exists() {
         tracing::info!("Launching the desktop app through the dev Electron runtime");
@@ -4657,9 +3833,7 @@ async fn spawn_desktop_app(server_port: u16) {
 async fn launch_desktop(path: &std::path::Path, args: &[&str], server_port: u16) {
     let mut child = match std::process::Command::new(path)
         .args(args)
-        // The shell reads this and MUST NOT spawn its own server; it attaches
-        // to ours instead. Without it there are two pond-servers fighting for
-        // one port, which presents as a blank window.
+        // Makes the shell attach to this server rather than spawn a rival on the same port.
         .env("GIAP_SERVER_PORT", server_port.to_string())
         .spawn()
     {
@@ -4674,14 +3848,7 @@ async fn launch_desktop(path: &std::path::Path, args: &[&str], server_port: u16)
     };
     let pid = child.id();
 
-    // Spawning is not the same as appearing, and this is the gap that made
-    // --native look broken: the app takes a single-instance lock, so if one is
-    // already running the process we just started quits within a few hundred
-    // milliseconds, in silence. Reporting "started" and returning left a server
-    // with no window on it and a log that claimed success.
-    //
-    // try_wait also reaps the child, which is what stopped it becoming a zombie
-    // under the server for as long as the server ran.
+    // Wait, then check it survived: a second instance quits silently (single-instance lock).
     tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
     match child.try_wait() {
         Ok(Some(status)) => tracing::warn!(
@@ -4697,9 +3864,7 @@ async fn launch_desktop(path: &std::path::Path, args: &[&str], server_port: u16)
     }
 }
 
-/// The desktop shell is macOS-only, so `--native` has nothing to launch here.
-/// This is not a degraded mode: on Linux -- which in practice means the Jetson
-/// -- the UI is the dashboard this server already serves.
+/// Off macOS there is no desktop shell; on Linux the served dashboard is the UI.
 #[cfg(not(target_os = "macos"))]
 async fn spawn_desktop_app(server_port: u16) {
     tracing::warn!(
@@ -4708,13 +3873,7 @@ async fn spawn_desktop_app(server_port: u16) {
     );
 }
 
-/// Write one `WorkflowEvent` to stdout as a single NDJSON line (JSON + `\n`,
-/// flushed immediately). This is the single framing helper for the
-/// `--json-events` contract; both the streaming event sink and the
-/// `ready`/`error`/`exit` lifecycle emissions in `run_chat` route through it so
-/// they can never drift into two inconsistently-framed families on the same
-/// pipe. Broken-pipe/partial-write errors are ignored: a dead shell means the
-/// child is being torn down anyway.
+/// Writes one NDJSON line; every `--json-events` emission goes through it so framing can't drift.
 fn write_ndjson_line(ev: &pond_core::shared::domain::agent::WorkflowEvent) {
     use std::io::Write as _;
     if let Some(line) = ev.to_ndjson() {
@@ -4725,21 +3884,8 @@ fn write_ndjson_line(ev: &pond_core::shared::domain::agent::WorkflowEvent) {
     }
 }
 
-/// Build the speech detector the capture loops should use, or `None` to keep
-/// the energy gate.
-///
-/// Diagnostics go to stderr rather than through `out!`: that macro is a no-op
-/// under `--json-events`, which is the only mode the desktop shell uses, so a
-/// warning printed with it would reach nobody in the case that matters most.
-///
-/// The composition root owns this choice because `pond-adapters-whisper` is in
-/// CI's fast-crate set and must stay buildable without an ONNX Runtime; it
-/// knows the trait and nothing else.
-///
-/// Every failure degrades to `None` rather than propagating — a missing model,
-/// a dead download, an ONNX Runtime that will not load. A pond that cannot load
-/// its VAD should be a pond with a worse VAD, not a deaf one, and the energy
-/// gate it falls back to is the one that shipped for a year.
+/// Returns the Silero VAD, or `None` (energy gate) on any failure: a worse VAD, never a deaf pond.
+/// Diagnostics use stderr: `out!` is a no-op under `--json-events`, the desktop's only mode.
 async fn build_speech_detector(
     vad_backend: &str,
     data_dir: &std::path::Path,
@@ -4749,29 +3895,15 @@ async fn build_speech_detector(
         return None;
     }
     if !vad_backend.eq_ignore_ascii_case("silero") {
-        // Validation rejects anything outside `VAD_BACKENDS` at the API, but
-        // `apply_key` stores whatever is in the row verbatim, so a hand-edited
-        // database can still land here. Say so rather than silently choosing.
+        // A hand-edited DB can land here: `apply_key` skips the API's `VAD_BACKENDS` validation.
         eprintln!("  Listen   unknown vad_backend \"{vad_backend}\" — using the energy gate.");
         return None;
     }
 
-    // This DOES download, in front of `ready`, which is the opposite of what
-    // the Kokoro engine does a few hundred lines below — and deliberately.
-    // Kokoro's weights are 92 MB and `serve` has already fetched them, so the
-    // voice child can refuse and report a diagnostic. These are 2 MB, and
-    // `chat --voice` has to work as a standalone command with no server ever
-    // having run: refusing here would mean the detector is only ever on for
-    // people who happened to start the desktop first. The whisper model on the
-    // same path is 142 MB and fetches here too, so on the run where this is
-    // slow it is not what is making it slow.
+    // Fetched before `ready`, unlike Kokoro: it's 2 MB and `chat --voice` must work with no server.
     let path = model_download::ensure_silero_model(data_dir).await?;
 
-    // Bounded, because a broken ONNX Runtime does not fail — it HANGS.
-    // `load-dynamic` with no dylib to open blocks forever inside ort's init,
-    // and an unbounded wait here is a permanently silent startup with nothing
-    // in the log. Kokoro's engine load is guarded the same way, for the same
-    // reason.
+    // Bounded: with no dylib, ort's `load-dynamic` init hangs forever instead of failing.
     const LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
     let loading = tokio::time::timeout(
         LOAD_TIMEOUT,
@@ -4816,9 +3948,7 @@ async fn run_chat(
     session_id_arg: Option<&str>,
     json_events: bool,
 ) -> Result<()> {
-    // In `--json-events` mode, stdout carries NOTHING but NDJSON lines. All the
-    // human-facing banners/prompts below route through `out!`, which no-ops when
-    // json_events is set. Diagnostics still reach stderr via `eout!`.
+    // Under `--json-events` stdout is NDJSON only, so human output must go through `out!`.
     macro_rules! out {
         ($($arg:tt)*) => {
             if !json_events {
@@ -4827,8 +3957,6 @@ async fn run_chat(
         };
     }
 
-    // Error/diagnostic output. Always writes to stderr, so it survives
-    // `--json-events` mode (which reserves stdout exclusively for NDJSON).
     macro_rules! eout {
         ($($arg:tt)*) => {
             eprintln!($($arg)*);
@@ -4840,21 +3968,11 @@ async fn run_chat(
         env!("CARGO_PKG_VERSION")
     );
 
-    // Before anything opens an audio device or loads a model: one voice
-    // session per device. Two sessions fight over the microphone and the
-    // speaker, and the symptoms never name that as the cause — they look like
-    // two assistants answering in different voices, or like a stream
-    // configuration the device has suddenly stopped supporting.
-    //
-    // Held for the rest of this function; released when the process exits,
-    // however it exits.
+    // Taken before any audio device opens: two sessions on one device fight over mic and speaker.
     let _voice_lock = match voice_lock::VoiceLock::acquire() {
         Ok(lock) => lock,
         Err(e) => {
-            // Returned, not printed: `main` already renders the error to
-            // stderr, and printing it here as well showed the user the same
-            // paragraph twice. The NDJSON events are additive — the desktop
-            // shell reads those, never stderr.
+            // `main` prints the error; the desktop shell reads only these NDJSON events.
             if json_events {
                 use pond_core::shared::domain::agent::WorkflowEvent;
                 write_ndjson_line(&WorkflowEvent::Error {
@@ -4869,34 +3987,18 @@ async fn run_chat(
     };
 
     let data_dir = default_data_dir();
-    // NOTE: `ensure_onnx_runtime()` used to be called here, before the database
-    // even existed. It moved below the settings load for the reason given at
-    // its new site. PAI-2 P6a.
     let db = Database::init(&data_dir).await?;
 
-    // And the sensor store. `run_server` installs all three; this path
-    // installed only two, so every voice session logged
-    // "spawn_sensor_server called before init_sensor_deps" and then failed to
-    // load giap-sensors — the extension was simply missing from voice, with
-    // an error on the console saying so.
+    // Needed on this path too, or giap-sensors fails to load in voice sessions.
     pond_mcp_server::init_sensor_deps(
         Arc::new(SqliteSensorStorage::new(db.logs.clone())),
         Arc::new(SqliteDeviceRegistry::new(db.system.clone())),
-        // No Matter runtime on this path, so no device to read live. The port's
-        // default `state` bails, which is exactly the case the stored fallback
-        // exists for -- and the reply says the reading is stored and how old it is
-        // rather than passing it off as current.
+        // No Matter here: `state` bails, so replies use the stored reading, labelled with its age.
         Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
     );
 
-    // And the personal-context read handles — the fourth verse of the same
-    // song (audit #115/#157, vision #130, sensors above): `serve` installed
-    // them and this path did not, so the first voice session that loaded
-    // giap-context panicked with "init_context_deps() not called"
-    // (2026-08-27) — and, before the spawn fns learned to degrade, took every
-    // other builtin server down with it. No vector index or embedder here:
-    // like the serve path without an embedding provider, `recall` answers
-    // nothing rather than quietly degrading to context-only results.
+    // Needed here too, or giap-context fails to load. No index or embedder on this path, so
+    // `recall` returns nothing rather than degrading to context-only results.
     pond_mcp_server::context::init_context_deps(
         Arc::new(pond_infra::sqlite_context::SqliteContextRepository::new(
             db.system.clone(),
@@ -4906,28 +4008,18 @@ async fn run_chat(
         None,
     );
 
-    // Load settings and model registry early — drives provider, model, TTS, and wake word.
-    // Falls back to Settings::default() when the DB has no rows yet (first run).
     let settings_repo_chat = SqliteSettingsRepository::new(db.system.clone());
     let settings = settings_repo_chat.get().await.unwrap_or_default();
 
-    // PAI-2 P6a: install the egress gate on THIS path too. `set_network_mode`
-    // had exactly one call site, inside `run_server`, and the mode is a
-    // process-global that defaults to `Open` — so `network_mode = "offline"`
-    // was a silent no-op for the whole of `pond chat`, which is also the
-    // terminal voice loop. Every outbound call this process makes, gated or
-    // not, was evaluated against a setting nobody had read.
+    // The mode is a process-global defaulting to `Open`; each entry point must install it.
     pond_core::shared::services::egress::set_network_mode(
         pond_core::shared::services::egress::NetworkMode::parse(&settings.network_mode),
     );
 
-    // Must run before any ONNX-dependent init (Piper TTS); without it
-    // ORT_DYLIB_PATH is never set and Piper::new() hangs indefinitely. It runs
-    // after the mode install above because it can download ~100 MB from
-    // github.com, and a download cannot be gated by a setting read afterwards.
+    // Before any ONNX init (else ORT_DYLIB_PATH is unset and Piper::new() hangs), and after the
+    // egress mode install, since it may download ~100 MB.
     ensure_onnx_runtime();
 
-    // CLI args override settings; settings provide the defaults from the chat role.
     let settings_provider = settings.chat_provider.clone();
     let effective_provider: &str = provider.unwrap_or(&settings_provider);
 
@@ -4937,18 +4029,8 @@ async fn run_chat(
     // Apply the microphone privacy setting before anything can open a device.
     pond_core::models::domain::mic_gate::set_mic_enabled(settings.mic_enabled);
 
-    // Single shared microphone owner (see `pond_audio`). Before this, the
-    // wake-word detector, the VAD follow-up capture, and the "record until
-    // silence" one-breath capture each opened their own `cpal` stream — live
-    // simultaneously by design (the wake listener races the reply for
-    // barge-in), which could race the very next turn's capture for the same
-    // device. Every capture path in this session goes through this one
-    // handle instead, so opens/closes are serialized on one owner thread.
-    //
-    // Sized to the wake-word detector's own history requirement —
-    // `window_ms.max(lookback_ms) + post_trigger_ms` from
-    // `KeywordDetectorConfig::default()` (~13.4s) — with headroom; see the
-    // sizing rule on `pond_audio::spawn`.
+    // Every capture path must use this one mic owner. 15_000 ms covers the wake-word detector's
+    // ~13.4 s history with headroom (see `pond_audio::spawn`).
     let (mic_handle, _mic_owner_join) = pond_audio::spawn(
         Box::new(pond_audio::CpalCapture::new()),
         pond_audio::CAPTURE_RATE_HZ,
@@ -4956,8 +4038,6 @@ async fn run_chat(
         settings.mic_enabled,
     );
 
-    // One resolution for both voice models, accepting every on-disk shape the
-    // settings fields have carried. See `voice_models` for why there are three.
     let voice_models = voice_models::resolve_voice_models(
         &settings,
         &SqliteModelRepository::new(db.system.clone()),
@@ -4965,36 +4045,20 @@ async fn run_chat(
     )
     .await;
 
-    // Setup problems worth telling the UI about, held until after `ready`.
-    // The NDJSON contract guarantees `ready` is the FIRST line and the desktop
-    // keys session setup on it, so a diagnostic emitted during wiring would
-    // both break the contract and arrive before there is a session to attach
-    // it to. Flushed immediately after `ready` below.
+    // Held until after `ready`, which the NDJSON contract requires to be the first line.
     let deferred_diagnostics: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
 
-    // Resolve the TTS engine from the CLI flag, else from what actually
-    // resolved. The old test was `active_tts_model.starts_with("piper")`, which
-    // is never true for a catalog name like `en-lessac-medium` — so every
-    // install fell through to text-only and said nothing about it.
     let effective_tts_owned: String;
     let effective_tts: &str = match tts {
         Some(t) => t,
         None => {
-            // Kokoro is the engine. Nothing else is.
-            //
-            // This used to fall through to `active_tts_model`, which since the
-            // engine swap holds a Kokoro VOICE name ("af_heart"). That matched
-            // no arm below, so voice mode selected the catch-all and went
-            // text-only — the session looked healthy over NDJSON and simply
-            // never made a sound.
+            // Always Kokoro; `active_tts_model` is a voice name ("af_heart"), not an engine.
             effective_tts_owned = "kokoro".to_string();
             &effective_tts_owned
         }
     };
 
-    // Resolve the whisper ggml model path for the in-process backend. Only
-    // under --voice: outside it there is no microphone and no reason to make a
-    // text session wait on a 142 MB download.
+    // Only under --voice: a text session shouldn't wait on a 142 MB whisper download.
     let whisper_model_path: Option<std::path::PathBuf> = if voice_mode {
         match voice_models.whisper.as_ref() {
             None => {
@@ -5065,8 +4129,7 @@ async fn run_chat(
         }
     }
 
-    // Auto-start llamafile only when the provider is explicitly "llamafile".
-    // Other providers (ollama, local, gguf, openai, etc.) manage their own process or need no process.
+    // Other providers run their own process or need none.
     let mut llamafile_port = ports::llamafile_port();
     let _llamafile_guard = if effective_provider == "llamafile" {
         match llamafile_process::try_start(&data_dir, chat_model_service, Some(effective_model))
@@ -5083,33 +4146,14 @@ async fn run_chat(
     };
     let llamafile_url = llamafile_process::url_for(llamafile_port);
 
-    // `--session-id` replaces the historical hardcoded "default-session" so the
-    // desktop shell can pass a per-session uuid; the UI then reads history via
-    // GET /api/v1/sessions/{id}/messages. Defaults to "default-session" when
-    // absent (backward compatible). ensure_session_title still derives a
-    // readable sidebar title from the first user message on this session.
     let session_id = session_id_arg.unwrap_or("default-session").to_string();
 
     // ── Build repos for GooseAdapter (before db.system is consumed) ───────────────
     let settings_repo_arc: Arc<
         dyn pond_core::user_data::ports::settings::SettingsRepository + Send + Sync,
     > = Arc::new(SqliteSettingsRepository::new(db.system.clone()));
-    // Chokepoint 1 again. This entry point hands `memory_repo` to
-    // `build_goose_backend`, which registers `giap-memory` -- so a CLI or voice
-    // session writes memories exactly like the server does, and leaving the
-    // repo raw here would be a hole in the chokepoint that nothing warns about.
-    //
-    // The index side of that same chokepoint, with the model id deliberately
-    // `None`. `db.vectors` exists on every entry point, but the embedder does
-    // not: this path passes `None` for `embedding_provider` to
-    // `build_goose_backend` below, so nothing here can say which model produced
-    // a vector. `None` is the honest answer rather than a guess --
-    // `SqliteMemoryRepository::mirror` reads it as "leave any attributed entry
-    // alone and let the sweep own it", which is exactly right for a process that
-    // cannot attribute. What the handle still buys on an embedder-less path is
-    // `delete`: the `giap-memory` tool this backend registers can forget a
-    // memory, and without the index the row went and its vector stayed behind as
-    // an orphan until someone ran `prune_orphans`.
+    // Same chokepoint as the server: this backend registers `giap-memory`. Model id `None` as
+    // there's no embedder here; the index is still needed so `delete` removes the vector too.
     let memory_repo: Arc<
         dyn pond_core::user_data::ports::memory_repository::MemoryRepository + Send + Sync,
     > = Arc::new(
@@ -5140,9 +4184,7 @@ async fn run_chat(
         dyn pond_core::user_data::ports::device_registry::DeviceRegistry + Send + Sync,
     > = Arc::new(SqliteDeviceRegistry::new(db.system.clone()));
 
-    // Reseed built-in prompt templates at startup with the latest Jinja2 general-purpose content.
-    // Uses upsert (not insert_if_absent) so existing installs get the updated templates.
-    // User-created templates (is_system = false) are never touched.
+    // Upsert so existing installs get updated built-ins; user templates are never touched.
     {
         use pond_core::prompts::BUILTIN_PROMPT_TEMPLATES;
         use pond_core::user_data::domain::prompt_template::PromptTemplate;
@@ -5165,10 +4207,6 @@ async fn run_chat(
         tracing::info!("Built-in prompt templates reseeded (Jinja2 general-purpose copilot)");
     }
 
-    // Wire weather so giap__get_current_weather MCP tool is available in voice mode.
-    // Same gate as the primary wiring above: coordinates OR a location name (the
-    // adapter geocodes the name), so an onboarded name-only config still works.
-    // The same question the HTTP wiring asks above, through the same function.
     let weather: Option<Arc<dyn WeatherProvider>> = match (
         settings.weather_enabled,
         pond_core::user_data::services::location::resolve(&settings).weather_target(),
@@ -5180,28 +4218,16 @@ async fn run_chat(
     };
 
     // ── Build the GooseAdapter (MCP tools + model routing) ───────────────────────
-    // When goose-agent is compiled in, GooseAdapter is used for all inference —
-    // it selects provider/model internally via the settings DB.  CLI --provider
-    // and --model flags are persisted to the DB first so GooseAdapter picks them up.
-    //
-    // Without the feature we fall back to MockAgent and wire a direct LlmProvider
-    // via with_provider() later (identical to the old behaviour).
     #[cfg(feature = "goose-agent")]
     let agent: Arc<dyn Agent> = {
-        // Persist CLI overrides so GooseAdapter reads the right provider + model.
-        // `--provider mock` is a test/dev-only shortcut that routes to MockAgent and
-        // never consults the DB provider, so we must NOT write "mock" into the user's
-        // real settings — a later `serve` would read it back and break live chat.
+        // Persist CLI overrides for GooseAdapter, but never "mock": a later `serve` would use it.
         if (provider.is_some() || model.is_some()) && effective_provider != "mock" {
             let mut s = settings.clone();
             s.chat_provider = effective_provider.to_string();
             s.chat_model = effective_model.to_string();
             settings_repo_arc.update(&s).await.ok();
         }
-        // `--provider mock` routes to the MockAgent backend so the loop runs
-        // deterministically offline (no llamafile/network/models) — used by the
-        // json-events spawn-binary contract test. Any other provider uses the
-        // live GooseAdapter, which selects its own provider/model via the DB.
+        // `mock` runs the loop offline and deterministically, for the json-events contract test.
         let agent_backend = if effective_provider == "mock" {
             "mock"
         } else {
@@ -5227,7 +4253,7 @@ async fn run_chat(
             Some(trim_storage), // powers the trimmer's summary splice
             Some(chat_model_repo.clone()),
             voice_mode,
-            Arc::new(tokio::sync::RwLock::new(None)), // mesh_provider — CLI chat doesn't build the mesh stack (server-only for now)
+            Arc::new(tokio::sync::RwLock::new(None)), // mesh_provider: no mesh stack in CLI chat
         )
         .await;
         a
@@ -5236,9 +4262,7 @@ async fn run_chat(
     #[cfg(not(feature = "goose-agent"))]
     let agent: Arc<dyn Agent> = Arc::new(MockAgent::new());
 
-    // Resolve the system prompt using the already-loaded settings:
-    // 1. File at $DATA_DIR/prompts/system.md (deployment override, rendered with all vars)
-    // 2. build_system_prompt(&settings) — honours custom_system_prompt + prompt_style + addendum
+    // `$DATA_DIR/prompts/system.md` is a deployment override of the built prompt.
     let system_prompt = {
         let prompt_dir = data_dir.join("prompts");
         let file_template = std::fs::read_to_string(prompt_dir.join("system.md")).ok();
@@ -5253,10 +4277,7 @@ async fn run_chat(
                 let persona =
                     pond_core::prompts::sanitize_field(&settings.assistant_personality, 200);
                 let tz = pond_core::prompts::sanitize_field(&settings.timezone, 50);
-                // Through the resolver, like `prompts.rs` already does. This
-                // copy read the raw field, so the two prompt paths described
-                // the same pond differently: one knew the time zone implied a
-                // city and the other said nothing at all.
+                // Via the resolver, like `prompts.rs`, so both prompt paths agree on the location.
                 let location =
                     match pond_core::user_data::services::location::resolve(&settings).describe() {
                         Some(place) => format!(
@@ -5283,11 +4304,9 @@ async fn run_chat(
     };
 
     let storage: Arc<dyn SessionStorage> = Arc::new(SqliteSessionStorage::new(db.system.clone()));
-    // Create session if it doesn't exist; ignore duplicate-key errors from prior runs
     if let Err(e) = storage.create_session(session_id.clone()).await {
         match e {
             pond_core::user_data::ports::session_storage::SessionStorageError::StorageError(_) => {
-                // Likely a duplicate key — session already exists, which is fine
                 tracing::debug!("Session already exists, reusing: {}", session_id);
             }
             other => return Err(other.into()),
@@ -5301,18 +4320,13 @@ async fn run_chat(
     if let Some(model_name) = model {
         chat_service = chat_service.with_model_name(model_name);
     }
-    // Durable per-turn telemetry (TTFT, tok/s, context) for voice turns —
-    // same turn_metrics table the REST path writes.
+    // Voice turns land in the same turn_metrics table as the REST path.
     match SqliteTelemetry::new(db.logs.clone()).await {
         Ok(telemetry) => chat_service = chat_service.with_telemetry(Arc::new(telemetry)),
         Err(e) => tracing::warn!("voice telemetry disabled (init failed): {e}"),
     }
 
     // ── NDJSON event sink (--json-events) ──────────────────────────────────────
-    // Writes one serialized WorkflowEvent per line to stdout with immediate
-    // flush. In this mode the run_loop's human-facing prints are suppressed
-    // (stdout_diagnostics=false) so stdout carries NOTHING but JSON lines. The
-    // The desktop shell parses these lines to drive its voice UI.
     if json_events {
         let sink: pond_core::shared::services::chat::WorkflowEventSink =
             Arc::new(|event: &pond_core::shared::domain::agent::WorkflowEvent| {
@@ -5323,9 +4337,7 @@ async fn run_chat(
             .with_stdout_diagnostics(false);
     }
 
-    // Live mic-level reporting for the voice-mode UI orb (wait + recording
-    // states). Only meaningful under --json-events — the desktop shell is the
-    // only consumer of this NDJSON contract.
+    // Drives the desktop voice orb; only the shell consumes it, so --json-events only.
     let audio_level_sink: Option<Arc<pond_adapters_whisper::ThrottledAudioLevelSink>> =
         if json_events {
             Some(Arc::new(
@@ -5340,8 +4352,6 @@ async fn run_chat(
         };
 
     // ── Wire LLM provider (no-goose-agent fallback only) ────────────────────────
-    // When GooseAdapter is active it selects the provider internally via the DB.
-    // This block runs only in builds without the goose-agent feature.
     #[cfg(not(feature = "goose-agent"))]
     match effective_provider {
         "ollama" => {
@@ -5399,7 +4409,6 @@ async fn run_chat(
             }
         }
         _ => {
-            // "llamafile" and any unrecognised value — use the llamafile process started above.
             out!(
                 "  Model:    {} (llamafile @ {}, max_tokens={}, temp={})",
                 effective_model,
@@ -5417,9 +4426,6 @@ async fn run_chat(
     }
 
     // ── Wire voice input ──
-    // Build a shared in-process Whisper backend once per session. It powers
-    // both the `VoiceInput` adapter and the wake-word detector — no separate
-    // KWS subprocess needed any more.
     let whisper_backend: Option<Arc<WhisperRsInput>> = if voice_mode {
         match &whisper_model_path {
             Some(p) => match WhisperRsInput::new(p.clone(), mic_handle.clone()) {
@@ -5431,12 +4437,7 @@ async fn run_chat(
                     Some(Arc::new(w))
                 }
                 Err(e) => {
-                    // Whisper was explicitly requested but failed to load. Under
-                    // --json-events, out! is a no-op, so a bare warning would leave
-                    // the desktop shell with a deaf session and zero diagnostics.
-                    // Surface it on stderr (eout!) AND as an NDJSON error event so
-                    // the UI can tell voice input is unavailable before we degrade
-                    // to stdin (which the shell holds open and never writes to).
+                    // NDJSON error too: the shell never writes stdin, so this session is deaf.
                     eout!("  Listen   FAILED to load speech model: {}", e);
                     eout!("           Falling back to typed input.");
                     out!("  Listen   FAILED to load speech model: {}", e);
@@ -5454,9 +4455,7 @@ async fn run_chat(
                 }
             },
             None => {
-                // whisper requested but no usable model path (download failed or
-                // model not in catalog — already warned above via out!). Same
-                // deaf-session hazard under --json-events: surface it.
+                // No usable model (warned above via out!); same deaf-session hazard.
                 eout!("  Listen   speech model unavailable — falling back to typed input.");
                 if json_events {
                     write_ndjson_line(&pond_core::shared::domain::agent::WorkflowEvent::Error {
@@ -5472,10 +4471,7 @@ async fn run_chat(
         None
     };
 
-    // Swap in the configured detector, if there is one and it loads. Done after
-    // construction rather than passed to `new` because both the VoiceInput
-    // adapter and the wake-word detector share this one instance, and the
-    // choice is a setting rather than a property of the model file.
+    // Set on the shared backend, so both voice input and the wake-word detector use it.
     if let Some(backend) = &whisper_backend {
         if let Some(detector) = build_speech_detector(&settings.vad_backend, &data_dir).await {
             backend.set_speech_detector(detector);
@@ -5538,25 +4534,18 @@ async fn run_chat(
             detector_builder = detector_builder.with_audio_level_sink(sink.clone());
         }
         let detector = Arc::new(detector_builder);
-        // The detector captures audio from before it fired, so the wake word
-        // is inside the command clip. Hand the transcriber the detector's own
-        // resolved trigger list so it strips exactly what matched.
+        // The command clip contains the wake word; strip exactly the triggers the detector used.
         backend.set_wake_words(detector.triggers());
         chat_service = chat_service.with_wake_word_detector(detector);
     };
 
     // ── Wire barge-in energy ──
-    // `MicEnergy` reads live RMS off the same shared mic owner every other
-    // capture path here uses. Without this, `ChatService::new`'s default
-    // `NoEnergy` is inert and barge-in-by-speaking silently never fires — the
-    // wake word was the only way to interrupt a reply.
+    // Required: the default `NoEnergy` is inert, so barge-in by speaking would never fire.
     chat_service =
         chat_service.with_speech_energy(Arc::new(pond_audio::MicEnergy::new(&mic_handle)));
 
     // ── Wire TTS output ──
-    // The text/print fallback (no piper): in --json-events mode this MUST NOT
-    // write to stdout (the assistant text is already streamed as NDJSON `token`
-    // events), so use SilentOutput. Otherwise PrintOutput echoes to stdout.
+    // Never stdout under --json-events: the text already streams as NDJSON `token` events.
     let text_fallback = || -> Arc<dyn VoiceOutput> {
         if json_events {
             Arc::new(SilentOutput)
@@ -5564,12 +4553,7 @@ async fn run_chat(
             Arc::new(PrintOutput)
         }
     };
-    // Same as text_fallback, but first surfaces WHY voice output is unavailable as
-    // a non-fatal NDJSON error event. Under --json-events the SilentOutput fallback
-    // makes a broken-TTS session protocol-indistinguishable from a working one
-    // (state:speak + tokens stream while zero audio plays); this lets the UI tell
-    // the user the response is text-only and why. Non-json runs get PrintOutput and
-    // still see the answer, so only the event differs.
+    // Also reports why: under --json-events silent TTS otherwise looks exactly like working TTS.
     let tts_unavailable = |reason: &str| -> Arc<dyn VoiceOutput> {
         if json_events {
             deferred_diagnostics.borrow_mut().push(format!(
@@ -5579,27 +4563,16 @@ async fn run_chat(
         text_fallback()
     };
     let voice_out: Arc<dyn VoiceOutput> = match effective_tts {
-        // Kokoro — the same engine `serve` builds, wired here because voice
-        // mode runs in THIS process, not through the HTTP server. Wiring one
-        // and not the other is why voice mode stayed on Piper (and then on
-        // nothing) while the Settings preview spoke correctly.
+        // Voice mode runs in-process, not via the server, so Kokoro is wired here as in `serve`.
         "kokoro" => {
-            // Deliberately does NOT download. `serve` ensures the engine; this
-            // child only uses it.
-            //
-            // Fetching here would put a 92 MB download in front of `ready`,
-            // and the desktop keys the whole voice session on `ready` being the
-            // first line out. A missing engine is reported as a diagnostic the
-            // UI can show, which is a far better failure than a session that
-            // appears to hang at startup.
+            // Never downloads (`serve` does): 92 MB before `ready` would look like a hang.
             let kdir = model_download::kokoro_dir(&data_dir);
             let espeak_data_dir = {
                 let p = model_download::piper_espeak_data_path(&data_dir);
                 p.exists().then_some(p)
             };
             let cfg = pond_adapters_kokoro::KokoroConfig {
-                // Same resolution `serve` does — the voice child reads the same
-                // settings row and must not load a tier that is silent here.
+                // Resolved as in `serve`: never load a tier that is silent here.
                 model_path: kdir.join(pond_adapters_kokoro::model_filename(
                     pond_adapters_kokoro::usable_quality(&settings.voice_tts_quality),
                 )),
@@ -5617,8 +4590,7 @@ async fn run_chat(
                     Ok(out) => {
                         let voice = settings.voice_tts_voice.trim();
                         if !voice.is_empty() && out.set_voice(voice).await.is_err() {
-                            // The default voice is always fetched, so this
-                            // degrades to a different voice, never to silence.
+                            // The default voice is always fetched; this never degrades to silence.
                             out!(
                                 "  Speak    voice '{}' unavailable — using the default",
                                 voice
@@ -5646,16 +4618,9 @@ async fn run_chat(
             text_fallback()
         }
         other => {
-            // Reached whenever no piper voice resolved. The old code treated
-            // this as a deliberate text-only choice and stayed quiet — but the
-            // desktop never chooses, it just spawns the child, so this arm was
-            // the whole "voice mode is silent and says nothing" symptom.
-            // Report it; silence must never be indistinguishable from success.
+            // Not a user choice (the desktop never picks one), so report it rather than go silent.
             out!("  Speak    off — replies are printed");
-            // Name the setting that is actually wrong. `other` is
-            // `active_tts_model`, but the voice is chosen by `voice_tts_voice`,
-            // so reporting on `other` alone told a user who had set a voice
-            // that they had not configured one.
+            // The voice comes from `voice_tts_voice`, so blame that setting before `other`.
             let configured_voice = settings.voice_tts_voice.trim();
             let reason = if !configured_voice.is_empty() {
                 format!("voice '{configured_voice}' is not installed and matches no catalog entry")
@@ -5669,22 +4634,14 @@ async fn run_chat(
     };
     chat_service = chat_service.with_voice_output(voice_out.clone());
 
-    // The console is deliberately near-silent from here on (tracing is pinned
-    // to WARN for it), so point at the file that is not — every detail of the
-    // session lands there and it is the first thing to ask for when something
-    // goes wrong.
+    // The console is pinned to WARN, so point at the full log file.
     out!(
         "  Log      {}",
         data_dir.join("logs").join("pond.log").display()
     );
 
     // ── Prefix warm-up + spoken readiness ─────────────────────────────────────
-    // The voice child used to pay model load + preamble prefill on the FIRST
-    // utterance, with the user already mid-sentence. Move that cost to session
-    // start, say so aloud while it runs, and greet by name when the pond is
-    // ready — the greeting doubles as the audible "you can speak now" signal.
-    // Under --json-events every spoken line goes through `voice_out`, which is
-    // SilentOutput when no TTS engine is up, so stdout stays pure NDJSON.
+    // Pay model load and prefill before the first utterance; the greeting signals "speak now".
     {
         use pond_core::models::ports::agent::WarmupPhase;
         use pond_core::shared::domain::agent::WorkflowEvent;
@@ -5729,10 +4686,7 @@ async fn run_chat(
     }
 
     // ── Emit `ready` (contract) ────────────────────────────────────────────────
-    // All models are loaded and every adapter is wired; announce readiness
-    // before entering the wait loop. run_loop emits the terminal `exit` event
-    // itself (stdin_eof on EOF, dismissed on hard exit); on an unexpected loop
-    // error we emit `exit` with reason "error" below.
+    // run_loop emits `exit` itself; only an unexpected loop error needs one here.
     if json_events {
         use pond_core::shared::domain::agent::WorkflowEvent;
         write_ndjson_line(&WorkflowEvent::Ready {
@@ -5766,14 +4720,9 @@ async fn run_chat(
 
 // ── Adversarial Answer Reviewer ───────────────────────────────────────────────
 
-/// Adversarial answer reviewer — post-inference quality gate.
-///
-/// Uses the same LlmProvider as the main LLM with a critic system prompt.
-/// Reviews the completed answer, and if it scores below threshold, sends
-/// the critique back to the LLM for revision.
+/// Critiques answers with the main LLM and sends below-threshold ones back for revision.
 struct GiapAnswerReviewer {
-    /// Live provider reference — reads from the RwLock so it always uses
-    /// whatever model is currently loaded.
+    /// Read per review, so it always uses the currently loaded model.
     live_provider:
         Arc<tokio::sync::RwLock<Option<Arc<dyn pond_core::models::ports::provider::LlmProvider>>>>,
     pass_threshold: u8,
@@ -5791,7 +4740,6 @@ impl pond_core::models::ports::answer_reviewer::AnswerReviewer for GiapAnswerRev
         use pond_core::models::domain::message::ChatMessage;
         use pond_core::models::ports::answer_reviewer::{ReviewResult, ReviewVerdict};
 
-        // Read the LIVE provider — always uses whatever model is currently loaded.
         let provider = {
             let guard = self.live_provider.read().await;
             match guard.as_ref() {
@@ -5807,7 +4755,6 @@ impl pond_core::models::ports::answer_reviewer::AnswerReviewer for GiapAnswerRev
         for _ in 0..self.max_rounds {
             rounds += 1;
 
-            // Step 1: Review the current answer
             let review_input = if let Some(ctx) = tool_context {
                 format!(
                     "QUESTION: {}\n\nCONTEXT PROVIDED TO THE ANSWERER:\n{}\n\nANSWER TO REVIEW:\n{}",
@@ -5841,7 +4788,6 @@ impl pond_core::models::ports::answer_reviewer::AnswerReviewer for GiapAnswerRev
                 });
             }
 
-            // Step 2: Revise the answer using the critique
             println!("[answer-reviewer] critique: {}", verdict.critique);
             let revision_input = format!(
                 "ORIGINAL QUESTION: {}\n\n\
@@ -5861,14 +4807,11 @@ impl pond_core::models::ports::answer_reviewer::AnswerReviewer for GiapAnswerRev
                 .complete(pond_core::prompts::REVISION_SYSTEM_PROMPT, revision_msg)
                 .await?;
 
-            // Strip thinking tags — the revision model (same GGUF provider)
-            // may emit <think>/<thought>/<|channel>thought reasoning in its
-            // revision, and this bypasses the SSE ThoughtFilter.
+            // This bypasses the SSE ThoughtFilter, so strip reasoning tags here.
             current_answer = strip_thinking_tags(&revision_response.content);
             last_verdict = Some(verdict);
         }
 
-        // Exhausted rounds — return the last revision
         Ok(ReviewResult {
             final_answer: current_answer,
             was_revised: true,
@@ -5883,10 +4826,7 @@ impl pond_core::models::ports::answer_reviewer::AnswerReviewer for GiapAnswerRev
     }
 }
 
-/// Strip reasoning-channel tags from model output.
-///
-/// Handles Gemma 4 (`<|channel>thought...<channel|>`), Qwen3/DeepSeek
-/// (`<think>...</think>`), and alternate `<thought>...</thought>` format.
+/// Strips reasoning from model output: Gemma 4 channels, Qwen3/DeepSeek `<think>`, `<thought>`.
 fn strip_thinking_tags(raw: &str) -> String {
     let mut text = raw.to_string();
 
@@ -5895,7 +4835,6 @@ fn strip_thinking_tags(raw: &str) -> String {
         text = text[pos + "<channel|>".len()..].trim().to_string();
     }
 
-    // <think>...</think> blocks
     while let Some(start) = text.find("<think>") {
         if let Some(end) = text[start..].find("</think>") {
             let before = &text[..start];
@@ -5907,7 +4846,6 @@ fn strip_thinking_tags(raw: &str) -> String {
         }
     }
 
-    // <thought>...</thought> blocks
     while let Some(start) = text.find("<thought>") {
         if let Some(end) = text[start..].find("</thought>") {
             let before = &text[..start];
@@ -5922,10 +4860,7 @@ fn strip_thinking_tags(raw: &str) -> String {
     text.trim().to_string()
 }
 
-/// Parse a review verdict from LLM output.
-///
-/// Tries to extract JSON from the response text. If parsing fails,
-/// defaults to `pass: true` — review must never block the user.
+/// Parses the verdict JSON; unparseable output passes, since review must never block the user.
 fn parse_review_verdict(text: &str) -> pond_core::models::ports::answer_reviewer::ReviewVerdict {
     use pond_core::models::ports::answer_reviewer::ReviewVerdict;
 
@@ -5939,7 +4874,6 @@ fn parse_review_verdict(text: &str) -> pond_core::models::ports::answer_reviewer
         }
     }
 
-    // Fallback — unparseable output defaults to pass
     println!(
         "[answer-reviewer] WARNING: unparseable verdict, defaulting to pass: {:?}",
         &text[..text.len().min(100)]
@@ -5952,11 +4886,6 @@ fn parse_review_verdict(text: &str) -> pond_core::models::ports::answer_reviewer
     }
 }
 
-/// Returns `true` when the process has access to a graphical display.
-///
-/// On Linux, a display is present when `DISPLAY` (X11) or `WAYLAND_DISPLAY`
-/// is set in the environment. On all other platforms (macOS, Windows) a
-/// display is unconditionally assumed.
 fn has_display() -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -5968,25 +4897,8 @@ fn has_display() -> bool {
     }
 }
 
-/// Newest `sessions.updated_at` across every session in `pond_system.db`.
-///
-/// This is the second of the consolidation scheduler's two activity sources.
-/// The terminal voice loop runs in a **separate OS process** (`pond-server chat
-/// --json-events`, spawned by the desktop shell) and so can never touch this
-/// process's `AppState.last_user_activity` — but it does persist every turn
-/// through `ChatService`, which bumps `sessions.updated_at` in the shared
-/// system DB. Watching that column is therefore what lets a voice interaction
-/// both hold consolidation off and interrupt a run already in flight.
-///
-/// Returns `None` when there are no sessions or the read fails; callers treat
-/// that as "no observable out-of-process activity".
-///
-/// **Sessions the pond minted for itself do not count** (`human_activity`,
-/// PAI-7 P1). Every `AgentPrompt` schedule fire creates a `sched-*` row and
-/// bumps its `updated_at`, so without the filter a cron line running at 3am is
-/// indistinguishable here from the user returning — which both opens the
-/// never-on-startup gate on a pond nobody has touched and holds consolidation
-/// off as if somebody were typing.
+/// Newest human `sessions.updated_at`, the only activity signal from the out-of-process voice
+/// loop; pond-minted `sched-*` sessions are excluded. `None` means no observable activity.
 async fn newest_session_activity(
     storage: &dyn pond_core::user_data::ports::session_storage::SessionStorage,
 ) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -5996,33 +4908,17 @@ async fn newest_session_activity(
 
 // ── PAI-7 P1: clock and session-activity publishers on the event bus ────────
 //
-// Both publish and nothing consumes: the rules engine now skips these events
-// (they have no `trigger_view`) and the bus-to-event-log bridge records them.
-// Deciding anything about them is PAI-7 P4's, and that separation is the point
-// of the phase — an event nobody can trust is worse than no event.
+// The rules engine skips these events (no `trigger_view`); the event-log bridge records them.
 
-/// Publish one [`BusEvent::Time`] per local hour boundary.
-///
-/// **Cadence is computed from the wall clock each time**, not by ticking a
-/// fixed hour-long interval, so the tick lands on the hour rather than an hour
-/// after whenever the pond happened to boot. A machine that slept through
-/// three hours publishes one tick when it wakes rather than three: the tick is
-/// a heartbeat, and a backlog of "it is now 2am" is noise.
-///
-/// **The bus is held weakly.** This is the one task on the spine with no input
-/// stream of its own — the rules engine and the event-log bridge both end when
-/// the bus's senders drop. A strong `Arc` here would keep the bus, and so
-/// their streams, alive for exactly as long as this loop, which is what turns
-/// a background timer into something that outlives the shutdown it should have
-/// ended with.
+/// Publishes one [`BusEvent::Time`] per local hour, re-read from the wall clock (no backlog
+/// after sleep). Holds the bus weakly so this timer can't keep it alive past shutdown.
 async fn run_time_ticker(bus: std::sync::Weak<dyn pond_core::shared::ports::event_bus::EventBus>) {
     use chrono::Timelike;
     use pond_core::shared::domain::time_tick::{secs_to_next_hour_from, TimeBoundary, TimeTick};
     use pond_core::shared::ports::event_bus::BusEvent;
 
     loop {
-        // The clock reading goes in whole. Splitting it into a minute and a
-        // second here is what let the two swap unnoticed.
+        // Pass the reading whole: separate minute/second arguments can be swapped unnoticed.
         let wait = secs_to_next_hour_from(&chrono::Local::now());
         tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
 
@@ -6040,45 +4936,8 @@ async fn run_time_ticker(bus: std::sync::Weak<dyn pond_core::shared::ports::even
     }
 }
 
-/// Publish [`BusEvent::Session`] transitions — a conversation started, the
-/// pond went quiet, the user came back — and [`BusEvent::Presence`]
-/// transitions, which say *which household member* that was.
-///
-/// Reuses the consolidation scheduler's activity model wholesale:
-/// `saw_activity_since_start` for the never-at-startup guard,
-/// `combined_idle_for` so an out-of-process voice turn counts, and
-/// `INACTIVITY_THRESHOLD_SECS` as the threshold — for presence too, so the
-/// bus cannot say a member is still here after it has already said the pond
-/// went idle. One pond, one definition of "the user has gone quiet".
-///
-/// **One task, one read, two observers** (PAI-7 P2). A second polling loop
-/// would read the same table on its own schedule and the two could disagree
-/// about which conversations exist — which is the shape of defect
-/// `human_activity` was written as one function to prevent.
-///
-/// **What this loop decides, honestly.** The seed, the machine-session filter,
-/// the never-at-startup gate, the idle arithmetic, the presence baseline, the
-/// freshness window, which rows are worth an identity read, what an unreadable
-/// profile list means and what an unreadable identity means all live in
-/// pond-core, where a mutation to any of them fails a test.
-///
-/// This paragraph used to open "this loop decides nothing", and that was false
-/// in both halves — four of those decisions were expressed right here, and the
-/// freshness window was one of them: `presence_window` was a field this
-/// function filled in, so I could set it to twenty-four hours and `cargo check`
-/// plus the entire `pond-core` suite stayed green. `PresenceInputs`'s fields
-/// are private now and `for_poll` is the only way in, so this loop cannot name
-/// a window at all.
-///
-/// **What genuinely remains here is unguarded, and it is not nothing.**
-/// `POLL_SECS`, the two store reads, the `tracing` lines — and `idle_threshold`
-/// for [`PollClock`], which is still bound at this call site from
-/// `INACTIVITY_THRESHOLD_SECS`. That is the same gap on P1's session-lifecycle
-/// side; it is left as it is because `PollClock`'s two `Instant` fields sit
-/// next to each other, and a positional constructor to close it would trade a
-/// visible constant for two arguments that swap silently. Nothing tests this
-/// function: `crates/pond-server/tests` does not name it, and `ci.yml` runs
-/// `cargo check` for this crate and never `cargo test`.
+/// Publishes [`BusEvent::Session`] and [`BusEvent::Presence`] transitions off one shared read
+/// so they can't disagree. Keep decisions in pond-core: nothing tests this loop.
 async fn run_session_activity_observer(
     bus: std::sync::Weak<dyn pond_core::shared::ports::event_bus::EventBus>,
     storage: Arc<dyn pond_core::user_data::ports::session_storage::SessionStorage>,
@@ -6095,8 +4954,7 @@ async fn run_session_activity_observer(
     const POLL_SECS: u64 = 60;
     let idle_threshold = std::time::Duration::from_secs(sched::INACTIVITY_THRESHOLD_SECS);
 
-    // Baselines for the never-at-startup guard, captured before the first
-    // poll so the activity clock's boot value can never pass for activity.
+    // Captured before the first poll so the boot-time clock never passes for activity.
     let started_at = std::time::Instant::now();
     let started_at_utc = chrono::Utc::now();
 
@@ -6111,9 +4969,6 @@ async fn run_session_activity_observer(
             break;
         };
 
-        // One read serves all three halves: which conversations exist, the
-        // newest `updated_at` (the out-of-process activity source), and which
-        // rows carry an attribution to look up.
         let sessions = match storage.list_sessions().await {
             Ok(sessions) => sessions,
             Err(e) => {
@@ -6145,16 +5000,7 @@ async fn run_session_activity_observer(
 
         // ── Presence (PAI-7 P2) ──────────────────────────────────────────
         //
-        // Which rows are worth a `get_session_identity` is pond-core's,
-        // because it is derived from the observer's own refusals rather than
-        // invented here: `attribution_candidates` drops the pond's own
-        // conversations, the ones nobody has spoken in inside the window, and
-        // the ones whose `sessions.profile_id` is NULL. It is read-avoidance
-        // and not a gate — the observer re-applies origin and freshness to
-        // whatever it is handed, through the same predicate — and it matters
-        // because `list_sessions` has no LIMIT and no time bound, so this used
-        // to be one point query per session the pond had EVER attributed,
-        // every sixty seconds, forever, on a Jetson.
+        // Read-avoidance only (the observer re-checks); `list_sessions` is unbounded.
         let mut attributed = Vec::new();
         let mut unreadable: Option<String> = None;
         for session in attribution_candidates(&sessions, now) {
@@ -6180,9 +5026,7 @@ async fn run_session_activity_observer(
             );
         }
 
-        // What an unreadable row means, and what an unreadable profile list
-        // means, are both pond-core's answers. This loop supplies the two
-        // `Result`s and logs them; it does not get to say what they imply.
+        // Pass read failures through: what they imply is pond-core's call, not this loop's.
         let evidence: Vec<PresenceEvidence<'_>> = attributed
             .iter()
             .map(|(session, identity)| PresenceEvidence::of(session, identity))
@@ -6208,30 +5052,7 @@ async fn run_session_activity_observer(
     }
 }
 
-/// PAI-7 P4: think about what has happened, in idle time, and propose.
-///
-/// `proactive_review.rs` decides everything of consequence and this is the
-/// loop it was written for. What is decided *here* — and therefore what is
-/// unguarded, because `ci.yml` runs `cargo check` for this crate and never
-/// `cargo test` — is `POLL_SECS`, the store reads, and the failure direction
-/// of each of them. Those directions are the part worth reading:
-///
-/// - **A settings or session read that fails skips the tick.** Nothing is
-///   assumed about a pond that cannot be read.
-/// - **A proposal count that fails reads as the cap.** An unreadable count
-///   means no review, never an unlimited one.
-/// - **A decision read that fails skips the tick**, and this one is the least
-///   obvious. An empty ledger suppresses nothing, so treating the failure as
-///   "no decisions" would re-propose exactly the things a member has already
-///   said no to — the widening direction, reached by a plausible default.
-/// - **No orchestrator means no review.** When Goose init fell back to the mock
-///   agent there is nothing in the `OnceLock`, and the loop returns rather than
-///   running with a second one it made itself.
-///
-/// The ring is DRAINED when a review starts, so a brief says what has happened
-/// *since the last review* — which is what the brief claims when it is empty.
-/// A run that then fails loses those events; the alternative is re-reviewing
-/// the same evening forever, which is worse and much harder to notice.
+/// Idle-time proactive review; every failed read fails closed (skips the tick or hits the cap).
 async fn run_proactive_reviewer(
     settings_repo: Arc<dyn pond_core::user_data::ports::settings::SettingsRepository + Send + Sync>,
     storage: Arc<dyn pond_core::user_data::ports::session_storage::SessionStorage>,
@@ -6250,9 +5071,7 @@ async fn run_proactive_reviewer(
 
     const POLL_SECS: u64 = 60;
 
-    // See the block in `run_server`: this is the SAME orchestrator and the SAME
-    // registry the `delegate` tool holds, because a second registry compiles and
-    // then refuses every spawn.
+    // The `delegate` tool's own orchestrator: a second registry compiles but refuses every spawn.
     let Some(deps) = pond_mcp_server::installed_orchestrator_deps() else {
         tracing::info!(
             "proactive reviewer: no orchestrator was installed (mock agent?) — not starting"
@@ -6262,9 +5081,7 @@ async fn run_proactive_reviewer(
     let orchestrator = deps.orchestrator();
     let authorities = deps.authorities();
 
-    // Fallible rather than a lazy unwrap, and checked once at start rather than
-    // per tick: the recipe is text through a `deny_unknown_fields` parser, and a
-    // typo in it should stop the reviewer loudly instead of logging every minute.
+    // Checked once: a recipe typo should stop the reviewer loudly, not log every minute.
     let role = match review::proactive_reviewer_role() {
         Ok(role) => role,
         Err(e) => {
@@ -6303,23 +5120,12 @@ async fn run_proactive_reviewer(
         };
         let now = chrono::Utc::now();
 
-        // Invariant 7's tidying pass. Correctness does not depend on it — every
-        // read filters expiry in SQL — but the terminal status is what the
-        // feedback ledger reads, so an unswept row teaches nothing.
+        // Optional for reads (SQL filters expiry) but the ledger learns from the terminal status.
         if let Err(e) = proposals.expire_due(now).await {
             tracing::debug!(error = %e, "proactive reviewer: expiry sweep failed");
         }
 
-        // Invariant 4. `None` here is the whole household and an unidentified
-        // speaker both answering "not addressable", and the answer is no review.
-        //
-        // It is TRACED rather than skipped in silence, and that is a repair
-        // rather than a nicety: on a pond where nobody has been identified —
-        // which is every pond until PAI-1's identification routes get a caller —
-        // this is where the reviewer stops, on every tick, and the first probe
-        // of this loop produced no output at all. A feature that is switched on
-        // and says nothing is indistinguishable from one that is broken, and
-        // this programme has spent whole phases on that distinction.
+        // Nobody addressable means no review; traced, as silence would look like a broken feature.
         let Some(audience) = review::audience_for_review(&sessions, now) else {
             tracing::trace!(
                 sessions = sessions.len(),
@@ -6333,8 +5139,7 @@ async fn run_proactive_reviewer(
             pond_core::shared::domain::session_activity::human_activity(&sessions).newest_activity;
         let in_process_at = *last_user_activity.read().await;
 
-        // A rolling 24 hours, not a calendar day: the cap is about how often
-        // somebody is interrupted, and midnight is not a fact about that.
+        // Rolling 24 h rather than a calendar day: the cap is about interruption frequency.
         let proposals_today = proposals
             .count_made_since(audience.profile_id(), now - chrono::Duration::days(1))
             .await
@@ -6358,8 +5163,7 @@ async fn run_proactive_reviewer(
             },
             settings.ext_orchestrator_enabled,
             proposals_today,
-            // The loop awaits its own run, so two can never overlap here. The
-            // input exists for a caller that does not have that property.
+            // This loop awaits its own run, so runs never overlap here.
             false,
         ));
         if let review::ReviewDecision::Skip(reason) = decision {
@@ -6370,8 +5174,7 @@ async fn run_proactive_reviewer(
             continue;
         }
 
-        // PAI-7 P7. A failed read skips the tick rather than proceeding with an
-        // empty ledger — see this function's docs for why that direction matters.
+        // Skip on failure: an empty ledger would re-propose what a member already declined.
         let decisions = match proposals
             .decisions_since(audience.profile_id(), now - review::SUPPRESSION_WINDOW)
             .await
@@ -6388,6 +5191,7 @@ async fn run_proactive_reviewer(
         };
         let ledger = review::FeedbackLedger::from_decisions(&decisions, now);
 
+        // Drained up front: a failed run loses these rather than re-reviewing them forever.
         let events = {
             let mut ring = observed.lock().await;
             let drained: Vec<pond_core::user_data::domain::proposal::BusEventRef> =
@@ -6415,9 +5219,7 @@ async fn run_proactive_reviewer(
             "idle after user activity — starting a proactive review"
         );
 
-        // The review becomes its own parent turn for the length of the run. The
-        // lease revokes on drop, so nothing can delegate from a review that has
-        // ended — the same property a user's finished turn has.
+        // The lease revokes on drop, so an ended review can no longer delegate.
         let cancel = tokio_util::sync::CancellationToken::new();
         let lease = authorities.publish(
             &session_id,
@@ -6425,9 +5227,7 @@ async fn run_proactive_reviewer(
             cancel.clone(),
         );
 
-        // Invariant 3's second half. On the Orin this is correctness rather than
-        // politeness: the review is holding the only GPU the household's next
-        // turn needs.
+        // Cancel on user activity: the review holds the only GPU the next user turn needs.
         let watcher = {
             let watcher_activity = last_user_activity.clone();
             let watcher_storage = storage.clone();
@@ -6446,8 +5246,7 @@ async fn run_proactive_reviewer(
                     }
                     tick = tick.wrapping_add(1);
                     if tick % DB_EVERY_N_TICKS == 0 {
-                        // A transient read failure reads as `None`, which must
-                        // never be mistaken for activity.
+                        // A failed read yields `None`, which must never count as activity.
                         db_seen = newest_session_activity(watcher_storage.as_ref()).await;
                     }
                     if review::cancelled_by_activity(
@@ -6467,10 +5266,7 @@ async fn run_proactive_reviewer(
         let run = orchestrator.spawn(spec).await;
         watcher.abort();
         drop(lease);
-        // An attempt spends the interval budget whether or not it produced
-        // anything, for the reason the consolidation scheduler records: retrying
-        // after the next idle window reintroduces the repeated-expensive-attempt
-        // churn the gate exists to remove.
+        // Failed attempts count too, or expensive retries would churn every idle window.
         last_run = Some(std::time::Instant::now());
 
         let run = match run {
@@ -6481,8 +5277,7 @@ async fn run_proactive_reviewer(
             }
         };
 
-        // `interpret_answer` reads `result_for_parent()`, so a cancelled or
-        // turn-exhausted run yields nothing rather than partial opinions.
+        // A cancelled or turn-exhausted run yields nothing here, never partial opinions.
         let yielded = review::interpret_answer(
             &run,
             &audience,
@@ -6494,28 +5289,7 @@ async fn run_proactive_reviewer(
             tracing::debug!(refusal = ?refusal, "proactive reviewer: impulse refused");
         }
 
-        // A run that produced words and yielded NOTHING is the failure this
-        // feature is most likely to have, and at DEBUG it is invisible.
-        //
-        // Measured on the Orin 2026-08-12: the loop fired correctly, resolved
-        // its audience, spawned a child that answered in 32 s, and every impulse
-        // was refused because a 2B model wrote a `type` field that
-        // `ReviewerImpulse` did not have. Zero proposals, one DEBUG line each,
-        // and a GPU spent per interval for nothing. On a household pond nobody
-        // would ever see the reason.
-        //
-        // That specific cause is FIXED -- `ReviewerImpulse` no longer carries
-        // `deny_unknown_fields`, because nothing in it is a capability and the
-        // attribute was refusing whole suggestions over a key that could not
-        // reach a decision. This warning stays regardless: it was never about
-        // that one schema, it is about the class. A reviewer that runs, costs a
-        // model turn and yields nothing is a defect whatever the reason, and
-        // DEBUG is where this one hid for two recorded runs.
-        //
-        // WARN, not INFO: refusing every impulse is a defect somewhere -- in the
-        // prompt, in the schema, or in the model -- and it is never the intended
-        // steady state. A run that legitimately has nothing to say returns an
-        // empty array and lands in neither branch.
+        // WARN: all-refused is always a defect; a run with nothing to say returns an empty array.
         if yielded.proposals.is_empty() && !yielded.refusals.is_empty() {
             tracing::warn!(
                 refused = yielded.refusals.len(),
@@ -6530,15 +5304,8 @@ async fn run_proactive_reviewer(
                 tracing::warn!(error = %e, "proactive reviewer: could not persist a proposal");
                 continue;
             }
-            // PAI-7 P5's first production caller, and PAI-1 P9's rung earning
-            // its keep. `send_to_profile` resolves the member's paired devices
-            // and reaches NOBODY when there are none — it cannot fall back to a
-            // broadcast, because `TargetedDelivery` has no variant meaning "the
-            // household".
-            //
-            // `action_required` rather than `alert`: a proposal wants a decision,
-            // and P6's speech gate ships allowing `alert` only, so switching the
-            // pond's voice on does not also make it read out its suggestions.
+            // Only the member's paired devices, never a broadcast. `action_required`, not `alert`:
+            // the speech gate voices only `alert`, and suggestions shouldn't be read aloud.
             let report = sender
                 .send_to_profile(
                     audience.profile_id(),
@@ -6567,25 +5334,7 @@ async fn run_proactive_reviewer(
     }
 }
 
-/// Run one consolidation pass in the configured mode, apply the accepted
-/// actions, and broadcast progress events.
-///
-/// Shared by the inactivity scheduler and the manual
-/// `POST /api/v1/memory/consolidate` endpoint (via `ConsolidationRunner`).
-///
-/// `mode` picks the cost/thoroughness tradeoff:
-/// - `"single"` — one LLM call. The default, and the sane choice on a 3B
-///   on-device model.
-/// - anything else (`"adversarial"`) — the three-stage Proposer -> Adversary ->
-///   Judge pipeline, cancellable between stages.
-///
-/// `batch_size` bounds how many memories reach the prompt, so a growing store
-/// cannot blow the context window. Whatever does not fit is logged, not
-/// silently dropped.
-///
-/// Both modes funnel their accepted actions through pond-core's
-/// `apply_actions`, so the correction-safety guards live in exactly one place
-/// and cannot drift between modes.
+/// Runs one consolidation pass; both modes apply through `apply_actions` so its guards can't drift.
 async fn run_consolidation_pipeline(
     repo: Arc<dyn pond_core::user_data::ports::memory_repository::MemoryRepository + Send + Sync>,
     provider: Arc<tokio::sync::RwLock<Option<Arc<dyn LlmProvider>>>>,
@@ -6611,9 +5360,7 @@ async fn run_consolidation_pipeline(
         }
     };
 
-    // Bound the prompt. Oldest-first, because duplicates cluster in time and a
-    // contiguous window is the ordering most likely to contain both halves of a
-    // duplicate pair (see `select_batch`).
+    // Oldest-first: duplicates cluster in time, so a contiguous window catches both halves.
     let selection = consolidation::select_batch(memories, batch_size);
 
     if selection.below_minimum() {
@@ -6642,8 +5389,6 @@ async fn run_consolidation_pipeline(
         );
     }
 
-    // Bridge: mpsc -> broadcast so the consolidator writes to mpsc and the
-    // SSE stream (if any) reads from broadcast.
     let (mpsc_tx, mut mpsc_rx) = tokio::sync::mpsc::channel::<ConsolidationEvent>(64);
     let bridge_tx = broadcast_tx.clone();
     tokio::spawn(async move {
@@ -6667,9 +5412,7 @@ async fn run_consolidation_pipeline(
 
     match result {
         Ok(ref result) => {
-            // Collected, not lazy: a borrowing iterator held across the
-            // `apply_actions` await defeats the compiler's higher-ranked
-            // lifetime inference for the whole spawned future.
+            // Collected, not lazy: a borrowing iterator across the await breaks HRTB inference.
             let accepted: Vec<
                 pond_core::user_data::ports::memory_consolidator::ConsolidationAction,
             > = result
@@ -6705,7 +5448,6 @@ async fn run_consolidation_pipeline(
                     duration_ms = result.duration_ms,
                     "memory consolidation complete"
                 );
-                // Persist audit trail
                 let details_json = serde_json::to_string(&result).ok();
                 let _ = repo
                     .log_consolidation_run(
@@ -6742,7 +5484,6 @@ async fn run_consolidation_pipeline(
 ///   [db] 2024-01-15 12:34:57 ERROR [pond-core] something failed — {"key":"val"}
 /// ```
 async fn tail_event_log(pool: sqlx::Pool<sqlx::Sqlite>) {
-    // Anchor to the highest existing ID so we only surface new events.
     let mut cursor: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM event_log")
         .fetch_one(&pool)
         .await
@@ -6823,49 +5564,14 @@ async fn run_status() -> Result<()> {
 
 // ── ONNX Runtime version pinned for auto-download ────────────────────────────
 //
-// 1.24.2 is here because fastembed takes `ort`'s default features, which include
-// `api-24`. The previous pin (1.22.0) does not expose that API level, and the
-// resulting failure was first seen on the Jetson and written up as a Jetson
-// problem; it was not. With this pin the Orin embeds normally.
-//
-// The cost, checked against GitHub Releases on 2026-08-16 rather than assumed:
-//
-//            osx-arm64   osx-x86_64   linux-x64   linux-aarch64
-//   1.23.2      yes          yes          yes           yes
-//   1.24.0      yes          NO           yes           NO
-//   1.24.2      yes          NO           yes           yes
-//
-// So 1.23.2 was the last release carrying all four, and this pin gives up the
-// Intel Mac: `ort_platform_tags()` builds `onnxruntime-osx-x86_64-1.24.2.tgz`,
-// which 404s, and `ensure_onnx_runtime` treats that as non-fatal — the server
-// starts with face recognition and embeddings silently absent. An Intel Mac
-// needs a system ONNX Runtime (`brew install onnxruntime`) or an explicit
-// `ORT_DYLIB_PATH`; both are checked before the download is attempted.
-//
-// Do NOT bump to 1.24.0: it drops linux-aarch64, which is the Jetson.
-//
-// Re-run the check before changing this — availability has moved in both
-// directions across three releases, so it is not a property to reason about:
-//   for a in osx-arm64 osx-x86_64 linux-x64 linux-aarch64; do
-//     curl -sIL -o /dev/null -w "$a %{http_code}\n" \
-//       "https://github.com/microsoft/onnxruntime/releases/download/vX/onnxruntime-$a-X.tgz"
-//   done
+// Needs `api-24` (fastembed's `ort` defaults). 1.24.x has no osx-x86_64 build, so Intel Macs
+// need a system ORT or `ORT_DYLIB_PATH`; 1.24.0 lacks linux-aarch64 (Jetson). Re-check to bump.
 const ORT_VERSION: &str = "1.24.2";
 
 /// Approximate size of the platform library in MB (for the progress message).
 const ORT_APPROX_SIZE_MB: u64 = 30;
 
-/// Ensure that `ORT_DYLIB_PATH` points at a usable ONNX Runtime shared
-/// library.  Resolution order:
-///
-///   1. Explicit env var — operator knows best; skip everything.
-///   2. Well-known system paths (Homebrew, system `/usr/lib`).
-///   3. Previously-downloaded local copy in `$DATA_DIR/lib/`.
-///   4. Auto-download from GitHub Releases into `$DATA_DIR/lib/`.
-///
-/// Runs synchronously before tokio starts, so it shells out to `curl`+`tar`
-/// instead of using async I/O.  Failures are non-fatal — the server starts
-/// without ONNX-dependent features (face recognition, embeddings).
+/// Points `ORT_DYLIB_PATH` at an ONNX Runtime, downloading one if needed; failure is non-fatal.
 fn ensure_onnx_runtime() {
     // ── 1. Explicit env var ──────────────────────────────────────────────
     if std::env::var_os("ORT_DYLIB_PATH").is_some() {
@@ -6902,8 +5608,7 @@ fn ensure_onnx_runtime() {
     let local_versioned = lib_dir.join(versioned_name);
     let local_unversioned = lib_dir.join(lib_name);
 
-    // Prefer the versioned file (it is the real binary); fall back to the
-    // unversioned name in case someone placed it there manually.
+    // The versioned file is the real binary; the bare name covers a manual install.
     for candidate in [&local_versioned, &local_unversioned] {
         if candidate.exists() {
             unsafe { std::env::set_var("ORT_DYLIB_PATH", candidate) };
@@ -6929,9 +5634,7 @@ fn ensure_onnx_runtime() {
          v{ORT_VERSION}/{archive_stem}.tgz"
     );
 
-    // stderr, not stdout: `chat --json-events` gives stdout to the NDJSON
-    // contract, and a download banner there corrupts the stream the desktop
-    // parses. model_download sends its progress to stderr for the same reason.
+    // stderr, not stdout: under `chat --json-events` stdout is the NDJSON stream.
     eprintln!("  Setup    downloading ONNX Runtime v{ORT_VERSION} (~{ORT_APPROX_SIZE_MB} MB), one time...");
 
     match download_and_extract_ort(&url, &lib_dir, &archive_stem) {
@@ -6951,9 +5654,6 @@ fn ensure_onnx_runtime() {
 }
 
 /// Returns `(lib_name, versioned_name)` for the current platform.
-///
-/// - macOS: `("libonnxruntime.dylib", "libonnxruntime.{ver}.dylib")`
-/// - Linux: `("libonnxruntime.so",    "libonnxruntime.so.{ver}")`
 fn ort_lib_names() -> (&'static str, String) {
     if cfg!(target_os = "macos") {
         (
@@ -6968,8 +5668,7 @@ fn ort_lib_names() -> (&'static str, String) {
     }
 }
 
-/// Returns `(os_tag, arch_tag)` matching the GitHub release archive naming
-/// convention, e.g. `("osx", "arm64")` or `("linux", "x64")`.
+/// Returns `(os_tag, arch_tag)` as ONNX Runtime's GitHub release archives name them.
 fn ort_platform_tags() -> Option<(&'static str, &'static str)> {
     let os = if cfg!(target_os = "macos") {
         "osx"
@@ -7023,30 +5722,17 @@ fn download_and_extract_ort(
 ) -> anyhow::Result<std::path::PathBuf> {
     use std::process::Command;
 
-    // Ensure the target directory exists.
     std::fs::create_dir_all(lib_dir)?;
 
     let tmp_dir = std::env::temp_dir().join("giap-ort-download");
-    // Clean up any leftover from a previous failed attempt.
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir)?;
 
     let tgz = tmp_dir.join("ort.tgz");
 
     // ── Download ─────────────────────────────────────────────────────────
-    // PAI-2 P6a. This is a ~100 MB fetch from github.com and it was invisible
-    // to `egress_guard.rs`, which finds senders by looking for `reqwest`. A
-    // subprocess is a sender too. It is the only one in the tree
-    // (`Command::new("curl")` matches here and nowhere else), so the hole was
-    // one call, but it was the largest single outbound transfer the pond makes.
-    //
-    // `check_egress` and not `EgressCall::begin`: this fn is synchronous, and
-    // `EgressCall::finish` -> `record_egress` reaches `tokio::spawn`, which
-    // panics with no runtime on the thread. All three callers happen to be
-    // inside an async fn today, but nothing in the signature says so, and
-    // panicking inside a privacy check is the failure this module's own
-    // `append_event` doc warns about. A refusal is still recorded -- that path
-    // is runtime-safe -- so the audit trail keeps the half that matters.
+    // The curl subprocess is egress too. `check_egress`, not `EgressCall`: this fn is sync and
+    // `finish` reaches `tokio::spawn`, which panics with no runtime on the thread.
     pond_core::shared::services::egress::check_egress(url)
         .map_err(|denied| anyhow::anyhow!("{denied}"))?;
 
@@ -7067,11 +5753,6 @@ fn download_and_extract_ort(
     }
 
     // ── Extract lib/ subtree directly into lib_dir ───────────────────────
-    // `--strip-components=1` removes the top-level `onnxruntime-{os}-…/`
-    // prefix, so `lib/libonnxruntime.*` lands at `{lib_dir}/lib/…`.
-    //
-    // We use `--include` (GNU tar) / `--include` (bsdtar, macOS default) to
-    // extract only the library files, skipping headers and pkgconfig.
     let status = Command::new("tar")
         .args(["xzf"])
         .arg(&tgz)
@@ -7103,29 +5784,13 @@ fn download_and_extract_ort(
         anyhow::anyhow!("failed to copy {} → {}: {e}", src.display(), dest.display())
     })?;
 
-    // Clean up the temp directory.
     let _ = std::fs::remove_dir_all(&tmp_dir);
 
     Ok(dest)
 }
 
-/// Populate the face-recognition-specific env vars with values that are
-/// known to work end-to-end on a fresh install.
-///
-/// **Does not touch `ORT_DYLIB_PATH`** — that is handled by
-/// `ensure_onnx_runtime()`, which must run first.
-///
-/// Each var is only set when currently **unset** — explicit values from
-/// the operator's shell keep taking precedence.
-///
-/// The anti-spoof tuning (`LIVE_INDEX=2`, `PIXEL_SCALE=unit`) reflects the
-/// specific 3-class Silent-Face ONNX file we shipped install instructions
-/// for — on that export, slot 2 is the live class and the preprocess
-/// expects `[0, 1]` pixels.  Other exports need different values; override
-/// at the shell if you swap the model file.
+/// Defaults unset face env vars for the shipped models; run `ensure_onnx_runtime()` first.
 fn apply_face_recognition_defaults() {
-    // Anti-spoof ONNX model — default to the canonical location under the
-    // platform data dir so users who followed the README land here too.
     if std::env::var_os("POND_FACE_ANTISPOOF_PATH").is_none() {
         let default_path = default_data_dir()
             .join("models")
@@ -7137,7 +5802,7 @@ fn apply_face_recognition_defaults() {
         }
     }
 
-    // Tuning for the specific 3-class Silent-Face export we ship.
+    // Shipped 3-class Silent-Face export: live is slot 2 and it expects [0, 1] pixels.
     if std::env::var_os("POND_FACE_ANTISPOOF_LIVE_INDEX").is_none() {
         unsafe { std::env::set_var("POND_FACE_ANTISPOOF_LIVE_INDEX", "2") };
     }
@@ -7145,9 +5810,7 @@ fn apply_face_recognition_defaults() {
         unsafe { std::env::set_var("POND_FACE_ANTISPOOF_PIXEL_SCALE", "unit") };
     }
 
-    // Secondary PAD (DeepPixBis) for the ensemble — same auto-opt-in logic
-    // as in `build_face_recognition`. Kept in both code paths because each
-    // is reachable under different launch flows (`setup` vs `serve`).
+    // Secondary PAD, duplicated in `build_face_recognition`: `setup` and `serve` each need it.
     if std::env::var_os("POND_FACE_ANTISPOOF_PATH_2").is_none() {
         let default_path = default_data_dir()
             .join("models")
@@ -7159,8 +5822,7 @@ fn apply_face_recognition_defaults() {
         }
     }
 }
-/// `pond-server calibrate` — record N samples of the wake-word phrase and store
-/// Whisper's transcriptions as calibration variants in settings.
+/// Records wake-word samples and stores Whisper's transcriptions as calibration variants.
 async fn run_calibrate(
     phrase_arg: Option<&str>,
     target_samples: usize,
@@ -7176,7 +5838,6 @@ async fn run_calibrate(
         .unwrap_or(settings.voice_wake_word.as_str())
         .to_string();
 
-    // Resolve the ggml model path used by the in-process whisper backend.
     let whisper_model_name = settings.active_whisper_model.clone();
     if whisper_model_name.is_empty() {
         anyhow::bail!(
@@ -7229,9 +5890,7 @@ async fn run_calibrate(
         settings.voice_wake_word = phrase.clone();
     }
 
-    // A self-contained mic owner for this one-shot calibration run — it never
-    // runs concurrently with the wake-word detector, so it does not share a
-    // handle with `run_chat`/`run_server`.
+    // Own mic owner: calibration never runs alongside the wake-word detector.
     let (mic_handle, _mic_owner_join) = pond_audio::spawn(
         Box::new(pond_audio::CpalCapture::new()),
         pond_audio::CAPTURE_RATE_HZ,
@@ -7333,8 +5992,7 @@ async fn run_calibrate(
 }
 
 fn default_data_dir() -> std::path::PathBuf {
-    // `POND_DATA_DIR` lets tests (and power users) redirect all DB and model
-    // storage to an arbitrary directory without touching the real data store.
+    // `POND_DATA_DIR` redirects all storage, e.g. for tests.
     if let Ok(dir) = std::env::var("POND_DATA_DIR") {
         return std::path::PathBuf::from(dir);
     }
@@ -7343,15 +6001,7 @@ fn default_data_dir() -> std::path::PathBuf {
         .join("goose-in-a-pond")
 }
 
-/// Build the face-recognition service for Phase 2.
-///
-/// Returns `None` in three cases:
-///   1. The `face-onnx` Cargo feature is disabled.
-///   2. No ONNX embedding model is present at `$DATA_DIR/models/face/arcface.onnx`.
-///   3. The ONNX Runtime shared library could not be loaded.
-///
-/// In all cases the server continues to start normally; the face endpoints
-/// return 503 until a model is supplied.
+/// Returns `None` (face endpoints then 503) with no feature, no model, or no loadable ORT.
 #[cfg(feature = "face-onnx")]
 fn build_face_recognition(
     data_dir: &std::path::Path,
@@ -7364,11 +6014,7 @@ fn build_face_recognition(
     use pond_core::user_data::ports::face_embedding_extractor::FaceEmbeddingExtractor;
     use pond_infra::sqlite_face_recognition::SqliteFaceRecognition;
 
-    // Embedder lookup, preferred → fallback:
-    //   1. `POND_FACE_MODEL_PATH` (explicit operator override)
-    //   2. `adaface_ir101.onnx`   (AdaFace IR-101 — best low-light tolerance)
-    //   3. `w600k_r50.onnx`       (ArcFace R50 from buffalo_l)
-    //   4. `arcface.onnx`         (legacy filename, still supported)
+    // AdaFace first for its low-light tolerance; `arcface.onnx` is the legacy name.
     let model_path = match std::env::var("POND_FACE_MODEL_PATH") {
         Ok(p) => std::path::PathBuf::from(p),
         Err(_) => {
@@ -7385,8 +6031,6 @@ fn build_face_recognition(
         }
     };
 
-    // Default the anti-spoof path so users get the Silent-Face PAD gate
-    // for free once the model file is present, with no env-var setup.
     if std::env::var_os("POND_FACE_ANTISPOOF_PATH").is_none() {
         let antispoof_default = data_dir.join("models/face/antispoof.onnx");
         if antispoof_default.exists() {
@@ -7396,21 +6040,14 @@ fn build_face_recognition(
             }
         }
     }
-    // Same idea for the live-class index — the Silent-Face MiniFASNetV2
-    // export at the install URL we ship has [fake_2D, fake_3D, live] order
-    // (live is index 2), but the in-tree default is `auto` which assumes
-    // index 0.  Pin the default to 2 so the model works out-of-the-box.
+    // The shipped MiniFASNetV2 export is [fake_2D, fake_3D, live]; the `auto` default assumes 0.
     if std::env::var_os("POND_FACE_ANTISPOOF_LIVE_INDEX").is_none() {
         unsafe {
             std::env::set_var("POND_FACE_ANTISPOOF_LIVE_INDEX", "2");
         }
     }
 
-    // Secondary PAD (DeepPixBis) for the ensemble path in
-    // `pond-adapters-face-onnx`.  When the file is on disk and the env var
-    // is unset, opt the user into the stronger ensemble automatically —
-    // the adapter already takes `max(spoof_score)` of primary + secondary
-    // so a missing or dud secondary just falls back to primary-alone.
+    // Safe to auto-enable: the ensemble takes `max(spoof_score)`, so a dud secondary is harmless.
     if std::env::var_os("POND_FACE_ANTISPOOF_PATH_2").is_none() {
         let secondary_default = data_dir.join("models/face/OULU_Protocol_2_model_0_0.onnx");
         if secondary_default.exists() {
@@ -7435,12 +6072,7 @@ fn build_face_recognition(
         EmbeddingModel::ArcFace512
     };
 
-    // ONNX Runtime initialises lazily on the first `Session::builder()` call
-    // and *panics* (rather than returning Err) when its dynamic library is
-    // missing — see the `ort` crate.  Wrap the entire constructor in
-    // `catch_unwind` so a missing libonnxruntime.dylib downgrades to
-    // "face disabled" instead of taking down the whole server.  This makes
-    // the misconfigured-ORT case behave the same as the missing-model case.
+    // ort panics, not errs, on first `Session::builder()` without its dylib; degrade instead.
     let extractor: Arc<dyn FaceEmbeddingExtractor> =
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             OnnxFaceEmbeddingExtractor::new(&model_path, model_kind)
@@ -7466,18 +6098,8 @@ fn build_face_recognition(
             }
         };
 
-    // Detector resolution order:
-    //   1. SCRFD at $POND_FACE_SCRFD_PATH or $DATA_DIR/models/face/scrfd.onnx
-    //      — landmark-producing, drives similarity-transform alignment
-    //      (dramatically better real-world accuracy).
-    //   2. UltraFace at $POND_FACE_DETECTOR_PATH or $DATA_DIR/models/face/ultraface.onnx
-    //      — bbox only; no alignment, roughly phase-2 baseline behaviour.
-    //   3. No detector; adapter falls back to center-square cropping.  Safe
-    //      but prone to the "everyone matches" failure mode — log loudly.
-    // Detector preference: SCRFD 34G > SCRFD 10G > UltraFace > center-square.
-    // 34G catches faces at smaller pixel sizes than 10G (deeper backbone)
-    // but is ~140 MB instead of ~17 MB. `POND_FACE_SCRFD_PATH` overrides
-    // both SCRFD candidates explicitly.
+    // SCRFD (34G finds smaller faces, 10G is lighter) gives landmarks for alignment; UltraFace is
+    // bbox-only; with neither, center-square crops risk "everyone matches".
     let scrfd_path = std::env::var("POND_FACE_SCRFD_PATH")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
@@ -7544,16 +6166,8 @@ fn build_face_recognition(
         }
     });
 
-    // Thresholds calibrated against ArcFace R100 on Umeyama-aligned 112×112
-    // crops.  The previous 0.50 floor was tuned for small in-house test
-    // sets where every profile was visually distinct; on real webcams
-    // with lighting / pose variance, 0.50 admits far too many
-    // cross-identity near-neighbours (a different person can trivially
-    // hit 0.55–0.65 post-blend once S-norm + centroid weights are in
-    // play).  The new floors sit inside the empirically-safe 0.68–0.75
-    // band for ArcFace aligned.  `POND_FACE_MATCH_THRESHOLD` still
-    // overrides via the env-driven default, but only when this code
-    // path does NOT call `.with_threshold()` — see below.
+    // ArcFace on aligned 112×112 crops: strangers can reach 0.55–0.65, so aligned floors sit in
+    // the empirically safe 0.68–0.75 band.
     let threshold = match (&detector, model_kind) {
         (Some(d), EmbeddingModel::ArcFace512) if d.produces_landmarks() => 0.70,
         (Some(_), EmbeddingModel::ArcFace512) => 0.72,
@@ -7562,9 +6176,6 @@ fn build_face_recognition(
         (Some(_), EmbeddingModel::MobileFaceNet128) => 0.72,
         (None, EmbeddingModel::MobileFaceNet128) => 0.85,
     };
-    // Allow a shell-level override to take precedence over the
-    // model-aware default — useful when a power user has tuned the gate
-    // for their specific enrollment quality.
     let threshold = std::env::var("POND_FACE_MATCH_THRESHOLD")
         .ok()
         .and_then(|s| s.parse::<f32>().ok())
@@ -7802,7 +6413,6 @@ async fn run_onboard(reset: bool) -> Result<()> {
 
             Some(OnboardingStep::Model) => {
                 println!("Step: AI Model");
-                // Show LLM models available in the catalog DB so users can pick by number.
                 let model_repo = SqliteModelRepository::new(db.system.clone());
                 let catalog_models: Vec<_> = model_repo
                     .list_all()
@@ -7887,11 +6497,7 @@ async fn run_onboard(reset: bool) -> Result<()> {
 
 // ── Private mesh (#132 Milestone 2) ───────────────────────────────────────────
 
-/// Build the real `MeshTransport` when `settings.mesh_enabled` and this
-/// binary was compiled with the `mesh` feature. The mesh identity keypair is
-/// generated once and persisted via the raw settings key-value store (not a
-/// `Settings` field — it's an internal secret) so peers stay pinned to the
-/// same `PeerId` across restarts.
+/// Starts the mesh if enabled; its key persists in the raw settings KV (a secret, not a field).
 #[cfg(feature = "mesh")]
 async fn build_mesh_transport(
     settings: &pond_core::user_data::domain::settings::Settings,
@@ -7933,20 +6539,11 @@ async fn build_mesh_transport(
     let keypair = MeshKeypair::from_bytes(secret_bytes);
     tracing::info!("mesh enabled: peer_id={}", keypair.peer_id());
 
-    // An OS-assigned ephemeral port (`tcp/0`) meant a fresh, unpredictable
-    // port on every restart — any peer holding an older invite/address then
-    // gets a real "connection refused" the moment this Pond restarts, with
-    // no way to tell that's what happened. Derived from the identity secret
-    // (already persisted, one value per install) rather than stored
-    // separately: stable across restarts for free, and naturally different
-    // per machine/instance since each generates its own secret.
+    // Identity-derived, so the port survives restarts and saved peer invites keep working.
     let listen_port = 40000 + (u16::from_be_bytes([secret_bytes[0], secret_bytes[1]]) % 10000);
     tracing::info!("mesh listening on a stable, identity-derived port: {listen_port}");
 
-    // Harness/model attestation isn't wired up yet (ties to reproducible
-    // builds — explicitly out of scope for this milestone per the issue's
-    // risk list); a fixed placeholder lets any two Milestone-2 Ponds pair
-    // during development. Replace once harness/model pinning lands.
+    // Placeholder hashes until harness/model attestation lands; any two dev Ponds can pair.
     let config = Libp2pMeshTransportConfig {
         listen_addr: format!("/ip4/0.0.0.0/tcp/{listen_port}")
             .parse()
@@ -8004,13 +6601,7 @@ fn hex_decode_32(s: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
-/// Connects to Breez/Spark for mesh-peer Lightning settlement (#132
-/// Milestone 5), when `settings.lightning_enabled` and this binary was
-/// compiled with the `lightning` feature. Mirrors `build_mesh_transport`'s
-/// shape and generate-once-and-persist discipline: the wallet mnemonic is
-/// read from (or, the first time, generated and written to) the raw
-/// settings key-value store under `lightning_wallet_mnemonic` — same
-/// mechanism as `mesh_identity_secret`, not a new secret-storage path.
+/// Connects to Breez/Spark for Lightning settlement; the wallet mnemonic persists in the raw KV.
 #[cfg(feature = "lightning")]
 async fn build_payment_rail(
     settings: &pond_core::user_data::domain::settings::Settings,
@@ -8077,11 +6668,7 @@ async fn build_payment_rail(
     None
 }
 
-/// Reads through `AppState.llm_provider`'s own hot-swap lock on every call,
-/// so the mesh responder (which needs a fixed `Arc<dyn LlmProvider>` at
-/// construction — see `pond_adapters_mesh_inference`) automatically serves
-/// with whatever provider is *currently* active on this Pond, not a stale
-/// snapshot from whenever the mesh service was built.
+/// A fixed provider handle for the mesh responder that follows `AppState.llm_provider` hot-swaps.
 #[cfg(feature = "mesh")]
 struct SharedLlmProvider(Arc<tokio::sync::RwLock<Option<Arc<dyn LlmProvider>>>>);
 
@@ -8106,16 +6693,7 @@ impl LlmProvider for SharedLlmProvider {
 
 use pond_core::models::ports::provider::UnavailableProvider;
 
-/// Builds the mesh `LlmProvider` (and its capability-query / invoice-request
-/// handles) exactly once at startup, only when `mesh_transport` is `Some` —
-/// constructing more than one `MeshInferenceService` would spawn a second
-/// consumer of the transport's single `recv()` queue (see the crate's own
-/// docs). `build_provider` / `build_one`'s `"mesh"` match arms hand back a
-/// cheap handle into this same singleton; they never construct a new one.
-/// All three return values are handles into the *same* service —
-/// `PeerCapabilityQuery` and `InvoiceRequester` are both implemented
-/// directly on `MeshInferenceService` alongside `LlmProvider` support via
-/// `.provider()`.
+/// Must run once: a second `MeshInferenceService` would split the transport's one `recv()` queue.
 #[cfg(feature = "mesh")]
 fn build_mesh_provider(
     mesh_transport: &Option<Arc<dyn pond_core::mesh::ports::mesh_transport::MeshTransport>>,
@@ -8141,13 +6719,7 @@ fn build_mesh_provider(
         usage_tally,
         settings_repo,
         backing_provider,
-        // Reset on every chunk received, not an overall stream deadline — so
-        // this bounds the GAP between chunks, not the total reply length.
-        // 30s was tuned for a fast LAN peer; a lender on modest hardware
-        // (observed as low as ~1.7 tokens/sec over a real mesh connection)
-        // can leave a longer gap between chunks on a long generation (e.g. a
-        // requested short story) without actually being stuck, and 30s
-        // turned that into a false "no reply from peer" failure.
+        // Max inter-chunk gap, not total time: slow lenders (~1.7 tok/s) legitimately pause long.
         std::time::Duration::from_secs(180),
         std::time::Duration::from_secs(15 * 60),
         payment_rail,
@@ -8181,14 +6753,7 @@ fn build_mesh_provider(
     (None, None, None)
 }
 
-/// Spawns the periodic Lightning settlement job (#132 Milestone 6): once per
-/// interval, pays down each trusted peer's pending usage tally via
-/// `SettlementService`, at the fixed `MESH_SETTLEMENT_MILLISATS_PER_TOKEN`
-/// rate. Always spawned — no `#[cfg(feature = "mesh")]` split needed, since
-/// it only touches `pond-core` port traits, always compiled — safe to,
-/// because the loop checks `payment_rail`/`invoice_requester` on every tick
-/// and simply does nothing until both are real (i.e. mesh + lightning are
-/// enabled on this Pond).
+/// Pays down trusted peers' usage tallies each interval; idles until mesh and lightning are on.
 fn spawn_settlement_job(
     peer_directory: Arc<dyn pond_core::mesh::ports::peer_directory::PeerDirectory + Send + Sync>,
     usage_tally: Arc<dyn pond_core::mesh::ports::usage_tally::UsageTally + Send + Sync>,
@@ -8254,10 +6819,6 @@ fn spawn_settlement_job(
 
 // ── Goose agent backend ───────────────────────────────────────────────────────
 
-/// Build a Goose-backed agent + extension manager.
-///
-/// Only compiled when the `goose-agent` feature is enabled (default).
-/// Falls back to MockAgent when `--agent mock` is explicitly passed.
 #[cfg(feature = "goose-agent")]
 async fn build_goose_backend(
     agent_backend: &str,
@@ -8287,16 +6848,10 @@ async fn build_goose_backend(
         dyn pond_core::user_data::ports::device_control::DeviceControlPort + Send + Sync,
     >,
     session_storage: Option<Arc<dyn pond_core::user_data::ports::session_storage::SessionStorage>>,
-    // Model catalog, so `GooseAdapter` can reach `ModelRecord.context_length`
-    // — rung 3 of the context governor. Optional only so a caller with no
-    // catalog to hand still compiles; every caller in this file supplies one,
-    // because without it an Ollama model's window is guessed from its name.
+    // Supply it: without the catalog an Ollama model's context window is guessed from its name.
     model_repo: Option<Arc<dyn ModelRepository>>,
     voice_mode: bool,
-    // Wrapped in a lock (not a fixed value) so `PUT /api/v1/settings`
-    // enabling mesh at runtime is visible on the very next chat turn — see
-    // AppState::mesh_rebuild's own docs. CLI callers with no mesh stack pass
-    // a lock that is permanently `None` (equivalent to the old `None` here).
+    // Locked so mesh enabled at runtime applies next turn; CLI callers pass a permanent `None`.
     mesh_provider: Arc<tokio::sync::RwLock<Option<Arc<dyn LlmProvider>>>>,
 ) -> (
     Arc<dyn Agent>,
@@ -8321,7 +6876,6 @@ async fn build_goose_backend(
 
         let settings = settings_repo.get().await.unwrap_or_default();
 
-        // Build LlamaCppEngine as the inference provider.
         let engine = match pond_inference::LlamaCppEngine::new(data_dir) {
             Ok(e) => e,
             Err(e) => {
@@ -8330,7 +6884,6 @@ async fn build_goose_backend(
             }
         };
 
-        // Load the configured model.
         let model_id = &settings.chat_model;
         if !model_id.is_empty() {
             if let Err(e) = engine.load_model(model_id, 99, true).await {
@@ -8339,7 +6892,6 @@ async fn build_goose_backend(
             }
         }
 
-        // Build the McpToolDispatcher for direct MCP tool routing.
         let dispatcher = pond_mcp_server::McpToolDispatcher::new(
             memory_repo.clone(),
             weather,
@@ -8354,7 +6906,6 @@ async fn build_goose_backend(
         let dispatcher: Arc<dyn pond_core::mcp::ports::tools::tool_dispatcher::ToolDispatcher> =
             Arc::new(dispatcher);
 
-        // Get tool definitions from the dispatcher for prompt injection.
         let tool_defs: Vec<pond_core::models::ports::inference::ToolDefinition> = dispatcher
             .available_tools()
             .await
@@ -8388,11 +6939,7 @@ async fn build_goose_backend(
         return (Arc::new(MockAgent::new()), None, None, default_registry);
     }
 
-    // Build tool-calling specialist (FunctionGemma) if configured.
-    // The specialist is an in-process GGUF engine, so it only exists when the
-    // `local-inference` feature is compiled in. In lean builds (e.g. the Jetson
-    // single-executable without in-process GGUF) there is no specialist and the
-    // main LLM handles all tool calling natively via MCP.
+    // Optional FunctionGemma tool-calling specialist; without it the main LLM calls tools via MCP.
     #[cfg(feature = "local-inference")]
     let tool_caller: Option<Arc<dyn ToolCaller>> = {
         let settings = settings_repo.get().await.unwrap_or_default();
@@ -8415,8 +6962,6 @@ async fn build_goose_backend(
     #[cfg(not(feature = "local-inference"))]
     let tool_caller: Option<Arc<dyn ToolCaller>> = None;
 
-    // Register all GIAP MCP servers into Goose's builtin extension registry.
-    // Extension toggles (ext_*_enabled) are read from settings to gate registration.
     let settings = settings_repo.get().await.unwrap_or_default();
     match pond_adapters_goose::register_giap_extensions(
         &settings,
@@ -8439,7 +6984,6 @@ async fn build_goose_backend(
         }
     }
 
-    // Build the adapter with all repos injected.
     match GooseAdapter::new(
         settings_repo,
         template_repo,
@@ -8453,32 +6997,22 @@ async fn build_goose_backend(
     .await
     {
         Ok(adapter) => {
-            // Session storage powers the deterministic turn trimmer's
-            // rolling-summary splice (hybrid compaction).
+            // Powers the turn trimmer's rolling-summary splice.
             let adapter = match session_storage {
                 Some(storage) => adapter.with_giap_session_storage(storage),
                 None => adapter,
             };
-            // Semantic memory injection: without this the per-turn retrieval
-            // falls back to the keyword LIKE search.
+            // Without it, per-turn memory retrieval falls back to keyword LIKE search.
             let adapter = match embedding_provider {
                 Some(provider) => adapter.with_embedding_provider(provider),
                 None => adapter,
             };
-            // The model catalog, which is the only rung of the context governor
-            // that can answer for an Ollama model. Without it the adapter falls
-            // back to a substring match on the model's name.
+            // Else an Ollama model's context window is guessed from its name.
             let adapter = match model_repo {
                 Some(repo) => adapter.with_model_repo(repo),
                 None => adapter,
             };
-            // Private mesh (#132): lets chat_provider="mesh" route through a
-            // trusted peer's compute. GooseAdapter reads this lock live on
-            // every turn, so it stays empty until the mesh transport is
-            // actually running — the "mesh" arm then warns and keeps
-            // whatever provider was already active rather than failing the
-            // turn — and starts serving the moment mesh_rebuild fills it,
-            // with no adapter rebuild required.
+            // Read per turn, so mesh_rebuild filling it later needs no adapter rebuild.
             let adapter = adapter.with_mesh_provider(mesh_provider);
             if voice_mode {
                 adapter.set_voice_mode(true);
@@ -8486,27 +7020,13 @@ async fn build_goose_backend(
             let ext_mgr: Arc<dyn ExtensionManagerPort> = adapter.extension_manager();
             tracing::info!("Goose agent active — GIAP MCP extension registered");
             let adapter = Arc::new(adapter);
-            // Phase D2 escape hatch: giap-toolkit's tools reach back into the
-            // adapter that owns the per-session tool selection. Installed here
-            // rather than in register_giap_extensions because the adapter is the
-            // implementor and did not exist at registration time.
+            // giap-toolkit calls back into the adapter, which didn't exist at registration time.
             pond_mcp_server::init_toolkit_deps(Some(adapter.clone()
                 as Arc<
                     dyn pond_core::mcp::ports::tools::tool_selection_control::ToolSelectionControl,
                 >));
-            // PAI-6 P5: the `delegate` tool's handles. Installed here for the
-            // same ordering reason as the toolkit's, and with one detail that
-            // decides whether the feature works at all: the registry passed
-            // here must be `adapter.turn_authorities()`, the SAME map the
-            // adapter publishes each turn's authority into. A freshly
-            // constructed registry compiles, and then answers `None` to every
-            // lookup — which the tool correctly reads as "no live turn" and
-            // refuses, so the failure would look like a working guard rather
-            // than like broken wiring.
-            //
-            // Installed unconditionally: the toggle
-            // gates REGISTRATION (in `register_giap_extensions`), so with it off
-            // no server is ever spawned and these handles are simply unused.
+            // Must be `turn_authorities()`: a fresh registry compiles, then refuses every lookup.
+            // Unconditional: the toggle gates registration, so with it off these go unused.
             {
                 let runner: Arc<dyn pond_adapters_goose::orchestrator::ChildRunner> =
                     Arc::new(pond_adapters_goose::GooseChildRunner::new(adapter.clone()));
@@ -8533,23 +7053,7 @@ async fn build_goose_backend(
 
 // ── Model catalog helpers ─────────────────────────────────────────────────────
 
-/// Seed the persistent model catalog from upstream sources (static list + local Ollama).
-///
-/// Upserts all returned records (preserving `is_custom` rows) and sets `downloaded`
-/// by checking the filesystem.  A failure to fetch is non-fatal — the server starts
-/// with whatever models are already in the DB.
-/// Give the speech engine a voice on first run, so the pond can talk out of
-/// the box.
-///
-/// Everything else about TTS bootstraps itself — `ensure_kokoro_engine` fetches
-/// the tokenizer, the weights and the default voice, and the 54 voice rows come
-/// from a static list that seeds even with no network. The one thing that did
-/// not was the *assignment*: a fresh install had a working engine, a downloaded
-/// voice, and `SPEAKING — Nothing assigned` on the Models page, because
-/// choosing the voice was left to the household.
-///
-/// Only ever fills a hole. An existing assignment is never touched, so this
-/// cannot overwrite a voice someone picked.
+/// Assigns a default TTS voice on first run; never overwrites an existing assignment.
 async fn ensure_tts_is_set_up(
     repo: &dyn ModelRepository,
     settings_repo: &dyn pond_core::user_data::ports::settings::SettingsRepository,
@@ -8559,9 +7063,7 @@ async fn ensure_tts_is_set_up(
         return;
     }
 
-    // Prefer whatever the household already has in settings — an upgrade from
-    // before roles existed carries a voice there — and fall back to Kokoro's
-    // own reference voice.
+    // Prefer a voice already in settings (upgrades from before roles), else Kokoro's default.
     let stored = settings_repo.get().await.ok();
     let configured = stored
         .as_ref()
@@ -8590,21 +7092,8 @@ async fn ensure_tts_is_set_up(
     println!("  ✅ Voice: {voice} assigned (first run)");
 }
 
-/// Give this machine the speech tier it can actually keep up with.
-///
-/// Deliberately NOT part of `ensure_tts_is_set_up`, which is where it used to
-/// live and where it did nothing. That function returns early when a TTS
-/// assignment already exists — a question about the *voice* — and the tier
-/// decision sat after the return, so every pond that had ever assigned a voice
-/// skipped it. That is every upgraded pond, including the Jetson the
-/// measurements were taken on: it kept `q8` and synthesised at **RTF 1.335**,
-/// slower than playback, while `q4f16` runs the same sentence at 0.780. The
-/// code was right and unreachable, which is the worst of both.
-///
-/// So it is its own step, run on every start, and idempotent by construction —
-/// `tier_to_adopt` returns `None` once the stored tier is the host default or
-/// anything the household picked. pond-core cannot make this call: it is pure
-/// domain and must not sniff the machine, so the composition root does it.
+/// Adopts the speech tier this machine can keep up with. Kept out of `ensure_tts_is_set_up`,
+/// which returns early once a voice is assigned; idempotent via `tier_to_adopt`.
 async fn ensure_host_tts_tier(
     settings_repo: &dyn pond_core::user_data::ports::settings::SettingsRepository,
 ) {
@@ -8628,6 +7117,7 @@ async fn ensure_host_tts_tier(
     println!("  ✅ Voice quality: {host_tier} (chosen for this machine)");
 }
 
+/// Seeds the model catalog from the static list and local Ollama; fetch failure is non-fatal.
 async fn seed_model_catalog(repo: &dyn ModelRepository, data_dir: &std::path::Path) {
     use crate::composite_model_catalog_provider::CompositeModelCatalogProvider;
     use crate::filesystem_model_storage::FilesystemModelStorage;
@@ -8662,11 +7152,7 @@ async fn seed_model_catalog(repo: &dyn ModelRepository, data_dir: &std::path::Pa
     tracing::info!("model catalog seeded ({count} records)");
 }
 
-/// Sync role assignments from the join table to the settings KV hot-cache.
-///
-/// The join table is the source of truth.  If a role has no assignment row yet,
-/// the settings KV value is left unchanged (backward-compat with existing installs
-/// that only have the legacy single-model settings fields).
+/// Mirrors role assignments, the source of truth, into settings; unassigned roles are untouched.
 async fn sync_assignments_to_settings(
     repo: &dyn ModelRepository,
     settings_repo: &dyn pond_core::user_data::ports::settings::SettingsRepository,
@@ -8717,27 +7203,8 @@ async fn sync_assignments_to_settings(
                     .await;
             }
             "tts" => {
-                // A `tts_piper` assignment is now always stale, and syncing it
-                // is actively harmful. Piper is gone as an engine; what this
-                // branch writes into `voice_tts_voice` is a `.onnx` FILENAME,
-                // and Kokoro takes a voice NAME, so the value can only ever be
-                // one the engine rejects.
-                //
-                // Measured on the Orin, which still carries
-                // `tts|tts_piper/en-lessac-medium` from before the swap: this
-                // sync wrote `en_US-lessac-medium.onnx` about four seconds into
-                // every boot, the Kokoro bootstrap noticed it was not a Kokoro
-                // id and healed it back to `af_heart` about eighty seconds
-                // later, and the next boot did it again. The heal's own comment
-                // says it "makes this a one-time event" — it could not, because
-                // it repaired the setting while this repaired the setting back
-                // from an assignment nobody had migrated.
-                //
-                // Skipped rather than migrated here: this function's job is to
-                // mirror assignments into settings, not to decide what the
-                // household's voice should be. Leaving the row alone and
-                // declining to mirror it lets the Kokoro bootstrap establish
-                // the truth once, and it stays.
+                // Skip `tts_piper`: Kokoro rejects Piper filenames; syncing flip-flops each boot.
+                // Not migrated here either; the Kokoro bootstrap owns choosing the voice.
                 if category == "tts_piper" {
                     tracing::info!(
                         model = %model_name,
@@ -8746,18 +7213,7 @@ async fn sync_assignments_to_settings(
                     );
                     continue;
                 }
-                // The TTS engine gate elsewhere checks active_tts_model.starts_with("piper")
-                // — a bare catalog slug (e.g. "en-lessac-medium") never satisfies that, so
-                // it must be stored prefixed for piper voices.
-                //
-                // Idempotent, because this value round-trips: it is written to
-                // `active_tts_model` here and read back into a role assignment
-                // elsewhere, so a bare `format!` compounds a prefix once per
-                // settings-write/boot cycle — `piper-piper-en-lessac-medium`,
-                // then `piper-piper-piper-...`. The gate that reads it only
-                // checks `starts_with("piper")`, so nothing fails loudly; the
-                // voice filename in the same block just stops matching a real
-                // model, and TTS goes quiet for a reason nobody can see.
+                // Idempotent: the value round-trips, so a bare format! would stack prefixes.
                 let stored_active_model = if category == "tts_piper" {
                     if model_name.starts_with("piper-") {
                         model_name.to_string()
@@ -8770,7 +7226,6 @@ async fn sync_assignments_to_settings(
                 let _ = settings_repo
                     .set_key("active_tts_model", stored_active_model)
                     .await;
-                // For piper models also sync voice_tts_voice to the .onnx filename.
                 if category == "tts_piper" {
                     if let Ok(Some(record)) = repo.get_by_id(&a.model_id).await {
                         if let Some(fname) = record.filename {
@@ -8811,15 +7266,7 @@ async fn run_models(action: ModelAction) -> Result<()> {
     let data_dir = default_data_dir();
     let db = Database::init(&data_dir).await?;
 
-    // PAI-2 P6a follow-up: `pond models download` calls
-    // `model_download::download_file` twice and was the FOURTH downloading
-    // entry point, not the third. P6a gated the download and installed the mode
-    // on serve/chat/setup, but never here — so the gate it added was inert on
-    // this path and a stored `network_mode = "offline"` permitted a full model
-    // download. That is a privacy control failing OPEN, which is the polarity
-    // invariant 3 forbids. The guard's detector now looks for functions that
-    // DOWNLOAD rather than functions that call `ensure_onnx_runtime()`, which
-    // is what let the omission through.
+    // This entry point downloads, so it must install the mode or "offline" fails open.
     pond_core::shared::services::egress::set_network_mode(
         pond_core::shared::services::egress::NetworkMode::parse(
             &SqliteSettingsRepository::new(db.system.clone())
@@ -8999,8 +7446,7 @@ async fn run_models(action: ModelAction) -> Result<()> {
 
 // ── Agent CLI ─────────────────────────────────────────────────────────────────
 
-/// Resolve the model role string from a `--role` flag value.
-/// All requests default to "chat" — the LLM handles tool routing natively via MCP.
+/// `auto` maps to `chat`: the LLM routes tools itself via MCP.
 fn resolve_role(role_arg: &str, _message: &str) -> String {
     match role_arg {
         "auto" | "chat" => "chat".to_string(),
@@ -9008,10 +7454,7 @@ fn resolve_role(role_arg: &str, _message: &str) -> String {
     }
 }
 
-/// Stream a single agent request to stdout, printing tool calls to stderr.
-///
-/// Text tokens are printed as they arrive. Tool calls and results are shown
-/// on stderr so they don't pollute piped output. Returns when the stream ends.
+/// Streams text to stdout; tool calls and status go to stderr so piped output stays clean.
 async fn stream_agent_response(
     agent: &Arc<dyn Agent>,
     request: pond_core::shared::domain::agent::AgentRequest,
@@ -9042,7 +7485,6 @@ async fn stream_agent_response(
                 }
             }
             AgentStreamEvent::ToolResult { content, .. } => {
-                // Show first line of result so the user sees what came back
                 let preview = content.lines().next().unwrap_or("(no output)");
                 eprintln!("     ↳ {preview}");
             }
@@ -9071,7 +7513,6 @@ async fn stream_agent_response(
                 score,
                 rounds,
             } => {
-                // Clear previous answer and print revised version
                 eprintln!(
                     "\r\x1b[K\x1b[33m  📝 Revised (score: {score}/5, rounds: {rounds})\x1b[0m"
                 );
@@ -9079,17 +7520,13 @@ async fn stream_agent_response(
                 printed_newline = content.ends_with('\n');
             }
             AgentStreamEvent::TurnLimitReached { max_turns } => {
-                // The cap sentence itself already printed as Text. In a REPL the
-                // continuation is just the next prompt, so say how to give it.
+                // The cap sentence already printed as Text; just say how to continue.
                 eprintln!(
                     "\r\x1b[K\x1b[2m  (turn budget of {max_turns} reached — \
                      send \"continue\" to resume)\x1b[0m"
                 );
             }
-            // PAI-6 P6. On stderr with the other progress chatter, so piping
-            // stdout still yields exactly the assistant's answer. `detail` is a
-            // tool name or a GIAP-authored reason and is printed as it arrives;
-            // it never carries the child's own text.
+            // On stderr; `detail` is a tool name or GIAP reason, never the child's own text.
             AgentStreamEvent::SubagentProgress {
                 role,
                 status,
@@ -9111,25 +7548,15 @@ async fn stream_agent_response(
     Ok(())
 }
 
-/// One-shot or interactive Goose agent chat from the CLI.
-///
-/// Builds the full GooseAdapter + GIAP MCP backend (same as `run_server`),
-/// streams the response to stdout, then exits (or loops in REPL mode).
+/// One-shot or REPL Goose agent chat on the same backend as `run_server`.
 async fn run_agent_cmd(action: AgentAction) -> Result<()> {
     let data_dir = default_data_dir();
     let db = Database::init(&data_dir).await?;
 
-    // Build all repos once — shared across Chat, Tools, and Extras arms.
     let settings_repo: Arc<
         dyn pond_core::user_data::ports::settings::SettingsRepository + Send + Sync,
     > = Arc::new(SqliteSettingsRepository::new(db.system.clone()));
-    // Chokepoint 1 again, for the same reason as the voice path: all three
-    // arms below reach `build_goose_backend`, so all three can write a memory.
-    //
-    // Index handle with no model id, for the reason spelled out at the same
-    // wiring in `run_chat`: every arm calls `build_goose_backend` with
-    // `embedding_provider: None`, so this process can delete an indexed memory
-    // through `giap-memory` but can never attribute a vector it wrote.
+    // As in `run_chat`: redacted, and indexed with model id `None` since no embedder exists here.
     let memory_repo: Arc<
         dyn pond_core::user_data::ports::memory_repository::MemoryRepository + Send + Sync,
     > = Arc::new(
@@ -9159,34 +7586,18 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
     let device_registry: Arc<
         dyn pond_core::user_data::ports::device_registry::DeviceRegistry + Send + Sync,
     > = Arc::new(SqliteDeviceRegistry::new(db.system.clone()));
-    // The catalog the context governor's rung 3 reads. The CLI paths get one
-    // too: a `pond-server chat` turn budgets its history exactly the way a
-    // dashboard turn does, and giving only the server the real window would put
-    // the two back out of agreement — which is the whole defect PAI-3 removes.
+    // CLI turns must budget history with the same real context window as dashboard turns.
     let cli_model_repo: Arc<dyn ModelRepository + Send + Sync> =
         Arc::new(SqliteModelRepository::new(db.system.clone()));
 
     let settings = settings_repo.get().await.unwrap_or_default();
-    // PAI-2 P6b: install the egress gate on THIS entry point too. `pond agent`
-    // has read the settings row since it was written, and ignored the one field
-    // on it that says whether the pond is allowed to talk to anybody. All three
-    // arms below reach `build_goose_backend`, which wires the LLM provider, the
-    // weather adapter and the whole MCP tool surface -- everything that phones
-    // out on a turn. Without this the process-global stays at its `Open`
-    // default and every gate those paths inherit evaluates against a mode
-    // nobody chose. P6a fixed the same defect for `run_chat` and `run_setup`
-    // and did not reach here.
+    // The mode is a process-global defaulting to `Open`; each entry point must install it.
     pond_core::shared::services::egress::set_network_mode(
         pond_core::shared::services::egress::NetworkMode::parse(&settings.network_mode),
     );
-    // Use the configured LLM server URL (llamafile default). GooseAdapter uses this to
-    // route requests when chat_provider = "llamafile"; for ollama/local it uses its own logic.
+    // Used only when chat_provider = "llamafile"; other providers route themselves.
     let llamafile_url = format!("http://127.0.0.1:{}", ports::llamafile_port());
 
-    // Wire weather from settings so giap__get_current_weather MCP tool is available.
-    // The third copy of this decision, and it was the strictest of the three:
-    // it required COORDINATES, so a pond that had only ever been given a place
-    // name got weather over HTTP and in voice mode, and was refused it here.
     let weather: Option<Arc<dyn WeatherProvider>> = match (
         settings.weather_enabled,
         pond_core::user_data::services::location::resolve(&settings).weather_target(),
@@ -9229,7 +7640,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 None, // session_storage — not needed for goose backend
                 Some(cli_model_repo.clone()),
                 false,
-                Arc::new(tokio::sync::RwLock::new(None)), // mesh_provider — CLI paths don't build the mesh stack (server-only for now)
+                Arc::new(tokio::sync::RwLock::new(None)), // mesh_provider: none on CLI paths
             )
             .await;
 
@@ -9240,9 +7651,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 images: Vec::new(),
                 voice_mode: false,
                 canvas_mode: false,
-                // Local CLI on the device itself. Whoever ran it has shell
-                // access to the pond already, so a narrower scope would be
-                // theatre rather than a boundary.
+                // The CLI user already has shell access, so a narrower scope would be theatre.
                 profile_scope: ProfileScope::Household,
                 profile_context: None,
                 tool_group_allowlist: None,
@@ -9273,7 +7682,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 None, // session_storage — not needed for goose backend
                 Some(cli_model_repo.clone()),
                 false,
-                Arc::new(tokio::sync::RwLock::new(None)), // mesh_provider — CLI paths don't build the mesh stack (server-only for now)
+                Arc::new(tokio::sync::RwLock::new(None)), // mesh_provider: none on CLI paths
             )
             .await;
 
@@ -9343,7 +7752,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 None, // session_storage — not needed for goose backend
                 Some(cli_model_repo.clone()),
                 false,
-                Arc::new(tokio::sync::RwLock::new(None)), // mesh_provider — CLI paths don't build the mesh stack (server-only for now)
+                Arc::new(tokio::sync::RwLock::new(None)), // mesh_provider: none on CLI paths
             )
             .await;
 
@@ -9435,9 +7844,7 @@ async fn run_prompts_cmd(action: PromptAction) -> Result<()> {
             use pond_core::prompts::builtin_template_content;
             use pond_core::user_data::domain::prompt_template::PromptTemplate;
 
-            // Deliberately the same lookup the REST reset handler uses. This arm
-            // used to carry its own `match`, so the two reset paths could ship
-            // different factory text — and did, for the description.
+            // Same lookup as the REST reset handler, so both paths restore identical factory text.
             let Some((content, description)) = builtin_template_content(&name) else {
                 eprintln!("'{name}' is not a built-in template. Only balanced | concise | technical | warm can be reset.");
                 std::process::exit(1);
@@ -9447,8 +7854,7 @@ async fn run_prompts_cmd(action: PromptAction) -> Result<()> {
                 content: content.to_string(),
                 description: description.to_string(),
                 is_system: true,
-                // An explicit reset returns the row to factory ownership, which
-                // includes adopting the current generation.
+                // A reset returns the row to factory ownership, including the current generation.
                 is_customized: false,
                 factory_version: pond_core::user_data::domain::prompt_template::FACTORY_VERSION,
                 updated_at: String::new(),
@@ -9657,16 +8063,8 @@ async fn run_memories_cmd(action: MemoryAction) -> Result<()> {
 
     let data_dir = default_data_dir();
     let db = Database::init(&data_dir).await?;
-    // Chokepoint 1: `memories add` is a direct write path into the same store
-    // the server writes to, and it takes its content straight from argv --
-    // which is where a shell-history copy of a credential comes from.
-    //
-    // `memories remove` is the delete that most needs the index handle: it is
-    // the one command whose entire job is to take a memory out, and unwired it
-    // took the row and left the vector sitting in `pond_vectors.db`. No embedder
-    // in this process either, so the model id is `None` -- the case `mirror`
-    // documents by name, and the reason it returns rather than removing when a
-    // fragment arrives carrying a vector it cannot attribute.
+    // Redacted, since `memories add` content comes from argv (think pasted credentials). Indexed
+    // so `remove` drops the vector too; model id `None` as there's no embedder here.
     let repo =
         pond_core::user_data::services::redacting_memory_repository::RedactingMemoryRepository::new(
             Arc::new(
@@ -9736,19 +8134,12 @@ async fn run_memories_cmd(action: MemoryAction) -> Result<()> {
     Ok(())
 }
 
-/// `pond pairing` — re-display (or refresh) the device pairing code + QR by asking
-/// the RUNNING server (loopback) to mint/return it. Pairing-code plaintext is
-/// process-local (`ISSUED_CODE_CACHE` lives in the server process), so the CLI must
-/// NOT mint locally — a locally-minted code lands in a per-process cache the running
-/// server can never see, so it can never verify (DEF-6). We instead delegate to the
-/// server's loopback-gated `GET/POST /api/v1/handshake/pairing-code` endpoints, which
-/// execute in the process that owns the cache.
+/// Shows the pairing code from the running server over loopback. Never mint locally: codes
+/// live in the server's process-local `ISSUED_CODE_CACHE`, so a CLI-minted one can't verify.
 async fn run_pairing(refresh: bool) -> Result<()> {
     let data_dir = default_data_dir();
 
-    // The running server persisted its actually-bound port here (see run_server).
-    // Fall back to the default only so the URL is still meaningful; a missing file
-    // almost certainly means the server isn't running, which the HTTP call surfaces.
+    // The server writes its bound port here; if missing, the HTTP call reports it isn't running.
     let port = std::fs::read_to_string(data_dir.join(".runtime_api_port"))
         .ok()
         .and_then(|s| s.trim().parse::<u16>().ok())
@@ -9759,8 +8150,7 @@ async fn run_pairing(refresh: bool) -> Result<()> {
         .timeout(std::time::Duration::from_secs(5))
         .build()?;
 
-    // GET returns the current unconsumed code; POST mints a fresh one. Both are
-    // loopback-only and execute inside the server process (cache is populated there).
+    // GET returns the current unconsumed code; POST mints a fresh one.
     let resp = if refresh {
         client.post(&base).send().await
     } else {
@@ -10005,8 +8395,7 @@ mod tests {
 
         sync_assignments_to_settings(&repo, &settings_repo).await;
 
-        // think_provider/think_model and task_provider/task_model are KV-only
-        // (not first-class fields on Settings), so read via get_key().
+        // These are KV-only, not `Settings` fields, hence get_key().
         assert_eq!(
             settings_repo
                 .get_key("think_provider")
@@ -10097,7 +8486,5 @@ mod tests {
         );
     }
 
-    // The session-activity seed's guards moved to pond-core with the code
-    // (`shared/domain/session_activity.rs`), because CI only `cargo check`s
-    // this crate — a test that lives here never runs in CI at all.
+    // CI only `cargo check`s this crate, so tests here never run there; put guards in pond-core.
 }
