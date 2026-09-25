@@ -45,8 +45,7 @@ function attrText(attrs: Record<string, AttributeValue>, key: string): string | 
   return undefined;
 }
 
-/** Human-readable detail line for a row, e.g. "api.spotify.com · via giap-music".
- *  Only egress.http events currently carry host/tool attributes. */
+/** Row detail, e.g. "api.spotify.com · via giap-music"; only egress.http events carry host/tool. */
 function eventDetail(event: ActivityEvent): string | undefined {
   const host = attrText(event.attributes, "host");
   if (!host) return undefined;
@@ -69,10 +68,7 @@ function CategoryIcon({ category, size = 16 }: { category: EventCategory; size?:
   );
 }
 
-/** Stable React key for an activity event. The backend sends no row id, so we
- *  derive one from the fields that identify an event within a wholesale refresh
- *  (timestamp + trace/session + position). Prevents key={undefined} collapsing
- *  every row to the same key, which corrupted reconciliation on the 30s refresh. */
+/** React key; the backend sends no row id, so derive one from timestamp, trace/session and position. */
 function eventKey(e: ActivityEvent, i: number): string {
   return e.id ?? `${e.timestamp}:${e.trace_id ?? e.session_id ?? ""}:${e.action}:${i}`;
 }
@@ -181,8 +177,7 @@ export function Logs() {
       api.getActivitySummary(window_),
     ])
       .then(([res, sum]) => {
-        // The scheduler's hourly heartbeat — noise in a human-facing activity
-        // feed, not something the user did or that touched their data.
+        // Drop `time.tick`, the scheduler's hourly heartbeat: noise in a human-facing feed.
         setEvents(res.events.filter((e) => e.action !== "time.tick"));
         setSummary(sum);
       })

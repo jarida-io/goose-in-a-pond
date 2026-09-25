@@ -305,7 +305,6 @@ function MemRow({
   }
 
   if (editing) {
-    // Editing state — spans full row width
     return (
       <div className="mem-row mem-row--editing">
         <div className="mem-row__edit-body">
@@ -744,19 +743,8 @@ function MemorySettingsCard({ settings, onToggle }: {
 }
 
 // ── Semantic index coverage ───────────────────────────────────
-//
-// This screen has always shown what the pond has STORED. It has never shown how
-// much of that the assistant can actually find, and those are different numbers:
-// retrieval reaches a memory only through a vector stamped with the embedding
-// model currently configured, and everything else falls back to recency. An
-// index sitting at roughly 2% populated survived six landed phases precisely
-// because the figure lived in a log line — the pond answered every question,
-// slightly worse, and nothing on any screen disagreed.
-//
-// So the panel's whole job is to make a corpus at zero impossible to scroll
-// past. A percentage alone does not do that: averaged into one figure, two
-// healthy corpora hid a third that could never populate at all. A row each,
-// with the empty one tinted and named in words, is the shape that shows it.
+// Retrieval reaches only rows with a vector from the configured embedding model. One row per
+// corpus: averaged into one figure, a corpus at zero hides behind healthy ones.
 
 const CORPUS_META: Record<ContextCorpus, { label: string; holds: string }> = {
   memory:  { label: "Memories",   holds: "facts the assistant extracted from conversation" },
@@ -764,14 +752,8 @@ const CORPUS_META: Record<ContextCorpus, { label: string; holds: string }> = {
   summary: { label: "Summaries",  holds: "the rolling summary of each conversation" },
 };
 
-/**
- * What a corpus's two numbers mean, as four cases rather than a percentage.
- *
- * `vacant` and `unindexed` both read 0 indexed and must never be shown the same
- * way: one is a store nobody has written to yet, which is fine and will fix
- * itself, and the other is a store full of rows the assistant cannot reach,
- * which is the defect this panel exists to surface.
- */
+/** A corpus's coverage as states, not a percentage: `vacant` (nothing written yet, fine)
+ *  and `unindexed` (rows retrieval cannot reach) both read 0 and must never look alike. */
 export type CoverageState = "vacant" | "excluded" | "unindexed" | "partial" | "complete";
 
 export function coverageState(row: {
@@ -779,10 +761,7 @@ export function coverageState(row: {
   indexed_rows: number;
   source_rows?: number;
 }): CoverageState {
-  // Checked BEFORE "vacant", because both are zero qualifying rows and only one
-  // of them is fine. A corpus holding rows that all fail the filter is broken in
-  // a way embedding cannot touch, and calling that "nothing stored yet" is the
-  // sentence that let it hide.
+  // Before "vacant": both have zero qualifying rows, but rows that all fail the filter are broken.
   if (row.rows === 0 && (row.source_rows ?? 0) > 0) return "excluded";
   if (row.rows === 0) return "vacant";
   if (row.indexed_rows === 0) return "unindexed";
@@ -790,17 +769,8 @@ export function coverageState(row: {
   return "partial";
 }
 
-/**
- * A coverage fraction as a percentage a person can read.
- *
- * `null` is the server saying "no qualifying rows", which is not 0% and not
- * 100% — see `ContextCorpusCoverage` — so it prints as a dash and the row's own
- * counts carry the meaning instead.
- *
- * Anything above nothing floors at "<1%" rather than rounding to zero. Rounding
- * would print the same "0%" for an index with a handful of vectors and one with
- * none at all, and telling those apart is the reason this number is on screen.
- */
+/** Coverage as a percentage. `null` (no qualifying rows; see `ContextCorpusCoverage`) is a dash;
+ *  anything above zero floors at "<1%" so a few vectors never reads as none. */
 export function formatCoverage(coverage: number | null | undefined): string {
   if (coverage === null || coverage === undefined) return "—";
   const pct = coverage * 100;
@@ -840,9 +810,7 @@ function CorpusCoverageRow({ row }: { row: ContextCorpusCoverage }) {
   const tone = STATE_TONE[state];
   const meta = CORPUS_META[row.corpus];
 
-  // A sliver rather than an honest 2% bar: at this width two percent draws less
-  // than one pixel and reads as empty, which is the exact confusion the panel is
-  // here to end. The counts beside it stay exact.
+  // Min 3% width: at this size 2% draws under a pixel and reads as empty; the counts stay exact.
   const pct = (row.coverage ?? 0) * 100;
   const barWidth = pct > 0 ? Math.max(3, pct) : 0;
 
@@ -869,8 +837,6 @@ function CorpusCoverageRow({ row }: { row: ContextCorpusCoverage }) {
         <div
           className="mem-settings__toggle-desc"
           title={meta?.holds}
-          // The words are the loudest part of the row, so the one state worth
-          // alarm gets to keep the alarm colour instead of the muted grey.
           style={{ color: state === "unindexed" || state === "excluded" ? tone.fg : undefined }}
         >
           {coverageNote(row)}
@@ -924,10 +890,7 @@ export function IndexCoveragePanel() {
     setNotice("");
     try {
       const result = await api.rebuildContextIndex();
-      // Said explicitly, because the figures below drop to near zero the instant
-      // this returns: the route clears the table and the sweep re-embeds in the
-      // background, so a reader who was not told would take the repair for the
-      // damage.
+      // Say so: the route clears the table and re-embeds in the background, so figures drop to near zero.
       setNotice(
         result.indexed
           ? `Cleared ${result.cleared} ${result.cleared === 1 ? "vector" : "vectors"}. The pond embeds them again in the background, so the figures start near zero and climb.`
@@ -984,9 +947,7 @@ export function IndexCoveragePanel() {
         {loading ? (
           <div className="mem-card__meta-item">Reading the index…</div>
         ) : !health ? null : !health.indexed ? (
-          // Embeddings switched off is a working pond, not a fault — the server
-          // answers 200 for it deliberately — so this state gets the server's own
-          // sentence and no percentages at all. A 0% here would read as breakage.
+          // Embeddings off is a working pond (the server answers 200): show its sentence, never a 0%.
           <div style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "4px 8px" }}>
             <span style={{ color: "var(--color-warning-fg)", display: "flex", flexShrink: 0, marginTop: 2 }} aria-hidden="true">
               <AlertTriangle size={14} strokeWidth={2} />
@@ -1152,7 +1113,7 @@ export function Memory() {
     }
   }
 
-  // Only show active lifecycle memories — with fallback for old API without lifecycle
+  // Active memories only; no `lifecycle` (older API) counts as active.
   const visibleItems = items.filter(
     (m) => !m.lifecycle || m.lifecycle === "active",
   );
@@ -1170,7 +1131,6 @@ export function Memory() {
     if (errs.length) setError(`${errs.length} deletion(s) failed.`);
   }
 
-  // Consolidation
   async function handleConsolidate() {
     if (consolidationStatus === "running") return;
     setConsolidationStatus("running");
@@ -1233,28 +1193,24 @@ export function Memory() {
     setConsolidationMsg("Cancelled.");
   }
 
-  // Segment counts for filter row
   const segCounts = SEGMENT_ORDER.reduce<Partial<Record<MemorySegment, number>>>((acc, seg) => {
     const n = visibleItems.filter((m) => m.segment === seg).length;
     if (n > 0) acc[seg] = n;
     return acc;
   }, {});
 
-  // Tier counts
   const tierCounts = (["short", "long", "permanent"] as MemoryTier[]).reduce<Partial<Record<MemoryTier, number>>>((acc, tier) => {
     const n = visibleItems.filter((m) => m.tier === tier).length;
     if (n > 0) acc[tier] = n;
     return acc;
   }, {});
 
-  // Source counts
   const sourceCounts = (["auto", "mcp", "chat"] as SourceKey[]).reduce<Partial<Record<SourceKey, number>>>((acc, src) => {
     const n = visibleItems.filter((m) => normalizedSource(m.source) === src).length;
     if (n > 0) acc[src] = n;
     return acc;
   }, {});
 
-  // Apply all filters
   const filtered = visibleItems.filter((m) => {
     if (activeSegment !== "all" && m.segment !== activeSegment) return false;
     if (activeTier !== "all" && m.tier !== activeTier) return false;

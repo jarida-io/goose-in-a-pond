@@ -29,15 +29,7 @@ function Mark({ consumer }: { consumer: Consumer }) {
 
 // ─── Re-titling result ────────────────────────────────────────────────────
 
-/**
- * One short line describing what a manual re-titling pass did.
- *
- * Sits beside the button in a narrow column, so it stays terse. The distinction
- * worth spending words on is "nothing needed doing" versus "nothing was
- * allowed" — a pond whose conversations are all named by hand would otherwise
- * report the same blank result as a broken pass, and the person would press the
- * button again expecting a different answer.
- */
+/** Terse retitle summary that tells "nothing needed doing" from "nothing was allowed" (all hand-named). */
 export function summariseRetitle(r: RetitleResult): string {
   if (r.renamed_count > 0) {
     const many = r.renamed_count === 1 ? "1 conversation" : `${r.renamed_count} conversations`;
@@ -52,11 +44,7 @@ export function summariseRetitle(r: RetitleResult): string {
 
 // ─── Options from the model registry ──────────────────────────────────────
 
-/**
- * Provider filters copied from `sections/Models.tsx`, which is this app's
- * existing authority on which `provider` value belongs to which role. Kept as
- * one table so the two cannot drift apart silently.
- */
+/** Registry filters per picker, by `provider` (the Models page's equivalent is `rolesFor`). */
 const PROVIDERS: Record<
   Exclude<OptionSource, "llm-providers" | "time-zones">,
   (m: ModelEntry) => boolean
@@ -76,9 +64,7 @@ function optionsFor(
   meshEnabled?: boolean,
 ): Option[] {
   if (source === "time-zones") {
-    // "Africa/Nairobi — Nairobi (+03:00)". The offset is worth showing: it is
-    // how somebody confirms they picked the right one of two zones with
-    // similar names, and it is resolved for TODAY rather than assumed.
+    // "Africa/Nairobi — Nairobi (+03:00)"; today's offset tells similar-named zones apart.
     return zones.map((z) => ({
       value: z.zone,
       label: z.place ? `${z.zone} — ${z.place} (${z.offset})` : `${z.zone} (${z.offset})`,
@@ -86,19 +72,13 @@ function optionsFor(
   }
   if (source === "llm-providers") {
     const seen = [...new Set(models.filter(PROVIDERS["llm-models"]).map((m) => m.provider))];
-    // "mesh" (#132) has no catalog row — it is not a downloadable model, it is
-    // a trusted peer's compute — so it can never appear via the `models` scan
-    // above. Gated on `mesh_enabled`, same principle as the `downloaded`
-    // filter below: offering a provider that cannot actually serve a turn
-    // right now is offering a failure, not a choice.
+    // "mesh" (a peer's compute) has no catalogue row, so add it, but only while mesh is enabled.
     const providers = meshEnabled ? [...seen, "mesh"] : seen;
     return providers.sort().map((p) => ({ value: p, label: p }));
   }
   return models
     .filter(PROVIDERS[source])
-    // A model the device has not downloaded cannot be selected into service,
-    // so offering it would be offering a failure. `downloaded` is optional in
-    // the registry, and absent means "not tracked" rather than "missing".
+    // Only downloaded models can serve; an absent `downloaded` means untracked, not missing.
     .filter((m) => m.downloaded !== false)
     .map((m) => ({
       value: source === "tts-voices" ? (m.filename ?? m.name) : m.name,
@@ -109,13 +89,7 @@ function optionsFor(
 
 // ─── Value helpers ────────────────────────────────────────────────────────
 
-/**
- * Render a stored value into a text box.
- *
- * `retention_events_by_category` is the one map-valued setting, shown as
- * `network 14, sensor 7` rather than raw JSON — nobody editing retention should
- * have to type braces. `parseText` is its inverse.
- */
+/** A stored value as text; the one map (`retention_events_by_category`) shows as `network 14, sensor 7`. */
 function textValue(v: unknown): string {
   if (v == null) return "";
   if (Array.isArray(v)) return v.join(", ");
@@ -141,8 +115,7 @@ function parseText(key: string, raw: string): unknown {
     }
     return out;
   }
-  // An emptied box means "unset", not the empty string — both of these are
-  // `Option<String>` server-side.
+  // Emptied means unset: both are `Option<String>` server-side.
   if (raw === "" && NULLABLE_TEXT.has(key)) return null;
   return raw;
 }
@@ -185,9 +158,7 @@ function EntryRow({
   /** Developer view: reveals field names, types and the consumer marks. */
   dev?: boolean;
 }) {
-  // A control nothing reads is not offered. Leaving it operable would let
-  // someone spend a decision on a value that changes nothing — the exact
-  // defect this page exists to surface.
+  // A control nothing reads is not offered: it would be a decision that changes nothing.
   const inert = entry.consumer === "none";
   const { control } = entry;
   const errId = error ? `scat-err-${entry.key}` : undefined;
@@ -279,9 +250,7 @@ function EntryRow({
 
           {control.kind === "lookup" && (
             options === null ? (
-              // The registry has not answered yet, or could not be reached.
-              // Free text rather than an empty picker: an empty dropdown offers
-              // nothing and hides the value that is already set.
+              // No registry answer yet: free text, since an empty picker would hide the current value.
               <input
                 type="text"
                 className="native-input scat__field scat__field--text"
@@ -326,9 +295,7 @@ function EntryRow({
                 min={control.min}
                 max={control.max}
                 value={value == null ? "" : String(value)}
-                // Emptying a number box means "unset", which is not 0 — sending
-                // 0 for a blank latitude would move the home to the Gulf of
-                // Guinea without anyone asking for it.
+                // Emptied means unset, not 0 (a blank latitude must not become 0°).
                 onChange={(e) => onChange(entry.key, e.target.value === "" ? null : Number(e.target.value))}
               />
               {control.unit && <span className="scat__unit">{control.unit}</span>}
@@ -370,28 +337,14 @@ export function SettingsCatalogueView({ onBack }: { onBack?: () => void } = {}) 
   const [saveError, setSaveError] = useState<string | null>(null);
   const [categoryId, setCategoryId] = useState(CATALOGUE[0].id);
   const [query, setQuery] = useState("");
-  /**
-   * Developer view. Off by default, so what a household sees is labels and
-   * descriptions; on, it adds field names, the consumer marks and their notes.
-   */
+  /** Developer view: adds field names, consumer marks and their notes. */
   const [dev, setDev] = useState(false);
-  /**
-   * Re-running setup is destructive enough to deserve a second press — it
-   * throws away the answers the wizard collected — but not a modal, because
-   * this only exists behind the developer flag in the first place.
-   */
+  /** Re-running setup discards the wizard's answers, so it takes a second press (dev-only, so no modal). */
   const [armed, setArmed] = useState(false);
   const [onboarding, setOnboarding] = useState(false);
   const [onboardErr, setOnboardErr] = useState<string | null>(null);
 
-  /**
-   * Reset on the server, then reload.
-   *
-   * Onboarding is a whole-app mode, decided in `App.tsx` from the status the
-   * backend reports — so the honest way back into it is to re-arm the guard and
-   * let the app read that on the next load. Reaching for the app dispatcher
-   * from here would couple a settings panel to the shell for no gain.
-   */
+  /** Reset on the server, then reload: `App.tsx` decides onboarding from the backend's status. */
   const startOnboarding = useCallback(async () => {
     if (!armed) { setArmed(true); return; }
     setOnboarding(true);
@@ -412,14 +365,7 @@ export function SettingsCatalogueView({ onBack }: { onBack?: () => void } = {}) 
   const [retitling, setRetitling] = useState(false);
   const [retitleNote, setRetitleNote] = useState<string | null>(null);
 
-  /**
-   * Rename conversations on demand.
-   *
-   * One model call per conversation renamed, so this can run for a while on a
-   * small board — the button reports that rather than pretending to be instant.
-   * The reply is the only feedback; nothing on this page shows conversation
-   * names, so there is nothing to refresh here.
-   */
+  /** Rename conversations now; one model call each, so it can take a while on a small board. */
   const runRetitle = useCallback(async () => {
     setRetitling(true);
     setRetitleNote(null);
@@ -437,13 +383,7 @@ export function SettingsCatalogueView({ onBack }: { onBack?: () => void } = {}) 
     setLoadError(null);
     api.getSettings()
       .then((s) => {
-        // Checked, not trusted. `request` casts its parsed body to `T`, so a
-        // reply that is not settings — an empty body, or the SPA's own
-        // index.html, which is what `dev:vite` serves for /api when no backend
-        // is running — arrives typed as `Settings` and undefined at runtime.
-        // The `errors` memo then indexes it by every catalogue key and the
-        // whole page dies on the first one, which is `user_name`. The docs
-        // promise this case shows "their error state"; it showed a crash.
+        // Checked, not trusted: `request` casts any body (e.g. `dev:vite`'s index.html) to `T`.
         if (!s || typeof s !== "object" || Array.isArray(s)) {
           setLoadError("The pond answered, but not with settings. Is the server running?");
           return;
@@ -458,15 +398,12 @@ export function SettingsCatalogueView({ onBack }: { onBack?: () => void } = {}) 
   useEffect(load, [load]);
 
   useEffect(() => {
-    // The registry only fills pickers. A failure here degrades every lookup to
-    // a text box rather than blocking the page, so it is not a load error.
+    // A registry failure only degrades lookups to text boxes; not a load error.
     let cancelled = false;
     api.listModels()
       .then((m) => !cancelled && setModels(m))
       .catch(() => !cancelled && setModels(null));
-    // Zones, from the server's IANA catalogue. `allZones` falls back to this
-    // webview's own `Intl` list and never rejects, so this cannot fail the
-    // page — at worst the picker degrades to a text box, same as the rest.
+    // `allZones` falls back to this webview's `Intl` list and never rejects.
     allZones()
       .then((z) => !cancelled && setZones(z))
       .catch(() => {});
@@ -480,15 +417,10 @@ export function SettingsCatalogueView({ onBack }: { onBack?: () => void } = {}) 
       if (e.consumer === "none") continue;
       const raw = (settings as Record<string, unknown>)[e.key];
 
-      // ABSENT IS NOT INVALID. A key the server did not send is not something a
-      // person can see or fix, and flagging it would block every save on a
-      // partial response — an older server, or a field added since. Only a
-      // value that is actually present gets judged.
+      // Absent is not invalid: a partial response (older server) must not block every save.
       if (raw === undefined) continue;
 
-      // An emptied number box is a different matter: no numeric setting is
-      // `Option<_>` server-side, so sending null earns a 422. Catching it here
-      // names the box instead of failing the whole save.
+      // No numeric setting is `Option<_>` server-side, so a null would 422 the whole save.
       if (raw === null && e.control.kind === "number") {
         out[e.key] = "Enter a number.";
         continue;
@@ -513,13 +445,7 @@ export function SettingsCatalogueView({ onBack }: { onBack?: () => void } = {}) 
     setSettings((prev) => ({ ...prev, [key]: value }));
   }, []);
 
-  /**
-   * The banner and the search box both start folded on a short screen.
-   *
-   * A 7-inch panel is 1024x600. The banner is ~180px and the masthead another
-   * ~90, so unfolded they take nearly half the height before a single setting
-   * is visible. On a desktop there is room for both, so nothing folds.
-   */
+  /** Fold the banner and search on short screens: on a 1024x600 panel they'd take half the height. */
   const short = typeof window !== "undefined"
     && window.matchMedia?.("(max-height: 720px)").matches === true;
   const [bannerOpen, setBannerOpen] = useState(!short);
@@ -527,47 +453,24 @@ export function SettingsCatalogueView({ onBack }: { onBack?: () => void } = {}) 
   const [appearance, setAppearance] = useState(false);
   const [searchOpen, setSearchOpen] = useState(!short);
 
-  /**
-   * Training the wake word, not just typing it.
-   *
-   * The classic view offered this beside the phrase and the hub still does. It
-   * has to live here too now — a box you can type a phrase into is not the same
-   * capability as teaching the pond to hear it, and losing the second one while
-   * keeping the first would look like the setting still worked.
-   */
+  /** Wake-word training; typing a phrase alone does not teach the pond to hear it. */
   const [calibrating, setCalibrating] = useState(false);
 
   const [locating, setLocating] = useState(false);
   const [locationNote, setLocationNote] = useState<string | null>(null);
 
-  /**
-   * Fill the place and both coordinates from the device.
-   *
-   * Staged on purpose rather than saved: this writes into the same draft every
-   * other control writes into, so it appears in the change count and can be
-   * abandoned. A detection that silently persisted would be the one control on
-   * the page that acts before you press Save.
-   *
-   * One cascade, run on the server, shared with the wizard. This used to ask
-   * `navigator.geolocation` directly — which a Tauri webview does not reliably
-   * answer, so the button's usual outcome was a refusal and a name guessed
-   * from the time zone, with no coordinates and therefore no weather.
-   * `detectPlace` still offers this device's coordinates when a real browser
-   * provides them; it just no longer depends on that.
-   */
+  /** Fill place and coordinates via the server-side cascade the wizard uses; geolocation is optional. */
   const findLocation = useCallback(async () => {
     setLocating(true);
     setLocationNote(null);
     try {
-      // What is already in the box beats anything derived, so a household that
-      // typed "Kisumu" gets Kisumu's coordinates rather than the capital's.
+      // A typed name beats anything derived.
       const typed = String(
         (settings as Record<string, unknown>).weather_location_name ?? "",
       ).trim();
       const at = await detectPlace(typed || undefined);
 
-      // Staged, not saved: this writes into the same draft every other control
-      // writes into, so it shows in the change count and can be abandoned.
+      // Staged, not saved: it joins the draft, so it can be abandoned.
       if (at.timezone) patch("timezone", at.timezone);
       if (at.name) patch("weather_location_name", at.name);
       if (at.has_coordinates) {
@@ -575,9 +478,7 @@ export function SettingsCatalogueView({ onBack }: { onBack?: () => void } = {}) 
         patch("weather_longitude", at.longitude);
       }
 
-      // Phrased by SOURCE, because "you are in Nairobi" and "your time zone
-      // suggests Nairobi" are different claims and the old code stated the
-      // guess as a fact.
+      // Phrased by source: a time-zone guess must not read as a located fact.
       setLocationNote(
         at.note
           ? at.note
@@ -599,18 +500,12 @@ export function SettingsCatalogueView({ onBack }: { onBack?: () => void } = {}) 
     setSaveError(null);
     try {
       const updated = await api.updateSettings(body);
-      // Fold against the patch we SENT, not the pre-save baseline — the rule
-      // the classic Settings panel follows. The server can answer with a value
-      // it derived rather than the one we sent (geocoding rewrites the
-      // coordinates), and that echo has to be adopted or every later save
-      // re-sends a stale value forever.
+      // Fold against what was sent: the server may echo derived values (geocoded coordinates) to adopt.
       setSettings((prev) => foldServerState(prev, { ...baseline, ...body }, updated));
       setBaseline(structuredClone(updated));
       setSaved(true);
     } catch (e) {
-      // Shown verbatim, not through `friendlyMessage`: a 422 from this endpoint
-      // names the field and the accepted values, and that sentence is the whole
-      // reason the request failed.
+      // Verbatim, not `friendlyMessage`: this endpoint's 422 names the field and accepted values.
       setSaveError(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
@@ -620,18 +515,7 @@ export function SettingsCatalogueView({ onBack }: { onBack?: () => void } = {}) 
   const searching = query.trim().length > 0;
   const category = CATALOGUE.find((c) => c.id === categoryId) ?? CATALOGUE[0];
 
-  /**
-   * Mirrors are not offered here. `pond-server` syncs the `active_*` keys from
-   * `model_role_assignments` — the join table is the source of truth — so a
-   * control on this page would lose to the next sync. The Models page owns them
-   * and this page points at it.
-   *
-   * A setting nothing reads is also withheld, but only outside developer view.
-   * It used to render disabled with a note explaining why; once the note moved
-   * behind the developer flag that left a dead control and no reason for it,
-   * which is worse than either half. So the household sees settings that do
-   * something, and the marks live where the field names do.
-   */
+  /** Withholds mirrors (Models owns `active_*`) and, outside developer view, settings nothing reads. */
   const offered = useCallback(
     (es: Entry[]) => es.filter((e) =>
       e.ownedBy === undefined && (dev || e.consumer !== "none")), [dev]);
@@ -644,10 +528,7 @@ export function SettingsCatalogueView({ onBack }: { onBack?: () => void } = {}) 
       .flatMap((c) => c.groups)
       .map((g) => ({
         ...g,
-        // Descriptions are in the haystack, so a setting is findable by what it
-        // does rather than only by what it is called. Field names join only in
-        // developer view — matching on a string the household cannot see gives
-        // a result they cannot explain.
+        // Search descriptions too; field names only in developer view, where they are visible.
         entries: offered(g.entries).filter((e) =>
           `${e.label} ${e.description} ${dev ? `${e.key} ${e.note ?? ""}` : ""}`
             .toLowerCase().includes(q)),
@@ -704,8 +585,6 @@ export function SettingsCatalogueView({ onBack }: { onBack?: () => void } = {}) 
       );
     }
 
-    // One press fills the name and both coordinates, because they are one
-    // answer to one question and nobody thinks of them as three settings.
     if (entry.key === "weather_location_name") {
       return (
         <>
@@ -726,9 +605,7 @@ export function SettingsCatalogueView({ onBack }: { onBack?: () => void } = {}) 
       );
     }
 
-    // Renaming on demand, rather than waiting for the pond to go quiet. Offered
-    // whatever the toggle says, because the toggle governs what happens
-    // unattended and this is not that.
+    // Offered whatever the toggle says: the toggle governs only unattended renaming.
     if (entry.key === "session_titling_enabled") {
       return (
         <>
@@ -831,9 +708,7 @@ export function SettingsCatalogueView({ onBack }: { onBack?: () => void } = {}) 
           phrase={String((settings as Record<string, unknown>).voice_wake_word ?? "")}
           onComplete={() => {
             setCalibrating(false);
-            // Calibration writes the learned pronunciations server-side, so the
-            // page has to re-read rather than assume. `foldServerState` keeps
-            // any other edit in progress.
+            // Calibration writes server-side, so re-read; `foldServerState` keeps other edits in progress.
             void load();
           }}
           onCancel={() => setCalibrating(false)}
@@ -1000,8 +875,7 @@ export function SettingsCatalogueView({ onBack }: { onBack?: () => void } = {}) 
             </nav>
 
             {appearance ? (
-              /* Rendered bare: it brings its own heading, and the pond has no
-                 say in any of it. */
+              /* Rendered bare: it brings its own heading. */
               <div className="scat__panel scat__panel--appearance">
                 <AppearanceView />
               </div>
@@ -1043,10 +917,7 @@ export function SettingsCatalogueView({ onBack }: { onBack?: () => void } = {}) 
                         error={errors[e.key] ?? null}
                         options={
                           e.control.kind === "lookup"
-                            // Zones do not wait on the model registry: they come
-                            // from a different call, and gating them on `models`
-                            // would leave the zone picker as a text box on any
-                            // pond with no models installed.
+                            // Zones come from their own call, so they must not wait on `models`.
                             ? e.control.source === "time-zones"
                               ? (zones.length ? optionsFor(e.control.source, [], zones) : null)
                               : (models

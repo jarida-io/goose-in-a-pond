@@ -1,32 +1,7 @@
 // ─── The settings catalogue ────────────────────────────────────────────────
-//
-// One entry per `Settings` field, grouped the way a household thinks about the
-// house rather than the way the Rust struct grew. `docs/architecture/settings-catalogue.md`
-// is the prose version of this file and the two are meant to move together.
-//
-// THE THREE AXES. A setting is not one thing; it is three, and they fail
-// independently:
-//
-//   Store     — is the value persisted?        (guarded in pond-infra)
-//   Consumer  — does anything ACT on it?       (this file's `consumer` field)
-//   Surface   — can a person change it, where? (this file's existence)
-//
-// pond-core's `every_settings_field_is_dispositioned` covers Store and Surface.
-// Nothing covered Consumer, which is how ten settings came to render as
-// operable controls that no code reads. `consumer` is that missing axis, and
-// `catalogue.test.ts` fails the build if an entry drifts from the `Settings`
-// type.
-//
-// `consumer` is maintained BY HAND against the Rust tree, so it can go stale in
-// one direction the test cannot catch: a setting that gets wired up stays
-// marked "none" until somebody edits this file. That is the safe direction —
-// it under-promises. The durable fix is `GET /api/v1/settings/schema` serving
-// this from the server (Fix 6 in the design doc); until then, re-check with:
-//
+// One entry per `Settings` field; moves with `docs/architecture/settings-catalogue.md`.
+// `consumer` is hand-checked: no hit outside `sqlite_settings.rs`/`domain/settings.rs` = no consumer.
 //   grep -rn --include='*.rs' -w '<key>' crates/ | grep -v sqlite_settings.rs
-//
-// A key with no hit outside `sqlite_settings.rs` and `domain/settings.rs` has
-// no consumer.
 
 import type { Settings } from "../api/types";
 import {
@@ -43,12 +18,7 @@ export type Consumer =
   /** Nothing reads it anywhere. The control is inert. */
   | "none";
 
-/**
- * Where a picker's options come from when they are not a fixed list.
- *
- * Filters mirror `sections/Models.tsx`, which is the app's existing authority
- * on which `provider` values belong to which role.
- */
+/** Where a picker's options come from when they are not a fixed list. */
 export type OptionSource = "llm-models" | "whisper-models" | "tts-voices" | "embedding-models" | "llm-providers" | "time-zones";
 
 export type Control =
@@ -62,44 +32,21 @@ export type Control =
   | { kind: "lookup"; source: OptionSource; placeholder?: string; allowCustom?: boolean };
 
 export interface Entry {
-  /** The `Settings` field. Typed, so a typo is a build error. */
   key: keyof Settings;
   /** What the person controls, in their words — never the field name. */
   label: string;
-  /**
-   * What it does, in one line, always shown under the label. Lifted from the
-   * doc comment on the `Settings` field so the explanation has exactly one
-   * home — if the behaviour changes, the Rust comment is what gets edited.
-   */
+  /** One line shown under the label, lifted from the Rust `Settings` doc comment (edit that first). */
   description: string;
   control: Control;
   consumer: Consumer;
-  /**
-   * Why the mark is not "live", in plain language. Required for `app` and
-   * `none` — a mark the interface will not explain is worse than no mark.
-   */
+  /** Why the mark is not "live", in plain language; required for `app` and `none`. */
   note?: string;
-  /**
-   * No control existed in the desktop app before this catalogue; the setting
-   * was reachable only through the API. Rendered as a "New" badge so the
-   * design reads as a proposal rather than a claim about what shipped.
-   */
+  /** No desktop control existed before this catalogue (API only); rendered with a "New" badge. */
   proposed?: boolean;
-  /**
-   * This field is a mirror, and something else owns the decision. `pond-server`
-   * syncs the `active_*` keys FROM `model_role_assignments` — "the join table is
-   * the source of truth" — so a control here would lose to the next sync.
-   *
-   * The entry stays in the catalogue because `catalogue.test.ts` proves every
-   * `Settings` field has a home, and deleting it would only make the field
-   * unaccounted for rather than unrendered. Settings shows a pointer to the
-   * owning surface instead of a control.
-   */
+  /** A mirror owned elsewhere: `pond-server` syncs `active_*` from `model_role_assignments`, so a
+   *  control here would lose to the next sync. Settings shows a pointer to the owner instead. */
   ownedBy?: "models";
-  /**
-   * Checked on every edit; a message blocks Save and renders under the control.
-   * See `validation.ts` for why the client checks what the server does not.
-   */
+  /** Checked on every edit; a message blocks Save (see `validation.ts` for why). */
   validate?: Validator;
 }
 
@@ -156,21 +103,14 @@ export const CATALOGUE: CatalogueCategory[] = [
           },
           {
             key: "timezone", label: "Time zone", description: "The time zone this home is in, so schedules land at the right hour.",
-            // A lookup, not a hand list. There were three lists in this app
-            // — 16, 18 and 13 zones, no two alike — so a household in Kampala
-            // could not pick its own zone anywhere. This one comes from the
-            // server's IANA catalogue, which is also what saving validates
-            // against, so the picker cannot offer a zone the save would reject.
+            // From the server's IANA catalogue, which saving validates against, so every offered zone saves.
             control: { kind: "lookup", source: "time-zones", placeholder: "Choose a time zone" },
             consumer: "live",
             validate: ianaTimezone,
           },
           { key: "weather_location_name", label: "Location", description: "The place name used when the pond talks about the weather.", control: { kind: "text", placeholder: "Nairobi" }, consumer: "live" },
           { key: "weather_enabled", label: "Use local weather", description: "Let the pond know the local weather.", control: { kind: "toggle" }, consumer: "live" },
-          // Filled in for you: saving a location name the coordinates do not
-          // match makes the server geocode it and answer with the result.
-          // Editing either number by hand suppresses that, so a deliberate
-          // coordinate is never overwritten by a name lookup.
+          // The server geocodes a saved location name into these unless either was edited by hand.
           { key: "weather_latitude", label: "Latitude", description: "Latitude of the place used for weather.", control: { kind: "number", step: 0.0001, min: -90, max: 90, unit: "°" }, consumer: "live", validate: optional(latitude) },
           { key: "weather_longitude", label: "Longitude", description: "Longitude of the place used for weather.", control: { kind: "number", step: 0.0001, min: -180, max: 180, unit: "°" }, consumer: "live", validate: optional(longitude) },
         ],
@@ -257,14 +197,10 @@ export const CATALOGUE: CatalogueCategory[] = [
         name: "Speaking",
         entries: [
           { key: "voice_tts_voice", label: "Voice", description: "The voice the pond speaks in.", control: { kind: "lookup", source: "tts-voices", placeholder: "Choose a downloaded voice" }, consumer: "live" },
-          // Pace is the engine's `speed` multiplier, not a percentage — stored
-          // exactly as the model takes it so there is no conversion to get
-          // backwards between here and the synthesiser.
+          // The engine's own `speed` multiplier, stored as-is (not a percentage).
           { key: "voice_tts_speed", label: "Speaking pace", description: "How fast it speaks. 1.0 is its natural pace.", control: { kind: "number", step: 0.05, min: 0.5, max: 2 }, consumer: "live", validate: range(0.5, 2) },
           { key: "voice_tts_quality", label: "Voice quality", description: "How much detail the voice is made with. Higher sounds smoother and takes longer.", control: { kind: "select", options: TTS_QUALITY }, consumer: "live" },
-          // No `note`: notes are reserved for controls that are not connected,
-          // and this one is. What the tone is for is said in the Voice view's
-          // row subtitle, where an explanation does not double as a warning.
+          // No `note`: notes mark unconnected controls; the Voice view's subtitle explains the tone.
           { key: "voice_thinking_tone_enabled", label: "Sound while it thinks", description: "Play a soft tone while it is thinking, so silence does not read as broken.", control: { kind: "toggle" }, consumer: "live" },
           { key: "active_tts_model", label: "Speech model", ownedBy: "models", description: "The voice used for speaking. Chosen on the Models page.", control: { kind: "text", placeholder: "af_heart" }, consumer: "live" },
           { key: "voice_max_turns", label: "Steps before answering aloud", description: "How much work it may do before answering aloud. Fewer steps means a faster reply.", control: { kind: "number", min: 0, max: 50 }, consumer: "live", proposed: true, validate: all(integer, range(0, 50)) },
@@ -299,8 +235,7 @@ export const CATALOGUE: CatalogueCategory[] = [
       {
         name: "Engine",
         entries: [
-          // "pond" is refused by the server with a 422 — the backend is
-          // quarantined (Q2-05), so offering it would be offering a failure.
+          // Not "pond": the server quarantines that backend and 422s it.
           {
             key: "agent_backend", label: "Agent engine", description: "Which engine runs the assistant. Only one is available.", consumer: "live",
             control: { kind: "radio", options: [
@@ -404,9 +339,6 @@ export const CATALOGUE: CatalogueCategory[] = [
         entries: [
           {
             key: "network_mode", label: "Network reach", description: "How much of the internet it may reach: everything, only what you allow, or nothing.", consumer: "live", proposed: true,
-            // A radio, not a dropdown: this is the setting that decides whether
-            // the pond can talk to the internet, and all three answers should
-            // be readable without opening anything.
             control: { kind: "radio", options: [
               { value: "open",      label: "Open",       hint: "Every outbound call is recorded, none refused" },
               { value: "allowlist", label: "Allowed only", hint: "Refuses hosts that are not loopback or on the curated list" },
@@ -530,12 +462,8 @@ export const CATALOGUE: CatalogueCategory[] = [
         entries: [
           { key: "unprompted_speech_enabled", label: "Speak without being asked", description: "Let it speak first, without being spoken to.", control: { kind: "toggle" }, consumer: "live" },
           { key: "unprompted_speech_categories", label: "Only for", description: "Which kinds of news it may say out loud unprompted.", control: { kind: "text", placeholder: "alert" }, consumer: "live", validate: speechCategories },
-          // Free text, not a time picker: a value the server cannot parse means
-          // silence, and a picker renders such a value as blank — which reads
-          // as "not set" when it actually means "quiet all day".
-          // Validated hard, because the server's failure mode here is silence:
-          // a time it cannot parse makes `quiet_hours_cover` fail closed and the
-          // pond never speaks, with nothing anywhere explaining why.
+          // Free text, validated hard: an unparseable time makes `quiet_hours_cover` fail closed (never
+          // speaks), and a time picker would render that value blank, as if unset.
           { key: "quiet_hours_start", label: "Quiet from", description: "When it should stop speaking unprompted for the night.", control: { kind: "text", placeholder: "22:00" }, consumer: "live", validate: hhmm },
           { key: "quiet_hours_end", label: "Quiet until", description: "When it may start speaking unprompted again.", control: { kind: "text", placeholder: "07:00" }, consumer: "live", validate: hhmm },
         ],
@@ -544,9 +472,7 @@ export const CATALOGUE: CatalogueCategory[] = [
         name: "Thinking unprompted",
         entries: [
           { key: "proactive_review_enabled", label: "Review the day on its own", description: "Let it think over the day without being asked.", control: { kind: "toggle" }, consumer: "live" },
-          // Only ever touches names the pond wrote itself. A title typed by
-          // hand is left alone whatever this is set to, so the control does not
-          // need to warn about losing one.
+          // Only renames titles the pond wrote itself; hand-typed ones are never touched.
           { key: "session_titling_enabled", label: "Give conversations better names", description: "Let it name your conversations while it is idle.", control: { kind: "toggle" }, consumer: "live" },
         ],
       },
@@ -634,9 +560,6 @@ export const CATALOGUE: CatalogueCategory[] = [
         entries: [
           { key: "hybrid_compaction_enabled", label: "Trim history as you go", description: "Trim long conversations as you go, so they keep fitting.", control: { kind: "toggle" }, consumer: "live", proposed: true },
           { key: "summary_idle_secs", label: "Summarise after idle", description: "How long you must be idle before it summarises the conversation so far.", control: { kind: "number", min: 0, unit: "seconds" }, consumer: "live", proposed: true, validate: all(integer, atLeast(0, "seconds")) },
-          // The server floors this at MIN_RESUME_IDLE_SECS; too SMALL is the
-          // damaging direction, so the client refuses the values that would be
-          // silently corrected rather than letting them look accepted.
           { key: "compaction_verbatim_days", label: "Keep in full for", description: "How many days of conversation to keep word for word before shortening it.", control: { kind: "number", min: 0, unit: "days" }, consumer: "live", proposed: true, validate: all(integer, atLeast(0, "days")) },
         ],
       },
@@ -666,8 +589,6 @@ export const CATALOGUE: CatalogueCategory[] = [
           {
             key: "vision_camera_url", label: "Camera address", description: "Where the camera is: a network address or a socket on this device.",
             control: { kind: "text", placeholder: "rtsp://… or /dev/video0" }, consumer: "live",
-            // A device path is not a URL, so this accepts either shape rather
-            // than insisting on a scheme the local-camera case does not have.
             validate: optional((v) => {
               const t = String(v).trim();
               if (t.startsWith("/dev/")) return null;
@@ -683,14 +604,11 @@ export const CATALOGUE: CatalogueCategory[] = [
       {
         name: "Matter",
         entries: [
-          // No enable toggle: Matter runs by default and installs its own
-          // controller, so the only question left is where that controller is —
-          // and that only matters to someone running their own.
+          // No enable toggle: Matter runs by default with its own controller.
           {
             key: "matter_ws_url", label: "Controller address", description: "Address of your smart-home controller.",
             control: { kind: "text", placeholder: "ws://127.0.0.1:5580/giap" }, consumer: "live",
-            // Mirrors the server's own 422 so the message arrives before the
-            // round-trip rather than instead of it.
+            // Mirrors the server's 422.
             validate: optional(url(["ws://", "wss://"], "ws://127.0.0.1:5580/giap")),
           },
           {
@@ -711,8 +629,7 @@ export const CATALOGUE: CatalogueCategory[] = [
       {
         name: "How long things are kept",
         entries: [
-          // 0 means "keep forever" for every one of these, which is why none of
-          // them has a floor of 1.
+          // 0 means "keep forever" for each of these, hence the floor of 0.
           { key: "retention_event_log_days", label: "Activity log", description: "How many days of activity to keep. Zero keeps everything.", control: { kind: "number", min: 0, unit: "days" }, consumer: "live", validate: all(integer, atLeast(0, "days")) },
           { key: "retention_sensor_days", label: "Sensor readings", description: "How many days of sensor readings to keep.", control: { kind: "number", min: 0, unit: "days" }, consumer: "live", validate: all(integer, atLeast(0, "days")) },
           { key: "retention_session_messages_keep", label: "Messages per conversation", description: "How many messages to keep in each conversation.", control: { kind: "number", min: 0, unit: "messages" }, consumer: "live", validate: all(integer, atLeast(0, "messages")) },
@@ -732,7 +649,6 @@ export const CATALOGUE: CatalogueCategory[] = [
   },
 ];
 
-/** Every entry, flattened. */
 export function allEntries(): Entry[] {
   return CATALOGUE.flatMap((c) => c.groups.flatMap((g) => g.entries));
 }

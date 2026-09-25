@@ -21,33 +21,8 @@ import { clampPace, DEFAULT_VOICE, DEFAULT_PACE, DEFAULT_QUALITY } from "../voic
 import "../styles/models.css";
 import "../hub/views/settings/voice-picker.css";
 
-/**
- * Models — what this pond runs on.
- *
- * # What this screen is for
- *
- * One question, asked three ways: what is doing each job, what is on the disk,
- * and what else could be. It replaced a page that opened on a guided-setup
- * wizard, hid the real view behind a second tab, and then split that into five
- * category tabs and four separate modals — so "which model answers me, and will
- * this one fit" took four clicks and a scroll to establish.
- *
- * # The fit meter
- *
- * The one thing this page knows that a generic model list does not: this
- * device has a fixed budget for models, and a given model either lives inside
- * it or spills to the CPU and runs slowly. Every card answers that BEFORE the
- * download, because finding out afterwards costs several gigabytes and an
- * evening. It reads live from `models/memory-status`, and says "unknown"
- * rather than guessing when the budget is not reported — which is the case on
- * a dev machine, and a confident bar drawn from nothing is worse than no bar.
- *
- * # Cards
- *
- * The pond's ink edge: a 2px border and the hard offset shadow. These cards
- * are the screen's content rather than its chrome, which is the same reason
- * the conversation wall uses it.
- */
+// Fit meter: whether a model fits this device's model budget or spills to the CPU, from
+// `models/memory-status`; "unknown" rather than a guess when no budget is reported (dev machines).
 
 // ─── Roles band ────────────────────────────────────────────────────────────
 
@@ -70,8 +45,6 @@ function RoleCard({
           </button>
         </>
       ) : (
-        /* An unfilled role is the only thing on this page that needs doing, so
-           it says so rather than showing an empty slot. */
         <span className="mdl-role__none">
           <AlertTriangle size={14} aria-hidden="true" />
           Nothing assigned
@@ -276,8 +249,7 @@ function AddBand({ onStarted }: { onStarted: () => void }) {
     if (files[repoId]) return;
     setLoadingFiles(repoId);
     try {
-      // Awaited before the updater runs: a `setState` callback is not async, so
-      // awaiting inside it would resolve to a promise stored as the file list.
+      // Await outside the updater: an async setState callback would store a promise as the list.
       const list = (await api.listHfModelFiles(repoId)).files ?? [];
       setFiles((f) => ({ ...f, [repoId]: list }));
     } catch {
@@ -395,14 +367,7 @@ export function Models() {
     catch { /* non-fatal */ }
   }, []);
 
-  /**
-   * Poll only while something is actually moving.
-   *
-   * The old page polled downloads on a timer that started at two seconds and
-   * doubled, whether or not anything was downloading, and refreshed disk usage
-   * every thirty seconds for the life of the section. Nothing here runs when
-   * nothing is happening.
-   */
+  /** Poll only while something is actually moving. */
   const pollDownloads = useCallback(() => {
     if (pollRef.current) return;
     const tick = async () => {
@@ -414,8 +379,7 @@ export function Models() {
       if (list.some((d) => d.status === "downloading")) {
         pollRef.current = setTimeout(tick, 1500);
       } else {
-        // Something finished, was paused or was stopped — the model list and
-        // the disk figure may both have moved.
+        // A transfer ended or paused: the model list and disk figure may have moved.
         void loadModels();
         void api.getDiskUsage().then(setDisk).catch(() => {});
       }
@@ -439,11 +403,7 @@ export function Models() {
   }, [downloads, pollDownloads]);
 
   // ── Voice, for the Speaking group ──
-  //
-  // Choosing a voice is not the same act as managing a model file, so the
-  // Speaking group gets the picker instead of a row list. The catalogue below
-  // still lists voices to download: this is for choosing among the ones you
-  // have, that one is for getting more.
+  // Choosing a voice is not managing a model file, so Speaking gets a picker, not a row list.
   const preview = useVoicePreview();
   const [voice, setVoice] = useState<string>(DEFAULT_VOICE);
   const [pace, setPace] = useState<number>(DEFAULT_PACE);
@@ -473,10 +433,7 @@ export function Models() {
     setApplying(true);
     try {
       await api.updateSettings({ voice_tts_voice: id });
-      // Apply to the RUNNING engine — fetching the voice first when this is
-      // the household's first time choosing it. Without this the change waits
-      // for a restart, which on a shelf device reads as the setting not
-      // working.
+      // Apply to the running engine (fetching the voice if new); otherwise it waits for a restart.
       pollDownloads();
       await api.applyTtsSettings({ voice: id });
       void loadModels();
@@ -489,8 +446,7 @@ export function Models() {
     }
   }
 
-  // Debounced — a slider drag emits a value per pixel, and each one would
-  // otherwise be a settings write and a synthesis.
+  // Debounced: a slider drag emits a value per pixel, each a settings write and a synthesis.
   function choosePace(next: number) {
     const value = clampPace(next);
     setPace(value);
@@ -510,11 +466,9 @@ export function Models() {
     setApplying(true);
     try {
       await api.updateSettings({ voice_tts_quality: value });
-      // Start polling BEFORE the apply: the fetch happens inside it, and a
-      // poll that only starts afterwards would show a finished transfer.
+      // Poll before the apply: the fetch happens inside it.
       pollDownloads();
-      // Fetches the tier if it is new, then drops the session so the next
-      // utterance loads it. No restart.
+      // Fetches a new tier, then drops the session so the next utterance loads it.
       await api.applyTtsSettings({ quality: value });
     } catch {
       setQuality(previous);
@@ -526,10 +480,7 @@ export function Models() {
   const onDisk = useMemo(() => downloadedOnly(models), [models]);
   const groups = useMemo(() => groupByJob(onDisk), [onDisk]);
 
-  // Every voice the catalogue knows, downloaded or not. A voice is a 522 KB
-  // style table fetched on selection, so hiding the ones not yet installed
-  // would be hiding most of the choice to save a wait the household never
-  // asked to avoid.
+  // Every catalogue voice, installed or not: each is a ~522 KB style table fetched on selection.
   const allVoices = useMemo(
     () => models.filter((m) => (m.category ?? m.provider) === "tts_kokoro").map((m) => m.name),
     [models],
@@ -538,21 +489,12 @@ export function Models() {
     () => new Set(onDisk.filter((m) => (m.category ?? m.provider) === "tts_kokoro").map((m) => m.name)),
     [onDisk],
   );
-  // Voices are deliberately absent from "Ready to download".
-  //
-  // The picker above offers every voice Kokoro publishes and fetches the one
-  // you choose, so listing 39 of them again with their own Download buttons
-  // was the same choice twice — and the two disagreed about what selecting a
-  // voice means. Speech models are chosen by hearing them, not by downloading
-  // them first.
+  // No voices in "Ready to download": the picker offers and fetches every one.
   const availableGroups = useMemo(
     () => groupByJob(availableToDownload(models)).filter((g) => g.key !== "tts"),
     [models],
   );
-  // "Coming down" deliberately excludes voice fetches: the picker shows those
-  // itself, next to the voice that caused them, and a transfer listed in two
-  // places is the same duplication that put voices in "Ready to download".
-  // Pause and stop stay with the big transfers, where they are worth having.
+  // "Coming down" excludes voice fetches; the picker shows those beside the voice.
   const inFlight = useMemo(
     () => downloads.filter(isInFlight).filter((d) => d.category !== "tts_kokoro"),
     [downloads],
@@ -562,9 +504,7 @@ export function Models() {
     [downloads],
   );
 
-  // Voice/engine fetches, for the picker's own progress row. Read from the
-  // same feed as `inFlight` so the two can never disagree about what is
-  // happening — they are the same transfers, shown where each is relevant.
+  // Voice/engine fetches for the picker's progress row, from the same feed as `inFlight`.
   const voiceTransfers = useMemo(
     () =>
       voiceInFlight
@@ -579,12 +519,8 @@ export function Models() {
   async function useFor(model: ModelEntry, role: RoleKey) {
     setBusy(true);
     try {
-      // `category`, not `provider`. `provider` is the group key the list
-      // endpoint buckets under ("tts"), while the record's real category is
-      // e.g. "tts_kokoro" — and the server builds the lookup id from it. Sending
-      // the group key made every Kokoro voice fail with
-      // "Model 'af_heart' not found in 'tts'". Piper only worked because its
-      // group key and category happen to be the same word.
+      // `category` (e.g. "tts_kokoro"), not `provider`: the server builds the lookup id from it,
+      // and `provider` is only the list endpoint's group key ("tts").
       await api.activateModel(model.category ?? model.provider, model.name, role);
       await loadRoles();
       say(`${modelLabel(model)} now handles ${ROLES.find((r) => r.key === role)?.label.toLowerCase()}.`);
@@ -613,8 +549,7 @@ export function Models() {
     } finally { setBusy(false); }
   }
 
-  /** Start a catalogue model downloading. TTS voices bring their config with
-   *  them — the server fetches the companion .json alongside the .onnx. */
+  /** Start a download; for TTS voices the server also fetches the companion .json. */
   async function fetchModel(model: ModelEntry) {
     setBusy(true);
     try {
@@ -723,11 +658,7 @@ export function Models() {
               <h3 className="mdl-group__title">{g.label}</h3>
               <span className="mdl-group__count">
                 {g.key === "tts"
-                  ? // The picker offers every voice Kokoro publishes, not just
-                    // the downloaded ones, so a plain count of what is on disk
-                    // contradicted the list right under it. Say both, and call
-                    // them voices — "3 models" was never the right word for a
-                    // style table either.
+                  ? // The picker lists every voice, so count installed out of all.
                     `${installedVoices.size} of ${allVoices.length} voices installed`
                   : `${g.models.length} ${g.models.length === 1 ? "model" : "models"}`}
               </span>

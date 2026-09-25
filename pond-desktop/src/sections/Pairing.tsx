@@ -39,12 +39,8 @@ export function Pairing() {
             ),
       ]);
       if (!pc.code) throw new Error("Server returned no pairing code");
-      // Every address this Pond has, because none of them works everywhere.
-      // The mDNS name survives a DHCP lease change and is what an iPhone
-      // resolves happily; Android's resolver does no mDNS at all, so
-      // `<host>.local` fails there and the phone needs the raw address; and
-      // neither reaches the Pond once the phone leaves the house, which is what
-      // the tailnet address is for. The client tries them in that order.
+      // Every address, tried in this order: mDNS (survives DHCP; Android's resolver has no mDNS),
+      // the raw LAN address, then the tailnet address for when the phone is away from home.
       const params = new URLSearchParams({
         host: `${sysInfo.hostname}.local`,
         port: String(sysInfo.port),
@@ -61,7 +57,6 @@ export function Pairing() {
     }
   }, []);
 
-  // Render QR code onto canvas whenever pairUrl changes.
   useEffect(() => {
     if (!info?.pairUrl || !canvasRef.current) return;
     QRCode.toCanvas(canvasRef.current, info.pairUrl, {
@@ -71,7 +66,6 @@ export function Pairing() {
     }).catch((e) => console.error("QR render failed", e));
   }, [info?.pairUrl]);
 
-  // Countdown timer.
   useEffect(() => {
     if (!info?.expiresAt) return;
     const id = setInterval(() => setTimeLeft(timeUntil(info.expiresAt)), 500);
@@ -79,7 +73,6 @@ export function Pairing() {
     return () => clearInterval(id);
   }, [info?.expiresAt]);
 
-  // Auto-refresh when expired.
   useEffect(() => {
     if (timeLeft === "expired") loadPairingInfo(true);
   }, [timeLeft, loadPairingInfo]);

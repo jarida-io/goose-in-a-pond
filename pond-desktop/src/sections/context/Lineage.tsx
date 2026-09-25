@@ -1,25 +1,6 @@
 // ─── Lineage: how what the pond kept got that way ───────────────────────────
-//
-// The advanced view, and the shape of it is an argument.
-//
-// The obvious thing to draw here is a force-directed graph, and it would be
-// wrong. This pond holds 276 memory fragments of which 5 are live: 211 of them
-// were superseded, folded into survivors by consolidation and correction. That
-// is not a web, it is a CONVERGENCE, and it runs in one direction through time.
-// A physics blob would scatter that into an even mist and hide the only thing
-// the picture has to say.
-//
-// So it is drawn as generations flowing left to right into the few rows that
-// survived. Depth is real — how many supersessions deep a chain runs — and the
-// widths are counts, not decoration.
-//
-// # What is NOT drawn, and why
-//
-// `memory_edges` (migration 0017) has a `caused` / `referenced` / `superseded`
-// relation and would be the richer graph. It has zero rows, and grep finds no
-// production writer for it — the port's edge methods are default bodies that
-// `sqlite_memory` never implements. Drawing an empty DAG as though it were a
-// sparse one would be inventing a picture. It is reported as absent instead.
+// Supersession converges one way, so chains are drawn as left-to-right generations, not a graph.
+// `memory_edges` is not drawn: no production code writes it, so it is reported as absent.
 
 import { useMemo, useState } from "react";
 import { RefreshCw } from "lucide-react";
@@ -34,15 +15,12 @@ interface Props {
 }
 
 interface Chain {
-  /** The surviving memory this chain ends at. */
   survivor: MemoryFragment;
   /** Every superseded fragment that folded into it, nearest first. */
   ancestors: MemoryFragment[];
 }
 
-/** Follow `superseded_by` forward until it stops, so each chain ends at a row
- *  that nothing replaced. Cycles cannot happen by design, but a corrupt row
- *  should not hang the screen, so the walk is bounded. */
+/** Follow `superseded_by` to a row nothing replaced; bounded so a corrupt cycle cannot hang. */
 function buildChains(memories: MemoryFragment[]): {
   chains: Chain[];
   orphaned: number;
@@ -64,9 +42,7 @@ function buildChains(memories: MemoryFragment[]): {
       hops += 1;
     }
     if (!cursor) {
-      // Points at a row this pond no longer has. Counted rather than dropped:
-      // a lineage with missing ends is a real state, and silently omitting it
-      // would make the totals disagree with the memory count above.
+      // Dangling: counted, not dropped, so the totals agree with the memory count above.
       orphaned += 1;
       continue;
     }
@@ -93,9 +69,7 @@ export function Lineage({ memories, health, onRebuilt }: Props) {
     setNote(null);
     try {
       const r = await api.rebuildContextIndex();
-      // The route only CLEARS -- refilling is the idle sweep's job, and it is
-      // deferred, so promising "reindexed" would be a promise about something
-      // that has not happened yet.
+      // The route only clears; the deferred idle sweep refills, so don't claim "reindexed".
       setNote(
         r.cleared === 0
           ? "Nothing was indexed, so there was nothing to clear."
@@ -216,10 +190,7 @@ export function Lineage({ memories, health, onRebuilt }: Props) {
                   corpus.rows === 0
                     ? null
                     : Math.round((corpus.indexed_rows / corpus.rows) * 100);
-                // Three different zeroes, and they need opposite answers.
-                // "Nothing here" is fine; "everything here is being excluded"
-                // is a fault that no amount of indexing repairs, and reporting
-                // both as 0% would hide the one worth acting on.
+                // "Nothing here" is fine; "all held back" is a fault indexing can't fix. Never show both as 0%.
                 const note = corpus.structurally_excluded
                   ? `all ${corpus.source_rows} held back`
                   : corpus.rows === 0

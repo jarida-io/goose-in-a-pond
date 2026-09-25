@@ -1,11 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { diffSettings, foldServerState, settingsValueEquals } from "./state";
 
-// The draft-state rules, moved here with the functions when the catalogue
-// became the settings view. They were always about holding an edit against a
-// server that may answer at any moment, not about the screen that used to
-// display them.
-
 const SERVER_SETTINGS = {
   assistant_name: "Pond",
   user_name: "Jerry",
@@ -96,5 +91,3 @@ describe("foldServerState", () => {
     });
   });
 });
-
-// ── The full catalogue, reached from the classic Settings list ──────────────

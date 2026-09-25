@@ -36,11 +36,7 @@ function serverSettings(overrides: Record<string, unknown> = {}) {
   return { ...structuredClone(SERVER_SETTINGS), ...overrides };
 }
 
-// The zone the device reports, held in a variable so a test can choose it.
-// Reading the real one couples the suite to the machine: a CI runner is UTC,
-// so a test that saves "UTC" and expects to be offered something else is
-// asking whether the two differ on THIS host, not whether the component does
-// the right thing when they do.
+// The device's zone, set per test: reading the real one couples the suite to the host (CI is UTC).
 let deviceZoneValue = "Africa/Nairobi";
 
 vi.mock("../lib/place", async (importOriginal) => ({
@@ -88,8 +84,6 @@ function retitleReply(over: Record<string, unknown> = {}) {
 async function renderPage(overrides: Record<string, unknown> = {}) {
   mockApi.getSettings.mockResolvedValue(serverSettings(overrides));
   mockApi.listModels.mockResolvedValue(MODELS);
-  // The zone picker asks the server for the IANA catalogue; a couple of rows
-  // is enough to prove it renders what it is given rather than a hand list.
   mockApi.listTimeZones.mockResolvedValue({
     zones: [
       { zone: "Africa/Nairobi", offset: "+03:00", place: "Nairobi" },
@@ -139,13 +133,9 @@ describe("SettingsCatalogue", () => {
     await renderPage();
     fireEvent.click(screen.getByRole("button", { name: /Privacy & Security/ }));
 
-    // `cameras_enabled` persists and renders, but no code reads it. It used to
-    // show disabled with a note saying why; the note is a maintenance fact, so
-    // it moved behind developer view — and a disabled control whose reason is
-    // hidden is worse than either half. So the household is not shown it at all.
+    // `cameras_enabled` is read by nothing, so a household is not shown it.
     expect(screen.queryByLabelText("Cameras")).toBeNull();
 
-    // Its live neighbour is untouched.
     expect((screen.getByLabelText("Microphone") as HTMLInputElement).disabled).toBe(false);
   });
 
@@ -157,7 +147,6 @@ describe("SettingsCatalogue", () => {
     const cameras = screen.getByLabelText("Cameras") as HTMLInputElement;
     expect(cameras.disabled).toBe(true);
     expect(rowFor("Cameras").textContent).toContain("Nothing reads this");
-    // The field name appears here and only here.
     expect(rowFor("Cameras").textContent).toContain("cameras_enabled");
   });
 
@@ -165,8 +154,7 @@ describe("SettingsCatalogue", () => {
     await renderPage();
     fireEvent.click(screen.getByRole("button", { name: /Privacy & Security/ }));
 
-    // A household sees what the setting does, never what it is called — but the
-    // description is there, so the row says more than its label.
+    // The description is there, so the row says more than its label.
     expect(rowFor("Microphone").textContent).not.toContain("mic_enabled");
     expect(rowFor("Microphone").textContent!.length).toBeGreaterThan("Microphone".length + 20);
 
@@ -180,7 +168,6 @@ describe("SettingsCatalogue", () => {
     });
     await renderPage();
 
-    // Not on offer to a household.
     expect(screen.queryByRole("button", { name: /Start onboarding/ })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: /Developer view/ }));
@@ -228,21 +215,14 @@ describe("SettingsCatalogue", () => {
     expect(document.querySelector(".scat__search")!.getAttribute("data-open")).toBe("false");
   });
 
-  /// Found while wiring the zone picker: with no backend, `dev:vite` serves
-  /// index.html for /api, `request` casts it to `Settings`, and the `errors`
-  /// memo indexes `undefined` by the first catalogue key — so the page died
-  /// with "Cannot read properties of undefined (reading 'user_name')" where
-  /// the docs promise an error state.
+  // With no backend `dev:vite` serves index.html for /api, which `request` casts to `Settings`.
   it("shows an error rather than crashing when the reply is not settings", async () => {
     mockApi.getSettings.mockResolvedValue(undefined);
     render(<SettingsCatalogueView />);
-    // The banner, not a blank page and not a thrown render. `ErrorBanner`
-    // rewrites the wording, so the role is what this asserts on.
+    // `ErrorBanner` rewrites the wording, so assert on the role.
     expect(await screen.findByRole("alert")).toBeTruthy();
   });
 
-  /// The three hand-maintained lists held 16, 18 and 13 zones and none of them
-  /// held Kampala, so a household there could not say where it was.
   it("offers every zone the server knows, not a hand-picked few", async () => {
     await renderPage();
     const picker = (await screen.findByLabelText("Time zone")) as HTMLSelectElement;
@@ -253,8 +233,7 @@ describe("SettingsCatalogue", () => {
   });
 
   it("fills the place and both coordinates from one press", async () => {
-    // No browser geolocation, which is the normal case inside Tauri. The old
-    // button depended on it and so produced a name and no coordinates.
+    // No browser geolocation: the normal case in the desktop shell's webview.
     vi.stubGlobal("navigator", { ...navigator, geolocation: undefined });
     mockApi.detectLocation.mockResolvedValue({
       name: "Nairobi, Kenya",
@@ -277,7 +256,6 @@ describe("SettingsCatalogue", () => {
     vi.unstubAllGlobals();
   });
 
-  /// A guess must not be reported as a fact.
   it("says when the place was inferred rather than found", async () => {
     vi.stubGlobal("navigator", { ...navigator, geolocation: undefined });
     mockApi.detectLocation.mockResolvedValue({
@@ -300,7 +278,6 @@ describe("SettingsCatalogue", () => {
     vi.unstubAllGlobals();
   });
 
-  /// What is already typed beats what the time zone implies.
   it("looks up the name already in the box", async () => {
     vi.stubGlobal("navigator", { ...navigator, geolocation: undefined });
     mockApi.detectLocation.mockResolvedValue({
@@ -322,8 +299,6 @@ describe("SettingsCatalogue", () => {
     vi.unstubAllGlobals();
   });
 
-  // The two things the deleted classic Settings view owned. Losing either while
-  // keeping the settings around them would look like they still worked.
   it("still offers appearance, which the pond has no say in", async () => {
     await renderPage();
     fireEvent.click(screen.getByRole("button", { name: /^Appearance/ }));
@@ -346,8 +321,7 @@ describe("SettingsCatalogue", () => {
   it("leaves the model-role mirrors to the Models page", async () => {
     await renderPage();
     fireEvent.click(screen.getByRole("button", { name: /^Models/ }));
-    // pond-server syncs these FROM model_role_assignments, so a control here
-    // would lose to the next sync. They stay catalogued, they are not offered.
+    // Mirrors of `model_role_assignments`: catalogued, not offered.
     expect(screen.queryByLabelText("Chat model")).toBeNull();
     expect(screen.queryByLabelText("Embedding model")).toBeNull();
   });
@@ -385,8 +359,7 @@ describe("SettingsCatalogue", () => {
     await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledTimes(1));
     // A patch, not the whole object.
     expect(mockApi.updateSettings).toHaveBeenCalledWith({ user_name: "Anyumba" });
-    // The action keeps its name through the flow — "Save" becomes "Saved" —
-    // and the panel settles clean, so the next save does not resend it.
+    // "Save" becomes "Saved" and the panel settles clean.
     await screen.findByRole("button", { name: /^Saved$/ });
   });
 
@@ -398,8 +371,6 @@ describe("SettingsCatalogue", () => {
     fireEvent.change(screen.getByLabelText("Your name"), { target: { value: "X" } });
     fireEvent.click(await screen.findByRole("button", { name: /Save 1 change/ }));
 
-    // Verbatim, not routed through friendlyMessage — the 422 names the field
-    // and the accepted values, and that sentence is the entire reason it failed.
     await screen.findByText(/is not one of/);
   });
 
@@ -432,8 +403,6 @@ describe("SettingsCatalogue", () => {
         .toBe("Africa/Kampala"));
   });
 
-  // The other half of "only when it differs", which nothing asserted before:
-  // the offer has to be absent, not merely correct when present.
   it("offers nothing when the device already agrees with the saved zone", async () => {
     deviceZoneValue = "UTC";
     await renderPage({ timezone: "UTC" });
@@ -442,21 +411,18 @@ describe("SettingsCatalogue", () => {
 
   it("searches across every category, not just the open one", async () => {
     await renderPage();
-    // "Motion sensitivity" lives under Vision; "Camera address" beside it — and
-    // neither is on the category the page opens to.
+    // "Camera address" is not on the category the page opens to.
     fireEvent.change(screen.getByLabelText("Search settings"), { target: { value: "camera" } });
     await screen.findByText(/results/);
     expect(screen.getByLabelText("Camera address")).toBeTruthy();
 
-    // `cameras_enabled` also matches "camera", but nothing reads it, so it is
-    // not among the results a household is offered.
+    // `cameras_enabled` matches too, but nothing reads it, so it is not offered.
     expect(screen.queryByLabelText("Cameras")).toBeNull();
   });
 
   it("finds a setting by what it does, not only by its name", async () => {
     await renderPage();
-    // "greetings" appears nowhere in the label "Home name" — only in its
-    // description. Before descriptions were searchable this found nothing.
+    // "greetings" is only in "Home name"'s description.
     fireEvent.change(screen.getByLabelText("Search settings"), { target: { value: "greetings" } });
     // One match, so the heading reads "result" — not "results".
     await screen.findByText(/result/);
@@ -510,9 +476,6 @@ describe("summariseRetitle", () => {
       .toBe("Renamed 20 conversations — press again for more");
   });
 
-  /// The distinction the copy exists for: "nothing needed doing" and "nothing
-  /// was allowed" look identical from a count alone, and a person told the
-  /// first would press the button again expecting a different answer.
   it("separates nothing-to-do from nothing-allowed", () => {
     expect(summariseRetitle(retitleReply({ considered: 0 })))
       .toBe("No conversations to rename");
@@ -567,8 +530,6 @@ describe("the rename-now button", () => {
     expect(mockApi.updateSettings).not.toHaveBeenCalled();
   });
 
-  /// One model call per conversation, so a pass is slow on a small board. The
-  /// button has to say so and refuse to be pressed twice.
   it("says it is working and cannot be pressed again mid-run", async () => {
     let release!: (v: unknown) => void;
     mockApi.retitleSessions.mockReturnValue(new Promise((r) => { release = r; }));
@@ -598,9 +559,6 @@ describe("the rename-now button", () => {
         .toBe(false));
   });
 
-  /// The toggle governs what happens unattended. A button that silently did
-  /// nothing because of a switch elsewhere on the same page is the worse
-  /// surprise, so it is offered either way.
   it("is offered even when the automatic pass is switched off", async () => {
     mockApi.retitleSessions.mockResolvedValue(retitleReply());
     await renderPage({ session_titling_enabled: false });

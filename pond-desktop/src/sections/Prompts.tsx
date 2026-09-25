@@ -22,17 +22,8 @@ function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
-/**
- * Template variables the backend interpolates, from `render_jinja_template` in
- * `crates/pond-core/src/prompts.rs`.
- *
- * `current_date` and `current_time` are deliberately absent even though the
- * renderer supplies them: `build_prompt_partition` blanks both in the static
- * prefix so the KV cache stays stable across turns, and they reach the model on
- * the user message instead. A template using them renders an empty string, so
- * advertising them here sent people to write a placeholder that silently does
- * nothing.
- */
+/** Variables `render_jinja_template` (crates/pond-core/src/prompts.rs) fills. `current_date` and
+ *  `current_time` are left out: the static prefix blanks them for KV-cache reuse, so they render empty. */
 const TEMPLATE_VARS = [
   "assistant_name",
   "user_name",
@@ -70,7 +61,6 @@ export function Prompts() {
         const arr = Array.isArray(list) ? list : [];
         setPrompts(arr);
 
-        // Seed bodies + originals from API data
         const bodyMap: Record<string, string> = {};
         const origMap: Record<string, string> = {};
         for (const p of arr) {
@@ -80,7 +70,6 @@ export function Prompts() {
         setBodies(bodyMap);
         setOriginals(origMap);
 
-        // Select first available preset, falling back to first item
         const firstPreset = PRESET_KEYS.find((k) => arr.some((p) => p.name === k));
         if (firstPreset) setActive(firstPreset);
         else if (arr.length) setActive(arr[0].name);
@@ -109,7 +98,6 @@ export function Prompts() {
       .finally(() => setLoading(false));
   }
 
-  /** Sorted list: known presets first, then any extras. */
   const orderedPrompts = [
     ...PRESET_KEYS.map((k) => prompts.find((p) => p.name === k)).filter(Boolean),
     ...prompts.filter((p) => !PRESET_KEYS.includes(p.name)),

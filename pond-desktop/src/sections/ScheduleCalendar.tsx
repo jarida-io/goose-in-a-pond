@@ -13,7 +13,7 @@ interface Props {
 }
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-// Day indices: Mon=1 Tue=2 Wed=3 Thu=4 Fri=5 Sat=6 Sun=0 (JS getDay())
+// Column → JS getDay() index (Sun=0).
 const DAY_JS_INDEX = [1, 2, 3, 4, 5, 6, 0];
 
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
@@ -39,7 +39,6 @@ export function ScheduleCalendar({ schedules, onEdit }: Props) {
       setNowMinute(now.getMinutes());
       setTodayDow(now.getDay());
     };
-    // Align to the next minute boundary.
     const msToNextMinute = (60 - new Date().getSeconds()) * 1000;
     const timeout = setTimeout(() => {
       tick();
@@ -49,7 +48,6 @@ export function ScheduleCalendar({ schedules, onEdit }: Props) {
     return () => clearTimeout(timeout);
   }, []);
 
-  // Close popover when clicking outside.
   useEffect(() => {
     if (!popover) return;
     const handler = (e: MouseEvent) => {
@@ -72,10 +70,7 @@ export function ScheduleCalendar({ schedules, onEdit }: Props) {
     bodyRef.current.scrollTop = targetRow * ROW_H;
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Build slots from schedules. One-shots (`fire_at` set, `cron` is the
-  // "@once" sentinel) fire a single time rather than on a weekly cadence, so
-  // they don't fit this grid's recurring-slot model — cronToSlots can't
-  // parse the sentinel either. Excluded here rather than shown wrong.
+  // Skip one-shots (`fire_at` set, `cron` = "@once"): not recurring, and cronToSlots can't parse "@once".
   const slots: ScheduleSlot[] = schedules
     .filter((s) => !s.fire_at)
     .map((s, i) => cronToSlots(s, i));
@@ -86,7 +81,6 @@ export function ScheduleCalendar({ schedules, onEdit }: Props) {
 
   for (const slot of slots) {
     if (slot.frequency === "hourly") {
-      // Show a dot in every hour × every column.
       for (let h = 0; h < 24; h++) {
         for (let col = 0; col < 7; col++) {
           const key: CellKey = `${h}-${col}`;
@@ -96,7 +90,6 @@ export function ScheduleCalendar({ schedules, onEdit }: Props) {
         }
       }
     } else if (slot.frequency === "weekly" && slot.daysOfWeek.length > 0) {
-      // Only columns matching the DOW.
       for (const dow of slot.daysOfWeek) {
         const col = DAY_JS_INDEX.indexOf(dow);
         if (col === -1) continue;
@@ -129,7 +122,7 @@ export function ScheduleCalendar({ schedules, onEdit }: Props) {
     [],
   );
 
-  // Pixel offset of the current-time marker within a cell.
+  // Marker offset within the hour's cell (48 px = ROW_H).
   const nowOffsetPx = (nowMinute / 60) * 48;
 
   return (

@@ -13,11 +13,7 @@ function memory(id: string, over: Partial<MemoryFragment> = {}): MemoryFragment 
 }
 
 describe("Lineage", () => {
-  /**
-   * The shape this pond is actually in: many fragments folding into few
-   * survivors. A chain has to follow `superseded_by` all the way, not one hop,
-   * or a three-generation merge reads as three separate one-step merges.
-   */
+  // Not one hop: otherwise a three-generation merge reads as three one-step merges.
   it("follows a chain to the row nothing replaced", () => {
     const memories = [
       memory("a", { superseded_by: "b", lifecycle: "merged" }),
@@ -27,8 +23,7 @@ describe("Lineage", () => {
     render(<Lineage memories={memories} health={null} />);
 
     expect(screen.getByText("the surviving fact")).toBeTruthy();
-    // Two ancestors folded in, and the deepest chain is two steps. "2" appears
-    // in both the stat and the wedge, so each is asserted where it lives.
+    // "2" appears in both the stat and the wedge, so each is asserted where it lives.
     expect(screen.getByText(/2 earlier versions folded into this/)).toBeTruthy();
     expect(document.querySelector(".lin__fanCount")?.textContent).toBe("2");
     expect(screen.getByText("Deepest chain").parentElement?.textContent).toContain("2");
@@ -45,18 +40,13 @@ describe("Lineage", () => {
     expect(screen.getByText(/3 earlier versions folded into this/)).toBeTruthy();
   });
 
-  /**
-   * A chain whose end was deleted is a real state. Counting it keeps the totals
-   * honest; dropping it silently would make this screen disagree with the
-   * memory count on the tab above it.
-   */
+  // Counted, not dropped, so the totals agree with the memory count on the tab above.
   it("reports chains that point at a memory the pond no longer has", () => {
     const memories = [memory("orphan", { superseded_by: "long-gone", lifecycle: "merged" })];
     render(<Lineage memories={memories} health={null} />);
     expect(screen.getByText(/point at a memory this pond no longer has/)).toBeTruthy();
   });
 
-  /** A corrupt row must not hang the screen. */
   it("does not loop forever on a cycle", () => {
     const memories = [
       memory("x", { superseded_by: "y", lifecycle: "merged" }),
@@ -72,10 +62,7 @@ describe("Lineage", () => {
     ).toBeGreaterThan(0);
   });
 
-  /**
-   * The distinction the coverage type argues for: "nothing here" and
-   * "everything here is held back" both read as zero and need opposite fixes.
-   */
+  // Both read as zero but need opposite fixes.
   it("separates an empty corpus from one that is entirely held back", () => {
     render(
       <Lineage
@@ -125,7 +112,6 @@ describe("Lineage", () => {
     // Held back names the count being excluded, which is the actionable number.
     expect(screen.getByText("all 27 held back")).toBeTruthy();
     expect(screen.getByText(/Everything in this corpus is being held back/)).toBeTruthy();
-    // And a genuinely empty corpus is not accused of holding anything back.
     expect(screen.getByText("nothing here yet")).toBeTruthy();
   });
 

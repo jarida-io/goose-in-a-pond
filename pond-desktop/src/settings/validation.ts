@@ -1,22 +1,6 @@
 // ─── Settings validation ───────────────────────────────────────────────────
-//
-// Client-side checks that run before `PUT /api/v1/settings`.
-//
-// WHY THIS EXISTS, given the server validates too: the server validates FOUR
-// fields (`network_mode`, `reasoning_effort`, `agent_backend`, `matter_ws_url`)
-// and accepts any type-valid value for the rest. So for most settings a bad
-// value is not refused — it is stored, and then a parser downstream quietly
-// falls back to a default. `quiet_hours_start = "10pm"` does not error; it
-// makes `quiet_hours_cover` fail closed and the pond goes silent all day, with
-// nothing anywhere saying why.
-//
-// These validators are therefore the ONLY place several of these mistakes are
-// ever reported to a person. They are deliberately conservative: they reject
-// what is definitely wrong and stay quiet otherwise, because a false rejection
-// blocks a save the server would have accepted.
-//
-// They never REPLACE the server's checks. The four the server enforces are
-// mirrored here so the message arrives before the round-trip, not instead of it.
+// The server rejects only `network_mode`, `reasoning_effort`, `agent_backend` and `matter_ws_url`;
+// other bad values are stored and silently defaulted. Reject only what is surely wrong.
 
 /** `null` means valid. A string is the message shown under the control. */
 export type Validator = (value: unknown) => string | null;
@@ -100,13 +84,7 @@ export function oneOf(options: readonly string[]): Validator {
     options.includes(String(value)) ? null : `Choose one of ${options.join(", ")}.`;
 }
 
-/**
- * `network 14, sensor 7` — a category name and a whole number of days.
- *
- * Typed rather than picked because the category set is server-side and open;
- * the check is that each pair parses, so a typo is caught before it becomes an
- * entry nothing matches.
- */
+/** `network 14, sensor 7`: category and whole days; typed, since the server's category set is open. */
 export const retentionMap: Validator = (value) => {
   if (value == null) return null;
   if (typeof value === "object" && !Array.isArray(value)) {
@@ -121,13 +99,7 @@ export const retentionMap: Validator = (value) => {
   return "Write pairs like: network 14, sensor 7";
 };
 
-/**
- * Comma-separated notification categories.
- *
- * Empty is REJECTED rather than treated as "all": server-side an unrecognised
- * or blank entry matches nothing, so an empty box silently means the pond never
- * speaks — which is the opposite of what someone typing here intends.
- */
+/** Comma-separated categories. Empty is rejected: server-side it matches nothing, so the pond never speaks. */
 export const speechCategories: Validator = (value) => {
   const s = String(value ?? "").trim();
   if (!s) return "Name at least one category, such as alert.";
@@ -142,12 +114,7 @@ export const speechCategories: Validator = (value) => {
 export const latitude = range(-90, 90, "degrees");
 export const longitude = range(-180, 180, "degrees");
 
-/**
- * An IANA zone the running system actually recognises.
- *
- * Checked against the platform rather than a bundled list, so a zone this
- * machine can resolve is never rejected for being absent from our own table.
- */
+/** An IANA zone this platform's `Intl` recognises, not one from a bundled list. */
 export const ianaTimezone: Validator = (value) => {
   const s = String(value ?? "").trim();
   if (!s) return "Choose a time zone.";
@@ -158,8 +125,3 @@ export const ianaTimezone: Validator = (value) => {
     return `“${s}” is not a time zone this device knows.`;
   }
 };
-
-// Detection used to live here — `detectTimezone`, `placeFromTimezone` and a
-// browser-geolocation `detectLocation`. It moved to `lib/place.ts`, which is
-// the one module that answers where and when this pond is, for every screen.
-// `ianaTimezone` above stays: it is a form validator, not a detector.

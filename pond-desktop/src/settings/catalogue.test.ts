@@ -3,24 +3,11 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CATALOGUE, allEntries, inertCount } from "./catalogue";
 
-/**
- * The frontend half of pond-core's `every_settings_field_is_dispositioned`.
- *
- * That test proves every Rust `Settings` field is classified as UI-wired or
- * headless. This one proves every field the TypeScript `Settings` type names is
- * dispositioned into a category — so a new setting cannot reach the app's type
- * without also getting a home, a label written for a person, and a `consumer`
- * mark saying whether anything actually reads it.
- *
- * It reads `types.ts` as SOURCE rather than importing it, because an interface
- * does not exist at runtime. That makes the failure mode of a source-scanning
- * test — matching nothing and reporting success — a live risk, so the key count
- * is asserted against a floor before anything else runs.
- */
+// Frontend half of pond-core's `every_settings_field_is_dispositioned`: every TS `Settings` field
+// needs a catalogue entry. `types.ts` is scanned as source, so a key-count floor guards a vacuous pass.
 
 function settingsTypeKeys(): string[] {
-  // Resolved from the vitest root (pond-desktop), not from import.meta.url —
-  // the transform does not always hand this module a file: URL.
+  // From the vitest root: the transform doesn't always give this module a file: URL.
   const src = readFileSync(resolve(process.cwd(), "src/api/types.ts"), "utf8");
 
   const start = src.indexOf("export interface Settings {");
@@ -29,9 +16,7 @@ function settingsTypeKeys(): string[] {
   expect(end, "could not find the end of the Settings interface").toBeGreaterThan(start);
 
   const body = src.slice(start, end);
-  // Property declarations only: two-space indent, then `name?: type`. Nested
-  // object literals indent further, so they are skipped rather than mistaken
-  // for fields.
+  // Two-space indent only, so nested object literals are not mistaken for fields.
   const keys = [...body.matchAll(/^ {2}([a-z_0-9]+)\??:/gm)].map((m) => m[1]);
   return [...new Set(keys)];
 }
@@ -59,8 +44,6 @@ describe("settings catalogue", () => {
   });
 
   it("explains every mark that is not 'connected'", () => {
-    // An unexplained mark is worse than no mark: it tells someone their control
-    // is different without telling them how.
     const unexplained = entries
       .filter((e) => e.consumer !== "live" && !e.note?.trim())
       .map((e) => e.key);
@@ -68,8 +51,7 @@ describe("settings catalogue", () => {
   });
 
   it("does not attach a note to a connected setting", () => {
-    // The note styling is reserved for the two exceptional states; a note on a
-    // live row would render in a colour that means something it does not.
+    // Note styling is reserved for the two exceptional states.
     const spurious = entries.filter((e) => e.consumer === "live" && e.note).map((e) => e.key);
     expect(spurious).toEqual([]);
   });
@@ -92,29 +74,22 @@ describe("settings catalogue", () => {
   });
 
   it("offers only server-accepted options for the validated enums", () => {
-    // These four are the ones `update_settings` rejects with 422. Offering a
-    // value the server refuses would turn a control into a guaranteed error.
-    // Either control kind carries the option set — a radio and a select differ
-    // in how they look, not in what they permit.
+    // `update_settings` 422s on any other value; radio and select both carry the option set.
     const optionsFor = (key: string) => {
       const c = entries.find((x) => x.key === key)?.control;
       if (c?.kind === "select") return [...c.options];
       if (c?.kind === "radio") return c.options.map((o) => o.value);
       return null;
     };
-    // Order is not asserted — the UI orders by what a person should reach for
-    // first (security_policy_mode leads with "audit", the shipped default),
-    // while the server only cares about the SET.
+    // Sorted: the UI orders by what to reach for first; the server only cares about the set.
     expect(optionsFor("network_mode")?.sort()).toEqual(["allowlist", "offline", "open"]);
     expect(optionsFor("reasoning_effort")?.sort()).toEqual(["balanced", "brief", "thorough"]);
     expect(optionsFor("security_policy_mode")?.sort()).toEqual(["audit", "enforce", "off"]);
-    // "pond" is quarantined server-side (Q2-05) and 422s, so it is not offered.
+    // "pond" is quarantined server-side and 422s, so it is not offered.
     expect(optionsFor("agent_backend")).toEqual(["goose"]);
   });
 
   it("validates the four fields the server rejects with 422", () => {
-    // The server refuses these outright, so the client must catch them first —
-    // otherwise the only feedback is a failed round-trip.
     for (const key of ["network_mode", "reasoning_effort", "agent_backend", "matter_ws_url"]) {
       const e = entries.find((x) => x.key === key);
       expect(e?.validate, `${key} must be validated client-side`).toBeTypeOf("function");
@@ -123,8 +98,6 @@ describe("settings catalogue", () => {
   });
 
   it("accepts each offered option as valid", () => {
-    // A picker that offers a value its own validator rejects would be a control
-    // that cannot be used.
     for (const e of entries) {
       if (!e.validate) continue;
       const opts =
@@ -138,8 +111,7 @@ describe("settings catalogue", () => {
   });
 
   it("bounds every numeric control it validates", () => {
-    // A number box with a validator but no min/max renders without the native
-    // stepper limits, so the two must agree.
+    // Without min/max the number box renders no native stepper limits.
     const unbounded = entries
       .filter((e) => e.control.kind === "number" && e.validate && e.control.min === undefined)
       .map((e) => e.key);
@@ -147,14 +119,11 @@ describe("settings catalogue", () => {
   });
 
   it("counts the inert settings the audit found", () => {
-    // Ten settings persist, render, and are read by nothing. If this number
-    // moves, either something got wired up (drop it to "live") or a new inert
-    // control shipped — and both deserve a failing test rather than silence.
+    // If this moves, something got wired up (mark it "live") or a new inert control shipped.
     const inert = entries.filter((e) => e.consumer === "none");
     expect(inert).toHaveLength(10);
     expect(entries.filter((e) => e.consumer === "app")).toHaveLength(3);
 
-    // And every one of them is flagged in its category's rail badge.
     const flagged = CATALOGUE.reduce((n, c) => n + inertCount(c), 0);
     expect(flagged).toBe(inert.length);
   });

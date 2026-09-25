@@ -7,12 +7,8 @@ import {
 } from "./contract";
 import { isDesktopShell, invoke, listen } from "./index";
 
-// `as const satisfies readonly ShellCommand[]` already fails the build on a
-// typo in either array. What it cannot catch is an OMISSION -- declaring a
-// command in the interface and forgetting to allowlist it, which would compile
-// and then be refused at runtime by the preload. These two mapped types force
-// the compiler to enumerate every key, and the length assertions below compare
-// that enumeration against the arrays.
+// `satisfies` catches a typo but not an omission (a command the preload would refuse at runtime);
+// these mapped types force every key, and the length checks below compare them with the arrays.
 const EVERY_COMMAND: Record<ShellCommand, true> = {
   server_health: true,
   ensure_server_running: true,
@@ -57,10 +53,7 @@ describe("the shell contract", () => {
     expect(new Set(SHELL_EVENTS).size).toBe(SHELL_EVENTS.length);
   });
 
-  // The voice family is the one the voice child driver maps NDJSON onto, and
-  // `useVoiceSession` is documented as owning every one of them exclusively.
-  // Pinning the count means adding a voice event without registering a
-  // listener for it is a failing test rather than a silently dropped frame.
+  // Pinned so a new voice event without a `useVoiceSession` listener fails here, not as a dropped frame.
   it("carries exactly eleven voice events", () => {
     const voice = SHELL_EVENTS.filter((e) => e.startsWith("voice-"));
     expect(voice).toHaveLength(11);
@@ -80,8 +73,7 @@ describe("outside the desktop shell", () => {
     await expect(invoke("server_health")).rejects.toThrow(/server_health/);
   });
 
-  // A browser caller should be able to register unconditionally; the whole
-  // point of the no-op is that it needs no isDesktopShell() guard.
+  // Browser callers register unconditionally, with no isDesktopShell() guard.
   it("makes listen a no-op that returns a callable unlisten", () => {
     const unlisten = listen("server-status", () => {
       throw new Error("must not fire");

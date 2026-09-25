@@ -1,16 +1,6 @@
 // ─── Collected: what the pond has read from your accounts ───────────────────
-//
-// Separate from Remembered because the provenance is different and a person
-// cares which is which. Remembered is what the pond was told or worked out;
-// this is what it read from a calendar or a mailbox, and the difference decides
-// what you do about a row you disagree with — you correct a memory, and you
-// disconnect a source.
-//
-// Search here is by WORD, not by meaning. Somebody scanning this list is
-// looking for a message they remember the wording of, and a cosine ranking
-// would bury an exact title match under three things merely about the same
-// subject. The semantic path is what the assistant uses; this is what a person
-// uses.
+// Separate from Remembered: a wrong memory is corrected, a wrong source disconnected.
+// Search is by word, not meaning: a cosine ranking would bury an exact title match.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { CalendarDays, Mail, Search, Camera, Radio } from "lucide-react";
@@ -81,8 +71,7 @@ export function Collected({ sessionId }: Props) {
     void load();
   }, [load]);
 
-  // Searching server-side rather than filtering here: the list is capped, so a
-  // local filter would only ever search the page you happen to be holding.
+  // Search server-side: the list is capped, so a local filter would miss rows.
   useEffect(() => {
     const t = setTimeout(() => void load(query), 250);
     return () => clearTimeout(t);

@@ -6,16 +6,8 @@ import { api } from "../api/PondApiClient";
 import { ApiError } from "../api/types";
 import { useDialogFocusTrap } from "../components/shared";
 
-// Mirrors the web `FaceEnrollment` page. Three-action layout (enroll,
-// identify, delete) over the same `/api/v1/faces/*` endpoints, styled with
-// desktop tokens so it sits naturally next to Models / Prompts / Settings
-// in the CONFIGURE group of the sidebar.
-//
-// The capture pipeline is intentionally identical to the web version: 5
-// JPEG frames at ~400 ms intervals → POST /faces/identify-burst, which
-// runs the inter-frame embedding-sameness + landmark-motion gates that
-// catch photo / phone-screen presentation attacks single frames cannot
-// see. Returns `reason: "liveness_failed"` on detected stills.
+// Mirrors the web `FaceEnrollment` page; keep capture identical: 5 JPEG frames ~400 ms apart to
+// /faces/identify-burst, whose inter-frame liveness gates catch photos and phone screens.
 
 interface Profile {
   id: string;
@@ -54,10 +46,7 @@ export function Faces() {
   const [last, setLast]                       = useState<IdentifyResult | null>(null);
   const [banner, setBanner]                   = useState<ReactNode | null>(null);
   const [error, setError]                     = useState<string | null>(null);
-  // Custom in-component confirm for the destructive Delete action — the
-  // browser's native `confirm()` can be ignored or no-op'd inside a Tauri
-  // WebView, which is why the previous "Delete biometrics" button silently
-  // did nothing. Toggling this state shows a small inline confirmation panel.
+  // In-component confirm for Delete: native `confirm()` can silently no-op in the app's WebView.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const householdLabelId = useId();
   const confirmTitleId = useId();
@@ -85,19 +74,13 @@ export function Faces() {
         return;
       }
       try {
-        // Low-light tuning: ask the webcam ISP for continuous auto-exposure +
-        // a +1 EV bias and continuous auto-white-balance.  The `advanced[]`
-        // entries are best-effort per the MediaCapabilities spec — any
-        // constraint the device doesn't support is silently dropped, so
-        // browsers/cameras without these capabilities still honour the
-        // base ideal-resolution + facingMode constraints.
+        // Low-light tuning; `advanced[]` entries are best-effort, so unsupported ones are silently dropped.
         const stream = await navigator.mediaDevices.getUserMedia({
           video: {
             width:       { ideal: 640 },
             height:      { ideal: 480 },
             facingMode:  "user",
-            // Cast keeps older TS lib.dom.d.ts happy: not every TS release
-            // ships the image-capture extensions in MediaTrackConstraintSet.
+            // Cast: not every TS lib.dom ships the image-capture fields of MediaTrackConstraintSet.
             advanced: [{
               exposureMode:         "continuous",
               exposureCompensation: 1.0,    // +1 EV brighter
@@ -183,8 +166,6 @@ export function Faces() {
     setBusy("enrolling");
     try {
       await api.registerFace(selectedProfile, blob);
-      // Use the freshly-refreshed enrollment list to give a precise count
-      // ("Sample 2 of 3 saved!") rather than a generic "saved".
       const fresh = await api.listFaceEnrollments(selectedProfile);
       const n = fresh.enrollments.length;
       if (n >= 3) {
@@ -211,9 +192,6 @@ export function Faces() {
       }
       const res = await api.identifyFaceBurst(frames);
       if (res.reason === "liveness_failed") {
-        // Friendly explanation: this happens for printed photos, phone-screen
-        // images, or someone holding very still. Tell the user what to do
-        // instead of leaking the technical reason.
         setError(
           "We couldn't confirm a real, live face in front of the camera. " +
           "If you're using a real face, look at the camera and blink or move slightly, then try again. " +
@@ -222,7 +200,6 @@ export function Faces() {
       } else if (res.identified && res.profile_id) {
         setBanner(<><Hand size={14} />{" "}Welcome back, {profileLabel(res.profile_id)}!</>);
       } else if (!res.identified) {
-        // Open-set non-match — frame a friendly hint instead of a raw "no match".
         setBanner(
           "Hi there — we don't recognise this face yet. " +
           "If you're a household member, head over to enrolment and capture a few samples first."
@@ -233,8 +210,7 @@ export function Faces() {
     finally { setBusy("idle"); }
   }
 
-  // Open the inline confirmation panel — the actual delete fires from
-  // `confirmDelete` below once the user clicks the explicit confirm button.
+  // Only opens the confirm panel; `confirmDelete` does the delete.
   function handleDelete() {
     if (!selectedProfile) return;
     setError(null);
