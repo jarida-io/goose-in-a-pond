@@ -10,14 +10,6 @@ import {
 } from "./serverProcess";
 import { type OrphanDeps } from "./orphan";
 
-// Ports the 6 tests from src-tauri/src/process.rs and the 2 from main.rs, none
-// of which ever ran in CI, and adds the branches they left uncovered -- in
-// particular that one launch produces at most one live child. The Rust killed a
-// live-but-unhealthy child before respawning; the first TypeScript port did
-// not, and the result was two pond-servers from one launch, the second falling
-// back to port 4001, and the first outliving the app because shutdown() could
-// only see the second.
-
 describe("resolveServerUrl", () => {
   it("uses port 4000 and self-managed mode when GIAP_SERVER_PORT is unset", () => {
     expect(resolveServerUrl(undefined)).toEqual({
@@ -33,8 +25,6 @@ describe("resolveServerUrl", () => {
     });
   });
 
-  // An exported-but-blank variable must not put us into parent-managed mode
-  // pointed at a malformed URL.
   it("treats a blank value as unset", () => {
     expect(resolveServerUrl("").parentManaged).toBe(false);
     expect(resolveServerUrl("   ").parentManaged).toBe(false);
@@ -68,10 +58,6 @@ describe("resolveServerBinary", () => {
     expect(path).toBe("/repo/target/release/pond-server");
   });
 
-  // The whole reason the Rust probed the running executable's siblings first
-  // was to stop a packaged app falling back to a stray binaries/ folder in the
-  // cwd. app.isPackaged is a hard boolean, so a packaged app looks in exactly
-  // one place and nowhere else.
   it("looks only in Resources when packaged", () => {
     const seen: string[] = [];
     const path = resolveServerBinary({
@@ -154,9 +140,7 @@ function deps(over: Partial<ServerDeps> = {}): ServerDeps {
       .fn()
       .mockReturnValue({ exitCode: null, kill: vi.fn() }) as never,
     sleep: () => Promise.resolve(),
-    // NOT optional. Without these the suite reads the real pidfile under
-    // tmpdir and can SIGKILL a pond-server the developer is running in another
-    // terminal -- a test run that kills your dev server is not a test run.
+    // Required: unstubbed, the suite reads the real pidfile and can SIGKILL your dev pond-server.
     orphanDeps: stubOrphanDeps(),
     writePid: vi.fn(),
     removePid: vi.fn(),
@@ -176,15 +160,7 @@ function stubOrphanDeps(): OrphanDeps {
   };
 }
 
-/**
- * A child that can actually end.
- *
- * The bare `{ exitCode: null, kill }` literal the older tests use cannot
- * express the difference between "alive" and "exited", which is exactly the
- * distinction the one-live-child invariant turns on. Simpler than the voice
- * driver's FakeChild because the server child is spawned with stdio "inherit"
- * and has no streams to fake.
- */
+/** A child that can actually end; stdio is "inherit", so there are no streams to fake. */
 class FakeChild {
   exitCode: number | null = null;
   signalCode: NodeJS.Signals | null = null;
@@ -241,8 +217,7 @@ describe("ServerProcess", () => {
     );
   });
 
-  // The failure this prevents is two pond-servers fighting for port 4000, which
-  // presents as a blank window rather than as an error.
+  // Two pond-servers fighting for port 4000 show up as a blank window, not an error.
   it("never spawns in parent-managed mode", async () => {
     const d = deps({
       env: { GIAP_SERVER_PORT: "8080" },
@@ -254,14 +229,10 @@ describe("ServerProcess", () => {
     expect(d.spawnFn).not.toHaveBeenCalled();
   });
 
-  // It is the same binary doing the same cold start either way -- loading face
-  // recognition, Whisper and TTS -- so a shorter self-spawned clock only ever
-  // declared a working server dead. That is what fired the timeout that then
-  // spawned a rival onto port 4000.
   it("gives a server it spawned itself the same cold-start budget as a parent-managed one", async () => {
     expect(SPAWNED_POLL_ATTEMPTS).toBe(PARENT_MANAGED_POLL_ATTEMPTS);
 
-    // 100 refusals is far past the old 10 s budget and inside the real one.
+    // 100 refusals is 50 s: inside the budget, far past a 10 s one.
     const parent = deps({
       env: { GIAP_SERVER_PORT: "8080" },
       fetchFn: fetchHealthyAfter(100),
@@ -276,8 +247,6 @@ describe("ServerProcess", () => {
     );
   });
 
-  // The budget is long, so a server that will never answer must not hold the
-  // startup screen for two minutes when it has already died.
   it("stops waiting as soon as a server it spawned exits, rather than polling out the budget", async () => {
     const child = new FakeChild();
     const d = deps({ spawnFn: spawnsInOrder(child) });
@@ -296,9 +265,6 @@ describe("ServerProcess", () => {
     );
   });
 
-  // THE regression test. One launch produced two servers: the first spawn
-  // timed out but stayed alive, and the next recovery reassigned the field and
-  // spawned a rival, which fell back to 4001 and clobbered .runtime_api_port.
   it("kills a live but unhealthy child rather than spawning a rival for its port", async () => {
     const wedged = new FakeChild();
     const replacement = new FakeChild();
@@ -311,16 +277,12 @@ describe("ServerProcess", () => {
     await expect(s.ensureRunning()).rejects.toThrow(/did not become healthy/);
     expect(d.spawnFn).toHaveBeenCalledTimes(1);
 
-    // The health loop's next tick. It must replace the wedged child, not
-    // abandon it: a second live server is the bug.
+    // The health loop's next tick must replace the wedged child, not abandon it.
     await expect(s.ensureRunning()).rejects.toThrow(/did not become healthy/);
     expect(wedged.signals).toContain("SIGTERM");
     expect(d.spawnFn).toHaveBeenCalledTimes(2);
   });
 
-  // In the trace that exposed this, the first child became healthy seconds
-  // after its budget expired. Killing it would have thrown away a working
-  // server; the point of the long budget is that this is now the common path.
   it("adopts the server it already spawned once that server answers", async () => {
     const child = new FakeChild();
     const d = deps({
@@ -356,9 +318,6 @@ describe("ServerProcess", () => {
     expect(wedged.signals).toContain("SIGKILL");
   });
 
-  // A child killed by a signal leaves exitCode null and sets signalCode, so
-  // testing the exit code alone reports a SIGKILLed server as live forever and
-  // SIGTERMs a dead pid on every recovery.
   it("treats a child killed by a signal as ended, not as a live child to kill again", async () => {
     const killed = new FakeChild();
     const d = deps({
@@ -390,9 +349,6 @@ describe("ServerProcess", () => {
     expect(d.spawnFn).toHaveBeenCalledTimes(2);
   });
 
-  // The zombie half of the bug. An orphan from a previous run IS healthy on
-  // 4000, so a health check that runs first adopts it and the reaper never
-  // gets a look -- which is how one sidecar survived several launches.
   it("reaps a sidecar orphaned by a previous run before asking whether one is listening", async () => {
     const order: string[] = [];
     const orphanDeps = stubOrphanDeps();
@@ -411,9 +367,6 @@ describe("ServerProcess", () => {
     expect(order).toEqual(["reap", "health"]);
   });
 
-  // `pond-server serve --native` launches this shell, so our own PARENT's
-  // command line matches the sidecar predicate exactly. A stale pidfile plus a
-  // reused pid would have us kill the process that started us.
   it("never reaps in parent-managed mode, because the parent is itself a pond-server serve", async () => {
     const orphanDeps = stubOrphanDeps();
     const d = deps({
@@ -457,10 +410,6 @@ describe("ServerProcess", () => {
     expect(d.removePid).toHaveBeenCalled();
   });
 
-  // --port is a START port for the server's bind_with_fallback, so a server
-  // that finds 4000 taken binds 4001 and says nothing. The UI then talks to a
-  // port nothing is listening on -- silently, which is how this whole class of
-  // bug stays hidden.
   it("adopts the port pond-server actually bound when it fell back past 4000", async () => {
     const onUrlChanged = vi.fn();
     const d = deps({
@@ -502,8 +451,6 @@ describe("ServerProcess", () => {
     expect(onUrlChanged).not.toHaveBeenCalled();
   });
 
-  // A tick or a renderer request landing mid-teardown must not leave behind a
-  // sidecar that nothing will ever shut down.
   it("refuses to spawn once the shell has begun quitting", async () => {
     const d = deps({ fetchFn: fetchHealthyAfter(1) });
     const s = new ServerProcess(d);
@@ -519,8 +466,6 @@ describe("ServerProcess", () => {
     );
   });
 
-  // The startup probe and the periodic health check both call this. Without
-  // serialisation they race into two children fighting for one port.
   it("serialises concurrent recovery into a single spawn", async () => {
     const d = deps({ fetchFn: fetchHealthyAfter(1) });
     const s = new ServerProcess(d);

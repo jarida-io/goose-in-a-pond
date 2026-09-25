@@ -1,23 +1,5 @@
-// Quitting, and the health loop that must stop when we do.
-//
-// Extracted from index.ts because both of these had defects that no test could
-// reach while they lived inside the module that calls app.whenReady():
-//
-//   * The health loop kept no handle on its own timer and never consulted the
-//     quitting flag, so a tick scheduled before quit could land AFTER the
-//     server was shut down and start a fresh sidecar during teardown -- one
-//     that nothing would ever shut down again.
-//
-//   * Only `before-quit` took the children down. The Tauri original ran the
-//     same teardown on RunEvent::ExitRequested AND RunEvent::Exit; the port
-//     kept the first and dropped the second, and `process.on("exit")` was
-//     left killing the voice child alone.
-//
-// The split between releaseChildren and releaseUi is load-bearing: killing a
-// child is a synchronous syscall and is legal from any exit hook, while the
-// Electron APIs behind releaseUi are not, and calling them from
-// `process.on("exit")` can throw AFTER the children are dead and mask the
-// teardown that mattered.
+// Quitting, and the health loop that must stop when we do. releaseChildren (sync kills) is
+// safe from any exit hook; releaseUi's Electron APIs are not, so keep them apart.
 
 /** A timer handle, opaque so tests can hand back whatever they like. */
 type TimerHandle = unknown;
@@ -47,15 +29,8 @@ export interface HealthLoop {
 const HEALTHY_INTERVAL_MS = 10_000;
 
 /**
- * Watch the server and bring it back when it goes away.
- *
- * Backs off exponentially so a server that cannot start is not hammered, and
- * reports every transition -- when the window is hidden the tray tooltip is the
- * only place this state is visible.
- *
- * The stopped flag is re-checked after every await, not only at the top of a
- * tick: the loop awaits both healthCheck and ensureRunning, and a quit can land
- * in either gap.
+ * Watch the server and restart it with exponential backoff. `stopped` is re-checked after
+ * every await: a quit can land during healthCheck or ensureRunning.
  */
 export function createHealthLoop(deps: HealthLoopDeps): HealthLoop {
   const setTimer = deps.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
@@ -129,11 +104,8 @@ export interface TeardownDeps {
 
 export interface Teardown {
   /**
-   * Kill both children. Idempotent, synchronous, safe from any exit hook.
-   *
-   * The health loop is stopped FIRST so a queued tick cannot respawn the
-   * sidecar we are about to kill, and the voice child dies before the server so
-   * the microphone and speaker are released first.
+   * Kill both children; idempotent, sync, safe from any exit hook. Stops the health loop
+   * first (no respawn), and kills voice before the server (mic and speaker free first).
    */
   releaseChildren(): void;
   /** Electron-only teardown. Only from before-quit or will-quit. */

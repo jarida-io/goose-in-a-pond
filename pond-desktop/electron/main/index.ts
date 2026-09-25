@@ -1,15 +1,5 @@
-// The desktop shell.
-//
-// Replaces src-tauri/src/main.rs. What it owns: the pond-server sidecar's
-// lifecycle, the voice child, one window, the tray, two global shortcuts, and
-// the menu.
-//
-// Ordering that matters, and cost someone a debugging session in the Rust:
-//
-//   * The scheme is registered before `whenReady`, because
-//     registerSchemesAsPrivileged has no effect afterwards.
-//   * On quit the voice child is killed BEFORE the server is shut down, so the
-//     microphone and speaker are released first.
+// The desktop shell. Ordering: the scheme is registered before `whenReady` (no effect after),
+// and on quit the voice child dies before the server so the mic and speaker free first.
 
 import { app, BrowserWindow } from "electron";
 import { join, resolve } from "node:path";
@@ -51,12 +41,7 @@ function emit<E extends ShellEvent>(name: E, payload?: ShellEvents[E]): void {
   win.webContents.send(`giap:${name}`, payload);
 }
 
-/**
- * The port pond-server says it bound, and when it said so.
- *
- * Deliberately computed from the server's own data directory rather than
- * Electron's userData path, which points somewhere else entirely on Linux.
- */
+/** The port pond-server says it bound, and when; read from the server's data dir, not userData. */
 function readPortFile(): { port: number; mtimeMs: number } | null {
   const file = join(
     resolveDataDir({
@@ -95,11 +80,7 @@ const voice = new VoiceChildProcess({
   log,
 });
 
-/**
- * The voice child runs the same binary as the sidecar. Resolved through the
- * server's own lookup so there is one answer to "where is pond-server", not
- * two that can disagree.
- */
+/** The voice child runs the sidecar's binary, found by the same lookup so they can't disagree. */
 function serverBinaryForVoice(): string | null {
   return resolveServerBinary({
     override: process.env["POND_SERVER_BIN"],
@@ -143,9 +124,7 @@ const teardown = createTeardown({
 // Must happen before the app is ready.
 registerAppScheme();
 
-// One instance only. A second launch -- from the Dock, or from
-// `pond-server serve --native` -- should surface the window we already have
-// rather than start a second shell fighting for the same port and microphone.
+// One instance: a second launch surfaces this window instead of fighting for port and mic.
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
@@ -154,8 +133,7 @@ if (!app.requestSingleInstanceLock()) {
   void app.whenReady().then(async () => {
     serveRendererFrom(distRoot(app.getAppPath()));
 
-    // Reap a voice child orphaned by a hard kill of a previous run; it would
-    // still be holding the microphone.
+    // Reap a voice child orphaned by a hard kill; it would still hold the microphone.
     voice.cleanupOrphans();
 
     setAboutPanel();
@@ -189,8 +167,7 @@ if (!app.requestSingleInstanceLock()) {
 
     registerHotkeys({ emit, focusWindow: showWindow, log: log.info });
 
-    // Kick the server, but do not block the window on it: the startup screen
-    // exists precisely to render while the server is still coming up.
+    // Don't block the window on the server: the startup screen renders while it comes up.
     server
       .ensureRunning()
       .then((url) => log.info(`pond-server ready at ${url}`))
@@ -204,8 +181,7 @@ if (!app.requestSingleInstanceLock()) {
     showWindow();
   });
 
-  // Closing the window hides to the tray, so this must NOT quit -- on any
-  // platform, because the tray is the app's resting state.
+  // Must not quit on any platform: closing the window hides to the tray.
   app.on("window-all-closed", () => {});
 
   app.on("before-quit", () => {
@@ -214,23 +190,18 @@ if (!app.requestSingleInstanceLock()) {
     teardown.releaseUi();
   });
 
-  // The RunEvent::Exit analogue the Tauri port dropped. `app.exit()` and a
-  // quit that skips before-quit both land here, and without it those paths
-  // left a sidecar running.
+  // `app.exit()` and quits that skip before-quit land here; release children or a sidecar survives.
   app.on("will-quit", () => {
     quitting = true;
     teardown.releaseChildren();
   });
 
-  // Last resort. `kill()` is a synchronous syscall, so it is legal here, and
-  // this is the path that runs when an uncaught exception takes the app down.
-  // UI teardown is deliberately NOT here: the Electron calls it makes are not
-  // safe this late, and throwing here would mask the kills that matter.
+  // Last resort, e.g. an uncaught exception: sync `kill()` is legal here. No UI teardown:
+  // Electron calls aren't safe this late, and a throw would mask the kills.
   process.on("exit", () => teardown.releaseChildren());
 
-  // Ctrl-C on a dev run is the commonest way to orphan a sidecar, because it
-  // reaches neither before-quit nor will-quit. `app.exit` rather than
-  // `app.quit`, which a window handler can block and leave the process hung.
+  // Ctrl-C reaches neither before-quit nor will-quit. `app.exit`, not `app.quit`, which a
+  // window handler can block.
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.once(signal, () => {
       log.warn(`received ${signal}; releasing child processes`);

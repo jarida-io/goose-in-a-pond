@@ -6,13 +6,7 @@ import { nodeToDevice } from "../src/mapping/devices.js";
 import { stateOf } from "../src/mapping/state.js";
 import { levelValveNode, plainValveNode } from "./fixtures.js";
 
-/**
- * A Matter water valve, end to end through the mappings.
- *
- * A valve has no On/Off cluster, so before this it advertised no capabilities at all
- * and every verb was answered "cannot be controlled" — while sitting there perfectly
- * openable, with the one cluster it does have unread.
- */
+/** A Matter water valve, end to end through the mappings. It has no On/Off cluster. */
 describe("a water valve", () => {
   it("is a valve, not an unknown device", () => {
     expect(nodeToDevice(levelValveNode()).device_type).toBe("valve");
@@ -21,9 +15,7 @@ describe("a water valve", () => {
 
   it("advertises opening, and a level only where it has one", () => {
     expect(nodeToDevice(levelValveNode()).capabilities).toEqual(["valve", "position"]);
-    // A plain solenoid has nothing to take a percentage with, and offering it one is
-    // a control the device would reject — the same rule `tilt` follows for a roller
-    // blind with no slats.
+    // A plain solenoid has no level, so it is offered no percentage.
     expect(nodeToDevice(plainValveNode()).capabilities).toEqual(["valve"]);
   });
 
@@ -77,8 +69,7 @@ describe("a water valve", () => {
   });
 
   it("sets a level through open's target, and shuts at zero", () => {
-    // The spec's own constraint on `targetLevel` is 1 to 100, so 0% cannot be asked
-    // for that way — and asking for 0% is asking for it shut anyway.
+    // The spec constrains `targetLevel` to 1..100, so 0% means close.
     const half = planControl(levelValveNode(), "matter-60", "position", 50);
     expect(half.actions).toEqual([
       {
@@ -110,8 +101,7 @@ describe("a water valve", () => {
   });
 
   it("reads back its settled state, and withholds an answer while it travels", () => {
-    // A motorised valve takes seconds to travel. Reporting "transitioning" as open or
-    // closed would tell a caller the valve had settled somewhere it has not reached.
+    // A motorised valve takes seconds to travel; "transitioning" is neither open nor closed.
     expect(observedFor(levelValveNode(), "valve")).toEqual({ valve: true });
     expect(observedFor(plainValveNode(), "valve")).toEqual({ valve: false });
 

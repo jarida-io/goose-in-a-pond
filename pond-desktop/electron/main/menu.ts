@@ -1,15 +1,5 @@
-// The application menu.
-//
-// The Edit menu is not decoration: macOS routes Cmd-C/V/X/A and Undo through
-// the responder chain to menu items, so a window with no Edit menu has no
-// working clipboard at all. The Tauri shell carried one for exactly this
-// reason, with a comment saying so. Electron installs a correct default menu
-// if you never touch it -- but the moment you call setApplicationMenu you
-// replace the whole thing, so the roles have to be spelled out.
-//
-// Everything here is a role except the two View items that emit to the
-// renderer. Roles are what make the standard items behave natively (and be
-// translated) rather than being re-implemented badly.
+// The application menu. macOS routes Cmd-C/V/X/A and Undo through Edit menu items, and
+// setApplicationMenu replaces Electron's default, so the Edit role must be spelled out.
 
 import { Menu, app, type MenuItemConstructorOptions } from "electron";
 import { join } from "node:path";
@@ -19,13 +9,7 @@ export interface MenuTargets {
   emit(event: ShellEvent): void;
 }
 
-/**
- * Brand the standard About panel.
- *
- * Without this it shows Electron's default: the app name, the Electron and
- * Chromium versions, and nothing about the product. Credit is
- * "Jarida Open Source Community" per DESIGN.md section 8.
- */
+/** Brand the About panel (credit per DESIGN.md section 8), replacing Electron's default. */
 export function setAboutPanel(): void {
   app.setAboutPanelOptions({
     applicationName: "Goose In A Pond",

@@ -2,12 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { parseArgs, parseDevice } from "../tools/virtual-device-args.js";
 
-/**
- * The harness's command line, which is the part of it that can be tested without a
- * fabric. Everything else needs a running `ServerNode`, so this is where the grammar
- * is pinned — the three device shapes it exists to express, and the errors that
- * would otherwise be discovered by reading a matter.js stack trace.
- */
+/** The harness's command line: the only part testable without a running `ServerNode`. */
 describe("virtual device arguments", () => {
   it("builds an ordinary device", () => {
     const spec = parseArgs(["--device", "dimmable-light"]);
@@ -18,9 +13,7 @@ describe("virtual device arguments", () => {
   });
 
   it("builds a composed device, whose parts are parts and not devices", () => {
-    // An oven carries nothing but Identify itself -- its own matter.js definition
-    // says it "contains one or more cabinets". The negative control for bridging:
-    // this must stay ONE device however many endpoints it has.
+    // An oven carries only Identify itself; its cabinets are parts, so it stays one device.
     const spec = parseArgs([
       "--device", "oven",
       "--part", "temperature-controlled-cabinet",
@@ -49,8 +42,7 @@ describe("virtual device arguments", () => {
   });
 
   it("attaches a part to whatever was named last", () => {
-    // The rule that makes a composed device BEHIND a bridge expressible, which is
-    // the shape where endpoint numbering stops being a usable guide.
+    // This is what makes a composed device behind a bridge expressible.
     const spec = parseArgs([
       "--bridged", "dimmable-light=Kitchen",
       "--bridged", "basic-video-player=Telly",
@@ -62,10 +54,7 @@ describe("virtual device arguments", () => {
   });
 
   it("forces endpoint numbers, so a part can sit below its own parent", () => {
-    // A real hub allocates its children's numbers in its own order, so a bridged
-    // device can be at a HIGHER endpoint than one of its parts. Anything reading
-    // "the lowest endpoint carrying this cluster" answers wrongly there, and without
-    // this the case cannot be built at all.
+    // Real hubs number children in their own order; lowest-endpoint lookups break there.
     const spec = parseArgs(["--bridged", "basic-video-player=Telly@7", "--part", "speaker@3"]);
 
     expect(spec.bridged[0]?.number).toBe(7);
@@ -87,8 +76,7 @@ describe("virtual device arguments", () => {
   });
 
   it("routes --attr to the endpoint it names, parts included", () => {
-    // matter.js enforces Matter conformance device-side, so several device types
-    // refuse to start without their mandatory attributes. This is how they are given.
+    // matter.js enforces conformance: some device types need mandatory attributes to start.
     const spec = parseArgs([
       "--bridged", "door-lock=Front",
       "--part", "speaker",
@@ -120,11 +108,8 @@ describe("virtual device arguments", () => {
   });
 
   it("takes the storage directory as --storage-dir, and knows no --storage", () => {
-    // The flag is not spelt `--storage` on purpose: matter.js parses OUR argv into
-    // its own variables, so `--storage /path` defines the scalar `storage` and the
-    // tool then dies setting `storage.path` — "segment storage is not a map". The
-    // rename is only worth anything if `--storage` stays an error rather than
-    // quietly becoming a matter.js variable again.
+    // matter.js parses our argv into its own variables: `--storage /path` makes `storage` a
+    // scalar and setting `storage.path` then dies, so `--storage` must stay an error.
     expect(parseArgs(["--device", "on-off-light", "--storage-dir", "/tmp/one"]).storage)
       .toBe("/tmp/one");
     expect(() => parseArgs(["--device", "on-off-light", "--storage", "/tmp/one"]))
@@ -140,8 +125,6 @@ describe("virtual device arguments", () => {
   });
 
   it("refuses an --attr naming an endpoint that does not exist", () => {
-    // Silently dropping it would leave a device that refuses to start for a reason
-    // the flag was meant to fix.
     expect(() => parseArgs(["--bridged", "door-lock=Front", "--attr", "kitchen.onOff.onOff=true"]))
       .toThrow(/not one of: front/);
   });

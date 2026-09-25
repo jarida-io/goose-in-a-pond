@@ -1,9 +1,6 @@
 import { defineConfig } from "vitest/config";
 
-// Two projects, because the two halves of this app run in different worlds.
-// The renderer needs happy-dom and the React setup file; the main process is
-// plain Node and must not get either -- a main-process module that only works
-// because a DOM happened to be present is a module that will fail in Electron.
+// Two projects: renderer on happy-dom; main process on plain Node, as it runs in Electron.
 export default defineConfig({
   test: {
     projects: [

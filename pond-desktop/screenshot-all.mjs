@@ -22,7 +22,6 @@ const SCREENS = [
 
   for (const label of SCREENS) {
     errors.length = 0;
-    // Try aria-label first, then title, then text content
     let btn = page.locator(`button[aria-label="${label}"]`);
     if (await btn.count() === 0) {
       btn = page.locator(`button[title="${label}"]`);

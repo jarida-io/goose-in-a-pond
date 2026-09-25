@@ -5,11 +5,6 @@ import type { ChildProcess } from "node:child_process";
 import { VoiceChildProcess, type VoiceChildDeps } from "./VoiceChildProcess";
 import { STDERR_TAIL_LINES } from "./ndjson";
 
-// A fake child, which is the whole reason this port is testable where the Rust
-// was not. `chat_process.rs` reached straight for `Command::new`, so the two
-// behaviours that mattered most -- the stale-reader guard and the stderr tail
-// reaching the renderer -- had no test at all.
-
 class FakeChild extends EventEmitter {
   stdout = new PassThrough();
   stderr = new PassThrough();
@@ -198,11 +193,6 @@ describe("forwarding the child's output", () => {
 });
 
 describe("the stderr tail reaching the renderer", () => {
-  // The bug this covers end to end: a sidecar staged weeks earlier was
-  // rejected by a newer database, exited 1, and emitted zero NDJSON lines. The
-  // shell said "crashed (code 1)" and dropped the one line that explained it.
-  // The Rust tested classify_end in isolation but never that the tail actually
-  // arrives in the payload, because it could not fake a child.
   it("carries the last twenty stderr lines as detail on a startup failure", async () => {
     const h = harness();
     await h.voice.start("s1");
@@ -245,8 +235,7 @@ describe("the stderr tail reaching the renderer", () => {
     });
   });
 
-  // "close" fires only after stdio has closed; "exit" fires before. Binding to
-  // the wrong one drops the fatal line, which is the whole point of the ring.
+  // Node fires "exit" before stdio drains and "close" after; only "close" has the fatal line.
   it("waits for stdio to close before classifying, not just for the process", async () => {
     const h = harness();
     await h.voice.start("s1");
@@ -268,12 +257,7 @@ describe("the stderr tail reaching the renderer", () => {
 });
 
 describe("the stale-reader guard", () => {
-  // The race: stop() kills child A, A's close event is queued, a new start()
-  // assigns session B, and only then does A's handler run. Without the guard
-  // it clears B's state and reports B's session as ended.
-  //
-  // This window is WIDER in Node than in Rust, where Child::kill() followed by
-  // wait() was synchronous and the slot was clear before kill returned.
+  // Race: stop() kills A, a start() assigns B, then A's queued close event runs.
   it("does not let a killed session's close event end a newer one", async () => {
     const h = harness();
     await h.voice.start("session-A");
@@ -338,8 +322,7 @@ describe("stopping", () => {
     expect(h.voice.isActive).toBe(false);
   });
 
-  // Faithful to the shipped behaviour: the child never reads stdin in voice
-  // mode, so this path is the normal one, not the exception.
+  // The normal path: in voice mode the child never reads stdin.
   it("escalates to SIGKILL when the child ignores stdin close", async () => {
     const h = harness();
     await h.voice.start("s1");
@@ -356,9 +339,7 @@ describe("stopping", () => {
     await expect(h.voice.stop()).resolves.toBeUndefined();
   });
 
-  // ipcMain.handle callbacks interleave across every await, and stop() awaits a
-  // timer, so without the lifecycle lock a stop and a start overlap and spawn
-  // two children that both hold the microphone.
+  // ipcMain.handle callbacks interleave at every await, and stop() awaits a timer.
   it("serialises an overlapping stop and start into one child at a time", async () => {
     const h = harness();
     await h.voice.start("s1");

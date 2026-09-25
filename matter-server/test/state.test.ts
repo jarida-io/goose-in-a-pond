@@ -18,7 +18,6 @@ import {
   tunableWhiteNode,
 } from "./fixtures.js";
 
-/** The value reported for a name, or undefined if it was not reported at all. */
 function valueOf(n: Parameters<typeof stateOf>[0], name: string) {
   return stateOf(n).values.find(v => v.name === name)?.value;
 }
@@ -35,13 +34,7 @@ describe("device state", () => {
   });
 
   it("names state with words the description also uses", () => {
-    // The invariant that makes one call follow from the other: every name reported
-    // here appears in the description, either as something settable or as something
-    // measured. So "spin speed is Low" leads straight to the call that makes it
-    // High, and a measurement is named the same way `list_sensors` names it.
-    //
-    // A device with both halves, because the earlier version of this test used a
-    // washer -- which has no sensors, so it never checked the measured half at all.
+    // Invariant: every reported name appears in the description, as settable or measured.
     const purifier = node(96, [
       named("Air Purifier"),
       endpoint(1, {
@@ -71,14 +64,10 @@ describe("device state", () => {
   });
 
   it("reports which way a switch is thrown, naming it as the description does", () => {
-    // A Generic Switch reports and takes no orders, so `states` is the only slot it
-    // has -- and before this it had none at all: it arrived typed `matter` with no
-    // capabilities and `state` had nothing to say about it either.
     const reported = stateOf(genericSwitchNode()).values;
     expect(reported).toContainEqual({ name: "switch_position", value: "1" });
 
-    // The same invariant the purifier checks, applied to a device that is ALL states:
-    // every name reported is a name the description declares.
+    // The same invariant, for a device that is all states.
     const declared = new Set(describeNode(genericSwitchNode()).states.map(s => s.name));
     for (const value of reported) {
       expect(declared.has(value.name), `'${value.name}' is reported but not declared`).toBe(true);
@@ -86,10 +75,7 @@ describe("device state", () => {
   });
 
   it("says nothing about a switch kind the device did not claim", () => {
-    // An unstated feature map means the device has not said which kind of switch it
-    // is. `clusterHasFeature` reads an unstated map as a yes, which is right when the
-    // question is "may this reading exist"; here it would put a word in the device's
-    // mouth.
+    // `clusterHasFeature` reads an unstated feature map as yes; that must not name a switch kind.
     const unstated = node(8, [
       named("Switch"),
       endpoint(1, { switch: { currentPosition: 0 } }, [0x000f]),
@@ -100,8 +86,7 @@ describe("device state", () => {
   });
 
   it("says where the door is, which the lock state cannot", () => {
-    // A bolt thrown into a frame standing open reports "locked" quite happily. Asked
-    // whether the door was shut, that answer is worse than no answer.
+    // A bolt thrown with the door open still reports "locked".
     const lock = doorLockNode();
 
     expect(valueOf(lock, "locked")).toBe("locked");
@@ -110,8 +95,6 @@ describe("device state", () => {
   });
 
   it("reads a door state matter.js decoded to its enum name", () => {
-    // Both encodings, for the reason the fan mode sequence reads both: a door reported
-    // as "DoorJammed" must not come out the same as a door that said nothing.
     const jammed = node(46, [
       named("Side Door"),
       endpoint(1, { doorLock: { lockState: 1, doorState: "DoorJammed" } }, [0x000a]),
@@ -121,10 +104,7 @@ describe("device state", () => {
   });
 
   it("declares a door it has no reading for yet, and reports nothing for it", () => {
-    // doorState is nullable in Matter, so a lock with a position sensor can have the
-    // attribute and no value in it. Describing it is right -- the device does report a
-    // door -- and inventing "closed" for the reading is not: an invented value cannot
-    // be told from a real one, and this is a door.
+    // doorState is nullable in Matter: the attribute can exist with no value.
     const unknown = node(47, [
       named("Back Door"),
       endpoint(1, { doorLock: { lockState: 1, doorState: null } }, [0x000a]),
@@ -142,22 +122,18 @@ describe("device state", () => {
   });
 
   it("says what colour a light is, which it could not before", () => {
-    // `state` never touched ColorControl, so the only way to learn a light's colour was
-    // to change it -- the same failure the whole op exists to remove.
     const light = extendedColorLightNode();
 
     expect(valueOf(light, "color")).toBe("hue 0, saturation 0%");
   });
 
   it("reports a white bulb's temperature in kelvin, not mireds", () => {
-    // 370 mireds is 2703 K. Mireds are the cluster's unit; kelvin is the one a person
-    // says and the one `color_temp` is written in.
+    // 370 mireds is 2703 K; `color_temp` is written in kelvin.
     expect(valueOf(tunableWhiteNode(), "color_temp")).toBe("2703 K");
   });
 
   it("reports the colour mode the device is in, not every attribute it holds", () => {
-    // A bulb sitting at 2700K still carries whatever hue it was last set to. Reporting
-    // both makes the reading contradict itself -- "it is warm white" and "it is red".
+    // A bulb at 2700K still carries its last hue; reporting both would contradict itself.
     const warm = node(54, [
       named("Lamp"),
       endpoint(1, {
@@ -191,8 +167,7 @@ describe("device state", () => {
   });
 
   it("names every colour reading with a word the description also uses", () => {
-    // The invariant, applied to the new names: `color` and `color_temp` are both verbs
-    // `control` accepts, so a reading leads straight to the call that changes it.
+    // The same invariant: `color` and `color_temp` are both verbs `control` accepts.
     for (const device of [extendedColorLightNode(), tunableWhiteNode()]) {
       const settable = new Set(describeNode(device).capabilities.map(c => c.setting ?? c.verb));
       for (const { name } of stateOf(device).values) {
@@ -202,10 +177,6 @@ describe("device state", () => {
   });
 
   it("says which alarm is sounding, not just a level", () => {
-    // The report this came from: asked for the states of an alarm expressing a CO alarm,
-    // GIAP answered "the current state is Critical" -- the SMOKE level, with no mention
-    // of carbon monoxide. Two dangers, two responses, and the attribute naming which one
-    // was the attribute nothing read.
     const alarm = smokeCoAlarmNode();
 
     expect(valueOf(alarm, "alarm")).toBe("co alarm");
@@ -223,7 +194,7 @@ describe("device state", () => {
   });
 
   it("names every alarm reading with a word the description also uses", () => {
-    // The invariant, across a device whose readings and states are both new.
+    // The same invariant, for readings and states.
     for (const device of [smokeCoAlarmNode(), coOnlyAlarmNode()]) {
       const described = describeNode(device);
       const settable = new Set(described.capabilities.map(c => c.setting ?? c.verb));
@@ -250,9 +221,6 @@ describe("device state", () => {
   });
 
   it("reports what a device measures, not only what it can be told to be", () => {
-    // Asked for an air purifier's state, GIAP answered power and fan speed and had
-    // to add that the filter conditions "are not measured in this reading" -- while
-    // both sat in the snapshot, and describe was already listing them.
     const purifier = node(97, [
       named("Air Purifier"),
       endpoint(1, {
@@ -268,8 +236,7 @@ describe("device state", () => {
   });
 
   it("reads a mode by the device's own code, not its position in the list", () => {
-    // ModeBase codes need not be 0,1,2: this device's second mode is code 7, and
-    // indexing into the label list would report the wrong cycle entirely.
+    // ModeBase codes need not be 0,1,2: this device's second mode is code 7.
     const oven = node(80, [
       named("Oven"),
       endpoint(1, {
@@ -287,8 +254,7 @@ describe("device state", () => {
   });
 
   it("reports a covering as percent open, matching how it is set", () => {
-    // WindowCovering counts percent CLOSED. Reporting its raw number would say 25%
-    // for a blind that is three-quarters open.
+    // WindowCovering counts percent closed.
     const blind = node(81, [
       named("Blind"),
       endpoint(1, { windowCovering: { currentPositionLiftPercent100ths: 2500 } }),
@@ -311,15 +277,11 @@ describe("device state", () => {
       endpoint(1, { thermostat: { systemMode: 0, occupiedHeatingSetpoint: 1200 } }),
     ]);
 
-    // Off is code 0 and a real answer, not an absent one: a thermostat that is off
-    // is the reason a setpoint appears to do nothing.
+    // Off is code 0: a real answer, not an absent one.
     expect(valueOf(thermostat, "system mode")).toBe("off");
     expect(valueOf(thermostat, "target_temp")).toBe("12 C");
   });
   it("says what an enum reading means, in the device's own words", () => {
-    // The purifier's own screen shows "Critical" for a spent filter and "OK" for a
-    // good one. GIAP reported "2 state" and "0 state" -- the same fact with the
-    // meaning removed, which is the whole of what was being asked for.
     const purifier = node(98, [
       named("Air Purifier"),
       endpoint(1, {
@@ -336,8 +298,6 @@ describe("device state", () => {
   });
 
   it("keeps the number when a value is outside the enum it knows", () => {
-    // A device reporting something this table has no word for must not be
-    // described as any of the words it does have.
     const odd = node(99, [
       named("Purifier"),
       endpoint(1, { hepaFilterMonitoring: { changeIndication: 7 } }),
@@ -345,10 +305,8 @@ describe("device state", () => {
     expect(valueOf(odd, "hepa_filter_change")).toBe("7 state");
   });
   it("says where a covering is heading when that is not where it is", () => {
-    // 0 hundredths is fully OPEN in Matter: UpOrOpen sets it to 0.00%, DownOrClose
-    // to 100.00%. A covering told to close therefore sits at "100% open" with a
-    // target of fully closed until it travels -- and on a device that accepts the
-    // command without moving, that is the only sign the command landed at all.
+    // 0 hundredths is fully open in Matter. The target is the only sign a close landed on a
+    // device that accepts the command without moving.
     const closing = node(110, [
       named("Blind"),
       endpoint(1, {
@@ -372,17 +330,14 @@ describe("device state", () => {
     ]);
     expect(valueOf(settled, "position")).toBe("70% open");
 
-    // Still one name, and one `describe` offers -- the thing reported is the thing
-    // `position` sets.
+    // The reported name is the one `position` sets.
     const settable = new Set(describeNode(closing).capabilities.map(c => c.setting ?? c.verb));
     for (const { name } of stateOf(closing).values) {
       expect(settable.has(name), `'${name}' is reported but nothing sets it`).toBe(true);
     }
   });
   it("offers and reports a covering's second axis, where it has one", () => {
-    // Lift and tilt are separate axes: how far a blind is lowered, and how far its
-    // slats are turned. A venetian blind is routinely down with its slats open, and
-    // position alone cannot ask for that.
+    // Lift and tilt are separate axes: how far a blind is lowered, how far its slats turn.
     const venetian = node(112, [
       named("Blind"),
       endpoint(1, {
@@ -414,8 +369,6 @@ describe("device state", () => {
   });
 
   it("does not offer tilt to a covering with no slats", () => {
-    // A roller blind has nothing to turn, and offering a control the device will
-    // reject is the failure this area exists to stop.
     const roller = node(113, [
       named("Roller"),
       endpoint(1, { windowCovering: { currentPositionLiftPercent100ths: 5000 } }),

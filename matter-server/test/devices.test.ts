@@ -35,8 +35,6 @@ describe("device typing", () => {
   });
 
   it("tells a plug from a bulb, which the clusters alone cannot", () => {
-    // The regression that started this: both are On/Off, so cluster inference called
-    // every plug a light and the UI drew a lightbulb on it. The node says which it is.
     const plug = describedNode(30, 0x010a, { onOff: { onOff: false } });
     expect(nodeToDevice(plug).device_type).toBe("plug");
 
@@ -63,9 +61,7 @@ describe("device typing", () => {
   });
 
   it("types the rest of the Matter device library, not just the ones MVD offers", () => {
-    // Every id here was read off matter.js's own device definitions rather than
-    // transcribed from the spec, and every one arrived as the monitor fallback before
-    // this — "unknown device", with whatever it can do listed underneath.
+    // Ids read off matter.js's own device definitions, not transcribed from the spec.
     const cases: [number, string][] = [
       [0x010f, "plug"], // Mounted On/Off Control
       [0x0110, "plug"], // Mounted Dimmable Load Control
@@ -91,10 +87,7 @@ describe("device typing", () => {
   });
 
   it("leaves the client device types untyped, deliberately", () => {
-    // A remote holds no server cluster GIAP could read or drive, so typing one would
-    // put a row on the wall that answers "cannot be controlled" for every verb. The
-    // omission is the whole family, and this is the test that says so out loud —
-    // otherwise the next person filling gaps from the spec adds them all.
+    // Remotes hold no server cluster GIAP could read or drive; don't type them from the spec.
     const remotes = [
       0x0103, // On/Off Light Switch
       0x0104, // Dimmer Switch
@@ -115,8 +108,7 @@ describe("device typing", () => {
   });
 
   it("does not mistake the root endpoint for the device", () => {
-    // Endpoint 0 is the Root Node (0x0016) on every device. Reading it would type the
-    // whole fabric as one thing.
+    // Endpoint 0 is the Root Node (0x0016) on every device.
     expect(deviceTypeFromDescriptor(describedNode(41, 0x0075))).toBe("appliance");
     const rootOnly = node(42, [endpoint(0, {}, [0x0016])]);
     expect(deviceTypeFromDescriptor(rootOnly)).toBeUndefined();
@@ -148,8 +140,7 @@ describe("device typing", () => {
   });
 
   it("treats a blank name as no name at all", () => {
-    // An empty nodeLabel is what a device ships with; taking it verbatim would name
-    // every unnamed device the empty string.
+    // Devices ship with an empty nodeLabel.
     const blank = node(9, [
       endpoint(0, { basicInformation: { nodeLabel: "   ", productName: "Acme Plug" } }),
       endpoint(1, { onOff: { onOff: false } }),
@@ -158,10 +149,6 @@ describe("device typing", () => {
   });
 
   it("types a Generic Switch as a switch, so it stops wearing a monitor", () => {
-    // A Generic Switch fell through to the `matter` sentinel, and the desktop's icon
-    // table has no entry for that -- so it rendered the generic Monitor fallback on
-    // the catch-all gradient. The type is what fixes the icon; the description is a
-    // separate fix in the same session.
     const device = nodeToDevice(genericSwitchNode());
 
     expect(device.device_type).toBe("switch");
@@ -170,10 +157,7 @@ describe("device typing", () => {
   });
 
   it("admits the switch cluster into the snapshot", () => {
-    // Without this the fix above is invisible: `readClusters` skips any cluster
-    // outside the allowlist, so `switch` never reached a snapshot and no mapping over
-    // it could have run. The allowlist derives from `deviceClusters()` for exactly
-    // this reason -- naming a cluster in one place and not the other is the failure.
+    // `readClusters` skips clusters outside the allowlist, so a mapping over one never runs.
     expect(isSnapshotCluster("switch")).toBe(true);
   });
 
@@ -185,10 +169,7 @@ describe("device typing", () => {
     expect(device.capabilities).toEqual([]);
   });
   it("lists an appliance's temperature, which is not a thermostat's", () => {
-    // The listing is what a model reads before deciding whether to ask for the
-    // description at all. A dishwasher offering 49 to 82 degrees was listed as
-    // "power, mode, operation", so the fuller answer was never reached -- the same
-    // shape as the washer that was listed as "power" alone.
+    // A model reads this listing to decide whether to fetch the full description.
     const dishwasher = node(105, [
       named("Dishwasher"),
       endpoint(1, {
@@ -199,8 +180,7 @@ describe("device typing", () => {
 
     expect(nodeToDevice(dishwasher).capabilities).toContain("temperature");
 
-    // A washer naming levels has no numeric setpoint, so it is a mode and not a
-    // temperature capability.
+    // Named temperature levels are a mode, not a numeric temperature capability.
     const washer = node(106, [
       named("Washer"),
       endpoint(1, {
@@ -214,8 +194,6 @@ describe("device typing", () => {
 
 describe("colour in the short capability list", () => {
   it("lists the colour controls the device claims", () => {
-    // Colour was missing from this list entirely while `describe` offered it, and the
-    // short list is what a model reads before deciding whether to look closer.
     const caps = nodeToDevice(extendedColorLightNode()).capabilities;
 
     expect(caps).toContain("color");

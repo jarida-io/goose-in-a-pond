@@ -1,9 +1,4 @@
-// Wiring the contract's commands to ipcMain.
-//
-// Every channel is prefixed `giap:` and every name comes from the shared
-// contract, so a handler registered here and a command declared there cannot
-// drift: the preload refuses anything not in SHELL_COMMANDS, and this file
-// will not compile with a name outside it.
+// Contract commands on `giap:` channels; names outside SHELL_COMMANDS don't compile.
 
 import { ipcMain, shell } from "electron";
 import type { ShellCommand } from "../../src/shell/contract";
@@ -39,9 +34,7 @@ export function registerIpc(t: IpcTargets): void {
   handle("open_external", async (args) => {
     const url = (args as { url?: string } | undefined)?.url;
     if (typeof url !== "string") throw new Error("open_external needs a url");
-    // Only ever hand the OS an http(s) URL. A renderer that has been
-    // compromised should not be able to launch a local file or a custom
-    // scheme handler through this.
+    // Security: http(s) only, so a compromised renderer can't launch files or scheme handlers.
     const parsed = new URL(url);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       throw new Error(`refusing to open a ${parsed.protocol} URL externally`);

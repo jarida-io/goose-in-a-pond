@@ -57,22 +57,14 @@ describe("sensor readings", () => {
   });
 
   it("drops a value whose shape is not what the mapping expects", () => {
-    // A null measured value is how Matter says "I do not know", and it must not
-    // become a reading of zero.
+    // Matter reports "unknown" as null, which must not become a zero reading.
     expect(readingFor(DEVICE, "temperatureMeasurement", "measuredValue", null)).toBeUndefined();
     expect(readingFor(DEVICE, "booleanState", "stateValue", 1)).toBeUndefined();
   });
 
   it("mints a sensor type from one cluster, save where a quantity has two sources", () => {
-    // Two clusters minting the same name is normally an accident -- the filter pair
-    // is the near miss this was written for. Readings carry a device id, so the harm
-    // is not telling devices apart; it is one device exposing both clusters, where
-    // two sources for one quantity would alternate in the reading cache.
-    //
-    // Temperature is the real exception rather than a slip. A thermostat measures the
-    // room and publishes it as `thermostat.localTemperature`, not through
-    // TemperatureMeasurement, and calling that anything but "temperature" would hide
-    // it from every question a person actually asks.
+    // Two sources for one quantity on one device would alternate in the reading cache.
+    // Exception: a thermostat publishes room temperature as `thermostat.localTemperature`.
     const DUPLICATES_ALLOWED = new Set(["temperature"]);
 
     const seen = new Set<string>();
@@ -88,10 +80,7 @@ describe("sensor readings", () => {
   });
 
   it("shares a cluster attribute only between device types, and once generally", () => {
-    // The invariant that replaced "no duplicate paths at all". Boolean State is one
-    // bit whose meaning is the endpoint's device type, so four mappings share its
-    // path on purpose -- but a SECOND entry with no device type would be shadowed by
-    // whichever the picker found first, silently, exactly as before.
+    // A second untyped entry for a path would be silently shadowed by whichever is found first.
     const byPath = new Map<string, typeof SENSORS[number][]>();
     for (const sensor of SENSORS) {
       const path = `${sensor.cluster}.${sensor.attribute}`;
@@ -108,9 +97,7 @@ describe("sensor readings", () => {
   });
 
   it("names one bit by the device holding it", () => {
-    // A leak detector, a freeze detector, a rain sensor and a contact sensor all
-    // publish Boolean State's `stateValue` and nothing else. Reported as `contact`,
-    // as they all were, a household was told its leak detector had a door.
+    // Leak, freeze, rain and contact sensors all publish only Boolean State's `stateValue`.
     const bit = (deviceType: number) =>
       readingFor(DEVICE, "booleanState", "stateValue", true, new Date(), undefined, [deviceType]);
 
@@ -121,18 +108,13 @@ describe("sensor readings", () => {
   });
 
   it("still reports the bit from a detector it has no name for", () => {
-    // Fails OPEN, like every other unstated case in this file: an endpoint that
-    // states no device type, or one GIAP has no specific mapping for, gets the
-    // general `contact` rather than no reading at all.
+    // Fails open: an untyped or unmapped endpoint gets the general `contact`.
     expect(readingFor(DEVICE, "booleanState", "stateValue", true)?.sensor_type).toBe("contact");
     const unknown = readingFor(DEVICE, "booleanState", "stateValue", true, new Date(), undefined, [0xbeef]);
     expect(unknown?.sensor_type).toBe("contact");
   });
   it("reports a reading in the unit the device declared, not the substance's default", () => {
-    // The Matter Virtual Device's air quality sensor declares ozone in ppm, where
-    // the conventional default is ppb, and pm1 in ppm where the default is ug/m3.
-    // describe read the declaration and readings did not, so one device described
-    // ozone in ppm and reported it in ppb at the same moment.
+    // The Matter Virtual Device declares ozone and pm1 in ppm; the defaults are ppb and ug/m3.
     const ozone = readingFor(DEVICE, "ozoneConcentrationMeasurement", "measuredValue", 60, new Date(), 0);
     expect(ozone?.unit).toBe("ppm");
 
@@ -143,8 +125,6 @@ describe("sensor readings", () => {
     const named = readingFor(DEVICE, "ozoneConcentrationMeasurement", "measuredValue", 60, new Date(), "ugm3");
     expect(named?.unit).toBe("ug/m3");
 
-    // A device that declares nothing keeps the substance's conventional unit,
-    // rather than a unit invented for it.
     const silent = readingFor(DEVICE, "ozoneConcentrationMeasurement", "measuredValue", 60);
     expect(silent?.unit).toBe("ppb");
   });

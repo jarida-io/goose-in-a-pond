@@ -1,10 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { resolveDataDir, readRuntimePort } from "./dataDir";
 
-// The shell has to agree with the server about where the data directory is,
-// and Electron's own app.getPath("userData") does NOT agree with Rust's
-// dirs::data_dir() on Linux. Getting this wrong means reading a port file that
-// is not there and silently keeping a stale port.
+// Disagreeing with the server here means a missing port file and a silently stale port.
 
 describe("resolveDataDir", () => {
   it("honours POND_DATA_DIR, matching the server's own override", () => {

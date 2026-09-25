@@ -41,8 +41,7 @@ describe("cmdlineIsServerChild", () => {
         "/Applications/Goose In A Pond.app/Contents/Resources/pond-server serve --port 4000",
       ),
     ).toBe(true);
-    // Keyed on the subcommand and never on --port, so a sidecar that fell back
-    // past 4000 -- the very symptom that led here -- is still recognised.
+    // Not keyed on --port: a sidecar that fell back past 4000 is still ours.
     expect(cmdlineIsServerChild("/opt/app/pond-server serve --port 4001")).toBe(
       true,
     );
@@ -59,8 +58,6 @@ describe("cmdlineIsServerChild", () => {
   });
 });
 
-// Both children are a `pond-server`, so matching the binary alone would have
-// each reaper killing the other's process.
 describe("the two child kinds", () => {
   it("never claim each other's processes", () => {
     const sidecar = "/opt/app/pond-server serve --port 4000";
@@ -87,16 +84,13 @@ describe("cmdlineIsVoiceChild", () => {
         "/opt/app/pond-server chat --voice --json-events --session-id abc",
       ),
     ).toBe(true);
-    // A macOS bundle sidecar path.
+    // A macOS bundle path.
     expect(
       cmdlineIsVoiceChild(
         "/Applications/Goose In A Pond.app/Contents/MacOS/pond-server chat --voice",
       ),
     ).toBe(true);
-    // The pre-rename invocation still matches, because orphan recovery has to
-    // reap a child spawned by a shell that was running before an upgrade. The
-    // matcher keys on the binary and the subcommand, never the flags, and that
-    // is exactly what makes an upgrade survivable.
+    // A pre-upgrade shell's flags still match: the matcher ignores flags.
     expect(
       cmdlineIsVoiceChild(
         "/opt/app/pond-server chat --input whisper --json-events --session-id abc",
@@ -115,8 +109,7 @@ describe("cmdlineIsVoiceChild", () => {
     );
     expect(cmdlineIsVoiceChild("/usr/bin/node /some/other/app.js")).toBe(false);
     expect(cmdlineIsVoiceChild("")).toBe(false);
-    // `chat` with no pond-server token must not match a reused pid running
-    // something else that happens to take a `chat` argument.
+    // `chat` without pond-server may be a reused pid running something else.
     expect(cmdlineIsVoiceChild("/usr/bin/irc-client chat")).toBe(false);
   });
 });
@@ -135,10 +128,7 @@ describe("readPidfile", () => {
     expect(readPidfile("1e5")).toBe(null);
   });
 
-  // This is the one that matters most. POSIX kill(0, sig) signals the entire
-  // process group and kill(-n, sig) signals group n, so a truncated or
-  // zero-filled pidfile would have the shell SIGKILL itself and every process
-  // it spawned. The Rust this replaces parsed into u32 and accepted "0".
+  // kill(0) signals our whole process group and kill(-n) group n: the shell would kill itself.
   it("rejects zero and negative pids", () => {
     expect(readPidfile("0")).toBe(null);
     expect(readPidfile("  0  ")).toBe(null);
@@ -161,8 +151,7 @@ describe("pidIsChildOfKind", () => {
   it("reports a dead pid without spawning ps at all", () => {
     const d = deps({ isAlive: vi.fn().mockReturnValue(false) });
     expect(pidIsChildOfKind(4242, VOICE_CHILD, d)).toBe(false);
-    // The common case is a stale pidfile naming a long-dead pid. Paying for a
-    // subprocess there is exactly what fails on a memory-pressured board.
+    // Stale pidfiles are the common case; spawning `ps` fails on a memory-pressured board.
     expect(d.commandLine).not.toHaveBeenCalled();
   });
 
@@ -228,9 +217,7 @@ describe("reapPidfileOrphan", () => {
     expect(d.removeFile).toHaveBeenCalledWith(PATH);
   });
 
-  // The rule this pins: an indeterminate result must KEEP the pidfile. A real
-  // orphan may still hold the microphone, and the file is the only record of
-  // it -- deleting it orphans the child permanently.
+  // The pidfile is the only record of an orphan that may still hold the microphone.
   it("keeps the pidfile when liveness is indeterminate", () => {
     const d = deps({
       readFile: vi.fn().mockReturnValue("4242"),

@@ -1,25 +1,6 @@
 /**
- * The virtual device's command line, parsed. Pure, so it is a test rather than a
- * thing discovered by running the tool and reading the error.
- *
- * The grammar is small on purpose. Three device shapes have to be expressible,
- * because they are the three that behave differently and the difference is the whole
- * point of the rig:
- *
- *   --device dimmable-light
- *       An ordinary device. One node, one GIAP device.
- *
- *   --device oven --part temperature-controlled-cabinet --part cook-surface
- *       A COMPOSED device. Its function lives in child endpoints — an oven's own
- *       `.d.ts` says it "contains one or more cabinets" and it carries nothing but
- *       Identify itself. Still one GIAP device: the parts are parts, not devices.
- *
- *   --bridged dimmable-light=Kitchen --bridged door-lock=Front
- *       A BRIDGE. One node, an Aggregator, and one separate GIAP device per child.
- *
- * `--part` attaches to whatever was named last, so a composed device behind a bridge
- * — the case where endpoint ordering stops being a reliable guide — is
- * `--bridged basic-video-player=Telly@7 --part speaker@3`.
+ * The virtual device's command line. Shapes: `--device X` (one device), `--device X
+ * --part Y` (composed: still one device), `--bridged X=Label` (one device per child).
  */
 
 import { tmpdir } from "node:os";
@@ -32,25 +13,9 @@ export interface DeviceSpec {
   id: string;
   /** The name the device reports for itself. */
   label?: string;
-  /**
-   * A forced Matter endpoint number.
-   *
-   * Worth having because a real hub allocates its children's numbers in its own
-   * order, so a bridged device can sit at a HIGHER number than one of its own parts.
-   * Anything that reads "the lowest endpoint carrying this cluster" is wrong on such
-   * a device, and without this flag that case cannot be built.
-   */
+  /** A forced Matter endpoint number, so a bridged device can sit above its own part. */
   number?: number;
-  /**
-   * Attribute values to construct with, as `behavior -> attribute -> value`.
-   *
-   * Needed because matter.js enforces Matter conformance on the DEVICE side: a Door
-   * Lock with no `lockType` refuses to start rather than advertising a device the
-   * spec forbids. That is a good property — a fixture built this way is spec-valid —
-   * but it means some device types cannot be constructed bare, and there is no table
-   * of which. So the tool reports what matter.js asked for and this is how you give
-   * it, rather than the tool carrying mandatory defaults for 81 device types.
-   */
+  /** Construction-time `behavior -> attribute -> value`; matter.js refuses some types bare. */
   state: Record<string, Record<string, unknown>>;
   parts: DeviceSpec[];
 }
@@ -84,8 +49,7 @@ function fail(message: string): never {
 }
 
 function asNumber(raw: string, what: string): number {
-  // Hex accepted because vendor and product ids are conventionally written that way,
-  // and MVD's form shows them as 0xFFF1 / 0x8000.
+  // Hex too: MVD's form shows vendor and product ids as 0xFFF1 / 0x8000.
   const value = /^0x/i.test(raw) ? Number.parseInt(raw, 16) : Number.parseInt(raw, 10);
   if (!Number.isFinite(value)) fail(`${what} must be a number, got '${raw}'`);
   return value;
@@ -191,8 +155,7 @@ export function parseArgs(argv: string[]): Spec {
         i++;
         break;
       case "--part": {
-        // Attaches to whatever was named last, which is what makes a composed device
-        // behind a bridge expressible.
+        // Attaches to whatever was named last, so a composed device can sit behind a bridge.
         const owner = bridged.at(-1);
         const parts = owner?.parts ?? (device === undefined ? undefined : rootParts);
         if (parts === undefined) fail("--part needs a --device or --bridged before it");
@@ -208,12 +171,8 @@ export function parseArgs(argv: string[]): Spec {
         id = slug(value(i, flag));
         i++;
         break;
-      // `--storage-dir`, NOT `--storage`. matter.js's `Environment` parses OUR argv
-      // into its own variables, so `--storage /path` defines the scalar variable
-      // `storage` -- and `vars.set("storage.path", ...)` then fails with "segment
-      // storage is not a map". `server.ts` records the same trap from the other
-      // side: "`--storage-path` is NOT left to matter.js's own argv parser, which
-      // reads it as a boolean".
+      // Not `--storage`: matter.js's `Environment` parses our argv, so `--storage /path` makes
+      // `storage` a scalar and `vars.set("storage.path", ...)` then fails.
       case "--storage-dir":
         storage = value(i, flag);
         i++;

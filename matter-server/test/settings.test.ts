@@ -20,7 +20,6 @@ import { deviceClusters } from "../src/mapping/devices.js";
 import { sensorClusters } from "../src/mapping/sensors.js";
 import { endpoint, laundryWasherNode, named, node } from "./fixtures.js";
 
-/** The capabilities of one verb, in the order the device offered them. */
 function verbs(n: Parameters<typeof describeNode>[0], verb: string) {
   return describeNode(n).capabilities.filter(c => c.verb === verb);
 }
@@ -29,8 +28,6 @@ describe("appliance settings", () => {
   it("finds every setting a washer offers, in the washer's own words", () => {
     const names = settingsOf(laundryWasherNode()).map(s => s.name);
 
-    // Four settings, none of which had a verb before: this is the whole gap that
-    // left "set the spin speed to high" answerable only with "it only turns on".
     expect(names).toContain("laundry washer mode");
     expect(names).toContain("temperature level");
     expect(names).toContain("spin speed");
@@ -45,8 +42,7 @@ describe("appliance settings", () => {
       kind: "enum",
       values: ["Normal", "Heavy", "Delicate", "Whites"],
     });
-    // "Whites" is offered because this washer said "Whites". A device with a
-    // different cycle list gets its own, with no code change.
+    // Labels are the device's own ("Whites"), so another cycle list needs no code change.
     expect(described.find(c => c.setting === "spin speed")?.value).toEqual({
       kind: "enum",
       values: ["Low", "Medium", "High"],
@@ -64,8 +60,7 @@ describe("appliance settings", () => {
         kind: "command",
         endpoint: 1,
         cluster: "laundryWasherMode",
-        // ModeBase changes by command: the device may refuse a transition, and
-        // the command is how it says so. Writing currentMode would lose that.
+        // Command, not a currentMode write: only the command can report a refused transition.
         command: "changeToMode",
         payload: { newMode: 1 },
       },
@@ -91,8 +86,7 @@ describe("appliance settings", () => {
   });
 
   it("takes the name a user would say for a setting", () => {
-    // "washer mode" for "laundry washer mode": people name the distinguishing
-    // part, not the cluster's full title.
+    // People name the distinguishing part, not the cluster's full title.
     const plan = planControl(laundryWasherNode(), "matter-50", "mode", {
       setting: "washer mode",
       value: "Delicate",
@@ -147,19 +141,12 @@ describe("appliance settings", () => {
   });
 
   it("lets appliance clusters into the snapshot at all", () => {
-    // The bug that made everything above invisible in a running Pond: settings are
-    // read by shape, but the snapshot dropped these clusters BY NAME before anything
-    // could look at their shape. Every test above passed while a paired washer still
-    // reported nothing but power. They build snapshots by hand, so they never went
-    // through the filter that was discarding the clusters.
+    // The hand-built snapshots in the tests above bypass this name filter.
     expect(isSnapshotCluster("laundryWasherMode")).toBe(true);
     expect(isSnapshotCluster("temperatureControl")).toBe(true);
     expect(isSnapshotCluster("laundryWasherControls")).toBe(true);
     expect(isSnapshotCluster("operationalState")).toBe(true);
 
-    // The same bug, a year and a device class later: these three were declared in
-    // settings.ts as module-private constants and never reached the allowlist, so every
-    // television described nothing but power and volume while all 158 tests passed.
     expect(isSnapshotCluster("mediaPlayback")).toBe(true);
     expect(isSnapshotCluster("mediaInput")).toBe(true);
     expect(isSnapshotCluster("audioOutput")).toBe(true);
@@ -175,10 +162,7 @@ describe("appliance settings", () => {
   });
 
   it("admits every cluster the mappings say they read", () => {
-    // Tautological while the allowlist is DERIVED from these three helpers, and that is
-    // the point: it is what fails the moment someone goes back to hand-listing a cluster
-    // in controller.ts, which is how the media clusters came to be dropped. The check
-    // costs nothing and the failure it guards cost a whole feature.
+    // Tautological while the allowlist is derived from these helpers; fails if one is hand-listed.
     for (const cluster of [...deviceClusters(), ...settingClusters(), ...sensorClusters()]) {
       expect(isSnapshotCluster(cluster), `'${cluster}' is read but never snapshotted`).toBe(
         true,
@@ -187,8 +171,6 @@ describe("appliance settings", () => {
   });
 
   it("finds a mode cluster it has never heard of, by its shape", () => {
-    // The point of reading structurally: a cluster nobody wrote code for works
-    // the day a device ships it.
     const unknown = node(61, [
       named("Something New"),
       endpoint(1, {
@@ -210,9 +192,7 @@ describe("appliance settings", () => {
   });
 
   it("offers only the operations the device says it has", () => {
-    // Start, Stop, Pause and Resume are each optional. The spec ties them to the
-    // state list: a device "shall expose the set of states matching the commands
-    // that are also supported", so a washer with no Paused state cannot be paused.
+    // Each command is optional, and the spec ties them to the state list: no Paused, no pause.
     const noPause = node(70, [
       named("Basic Washer"),
       endpoint(1, {
@@ -233,8 +213,6 @@ describe("appliance settings", () => {
   });
 
   it("reports the state the device is in, not the verb it was sent", () => {
-    // The whole complaint: GIAP said a washer was running while the washer said
-    // Stopped, because it echoed the request back instead of looking.
     expect(observedOperation(laundryWasherNode())).toBe("stopped");
 
     const running = node(71, [
@@ -251,9 +229,7 @@ describe("appliance settings", () => {
   });
 
   it("treats a refusal as a failure, in the device's own words", () => {
-    // A refused command is a perfectly successful invocation carrying a non-zero
-    // code. Nothing throws, so nothing looked -- and a washer that never started
-    // was reported as running.
+    // A refused command is a successful invocation carrying a non-zero code; nothing throws.
     expect(() =>
       assertAccepted("matter-50", "start", {
         commandResponseState: { errorStateId: 3, errorStateLabel: "CommandInvalidInState" },
@@ -273,10 +249,7 @@ describe("appliance settings", () => {
     expect(() => assertAccepted("matter-50", "off", undefined)).not.toThrow();
   });
   it("takes the cluster's name for a setting when only one can be meant", () => {
-    // What Goose actually sent: the setting reads "temperature level", but the
-    // cluster is called TemperatureControl, so it asked for "temperature control"
-    // first and had to be told no before retrying -- which is why one answer both
-    // denied setting it and reported it set.
+    // Goose asks by cluster name ("temperature control") for the "temperature level" setting.
     const plan = planControl(laundryWasherNode(), "matter-50", "mode", {
       setting: "temperature control",
       value: "Hot",
@@ -285,8 +258,6 @@ describe("appliance settings", () => {
   });
 
   it("still refuses a name that could mean two settings", () => {
-    // "mode" alone is not an answer on a device with two of them: picking one is
-    // how a wash ends up on the wrong cycle.
     const twoModes = node(72, [
       named("Combo"),
       endpoint(1, {
@@ -306,10 +277,7 @@ describe("appliance settings", () => {
     ).toThrowError(/is not a setting/);
   });
   it("waits for the device to report the command's effect", async () => {
-    // Measured against the Matter Virtual Device washer: the command answers in
-    // about 13ms and the state arrives around 500ms later. Reading straight after
-    // the invocation returns the state BEFORE the command, which reported a washer
-    // that started perfectly well as having stayed stopped.
+    // On the Matter Virtual Device the command answers in ~13ms and the state arrives ~500ms later.
     let reads = 0;
     const washer = () => (++reads < 3 ? "stopped" : "running");
 
@@ -318,8 +286,6 @@ describe("appliance settings", () => {
   });
 
   it("gives up and reports what the device actually is", async () => {
-    // A device that takes the command and does nothing is reported as it is, not
-    // waited on forever and not assumed to have obeyed.
     expect(await settleTo("running", () => "stopped", 20, 1)).toBe("stopped");
 
     // A verb with no state of its own to reach is not waited on at all.
@@ -338,42 +304,31 @@ describe("appliance settings", () => {
     expect(reads).toBe(1);
   });
   it("calls a refusal a refusal, not an unreachable device", () => {
-    // The thermostat answered "Constraint error" in milliseconds, from the same
-    // machine, and was reported as unreachable -- which sends the reader looking at
-    // the network for a fault that is not there.
     const refused = refusalOrFault("matter-1", new Error("Constraint error"));
     expect(refused.code).toBe("device_refused");
     expect(refused.message).toMatch(/outside what it will accept/);
     // The device's own words are kept alongside the explanation.
     expect(refused.message).toMatch(/Constraint error/);
 
-    // A real fault stays one: guessing that an unfamiliar error was a refusal
-    // would hide an outage.
+    // A real fault stays one: calling an unfamiliar error a refusal would hide an outage.
     const fault = refusalOrFault("matter-1", new Error("socket hang up"));
     expect(fault.code).toBe("device_unreachable");
     expect(fault.message).toBe("socket hang up");
   });
 
   it("calls a device that answered with a status answered, not unreachable", () => {
-    // Measured against a valve whose firmware declares `open` and has no handler for
-    // it: the command was delivered, the device answered Matter's generic Failure,
-    // and GIAP reported the valve as UNREACHABLE -- while it sat there responding in
-    // milliseconds. Any status response proves the session was up.
+    // Any status response, even Matter's generic Failure, proves the session was up.
     const answered = refusalOrFault(
       "matter-17",
       new Error("Received error status: Failure(1) (InvokeResponse)"),
     );
     expect(answered.code).toBe("device_refused");
     expect(answered.message).toMatch(/answered with an error of its own/);
-    // Still carrying what the device actually said, so the generic status is not
-    // hidden behind the explanation of it.
     expect(answered.message).toMatch(/Failure\(1\)/);
   });
 
   it("keeps a specific status more specific than the generic one", () => {
-    // A device answering "Constraint error" arrives wrapped in the same "Received
-    // error status" phrasing, and must still get the meaning of the constraint
-    // rather than the catch-all.
+    // "Constraint error" arrives in the same "Received error status" wrapper as generic ones.
     const constrained = refusalOrFault(
       "matter-1",
       new Error("Received error status: Constraint error (WriteResponse)"),
@@ -382,16 +337,12 @@ describe("appliance settings", () => {
   });
 
   it("tells a refusal everything the description already knew", () => {
-    // The gap: describe said "49 to 82 C in steps of 1" while the refusal said
-    // "49 to 82 C" -- true of a request for 50.5, and no use, because it does not
-    // say what was wrong with it. A refusal knowing less than the description is
-    // how a caller guesses twice.
+    // A refusal that knows less than the description makes a caller guess twice.
     expect(
       wordValueSpec({ kind: "number", unit: "C", min: 49, max: 82, step: 1 }),
     ).toBe("49 to 82 C, in steps of 1");
 
-    // A condition travels too: a thermostat's range is a different range a mode
-    // later, so quoting one without it is wrong as soon as it is repeated.
+    // The condition travels too: the range changes with the mode.
     expect(
       wordValueSpec({ kind: "number", unit: "C", min: 7, max: 23.5, when: "while heating" }),
     ).toBe("7 to 23.5 C (while heating)");
@@ -404,8 +355,7 @@ describe("appliance settings", () => {
   });
 
   it("says what the device will take, on the refusal itself", () => {
-    // A caller that did not read the description first is exactly the caller who
-    // gets here. Told only that 30 was wrong, it asked for 30 again.
+    // A caller who skipped the description is exactly the one who gets here.
     const refused = refusalOrFault("matter-1", new Error("Constraint error"), "7 to 23.5 C");
     expect(refused.message).toMatch(/It accepts 7 to 23\.5 C\./);
 
@@ -414,9 +364,7 @@ describe("appliance settings", () => {
     expect(bare.message).not.toMatch(/It accepts/);
   });
   it("offers the one thermostat control a person can see on the device", () => {
-    // A setpoint change may show nowhere on the thermostat's own screen; system
-    // mode is the control it does display. It is also the mode that decides whether
-    // a setpoint means anything: aiming a thermostat that is Off at 20 does nothing.
+    // System mode is shown on the device, and decides whether a setpoint does anything at all.
     const thermostat = node(93, [
       named("Thermostat"),
       endpoint(1, { thermostat: { systemMode: 1, occupiedHeatingSetpoint: 2000 } }),
@@ -451,22 +399,17 @@ describe("appliance settings", () => {
 
 describe("wiring attribute changes", () => {
   it("finds the level that holds the change observables", () => {
-    // matter.js hands these back nested: the outer object's single key is `events`.
-    // Iterating the outer level found one key not ending in `$Changed` and wired
-    // nothing, for every cluster, with no error -- so readings only ever refreshed
-    // when the bridge re-subscribed, and a thermostat measuring 47.33 answered 100.
+    // matter.js nests the observables under a single `events` key.
     const nested = {
       events: { localTemperature$Changed: {}, systemMode$Changed: {}, systemMode$Changing: {} },
     };
     expect(Object.keys(changeObservables(nested))).toContain("localTemperature$Changed");
 
-    // A flat shape is taken as it comes: the nesting is matter.js's business and
-    // may change back.
+    // A flat shape is taken as is, in case matter.js drops the nesting.
     const flat = { measuredValue$Changed: {} };
     expect(changeObservables(flat)).toBe(flat);
 
-    // Neither level has any: returned unchanged, so the caller wires nothing rather
-    // than reaching into something it does not understand.
+    // Neither level has any: returned unchanged, so the caller wires nothing.
     const barren = { events: { somethingElse: {} } };
     expect(changeObservables(barren)).toBe(barren);
   });
