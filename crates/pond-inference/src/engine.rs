@@ -17,8 +17,15 @@ pub(crate) struct LoadedModel {
     pub chat_template: LlamaChatTemplate,
     pub capabilities: ModelCapabilities,
     /// KV-cache context kept across calls so only the prompt delta is prefilled.
-    /// MUST be set to `None` before the model is dropped or replaced.
+    /// Borrows `model`, so `Drop` clears it first; clear it before assigning a new `model`.
     pub cached_ctx: Option<CachedInferenceContext>,
+}
+
+impl Drop for LoadedModel {
+    fn drop(&mut self) {
+        // Fields drop in declaration order, which would free `model` before the context using it.
+        self.cached_ctx = None;
+    }
 }
 
 /// Persistent context with its token history, for KV-cache prefix reuse.
