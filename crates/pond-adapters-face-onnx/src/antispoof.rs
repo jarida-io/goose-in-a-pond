@@ -1,11 +1,8 @@
-//! Passive presentation-attack detection (PAD) for printed photos and phone screens.
-//! Saturation variance, specular-highlight density (`V > 0.85 && S < 0.20`) and the horizontal
-//! to vertical Sobel ratio on the aligned 112×112 crop combine into a [0, 1] `spoof_score`.
-//! `POND_FACE_ANTISPOOF_THRESHOLD` (default 0.65) sets the gate; the caller may turn it off.
+//! Passive anti-spoof (printed photos, screens): saturation variance, highlight density and
+//! gradient skew give a [0, 1] score; `POND_FACE_ANTISPOOF_THRESHOLD` (default 0.65) gates it.
 
 use image::RgbImage;
 
-/// Result of the anti-spoof analysis.
 #[derive(Debug, Clone, Copy)]
 pub struct AntispoofReport {
     /// Scalar in \[0, 1\].  Higher = more likely to be a presentation attack.
@@ -23,7 +20,6 @@ pub fn analyse(img: &RgbImage) -> AntispoofReport {
     let (w, h) = img.dimensions();
     let n = (w * h) as f64;
 
-    // Accumulate saturation moments and highlight counts.
     let mut sat_sum = 0.0_f64;
     let mut sat_sq = 0.0_f64;
     let mut hl_count: u32 = 0;
@@ -62,16 +58,13 @@ pub fn analyse(img: &RgbImage) -> AntispoofReport {
     };
 
     // ── Scoring ─────────────────────────────────────────────────────────
-    // Each component maps raw statistic → [0, 1] where 1 = strongly spoofy.
-    // Thresholds picked empirically; loosened slightly to avoid hair-trigger
-    // rejection of real users in poor lighting.
+    // Components map to [0, 1] (1 = spoofy); empirical thresholds, loosened for dim light.
     let sat_component = (0.012 - sat_var).max(0.0) / 0.012;
     let hl_component = (0.004 - hl_density).max(0.0) / 0.004;
     let skew_component = (gradient_skew - 0.12).max(0.0) / 0.30;
     let skew_component = skew_component.min(1.0);
 
-    // Weighted combination.  Saturation variance is the strongest signal
-    // across our failure cases, so it gets the largest weight.
+    // Saturation variance is the strongest signal, hence the largest weight.
     let spoof_score =
         (0.5 * sat_component + 0.3 * hl_component + 0.2 * skew_component).clamp(0.0, 1.0);
 
@@ -112,8 +105,6 @@ mod tests {
 
     #[test]
     fn uniform_grey_scores_as_spoofy() {
-        // A flat grey image has zero saturation variance and no highlights
-        // → spoof_score should be high.
         let img = RgbImage::from_pixel(40, 40, Rgb([128, 128, 128]));
         let r = analyse(&img);
         assert!(
@@ -125,7 +116,6 @@ mod tests {
 
     #[test]
     fn colourful_noisy_image_scores_as_live() {
-        // Pseudo-random colour image has high saturation variance → low score.
         let mut img = RgbImage::new(40, 40);
         for y in 0..40 {
             for x in 0..40 {
@@ -145,12 +135,10 @@ mod tests {
 
     #[test]
     fn rgb_to_hsv_primary_colours() {
-        // Pure red
         let (h, s, v) = rgb_to_hsv(255, 0, 0);
         assert!((h * 360.0).abs() < 1e-3);
         assert!((s - 1.0).abs() < 1e-6);
         assert!((v - 1.0).abs() < 1e-6);
-        // Pure grey → zero saturation
         let (_, s, _) = rgb_to_hsv(128, 128, 128);
         assert_eq!(s, 0.0);
     }

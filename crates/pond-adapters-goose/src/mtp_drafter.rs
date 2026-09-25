@@ -1,14 +1,5 @@
-//! Drafter registration for the live serving path.
-//!
-//! Speculative decoding needs a second, small model beside the chat model, and
-//! the engine finds it by name through the registry — so a drafter file with no
-//! registry row is invisible however correctly it was downloaded.
-//!
-//! This lives here, next to [`crate::vision_encoder`], because this is the path
-//! that actually serves: `GooseAdapter` builds `LocalInferenceProvider`
-//! directly and never goes through `LocalInferenceLlmAdapter`, which feeds the
-//! quarantined PondAgent loop. Registering from there looks right, compiles,
-//! and never runs.
+//! Registers speculative-decoding drafters, which the engine finds only via the registry. Must
+//! live on this serving path: `GooseAdapter` never goes through `LocalInferenceLlmAdapter`.
 
 use goose::providers::local_inference::local_model_registry::{
     get_registry, LocalModelEntry, LocalModelRegistry, LocalModelStorage, ModelSettings,
@@ -16,13 +7,8 @@ use goose::providers::local_inference::local_model_registry::{
 use pond_core::models::domain::drafter::{drafter_for, drafter_path};
 use std::path::Path;
 
-/// Put this model's MTP drafter in the registry, if its weights are on disk.
-///
-/// Returns the registry id when speculation is available. Called on every
-/// provider build rather than once, which is what makes the arrangement
-/// self-correcting: a drafter downloaded after boot is picked up without a
-/// restart, and one that has been deleted stops being referenced instead of
-/// failing the next context creation.
+/// Register this model's MTP drafter if its weights exist; returns its id. Called on every
+/// provider build, so drafters added or deleted after boot are handled without a restart.
 pub fn ensure_drafter_registered(data_dir: &Path, model_name: &str) -> Option<String> {
     let spec = drafter_for(model_name)?;
     let path = drafter_path(data_dir, &spec);
@@ -37,12 +23,8 @@ pub fn ensure_drafter_registered(data_dir: &Path, model_name: &str) -> Option<St
             return None;
         }
     };
-    // Registering and pointing are separate steps, and the early return has to
-    // skip only the first. This function is called twice with two different
-    // spellings of the same model -- once from startup with the settings
-    // string, once from the provider build with the canonical stem the engine
-    // resolves -- and returning here on "already registered" meant the second
-    // call, the only one holding the id that matters, never ran.
+    // Already registered: still point this model at it. Startup and the provider build pass
+    // different spellings, and only the provider build's canonical stem is read.
     if registry
         .get_model(spec.id)
         .is_some_and(|e| e.local_path == path)
@@ -63,9 +45,7 @@ pub fn ensure_drafter_registered(data_dir: &Path, model_name: &str) -> Option<St
         ),
         backend_id: None,
         storage: LocalModelStorage::ManualPath,
-        // Defaults on purpose: a drafter is never a chat model, so nothing
-        // reads its context size, tool mode or thinking flag. Its context is
-        // built from the TARGET's settings, beside the target's own.
+        // Defaults on purpose: a drafter's context is built from the TARGET's settings.
         settings: ModelSettings::default(),
         size_bytes: 0,
         mmproj_path: None,
@@ -83,18 +63,8 @@ pub fn ensure_drafter_registered(data_dir: &Path, model_name: &str) -> Option<St
     Some(spec.id.to_string())
 }
 
-/// Set `draft_model` on the row the ENGINE resolves.
-///
-/// `apply_jetson_settings` stamps the model id as spelled in settings
-/// (`gemma-4-E2B-it-qat-UD-Q4_K_XL`), while the engine loads the canonical stem
-/// (`gemma-4-E2B-it-qat`) that `register_gguf_model` returns. Those are two rows
-/// in one registry, and a `draft_model` written to the first is never read. This
-/// is called with the canonical key, because that is what the caller in
-/// `goose_agent` has in hand.
-///
-/// Read-modify-write rather than a fresh block: `update_model_settings` replaces
-/// the whole `ModelSettings`, so constructing one here would drop whatever else
-/// the row is carrying.
+/// Set `draft_model` on the row the ENGINE resolves (the canonical stem). Read-modify-write:
+/// `update_model_settings` replaces the whole `ModelSettings`.
 fn point_target_at_drafter(
     registry: &mut impl std::ops::DerefMut<Target = LocalModelRegistry>,
     model_id: &str,
@@ -129,9 +99,7 @@ mod tests {
 
     #[test]
     fn a_drafter_that_is_not_on_disk_registers_nothing() {
-        // The registry row is what the engine resolves, so writing one for a
-        // file that is not there would turn a missing download into a failed
-        // context creation on the next turn.
+        // A row for a missing file would fail the next context creation.
         let tmp = tempfile::tempdir().unwrap();
         assert!(ensure_drafter_registered(tmp.path(), "gemma-4-E2B-it-qat").is_none());
     }

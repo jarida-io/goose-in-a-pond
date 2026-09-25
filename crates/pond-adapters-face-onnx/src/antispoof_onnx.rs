@@ -1,7 +1,5 @@
-//! ONNX anti-spoofing (Silent-Face MiniFASNet or DeepPixBis) with the same [`AntispoofReport`]
-//! shape as the heuristic [`crate::antispoof`] gate, so the embedder can switch between them.
-//! A model at `$POND_FACE_ANTISPOOF_PATH` is preferred; otherwise [`OnnxAntispoof::try_from_env`]
-//! returns `Ok(None)` and the heuristic runs. Both share `POND_FACE_ANTISPOOF_THRESHOLD`.
+//! ONNX anti-spoof (Silent-Face or DeepPixBis) producing an [`AntispoofReport`]; used instead
+//! of the heuristic when `$POND_FACE_ANTISPOOF_PATH` names a model.
 
 use crate::antispoof::AntispoofReport;
 use anyhow::{anyhow, Context, Result};
@@ -14,26 +12,18 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
 
-/// Silent-Face input geometry.  Don't change unless you also retrain.
+/// Silent-Face input side, fixed by the trained model.
 const INPUT_SIDE: u32 = 80;
 
 /// DeepPixBis input geometry — fixed by the OULU-NPU Protocol-2 export.
 const DEEPPIXBIS_SIDE: u32 = 224;
 
-/// Which architecture an [`OnnxAntispoof`] wraps. The two differ in input size, channel
-/// order, pixel scale and output shape, so [`OnnxAntispoof::analyse`] dispatches on this
-/// rather than guessing at run time. Resolved once at construction by `resolve_variant`;
-/// filename sniffing is conservative because a wrong guess silently feeds the wrong tensor.
+/// Anti-spoof architecture; it determines input size, channel order, pixel scale and output shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Variant {
-    /// Minivision Silent-Face (MiniFASNetV2 / V1SE) — 80×80 BGR input,
-    /// multi-class softmax output (`[live, fake_2D, fake_3D]` for the
-    /// 3-class export, `[spoof, live]` for the 2-class yakhyo export).
+    /// Silent-Face MiniFASNet, 80×80 BGR; softmax `[live, fake_2D, fake_3D]` or `[spoof, live]`.
     SilentFace80,
-    /// DeepPixBis trained on OULU-NPU Protocol 2 — 224×224 RGB input,
-    /// dual output `(output_pixel: [1,1,14,14], output_binary: [1,1])`.
-    /// We read the binary head as a sigmoid scalar and treat
-    /// `1 - p_live` as the spoof score.
+    /// DeepPixBis (OULU-NPU Protocol 2), 224×224 RGB; spoof = `1 - p_live` from `output_binary`.
     DeepPixBis224,
 }
 
@@ -44,16 +34,12 @@ pub struct OnnxAntispoof {
 }
 
 impl OnnxAntispoof {
-    /// Build a primary-slot anti-spoof — variant detection consults
-    /// `POND_FACE_ANTISPOOF_VARIANT`.  Use [`Self::new_with_variant_env`]
-    /// when you need to point a secondary slot at a different env var.
+    /// Primary-slot model; the variant override comes from `POND_FACE_ANTISPOOF_VARIANT`.
     pub fn new(model_path: impl Into<PathBuf>) -> Result<Self> {
         Self::new_with_variant_env(model_path, "POND_FACE_ANTISPOOF_VARIANT")
     }
 
-    /// Build with explicit control over which env var supplies the
-    /// variant override. The env var lookup falls back to the filename
-    /// heuristic when unset.
+    /// As `new`, reading the variant override from `variant_env` (filename heuristic if unset).
     pub fn new_with_variant_env(model_path: impl Into<PathBuf>, variant_env: &str) -> Result<Self> {
         let path = model_path.into();
         if !path.exists() {
@@ -77,17 +63,12 @@ impl OnnxAntispoof {
         })
     }
 
-    /// Construct from `$POND_FACE_ANTISPOOF_PATH`, or return `Ok(None)` when
-    /// the env var is unset / the file is missing.  Intentionally lenient:
-    /// a missing model is the *expected* state on installs that haven't
-    /// downloaded one yet — we don't want server boot to fail for it.
+    /// Load `$POND_FACE_ANTISPOOF_PATH`, or `Ok(None)` if unset/missing (normal, not a boot error).
     pub fn try_from_env() -> Result<Option<Self>> {
         Self::try_from_env_var("POND_FACE_ANTISPOOF_PATH")
     }
 
-    /// Load from an arbitrary path env var, used for the secondary ensemble model
-    /// (`POND_FACE_ANTISPOOF_PATH_2`). The variant override is read from the matching
-    /// `*_VARIANT` var; the two known paths map by name and any other gets `_VARIANT` appended.
+    /// Load from a path env var, e.g. the secondary `POND_FACE_ANTISPOOF_PATH_2`.
     pub fn try_from_env_var(var: &str) -> Result<Option<Self>> {
         let Ok(raw) = std::env::var(var) else {
             return Ok(None);
@@ -113,10 +94,7 @@ impl OnnxAntispoof {
         self.variant
     }
 
-    /// Score an aligned 112×112 RGB crop and return a synthetic
-    /// [`AntispoofReport`] whose `spoof_score` is the model's combined
-    /// fake probability.  The diagnostic fields (saturation_var etc.)
-    /// are zeroed because they are not produced by the ONNX path.
+    /// Score an aligned 112×112 crop; only `spoof_score` is set, the heuristic diagnostics are 0.
     pub fn analyse(&self, img: &RgbImage) -> Result<AntispoofReport> {
         match self.variant {
             Variant::SilentFace80 => self.analyse_silent_face(img),
@@ -124,19 +102,11 @@ impl OnnxAntispoof {
         }
     }
 
-    /// Silent-Face MiniFASNetV2 / V1SE path — 80×80 BGR input, multi-class
-    /// softmax output.  See the block comment at the top of the file for
-    /// why pixel scale + class ordering each have an env override.
     fn analyse_silent_face(&self, img: &RgbImage) -> Result<AntispoofReport> {
-        // Down-sample 112×112 → 80×80 with a Triangle filter.
         let small = DynamicImage::ImageRgb8(img.clone())
             .resize_exact(INPUT_SIDE, INPUT_SIDE, FilterType::Triangle)
             .to_rgb8();
 
-        // Pixel scaling differs between known Silent-Face exports:
-        //   * yakhyo MiniFASNetV2 (2-class) — raw `[0, 255]` float
-        //   * minivision-ai 3-class — `[0, 1]`
-        // Configurable via POND_FACE_ANTISPOOF_PIXEL_SCALE.
         let divisor: f32 = match pixel_scale_from_env() {
             PixelScale::Raw => 1.0,
             PixelScale::Unit => 255.0,
@@ -145,7 +115,7 @@ impl OnnxAntispoof {
         let mut tensor = Array4::<f32>::zeros((1, 3, side, side));
         for (x, y, px) in small.enumerate_pixels() {
             let [r, g, b] = px.0;
-            // BGR channel order: 0 = B, 1 = G, 2 = R.
+            // Silent-Face expects BGR.
             tensor[[0, 0, y as usize, x as usize]] = b as f32 / divisor;
             tensor[[0, 1, y as usize, x as usize]] = g as f32 / divisor;
             tensor[[0, 2, y as usize, x as usize]] = r as f32 / divisor;
@@ -167,9 +137,7 @@ impl OnnxAntispoof {
             .try_extract_tensor::<f32>()
             .context("failed to extract Silent-Face output tensor")?;
 
-        // Most Silent-Face exports return raw logits; some return softmax.
-        // Defensive softmax is idempotent on already-normalised dists up to
-        // FP error.  Class-ordering varies (see block comment at top).
+        // Softmax assumes raw logits; class order varies by export (see `live_index_from_env`).
         let logits = data;
         if logits.len() < 2 {
             return Err(anyhow!(
@@ -203,15 +171,9 @@ impl OnnxAntispoof {
         })
     }
 
-    /// DeepPixBis (OULU-NPU Protocol-2) path: 224×224 RGB, ImageNet standardisation as in the
-    /// reference repo `ffletcherr/face-recognition-liveness`. Only the binary head is read (a
-    /// sigmoid live probability, reported as `1 - p_live` so the Silent-Face threshold
-    /// arithmetic applies); the pixel-supervision map is ignored on purpose.
+    /// Preprocessing follows `ffletcherr/face-recognition-liveness`; only the binary head is read.
     fn analyse_deep_pix_bis(&self, img: &RgbImage) -> Result<AntispoofReport> {
-        // Resize 112×112 → 224×224 (we receive an aligned 112 crop from
-        // the embedder pipeline; DeepPixBis was trained on full-face crops
-        // at 224×224 so the upscale is fine, the model's first stride
-        // collapses it back down anyway).
+        // Upscaling the aligned 112 crop is fine: the model's first stride downsamples anyway.
         let big = DynamicImage::ImageRgb8(img.clone())
             .resize_exact(DEEPPIXBIS_SIDE, DEEPPIXBIS_SIDE, FilterType::Triangle)
             .to_rgb8();
@@ -241,10 +203,7 @@ impl OnnxAntispoof {
             .run(ort::inputs![input])
             .context("DeepPixBis anti-spoof inference failed")?;
 
-        // The OULU export emits TWO outputs: `output_pixel` (a 14×14
-        // pixel-supervision map) and `output_binary` (a single sigmoid
-        // scalar). Find the binary head by name first; fall back to the
-        // tensor with the smallest element count if the names ever change.
+        // Find `output_binary` by name, else the smallest output (the other is a 14×14 pixel map).
         let (binary_name, binary_value) = outputs
             .iter()
             .find(|(name, _)| name.contains("output_binary") || name.contains("binary"))
@@ -267,10 +226,7 @@ impl OnnxAntispoof {
             ));
         }
 
-        // The binary head's output is described as a sigmoid probability in
-        // `[0, 1]` — but some PyTorch exports leave it as a raw logit.
-        // Defensive: detect by range.  If the value is already inside
-        // `[0, 1]` we trust it; otherwise we apply sigmoid.
+        // Some exports leave the sigmoid off; a value outside [0, 1] is taken as a logit.
         let raw = data[0];
         let p_live = if (0.0..=1.0).contains(&raw) {
             raw
@@ -296,8 +252,7 @@ impl OnnxAntispoof {
     }
 }
 
-/// Pixel-scale convention for the Silent-Face input tensor: the yakhyo MiniFASNetV2 export
-/// expects raw `[0, 255]` floats, while the minivision-ai 3-class originals expect `[0, 1]`.
+/// Silent-Face input scale: yakhyo MiniFASNetV2 wants raw `[0, 255]`, minivision 3-class `[0, 1]`.
 #[derive(Clone, Copy, Debug)]
 enum PixelScale {
     /// Feed pixels as-is, in `[0, 255]`.  Divisor = 1.
@@ -306,9 +261,7 @@ enum PixelScale {
     Unit,
 }
 
-/// Resolve the pixel-scale convention from `POND_FACE_ANTISPOOF_PIXEL_SCALE={auto,raw,unit}`.
-/// Auto means `Raw` because the yakhyo MiniFASNetV2 weights the install instructions ship are
-/// the common case; a 3-class minivision export needs `unit` set explicitly.
+/// `POND_FACE_ANTISPOOF_PIXEL_SCALE={auto,raw,unit}`; auto is `Raw`, matching the shipped weights.
 fn pixel_scale_from_env() -> PixelScale {
     let raw = std::env::var("POND_FACE_ANTISPOOF_PIXEL_SCALE").ok();
     match raw.as_deref().unwrap_or("auto") {
@@ -324,10 +277,8 @@ fn pixel_scale_from_env() -> PixelScale {
     }
 }
 
-/// Resolve which softmax slot holds the "live" class from `POND_FACE_ANTISPOOF_LIVE_INDEX`:
-/// `auto` (default) is the last slot for 2-class outputs (yakhyo MiniFASNetV2) and the first
-/// for 3-class (minivision-ai); an integer forces that slot. Out-of-range values fall back to
-/// auto so a bad env value cannot panic the adapter.
+/// Softmax slot of the "live" class from `POND_FACE_ANTISPOOF_LIVE_INDEX`: auto is last for
+/// 2-class, first for 3-class; an out-of-range index falls back to auto rather than panic.
 fn live_index_from_env(n_classes: usize) -> usize {
     let raw = std::env::var("POND_FACE_ANTISPOOF_LIVE_INDEX").ok();
     match raw.as_deref().unwrap_or("auto") {
@@ -355,10 +306,8 @@ fn live_index_from_env(n_classes: usize) -> usize {
     }
 }
 
-/// Resolve which architecture an anti-spoof file is: the `variant_env` override
-/// (`silentface` or `deeppixbis`) first, then the case-insensitive filename heuristic
-/// (`deeppixbis`, `oulu_protocol`, `oulu_npu`, `pixel_supervision`, or a `pixbis_` prefix),
-/// Silent-Face by default.
+/// `variant_env` override, else a filename match, else Silent-Face. The match is conservative:
+/// a wrong guess silently feeds the wrong tensor.
 fn resolve_variant(path: &std::path::Path, variant_env: &str) -> Variant {
     if let Ok(raw) = std::env::var(variant_env) {
         match raw.trim().to_ascii_lowercase().as_str() {
@@ -396,10 +345,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// `cargo test` runs tests in parallel. The variant tests below all
-    /// poke `POND_FACE_ANTISPOOF_VARIANT` and would otherwise stomp on
-    /// each other's reads. We could `#[serial]` them with `serial_test`,
-    /// but a tiny in-mod mutex is dependency-free and equivalent.
+    /// Serialises the tests that set `POND_FACE_ANTISPOOF_VARIANT` (tests run in parallel).
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]

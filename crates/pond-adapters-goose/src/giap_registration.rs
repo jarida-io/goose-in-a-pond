@@ -1,6 +1,4 @@
-//! Registers GIAP's modular MCP servers into Goose's builtin extension registry.
-//! Call `register_giap_extensions(...)` once at startup before creating any GooseAdapter; it
-//! returns the names actually registered, which depend on the `ext_*_enabled` settings toggles.
+//! Registers GIAP's MCP servers in Goose's builtin extension registry.
 
 use anyhow::Result;
 use goose::builtin_extension::register_builtin_extension;
@@ -16,12 +14,10 @@ use pond_core::user_data::ports::settings::SettingsRepository;
 use pond_core::user_data::ports::skill::UserSkillRepository;
 use std::sync::{Arc, OnceLock};
 
-/// Registered extension names — populated at startup by `register_giap_extensions()`.
-/// Read by GooseAdapter to load/filter extensions per session.
+/// Set once by `register_giap_extensions()`; GooseAdapter filters extensions by it.
 static REGISTERED_EXTENSIONS: OnceLock<Vec<String>> = OnceLock::new();
 
-/// Returns the list of builtin extensions that were registered at startup.
-/// Panics if called before `register_giap_extensions()`.
+/// Extensions registered at startup; empty before `register_giap_extensions()` runs.
 pub fn registered_extensions() -> &'static [String] {
     REGISTERED_EXTENSIONS
         .get()
@@ -29,9 +25,8 @@ pub fn registered_extensions() -> &'static [String] {
         .unwrap_or(&[])
 }
 
-/// Register GIAP MCP servers as Goose builtin extensions, respecting the `ext_*_enabled` toggles.
-/// Must be called once at process startup before any GooseAdapter session; returns the names
-/// actually registered. `giap-toolkit` is always on (the escape hatch, not toggleable).
+/// Register the MCP servers enabled by `ext_*_enabled` (plus the always-on toolkit) and return
+/// their names. Call once at startup, before any GooseAdapter session.
 pub fn register_giap_extensions(
     settings: &Settings,
     memory_repo: Arc<dyn MemoryRepository + Send + Sync>,
@@ -44,14 +39,8 @@ pub fn register_giap_extensions(
     device_control: Arc<dyn DeviceControlPort + Send + Sync>,
     tool_caller: Option<Arc<dyn ToolCaller>>,
 ) -> Result<Vec<String>> {
-    // `GIAP_NO_TOOLS` — register nothing, so no MCP server is even spawned.
-    //
-    // The provider shim enforces the same thing again at the boundary where the
-    // final tool list is handed over, which is what actually guarantees "no
-    // tools": goose registers platform extensions of its own, and a user can
-    // add an MCP server, neither of which passes through here. This early
-    // return is the cheaper half — it stops eleven servers starting for a
-    // pond that will offer none of them.
+    // `GIAP_NO_TOOLS`: spawn no servers. Only a saving; the provider shim is what guarantees no
+    // tools, since Goose's platform extensions and user-added servers bypass this.
     if pond_core::mcp::domain::tool_group::no_tools_env_set() {
         tracing::warn!(
             "{} is set — registering no extensions at all. Unset it to restore normal behaviour.",
@@ -66,12 +55,9 @@ pub fn register_giap_extensions(
 
     let mut registered = Vec::new();
 
-    // ── Always-on: toolkit server (Phase D2 escape hatch) ───────────────────
-    // Not toggleable: under `"relevant"` its two tools let the model load a group nobody
-    // predicted, and under `"minimal"` they are the ENTIRE tool surface — turning this off
-    // there would leave a pond that can never reach a tool again. Its
-    // `ToolSelectionControl` handle is set by `init_toolkit_deps`
-    // in pond-server (the adapter is built after this call); without it both report all loaded.
+    // ── Always-on: toolkit server (escape hatch) ────────────────────────────
+    // Not toggleable: under `"minimal"` its two tools are the entire tool surface.
+    // Its handle comes later from `init_toolkit_deps`; without it both tools report all loaded.
     register_builtin_extension(
         pond_core::mcp::domain::tool_group::TOOLKIT_EXTENSION,
         pond_mcp_server::spawn_toolkit_server,
@@ -120,9 +106,7 @@ pub fn register_giap_extensions(
         register_builtin_extension("giap-device", pond_mcp_server::spawn_device_server);
         registered.push("giap-device".into());
 
-        // Device actuation surface (set_device_state) — grouped with device
-        // read. The registry lets the tool resolve natural references
-        // ("the light") to registered device ids.
+        // The registry resolves natural references ("the light") to device ids.
         pond_mcp_server::init_device_control_deps(device_control, device_registry);
         register_builtin_extension(
             "giap-device-control",
@@ -131,17 +115,14 @@ pub fn register_giap_extensions(
         registered.push("giap-device-control".into());
     }
 
-    // Sensor data aggregator. Storage handle installed separately via
-    // `init_sensor_deps` in pond-server (where the logs DB is in scope).
+    // Storage handle comes from `init_sensor_deps` in pond-server, where the logs DB lives.
     if settings.ext_sensor_enabled {
         register_builtin_extension("giap-sensors", pond_mcp_server::spawn_sensor_server);
         registered.push("giap-sensors".into());
     }
 
-    // Personal context (PAI-8 P2): read-only `search_context` and `get_recent_context`, scoped to
-    // the speaker by the engine session id in `_meta`; deps: `init_context_deps` in pond-server.
-    // Never add an `ingest_context` tool: prompt injection could plant a memo later quoted as fact.
-    // OFF by default: two schemas cost every turn yet say "nothing found" until a source exists.
+    // Personal context: read-only, scoped to the speaker via the session id in `_meta`. Never add
+    // an `ingest_context` tool: injected text could be planted and later quoted as fact.
     if settings.ext_context_enabled {
         register_builtin_extension(
             "giap-context",
@@ -150,10 +131,8 @@ pub fn register_giap_extensions(
         registered.push("giap-context".into());
     }
 
-    // Orchestration / delegation (PAI-6 P5). OFF by default: turning it on means an autonomous
-    // multi-turn agent under `GooseMode::Auto`, which an install must not acquire by upgrading.
-    // `Settings::default_ext_orchestrator_enabled` is false; `default_ext_enabled` would flip it.
-    // Handles come from `init_orchestrator_deps` in pond-server: it wraps the adapter built later.
+    // Orchestration: OFF by default (`default_ext_orchestrator_enabled`), so an upgrade never
+    // silently grants an autonomous `GooseMode::Auto` agent.
     if settings.ext_orchestrator_enabled {
         register_builtin_extension(
             pond_core::mcp::domain::tool_group::ORCHESTRATOR_EXTENSION,
@@ -162,7 +141,6 @@ pub fn register_giap_extensions(
         registered.push(pond_core::mcp::domain::tool_group::ORCHESTRATOR_EXTENSION.into());
     }
 
-    // Store for GooseAdapter to read
     let _ = REGISTERED_EXTENSIONS.set(registered.clone());
 
     tracing::info!(

@@ -12,24 +12,11 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Reserved name of the engine session that owns MCP extension state.
-///
-/// Extensions are added to and removed from this one session; chat sessions
-/// inherit them. The name — not an id — is the identity, for two reasons.
-/// It lets [`resolve_extension_session`] find the row again after a restart
-/// instead of latching onto whichever chat session happens to be newest. And
-/// it makes the row un-deletable by any user action: `GooseAdapter::forget_session`
-/// only ever deletes engine rows paired with a GIAP session UUID, so a row
-/// named this can never be collateral of a deleted chat.
+/// Name of the engine session owning extension state. A name survives restarts, and
+/// `forget_session` only deletes rows tied to a GIAP session UUID, so no chat delete removes it.
 pub const EXTENSION_SESSION_NAME: &str = "giap-extensions";
 
-/// Resolves the engine session that owns extension state, creating it if it
-/// does not exist yet.
-///
-/// Extension subprocesses spawn in the returned session's `working_dir`, so an
-/// existing row's is re-pinned to `working_dir` whenever it has drifted — a
-/// long-lived session's directory is otherwise frozen at whatever the cwd was
-/// when it was first created, potentially days and several restarts ago.
+/// Get or create the extension session; re-pins a drifted `working_dir`, where extensions spawn.
 pub async fn resolve_extension_session(
     session_manager: &SessionManager,
     working_dir: &Path,
@@ -74,13 +61,9 @@ pub async fn resolve_extension_session(
 pub struct GiapGooseExtensionManager {
     agent: Arc<GooseAgent>,
     session_manager: Arc<SessionManager>,
-    /// Id of the engine session extensions are added to, resolved on first use
-    /// and re-resolved whenever it stops being valid. Never pinned for the
-    /// process lifetime: the row it names can be deleted or wiped underneath
-    /// us, and a dangling id fails every method on this port.
+    /// Cached extension-session id, re-resolved once invalid: the row can be deleted under us.
     session_id: Arc<RwLock<Option<String>>>,
-    /// Names of extensions that have been disabled by the user.
-    /// Kept in memory; persists until server restart.
+    /// User-disabled extensions; in memory only, so reset on restart.
     disabled: Arc<RwLock<HashSet<String>>>,
     /// Stored configurations for re-enabling extensions.
     extension_configs: Arc<RwLock<HashMap<String, ExtensionConfig>>>,
@@ -100,14 +83,8 @@ impl GiapGooseExtensionManager {
         }
     }
 
-    /// The engine session id to add extensions to, re-resolving it if the
-    /// cached one no longer names a live extension session.
-    ///
-    /// The name check on top of a successful lookup guards against a recycled
-    /// id: engine ids are `MAX(per-day counter) + 1`, so an id freed by a
-    /// delete is handed to the next session created that day. Without the
-    /// check a dangling id could silently resolve to a stranger's chat and
-    /// spawn extensions in its working directory.
+    /// Extension-session id, re-resolved if stale. The name check matters: engine ids are
+    /// `MAX(per-day counter) + 1`, so a freed id can be reissued to a stranger's chat.
     async fn session(&self) -> Result<String> {
         // Fast path: a cached id that still names the extension session.
         if let Some(cached) = self.session_id.read().await.clone() {
@@ -126,9 +103,7 @@ impl GiapGooseExtensionManager {
             }
         }
 
-        // Slow path. The write guard is held across the resolve so concurrent
-        // callers cannot each create a session; re-checking the cache under it
-        // means the losers of that race reuse what the winner resolved.
+        // Slow path: the write guard spans the resolve, so racers don't each create a session.
         let mut guard = self.session_id.write().await;
         if let Some(cached) = guard.clone() {
             if let Ok(session) = self.session_manager.get_session(&cached, false).await {
@@ -155,9 +130,7 @@ impl GiapGooseExtensionManager {
     }
 }
 
-/// GIAP tool names are fully-qualified as `"ext_name__tool_name"`. Splits a
-/// tool's name into (extension, bare tool name), falling back to the
-/// `"default"` extension bucket for tools with no `__` separator.
+/// Split `ext_name__tool_name` into its parts; a name without `__` goes to `"default"`.
 fn split_tool_name(full_name: &str) -> (String, String) {
     match full_name.find("__") {
         Some(sep) => (
@@ -174,7 +147,6 @@ impl ExtensionManagerPort for GiapGooseExtensionManager {
         let session_id = self.session().await?;
         let tools = self.agent.list_tools(&session_id, None).await;
 
-        // Group tools by extension name prefix (format: "ext_name__tool_name")
         let mut ext_map: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
         for tool in &tools {
@@ -209,9 +181,8 @@ impl ExtensionManagerPort for GiapGooseExtensionManager {
     }
 
     async fn add_extension(&self, request: AddExtensionRequest) -> Result<ExtensionInfo> {
-        // --- Phase 1.5: Pre-add validation ---
+        // --- Pre-add validation ---
 
-        // Stdio: check that the command exists in PATH
         if request.kind == "stdio" {
             if let Some(cmd) = &request.command {
                 let which_check = std::process::Command::new("which")
@@ -220,7 +191,7 @@ impl ExtensionManagerPort for GiapGooseExtensionManager {
                     .stderr(std::process::Stdio::null())
                     .output();
                 match which_check {
-                    Ok(output) if output.status.success() => {} // found in PATH
+                    Ok(output) if output.status.success() => {}
                     _ => {
                         return Err(anyhow!(
                             "Command '{}' not found in PATH. Install it first.",
@@ -231,23 +202,19 @@ impl ExtensionManagerPort for GiapGooseExtensionManager {
             }
         }
 
-        // HTTP: attempt a lightweight connectivity check with a timeout
         if matches!(request.kind.as_str(), "http" | "streamable_http") {
             if let Some(uri) = &request.uri {
                 let client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(5))
                     .build()
                     .unwrap_or_default();
-                // PAI-2 P6a: the URI here is typed by whoever is adding the
-                // extension, so this is the most attacker-influenced
-                // destination in the tree. The gate runs before the probe --
-                // refusing after the packet has left is not a refusal.
+                // A user-typed URI: gate egress before probing, not after the packet has left.
                 let call = pond_core::shared::services::egress::begin(uri, "GET")
                     .map_err(|e| anyhow!("Cannot reach MCP server at {}: {}", uri, e))?;
                 let probed = client.get(uri).send().await;
                 call.finish(probed.as_ref().ok().map(|r| r.status().as_u16()));
                 match probed {
-                    Ok(_) => {} // reachable
+                    Ok(_) => {}
                     Err(e) => return Err(anyhow!("Cannot reach MCP server at {}: {}", uri, e)),
                 }
             }
@@ -307,7 +274,6 @@ impl ExtensionManagerPort for GiapGooseExtensionManager {
             other => return Err(anyhow!("Unknown extension kind: {}", other)),
         };
 
-        // Store config for possible re-enabling later
         self.extension_configs
             .write()
             .await
@@ -319,7 +285,6 @@ impl ExtensionManagerPort for GiapGooseExtensionManager {
 
         match self.agent.add_extension(config, &session_id).await {
             Ok(()) => {
-                // Clear any previous error for this extension
                 self.errors.write().await.remove(&request.name);
             }
             Err(e) => {
@@ -332,7 +297,7 @@ impl ExtensionManagerPort for GiapGooseExtensionManager {
             }
         }
 
-        // --- Phase 1.4: Poll for tools after add ---
+        // --- Poll for tools after add ---
 
         let mut discovered_tools = vec![];
         let prefix = format!("{}__", request.name);
@@ -406,7 +371,6 @@ impl ExtensionManagerPort for GiapGooseExtensionManager {
         let mut disabled = self.disabled.write().await;
         if enabled {
             if disabled.contains(name) {
-                // Re-enable: re-add to Goose agent
                 let configs = self.extension_configs.read().await;
                 if let Some(config) = configs.get(name) {
                     self.agent
@@ -418,7 +382,6 @@ impl ExtensionManagerPort for GiapGooseExtensionManager {
             }
         } else {
             if !disabled.contains(name) {
-                // Disable: remove from Goose agent
                 self.agent
                     .remove_extension(name, &session_id)
                     .await
@@ -435,8 +398,7 @@ mod tests {
     use super::*;
     use goose::agents::{AgentConfig, GoosePlatform};
 
-    /// A manager backed by an isolated on-disk session store, so a test can
-    /// delete rows out from under it the way a user deleting a chat does.
+    /// Manager over an isolated on-disk store, so tests can delete rows under it.
     fn manager(data_dir: &Path) -> (GiapGooseExtensionManager, Arc<SessionManager>) {
         let session_manager = Arc::new(SessionManager::new(data_dir.to_path_buf()));
         let config = AgentConfig::new(
@@ -464,9 +426,7 @@ mod tests {
             .await
             .unwrap();
 
-        // A chat created afterwards is the most recently active session, which
-        // is exactly what the old `list_sessions().first()` selection latched
-        // onto. Resolving by name has to ignore it.
+        // The newest session is now a chat; resolving by name must ignore it.
         let chat = session_manager
             .create_session(
                 cwd.clone(),
@@ -526,15 +486,10 @@ mod tests {
             "a valid id must be served from cache"
         );
 
-        // What a user deleting the bound chat used to do to the old pinned id:
-        // every subsequent call failed with "Session not found" until restart.
         session_manager.delete_session(&first).await.unwrap();
         assert!(session_manager.get_session(&first, false).await.is_err());
 
-        // A fresh row, not the error the old pinned id produced forever. Its
-        // id may well be `first` again — the per-day counter is `MAX + 1`, so
-        // deleting the only row frees the id — which is why the assertion that
-        // matters is that it now resolves to a live extension session.
+        // Its id may be `first` again (ids are MAX + 1); what matters is it names a live session.
         let healed = mgr.session().await.unwrap();
         assert_eq!(
             session_manager
@@ -554,9 +509,7 @@ mod tests {
         let bound = mgr.session().await.unwrap();
         session_manager.delete_session(&bound).await.unwrap();
 
-        // Engine ids are `MAX(per-day counter) + 1`, so the id just freed is
-        // handed to the next session created that day — here a chat. Serving
-        // the cached id back would spawn extensions in a stranger's session.
+        // The freed id is reissued to this chat; serving the cached id would hijack it.
         let chat = session_manager
             .create_session(
                 data_dir.path().to_path_buf(),

@@ -7,9 +7,7 @@ use pond_core::models::domain::message::{ChatMessage, Role};
 use pond_core::models::ports::provider::LlmProvider;
 use std::sync::Arc;
 
-/// Bridges pond's `LlmProvider` port to Goose's `Provider` trait, converting between pond
-/// `ChatMessage` and Goose `Message`. Goose providers are model-agnostic; the `ModelConfig`
-/// selects the model per call, so this adapter carries it alongside the provider.
+/// Exposes a Goose `Provider` as a pond `LlmProvider`, carrying the per-call `ModelConfig`.
 pub struct GooseProviderAdapter {
     provider: Arc<dyn GooseProvider>,
     model_config: ModelConfig,
@@ -23,25 +21,18 @@ impl GooseProviderAdapter {
         }
     }
 
-    /// Convert a pond ChatMessage into a Goose Message.
     fn to_goose_message(msg: &ChatMessage) -> GooseMessage {
         match msg.role {
             Role::User => GooseMessage::user().with_text(&msg.content),
             Role::Assistant => GooseMessage::assistant().with_text(&msg.content),
             Role::System => {
-                // Goose doesn't have a System message role —
-                // system content is passed as the `system` parameter to `complete()`.
-                // We treat System messages as User messages with a note.
+                // Goose has no System role (that text goes in `system`); fall back to User.
                 GooseMessage::user().with_text(&msg.content)
             }
-            Role::Tool => {
-                // Tool results are treated as user messages in the Goose provider adapter.
-                GooseMessage::user().with_text(&msg.content)
-            }
+            Role::Tool => GooseMessage::user().with_text(&msg.content),
         }
     }
 
-    /// Convert a Goose Message back into a pond ChatMessage.
     fn from_goose_message(msg: &GooseMessage) -> ChatMessage {
         let role = match msg.role {
             rmcp::model::Role::User => Role::User,
@@ -71,8 +62,7 @@ impl LlmProvider for GooseProviderAdapter {
         system_prompt: &str,
         messages: Vec<ChatMessage>,
     ) -> Result<ChatMessage> {
-        // Convert pond messages to Goose messages, filtering out System role
-        // (system content goes into the `system` parameter instead)
+        // System messages go in the `system` parameter instead.
         let goose_messages: Vec<GooseMessage> = messages
             .iter()
             .filter(|m| m.role != Role::System)

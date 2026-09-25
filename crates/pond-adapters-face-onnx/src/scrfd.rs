@@ -1,7 +1,5 @@
-//! SCRFD face detector (InsightFace 2021): bbox plus the five landmarks alignment needs.
-//! Three FPN levels (strides 8, 16, 32) each emit `score_/bbox_/kps_{stride}`, 2 anchors per
-//! location; bbox is (l,t,r,b) distance from the anchor centre, keypoints are offsets from it,
-//! all in input-pixel units. If `$POND_FACE_DETECTOR_PATH` is absent the server uses UltraFace.
+//! SCRFD face detector: bbox plus the five landmarks alignment needs. Without
+//! `$POND_FACE_DETECTOR_PATH` the server falls back to UltraFace.
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -16,17 +14,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
 
-/// Input size SCRFD is typically exported at (640×640 for SCRFD_10G;
-/// 320×320 for SCRFD_500M — the small one we prefer on edge).  We resize
-/// letterbox-free because SCRFD's outputs are already in input-pixel space.
+/// SCRFD export input side (640 for SCRFD_10G; SCRFD_500M is exported at 320).
 const INPUT_SIDE: u32 = 640;
 
 const MEAN: f32 = 127.5;
 const SCALE: f32 = 1.0 / 128.0;
 
-/// Strides of the three FPN levels.  SCRFD's InsightFace export uses these
-/// exact values; if a different export is dropped in, override via
-/// `with_strides`.
+/// InsightFace SCRFD's FPN strides; other exports can override via `with_strides`.
 const DEFAULT_STRIDES: [u32; 3] = [8, 16, 32];
 const DEFAULT_NUM_ANCHORS: usize = 2;
 
@@ -40,10 +34,7 @@ pub struct ScrfdDetector {
 }
 
 impl ScrfdDetector {
-    /// Load an SCRFD ONNX model.
-    ///
-    /// `score_thresh` — face-ness threshold (default 0.5).
-    /// `iou_thresh`   — NMS IoU threshold (default 0.4).
+    /// Load a model; typical thresholds are 0.5 (`score_thresh`) and 0.4 (NMS `iou_thresh`).
     pub fn new(model_path: impl Into<PathBuf>, score_thresh: f32, iou_thresh: f32) -> Result<Self> {
         let path = model_path.into();
         if !path.exists() {
@@ -103,9 +94,8 @@ impl FaceDetector for ScrfdDetector {
     async fn detect_face(&self, image_bytes: &[u8]) -> Result<Option<DetectedFace>> {
         let bytes = image_bytes.to_vec();
         let session = Arc::clone(&self.session);
-        // In low light SCRFD's confidence drops uniformly across true faces, so below
-        // LOW_LIGHT_TRIGGER a relaxed threshold applies; the matcher threshold and the
-        // burst-liveness gates remain the real spoof and quality safeguards.
+        // Dim frames lower SCRFD's confidence on real faces, so they get a relaxed threshold;
+        // the matcher and liveness gates remain the real safeguards.
         let configured_score_thresh = self.score_thresh;
         let low_light_score_thresh: f32 = std::env::var("POND_FACE_SCRFD_LOW_LIGHT_THRESH")
             .ok()
@@ -122,16 +112,12 @@ impl FaceDetector for ScrfdDetector {
                 // ── Preprocess ────────────────────────────────────────────────
                 let img = image::load_from_memory(&bytes).context("decode failed")?;
                 let (orig_w, orig_h) = img.dimensions();
-                // Letterbox-free resize to a fixed square.  Aspect change is
-                // absorbed by bbox rescaling below.
+                // No letterbox: the aspect change is undone by the per-axis rescale below.
                 let mut resized = img
                     .resize_exact(input_side, input_side, FilterType::Triangle)
                     .to_rgb8();
 
-                // Low-light auto-exposure on the FULL detector input BEFORE SCRFD runs (the same
-                // 2-98 percentile stretch the embedder uses): without it a dim face never clears
-                // the detection threshold and the embedder never sees the frame. Disable with
-                // POND_FACE_AUTO_EXPOSURE=off. A still-dim frame relaxes the score threshold.
+                // Stretch dim frames before detection, or a dim face never clears the threshold.
                 let pre_mean = crate::mean_luminance(&resized);
                 let was_dim = pre_mean < crate::LOW_LIGHT_TRIGGER;
                 if crate::auto_exposure_enabled() && was_dim {
@@ -165,10 +151,7 @@ impl FaceDetector for ScrfdDetector {
                     .run(ort::inputs![input])
                     .context("SCRFD inference failed")?;
 
-                // Collect outputs keyed by last-dim channel count so we can match
-                // scores / bboxes / keypoints per stride.  SCRFD's InsightFace
-                // exports use names "score_8" / "bbox_8" / "kps_8" etc., but we
-                // stay name-agnostic and classify by tensor shape.
+                // Classify outputs by shape rather than name (`score_8`, `kps_8`, ...).
                 let mut scores: Vec<(usize, Vec<f32>)> = Vec::new();
                 let mut bboxes: Vec<(usize, Vec<f32>)> = Vec::new();
                 let mut kps: Vec<(usize, Vec<f32>)> = Vec::new();
@@ -177,20 +160,15 @@ impl FaceDetector for ScrfdDetector {
                         .try_extract_tensor::<f32>()
                         .context("SCRFD output tensor extract failed")?;
                     let n_elements = data.len();
-                    // Each output has shape (1, N·C, 1) where C ∈ {1, 4, 10}.
-                    // Identify by total element count modulo the stride's
-                    // expected tile size.  We approximate by inspecting shape
-                    // dims directly when possible.
+                    // Last dim > 1 picks the kind: 4 = bbox, 10 = kps, anything else = scores.
                     let ushape: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
                     let per_loc = ushape.iter().rev().find(|&&d| d > 1).copied().unwrap_or(1);
-                    // Flatten → a single row vector we decode below.
                     match per_loc % 10 {
                         _ if per_loc == 1 => scores.push((n_elements, data.to_vec())),
                         _ if per_loc == 4 => bboxes.push((n_elements, data.to_vec())),
                         _ if per_loc == 10 => kps.push((n_elements, data.to_vec())),
                         _ => {
-                            // Fallback: infer by divisibility against anchor
-                            // count across strides. Rarely taken.
+                            // Score tensors (1, N, 1) land here, as N is their last dim > 1.
                             if data.len() >= 10 && data.len() % 10 == 0 && per_loc == 10 {
                                 kps.push((n_elements, data.to_vec()));
                             } else if data.len() % 4 == 0 && per_loc == 4 {
@@ -214,14 +192,10 @@ impl FaceDetector for ScrfdDetector {
                     ));
                 }
 
-                // Sort each tensor list by element count ascending — this
-                // mirrors the stride order (stride 8 has more anchors than 32).
+                // Largest first, i.e. stride 8 first (smaller stride = bigger feature map).
                 scores.sort_by_key(|(n, _)| *n);
                 bboxes.sort_by_key(|(n, _)| *n);
                 kps.sort_by_key(|(n, _)| *n);
-                // strides are [8, 16, 32] by default; smaller stride ⇒ larger
-                // feature map ⇒ more anchors ⇒ larger tensor.  So reverse
-                // (descending element count = stride 8 first).
                 scores.reverse();
                 bboxes.reverse();
                 kps.reverse();
@@ -259,8 +233,7 @@ impl FaceDetector for ScrfdDetector {
                                 let cx = (col as f32 + 0.5) * stride as f32;
                                 let cy = (row as f32 + 0.5) * stride as f32;
 
-                                // Bbox distances — already scaled by stride in
-                                // SCRFD's regression head, so just multiply.
+                                // Distances come in stride units.
                                 let o = anchor_idx * 4;
                                 let l = bb[o] * stride as f32;
                                 let t = bb[o + 1] * stride as f32;
@@ -271,7 +244,6 @@ impl FaceDetector for ScrfdDetector {
                                 let x2 = cx + r;
                                 let y2 = cy + b;
 
-                                // Keypoint offsets.
                                 let ko = anchor_idx * 10;
                                 let mut pts = [(0.0_f32, 0.0_f32); 5];
                                 for j in 0..5 {
@@ -308,8 +280,6 @@ impl FaceDetector for ScrfdDetector {
                     None => return Ok(None),
                 };
 
-                // Rescale from the (input_side × input_side) detection frame
-                // back into the source image's pixel space.
                 let sx = orig_w as f32 / input_side as f32;
                 let sy = orig_h as f32 / input_side as f32;
                 let to_px = |(x, y): (f32, f32)| (x * sx, y * sy);

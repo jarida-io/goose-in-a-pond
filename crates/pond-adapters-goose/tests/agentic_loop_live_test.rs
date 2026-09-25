@@ -69,10 +69,7 @@ async fn live_action_loop_ollama_executes_tool_call() {
         images: Vec::new(),
         voice_mode: false,
         canvas_mode: false,
-        // PAI-1 P3/P6 made these required on AgentRequest and did not update
-        // the live-hardware tests, so this file stopped compiling and
-        // `cargo test -p pond-adapters-goose -- --ignored` has been failing at
-        // BUILD ever since. Household is what a test with no speaker means.
+        // Household is what a test with no speaker means.
         profile_scope: ProfileScope::Household,
         profile_context: None,
         tool_group_allowlist: None,
@@ -143,10 +140,7 @@ async fn live_action_loop_llamafile_executes_tool_call() {
         images: Vec::new(),
         voice_mode: false,
         canvas_mode: false,
-        // PAI-1 P3/P6 made these required on AgentRequest and did not update
-        // the live-hardware tests, so this file stopped compiling and
-        // `cargo test -p pond-adapters-goose -- --ignored` has been failing at
-        // BUILD ever since. Household is what a test with no speaker means.
+        // Household is what a test with no speaker means.
         profile_scope: ProfileScope::Household,
         profile_context: None,
         tool_group_allowlist: None,
@@ -213,10 +207,7 @@ async fn live_action_loop_local_executes_tool_call() {
         images: Vec::new(),
         voice_mode: false,
         canvas_mode: false,
-        // PAI-1 P3/P6 made these required on AgentRequest and did not update
-        // the live-hardware tests, so this file stopped compiling and
-        // `cargo test -p pond-adapters-goose -- --ignored` has been failing at
-        // BUILD ever since. Household is what a test with no speaker means.
+        // Household is what a test with no speaker means.
         profile_scope: ProfileScope::Household,
         profile_context: None,
         tool_group_allowlist: None,

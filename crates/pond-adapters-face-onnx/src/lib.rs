@@ -1,7 +1,5 @@
-//! ONNX face embedding adapter implementing [`FaceEmbeddingExtractor`] (ArcFace-512 default,
-//! MobileFaceNet-128). Pipeline: decode, align via Umeyama to the 112×112 template (or crop),
-//! normalise `(pixel/255 - 0.5) / 0.5`, quality gates, NCHW inference, then L2-normalise so
-//! cosine similarity reduces to a dot product. `ORT_DYLIB_PATH` overrides the ORT shared library.
+//! ONNX [`FaceEmbeddingExtractor`]: align (or crop), quality-gate, infer, then L2-normalise so
+//! cosine similarity is a dot product. `ORT_DYLIB_PATH` overrides the ORT shared library.
 
 pub mod alignment;
 pub mod antispoof;
@@ -14,12 +12,9 @@ pub use scrfd::ScrfdDetector;
 
 use std::sync::OnceLock;
 
-/// Process-wide ONNX anti-spoof handle, lazy-loaded once so `POND_FACE_ANTISPOOF_PATH` is
-/// read once and a failed load is not retried per frame. `None` means the heuristic gate runs.
+/// Loaded once so a failed load isn't retried per frame; `None` means the heuristic gate runs.
 static ONNX_ANTISPOOF: OnceLock<Option<OnnxAntispoof>> = OnceLock::new();
-/// Optional secondary model for ensemble PAD (`$POND_FACE_ANTISPOOF_PATH_2`). Silent-Face
-/// pairs MiniFASNetV2 at a 2.7× crop with V1SE at 4.0×, whose wider view sees phone bezels
-/// and paper edges; both run and `max(spoof_score)` wins, so either model firing rejects.
+/// Optional ensemble model from `$POND_FACE_ANTISPOOF_PATH_2`; the higher spoof score wins.
 static ONNX_ANTISPOOF_2: OnceLock<Option<OnnxAntispoof>> = OnceLock::new();
 
 fn antispoof_onnx() -> Option<&'static OnnxAntispoof> {
@@ -48,9 +43,7 @@ fn antispoof_onnx_2() -> Option<&'static OnnxAntispoof> {
         .as_ref()
 }
 
-/// Crop scale for the secondary anti-spoof model.  Silent-Face's V1SE was
-/// trained at 4.0× (wider context reveals bezels / edges).  Override via
-/// `POND_FACE_ANTISPOOF_SCALE_2` for exports that want a different ratio.
+/// Secondary model's crop scale: 4.0× (V1SE's training crop), or `POND_FACE_ANTISPOOF_SCALE_2`.
 fn antispoof_scale_2() -> f32 {
     std::env::var("POND_FACE_ANTISPOOF_SCALE_2")
         .ok()
@@ -75,7 +68,6 @@ use tracing::{debug, info, warn};
 use crate::alignment::align_to_canonical_112;
 use crate::antispoof::AntispoofReport;
 
-/// Supported embedding model families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingModel {
     /// ArcFace (ResNet-100 / R50 / etc.) — 112×112 input, 512-d output.
@@ -96,42 +88,29 @@ impl EmbeddingModel {
     }
 }
 
-/// Per-channel mean/std for both ArcFace and MobileFaceNet: normalise
-/// `(pixel/255 - 0.5) / 0.5` → range \[-1, 1\].
+/// ArcFace and MobileFaceNet both take `(pixel/255 - 0.5) / 0.5`, i.e. \[-1, 1\].
 const MEAN: f32 = 0.5;
 const SCALE: f32 = 1.0 / 0.5;
 
-/// Channel order for the embedder input, `POND_FACE_EMBED_CHANNEL_ORDER=bgr|rgb` (default
-/// rgb). Stock InsightFace `buffalo_l` exports expect RGB (`swapRB=True`); community ArcFace
-/// R100 re-exports often assume BGR, and feeding them RGB gives the "every face scores 0.98+"
-/// collapsed-embedding symptom.
+/// `POND_FACE_EMBED_CHANNEL_ORDER=bgr|rgb` (default rgb, as `buffalo_l` expects). Many ArcFace
+/// R100 re-exports want BGR; feeding them RGB makes every face score 0.98+.
 fn use_bgr_input() -> bool {
     std::env::var("POND_FACE_EMBED_CHANNEL_ORDER")
         .map(|v| v.to_ascii_lowercase() == "bgr")
         .unwrap_or(false)
 }
 
-/// Minimum *post-normalisation* pixel variance required to run inference.
-/// Uniform / near-uniform inputs (lens cap, covered camera, blank frame)
-/// produce degenerate embeddings that collapse toward a single direction —
-/// the very source of the "everyone matches" failure mode.
+/// Min pixel variance (0-1 scale) to embed; near-uniform frames collapse to one embedding.
 const MIN_CONTENT_VARIANCE: f32 = 0.006;
 
-/// Mean-brightness gate in pre-normalisation units (0.0 black, 1.0 white): exposure so far
-/// off that the face has no detail to embed. The floor must stay below the ~0.04 that genuine
-/// low-light frames still measure after auto-exposure; 0.025 still catches a lens cap.
+/// Mean-brightness gate (0-1); floor sits under real low-light frames' ~0.04, above a lens cap.
 const MIN_MEAN_BRIGHTNESS: f32 = 0.025;
 const MAX_MEAN_BRIGHTNESS: f32 = 0.95;
 
-/// Blur-gate floor: Laplacian variance in normalised [0,1] pixel units, times 1000. Measured
-/// on real webcam captures: a focused indoor headshot sits at ~30-200, motion blur at ~3-10,
-/// fully out of focus below 1. Four rejects obvious blur yet admits cheap-webcam focus.
+/// Blur floor, Laplacian variance ×1000: focused webcam ~30-200, motion blur ~3-10, defocus <1.
 const MIN_LAPLACIAN_VAR_X1000: f32 = 4.0;
 
-/// Mean-luminance threshold below which the low-light auto-exposure pass
-/// fires.  0.30 catches noticeably dim indoor lighting (no overhead light,
-/// only ambient evening light) without touching a normally-lit headshot
-/// (which sits comfortably in 0.40–0.65).
+/// Mean luminance that triggers auto-exposure; normally-lit headshots sit at 0.40-0.65.
 pub(crate) const LOW_LIGHT_TRIGGER: f32 = 0.30;
 
 pub(crate) fn auto_exposure_enabled() -> bool {
@@ -154,13 +133,10 @@ pub(crate) fn mean_luminance(img: &RgbImage) -> f32 {
     ((acc / n as f64) / 255.0) as f32
 }
 
-/// Low-light auto-exposure, in place. Each channel is mapped from `[p2, p98]` to `[0, 255]`
-/// (or CLAHE, see the mode switch below). Channels are independent, so a global colour cast
-/// does not survive; chroma carries no identity signal, so that is wanted.
+/// In-place low-light fix, per channel (dropping any colour cast; chroma carries no identity).
 pub(crate) fn stretch_histogram_2_98(img: &mut RgbImage) {
-    // POND_FACE_AUTO_EXPOSURE_MODE picks the algorithm: `stretch` (default, ~0.2 ms on 112x112,
-    // keeps global tonality but can leave shadowed faces in mixed light) or `clahe` (8x8 tiles,
-    // clip 4x mean, ~3 ms; recovers detail next to bright windows, noisier when uniformly dim).
+    // `stretch` (default, ~0.2 ms) keeps global tonality but can leave shadowed faces; `clahe`
+    // (~3 ms) recovers detail beside bright windows but is noisier when uniformly dim.
     match auto_exposure_mode().as_str() {
         "clahe" => clahe_per_channel(img, 8, 4.0),
         _ => stretch_histogram_2_98_linear(img),
@@ -175,8 +151,7 @@ fn auto_exposure_mode() -> String {
         .unwrap_or_else(|| "stretch".to_string())
 }
 
-/// Per-channel 2-98 percentile linear stretch.  See dispatcher above for
-/// when this beats CLAHE and vice-versa.
+/// Per-channel 2-98 percentile linear stretch.
 fn stretch_histogram_2_98_linear(img: &mut RgbImage) {
     let n = (img.width() * img.height()) as usize;
     if n == 0 {
@@ -224,10 +199,7 @@ fn stretch_histogram_2_98_linear(img: &mut RgbImage) {
     }
 }
 
-/// Per-channel Contrast Limited Adaptive Histogram Equalisation: `tiles_per_axis` squared
-/// tiles, bins above `clip_limit × mean_bin_count` redistributed, bilinear blend of the four
-/// nearest tile CDFs. About 3 ms on 640×640. Per-channel, like the percentile stretch, drops
-/// chroma, which the embedder ignores anyway.
+/// Per-channel CLAHE over `tiles_per_axis`² tiles, clipping at `clip_limit` × the mean bin.
 fn clahe_per_channel(img: &mut RgbImage, tiles_per_axis: u32, clip_limit: f32) {
     let (w, h) = img.dimensions();
     if w == 0 || h == 0 {
@@ -244,7 +216,7 @@ fn clahe_per_channel(img: &mut RgbImage, tiles_per_axis: u32, clip_limit: f32) {
     let avg_per_bin = pixels_per_tile as f32 / 256.0;
     let clip_count: u32 = (clip_limit * avg_per_bin).max(1.0) as u32;
 
-    // Per-channel CDF lookup table per tile: [channel][tile_y][tile_x][value 0..255]
+    // Per-tile CDF lookup: cdfs[ty * n_tiles + tx][channel][value].
     let mut cdfs: Vec<[[u8; 256]; 3]> = vec![[[0u8; 256]; 3]; n_tiles * n_tiles];
 
     for ty in 0..n_tiles {
@@ -331,18 +303,14 @@ fn clahe_per_channel(img: &mut RgbImage, tiles_per_axis: u32, clip_limit: f32) {
 }
 
 pub struct OnnxFaceEmbeddingExtractor {
-    // `Session::run` takes `&mut self`; we guard with a std::sync::Mutex
-    // because the entire inference call already runs inside `spawn_blocking`.
+    // std Mutex, not tokio: `Session::run` needs `&mut self` and runs inside `spawn_blocking`.
     session: Arc<Mutex<Session>>,
     model: EmbeddingModel,
     model_path: PathBuf,
 }
 
 impl OnnxFaceEmbeddingExtractor {
-    /// Build a new extractor backed by the ONNX model at `model_path`.
-    ///
-    /// Fails if the file is missing or the ONNX Runtime shared library
-    /// cannot be loaded from the system library path / `ORT_DYLIB_PATH`.
+    /// Load the model; fails if it is missing or ORT can't load (system path or `ORT_DYLIB_PATH`).
     pub fn new(model_path: impl Into<PathBuf>, model: EmbeddingModel) -> Result<Self> {
         let path = model_path.into();
         if !path.exists() {
@@ -379,8 +347,7 @@ impl OnnxFaceEmbeddingExtractor {
     }
 }
 
-/// Clamp a client/detector bbox to the image dimensions.  Returns `None`
-/// if the box has zero area after clamping.
+/// Clamp a bbox to the image; `None` if nothing is left.
 fn clamp_bbox(bbox: BoundingBox, img_w: u32, img_h: u32) -> Option<(u32, u32, u32, u32)> {
     if bbox.x >= img_w || bbox.y >= img_h || bbox.width == 0 || bbox.height == 0 {
         return None;
@@ -390,9 +357,7 @@ fn clamp_bbox(bbox: BoundingBox, img_w: u32, img_h: u32) -> Option<(u32, u32, u3
     Some((bbox.x, bbox.y, w, h))
 }
 
-/// Fallback when no bbox is supplied: take the largest square centred on
-/// the image.  Works reasonably for headshot-style framings; a real face
-/// detector (SCRFD) should be wired in front for general photos.
+/// No-bbox fallback: the largest centred square, adequate only for headshot framing.
 fn center_square(img_w: u32, img_h: u32) -> (u32, u32, u32, u32) {
     let side = img_w.min(img_h);
     let x = (img_w - side) / 2;
@@ -400,8 +365,7 @@ fn center_square(img_w: u32, img_h: u32) -> (u32, u32, u32, u32) {
     (x, y, side, side)
 }
 
-/// Decode + (landmarks-warp **or** bbox-crop) + resize + normalise an image
-/// into an NCHW `[1, 3, 112, 112]` f32 tensor.
+/// Decode, align or crop, normalise into `[1, 3, 112, 112]`; `None` if a quality gate rejects.
 fn preprocess(
     image_bytes: &[u8],
     model: EmbeddingModel,
@@ -411,9 +375,6 @@ fn preprocess(
     let img = image::load_from_memory(image_bytes).context("failed to decode image bytes")?;
     let size = model.input_size();
 
-    // Landmarks path: similarity-warp the whole image into the canonical
-    // 112×112 template.  This is the ArcFace-trained alignment and is
-    // dramatically more identity-preserving than a naive crop.
     let mut resized = if let Some(lms) = landmarks {
         let warped = align_to_canonical_112(&img, &lms, size);
         warped.to_rgb8()
@@ -427,9 +388,7 @@ fn preprocess(
             .to_rgb8()
     };
 
-    // Low-light auto-correct on crops below `LOW_LIGHT_TRIGGER`: recovers dynamic range so the
-    // brightness gate does not false-reject, the blur gate sees real edges, and the embedder
-    // gets an input closer to its training data. Disable with POND_FACE_AUTO_EXPOSURE=off.
+    // Before the gates, so dim crops aren't false-rejected as dark or blurry.
     if auto_exposure_enabled() {
         let mean_pre = mean_luminance(&resized);
         if mean_pre < LOW_LIGHT_TRIGGER {
@@ -447,15 +406,10 @@ fn preprocess(
     let w = size as usize;
     let mut tensor = Array4::<f32>::zeros((1, 3, h, w));
 
-    // While packing the tensor, accumulate statistics for the quality gate.
     let mut sum: f64 = 0.0;
     let mut sum_sq: f64 = 0.0;
     let npx: f64 = (h * w * 3) as f64;
 
-    // When the loaded ONNX file was exported assuming BGR input, remap
-    // channel `c` → `2 - c` on write.  This leaves the sampled pixel
-    // unchanged (so the quality gate statistics below still read true
-    // brightness / variance) but flips the order the model sees.
     let bgr = use_bgr_input();
     for y in 0..h {
         for x in 0..w {
@@ -471,15 +425,11 @@ fn preprocess(
         }
     }
 
-    // Quality gate: reject blank / extreme-exposure crops before we waste
-    // ONNX cycles on them.  Units here are in the pre-normalisation [0,1]
-    // pixel space — easier to reason about than the post-norm space.
+    // Quality gates, in pre-normalisation 0-1 units.
     let mean = (sum / npx) as f32;
     let variance = ((sum_sq / npx) - (mean as f64).powi(2)).max(0.0) as f32;
     if variance < MIN_CONTENT_VARIANCE {
-        // Surface at info! so operators can see which gate tripped without
-        // enabling the whole `--debug` firehose.  Same treatment for the
-        // other three gates below.
+        // info!, not debug!, so operators see which gate tripped (same for the gates below).
         info!(
             variance,
             threshold = MIN_CONTENT_VARIANCE,
@@ -508,15 +458,11 @@ fn preprocess(
         return Ok(None);
     }
 
-    // Anti-spoof gate. Disabled by POND_FACE_ANTISPOOF=off; the threshold comes from
-    // `antispoof_threshold` (POND_FACE_ANTISPOOF_THRESHOLD or a per-path default). The ONNX
-    // model at $POND_FACE_ANTISPOOF_PATH is preferred, the heuristic gate is the fallback.
+    // Anti-spoof gate: the ONNX model if loaded, else the heuristic.
     if antispoof_enabled() {
         let (report, is_onnx) = match antispoof_onnx() {
             Some(model) => {
-                // Silent-Face was trained on loose crops (about 2.7x the face bbox) where bezel
-                // and paper-edge cues are visible; the tight aligned 112×112 template is out of
-                // distribution and scores every frame `live ≈ 0`, so crop the original `img`.
+                // Silent-Face wants a ~2.7× loose crop; the tight aligned crop scores live ≈ 0.
                 let loose = loose_antispoof_crop(&img, bbox, landmarks, 2.7);
                 let primary = match model.analyse(&loose) {
                     Ok(r) => r,
@@ -527,9 +473,7 @@ fn preprocess(
                         antispoof::analyse(&resized)
                     }
                 };
-                // Ensemble with secondary model at wider crop (typically
-                // 4.0×) if configured.  Take max(spoof) so either model
-                // firing rejects — strictly safer for PAD.
+                // Optional wider-crop second model; max(spoof) so either one firing rejects.
                 let combined = if let Some(m2) = antispoof_onnx_2() {
                     let scale2 = antispoof_scale_2();
                     let loose2 = loose_antispoof_crop(&img, bbox, landmarks, scale2);
@@ -577,9 +521,7 @@ fn preprocess(
     Ok(Some(tensor))
 }
 
-/// The loose crop Silent-Face expects: the face bbox expanded `scale` times about its centre,
-/// clamped to the image, cut from the ORIGINAL frame as RGB. Without a bbox one is derived
-/// from the landmarks; without either, the centre square.
+/// Face box scaled `scale`× about its centre, cut from the original frame (Silent-Face input).
 fn loose_antispoof_crop(
     img: &DynamicImage,
     bbox: Option<BoundingBox>,
@@ -589,8 +531,6 @@ fn loose_antispoof_crop(
     let antispoof_scale: f32 = scale;
     let (img_w, img_h) = img.dimensions();
 
-    // Prefer the caller-supplied bbox; otherwise synthesise a tight bbox
-    // from the 5 landmark points.
     let base: Option<(u32, u32, u32, u32)> =
         bbox.and_then(|b| clamp_bbox(b, img_w, img_h)).or_else(|| {
             landmarks.map(|lms| {
@@ -621,7 +561,6 @@ fn loose_antispoof_crop(
         None => center_square(img_w, img_h),
     };
 
-    // Expand the bbox around its centre by ANTISPOOF_SCALE and clamp.
     let cx = x as f32 + w as f32 * 0.5;
     let cy = y as f32 + h as f32 * 0.5;
     let side = (w.max(h) as f32) * antispoof_scale;
@@ -644,16 +583,14 @@ fn antispoof_enabled() -> bool {
 }
 
 fn antispoof_threshold(is_onnx: bool) -> f32 {
-    // Explicit override always wins.
     if let Some(v) = std::env::var("POND_FACE_ANTISPOOF_THRESHOLD")
         .ok()
         .and_then(|s| s.parse::<f32>().ok())
     {
         return v;
     }
-    // Defaults differ by path. ONNX gives a calibrated probability: 0.40 catches phone-screen
-    // replays (measured 0.42-0.48) while staying above the live regime (0.05-0.20). The
-    // heuristic score needs 0.65 to avoid false-rejecting real users under LED ring lights.
+    // ONNX: 0.40 sits between live (0.05-0.20) and phone replays (0.42-0.48). Heuristic: 0.65
+    // avoids false-rejecting real users under LED ring lights.
     if is_onnx {
         0.40
     } else {
@@ -661,9 +598,7 @@ fn antispoof_threshold(is_onnx: bool) -> f32 {
     }
 }
 
-/// Compute the variance of a 3×3 Laplacian kernel applied to the BT.601
-/// luma channel of the image, with pixel values normalised to \[0, 1\].
-/// Used as a no-reference blur metric.
+/// Blur metric: variance of the 3×3 Laplacian of BT.601 luma, pixels in \[0, 1\].
 fn laplacian_variance_luma(img: &image::RgbImage) -> f32 {
     let (w, h) = img.dimensions();
     if w < 3 || h < 3 {
@@ -723,8 +658,6 @@ impl FaceEmbeddingExtractor for OnnxFaceEmbeddingExtractor {
         let session = self.session.clone();
         let bytes = image_bytes.to_vec();
 
-        // ONNX inference is CPU/GPU-bound; run on the blocking pool so we
-        // don't stall the tokio reactor.
         let embedding = tokio::task::spawn_blocking(move || -> Result<Option<Vec<f32>>> {
             let tensor = match preprocess(&bytes, model, bbox, landmarks)? {
                 Some(t) => t,
@@ -766,8 +699,7 @@ impl FaceEmbeddingExtractor for OnnxFaceEmbeddingExtractor {
     }
 }
 
-// Silence unused-import warnings on paths that aren't exercised in every
-// configuration.  DynamicImage is consumed indirectly through alignment.
+// Keeps the `DynamicImage` import referenced.
 #[allow(dead_code)]
 fn _touch(_: &DynamicImage) {}
 
@@ -784,7 +716,6 @@ mod tests {
 
     #[test]
     fn histogram_stretch_brightens_dim_image() {
-        // 32×32 image with all values in [10, 30] — heavily underexposed.
         let mut img = RgbImage::from_fn(32, 32, |x, y| {
             let v = ((x + y) % 21 + 10) as u8; // 10..=30
             image::Rgb([v, v, v])
@@ -796,15 +727,11 @@ mod tests {
             mean_after > mean_before * 2.0,
             "expected histogram stretch to roughly double mean luminance; got {mean_before} -> {mean_after}",
         );
-        // Stretched output should reach toward saturation on the brightest
-        // pixels (close to 255 / ~1.0 luminance).
         assert!(mean_after > 0.4, "stretched mean too dark: {mean_after}");
     }
 
     #[test]
     fn histogram_stretch_idempotent_on_full_range_image() {
-        // Image already spans 0..=255 — stretch should leave the bulk of
-        // pixels roughly where they were.
         let mut img = RgbImage::from_fn(32, 32, |x, _| {
             let v = ((x * 8) % 256) as u8;
             image::Rgb([v, v, v])
@@ -821,7 +748,6 @@ mod tests {
 
     #[test]
     fn clahe_brightens_dim_image() {
-        // Heavily-underexposed gradient — every pixel in [10, 30].
         let mut img = RgbImage::from_fn(64, 64, |x, y| {
             let v = ((x + y) % 21 + 10) as u8;
             image::Rgb([v, v, v])
@@ -837,10 +763,7 @@ mod tests {
 
     #[test]
     fn clahe_recovers_dark_corner_in_mixed_lighting() {
-        // Top-left quarter is bright (200), bottom-right quarter is dim (20),
-        // remainder a mid-tone (110). The percentile stretch can't help the
-        // dim quarter much because the bright quarter dominates the
-        // global histogram; CLAHE handles each tile independently.
+        // A global stretch is dominated by the bright quarter; per-tile CLAHE lifts the dim one.
         let mut img = RgbImage::from_fn(64, 64, |x, y| {
             let v = if x < 32 && y < 32 {
                 200u8
@@ -851,7 +774,6 @@ mod tests {
             };
             image::Rgb([v, v, v])
         });
-        // Sample the dim quarter's mean before/after.
         let dim_mean = |im: &RgbImage| -> f32 {
             let mut s = 0u32;
             let mut n = 0u32;
@@ -907,12 +829,11 @@ mod tests {
         assert!(postprocess(&raw, 512).is_err());
     }
 
-    /// Helper: build a noisy PNG so the variance gate doesn't reject it.
+    /// Noisy PNG that passes the variance gate.
     fn noisy_png(w: u32, h: u32) -> Vec<u8> {
         let mut img = image::RgbImage::new(w, h);
         for y in 0..h {
             for x in 0..w {
-                // Deterministic pseudo-random pattern with plenty of variance.
                 let r = ((x * 7 + y * 13) % 256) as u8;
                 let g = ((x * 11 + y * 5) % 256) as u8;
                 let b = ((x * 3 + y * 17) % 256) as u8;
@@ -952,7 +873,6 @@ mod tests {
 
     #[test]
     fn preprocess_rejects_uniform_grey_frame() {
-        // Solid grey — zero variance, should be rejected.
         let bytes = solid_png(120, 120, [128, 128, 128]);
         let out = preprocess(&bytes, EmbeddingModel::ArcFace512, None, None).unwrap();
         assert!(out.is_none(), "uniform frame should fail variance gate");
@@ -1011,9 +931,7 @@ mod tests {
 
     #[test]
     fn preprocess_with_landmarks_goes_through_alignment_path() {
-        // Any plausible landmark set should steer preprocess through the warp
-        // branch without panicking.  We only check that the output tensor has
-        // the right shape — warp correctness is covered in alignment::tests.
+        // Only checks the shape; warp correctness is covered in alignment::tests.
         let bytes = noisy_png(200, 200);
         let lms = FaceLandmarks {
             left_eye: (70.0, 80.0),

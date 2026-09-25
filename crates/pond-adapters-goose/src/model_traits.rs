@@ -1,7 +1,5 @@
-//! What the ACTIVE model can be asked to do, read from the model's own GGUF rather than its
-//! filename. Local GGUF providers only; HTTP providers keep the name heuristic. Every answer must
-//! be synchronous, cheap and identical on turn 1 and turn 2, or the `<thinking>` section moves
-//! `prefix_hash` and forces a full re-prefill; `probe_cached` memoises on `(path, mtime, len)`.
+//! Active-model traits read from its GGUF (local providers; HTTP ones use the name heuristic).
+//! Answers must be cheap and stable across turns, or `prefix_hash` moves and forces a re-prefill.
 
 use pond_core::models::domain::model_probe::{probe_cached, ModelProbe};
 use std::path::Path;
@@ -11,9 +9,7 @@ fn is_local_gguf(provider: &str) -> bool {
     matches!(provider, "local" | "gguf")
 }
 
-/// The active model's own account of itself, when there is a file to ask. `None` means "no file
-/// to read" (HTTP provider, not yet downloaded, unparseable header), never a negative answer:
-/// callers must fall back to the name heuristic rather than treat it as "no".
+/// The active model's probe. `None` = no readable file, not "no": fall back to the name heuristic.
 #[must_use]
 pub fn probe_for_model(
     provider: &str,
@@ -31,10 +27,7 @@ pub fn probe_for_model(
     probe
 }
 
-/// Log what a model turned out to be, once per model per process (this runs every turn). The
-/// classification decides how tools are offered and whether the prompt carries a `<thinking>`
-/// section, so it is the first thing worth seeing when a model behaves oddly. A model with no
-/// readable file is logged at `debug`: that state silently falls back to the name heuristic.
+/// Log each model's classification once per process (this runs every turn).
 fn announce_once(model_name: &str, probe: Option<&ModelProbe>) {
     use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock};
@@ -66,10 +59,8 @@ fn announce_once(model_name: &str, probe: Option<&ModelProbe>) {
     }
 }
 
-/// Whether this model reasons, for `thinking_mode = "auto"`. The probe answers when it can, the
-/// name heuristic otherwise. Both `Gated` and `Always` count: a `Gated` model needs the flag AND
-/// the prompt section, and an `Always` model emits a reasoning block regardless, so the prompt
-/// must explain what to do with it and the filter must know the tag.
+/// Whether the model reasons, for `thinking_mode = "auto"`. `Always` counts too: it emits a
+/// reasoning block regardless, which the prompt and filter must handle.
 #[must_use]
 pub fn model_reasons(provider: &str, model_name: &str, data_dir: Option<&Path>) -> bool {
     match probe_for_model(provider, model_name, data_dir) {
@@ -83,10 +74,8 @@ pub fn model_reasons(provider: &str, model_name: &str, data_dir: Option<&Path>) 
     }
 }
 
-/// The reasoning marker this model's TEMPLATE carries, when it has one. This is how the template
-/// expresses reasoning, which [`model_reasons`] needs; it is NOT what the output filter should
-/// strip. Gemma 4's `<|think|>` is a prompt-side switch (its output uses `<|channel>thought`),
-/// while the Nemotron / DeepSeek-R1 `<think>` is the output tag. `ThoughtFilter` covers both.
+/// The template's reasoning marker; NOT necessarily the output tag to strip (Gemma 4's
+/// `<|think|>` is a prompt switch, its output uses `<|channel>thought`).
 #[must_use]
 pub fn thinking_marker(
     provider: &str,
@@ -97,10 +86,8 @@ pub fn thinking_marker(
         .and_then(|p| p.thinking_marker().map(str::to_string))
 }
 
-/// The tool-calling mode a GGUF should be REGISTERED with, read from its file. Must stay identical
-/// to `LocalInferenceLlmAdapter::tool_and_thinking_for`: both write goose's one registry, and the
-/// live turn resolves the key `GooseAdapter::register_gguf_model` returns. `ForceNative` skips the
-/// template dry-run AND disables the prose fallback, so a tools-less template must never get it.
+/// Tool-calling mode to register a GGUF with; must match
+/// `LocalInferenceLlmAdapter::tool_and_thinking_for`, which writes the same goose registry.
 #[must_use]
 pub fn tool_mode_for_gguf(
     path: &Path,
@@ -109,19 +96,15 @@ pub fn tool_mode_for_gguf(
     use pond_core::models::domain::model_probe::ToolSupport;
 
     match probe_cached(path).map(|p| p.tools) {
-        // The template renders a `tools` variable. Declarations can go natively.
         Some(ToolSupport::Native) => ToolCallingMode::ForceNative,
-        // No `tools` variable: describe them in prose or not at all.
+        // Never ForceNative here: it would also disable the prose fallback.
         Some(ToolSupport::Absent) => ToolCallingMode::ForceEmulated,
-        // No template, or no readable file. Leave goose its own dry-run
-        // judgement rather than overriding it with a guess of ours.
+        // Unknown: leave goose its own dry-run judgement.
         Some(ToolSupport::Unknown) | None => ToolCallingMode::Auto,
     }
 }
 
-/// Whether this model can be handed tool declarations natively: [`tool_mode_for_gguf`]'s question
-/// phrased for `ModelCapabilities.tool_calling`, which `GET /api/v1/models/capabilities` serves to
-/// the UI. The name-keyed fallback misreports models it has not heard of, so prefer the file.
+/// Native tool support for `ModelCapabilities.tool_calling`: the file, else the name heuristic.
 #[must_use]
 pub fn model_uses_native_tools(provider: &str, model_name: &str, data_dir: Option<&Path>) -> bool {
     match probe_for_model(provider, model_name, data_dir) {
@@ -135,9 +118,8 @@ pub fn model_uses_native_tools(provider: &str, model_name: &str, data_dir: Optio
     }
 }
 
-/// The window the weights were TRAINED for, when the file says. Not what this machine can afford:
-/// the context governor ranks a registry pin and the engine's memory cap above this. It replaces
-/// `ModelCapabilities::from_model_name`'s 4096 default, which is simply wrong for unknown models.
+/// The context window the weights were TRAINED for, if the file says; a registry pin and the
+/// engine's memory cap outrank it.
 #[must_use]
 pub fn trained_context_window(
     provider: &str,
@@ -162,8 +144,6 @@ mod tests {
         assert!(probe_for_model("local", "gemma-4-E2B-it", None).is_none());
     }
 
-    /// Without a readable file the answer must be the old one exactly, or this
-    /// change silently moves behaviour for every HTTP provider.
     #[test]
     fn the_name_heuristic_still_answers_when_there_is_no_file() {
         assert!(model_reasons("ollama", "qwen3-8b", None));
@@ -172,9 +152,7 @@ mod tests {
         assert!(!model_reasons("ollama", "mistral-small", None));
     }
 
-    /// The name heuristic did not know Nemotron reasons; the probe path exists because the
-    /// FALLBACK was what was wrong. Pinned so that teaching the heuristic about Nemotron surfaces
-    /// this path instead of silently making it redundant.
+    /// Fails if the heuristic learns Nemotron, flagging the probe path as redundant.
     #[test]
     fn the_fallback_is_the_thing_that_did_not_know_nemotron() {
         assert!(
@@ -183,17 +161,12 @@ mod tests {
         );
     }
 
-    /// Pins the MAPPING rather than the call site, so it fails if the two registry writers ever
-    /// disagree again. `Absent` must not map to `ForceNative`: `should_use_native_tool_calling`
-    /// takes `ForceNative` as true outright and `use_emulator` is its negation, so forcing native
-    /// on a tools-less template renders declarations nowhere AND disables the prose fallback.
     #[test]
     fn a_template_that_cannot_carry_tools_is_never_forced_native() {
         use goose::providers::local_inference::local_model_registry::ToolCallingMode;
         use pond_core::models::domain::model_probe::{ModelProbe, Thinking, ToolSupport};
 
-        // The mapping this crate must agree with, mirrored from
-        // `LocalInferenceLlmAdapter::tool_and_thinking_for`.
+        // Mirrors `LocalInferenceLlmAdapter::tool_and_thinking_for`.
         for (tools, expected) in [
             (ToolSupport::Native, ToolCallingMode::ForceNative),
             (ToolSupport::Absent, ToolCallingMode::ForceEmulated),
@@ -214,8 +187,6 @@ mod tests {
         }
     }
 
-    /// The mapping above, but through the REAL function and a REAL file, so a
-    /// refactor that stops consulting the probe is caught.
     #[test]
     #[ignore = "needs real GGUFs on disk"]
     fn the_registered_tool_mode_comes_from_the_file() {
@@ -259,9 +230,7 @@ mod tests {
         );
     }
 
-    /// Against the real GGUFs, if they are present. Ignored by default because
-    /// it needs a populated model directory; run with
-    /// `GIAP_MODEL_DIR=... cargo test -p pond-adapters-goose -- --ignored`.
+    /// Run with `GIAP_DATA_DIR=... cargo test -p pond-adapters-goose -- --ignored`.
     #[test]
     #[ignore = "needs real GGUFs on disk"]
     fn real_files_answer_where_the_name_heuristic_cannot() {

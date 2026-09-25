@@ -11,8 +11,7 @@ use goose_providers::model::ModelConfig;
 use rmcp::model::Tool;
 use std::sync::Arc;
 
-/// A mock provider that simply prints out the payloads it receives
-/// and returns a mock tool call request to simulate the agent hallucinating or using a tool.
+/// Mock provider that prints each payload it receives and replies with canned text.
 struct MockInterceptProvider;
 
 #[async_trait]
@@ -46,8 +45,6 @@ impl Provider for MockInterceptProvider {
         }
         println!("======================================\n");
 
-        // We can simulate an empty tool call hallucination here,
-        // or just return a dummy response.
         let msg = Message::assistant().with_text(
             "I am a mock response. The real LLM would process the above tools and system prompt.",
         );
@@ -64,12 +61,9 @@ impl Provider for MockInterceptProvider {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // tracing_subscriber::fmt::init(); // Omitted because it's not a dependency
-
     let session_manager = Arc::new(SessionManager::instance());
     let permission_manager = goose::config::permission::PermissionManager::instance();
 
-    // Try GooseMode::Auto which is what the fix introduces
     let config = AgentConfig::new(
         session_manager.clone(),
         permission_manager,
@@ -81,7 +75,6 @@ async fn main() -> Result<()> {
 
     let agent = Arc::new(GooseAgent::with_config(config));
 
-    // Create session
     let session = session_manager
         .create_session(
             std::env::current_dir().unwrap_or_default(),
@@ -92,14 +85,12 @@ async fn main() -> Result<()> {
         .await?;
     let session_id = session.id.clone();
 
-    // Remove built-in extensions just like the fix
     agent.remove_extension("developer", &session_id).await.ok();
     agent
         .remove_extension("computercontroller", &session_id)
         .await
         .ok();
 
-    // Add the Playwright MCP extension via npx
     let playwright_extension =
         ExtensionConfig::stdio("playwright", "npx", "Playwright browser automation", 60u64)
             .with_args(vec!["-y", "@playwright/mcp"]);
@@ -111,7 +102,6 @@ async fn main() -> Result<()> {
         .add_extension(playwright_extension, &session_id)
         .await?;
 
-    // Inject our mock provider!
     let provider = MockInterceptProvider;
     agent
         .update_provider(
@@ -126,7 +116,6 @@ async fn main() -> Result<()> {
         .override_system_prompt("You are a helpful assistant.".to_string())
         .await;
 
-    // Send a message
     let user_msg = Message::user().with_text("Navigate to google.com and take a screenshot.");
     let session_cfg = goose::agents::types::SessionConfig {
         id: session_id,
@@ -140,17 +129,15 @@ async fn main() -> Result<()> {
 
     while let Some(event_result) = stream.next().await {
         match event_result {
-            Ok(event) => {
-                match event {
-                    goose::agents::AgentEvent::Message(msg) => {
-                        println!("Agent Event -> Message Content:");
-                        for c in &msg.content {
-                            println!("{:?}", c);
-                        }
+            Ok(event) => match event {
+                goose::agents::AgentEvent::Message(msg) => {
+                    println!("Agent Event -> Message Content:");
+                    for c in &msg.content {
+                        println!("{:?}", c);
                     }
-                    _ => {} // Ignore other events like HistoryReplaced
                 }
-            }
+                _ => {}
+            },
             Err(e) => {
                 eprintln!("Stream Error: {}", e);
             }

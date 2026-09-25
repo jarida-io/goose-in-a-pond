@@ -1,23 +1,14 @@
-//! Turning a fetched message body into text worth indexing. What arrives from
-//! `BODY.PEEK[TEXT]` is a MIME entity with quoted replies, signatures and boilerplate under the
-//! sentences that matter; indexed raw, the text repeated across hundreds of messages becomes
-//! the most findable thing in the mailbox. This keeps the body's own words and drops the rest.
+//! Turns a fetched MIME body into indexable text: its own words, without quoted replies,
+//! signatures and boilerplate, which would otherwise dominate search.
 
-/// Extract readable text from a raw MIME body. Prefers `text/plain` over a tag-stripped HTML
-/// part, decodes quoted-printable and base64 transfer encodings, then trims quoted replies
-/// and signatures.
+/// Readable text from a raw MIME body, preferring `text/plain` over tag-stripped HTML.
 pub fn body_to_text(raw: &str) -> String {
     let (headers, content) = split_headers(raw);
 
-    // Two ways to learn the boundary, and the sniffed one is what production hits:
-    // `BODY.PEEK[TEXT]` omits the message headers, so the top-level `Content-Type` that names
-    // the boundary is absent. Decoding the multipart as one blob leaves a QP soft break inside
-    // `<sty=\r\nle ...>` and the stylesheet survives as text.
+    // `BODY.PEEK[TEXT]` omits the message headers, so production usually sniffs the boundary.
     let text = mime_boundary(&headers)
         .and_then(|b| best_part(content, &b))
-        // Sniffed from `raw`, not `content`: the first part's headers have
-        // already been eaten by `split_headers`, and the parts must be split
-        // from the delimiter that precedes them.
+        // From `raw`: `split_headers` already ate the first part's headers from `content`.
         .or_else(|| sniff_boundary(raw).and_then(|b| best_part(raw, &b)))
         .unwrap_or_else(|| decode_transfer(content, &headers));
 
@@ -41,10 +32,7 @@ fn split_headers(raw: &str) -> (String, &str) {
     }
 }
 
-/// One header's value, with folded continuation lines joined back on. RFC 5322 lets a long
-/// header wrap onto lines starting with a space or tab, and servers do so constantly for
-/// `Content-Type`; reading only to the first newline loses `boundary=`, so the parts never
-/// split and the whole raw multipart, stylesheet included, is stored as the body.
+/// One header's value, RFC 5322 folds joined: servers often wrap `boundary=` onto a new line.
 fn header_value(headers: &str, name: &str) -> Option<String> {
     let lower = headers.to_ascii_lowercase();
     let at = lower.find(&format!("{}:", name.to_ascii_lowercase()))?;
@@ -55,7 +43,6 @@ fn header_value(headers: &str, name: &str) -> Option<String> {
         if n == 0 {
             value.push_str(line.split_once(':')?.1);
         } else if line.starts_with(' ') || line.starts_with('\t') {
-            // A fold is a line break inserted for width; the value continues.
             value.push(' ');
             value.push_str(line.trim());
         } else {
@@ -65,10 +52,7 @@ fn header_value(headers: &str, name: &str) -> Option<String> {
     Some(value.trim().to_string())
 }
 
-/// The boundary as written in the body itself, for a body that arrived without its message
-/// headers: a multipart opens with its own delimiter, so the first non-empty line is
-/// `--<boundary>`. Guarded against the `-- ` signature separator, the one other thing in
-/// mail that begins a line with two dashes.
+/// Boundary from a headerless body's first line (`--<boundary>`), not mistaking a `-- ` signature.
 fn sniff_boundary(raw: &str) -> Option<String> {
     let first = raw.lines().find(|l| !l.trim().is_empty())?.trim_end();
     let token = first.strip_prefix("--")?;
@@ -83,10 +67,7 @@ fn mime_boundary(headers: &str) -> Option<String> {
     let ct = header_value(headers, "content-type")?;
     let at = ct.to_ascii_lowercase().find("boundary=")?;
     let rest = ct[at + "boundary=".len()..].trim();
-    // A parameter ends at the next `;`, not at the end of the header --
-    // `boundary="xyz"; charset=UTF-8` is ordinary. `trim_matches` only strips
-    // the OUTER characters, so it yielded `xyz"; charset=UTF-8`: a boundary
-    // that matches nothing, leaving the parts unsplit.
+    // The value ends at the closing quote or next `;` (`boundary="xyz"; charset=UTF-8`).
     let rest = if let Some(stripped) = rest.strip_prefix('"') {
         stripped.split('"').next().unwrap_or("")
     } else {
@@ -106,10 +87,7 @@ fn best_part(content: &str, boundary: &str) -> Option<String> {
     plain.or(html)
 }
 
-/// Walk the part tree, keeping the first text/plain and the first text/html. The tree is the
-/// point: large senders wrap `multipart/alternative` in `multipart/related`, and a single-level
-/// scan sees only the `multipart/*` wrapper and falls back to storing the raw body. Depth is
-/// bounded because a mail body is not worth a stack overflow.
+/// Walk the (depth-bounded) part tree for the first text/plain and text/html; senders nest them.
 fn collect_parts(
     content: &str,
     boundary: &str,
@@ -128,9 +106,7 @@ fn collect_parts(
             .to_ascii_lowercase();
 
         if ct.contains("multipart/") {
-            // A wrapper carries its own boundary; the equality guard stops a
-            // malformed part that repeats its parent's from recursing on
-            // itself.
+            // The guard stops a part that repeats its parent's boundary recursing on itself.
             match mime_boundary(&h) {
                 Some(inner) if inner != boundary => {
                     collect_parts(body, &inner, depth + 1, plain, html);
@@ -168,9 +144,7 @@ fn decode_transfer(body: &str, headers: &str) -> String {
     }
 }
 
-/// Quoted-printable as bodies use it: `=XX` escapes and `=` soft line breaks. Distinct from
-/// the header form in `header.rs`, where `_` means a space and there are no soft breaks;
-/// sharing one decoder would corrupt one or the other.
+/// Body quoted-printable (`=XX`, soft breaks); unlike the header form, `_` is not a space.
 fn decode_qp(text: &str) -> String {
     let mut out: Vec<u8> = Vec::with_capacity(text.len());
     let bytes = text.as_bytes();
@@ -202,9 +176,7 @@ fn decode_qp(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Whether this text carries markup worth stripping. Deliberately not anchored to the start:
-/// a multipart whose boundary failed to parse begins with readable text and turns into markup
-/// thousands of bytes later. Checked over a bounded prefix so a huge body pays once.
+/// Markup anywhere in the first 64 KiB, not just at the start: a failed split puts it later.
 fn looks_like_html(text: &str) -> bool {
     let window = &text[..text.len().min(64 * 1024)];
     let lower = window.to_ascii_lowercase();
@@ -216,9 +188,7 @@ fn looks_like_html(text: &str) -> bool {
         || lower.contains("<table")
 }
 
-/// Tags out, entities in, whitespace collapsed. `script` and `style` contents are dropped
-/// rather than flattened: minified CSS is often the largest part of a marketing email and the
-/// least useful thing that could be embedded.
+/// Tags out, entities in, whitespace collapsed; `script`/`style` bodies dropped entirely.
 fn html_to_text(html: &str) -> String {
     let mut out = String::with_capacity(html.len() / 2);
     let bytes = html.as_bytes();
@@ -227,10 +197,7 @@ fn html_to_text(html: &str) -> String {
 
     while i < bytes.len() {
         if bytes[i] == b'<' {
-            // `continue` inside the `for` continued the FOR loop, not this
-            // one: after skipping a style block it fell through to the generic
-            // tag handler with `i` no longer on a `<`, which then deleted
-            // everything up to the next `>` -- real text, silently.
+            // A flag, not `continue`: inside the `for` that would continue the wrong loop.
             let mut skipped = false;
             for tag in ["script", "style"] {
                 let open = format!("<{tag}");
@@ -297,9 +264,7 @@ fn collapse_blank_lines(text: &str) -> String {
     out.join("\n").trim().to_string()
 }
 
-/// Cut the quoted reply and the signature. Both are text this message did not write: a
-/// thread of ten replies would otherwise store the first message ten times, each copy as
-/// findable as the original.
+/// Cut quoted replies and the signature, or a thread stores its first message once per reply.
 fn trim_reply_and_signature(text: &str) -> String {
     let mut cut = text.len();
 
@@ -327,10 +292,8 @@ fn trim_reply_and_signature(text: &str) -> String {
     collapse_blank_lines(&unquoted.join("\n"))
 }
 
-/// Reduce a URL to its host, and drop the other machine-readable debris. Measured: a job
-/// alert carried ~90 characters of content and 600+ of tracking URL, so the vector described
-/// a `trackingId` and the redactor took it for an API key. The host is kept because it is the
-/// one part of a URL a person would search for.
+/// Reduce URLs to their host (the part people search) and drop machine debris: tracking URLs
+/// can dwarf the content, and the redactor mistakes their tokens for API keys.
 fn strip_machine_noise(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -361,16 +324,14 @@ fn strip_machine_noise(text: &str) -> String {
     }
     out.push_str(rest);
 
-    // Invisible characters: marketing mail is full of zero-width spaces used to
-    // defeat spam filters, and they survive every other step here.
+    // Zero-width characters (spam-filter evasion) survive every other step.
     let cleaned: String = out
         .chars()
         .filter(|c| !matches!(c, '\u{200b}'..='\u{200f}' | '\u{feff}' | '\u{00ad}'))
         .collect();
 
-    // Machine output, by two tests: a low letter ratio catches separator rows and punctuation
-    // soup but not base64, which is mostly letters, so a run of 30-plus characters without a
-    // space is also dropped. Short lines are exempt so "Kenya" and "$4,200" survive.
+    // Machine output: a low letter ratio (separators) or a 30+ char run without a space (base64).
+    // Short lines are exempt so "Kenya" and "$4,200" survive.
     let kept: Vec<&str> = cleaned
         .lines()
         .filter(|line| {
@@ -378,8 +339,7 @@ fn strip_machine_noise(text: &str) -> String {
             if t.is_empty() {
                 return true;
             }
-            // A part header that reached the text means the split missed it.
-            // These lines are never something a person wrote.
+            // A part header here means the split missed it; never human text.
             const MIME_HEADERS: [&str; 4] = [
                 "content-type:",
                 "content-transfer-encoding:",
@@ -430,8 +390,6 @@ mod tests {
         assert_eq!(body_to_text(raw), "Hello world");
     }
 
-    /// A marketing email is mostly CSS. Embedding it would make minified style
-    /// rules the most findable text in the mailbox.
     #[test]
     fn style_and_script_blocks_are_dropped_not_flattened() {
         let raw = "Content-Type: text/html\r\n\r\n<html><style>.a{color:red}</style>\
@@ -442,9 +400,6 @@ mod tests {
         assert!(!out.contains("track()"), "{out}");
     }
 
-    /// A wrapped Content-Type is the common case, not an edge case, and
-    /// missing the fold meant the boundary was never found: the whole raw
-    /// multipart became the body, stylesheet included.
     #[test]
     fn a_folded_content_type_still_yields_its_boundary() {
         let raw = "Content-Type: multipart/alternative;\r\n\
@@ -459,7 +414,6 @@ mod tests {
         assert_eq!(body_to_text(raw), "The invoice is attached.");
     }
 
-    /// `boundary="xyz"; charset=UTF-8` -- the parameter ends at the `;`.
     #[test]
     fn a_boundary_followed_by_another_parameter_is_not_swallowed() {
         let raw = "Content-Type: multipart/alternative; boundary=\"xyz\"; charset=UTF-8\r\n\r\n\
@@ -470,9 +424,6 @@ mod tests {
         assert_eq!(body_to_text(raw), "Rent is due Friday.");
     }
 
-    /// Measured: 850 lines, 246 of them a bare `}`. When part-splitting fails
-    /// the readable text comes first and the stylesheet follows, so a
-    /// markup test anchored to the START of the body reports "not HTML".
     #[test]
     fn a_stylesheet_after_readable_text_is_still_dropped() {
         let raw = "Content-Type: text/plain\r\n\r\n\
@@ -490,9 +441,6 @@ mod tests {
         assert!(!out.contains("transform"), "stylesheet survived: {out}");
     }
 
-    /// The structure a large sender actually uses: related wrapping
-    /// alternative wrapping the text. A single-level scan sees only the
-    /// wrapper and stores the whole raw body instead.
     #[test]
     fn a_nested_multipart_is_walked_to_its_text_part() {
         let raw = "Content-Type: multipart/related; boundary=\"OUT\"\r\n\r\n\
@@ -510,8 +458,6 @@ mod tests {
         assert_eq!(out, "Your job alert for full-stack developer");
     }
 
-    /// A part header inside the text means the split missed a boundary. Even
-    /// then the header line itself is not content.
     #[test]
     fn a_stray_part_header_is_not_kept_as_text() {
         let raw = "Content-Type: text/plain\r\n\r\n\
@@ -522,10 +468,6 @@ mod tests {
         assert_eq!(body_to_text(raw), "Rent is due Friday.");
     }
 
-    /// What `BODY.PEEK[TEXT]` actually returns: the body without the message headers, so the
-    /// top-level `Content-Type` that names the boundary is absent. The parts have different
-    /// encodings, so one global decode leaves a QP soft break inside `<sty=\r\nle ...>` and
-    /// the stylesheet survives as text. The boundary must be sniffed from the first line.
     #[test]
     fn a_body_without_message_headers_still_finds_its_boundary() {
         let raw = "--00000000000041cd\r\n\
@@ -555,8 +497,6 @@ mod tests {
         assert_eq!(body_to_text(raw), "plain version");
     }
 
-    /// A ten-deep thread would otherwise store the first message ten times, and
-    /// every copy is as findable as the original.
     #[test]
     fn quoted_replies_are_cut() {
         let raw = "Content-Type: text/plain\r\n\r\nYes, Tuesday works.\n\n\
@@ -577,8 +517,6 @@ mod tests {
         assert_eq!(body_to_text(raw), "my reply");
     }
 
-    /// Measured on real mail: 90 characters of job, 600 of trackingId. The
-    /// vector would have described the tracking token.
     #[test]
     fn a_tracking_url_becomes_its_host() {
         let raw = "Content-Type: text/plain\r\n\r\nFull-Stack Developer (Remote)\nHire Feed\n\
@@ -600,7 +538,6 @@ mod tests {
         assert_eq!(body_to_text(raw), "Yourinvoice is ready");
     }
 
-    /// A row of base64 or separators reads as nothing and searches as nothing.
     #[test]
     fn lines_that_are_mostly_not_letters_are_dropped() {
         let raw = "Content-Type: text/plain\r\n\r\nThe invoice is attached.\n\
@@ -610,8 +547,6 @@ mod tests {
         assert_eq!(out, "The invoice is attached.");
     }
 
-    /// Short lines survive the letter test — "Kenya", "$4,200", "Q3" are all
-    /// content, and a rule that judged them by letter ratio would cut them.
     #[test]
     fn short_lines_survive_even_when_they_are_not_words() {
         let raw = "Content-Type: text/plain\r\n\r\nSalary\n$4,200\nKenya";

@@ -1,7 +1,5 @@
-//! GIAP's last-mile veto over everything Goose sends to the model. [`GiapProviderShim`] wraps the
-//! real provider at `Provider::stream`, the one boundary where the FINAL `(system, messages,
-//! tools)` is visible: a system derived from GIAP's prefix is rebuilt as prefix plus appendix,
-//! `<turn-context>` is stripped, tools outside the allow-set are vetoed; else pure pass-through.
+//! GIAP's last-mile veto at `Provider::stream`, where the FINAL `(system, messages, tools)` is
+//! visible: restores GIAP's system prompt and vetoes tools outside the allow-set.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
@@ -13,33 +11,21 @@ use goose_providers::errors::ProviderError;
 use goose_providers::model::ModelConfig;
 use rmcp::model::Tool;
 
-/// Marker present in Goose's built-in `system.md` ("created by AAIF") and in
-/// the hard fallback string ("created by Block") that replaces a failed
-/// override render. If either ever reaches the provider on the chat path,
-/// GIAP's prompt was lost and must be restored.
+/// Found in Goose's default prompt and fallback; on the chat path it means GIAP's was lost.
 const GOOSE_DEFAULT_MARKER: &str = "general-purpose AI agent called goose";
 
-/// How many Goose sessions keep live per-turn control state. Goose has no session-end hook, so
-/// entries are evicted in insertion order past this bound. Evicting a live session only costs
-/// the veto for one turn (the adapter republishes every turn), so the bound is generous.
+/// No session-end hook, so oldest-first eviction past this; a live victim loses one turn's veto.
 const MAX_TRACKED_SESSIONS: usize = 64;
 
-/// Per-turn control state for ONE Goose session. Split out of [`ShimControls`] because tool
-/// selection (Phase D2) makes these values differ between sessions; a shared slot would let
-/// session A's provider call read session B's allow-set.
+/// Per-turn control state for ONE Goose session, so no session reads another's allow-set.
 #[derive(Default)]
 pub struct SessionControls {
-    /// Per-turn GIAP-owned appendix (prompt extras + skills), rebuilt fresh
-    /// each turn. Kept separate from the prefix so the veto can truncate
-    /// Goose's extras without losing GIAP's own.
+    /// GIAP's per-turn appendix (extras + skills), apart from the prefix so Goose's can be cut.
     turn_appendix: Mutex<Option<String>>,
-    /// Exact (prefixed) tool names allowed for this session. `None` disables
-    /// tool filtering entirely.
+    /// Exact (prefixed) tool names allowed; `None` disables filtering.
     allowed_tools: Mutex<Option<HashSet<String>>>,
-    /// The complete system prompt this session owns, bypassing the prefix-plus-appendices
-    /// rebuild. PAI-6 P3, SUBAGENT sessions only: a child's prompt starts with the parent's
-    /// static prefix, so the rebuild would silently replace its delegation envelope (turn budget,
-    /// no-delegation rule, exact tool names) with the GLOBAL extension appendix and warn nothing.
+    /// Subagent-owned system prompt, sent verbatim: it starts with the parent's prefix, so the
+    /// rebuild would silently replace its delegation envelope with the global appendix.
     system_override: Mutex<Option<String>>,
 }
 
@@ -52,9 +38,7 @@ impl SessionControls {
         *self.allowed_tools.lock().unwrap_or_else(|e| e.into_inner()) = Some(tools);
     }
 
-    /// Widen the allow-set in place (the `enable_tool_group` escape hatch). Takes effect on the
-    /// next provider call, including later calls of the same turn, since the shim filters on
-    /// every call. A no-op when no allow-set is published (nothing is being filtered).
+    /// Widen the allow-set (`enable_tool_group`), effective next provider call; no-op if unset.
     pub fn extend_allowed_tools<I: IntoIterator<Item = String>>(&self, tools: I) {
         let mut guard = self.allowed_tools.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(set) = guard.as_mut() {
@@ -69,8 +53,7 @@ impl SessionControls {
             .clone()
     }
 
-    /// Declare that this session's system prompt is owned wholesale, so the
-    /// shim must deliver it verbatim rather than rebuilding it.
+    /// Own this session's system prompt wholesale; the shim delivers it verbatim.
     pub fn set_system_override(&self, system: Option<String>) {
         *self
             .system_override
@@ -85,8 +68,7 @@ impl SessionControls {
             .clone()
     }
 
-    /// Whether a tool call may proceed. `true` when no allow-set is published,
-    /// matching the shim's pass-through semantics.
+    /// Whether a tool call may proceed; `true` when no allow-set is published.
     pub fn is_tool_allowed(&self, tool: &str) -> bool {
         self.allowed_tools
             .lock()
@@ -96,18 +78,13 @@ impl SessionControls {
     }
 }
 
-/// Mutable controls shared between [`GooseAdapter`] (writer, while assembling a turn) and the
-/// shim (reader, inside `Provider::stream`, session from `current_session_id`); all `None` means
-/// pass-through. `system_prefix` and `extension_appendix` are GLOBAL: the prefix IS the KV prefix
-/// and a per-session one would churn `last_prefix_hash`; session text rides `<system-context>`.
+/// Written by [`GooseAdapter`] per turn, read by the shim; all `None` is pass-through. The prefix
+/// is GLOBAL: it IS the KV prefix, so a per-session one would churn `last_prefix_hash`.
 #[derive(Default)]
 pub struct ShimControls {
-    /// GIAP's authoritative static system prefix for the current chat model —
-    /// the exact string passed to `override_system_prompt`.
+    /// GIAP's static system prefix: the exact string passed to `override_system_prompt`.
     system_prefix: Mutex<Option<String>>,
-    /// External MCP extension listing — recomputed only when the tool cache
-    /// refreshes, so it persists across turns (same lifetime as the goose
-    /// extra it mirrors).
+    /// External MCP extension listing; recomputed only on tool-cache refresh.
     extension_appendix: Mutex<Option<String>>,
     /// Per-turn state keyed by GOOSE session id.
     sessions: RwLock<SessionMap>,
@@ -132,9 +109,7 @@ impl ShimControls {
             .unwrap_or_else(|e| e.into_inner()) = appendix;
     }
 
-    /// The control entry for a Goose session, created on first use. Returned as an `Arc` so a
-    /// caller (the chat stream's tool-call guard, the escape hatch) can observe live updates
-    /// without re-locking the map.
+    /// A session's control entry, created on first use; the `Arc` sees live updates.
     pub fn session(&self, goose_session_id: &str) -> Arc<SessionControls> {
         if let Some(existing) = self
             .sessions
@@ -162,9 +137,7 @@ impl ShimControls {
         entry
     }
 
-    /// The entry for a session, WITHOUT creating one. Used by the shim: an
-    /// auxiliary provider call for a session GIAP never chatted in must stay
-    /// pass-through rather than mint an empty entry.
+    /// Lookup WITHOUT creating, so an unknown session's auxiliary call stays pass-through.
     fn existing_session(&self, goose_session_id: &str) -> Option<Arc<SessionControls>> {
         self.sessions
             .read()
@@ -174,10 +147,8 @@ impl ShimControls {
             .cloned()
     }
 
-    /// Drop a session's entry outright. PAI-6 P3: every subagent run mints an entry and the map
-    /// evicts OLDEST-FIRST regardless of liveness, so a stream of delegations would evict a
-    /// long-running parent's allow-set and make its turns pass-through (taking a Guest's
-    /// `subtract_guest_denied_tools` result with them). Release a child the moment its run ends.
+    /// Drop a session's entry; release each subagent when its run ends, or a burst of them evicts
+    /// a live parent's allow-set (oldest-first) and its turns go pass-through.
     pub fn forget_session(&self, goose_session_id: &str) {
         let mut map = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         if map.entries.remove(goose_session_id).is_some() {
@@ -195,19 +166,15 @@ impl ShimControls {
     }
 }
 
-/// The last minification, kept so an unchanged tool set is not re-minified on every call.
-/// `input` is retained deliberately: identity is compared by `Arc::ptr_eq` on `input_schema`,
-/// which is only sound while the compared allocations stay alive. Holding them prevents address
-/// reuse by a different schema. The clone is a refcount bump per tool, not a schema copy.
+/// Last minification. `input` is held so its `input_schema` allocations stay alive: identity
+/// is `Arc::ptr_eq`, unsound if a freed address were reused by another schema.
 struct MinifyCache {
     input: Vec<Tool>,
     output: Option<Vec<Tool>>,
 }
 
 impl MinifyCache {
-    /// Whether `tools` is the same set, tool for tool, that produced `output`. Conservative:
-    /// structurally identical schemas behind different allocations miss and re-minify. A false
-    /// miss costs one minification; a false hit would send the model the wrong tool set.
+    /// Pointer-identical to `input`; equal schemas in new allocations miss (costs a re-minify).
     fn matches(&self, tools: &[Tool]) -> bool {
         self.input.len() == tools.len()
             && self
@@ -222,13 +189,10 @@ impl MinifyCache {
 pub struct GiapProviderShim {
     inner: Arc<dyn Provider>,
     controls: Arc<ShimControls>,
-    /// Guarded by a plain `Mutex` rather than an async one: the critical section
-    /// is a pointer comparison and a `Vec` clone, and it never awaits.
+    /// Plain `Mutex`: the critical section never awaits.
     minify_cache: Mutex<Option<MinifyCache>>,
-    /// Where the wrapped provider sends its HTTP, when it sends any. The inner provider is Goose
-    /// submodule code with its own reqwest client, invisible to the workspace egress guard, so
-    /// the PAI-2 gate lives here at the one chokepoint. `None` means in-process inference, nothing
-    /// gated. A constructor parameter, not a setter, so every construction site must answer it.
+    /// Inner provider's HTTP endpoint, egress-gated here: Goose's own reqwest client bypasses the
+    /// workspace guard. `None` means in-process; a constructor arg so no site can forget it.
     endpoint: Option<String>,
 }
 
@@ -246,10 +210,8 @@ impl GiapProviderShim {
         }
     }
 
-    /// Gate one outbound provider call, PAI-2 style: refused before a packet leaves, recorded
-    /// after. The denial maps to [`ProviderError::RequestFailed`] deliberately: `NetworkError` is
-    /// in goose's retryable class, and retrying a policy refusal with backoff would turn a clear
-    /// "offline mode refused this host" into thirty seconds of apparent hang.
+    /// Gate one provider call before any packet leaves. Denial is `RequestFailed`, not the
+    /// retryable `NetworkError`, or backoff turns a clear refusal into a 30 s apparent hang.
     fn begin_egress(
         &self,
     ) -> Result<Option<pond_core::shared::services::egress::EgressCall>, ProviderError> {
@@ -264,10 +226,7 @@ impl GiapProviderShim {
         }
     }
 
-    /// `minify_tools`, memoised on the tool set it was last given. The uncached call deep-clones
-    /// and walks every schema on EVERY provider call (about a thousand small allocations) for an
-    /// answer that changes only when an extension or allow-set does. The allow-set is NOT part of
-    /// the key: this runs on `enforce_tools` output, so a narrowed set already misses on length.
+    /// Memoised `minify_tools`; the allow-set needs no key, since narrowing changes the length.
     fn minify_tools_cached(&self, tools: &[Tool]) -> Option<Vec<Tool>> {
         let mut cache = self.minify_cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(hit) = cache.as_ref().filter(|c| c.matches(tools)) {
@@ -282,18 +241,15 @@ impl GiapProviderShim {
     }
 }
 
-/// The enforced system string for this call, or `None` to pass through
-/// (auxiliary calls whose prompt GIAP does not own).
+/// Enforced system string, or `None` to pass through a prompt GIAP doesn't own.
 fn enforce_system(
     incoming: &str,
     prefix: &Option<String>,
     appendices: &[&Option<String>],
 ) -> Option<String> {
     let prefix = prefix.as_ref()?;
-    // Recognise OUR prompt ignoring trailing whitespace. GIAP's static prefix ends
-    // `</output-quality>\n\n\n\n` and goose appends its block after `</output-quality>\n\n`, so
-    // a plain `starts_with(prefix)` diverges inside GIAP's own newlines, calls the prompt somebody
-    // else's, and passes ~28 KB of "# Additional Instructions" through with no warning fired.
+    // Match OUR prompt ignoring trailing whitespace: goose appends after fewer newlines than the
+    // prefix ends with, so a plain `starts_with(prefix)` misses and ~28 KB leaks through.
     let anchor = prefix.trim_end();
     let giap_owned = !anchor.is_empty() && incoming.starts_with(anchor);
     let goose_default = incoming.contains(GOOSE_DEFAULT_MARKER);
@@ -308,29 +264,24 @@ fn enforce_system(
         }
     }
     if rebuilt == incoming {
-        None // already exactly what GIAP intends — avoid an allocation swap
+        None // already what GIAP intends
     } else {
         Some(rebuilt)
     }
 }
 
-/// Provider names whose format layer already relocates tool-result images, so promotion must
-/// NOT run for them: `formats/openai.rs`, `formats/google.rs` and `formats/databricks.rs` each
-/// re-host a tool-response image as a following user message, so promoting would send it twice.
+/// Providers whose format layer already re-hosts tool-result images; promoting would send twice.
 fn provider_relocates_tool_images(provider_name: &str) -> bool {
     !matches!(provider_name, "local" | "gguf")
 }
 
-/// Lift images out of tool responses into a top-level user message (phase F3). Two fork-side gaps
-/// in the goose local-inference engine stop nested images reaching mtmd: `multimodal.rs` extracts
-/// only top-level `MessageContent::Image`, and `lib.rs` strips `image_url` parts with no vision
-/// guard. A no-op once the fork handles tool-result images; `None` means nothing to promote.
+/// Lift tool-response images into a top-level user message: goose's local engine passes only
+/// top-level `MessageContent::Image` to mtmd. `None` means nothing to promote.
 fn promote_tool_result_images(messages: &[Message], max_images: usize) -> Option<Vec<Message>> {
     use goose::conversation::message::MessageContent;
     use rmcp::model::RawContent;
 
-    // Newest-first: when a session has accumulated several looks at a camera,
-    // the most recent frame is the one being asked about.
+    // Newest first: the latest frame is the one being asked about.
     let mut promoted: Vec<(String, String)> = Vec::new();
     'outer: for msg in messages.iter().rev() {
         for content in msg.content.iter().rev() {
@@ -353,14 +304,10 @@ fn promote_tool_result_images(messages: &[Message], max_images: usize) -> Option
     if promoted.is_empty() {
         return None;
     }
-    // Restore chronological order for the model.
     promoted.reverse();
 
     let mut out = messages.to_vec();
-    // A dedicated trailing user message rather than editing an existing one:
-    // rewriting a tool-response message would break the call/response pairing
-    // every provider validates, and appending to the last user message would
-    // reorder it after its own assistant reply.
+    // A new trailing message: editing a tool response breaks call/response pairing.
     let mut carrier = Message::user().with_text(
         "The images below are the frames returned by the tool call above. Describe only what \
          you can actually see in them.",
@@ -374,8 +321,7 @@ fn promote_tool_result_images(messages: &[Message], max_images: usize) -> Option
 
 use pond_core::mcp::domain::tool_group::{no_tools_env_set, NO_TOOLS_ENV};
 
-/// Read once: this is on the per-turn path and the environment cannot change
-/// under a running process in any way this needs to notice.
+/// Read once; it's on the per-turn path.
 fn tools_disabled() -> bool {
     static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
@@ -405,19 +351,8 @@ fn enforce_tools(tools: &[Tool], allowed: &Option<HashSet<String>>) -> Option<Ve
     )
 }
 
-/// Strip mechanical schemars/serde boilerplate from a tool's input schema, since every char is
-/// re-prefilled by the local model each turn: the `"$schema"` URI, the struct-name `"title"`, and
-/// integer-width artifacts (`"format": "uintN"/"intN"` with the `minimum: 0` / power-of-two
-/// `maximum` pair serde derives). Walks nested objects but never touches `properties` KEYS.
-/// Write the final `(system, messages, tools)` as an OpenAI chat body when
-/// `GIAP_CAPTURE_PAYLOAD` names a directory.
-///
-/// Exists so a candidate engine in an inference bake-off is measured on the prompt GIAP
-/// actually sends. Reusing goose's `create_request` rather than hand-rolling the body keeps
-/// the capture honest: the same serializer the HTTP providers use, so a replay differs from
-/// a live call only by transport.
-///
-/// Failures are logged and swallowed -- a diagnostic must never fail a turn.
+/// Write the final payload as an OpenAI chat body into `$GIAP_CAPTURE_PAYLOAD`, via goose's own
+/// `create_request` so replays differ only by transport. Failures are logged, never fatal.
 fn capture_payload(model_config: &ModelConfig, system: &str, messages: &[Message], tools: &[Tool]) {
     let Some(dir) = std::env::var_os("GIAP_CAPTURE_PAYLOAD") else {
         return;
@@ -431,11 +366,7 @@ fn capture_payload(model_config: &ModelConfig, system: &str, messages: &[Message
     );
 }
 
-/// The capture itself, with the directory passed in.
-///
-/// Split from [`capture_payload`] so a test can exercise it without `set_var`: the env is
-/// process-global and a test binary is threaded, so a test that set it would decide whether
-/// OTHER tests capture.
+/// The capture with `dir` passed in, so tests needn't `set_var` the process-global env.
 fn write_payload_capture(
     dir: &std::path::Path,
     model_config: &ModelConfig,
@@ -467,8 +398,7 @@ fn write_payload_capture(
         return None;
     };
 
-    // The hash is over the body, so two turns that produce a byte-identical prompt land on
-    // the same name -- which is how the capture proves prefix stability rather than assuming it.
+    // Body hash in the name: byte-identical prompts share it, proving prefix stability.
     let mut h = std::collections::hash_map::DefaultHasher::new();
     text.hash(&mut h);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
@@ -494,6 +424,8 @@ fn write_payload_capture(
     Some(path)
 }
 
+/// Strip schemars/serde boilerplate (every char is re-prefilled each turn): `$schema`, the
+/// struct-name `title`, int-width `format`/bounds. Never touches `properties` KEYS.
 fn minify_schema_object(obj: &mut serde_json::Map<String, serde_json::Value>) {
     obj.remove("$schema");
     obj.remove("title");
@@ -574,15 +506,11 @@ impl Provider for GiapProviderShim {
         messages: &[Message],
         tools: &[Tool],
     ) -> Result<MessageStream, ProviderError> {
-        // Before any payload work: a call the gate refuses should cost nothing,
-        // and a refused call must not reach the veto/minify machinery below —
-        // its output would describe a request that never happens.
+        // Gate first, so a refused call costs nothing and never reaches the veto/minify below.
         let egress = self.begin_egress()?;
 
-        // Which session is this call for? Goose wraps every provider call in
-        // `session_context::with_session_id` (reply_parts.rs), the only session identity that
-        // reaches `stream()`; Goose holds ONE agent-wide provider slot, so a shim per session
-        // cannot work. `None` (an auxiliary call outside the scope) stays pass-through.
+        // Goose has one agent-wide provider slot, so the session comes from `current_session_id`
+        // (set by `with_session_id`); outside that scope the call stays pass-through.
         let session = goose::session_context::current_session_id()
             .and_then(|sid| self.controls.existing_session(&sid));
 
@@ -612,19 +540,14 @@ impl Provider for GiapProviderShim {
             None => (None, None, None),
         };
 
-        // PAI-6 P3. A session that owns its whole system prompt (a subagent) skips the
-        // prefix-plus-appendices rebuild: a child's prompt starts with the same GIAP prefix as
-        // the parent's, so the rebuild would silently swap its delegation envelope for the GLOBAL
-        // extension appendix, which describes tools the child does not have.
+        // A subagent's owned prompt skips the rebuild (see `system_override`).
         let enforced_system = match &owned_system {
             Some(owned) => (owned.as_str() != system).then(|| owned.clone()),
             None => enforce_system(system, &prefix, &[&turn_apx, &ext_apx]),
         };
 
-        // The shim is the only thing that delivers GIAP's appendix, so a pass-through here is
-        // load-bearing: the incoming system did not start with GIAP's prefix and the appendix is
-        // attached to nothing. Silent for auxiliary calls with no session appendix; a warning when
-        // a real per-turn appendix is dropped, e.g. a name containing `{{` that minijinja mangles.
+        // Only the shim delivers GIAP's appendix, so a dropped one warns (e.g. a `{{` in a name
+        // that minijinja mangled).
         if enforced_system.is_none() && turn_apx.is_some() && owned_system.is_none() {
             tracing::warn!(
                 target: "giap::trace",
@@ -633,30 +556,10 @@ impl Provider for GiapProviderShim {
                  did not match GIAP's prefix, so the shim passed it through unchanged"
             );
         }
-        // C3: goose's `<turn-context>` is KEPT.
-        //
-        // The shim used to strip every MOIM injection, on the reasoning that
-        // GIAP owns per-turn context through its own `<system-context>`. Parity
-        // means goose's block reaches the model: current time, working
-        // directory, remaining tokens, turn budget, and whatever the `todo` and
-        // `tom` extensions contribute — the last of which is the only mechanism
-        // either side has for an instruction that survives compaction.
-        //
-        // It needed BOTH halves. `MIN_CONTEXT_FOR_MOIM` was 32,000 upstream and
-        // GIAP clamps local prompts to 8,192, so the block was never composed in
-        // the first place; lowering it without this would have produced a block
-        // the shim then deleted, and stripping without lowering deleted a block
-        // that was never there. Neither half alone does anything.
-        //
-        // No stale-block problem, checked rather than assumed: `inject_moim`
-        // works on `conversation.clone()` (`agent.rs:2093`) and the result is
-        // used only for that provider call, so the stored conversation never
-        // accumulates injections.
-        //
-        // `strip_turn_context` is kept and still tested — it is the lever to
-        // pull if the block turns out to cost more in KV churn than it returns.
+        // Keep goose's `<turn-context>` (time, budget, `todo`/`tom` notes that survive compaction).
+        // `strip_turn_context` remains the lever if its KV churn costs more than it returns.
         let stripped_messages: Option<Vec<Message>> = None;
-        // Phase F3: built from the messages the provider will actually receive.
+        // Built from the messages the provider will actually receive.
         let promoted_messages = if provider_relocates_tool_images(self.inner.get_name()) {
             None
         } else {
@@ -676,10 +579,7 @@ impl Provider for GiapProviderShim {
             .as_deref()
             .or(vetoed_tools.as_deref())
             .unwrap_or(tools);
-        // Order the tools so a KV prefix can survive a changed selection: the template renders
-        // schemas in the order given, so two turns share a prefix only up to their first differing
-        // tool. Sorting core-first makes the always-loaded groups a common prefix (measured 70% vs
-        // 85% shared preamble against the real Gemma template). See `tool_group::prefix_sort_key`.
+        // Core-first order keeps always-loaded tools a shared KV prefix when the selection changes.
         let ordered_tools = {
             let mut v = selected.to_vec();
             v.sort_by(|a, b| {
@@ -690,10 +590,7 @@ impl Provider for GiapProviderShim {
             (v != selected).then_some(v)
         };
         let final_tools: &[Tool] = ordered_tools.as_deref().unwrap_or(selected);
-        // Applied LAST, after selection, ordering and minification, because this
-        // is the only boundary that sees every tool the provider will be given —
-        // GIAP's builtins, a user's own MCP server, and goose's platform
-        // extensions alike. Filtering earlier would let any of those through.
+        // `GIAP_NO_TOOLS` applies LAST: only here are user and goose platform tools visible too.
         let final_tools: &[Tool] = if tools_disabled() { &[] } else { final_tools };
 
         if enforced_system.is_some()
@@ -710,9 +607,7 @@ impl Provider for GiapProviderShim {
             );
         }
 
-        // Prompt-cost accounting (debug only — serialization is skipped when
-        // the level is off): chars/4 approximates tokens, making the split
-        // between system prompt and tools JSON visible per call.
+        // Debug-only prompt-cost accounting; serialization is skipped when the level is off.
         if tracing::enabled!(tracing::Level::DEBUG) {
             let final_system = enforced_system.as_deref().unwrap_or(system);
             let tools_chars = serde_json::to_string(final_tools)
@@ -720,19 +615,14 @@ impl Provider for GiapProviderShim {
                 .unwrap_or(0);
             tracing::debug!(
                 system_chars = final_system.len(),
-                // `tools_offered` is what Goose handed us (always the full
-                // union); `tools_count` is what the model actually sees after
-                // Phase D selection. The gap is the saving.
+                // Offered = Goose's full union; count = what the model sees after selection.
                 tools_offered = tools.len(),
                 tools_count = final_tools.len(),
                 tools_json_chars = tools_chars,
                 session_scoped = session.is_some(),
                 "provider payload size"
             );
-            // WHY the veto did or did not fire, which the size alone cannot say:
-            // `system_rebuilt = false` covers both "already exactly GIAP's" and "not recognised,
-            // passed through untouched". The second is a silent hole in the ownership guarantee,
-            // and telling them apart needs the prefix and the incoming head side by side.
+            // Tells "already GIAP's" from "unrecognised", which `system_rebuilt = false` conflates.
             let prefix_snapshot = self
                 .controls
                 .system_prefix
@@ -746,9 +636,7 @@ impl Provider for GiapProviderShim {
                 starts_with_giap_prefix = prefix_snapshot
                     .as_deref()
                     .map(|p| system.starts_with(p)),
-                // `?` not `%`: these are multi-line prompts, and a raw newline
-                // ends the log line mid-field — which is how the first capture
-                // of this came back with the one value that mattered missing.
+                // `?` not `%`: a raw newline in a multi-line prompt ends the log line mid-field.
                 incoming_head = ?system.chars().take(160).collect::<String>(),
                 giap_prefix_head = ?prefix_snapshot
                     .as_deref()
@@ -760,10 +648,7 @@ impl Provider for GiapProviderShim {
                         .position(|(a, b)| a != b)
                         .unwrap_or(p.chars().count())
                 }),
-                // The window either side of the divergence, which is what says
-                // whether goose APPENDED to GIAP's prompt (harmless, and what
-                // `starts_with` assumes) or INSERTED into it (fatal to the
-                // check, and invisible without this).
+                // Divergence window: goose APPENDED (fine) or INSERTED (breaks `starts_with`)?
                 prefix_at_divergence = ?prefix_snapshot.as_deref().map(|p| {
                     let d = p.chars().zip(system.chars()).position(|(a, b)| a != b).unwrap_or(0);
                     p.chars().skip(d.saturating_sub(60)).take(140).collect::<String>()
@@ -776,11 +661,7 @@ impl Provider for GiapProviderShim {
             );
         }
 
-        // Bake-off capture (`GIAP_CAPTURE_PAYLOAD=<dir>`). This is the only place the
-        // FINAL payload exists: goose's own `sessions.db` stores the raw messages, not the
-        // shim-enforced system prompt, the vetoed/minified tool array, or the core-first
-        // ordering -- so an engine replayed from that store is not answering GIAP's prompt.
-        // No-op, and no serialization cost, when the variable is unset.
+        // Only here does the FINAL payload exist; goose's `sessions.db` holds the raw messages.
         capture_payload(
             model_config,
             enforced_system.as_deref().unwrap_or(system),
@@ -798,10 +679,7 @@ impl Provider for GiapProviderShim {
             )
             .await;
         if let Some(call) = egress {
-            // The provider abstracts the wire, so the real HTTP status is not
-            // visible here; 200/500 is the same synthesis the IMAP adapter
-            // records for its raw-TLS session. Ok means the stream was
-            // ESTABLISHED — latency is time-to-stream, not time-to-last-token.
+            // Real status is hidden by the provider: synthesise 200/500; latency is time-to-stream.
             call.finish(Some(if result.is_ok() { 200 } else { 500 }));
         }
         result
@@ -816,8 +694,7 @@ impl Provider for GiapProviderShim {
     }
 
     async fn fetch_supported_models(&self) -> Result<Vec<String>, ProviderError> {
-        // Model listing reaches the same host the chat does; an offline pond
-        // has no business pinging a remote registry either.
+        // Model listing hits the same host, so it is gated too.
         let egress = self.begin_egress()?;
         let result = self.inner.fetch_supported_models().await;
         if let Some(call) = egress {
@@ -847,10 +724,6 @@ impl Provider for GiapProviderShim {
 mod tests {
     use super::*;
 
-    /// The veto declining by four newlines: GIAP's static prefix ends `</output-quality>\n\n\n\n`
-    /// and goose appends its hints block after `</output-quality>\n\n`, so the two diverge INSIDE
-    /// GIAP's own trailing whitespace. `starts_with` said "not ours" and ~28 KB of developer-agent
-    /// hints reached a household assistant, logged just like the healthy "already correct" case.
     #[test]
     fn goose_extras_are_vetoed_even_when_our_prefix_ends_in_blank_lines() {
         let prefix = "<identity>\nYou are Goose.\n</output-quality>\n\n\n\n".to_string();
@@ -866,16 +739,12 @@ mod tests {
         );
     }
 
-    /// The healthy case must keep answering `None`, or every turn pays an
-    /// allocation swap to rewrite a prompt that was already right.
     #[test]
     fn an_already_correct_prompt_is_still_left_alone() {
         let prefix = "<identity>\nYou are Goose.\n".to_string();
         assert_eq!(enforce_system(&prefix, &Some(prefix.clone()), &[]), None);
     }
 
-    /// Somebody else's prompt is still not ours to rewrite. Trimming the anchor
-    /// must not widen recognition to prompts that share no prefix at all.
     #[test]
     fn a_foreign_prompt_is_still_passed_through() {
         let prefix = "<identity>\nYou are Goose.\n\n\n".to_string();
@@ -932,7 +801,6 @@ mod tests {
         );
     }
 
-    /// Auxiliary calls (compaction, etc.) use their own prompts — untouched.
     #[test]
     fn foreign_system_prompts_pass_through() {
         let incoming = "Summarise the conversation below into key points.";
@@ -947,7 +815,7 @@ mod tests {
         assert_eq!(enforce_system("anything", &None, &[&None, &None]), None);
     }
 
-    // ── F3: tool-result image promotion ──────────────────────────────────
+    // ── Tool-result image promotion ──────────────────────────────────────
 
     fn image_tool_response(id: &str, note: &str, images: &[(&str, &str)]) -> Message {
         let mut parts = vec![rmcp::model::Content::text(note.to_string())];
@@ -998,8 +866,7 @@ mod tests {
         ];
         let out = promote_tool_result_images(&msgs, 4).expect("an image was returned");
         assert_eq!(out.len(), 3, "the original messages are kept intact");
-        // The tool response itself is untouched — rewriting it would break the
-        // call/response pairing providers validate.
+        // Untouched: rewriting it would break call/response pairing.
         assert_eq!(out[1].content.len(), msgs[1].content.len());
         let carrier = out.last().unwrap();
         assert_eq!(
@@ -1024,8 +891,7 @@ mod tests {
         );
     }
 
-    /// The cap is the same one a manual attachment obeys — a camera window that
-    /// returned six frames must not become a six-image prefill.
+    /// Uses the manual-attachment cap.
     #[test]
     fn promotion_is_capped_and_keeps_the_newest_frames() {
         let msgs = vec![image_tool_response(
@@ -1048,8 +914,6 @@ mod tests {
         assert_eq!(kept, vec!["F5".to_string(), "F6".to_string()]);
     }
 
-    /// HTTP formats already relocate tool-result images; promoting on top of
-    /// that would send every frame twice.
     #[test]
     fn only_the_local_engine_needs_promotion() {
         assert!(!provider_relocates_tool_images("local"));
@@ -1067,9 +931,6 @@ mod tests {
         )
     }
 
-    /// The bake-off replays these files against candidate engines, so the capture has to be
-    /// the payload GIAP sends -- and it has to be BYTE-STABLE across two identical turns, or
-    /// a "prefix moved" finding would just be capture noise. Same body, same name, one file.
     #[test]
     fn an_identical_turn_captures_to_the_same_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -1115,8 +976,6 @@ mod tests {
         );
     }
 
-    /// A payload is captured only when asked for. The hook sits on the hot path of every
-    /// provider call, so an unset variable must not touch the filesystem.
     #[test]
     fn no_capture_directory_means_no_files() {
         let dir = tempfile::tempdir().unwrap();
@@ -1213,8 +1072,7 @@ mod tests {
 
     // ── minification cache ─────────────────────────────────────────────────
 
-    /// A tool carrying the keys `minify_schema_object` strips, so the cached
-    /// answer is a `Some` rather than the less interesting `None`.
+    /// A tool with keys `minify_schema_object` strips, so the cache holds a `Some`.
     fn noisy_tool(name: &str) -> Tool {
         Tool::new(
             name.to_string(),
@@ -1229,8 +1087,7 @@ mod tests {
     }
 
     fn shim_with(controls: ShimControls) -> GiapProviderShim {
-        // `Provider` requires only `get_name` and `stream`; the cache tests
-        // exercise neither, so both are left unreachable rather than mocked.
+        // The cache tests call neither required method, so both are unreachable.
         struct Unused;
         #[async_trait::async_trait]
         impl Provider for Unused {
@@ -1260,16 +1117,12 @@ mod tests {
             .expect("minification fired");
         let second = shim.minify_tools_cached(&tools).expect("cache hit");
         assert_eq!(first, second);
-        // The stripped keys really are gone, so the cached value is the
-        // minified one and not a pass-through of the input.
+        // Proves the cached value is minified, not the input passed through.
         assert!(first[0].input_schema.get("$schema").is_none());
         assert!(first[0].input_schema.get("title").is_none());
     }
 
-    /// The cache must key on the SCHEMAS, not the names. A narrowed allow-set
-    /// arrives here as a shorter slice, and a re-registered extension arrives as
-    /// the same names behind fresh allocations; both must miss rather than
-    /// replay a stale tool set to the model.
+    /// Keyed on SCHEMAS, not names: re-registered extensions reuse names with new allocations.
     #[test]
     fn a_different_tool_set_is_never_served_from_the_cache() {
         let shim = shim_with(ShimControls::default());
@@ -1296,9 +1149,6 @@ mod tests {
         assert_eq!(wide_again.len(), 2);
     }
 
-    /// Same names, same schema CONTENT, different allocations. Pointer identity
-    /// makes this a miss, which is the conservative direction: it costs one
-    /// extra minification and can never serve the wrong schemas.
     #[test]
     fn structurally_equal_tools_behind_new_allocations_are_recomputed_not_replayed() {
         let shim = shim_with(ShimControls::default());
@@ -1310,15 +1160,12 @@ mod tests {
         assert_eq!(a, b, "a recompute must agree with the cached answer");
     }
 
-    // ── D1: session-keyed controls ─────────────────────────────────────────
+    // ── Session-keyed controls ─────────────────────────────────────────────
 
     fn set(names: &[&str]) -> HashSet<String> {
         names.iter().map(|n| n.to_string()).collect()
     }
 
-    /// The reason D1 exists. Before keying, two sessions shared one allow-set
-    /// slot; with different tool selections that is a cross-session data race
-    /// where one session's provider call filters by another's set.
     #[test]
     fn two_sessions_do_not_see_each_others_allow_sets() {
         let controls = ShimControls::default();
@@ -1369,13 +1216,11 @@ mod tests {
         first.set_allowed_tools(set(&["giap-memory__recall_memories"]));
         let second = controls.session("goose-a");
         assert!(Arc::ptr_eq(&first, &second));
-        // A widen through one handle is visible through the other — this is what
-        // lets the escape hatch affect the in-flight turn.
+        // Visible through the other handle, so the escape hatch reaches the in-flight turn.
         second.extend_allowed_tools(["giap-sensors__get_sensor_reading".to_string()]);
         assert!(first.is_tool_allowed("giap-sensors__get_sensor_reading"));
     }
 
-    /// D2 escape hatch: enabling a group widens the live allow-set.
     #[test]
     fn extending_the_allow_set_admits_newly_enabled_tools() {
         let controls = ShimControls::default();
@@ -1394,8 +1239,6 @@ mod tests {
         assert!(s.is_tool_allowed("giap-toolkit__enable_tool_group"));
     }
 
-    /// Widening when nothing is being filtered must not accidentally START
-    /// filtering — that would narrow the surface, the opposite of the intent.
     #[test]
     fn extending_without_an_allow_set_stays_pass_through() {
         let controls = ShimControls::default();
@@ -1405,8 +1248,6 @@ mod tests {
         assert!(s.is_tool_allowed("literally-anything"));
     }
 
-    /// An auxiliary provider call for a session GIAP never chatted in must not
-    /// mint an entry — otherwise the map grows on compaction traffic.
     #[test]
     fn lookup_without_creation_does_not_track_the_session() {
         let controls = ShimControls::default();
@@ -1417,7 +1258,6 @@ mod tests {
         assert_eq!(controls.tracked_sessions(), 1);
     }
 
-    /// Goose gives us no session-end hook, so the map is bounded.
     #[test]
     fn session_tracking_is_bounded() {
         let controls = ShimControls::default();
@@ -1432,12 +1272,8 @@ mod tests {
             .is_some());
     }
 
-    // ── PAI-6 P3 ────────────────────────────────────────────────────────────
+    // ── Subagent sessions ───────────────────────────────────────────────────
 
-    /// Every subagent run mints an entry in a map that evicts oldest-first regardless of liveness.
-    /// Releasing a child's entry when its run ends is what stops a stream of delegations taking
-    /// a long-running PARENT's allow-set, after which its turns are pass-through and a Guest's
-    /// `subtract_guest_denied_tools` result goes with them.
     #[test]
     fn releasing_children_keeps_a_live_parents_allow_set() {
         let controls = ShimControls::default();
@@ -1469,9 +1305,7 @@ mod tests {
         assert_eq!(controls.tracked_sessions(), 1);
     }
 
-    /// Vacuity control for the test above: without the release the parent IS
-    /// evicted, so `forget_session` is doing the work rather than the cap
-    /// happening never to be reached.
+    /// Vacuity control for the test above.
     #[test]
     fn without_releasing_them_children_do_evict_a_live_parent() {
         let controls = ShimControls::default();
@@ -1497,17 +1331,13 @@ mod tests {
         controls.forget_session("a");
         assert!(controls.existing_session("a").is_none());
         assert!(controls.existing_session("b").is_some());
-        // Idempotent: releasing a child twice, or one that never existed, is
-        // not an error -- `release` runs on every path out of a run.
+        // Idempotent, as `release` runs on every path out of a run.
         controls.forget_session("a");
         controls.forget_session("never-existed");
         assert_eq!(controls.tracked_sessions(), 1);
     }
 
-    /// Captures what actually reached the inner provider. These tests drive the REAL
-    /// `Provider::stream`, not `enforce_system`, because the subagent override is resolved inside
-    /// `stream` and the direct `enforce_system` tests cannot see it; the defect was invisible to
-    /// every existing test for exactly that reason.
+    /// Captures what reached the inner provider, via the REAL `stream` (where the override lives).
     struct Capturing {
         seen: Arc<Mutex<Option<(String, Vec<String>)>>>,
     }
@@ -1570,14 +1400,10 @@ mod tests {
         captured.expect("the inner provider was never reached")
     }
 
-    // ── The egress gate (PAI-2) ─────────────────────────────────────────
-    // These tests are the gate's only guard: the inner provider is submodule code sending its
-    // own reqwest HTTP, so the workspace's egress_guard test cannot see it and would not fail
-    // if the gate were deleted. These do.
+    // ── The egress gate ─────────────────────────────────────────────────
+    // The gate's only guard: the workspace egress_guard test can't see submodule HTTP.
 
-    /// `network_mode` is process-global, so the tests that set it take this
-    /// lock and restore Open before releasing — without it, parallel test
-    /// threads race the mode and the failures point at the wrong test.
+    /// Serialises tests that set the process-global `network_mode` (they restore Open).
     static NETWORK_MODE_LOCK: Mutex<()> = Mutex::new(());
 
     /// A provider that remembers whether the call got through the gate.
@@ -1616,10 +1442,6 @@ mod tests {
             .map(|_| ())
     }
 
-    /// The hole this gate closes, measured before it existed: a pond with
-    /// `chat_provider = ollama` and `GIAP_OLLAMA_URL` pointed off-box shipped
-    /// every conversation — extracted memories included — with no gate, no
-    /// record, and offline mode not stopping it.
     #[tokio::test]
     async fn offline_mode_refuses_a_remote_model_host_before_a_packet_leaves() {
         use pond_core::shared::services::egress::{set_network_mode, NetworkMode};
@@ -1642,8 +1464,6 @@ mod tests {
         );
     }
 
-    /// Offline means loopback-only, not silence: the normal install's own
-    /// model server keeps answering.
     #[tokio::test]
     async fn offline_mode_still_reaches_a_loopback_model_server() {
         use pond_core::shared::services::egress::{set_network_mode, NetworkMode};
@@ -1658,8 +1478,7 @@ mod tests {
         assert!(*reached.lock().unwrap_or_else(|e| e.into_inner()));
     }
 
-    /// Allowlist refuses hosts that classify as Sensitive — a remote model box
-    /// is exactly that class.
+    /// A remote model host classifies as Sensitive, which allowlist mode refuses.
     #[tokio::test]
     async fn allowlist_mode_refuses_a_remote_model_host() {
         use pond_core::shared::services::egress::{set_network_mode, NetworkMode};
@@ -1676,8 +1495,6 @@ mod tests {
         assert!(!*reached.lock().unwrap_or_else(|e| e.into_inner()));
     }
 
-    /// In-process inference has no wire. `None` must mean "not gated", or
-    /// offline mode would refuse the one provider that never leaves the box.
     #[tokio::test]
     async fn a_provider_with_no_endpoint_is_not_gated_even_offline() {
         use pond_core::shared::services::egress::{set_network_mode, NetworkMode};
@@ -1692,7 +1509,6 @@ mod tests {
         assert!(*reached.lock().unwrap_or_else(|e| e.into_inner()));
     }
 
-    /// The metadata fetches reach the same host the chat does.
     #[tokio::test]
     async fn model_listing_is_gated_like_the_chat_is() {
         use pond_core::shared::services::egress::{set_network_mode, NetworkMode};
@@ -1709,10 +1525,6 @@ mod tests {
         );
     }
 
-    /// A child's system prompt is the parent's static prefix plus GIAP's delegation envelope, so
-    /// `incoming.starts_with(prefix)` matches; without an override the rebuild throws the
-    /// envelope (turn budget, no-delegation rule, exact tools held) away and splices in the
-    /// GLOBAL extension appendix instead.
     #[tokio::test]
     async fn a_subagent_sessions_system_prompt_reaches_the_provider_intact() {
         let controls = Arc::new(ShimControls::default());
@@ -1745,16 +1557,13 @@ mod tests {
         );
     }
 
-    /// Vacuity control, and proof the defect was real: the same child prompt and session with no
-    /// override has its envelope destroyed and the global appendix arrives instead. If this ever
-    /// stops happening, the override has become decoration and the test above asserts nothing.
+    /// Vacuity control for the test above: without the override the envelope IS destroyed.
     #[tokio::test]
     async fn without_the_override_the_shim_destroys_a_childs_prompt() {
         let controls = Arc::new(ShimControls::default());
         controls.set_system_prefix(PREFIX.to_string());
         controls.set_extension_appendix(Some("# MCP Extensions\n- music".to_string()));
-        // An entry exists -- this is not the pass-through path -- it simply
-        // does not claim to own its system prompt.
+        // An entry exists (not pass-through), it just owns no system prompt.
         controls.session("child-1");
 
         let child_system = child_system_prompt();

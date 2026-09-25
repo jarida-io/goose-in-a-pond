@@ -14,10 +14,7 @@ struct Line<'a> {
     value: String,
 }
 
-/// Undo RFC 5545 line folding.
-///
-/// A line beginning with a space or tab continues the previous one, and the break can fall
-/// mid-word or mid-escape, so this must run before anything else looks at the text.
+/// Undo RFC 5545 line folding; must run first, as a fold can split a word or an escape.
 fn unfold(body: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for raw in body.split('\n') {
@@ -56,8 +53,7 @@ fn unescape(value: &str) -> String {
 }
 
 fn parse_line(line: &str) -> Option<Line<'_>> {
-    // The colon that ends the name+params can be preceded by a quoted parameter
-    // value containing one, so scan rather than `split_once`.
+    // A quoted param value may contain ':', so scan instead of `split_once`.
     let mut in_quotes = false;
     let mut colon = None;
     for (i, c) in line.char_indices() {
@@ -84,10 +80,7 @@ fn parse_line(line: &str) -> Option<Line<'_>> {
     })
 }
 
-/// Read a `DATE-TIME` or `DATE` value.
-///
-/// A naive value is taken AS UTC rather than refused: dropping the event would lose a real
-/// entry over an offset, and server-side expansion keeps that branch rare. DATE is midnight UTC.
+/// Parse DATE-TIME or DATE (midnight) as UTC; a naive value is assumed UTC, not dropped.
 fn parse_datetime(value: &str) -> Option<DateTime<Utc>> {
     let v = value.trim();
     if let Some(stripped) = v.strip_suffix('Z') {
@@ -104,10 +97,7 @@ fn parse_datetime(value: &str) -> Option<DateTime<Utc>> {
         .map(|n| Utc.from_utc_datetime(&n))
 }
 
-/// A calendar address, reduced to something a person would recognise.
-///
-/// The `CN=` parameter wins, falling back to the address with its `mailto:` prefix
-/// stripped: participants are shown to a household, so a raw URI is noise.
+/// Display name for a calendar address: `CN=` if present, else the address minus `mailto:`.
 fn participant(line: &Line<'_>) -> Option<String> {
     for part in line.params.split(';') {
         if let Some(cn) = part.strip_prefix("CN=") {
@@ -125,10 +115,7 @@ fn participant(line: &Line<'_>) -> Option<String> {
     (!addr.is_empty()).then(|| addr.to_string())
 }
 
-/// Every VEVENT in an iCalendar document, as items the pipeline can ingest.
-///
-/// A VEVENT with no UID or no start is skipped, not defaulted: the UID is the idempotency
-/// key for re-sync, and an invented one would be re-created as a duplicate on every sync.
+/// Every VEVENT as an ingestable item; skips any lacking a UID (the re-sync key) or a start.
 pub fn events_from_ics(body: &str) -> Vec<RawItem> {
     let mut items = Vec::new();
     let mut in_event = false;
@@ -158,9 +145,7 @@ pub fn events_from_ics(body: &str) -> Vec<RawItem> {
         if trimmed.eq_ignore_ascii_case("END:VEVENT") {
             in_event = false;
             if let (Some(uid), Some(occurred_at)) = (uid.take(), start) {
-                // An expanded recurrence repeats its parent's UID, so the
-                // instance start has to join the key or every occurrence
-                // overwrites the last one and a weekly meeting is one row.
+                // Expanded recurrences share their parent's UID, so the instance joins the key.
                 let external_id = match &recurrence_id {
                     Some(rid) => format!("{uid}:{rid}"),
                     None => uid,
@@ -208,10 +193,7 @@ pub fn events_from_ics(body: &str) -> Vec<RawItem> {
     items
 }
 
-/// The prose half of the item, and therefore half of what gets embedded.
-///
-/// `ContextItem::embedding_text` is `title\nbody`, so this text IS the retrieval surface;
-/// write it as sentences a person would say, not a field dump, or location queries miss.
+/// Item body as prose: it is half of `embedding_text`, so a field dump would hurt retrieval.
 fn event_body(
     start: DateTime<Utc>,
     end: Option<DateTime<Utc>>,
@@ -265,8 +247,6 @@ END:VCALENDAR\r\n";
         assert_eq!(e.occurred_at.to_rfc3339(), "2026-08-17T09:30:00+00:00");
     }
 
-    /// The body IS the retrieval surface -- `embedding_text` is `title\nbody`.
-    /// If this becomes a field dump, retrieval quality goes with it.
     #[test]
     fn the_body_reads_like_a_sentence_and_carries_place_and_time() {
         let e = &events_from_ics(ONE)[0];
@@ -280,8 +260,6 @@ END:VCALENDAR\r\n";
         assert!(e.body.contains("Bring the referral letter"), "{}", e.body);
     }
 
-    /// RFC 5545 lets a break fall anywhere, including mid-word. Unfolding has to
-    /// happen before parsing or the property name itself can be split.
     #[test]
     fn folded_lines_are_rejoined_before_anything_reads_them() {
         let ics = "BEGIN:VEVENT\r\nUID:f1\r\nSUMMARY:Quarterly plan\r\n review with the team\r\nDTSTART:20260901T080000Z\r\nEND:VEVENT\r\n";
@@ -297,8 +275,6 @@ END:VCALENDAR\r\n";
         assert!(e.body.contains("One\nTwo"), "{}", e.body);
     }
 
-    /// The defect that would make a weekly meeting one row. An expanded
-    /// recurrence repeats its parent UID, so the instance has to join the key.
     #[test]
     fn expanded_recurrences_do_not_collapse_onto_one_id() {
         let ics = "BEGIN:VEVENT\r\nUID:weekly\r\nRECURRENCE-ID:20260901T080000Z\r\nSUMMARY:Standup\r\nDTSTART:20260901T080000Z\r\nEND:VEVENT\r\n\
@@ -311,8 +287,6 @@ BEGIN:VEVENT\r\nUID:weekly\r\nRECURRENCE-ID:20260908T080000Z\r\nSUMMARY:Standup\
         );
     }
 
-    /// The UID is the idempotency key. Inventing one would re-create the event
-    /// as a duplicate on every sync, forever.
     #[test]
     fn an_event_without_a_uid_or_a_start_is_skipped_not_defaulted() {
         let no_uid = "BEGIN:VEVENT\r\nSUMMARY:Ghost\r\nDTSTART:20260901T080000Z\r\nEND:VEVENT\r\n";
@@ -328,8 +302,6 @@ BEGIN:VEVENT\r\nUID:weekly\r\nRECURRENCE-ID:20260908T080000Z\r\nSUMMARY:Standup\
         assert_eq!(e.occurred_at.to_rfc3339(), "2026-12-25T00:00:00+00:00");
     }
 
-    /// A quoted parameter may contain a colon, so the name/value split cannot
-    /// be a plain `split_once(':')`.
     #[test]
     fn a_colon_inside_a_quoted_parameter_does_not_end_the_name() {
         let ics = "BEGIN:VEVENT\r\nUID:q1\r\nATTENDEE;CN=\"Ochieng: the elder\":mailto:o@example.org\r\nSUMMARY:Call\r\nDTSTART:20260901T080000Z\r\nEND:VEVENT\r\n";
@@ -344,8 +316,6 @@ BEGIN:VEVENT\r\nUID:weekly\r\nRECURRENCE-ID:20260908T080000Z\r\nSUMMARY:Standup\
         assert_eq!(e.participants, vec!["sam@example.org".to_string()]);
     }
 
-    /// Text outside a VEVENT -- VTIMEZONE, VALARM, calendar-level properties --
-    /// must not leak into the event being built.
     #[test]
     fn properties_outside_an_event_are_ignored() {
         let ics = "BEGIN:VCALENDAR\r\nSUMMARY:Not an event\r\nBEGIN:VEVENT\r\nUID:s1\r\nSUMMARY:Real\r\nDTSTART:20260901T080000Z\r\nEND:VEVENT\r\nLOCATION:Nowhere\r\nEND:VCALENDAR\r\n";

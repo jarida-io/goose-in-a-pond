@@ -1,9 +1,6 @@
 pub mod extension_manager;
 pub mod giap_registration;
 pub mod goose_agent;
-/// Test-only: pins the wording of the invisible messages goose appends to a
-/// turn. See the module docs — it lives here rather than in `pond-core` because
-/// it `include_str!`s the submodule, which `pond-core` must never need.
 #[cfg(test)]
 mod goose_nudges;
 pub mod logging;

@@ -1,7 +1,5 @@
-//! The ONNX session and the forward pass. Kokoro takes `input_ids` (i64, `[1, ≤512]`),
-//! `style` (f32, `[1, 256]`) and `speed` (f32, `[1]`) and returns mono f32 at 24 kHz.
-//! The ~92 MB (q8) weights load on first use and can be dropped by [`Engine::unload`]: the
-//! pond is idle most of its life, so a session held from startup costs memory for nothing.
+//! Kokoro ONNX session: `input_ids` (i64, `[1, ≤512]`), `style` (f32, `[1, 256]`) and `speed`
+//! (f32, `[1]`) in, mono f32 at 24 kHz out. Loaded lazily and unloadable: the pond is mostly idle.
 
 use anyhow::{anyhow, Context, Result};
 use ort::session::Session;
@@ -11,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::tokenizer::Chunk;
 use crate::voices::STYLE_DIM;
 
-/// Kokoro's output sample rate. Not configurable — it is what the vocoder emits.
+/// Kokoro's output sample rate, fixed by the vocoder.
 pub const SAMPLE_RATE: u32 = 24_000;
 
 /// A loaded Kokoro graph.
@@ -21,9 +19,7 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Build a session over `model_path`. `intra_threads` bounds ONNX Runtime's per-op thread
-    /// pool; on the Jetson the LLM wants the same six cores, and an unbounded pool's threads
-    /// sit in resident memory whether or not anything is speaking.
+    /// Load the model; `intra_threads` caps ORT's pool, since the Jetson's LLM shares its cores.
     pub fn load(model_path: &Path, intra_threads: Option<usize>) -> Result<Self> {
         if !model_path.exists() {
             return Err(anyhow!(
@@ -33,9 +29,7 @@ impl Engine {
         }
         let mut builder = Session::builder().context("failed to create ort session builder")?;
         if let Some(n) = intra_threads {
-            // ort returns its builder back inside the error type here, which
-            // means the error is not `std::error::Error` and `.context()` does
-            // not apply. Flatten it by hand.
+            // ort's error here wraps the builder and isn't `std::error::Error`, so no `.context()`.
             builder = builder
                 .with_intra_threads(n)
                 .map_err(|e| anyhow!("failed to set ort intra-op threads to {n}: {e}"))?;
@@ -59,8 +53,7 @@ impl Engine {
         &self.model_path
     }
 
-    /// Run one chunk. `style` must be [`STYLE_DIM`] long; `speed` is the pace
-    /// multiplier (1.0 = as trained).
+    /// Run one chunk; `style` must be [`STYLE_DIM`] long, `speed` 1.0 = as trained.
     pub fn synthesize(&mut self, chunk: &Chunk, style: &[f32], speed: f32) -> Result<Vec<f32>> {
         if style.len() != STYLE_DIM {
             return Err(anyhow!(
@@ -77,8 +70,7 @@ impl Engine {
             ));
         }
 
-        // Built as (shape, Vec) on purpose: `ort` resolves ndarray 0.17 while the workspace is
-        // on 0.16, so an `Array2` built here is a different type from what `from_array` takes.
+        // (shape, Vec), not `Array2`: `ort` uses ndarray 0.17, the workspace 0.16.
         let n = ids.len() as i64;
         let outputs = self
             .session
@@ -110,9 +102,7 @@ pub fn duration_secs(samples: &[f32]) -> f32 {
 mod tests {
     use super::*;
 
-    /// A missing model must surface as an error the caller can report, not a
-    /// panic inside the voice loop. `Session` is not `Debug`, so match rather
-    /// than `unwrap_err`.
+    /// `Session` is not `Debug`, so match rather than `unwrap_err`.
     #[test]
     fn missing_model_is_an_error_not_a_panic() {
         match Engine::load(Path::new("/nope/kokoro.onnx"), None) {

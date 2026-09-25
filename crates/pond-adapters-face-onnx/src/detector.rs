@@ -1,6 +1,4 @@
-//! UltraFace (RFB-320) ONNX face detector implementing [`FaceDetector`]: bbox only, no
-//! landmarks. Outputs are decoded `[x1,y1,x2,y2]` in normalised `[0,1]`, so post-processing
-//! is confidence filtering plus NMS. Model:
+//! UltraFace (RFB-320) ONNX [`FaceDetector`]: boxes only, no landmarks. Model:
 //! <https://github.com/onnx/models/tree/main/validated/vision/body_analysis/ultraface>
 
 use anyhow::{anyhow, Context, Result};
@@ -34,10 +32,7 @@ pub struct UltraFaceDetector {
 }
 
 impl UltraFaceDetector {
-    /// Load an UltraFace ONNX model from `model_path`.
-    ///
-    /// `score_thresh` is the minimum anchor confidence (default 0.7 suits indoor cameras);
-    /// `iou_thresh` is the IoU above which NMS collapses overlapping boxes (default 0.3).
+    /// Load a model; 0.7 `score_thresh` suits indoor cameras, 0.3 is a typical NMS `iou_thresh`.
     pub fn new(model_path: impl Into<PathBuf>, score_thresh: f32, iou_thresh: f32) -> Result<Self> {
         let path = model_path.into();
         if !path.exists() {
@@ -62,9 +57,7 @@ impl UltraFaceDetector {
         })
     }
 
-    /// Preprocess raw image bytes into the `[1,3,H,W]` float tensor the model
-    /// expects.  Returns the tensor **and** the original image dimensions so
-    /// the detected normalised boxes can be rescaled.
+    /// Decode into the `[1,3,H,W]` input tensor, plus the original size for rescaling boxes.
     fn preprocess(&self, bytes: &[u8]) -> Result<(Array4<f32>, u32, u32)> {
         let img = image::load_from_memory(bytes).context("failed to decode image")?;
         let (orig_w, orig_h) = img.dimensions();
@@ -92,10 +85,8 @@ impl FaceDetector for UltraFaceDetector {
         let iou_thresh = self.iou_thresh;
         let this_input = (self.input_w, self.input_h);
 
-        // ONNX inference is CPU-bound — offload to a blocking thread.
         let res = tokio::task::spawn_blocking(move || -> Result<Option<DetectedFace>> {
-            // Preprocess inside the blocking thread so image decode doesn't
-            // hog the async runtime.
+            // Decode here too, off the async runtime.
             let det = UltraFaceDetector {
                 session: session.clone(),
                 score_thresh,
@@ -113,10 +104,8 @@ impl FaceDetector for UltraFaceDetector {
                 .run(ort::inputs![input_tensor])
                 .context("UltraFace inference failed")?;
 
-            // The ONNX Model Zoo UltraFace graph outputs two tensors:
-            //   scores: [1, N, 2]  (background, face)
-            //   boxes:  [1, N, 4]  (x1, y1, x2, y2 in normalised [0,1])
-            // Names vary ("scores"/"boxes"), so we identify by the last dim.
+            // scores [1, N, 2] = (background, face); boxes [1, N, 4] = normalised x1,y1,x2,y2.
+            // Output names vary, so match on the last dim.
             let mut scores_vec: Option<Vec<f32>> = None;
             let mut scores_shape: Vec<usize> = vec![];
             let mut boxes_vec: Option<Vec<f32>> = None;
@@ -145,7 +134,6 @@ impl FaceDetector for UltraFaceDetector {
             let boxes =
                 boxes_vec.ok_or_else(|| anyhow!("UltraFace boxes tensor missing (last-dim 4)"))?;
 
-            // scores: [1, N, 2], boxes: [1, N, 4]
             let n = *scores_shape.get(1).unwrap_or(&0);
             if n == 0 || boxes_shape.get(1) != Some(&n) {
                 return Err(anyhow!(
@@ -190,10 +178,7 @@ impl FaceDetector for UltraFaceDetector {
                 }
             }
 
-            // Return the highest-scoring remaining box, rescaled to the
-            // original image's pixel coordinates.  UltraFace does not emit
-            // landmarks, so the embedding stage will fall back to the
-            // crop-and-resize path (no similarity-warp alignment).
+            // UltraFace has no landmarks, so embedding falls back to crop-and-resize, unaligned.
             let top = kept.first().copied();
             Ok(top.map(|([x1, y1, x2, y2], score)| {
                 let px1 = (x1 * orig_w as f32).round().clamp(0.0, orig_w as f32 - 1.0) as u32;
@@ -257,7 +242,6 @@ mod tests {
 
     #[test]
     fn iou_half_overlap() {
-        // Two unit squares overlapping on exactly half their area.
         let a = [0.0, 0.0, 1.0, 1.0];
         let b = [0.5, 0.0, 1.5, 1.0];
         // intersection = 0.5, union = 1.5 → 1/3.

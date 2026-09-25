@@ -1,7 +1,5 @@
-//! Wraps an `LlmProvider` as a Goose `Provider` (inverse of `provider_adapter.rs`) so that
-//! `chat_provider = "mesh"` drives real chat through `GooseAdapter` (#132 M4). No MCP tool-calling
-//! over mesh by construction: `LlmProvider` has no tools parameter, so `tools` is dropped and the
-//! model is told so on the LAST message, where an instruction survives best (`answer_contract()`).
+//! Wraps an `LlmProvider` as a Goose `Provider` for `chat_provider = "mesh"`. `LlmProvider` has
+//! no tools parameter, so tools are dropped and the LAST message says so (it survives best).
 
 use std::sync::Arc;
 
@@ -15,10 +13,8 @@ use pond_core::models::domain::message::{ChatMessage, Role};
 use pond_core::models::ports::provider::{LlmProvider, StreamToken};
 use rmcp::model::Tool;
 
-/// Appended to the last message whenever a non-empty `tools` is about to be dropped, so the
-/// borrowed model hears that the tools it was just described do not work this turn. Spelled out
-/// negatively as well ("do not use tags / do not narrate") because both observed leaks were about
-/// FORM: one echoed `<answer-contract>` verbatim, the other narrated a tool decision.
+/// Appended when non-empty `tools` are dropped. The explicit "don'ts" target observed leaks:
+/// an echoed `<answer-contract>` tag and narrated tool decisions.
 const NO_TOOLS_OVER_MESH_NOTICE: &str = "\n\n(Tool calls and memory search are not available for \
 this response — it is running on a borrowed peer over the mesh. Answer directly and briefly, in \
 plain prose. Do not call a tool, do not describe deciding whether one is needed, and do not use or \
@@ -33,9 +29,7 @@ impl MeshProvider {
         Self { inner }
     }
 
-    /// Goose has no `System`/`Tool` message role at the type level — mirrors
-    /// `GooseProviderAdapter::from_goose_message`'s existing treatment
-    /// exactly (`provider_adapter.rs`), just run in the opposite direction.
+    /// Inverse of `GooseProviderAdapter::from_goose_message`; Goose has no `System`/`Tool` role.
     fn from_goose_message(msg: &Message) -> ChatMessage {
         let role = match msg.role {
             rmcp::model::Role::User => Role::User,
@@ -72,10 +66,7 @@ impl Provider for MeshProvider {
                 tool_count = tools.len(),
                 "mesh provider: dropping tools — MCP tool-calling is not available over the mesh yet"
             );
-            // `system` names every tool and invites their use; dropping only the structured
-            // argument would leave the borrowed model narrating tool decisions, not answering.
-            // The notice goes on the LAST message, not `system` (module docs say why). A real turn
-            // always has a message; an empty one falls back to `system` rather than dropping it.
+            // `system` still advertises the tools; with no messages, the notice becomes one.
             match chat_messages.last_mut() {
                 Some(last) => last.content.push_str(NO_TOOLS_OVER_MESH_NOTICE),
                 None => {
@@ -83,10 +74,7 @@ impl Provider for MeshProvider {
                 }
             }
         }
-        // Owned clones moved into the generator below so the returned stream
-        // is 'static (Goose's `MessageStream` alias carries no lifetime) —
-        // `self.inner.stream_complete(...)` itself returns a stream borrowing
-        // `&self`, which would not outlive this method call otherwise.
+        // Owned clone so the stream is 'static, as Goose's `MessageStream` requires.
         let inner = self.inner.clone();
 
         let stream = async_stream::stream! {
@@ -138,9 +126,7 @@ mod tests {
         assert_eq!(translated.content, "hi there");
     }
 
-    /// `MockProvider`'s `stream_complete` is the trait default (text-only, never
-    /// `StreamToken::Usage`), so it cannot exercise usage translation; this stub emits both,
-    /// as a real streaming provider or `MeshInferenceProvider`'s responder does.
+    /// Emits text and `StreamToken::Usage`, which `MockProvider`'s default stream never does.
     struct StreamingStubProvider;
 
     #[async_trait]
@@ -201,9 +187,7 @@ mod tests {
         assert!(saw_usage, "expected a terminal usage item");
     }
 
-    /// Records the `system_prompt` and `messages` it was called with, so
-    /// tests can assert on what actually reached the "model" rather than
-    /// just that the call succeeded.
+    /// Records the `system_prompt` and `messages` that reached the "model".
     struct CapturingProvider {
         seen_system: std::sync::Mutex<Option<String>>,
         seen_messages: std::sync::Mutex<Option<Vec<ChatMessage>>>,
@@ -235,10 +219,6 @@ mod tests {
         }
     }
 
-    /// The exact failure the notice exists for: `system` names tools the dropped `tools` argument
-    /// makes non-functional, and without it the borrowed model narrates tool use instead of
-    /// answering. It must land on the LAST message, not `system`, which sits furthest from
-    /// generation and decays worst for a small model (see the module docs).
     #[tokio::test]
     async fn a_nonempty_tools_list_gets_a_no_tools_notice_appended_to_the_last_message() {
         let provider = Arc::new(CapturingProvider::new());
@@ -277,8 +257,6 @@ mod tests {
         );
     }
 
-    /// A turn with no tools offered in the first place needs no override —
-    /// both `system` and the last message reach the peer byte-for-byte.
     #[tokio::test]
     async fn an_empty_tools_list_leaves_the_conversation_untouched() {
         let provider = Arc::new(CapturingProvider::new());

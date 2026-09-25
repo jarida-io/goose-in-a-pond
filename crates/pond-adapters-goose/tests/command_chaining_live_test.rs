@@ -1,7 +1,5 @@
-//! #105 (Q2-28) Command-chaining harness: multi-intent voice utterances through the REAL
-//! GooseAdapter loop with giap builtins wired to recording fakes. Asserts one tool call per
-//! sub-intent, real side effects and a spoken summary; prints the turn count and latency that
-//! `default_voice_max_turns` was tuned on. Ignored; set GIAP_OLLAMA_URL=http://127.0.0.1:11434.
+//! Command-chaining harness: multi-intent voice utterances through the REAL GooseAdapter loop,
+//! with builtins wired to recording fakes. Ignored; set GIAP_OLLAMA_URL=http://127.0.0.1:11434.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -29,12 +27,10 @@ fn chaining_settings() -> Settings {
     let mut s = Settings::default();
     s.chat_provider = "ollama".to_string();
     s.chat_model = std::env::var("GIAP_CHAINING_MODEL").unwrap_or_else(|_| "llama3.2".to_string());
-    // The exact production voice budget under test — a chained command must
-    // complete inside it (acceptance criterion for the tuning half of #105).
+    // The production voice budget: a chained command must complete inside it.
     s.agent_max_turns = Settings::default().agent_max_turns;
     s.voice_max_turns = Settings::default().voice_max_turns;
-    // Keep the tool surface small and deterministic for 3B-class models:
-    // only the extensions the scenarios exercise.
+    // Only the extensions the scenarios use, to keep 3B-class models deterministic.
     s.ext_device_enabled = true;
     s.ext_schedule_enabled = true;
     s.ext_memory_enabled = false;
@@ -64,8 +60,7 @@ impl SettingsRepository for ChainingSettingsRepo {
 
 // ── Recording fakes behind the real MCP tools ────────────────────────────────
 
-/// One registered smart light, so `set_device_state` has a real target and
-/// the prompt advertises a home device.
+/// One smart light, so `set_device_state` has a real target.
 struct OneLightRegistry;
 
 fn living_room_light() -> Device {
@@ -102,8 +97,7 @@ impl DeviceRegistry for OneLightRegistry {
     }
 }
 
-/// Records EVERY control call (pond-core's RecordingDeviceControl only keeps
-/// the last one; chaining assertions need the full list).
+/// Records EVERY control call; pond-core's `RecordingDeviceControl` keeps only the last.
 #[derive(Default)]
 struct CountingDeviceControl {
     calls: Mutex<Vec<String>>,
@@ -141,8 +135,7 @@ impl DeviceControlPort for CountingDeviceControl {
     }
 }
 
-/// In-memory scheduler: records created tasks so the alarm half of a chained
-/// command is observable.
+/// In-memory scheduler recording created tasks.
 #[derive(Default)]
 struct RecordingScheduler {
     created: Mutex<Vec<Schedule>>,
@@ -207,9 +200,7 @@ impl SchedulerPort for RecordingScheduler {
 
 // ── Harness plumbing ─────────────────────────────────────────────────────────
 
-/// The recording fakes the MCP tools dispatch into. Registration into Goose's
-/// builtin-extension registry is process-global, so it happens exactly once
-/// per test binary and every scenario reads the same fakes.
+/// Fakes the MCP tools dispatch into, registered once per binary (Goose's registry is global).
 struct Recorders {
     device_control: Arc<CountingDeviceControl>,
     scheduler: Arc<RecordingScheduler>,
@@ -273,14 +264,10 @@ async fn run_utterance(session_id: &str, utterance: &str) -> ChainRun {
         session_id: session_id.to_string(),
         model_role: "task".to_string(),
         images: Vec::new(),
-        // The whole point of #105: this is a VOICE request, so the loop runs
-        // under the tuned voice_max_turns cap.
+        // A VOICE request, so the loop runs under the tuned `voice_max_turns` cap.
         voice_mode: true,
         canvas_mode: false,
-        // PAI-1 P3/P6 made these required on AgentRequest and did not update
-        // the live-hardware tests, so this file stopped compiling and
-        // `cargo test -p pond-adapters-goose -- --ignored` has been failing at
-        // BUILD ever since. Household is what a test with no speaker means.
+        // Household is what a test with no speaker means.
         profile_scope: ProfileScope::Household,
         profile_context: None,
         tool_group_allowlist: None,
@@ -324,8 +311,6 @@ fn summary_mentions(summary: &str, any_of: &[&str]) -> bool {
 
 // ── Scenarios ────────────────────────────────────────────────────────────────
 
-/// #105 acceptance: "turn off the lights AND set a 7am alarm" executes both
-/// sub-actions and the spoken summary covers both.
 #[tokio::test]
 #[ignore = "requires live Ollama agent at GIAP_OLLAMA_URL"]
 async fn chained_light_and_alarm_executes_both_and_summarises() {
@@ -383,8 +368,6 @@ async fn chained_light_and_alarm_executes_both_and_summarises() {
     );
 }
 
-/// Second scripted chain — a different tool pairing (brightness + reminder)
-/// to show chaining generalises beyond the canonical utterance.
 #[tokio::test]
 #[ignore = "requires live Ollama agent at GIAP_OLLAMA_URL"]
 async fn chained_dim_and_reminder_executes_both_and_summarises() {

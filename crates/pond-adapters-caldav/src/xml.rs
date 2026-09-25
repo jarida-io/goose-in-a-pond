@@ -1,7 +1,5 @@
-//! Reading a WebDAV `multistatus` without pretending to implement WebDAV.
-//!
-//! Servers disagree about namespace prefixes (`d:href`, `D:href`, `href`), so everything here
-//! matches on the LOCAL name and ignores the prefix; a different server must not break it.
+//! Minimal WebDAV `multistatus` reader. Matches LOCAL names only, since servers disagree on
+//! namespace prefixes (`d:href`, `D:href`, `href`).
 
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -18,9 +16,7 @@ pub struct DavResponse {
     pub calendar_data: Option<String>,
     /// `<getctag>` or `<sync-token>`: what makes the next sync incremental.
     pub ctag: Option<String>,
-    /// An href nested inside a property such as `<current-user-principal>` or
-    /// `<calendar-home-set>`, which is how discovery walks from one URL to the
-    /// next.
+    /// Href inside `<current-user-principal>`/`<calendar-home-set>`: discovery's next URL.
     pub nested_href: Option<String>,
 }
 
@@ -29,21 +25,15 @@ fn local(name: &[u8]) -> String {
     s.rsplit(':').next().unwrap_or("").to_ascii_lowercase()
 }
 
-/// Parse a `multistatus` document into its responses.
-///
-/// Unknown elements are skipped rather than refused: a server that sends extra properties
-/// is behaving correctly, and failing on them would tie the connector to the servers tested.
+/// Parse a `multistatus` into its responses; unknown elements are skipped, not refused.
 pub fn parse_multistatus(xml: &str) -> anyhow::Result<Vec<DavResponse>> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
 
     let mut responses = Vec::new();
     let mut current: Option<DavResponse> = None;
-    // The element stack, by local name, so text can be attributed to the
-    // property that contains it rather than to whatever opened last.
+    // Local-name element stack, so text is attributed to its enclosing property.
     let mut stack: Vec<String> = Vec::new();
-    // `<href>` appears both as the response's own subject and nested inside
-    // properties; depth tells them apart.
     let mut seen_response_href = false;
 
     loop {
@@ -55,8 +45,7 @@ pub fn parse_multistatus(xml: &str) -> anyhow::Result<Vec<DavResponse>> {
                     seen_response_href = false;
                 }
                 if name == "resourcetype" {
-                    // Children of resourcetype are empty elements; collect them
-                    // as they open.
+                    // Its children are self-closing; the `Empty` arm collects them.
                 }
                 stack.push(name);
             }
@@ -78,9 +67,7 @@ pub fn parse_multistatus(xml: &str) -> anyhow::Result<Vec<DavResponse>> {
                 };
                 match stack.last().map(String::as_str) {
                     Some("href") => {
-                        // The first href under a response is its own subject;
-                        // any later one is nested in a property and is where
-                        // discovery goes next.
+                        // First href is the response's; one nested in a property is the next hop.
                         if !seen_response_href
                             && !stack.iter().rev().skip(1).any(|s| {
                                 s == "current-user-principal"
@@ -110,9 +97,7 @@ pub fn parse_multistatus(xml: &str) -> anyhow::Result<Vec<DavResponse>> {
                 }
             }
             Ok(Event::Eof) => {
-                // quick-xml reports Eof on a TRUNCATED document rather than an error, so an
-                // interrupted reply would parse as a short list that the caller cannot tell
-                // from an empty calendar. Refuse it instead.
+                // quick-xml reports truncation as plain Eof; refuse it rather than look empty.
                 if !stack.is_empty() || current.is_some() {
                     return Err(anyhow::anyhow!(
                         "the calendar server's reply ended early, with {} element(s) unclosed",
@@ -153,8 +138,6 @@ mod tests {
         assert_eq!(r[0].ctag.as_deref(), Some("tag-1"));
     }
 
-    /// Prefix-blindness is the property that makes this work against more than
-    /// one server. iCloud, Google and Nextcloud all choose differently.
     #[test]
     fn an_unprefixed_document_parses_identically() {
         let xml = r#"<multistatus xmlns="DAV:">
@@ -166,8 +149,6 @@ mod tests {
         assert!(r[0].resource_types.iter().any(|t| t == "calendar"));
     }
 
-    /// Discovery depends on this distinction. Confusing the two hrefs sends the
-    /// next request back to the URL it just came from, which loops.
     #[test]
     fn an_href_inside_a_property_is_kept_apart_from_the_responses_own() {
         let xml = r#"<multistatus xmlns="DAV:">
@@ -192,9 +173,6 @@ END:VCALENDAR</C:calendar-data></prop></propstat>
         assert!(r[0].calendar_data.as_deref().unwrap().contains("VCALENDAR"));
     }
 
-    /// A server sending properties this connector has never heard of is
-    /// behaving correctly; refusing them would restrict it to the servers it
-    /// happened to be written against.
     #[test]
     fn unknown_properties_are_skipped_rather_than_refused() {
         let xml = r#"<multistatus xmlns="DAV:">
@@ -206,15 +184,11 @@ END:VCALENDAR</C:calendar-data></prop></propstat>
         assert_eq!(r[0].display_name.as_deref(), Some("Work"));
     }
 
-    /// A truncated reply must not read as an empty calendar. This is the
-    /// difference between "nothing is scheduled" and "the connection dropped",
-    /// and only one of them is worth telling a household.
     #[test]
     fn a_truncated_reply_is_an_error_not_an_empty_list() {
         let err = parse_multistatus("<multistatus><response><href>/c/</href>").unwrap_err();
         assert!(err.to_string().contains("ended early"), "{err}");
-        // And the well-formed empty case still parses, or the guard above is
-        // just refusing everything.
+        // The guard must not refuse a well-formed empty reply.
         assert!(
             parse_multistatus("<multistatus xmlns=\"DAV:\"></multistatus>")
                 .unwrap()

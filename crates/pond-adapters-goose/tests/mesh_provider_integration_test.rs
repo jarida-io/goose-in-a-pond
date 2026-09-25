@@ -1,7 +1,5 @@
-//! #132 Milestone 4: drives a real `GooseAdapter` turn through the "mesh" arm of
-//! `ensure_provider_current` with a real `MeshInferenceProvider` over mocked transport and
-//! ledger, so it runs in CI unlike the `*_live_test.rs` files here. It proves that
-//! `chat_provider = "mesh"` reaches a real chat turn, not just `AppState.llm_provider`.
+//! A real `GooseAdapter` turn through the "mesh" arm of `ensure_provider_current`, over mocked
+//! transport and ledger so it runs in CI (unlike the `*_live_test.rs` files).
 
 use std::sync::Arc;
 
@@ -43,10 +41,7 @@ impl SettingsRepository for MeshSettingsRepo {
 
 #[tokio::test]
 async fn a_chat_turn_over_an_unavailable_mesh_surfaces_a_clean_error() {
-    // No trusted peer configured — deterministically exercises the
-    // "no trusted, connected, funded mesh peer is available" path,
-    // mirroring exactly what a fresh Pond with mesh_enabled=true but no
-    // Circle yet would see on a real chat turn.
+    // No trusted peer: what a fresh mesh-enabled Pond with no Circle sees.
     let mesh_service = MeshInferenceService::spawn(
         Arc::new(MockMeshTransport::new(PeerId::from([1u8; 32]))),
         Arc::new(MockPeerDirectory::new()),
@@ -96,10 +91,7 @@ async fn a_chat_turn_over_an_unavailable_mesh_surfaces_a_clean_error() {
     let mut saw_mesh_error = false;
     while let Some(event_result) = stream.next().await {
         match event_result {
-            // Goose's own agent loop catches a provider error and surfaces it
-            // as a normal assistant Text event ("Ran into this error: ...
-            // Please retry..."), not a distinct Error event — confirmed by
-            // running this test and observing the real event stream.
+            // Goose surfaces a provider error as a normal Text event, not an Error event.
             Ok(AgentStreamEvent::Text { content }) => {
                 assert!(
                     content.to_lowercase().contains("mesh")
