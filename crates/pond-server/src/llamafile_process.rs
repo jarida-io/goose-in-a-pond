@@ -1,14 +1,4 @@
-//! Auto-start helper for the llamafile LLM server.
-//!
-//! llamafile bundles model weights + llama.cpp into a single executable.
-//! Running it with `--server --port 8080` starts an OpenAI-compatible HTTP
-//! server at `http://127.0.0.1:8080/v1/chat/completions`.
-//!
-//! Flow (called by `run_server`):
-//!   1. If something is already answering on port 8080, do nothing.
-//!   2. Find the first downloaded llamafile model in `<data_dir>/models/llm/`.
-//!   3. Spawn it as a background process.
-//!   4. Return a `LlamafileProcess` guard that kills it on drop.
+//! Auto-starts a downloaded llamafile as the local OpenAI-compatible LLM server.
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -40,9 +30,7 @@ pub async fn is_running(port: u16) -> bool {
 
 // ── Binary lookup ─────────────────────────────────────────────────────────────
 
-/// Find the first downloaded llamafile model in `<data_dir>/models/llm/`.
-///
-/// Scans the directory for any `.llamafile` (or `.llamafile.exe` on Windows) file.
+/// First `.llamafile` (`.llamafile.exe` on Windows) in `<data_dir>/models/llm/`.
 pub fn find_model(data_dir: &Path) -> Option<PathBuf> {
     let llm_dir = data_dir.join("models").join("llm");
     let entries = std::fs::read_dir(&llm_dir).ok()?;
@@ -62,10 +50,7 @@ pub fn find_model(data_dir: &Path) -> Option<PathBuf> {
 
 // ── Spawn ─────────────────────────────────────────────────────────────────────
 
-/// Returns true if the llamafile binary supports the `--jinja` flag.
-///
-/// Older builds (≤ v0.9.0 / build ~1500) do not have this flag and will crash
-/// if it is passed.  Running `--help` and checking the output is safe and fast.
+/// Whether the binary takes `--jinja`; builds ≤ v0.9.0 crash if it is passed.
 fn supports_jinja(binary: &Path) -> bool {
     std::process::Command::new(binary)
         .arg("--help")
@@ -78,16 +63,7 @@ fn supports_jinja(binary: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Spawn the llamafile server and wait up to 60 s for it to become ready.
-///
-/// Flags:
-///   `--server`        — HTTP server mode (serves `/v1/chat/completions`)
-///   `--port <port>`   — listen port
-///   `--host 127.0.0.1` — loopback only (local privacy, matches GIAP policy)
-///   `--nobrowser`     — don't open a browser tab
-///   `--jinja`         — Jinja2 chat templates (only passed on compatible builds)
-///
-/// Loading a 1–2 GB model typically takes 5–30 seconds depending on hardware.
+/// Spawn the server on loopback only (privacy) and wait up to 60 s for it to load.
 async fn spawn(binary: &Path, port: u16) -> Result<LlamafileProcess> {
     let jinja = supports_jinja(binary);
     if jinja {
@@ -122,9 +98,7 @@ async fn spawn(binary: &Path, port: u16) -> Result<LlamafileProcess> {
         }
     }
 
-    // Model still loading after 60 s — return the guard anyway.
-    // The first chat request will either succeed (if it finishes loading) or
-    // the FallbackProvider will catch the error.
+    // Still loading after 60 s: return the guard; the FallbackProvider covers early requests.
     println!("  ⚠  LLM did not respond within 60 s — it may still be loading in the background.");
     Ok(proc)
 }
@@ -136,17 +110,8 @@ pub fn url_for(port: u16) -> String {
     format!("http://127.0.0.1:{}", port)
 }
 
-/// Check → find → spawn.  Never returns an error — failures are printed as warnings.
-///
-/// The base port is [`crate::ports::LLAMAFILE`].  If busy, the next port in
-/// arithmetic sequence is tried automatically.
-///
-/// When `model_name` is provided, uses `ModelService::ensure_downloaded()` to
-/// autonomously download the model if it's not yet on disk.  Falls back to
-/// `find_model()` to locate any previously-downloaded model.
-///
-/// Returns `Some((guard, port))` with the actual port the process was started
-/// on, or `None` if already running (port = base) or no model was found.
+/// Check, find (downloading if needed), spawn on the first free port. Never errors: `None`
+/// if the base port already serves, or on any failure, which is printed.
 pub async fn try_start(
     data_dir: &Path,
     model_service: std::sync::Arc<pond_core::models::services::model_service::ModelService>,
@@ -167,33 +132,24 @@ pub async fn try_start(
         }
     };
 
-    // Try autonomous download via ModelService.
-    // When the name is empty/None, try to resolve from the assigned chat role
-    // or the first available llamafile model in the catalog.
+    // Resolve a model name (argument, chat role, then catalog) and download it if needed.
     let preferred_model = {
         use pond_core::models::domain::model_record::ModelCategory;
 
         let resolved_name: Option<String> = match model_name {
             Some(name) if !name.is_empty() => Some(name.to_string()),
-            _ => {
-                // Try role assignment first
-                if let Ok(Some(record)) = model_service.model_for_role("chat").await {
-                    if record.category == ModelCategory::Llamafile {
-                        Some(record.name.clone())
-                    } else {
-                        None
-                    }
+            _ => if let Ok(Some(record)) = model_service.model_for_role("chat").await {
+                if record.category == ModelCategory::Llamafile {
+                    Some(record.name.clone())
                 } else {
                     None
                 }
-                .or_else(|| {
-                    // Fall back to first available llamafile from catalog (blocking is fine at startup)
-                    None
-                })
+            } else {
+                None
             }
+            .or_else(|| None),
         };
 
-        // If we still don't have a name, try listing llamafile models from DB
         let resolved_name = match resolved_name {
             Some(n) => Some(n),
             None => {
@@ -202,7 +158,6 @@ pub async fn try_start(
                     .await
                 {
                     Ok(models) => {
-                        // Prefer a downloaded model; otherwise take the first one
                         let downloaded = models.iter().find(|m| m.downloaded);
                         let first = downloaded.or(models.first());
                         first.map(|m| m.name.clone())
@@ -230,7 +185,6 @@ pub async fn try_start(
         }
     };
 
-    // Prefer the downloaded model; fall back to any model in the models/llm/ directory.
     let model = preferred_model
         .filter(|p| p.exists())
         .or_else(|| find_model(data_dir));

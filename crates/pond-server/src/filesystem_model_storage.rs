@@ -1,16 +1,4 @@
-//! Filesystem implementation of `ModelStorage`.
-//!
-//! This is the **single place** that defines the on-disk directory layout
-//! for all model categories and tool binaries under `data_dir`.
-//!
-//! | Category       | Directory                       |
-//! |----------------|---------------------------------|
-//! | Whisper        | `models/`                       |
-//! | Llamafile      | `models/llm/`                   |
-//! | Gguf           | `models/gguf/`                  |
-//! | TtsPiper       | `models/tts/`                   |
-//! | TtsHttp/Ollama | no local file (`path_for` → None)|
-//! | Binaries       | `bin/`                          |
+//! Filesystem `ModelStorage`: the single place that defines the on-disk model layout.
 
 use std::path::{Path, PathBuf};
 
@@ -42,9 +30,7 @@ impl ModelStorage for FilesystemModelStorage {
             }
             ModelCategory::Gguf => self.data_dir.join("models").join("gguf").join(filename),
             ModelCategory::TtsPiper => self.data_dir.join("models").join("tts").join(filename),
-            // Voices sit under the engine dir: they are useless without the
-            // shared weights, and keeping them together means one directory
-            // to check when TTS goes quiet.
+            // Voices live under the engine dir: useless without its shared weights.
             ModelCategory::TtsKokoro => self
                 .data_dir
                 .join("models")

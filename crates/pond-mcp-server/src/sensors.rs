@@ -1,6 +1,4 @@
-//! Sensor Data Aggregator MCP Server — query stored IoT sensor readings.
-//!
-//! Provides 3 tools: `get_sensor_reading`, `get_sensor_history`, `list_sensors`.
+//! Sensor MCP server: live and stored IoT sensor readings.
 
 use std::sync::{Arc, OnceLock};
 
@@ -101,20 +99,8 @@ pub struct DeleteSensorRuleParams {
     pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
-/// What an enum-valued reading means, for the readings that are grades rather than
-/// quantities.
-///
-/// A reading is stored as a number, because that is what a rule threshold compares
-/// and what the table holds. But "air quality: 2 level" tells a reader nothing the
-/// device did not already know how to say — its own screen shows "Fair" for that
-/// value. The number stays, and the word goes beside it.
-///
-/// This is Matter's vocabulary, and the controller holds the same table in
-/// `matter-server/src/mapping/sensors.ts` for the surfaces it renders. Two copies
-/// is the price of readings being stored as bare numbers: the alternative is a
-/// column to carry the word, which would freeze it at write time and go stale
-/// whenever the wording improved. Both copies are Matter's own names, so neither
-/// is free to drift on its own.
+/// Matter's word for a graded (enum-valued) reading, e.g. air quality 2 = "Fair".
+/// Mirrors the table in `matter-server/src/mapping/sensors.ts`; keep both in sync.
 fn worded_reading(sensor_type: &str, value: f64) -> Option<&'static str> {
     // Only exact whole numbers name a grade; 1.5 is not a level.
     if value.fract() != 0.0 {
@@ -161,8 +147,6 @@ fn render_reading(sensor_type: &str, value: f64, unit: &str) -> String {
 mod reading_words {
     use super::*;
 
-    /// The purifier's own screen shows "Fair" where GIAP reported "2 level" -- the
-    /// same fact with the meaning removed, from the tool a model reaches for first.
     #[test]
     fn a_grade_is_read_as_a_grade() {
         assert_eq!(
@@ -179,15 +163,12 @@ mod reading_words {
         );
     }
 
-    /// The number stays beside the word: a rule threshold compares it, and a reader
-    /// checking one against the other should not have to translate back.
     #[test]
     fn a_quantity_is_left_alone() {
         assert_eq!(render_reading("temperature", 21.5, "C"), "21.5 C");
         assert_eq!(render_reading("carbon_monoxide", 433.0, "ppm"), "433 ppm");
     }
 
-    /// A value with no word must keep its number rather than borrow a neighbour's.
     #[test]
     fn an_unknown_grade_keeps_its_number() {
         assert_eq!(render_reading("air_quality", 9.0, "level"), "9 level");
@@ -196,12 +177,7 @@ mod reading_words {
     }
 }
 
-/// How long ago, in the coarsest unit that is still true.
-///
-/// The reply used to carry an absolute timestamp and nothing else, and a model
-/// reading "recorded at 10:50:59 UTC" has no way to know whether that is a minute or
-/// a day ago -- so it relayed the number as current. An age cannot be misread that
-/// way.
+/// How long ago, in the coarsest true unit; a model relays a bare timestamp as current.
 fn describe_age(elapsed: chrono::Duration) -> String {
     let seconds = elapsed.num_seconds().max(0);
     match seconds {
@@ -217,38 +193,18 @@ fn describe_age(elapsed: chrono::Duration) -> String {
 #[derive(Clone)]
 pub struct SensorsMcpServer {
     sensor_storage: Arc<dyn SensorStorage + Send + Sync>,
-    /// Read to answer for sensors that have never reported — readings alone cannot
-    /// distinguish "no such device" from "that device is here and has said nothing
-    /// yet", and the two need opposite replies — and to tell whether a device is
-    /// reachable, which decides whether a stored reading may be called current.
+    /// Knows devices that have not reported yet, and whether each is reachable.
     device_registry: Arc<dyn DeviceRegistry + Send + Sync>,
-    /// Asked what a reachable device reads NOW.
-    ///
-    /// This server held storage and a registry and so could not reach a device at
-    /// all, which made every answer a stored one. Worse than it sounds: the Matter
-    /// controller publishes only CHANGED values and the bridge dedupes again, so a
-    /// steady sensor is written once and never again. A flow sensor reporting 197.8
-    /// had exactly one row, hours old, for a device that had since been removed from
-    /// the fabric — and "what is the CURRENT reading" was answered with it.
+    /// Asked what a reachable device reads NOW. Stored rows can be hours stale: the Matter
+    /// controller publishes only changes and the bridge dedupes again.
     device_control: Arc<dyn DeviceControlPort>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
 
 impl SensorsMcpServer {
-    /// The registered id for a device reference, resolved the way every other tool
-    /// resolves one.
-    ///
-    /// A reading was looked up under whatever string the caller passed, so asking
-    /// for the temperature of "Thermostat" -- the device's own name, and the name
-    /// every other tool answers to -- found nothing, while "matter-1" found 20 C.
-    /// The visible symptom was a model reporting no reading, calling list_sensors,
-    /// and asking again with the id to get an answer: right twice, in a way that
-    /// reads as a device flickering in and out of existence.
-    ///
-    /// An unresolvable reference is passed through unchanged, so a caller naming a
-    /// device this registry has never heard of still gets the "no readings yet"
-    /// reply rather than a different error about the name.
+    /// Registered id for a device reference, resolved like every other tool; an unknown
+    /// reference passes through unchanged so the caller still gets "no readings yet".
     async fn resolved_device(&self, reference: &str) -> String {
         match self.device_registry.list_devices().await {
             Ok(devices) => match crate::device_control::resolve_device(reference, &devices) {
@@ -265,12 +221,7 @@ impl SensorsMcpServer {
 
 #[tool_router]
 impl SensorsMcpServer {
-    /// Every tool this server exposes, without constructing it or its deps.
-    ///
-    /// `tool_router()` is generated private to this module, so inventory code
-    /// outside it could not reach the real definitions and resorted to scanning
-    /// source text for `#[tool(` instead. This is the enumeration that scan was
-    /// standing in for.
+    /// Every tool this server exposes, without constructing it (`tool_router()` is private).
     pub(crate) fn tool_defs() -> Vec<rmcp::model::Tool> {
         Self::tool_router().list_all()
     }
@@ -288,23 +239,8 @@ impl SensorsMcpServer {
         }
     }
 
-    /// What the device reads now, if it can be asked and it answers for this sensor.
-    ///
-    /// `None` for every other case, and the caller falls back to the store: no such
-    /// device, a device the registry calls unreachable, a backend that cannot read
-    /// state at all (the port's default `state` bails, which is what every
-    /// non-Matter source does), or a device that answered without this sensor among
-    /// its values.
-    ///
-    /// Gated on reachability BEFORE the call, not on the call failing, because an
-    /// unreachable Matter device costs a fabric timeout to discover. `is_online` is
-    /// derived from `last_seen` freshness, so it is exactly the question "would this
-    /// answer".
-    ///
-    /// `state` names sensor values with the same words `list_sensors` uses -- both
-    /// come from the controller's one `SENSORS` table -- so matching `sensor_type`
-    /// against a `StateValue.name` is the protocol's own guarantee rather than a
-    /// convention this function hopes holds.
+    /// Live value, or `None` to use the store. Gated on `is_online`: an unreachable Matter
+    /// device costs a fabric timeout. `StateValue.name` uses the `list_sensors` words.
     async fn live_reading(&self, device_id: &str, sensor_type: &str) -> Option<String> {
         match self.device_registry.get_device(device_id).await {
             Ok(Some(device)) if device.is_online => {}
@@ -314,8 +250,7 @@ impl SensorsMcpServer {
         let state = match self.device_control.state(device_id).await {
             Ok(state) => state,
             Err(e) => {
-                // Debug: a backend that cannot read state reaches here on every
-                // call, and that is a normal configuration rather than a fault.
+                // Debug, not warn: backends that cannot read state hit this on every call.
                 tracing::debug!(error = %e, device_id, "sensors: live read unavailable");
                 return None;
             }
@@ -329,10 +264,6 @@ impl SensorsMcpServer {
     }
 
     /// Registered sensing devices that have no stored reading.
-    ///
-    /// A commissioned sensor is a device long before it is a row of readings —
-    /// asked about one, the old answer was "no sensor readings have been
-    /// recorded", which a model relays as "you have no such sensor".
     async fn silent_sensors(&self, reported: &[(String, String)]) -> Vec<String> {
         let Ok(devices) = self.device_registry.list_devices().await else {
             return Vec::new();
@@ -371,10 +302,7 @@ impl SensorsMcpServer {
 
         let (Some(device_id), Some(sensor_type)) = (device_id, sensor_type) else {
             return Ok(CallToolResult::success(vec![Content::text(
-                // No sample values: `resolved_device` falls through to the
-                // literal string when the registry has no match, so a copied
-                // device_id='bedroom' queries a device that does not exist and
-                // reports on it as though it did.
+                // No example values: a model copies them, and unknown ids pass through unresolved.
                 "Please provide both `device_id` and `sensor_type`, taken from the \
                  device and reading the user asked about.",
             )]));
@@ -382,9 +310,7 @@ impl SensorsMcpServer {
 
         let device_id = self.resolved_device(&device_id).await;
 
-        // Ask the device first, when the device is there to ask. See `live_reading`:
-        // a stored row can be arbitrarily old through no fault of anything, because
-        // only CHANGES are ever written.
+        // Live first: stored rows can be arbitrarily old, since only changes are written.
         if let Some(value) = self.live_reading(&device_id, &sensor_type).await {
             return Ok(CallToolResult::success(vec![Content::text(format!(
                 "Current {sensor_type} reading from '{device_id}': {value} (read from the \
@@ -398,12 +324,7 @@ impl SensorsMcpServer {
             .await
         {
             Ok(Some(r)) => Ok(CallToolResult::success(vec![Content::text(format!(
-                // Says it is STORED, and how old. The old wording was "Latest {type}
-                // reading from '{id}': {value} (recorded at {time})", and a model
-                // relayed that as the current reading -- correctly, since nothing in
-                // the sentence suggested otherwise. One flow reading was passed off
-                // as current more than five hours after the device had been removed
-                // from the fabric.
+                // Says STORED and how old, or a model relays it as the current reading.
                 "Last STORED {} reading from '{}': {} — recorded {}, {} ago. The device \
                  could not be read just now, so this may no longer be true.",
                 r.sensor_type,
@@ -661,8 +582,7 @@ struct SensorDeps {
 
 static SENSOR_DEPS: OnceLock<SensorDeps> = OnceLock::new();
 
-/// Install the sensor server's storage handle. Call once at startup,
-/// before any chat session loads the extension.
+/// Install the server's deps; call once at startup, before any session loads the extension.
 pub fn init_sensor_deps(
     sensor_storage: Arc<dyn SensorStorage + Send + Sync>,
     device_registry: Arc<dyn DeviceRegistry + Send + Sync>,
@@ -712,8 +632,7 @@ mod tests {
 
     use pond_core::user_data::ports::device_registry::{Device, RegisterDeviceRequest};
 
-    /// Registry stub, same reason as `StubStorage`: the pond-core mocks sit
-    /// behind a feature gate.
+    /// Local stub: the pond-core mocks sit behind a feature gate.
     struct StubRegistry(Vec<Device>);
 
     #[async_trait]
@@ -742,9 +661,7 @@ mod tests {
         Arc::new(StubRegistry(Vec::new()))
     }
 
-    /// A control port that cannot read state, which is every non-Matter backend:
-    /// `DeviceControlPort::state` has a default that bails, and that is the case the
-    /// stored fallback exists for.
+    /// Cannot read state, like every non-Matter backend (the default `state` bails).
     struct MuteControl;
 
     #[async_trait]
@@ -931,11 +848,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_reachable_device_is_read_now_rather_than_recalled() {
-        // The report this came from: "what is the CURRENT reading on the Flow
-        // Sensor?" answered 197.8 m3/h from a single stored row -- for a device that
-        // had been removed from the fabric five hours earlier. One row, because the
-        // controller publishes only CHANGED values and the bridge dedupes again, so a
-        // steady sensor is written once and never again.
         let storage = Arc::new(StubStorage::new());
         storage
             .record(reading("matter-5", "flow", 197.8))
@@ -966,10 +878,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_unreachable_device_falls_back_to_the_store_and_says_so() {
-        // The stored reading is still the best answer available -- it just must not
-        // be passed off as current. The old wording was "Latest {type} reading from
-        // '{id}': {value} (recorded at {time})", and a model relayed that as the
-        // present state, correctly, because nothing in the sentence said otherwise.
         let storage = Arc::new(StubStorage::new());
         storage
             .record(reading("matter-5", "flow", 197.8))
@@ -979,9 +887,7 @@ mod tests {
         let mut absent = sensor_device("matter-5", "Flow Sensor");
         absent.is_online = false;
         let registry: Arc<dyn DeviceRegistry + Send + Sync> = Arc::new(StubRegistry(vec![absent]));
-        // A control port that WOULD answer, to prove reachability is what gates the
-        // read rather than the call failing. An unreachable Matter device costs a
-        // fabric timeout to discover, and the registry already knows.
+        // Would answer: proves reachability, not a failed call, gates the read.
         let live: Arc<dyn DeviceControlPort> = Arc::new(SpeakingControl(vec![(
             "flow".to_string(),
             "12.4 m3/h".to_string(),
@@ -1005,10 +911,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_device_that_does_not_report_this_sensor_falls_back_too() {
-        // A reachable device that answers about other things. Matching `sensor_type`
-        // against a `StateValue.name` is the protocol's own guarantee -- both come
-        // from the controller's single SENSORS table -- but a device with a flow
-        // sensor and no thermometer must not silently produce a temperature.
         let storage = Arc::new(StubStorage::new());
         storage
             .record(reading("matter-5", "temperature", 20.0))
@@ -1109,10 +1011,6 @@ mod tests {
         assert!(text.contains("kitchen"), "should list kitchen: {text}");
     }
 
-    /// A commissioned sensor is a device long before it is a row of readings.
-    /// Listing only what has reported answered "no sensor readings recorded",
-    /// which a model relays as "you have no such sensor" — while the device sat
-    /// in the list, online.
     #[tokio::test]
     async fn a_registered_sensor_is_listed_even_before_it_reports() {
         let registry = Arc::new(StubRegistry(vec![sensor_device(
@@ -1135,7 +1033,6 @@ mod tests {
         );
     }
 
-    /// The silent list must not duplicate a sensor that has in fact reported.
     #[tokio::test]
     async fn a_reporting_sensor_is_listed_once() {
         let storage = Arc::new(StubStorage::new());

@@ -1,8 +1,4 @@
-//! System MCP Server — time, system info, notifications, shell, file I/O.
-//!
-//! Provides 6 tools: `get_current_time`, `get_system_info`, `send_notification`,
-//! `run_shell_command`, `read_file`, `write_file`.
-//! Stateless — no external dependencies.
+//! System MCP server: time, system info, notifications, shell and file I/O. Stateless.
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -65,12 +61,7 @@ pub struct SystemMcpServer {
 
 #[tool_router]
 impl SystemMcpServer {
-    /// Every tool this server exposes, without constructing it or its deps.
-    ///
-    /// `tool_router()` is generated private to this module, so inventory code
-    /// outside it could not reach the real definitions and resorted to scanning
-    /// source text for `#[tool(` instead. This is the enumeration that scan was
-    /// standing in for.
+    /// Every tool this server exposes, without constructing it (`tool_router()` is private).
     pub(crate) fn tool_defs() -> Vec<rmcp::model::Tool> {
         Self::tool_router().list_all()
     }
@@ -165,7 +156,6 @@ impl SystemMcpServer {
             sections.push(format!("Disks:\n{}", disk_lines.join("\n")));
         }
 
-        // Build UI hint with system overview
         let os_name = sysinfo::System::name().unwrap_or_else(|| "unknown".to_string());
         let arch = sysinfo::System::cpu_arch();
         let mut sys_mem = sysinfo::System::new();
@@ -202,8 +192,7 @@ impl SystemMcpServer {
             tracing::debug!("desktop notification unavailable: {e}");
         }
 
-        // Also push to connected phones over the foreground stream (#99), if the
-        // notification sender is wired (broadcast to all connected devices).
+        // Also push to connected phones over the foreground stream, if a sender is wired.
         let mut reached_devices = false;
         if let Some(sender) = crate::notification_sender() {
             let notification = pond_core::mcp::ports::notification::Notification {
@@ -264,9 +253,7 @@ impl ServerHandler for SystemMcpServer {
 
 use tokio::io::DuplexStream;
 
-/// Spawn function compatible with Goose's `SpawnServerFn` type.
-///
-/// No `init_*` needed — `SystemMcpServer` is stateless.
+/// Spawn function compatible with Goose's `SpawnServerFn` type; needs no `init_*`.
 pub fn spawn_system_server(reader: DuplexStream, writer: DuplexStream) {
     let server = SystemMcpServer::default();
     crate::serve_builtin("giap-system", server, reader, writer);

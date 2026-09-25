@@ -1,24 +1,5 @@
-//! Pulling a connected account into the personal-context corpus.
-//!
-//! The composition step for PAI-8's account connectors: it holds the
-//! [`ContextRepository`], the [`IngestPipeline`], the secret store and the
-//! protocol adapters together, which is why it lives in the binary rather than
-//! in `pond-core` — the domain does not know that CalDAV or IMAP exist and
-//! should not learn.
-//!
-//! # What it refuses to do
-//!
-//! * **It does not run when the pond is offline.** `network_mode` is checked
-//!   before a source is touched and the source is marked
-//!   [`Paused`](SourceStatus::Paused), never `Error`. PAI-8 invariant 5: an
-//!   operator who turned the network off is not looking at a fault.
-//! * **It does not retry a refused password.** A 401 becomes
-//!   [`NeedsReauth`](SourceStatus::NeedsReauth) and the source is left alone
-//!   until a person fixes it, because the alternative is a scheduled task
-//!   walking into a rate limit every interval on credentials that cannot work.
-//! * **It does not re-fetch an unchanged calendar.** The server's ctag is the
-//!   cursor; equal ctag means nothing has happened and the sync ends without a
-//!   REPORT. On a household calendar that is most syncs.
+//! Syncs connected accounts into the context corpus. Offline: `Paused`, never `Error`.
+//! A 401 becomes `NeedsReauth` and is not retried; an unchanged ctag skips the REPORT.
 
 use std::sync::Arc;
 
@@ -50,8 +31,7 @@ pub struct AccountSyncReport {
     pub failed: usize,
     /// Sources skipped because the pond is offline.
     pub paused: usize,
-    /// What each source did, named, so a household with two accounts can tell
-    /// which of them is the one that is not working.
+    /// Each source's outcome, by name, so a two-account household can tell which failed.
     pub per_source: Vec<SourceSyncOutcome>,
 }
 
@@ -66,18 +46,13 @@ fn note(report: &mut AccountSyncReport, source: &ContextSource, outcome: &str, i
     });
 }
 
-/// The credential blob behind a source's `secret_ref`.
-///
-/// The self-hosted base URL lives in here with the password rather than in a
-/// plain column, and that is deliberate: the address of a household's own
-/// server names the household. It is account configuration, and account
-/// configuration belongs in the encrypted store.
+/// The credential blob behind a source's `secret_ref`. Holds the self-hosted URL too: a
+/// household's own server address identifies it, so it belongs in the encrypted store.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AccountCredentials {
     pub username: String,
     pub password: String,
-    /// The self-hosted server, when there is one: a CalDAV base URL, or
-    /// `host:port` for IMAP. `None` for every named preset.
+    /// Self-hosted server: a CalDAV base URL or IMAP `host:port`; `None` for named presets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
 }
@@ -98,22 +73,13 @@ fn adapter_for(source: &ContextSource, creds: &AccountCredentials) -> Result<Cal
     })
 }
 
-/// True when the failure is the one a household can fix.
-///
-/// Matched on the adapter's own sentence rather than a status code, because by
-/// the time it reaches here it is an `anyhow` chain. The adapter writes that
-/// sentence in exactly one place and a test pins it.
+/// True for the failure a household can fix; matches the adapter's pinned error sentence.
 fn is_auth_failure(err: &anyhow::Error) -> bool {
     err.to_string().contains("app-specific password")
 }
 
-/// Sync every calendar source this pond holds.
-///
-/// Scope is [`ProfileScope::Household`] on purpose: this is a background sweep
-/// with no session and no speaker, so it must see every member's sources. The
-/// items it produces still inherit their own source's owner, which is where
-/// isolation actually lives — `ContextItem` denormalises `profile_id` from the
-/// source and migration 0044 refuses to let it move.
+/// Sync every calendar source. Household scope, as a sessionless sweep; items still inherit
+/// their source's `profile_id`, which migration 0044 keeps from moving.
 pub async fn sync_calendars(
     repo: Arc<dyn ContextRepository>,
     pipeline: Arc<IngestPipeline>,
@@ -209,10 +175,7 @@ async fn sync_one(
     let adapter = adapter_for(source, &creds)?;
     let calendars = adapter.discover_calendars().await?;
 
-    // Every calendar's ctag, joined. One string so a household with two
-    // calendars still gets "nothing changed" when neither did, and a change in
-    // either one re-fetches both -- which is correct and cheap, since the
-    // expensive part is the REPORT and there is at most a handful of them.
+    // All calendars' ctags joined: any change re-fetches all, which is cheap at a handful.
     let ctag: String = calendars
         .iter()
         .map(|c| c.ctag.clone().unwrap_or_else(|| c.url.clone()))
@@ -231,10 +194,7 @@ async fn sync_one(
             match pipeline.ingest(source, item, now).await {
                 Ok(_) => ingested += 1,
                 Err(e) => {
-                    // One malformed event must not abandon the rest of the
-                    // calendar. The pipeline already refused it; carrying on is
-                    // what makes a sync partially useful rather than all or
-                    // nothing.
+                    // One malformed event must not abandon the rest of the calendar.
                     tracing::debug!(source = source.id(), error = %e, "one calendar event was not ingested");
                 }
             }
@@ -247,13 +207,7 @@ async fn sync_one(
 
 // ── Mail ─────────────────────────────────────────────────────────────────────
 
-/// Sync every mail source this pond holds.
-///
-/// Deliberately a sibling of [`sync_calendars`] rather than a generic over both.
-/// The two protocols share their SHAPE — credentials, a window, a status — and
-/// nothing else: CalDAV discovers collections and has a ctag to skip work with,
-/// IMAP opens one mailbox and has neither. A generic over that difference would
-/// be a trait with one useful method and two awkward ones.
+/// Sync every mail source. Not generic with [`sync_calendars`]: they share only shape.
 pub async fn sync_mail(
     repo: Arc<dyn ContextRepository>,
     pipeline: Arc<IngestPipeline>,
@@ -345,12 +299,7 @@ async fn sync_one_mailbox(
         password: creds.password.clone(),
     });
 
-    // Resume above the last UID this pond saw.
-    //
-    // Re-reading the window is still idempotent — Message-ID is the
-    // external_id, so a message already stored is an update to the same row —
-    // but with bodies it is no longer CHEAP: a full re-read measured at 769 MB
-    // resident and took the pond off the air, every thirty minutes.
+    // Resume above the last seen UID: re-reading the window with bodies costs ~769 MB resident.
     let (items, next_cursor) = adapter
         .messages_since_cursor(ImapAdapter::default_window(now), source.cursor())
         .await?;
@@ -369,12 +318,7 @@ async fn sync_one_mailbox(
 
 // ── The port the route asks through ─────────────────────────────────────────
 
-/// Both connectors, one pass, wired to what the binary already holds.
-///
-/// The scheduled loop and the "check now" button go through this same struct
-/// rather than each calling the two sweeps in their own order. Two callers with
-/// their own idea of what a sync is, is how the button and the timer start
-/// disagreeing about what happened.
+/// Both connectors in one pass; the timer and the "check now" button must both use this.
 pub struct AccountSyncer {
     repo: Arc<dyn ContextRepository>,
     pipeline: Arc<IngestPipeline>,
@@ -394,11 +338,7 @@ impl AccountSyncer {
         }
     }
 
-    /// Calendar then mail, summed.
-    ///
-    /// Sequential rather than joined: they compete for the same uplink and the
-    /// same CPU, and on a Jetson two protocol conversations at once is a load
-    /// spike for no latency the household would notice.
+    /// Calendar then mail, summed; sequential, as both share one uplink and CPU on a Jetson.
     pub async fn run(&self, now: DateTime<Utc>) -> Result<AccountSyncSummary> {
         let calendars = sync_calendars(
             self.repo.clone(),

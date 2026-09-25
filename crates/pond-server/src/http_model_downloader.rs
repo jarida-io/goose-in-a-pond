@@ -1,7 +1,4 @@
-//! HTTP implementation of `ModelDownloader`.
-//!
-//! Wraps the existing `model_download::download_file()` helper so all download
-//! logic stays in one place.  No model-specific knowledge — just URL + path + size.
+//! HTTP `ModelDownloader`: a thin wrapper over `model_download::download_file()`.
 
 use anyhow::Result;
 use async_trait::async_trait;

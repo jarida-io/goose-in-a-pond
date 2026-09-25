@@ -1,14 +1,5 @@
-//! LLM-based memory extractor — uses the live LLM provider to extract
-//! durable facts from conversation turns.
-//!
-//! The extraction prompt is the whole per-turn prefill of a background job that
-//! runs after *every* turn, on the same single-slot local model that is serving
-//! chat — so its size is a latency cost, not just a context cost. It is kept
-//! near ~400 tokens (1589 chars) and spends that budget on the two rules a
-//! small model gets wrong unprompted: write in the third person, and write a
-//! sentence that still means something with the conversation removed.
-//! `pond-core`'s extraction service enforces both regardless — see
-//! `fact_defect`.
+//! LLM memory extractor. Its prompt is prefilled after every turn on the model serving chat,
+//! so keep it small (~400 tokens): size here is next-turn latency.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -81,23 +72,13 @@ impl MemoryExtractor for LlmMemoryExtractor {
                 .ok_or_else(|| anyhow!("no LLM provider available"))?
         };
 
-        // Build the user message for extraction
-        // Truncate long responses to stay within small-model context
-        // Truncate by CHARACTERS, not bytes. `&s[..500]` panics when byte 500
-        // lands inside a multi-byte char, and this runs in a spawned task whose
-        // JoinHandle is dropped — so the panic was swallowed and extraction was
-        // silently lost for that turn. Typographic apostrophes and em-dashes are
-        // 3 bytes each, and GIAP's users write Swahili and English prose full of
-        // them, so this fired on exactly the longest, most fact-dense replies.
+        // 500 chars, not bytes: slicing mid-char panics, and in this detached task, silently.
         let asst_truncated = match assistant_response.char_indices().nth(500) {
             Some((end, _)) => format!("{}...", &assistant_response[..end]),
             None => assistant_response.to_string(),
         };
 
-        // Label the roles. The assistant's reply is background for resolving
-        // what the user meant, never itself a source of facts — without saying
-        // so, a 500-char answer against a 17-char question is 97% of the input
-        // and the model dutifully extracts the assistant's own prose.
+        // The reply is labelled background only, or a small model mines it for facts.
         let input = format!(
             "User said: {user_message}\n\
              Assistant replied (background only, never a source of facts): {asst_truncated}"
@@ -110,13 +91,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
     }
 }
 
-/// Parse the LLM's extraction response into `ExtractedFact` objects.
-///
-/// Accepts multiple formats for robustness with small models:
-/// - New format: `{"facts": [...]}`
-/// - Legacy format: bare JSON array `[...]`
-/// - Preamble: text before the JSON (model may add explanation)
-/// - Wrapped in thinking tags
+/// Parse extraction output, tolerating small-model variants (bare array, preamble, thinking).
 fn parse_extraction_response(
     raw: &str,
     existing_content: &[String],
@@ -124,10 +99,8 @@ fn parse_extraction_response(
 ) -> Result<Vec<ExtractedFact>> {
     let text = raw.trim();
 
-    // Strip thinking tokens if present
     let cleaned = strip_thinking(text);
 
-    // Try new format: {"facts": [...]}
     if let Some(arr) = extract_facts_from_object(&cleaned) {
         return Ok(parse_fact_array(&arr, existing_content, max_facts));
     }
@@ -137,8 +110,7 @@ fn parse_extraction_response(
         return Ok(parse_fact_array(&arr, existing_content, max_facts));
     }
 
-    // Try extracting JSON from within the text (model may add preamble)
-    // First try object format, then array format
+    // JSON inside a preamble: object format first, then array.
     if let Some(start) = cleaned.find('{') {
         if let Some(end) = cleaned.rfind('}') {
             let slice = &cleaned[start..=end];
@@ -176,12 +148,8 @@ fn extract_facts_from_object(text: &str) -> Option<Vec<serde_json::Value>> {
     Some(arr.clone())
 }
 
-/// Parse a JSON array of fact objects into `ExtractedFact` values.
-///
-/// Rejected facts do not consume the `max_facts` budget, and each accepted fact
-/// joins the dedup set so one response cannot emit the same fact twice in two
-/// wordings. The extraction service re-applies both checks before writing —
-/// this pass only stops junk from crowding out good facts here.
+/// Parse fact objects. Rejects don't count against `max_facts`; each accepted fact joins
+/// the dedup set, so one response can't repeat a fact in two wordings.
 fn parse_fact_array(
     arr: &[serde_json::Value],
     existing_content: &[String],
@@ -209,8 +177,7 @@ fn parse_fact_json(v: &serde_json::Value, existing: &[String]) -> Option<Extract
         .and_then(|f| f.as_str())?;
     let content = normalise_fact_content(raw);
 
-    // Unusable content: first person, a reference nothing can resolve, or
-    // nothing at all. Dropped here so it never reaches the store.
+    // Drop unusable content (first person, unresolvable reference, empty) before the store.
     if let Some(defect) = fact_defect(&content) {
         tracing::debug!(defect = %defect, "[memory-extraction] rejected fact: {content:?}");
         return None;
@@ -222,13 +189,7 @@ fn parse_fact_json(v: &serde_json::Value, existing: &[String]) -> Option<Extract
         .and_then(parse_segment_str)
         .unwrap_or(MemorySegment::Knowledge);
 
-    // Clamp to the segment's own ceiling, not to 1.0. The model authors this
-    // number and it drifts upward: on the device the eight `knowledge` rows
-    // averaged 0.806 against a prompted 0.50, and the single highest-importance
-    // memory in the whole store was "AI assistant" at 0.9 — which asserts
-    // nothing about anybody. Clamping (rather than ignoring the field) keeps the
-    // model's ability to signal LOWER confidence while removing its ability to
-    // promote noise above a real preference.
+    // Clamp to the segment's ceiling, not 1.0: the model inflates it, but may still go lower.
     let importance = v
         .get("importance")
         .and_then(|i| i.as_f64())
@@ -244,11 +205,7 @@ fn parse_fact_json(v: &serde_json::Value, existing: &[String]) -> Option<Extract
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    // Skip if an existing memory already says this — unless it is a
-    // correction, which restates the claim it overturns almost word for word
-    // and would be dropped in favour of the stale row. Read after the segment
-    // so the exemption can see it; `pond-core` applies the same rule at the
-    // write gate.
+    // Skip duplicates, except corrections: they restate the claim they overturn.
     let is_correction = segment == MemorySegment::Correction || corrects.is_some();
     if !is_correction && existing.iter().any(|e| is_duplicate_content(e, &content)) {
         return None;
@@ -280,7 +237,6 @@ pub fn parse_segment_str(s: &str) -> Option<MemorySegment> {
 pub fn strip_thinking(text: &str) -> String {
     let mut result = text.to_string();
 
-    // Strip <think>…</think>
     while let Some(start) = result.find("<think>") {
         if let Some(end) = result.find("</think>") {
             result = format!("{}{}", &result[..start], &result[end + 8..]);
@@ -291,7 +247,6 @@ pub fn strip_thinking(text: &str) -> String {
         }
     }
 
-    // Strip <|channel>…<channel|>
     while let Some(start) = result.find("<|channel>") {
         if let Some(end) = result.find("<channel|>") {
             result = format!("{}{}", &result[..start], &result[end + 10..]);
@@ -376,12 +331,6 @@ mod tests {
         assert_eq!(facts[0].segment, MemorySegment::Knowledge);
     }
 
-    /// Importance is clamped to the SEGMENT's ceiling, not to 1.0.
-    ///
-    /// The model authors this number and it drifts upward — on the device the
-    /// eight `knowledge` rows averaged 0.806 against a prompted 0.50, and the
-    /// highest-importance memory in the whole store was "AI assistant" at 0.9.
-    /// An over-confident label must not let noise outrank a real preference.
     #[test]
     fn importance_is_clamped_to_the_segment_ceiling() {
         let json = r#"[{"fact": "High importance", "segment": "identity", "importance": 1.5}]"#;
@@ -401,8 +350,6 @@ mod tests {
         );
     }
 
-    /// The model may still signal LOWER confidence than the segment default —
-    /// clamping is a ceiling, not a replacement.
     #[test]
     fn a_below_default_importance_is_preserved() {
         let json = r#"[{"fact": "User might prefer dark mode", "segment": "preference", "importance": 0.4}]"#;
@@ -536,8 +483,7 @@ mod tests {
 
     #[test]
     fn the_prompt_states_the_rules_the_gate_enforces() {
-        // The gate is silent when it fires, so the prompt has to carry the same
-        // rules or every turn pays for facts that are thrown away.
+        // Otherwise every turn pays for facts the silent gate throws away.
         for clue in [
             "Third person",
             "Self-contained",
@@ -552,11 +498,7 @@ mod tests {
         }
     }
 
-    /// This prompt is prefilled after *every* turn, on the same single-slot
-    /// local model that is serving chat, so growth here is felt as latency on
-    /// the next user message. It reached 2466 chars once by accretion; this
-    /// ceiling makes the next accretion a failing test rather than a silent
-    /// regression.
+    /// Growth here is latency on the next message, so accretion must fail a test.
     const EXTRACTION_PROMPT_CEILING: usize = 1800;
 
     #[test]
@@ -570,12 +512,7 @@ mod tests {
 
     #[test]
     fn a_correction_is_not_deduplicated_away_at_parse_time() {
-        // The stale row is already in the store; the correction changes one
-        // word of it, in the same order. Deliberately *not* an argument
-        // reversal: the order guard exempts those anyway, so a reversal pair
-        // would pass this test even with the correction exemption deleted. Here
-        // the lexical measure genuinely reads a duplicate (Jaccard 0.75,
-        // containment 0.86), so only the exemption keeps the fix.
+        // Not a reversal (the order guard exempts those anyway): a true lexical duplicate.
         let stale = "The user's daughter Aisha started school in Nakuru last year";
         let fixed = "The user's daughter Aisha started school in Nairobi last year";
         assert!(
@@ -583,8 +520,7 @@ mod tests {
             "test is vacuous unless the lexical measure flags this pair"
         );
 
-        // Both the segment and the bare `corrects` field must exempt it, since
-        // a small model sets one without the other often enough.
+        // Segment or bare `corrects` alone must exempt it: small models often set just one.
         let existing = vec![stale.to_lowercase()];
         for segment in ["correction", "preference"] {
             let json = format!(

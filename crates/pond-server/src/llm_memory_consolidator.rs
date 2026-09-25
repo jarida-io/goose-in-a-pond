@@ -1,7 +1,4 @@
-//! LLM-based memory consolidator — single-pass merge/prune using the live model.
-//!
-//! Simplified from boop-agent's 3-phase (proposer/adversary/judge) to a single
-//! compact prompt suitable for 3B models.
+//! LLM memory consolidator: one compact merge/prune prompt, small enough for 3B models.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -48,7 +45,7 @@ impl MemoryConsolidator for LlmMemoryConsolidator {
                 .ok_or_else(|| anyhow!("no LLM provider"))?
         };
 
-        // Format memories for the prompt (max 20 to stay within context)
+        // Max 20 memories, to stay within context.
         let batch: Vec<_> = memories.iter().take(20).collect();
         let formatted = batch
             .iter()
@@ -71,19 +68,8 @@ impl MemoryConsolidator for LlmMemoryConsolidator {
     }
 }
 
-/// Run a single-pass consolidation and shape the outcome like a three-stage run.
-///
-/// This is the `"single"` value of `memory_consolidation_mode`: one LLM call
-/// instead of three. On a 3B on-device model, paying for a Proposer, an
-/// Adversary and a Judge for a background chore is a real cost, so single-pass
-/// is the default and adversarial is the opt-in thorough mode.
-///
-/// The returned [`ConsolidationRunResult`] uses the same shape as the
-/// three-stage run so the SSE modal, the caller's apply step, and the
-/// `consolidation_runs` audit row are identical across modes. Because there is
-/// no adversary or judge here, every proposal is recorded as agreed-and-accepted
-/// with a rationale that says so — the audit trail must not imply a review that
-/// did not happen.
+/// The `"single"` `memory_consolidation_mode`: one LLM call, three-stage result shape.
+/// Every proposal is recorded as accepted, with a rationale saying no review happened.
 pub async fn run_single_pass(
     provider: Arc<RwLock<Option<Arc<dyn LlmProvider>>>>,
     memories: &[MemoryFragment],
@@ -125,8 +111,7 @@ pub async fn run_single_pass(
         .consolidate(memories)
         .await?;
 
-    // A cancel that landed while the single call was in flight: drop the
-    // proposals rather than applying work the user interrupted.
+    // Cancelled mid-call: drop the proposals rather than apply interrupted work.
     if cancel.is_cancelled() {
         emit(&event_tx, ConsolidationEvent::Cancelled).await;
         return Ok(empty(start));
@@ -181,10 +166,8 @@ pub async fn run_single_pass(
 fn parse_consolidation_response(raw: &str) -> Result<Vec<ConsolidationAction>> {
     let text = raw.trim();
 
-    // Strip thinking tokens
     let cleaned = crate::llm_memory_extractor::strip_thinking(text);
 
-    // Try to find JSON array
     let json_str = if cleaned.starts_with('[') {
         cleaned.to_string()
     } else if let Some(start) = cleaned.find('[') {

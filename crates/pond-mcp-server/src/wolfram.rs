@@ -1,43 +1,5 @@
-//! Wolfram|Alpha computation tools, served as part of the `giap-knowledge`
-//! extension.
-//!
-//! Two tools, deliberately, because two is what the capability needs and every
-//! tool schema is re-prefilled into the prompt on every turn:
-//!
-//! - `compute_answer` — ask Wolfram|Alpha a question. Replaces the DuckDuckGo
-//!   `instant_answer` tool this module was written to succeed. DuckDuckGo's
-//!   Instant Answer API returned a Wikipedia abstract, which
-//!   `get_wikipedia_article` already fetches in full; Wolfram *computes*, which
-//!   is a capability the pond had nowhere else. Nothing in the 60-odd tools
-//!   could do arithmetic, unit conversion, or "how many days until".
-//! - `explore_computation` — open one of the suggestions the previous answer
-//!   offered. A Wolfram result is rarely one answer: "mercury" is a planet and
-//!   an element, and the API says so in `assumptions` rather than picking. That
-//!   choice belongs to the model, which has the conversation, not to a
-//!   tie-break here that has only the query string.
-//!
-//! ## Why the suggestions are addressed by a short id
-//!
-//! Wolfram identifies an assumption by a code like `*C.mercury-_*Planet-`. A 2B
-//! model asked to echo that back gets it wrong often enough to matter, and a
-//! wrong code is a silent re-run of the *unrefined* query — an answer that
-//! looks fine and ignores what the user asked for. So each suggestion is
-//! offered as `w7`, resolved here against a small in-process ring. The literal
-//! `query` + `assumption` pair is still accepted, which is what makes a lost id
-//! (process restart, ring eviction) recoverable rather than a dead end.
-//!
-//! ## Key handling
-//!
-//! `WOLFRAM_APP_ID` comes from the secret store (the PAI-2 P2 pattern — see
-//! `secrets.rs`), never from `Settings`, because `GET /api/v1/settings`
-//! serialises that struct wholesale. With no key both tools say so and name the
-//! signup page; they never fall back to another provider, since silently
-//! answering a computation from a different source is how a wrong number gets
-//! an authoritative-looking citation.
-//!
-//! The app id is a credential in a query string, so the URL is never logged.
-//! [`redact_appid`] is what the log lines go through, and
-//! `a_logged_url_never_carries_the_app_id` is what keeps that true.
+//! Wolfram|Alpha computation for `giap-knowledge`. The AppID comes from the secret store
+//! (the settings API serves `Settings` whole) and rides the URL, so log via [`redact_appid`].
 
 use rmcp::{
     handler::server::wrapper::Parameters,
@@ -61,31 +23,16 @@ pub const WOLFRAM_APP_ID_KEY: &str = "WOLFRAM_APP_ID";
 const WOLFRAM_QUERY_BASE: &str = "https://api.wolframalpha.com/v2/query";
 const WOLFRAM_SIGNUP_URL: &str = "https://developer.wolframalpha.com/access";
 
-/// Result budget in characters. Matches the old `instant_answer` budget: a
-/// computation that needs more than this to state its answer is one the model
-/// should be drilling into with `explore_computation`, not dumping whole.
+/// Result budget in characters.
 const WOLFRAM_BUDGET: usize = 1800;
 
 /// Pods carried in the answer before the rest become explorable suggestions.
 const MAX_PODS: usize = 5;
 
-/// Suggestions offered at once. More than this and a small model starts
-/// picking by position rather than by meaning.
+/// Suggestions offered at once; beyond this a small model picks by position, not meaning.
 const MAX_EXPLORE: usize = 6;
 
-/// How many suggestions stay addressable by id. Sized for a conversation, not
-/// for a session: an id from twenty tool calls ago is not one the model is
-/// still reasoning about, and the explicit `query` + `assumption` form is the
-/// recovery path when an id has aged out.
-
-/// One call to the Full Results API.
-///
-/// `base` is a field rather than the [`WOLFRAM_QUERY_BASE`] constant read
-/// in-place so the HTTP path can be driven against a stub in
-/// `a_real_call_reaches_the_api_and_comes_back_rendered`. Without an injectable
-/// endpoint the only reachable tests are the ones either side of the network
-/// call, and "the request we build is one Wolfram would accept" is exactly the
-/// claim those cannot make. Production has one caller and it passes the const.
+/// One call to the Full Results API; `base` is injectable so tests can hit a stub.
 struct WolframQuery<'a> {
     base: &'a str,
     app_id: &'a str,
@@ -137,9 +84,7 @@ pub enum ExploreKind {
 }
 
 impl ExploreKind {
-    /// The verb shown to the model and the user. Deliberately plain: the model
-    /// picks by reading these, so "interpret as" has to be distinguishable from
-    /// "show section" at a glance.
+    /// Verb shown to the model and user; kept plain because the model picks by reading it.
     fn verb(self) -> &'static str {
         match self {
             ExploreKind::Assumption => "interpret as",
@@ -157,44 +102,21 @@ impl ExploreKind {
     }
 }
 
-/// One refinement the model can open with `explore_computation`.
+/// One refinement Wolfram offered alongside an answer.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExploreOption {
     pub id: String,
     pub label: String,
     pub kind: ExploreKind,
-    /// The input to send. For a `DidYouMean` this is the *replacement*
-    /// question; for the others it is the original.
+    /// Input to send: the replacement question for `DidYouMean`, else the original.
     pub query: String,
     pub assumption: Option<String>,
     pub pod_id: Option<String>,
 }
 
-/// Suggestions, tagged with the engine session that was offered them.
 static NEXT_EXPLORE_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Assign ids to a batch of suggestions and make them resolvable by id, for one
-/// session only.
-///
-/// **Scoped to the session, not the process.** The ring holds the user's own
-/// question text, and ids are short and therefore guessable, so a process-wide
-/// bucket would let any caller read back what another session asked. That is
-/// the same shape as the `giap-draft` bug `session_meta.rs` documents, where a
-/// model-supplied id defaulted to the literal "default" and every draft on the
-/// pond shared one bucket.
-///
-/// `None` — no `agent-session-id` in the call's `_meta` — mints nothing. The
-/// answer is still returned; only the openers are withheld, because the
-/// alternative is one shared bucket for every unattributed caller.
-///
-/// Ids are process-monotonic rather than per-result (`w1` every time) on
-/// purpose: reusing `w1` for a different suggestion means a stale id from
-/// earlier in the conversation points at something else.
-///
-/// They are now only a stable list key for the UI card. Nothing resolves one
-/// back to a suggestion: `explore_computation` was the reader and is gone, so
-/// a follow-up re-asks `compute_answer` with the suggestion's own wording
-/// instead of naming an id.
+/// Number suggestions with process-unique ids (UI list keys); without a session, offer none.
 fn with_ids(session: Option<&str>, mut options: Vec<ExploreOption>) -> Vec<ExploreOption> {
     if session.is_none() {
         return Vec::new();
@@ -278,8 +200,7 @@ impl KnowledgeMcpServer {
             }
         };
 
-        // 403 is the one status worth naming: it means the AppID is wrong or
-        // out of quota, and "HTTP 403" sends the user looking at their network.
+        // 403 means a bad AppID or exhausted quota; a bare "HTTP 403" reads as a network fault.
         if resp.status() == reqwest::StatusCode::FORBIDDEN {
             eprintln!("[wolfram] HTTP 403 — AppID rejected or over quota");
             return Ok(text_result(
@@ -313,10 +234,7 @@ impl KnowledgeMcpServer {
     }
 }
 
-/// Build the Full Results API URL.
-///
-/// `format=plaintext` because every pod is going into a prompt; asking for
-/// images as well doubles the response for bytes nothing here can read.
+/// The Full Results API URL, plaintext only: pods feed a prompt and images double the bytes.
 fn build_query_url(q: &WolframQuery<'_>) -> String {
     let mut url = format!(
         "{}?input={}&appid={}&output=json&format=plaintext&podtimeout=8",
@@ -333,11 +251,8 @@ fn build_query_url(q: &WolframQuery<'_>) -> String {
     url
 }
 
-/// Replace the AppID in any string with `appid=REDACTED`.
-///
-/// Applied to everything that reaches a log line or a tool result, because the
-/// key travels in the query string and `reqwest`'s own error Display includes
-/// the URL it failed on.
+/// Replace the AppID in any string with `appid=REDACTED`. Apply to every log line and
+/// tool result: `reqwest`'s error Display includes the URL, key and all.
 pub fn redact_appid(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
@@ -374,16 +289,13 @@ pub struct Pod {
     pub primary: bool,
 }
 
-/// Turn a Full Results payload into the string the model reads, with the
-/// `[[[mcp-ui:wolfram:...]]]` hint the dashboard renders in front of it.
+/// Full Results payload as model text, prefixed with the `[[[mcp-ui:wolfram:...]]]` card hint.
 pub fn render_query_result(body: &Value, query: &str, session: Option<&str>) -> String {
     let qr = &body["queryresult"];
     let pods = parse_pods(qr);
 
     if pods.is_empty() {
-        // Wolfram understood nothing. Its own "did you mean" is the best next
-        // step it can offer; after that the question is not a computation and
-        // belongs to Wikipedia.
+        // Nothing understood: offer Wolfram's "did you mean", else defer to Wikipedia.
         let suggestions = with_ids(session, parse_didyoumeans(qr, query));
         if !suggestions.is_empty() {
             let body_text = format!(
@@ -446,17 +358,14 @@ fn render_explore_lines(options: &[ExploreOption]) -> String {
 
 fn primary_of(pods: &[Pod]) -> Option<&Pod> {
     pods.iter().find(|p| p.primary).or_else(|| {
-        // No pod claimed primacy, which is common. "Result" is Wolfram's own
-        // name for the answer pod; failing that the first non-input pod is it.
+        // Often no pod is primary; "Result" is Wolfram's name for the answer pod.
         pods.iter()
             .find(|p| p.id == "Result" || p.title.eq_ignore_ascii_case("result"))
             .or_else(|| pods.iter().find(|p| p.id != "Input"))
     })
 }
 
-/// Prepend the MCP-UI hint. The payload is sanitised because the frontend
-/// parser (`pond-api :: extract_ui_hint`) ends the marker at the first `]]]`,
-/// and Wolfram plaintext is free to contain one.
+/// Prepend the MCP-UI hint, sanitised: `extract_ui_hint` ends the marker at the first `]]]`.
 fn with_ui_hint(
     query: &str,
     primary: Option<&Pod>,
@@ -486,14 +395,12 @@ fn with_ui_hint(
     format!("[[[mcp-ui:wolfram:{}]]]\n{}", ui, body_text)
 }
 
-/// Neutralise the marker terminator so a result containing `]]]` cannot cut its
-/// own hint short.
+/// Neutralise `]]]` so a result cannot cut its own hint short.
 fn sanitize(s: &str) -> String {
     s.replace("]]]", "] ] ]")
 }
 
-/// The human-facing Wolfram|Alpha page for a query. Carries no AppID, so it is
-/// safe to show and to store.
+/// The human-facing Wolfram|Alpha page for a query; carries no AppID, so safe to store.
 fn website_url(query: &str) -> String {
     format!(
         "https://www.wolframalpha.com/input?i={}",
@@ -503,9 +410,7 @@ fn website_url(query: &str) -> String {
 
 // ── Payload parsing ────────────────────────────────────────────────────────
 
-/// Wolfram's JSON output gives a single-element collection as a bare object and
-/// a multi-element one as an array, and sometimes wraps values a level deeper.
-/// Normalising here is what stops every call site growing the same two arms.
+/// Wolfram gives a one-element collection as a bare object and several as an array.
 fn as_list(v: &Value) -> Vec<Value> {
     match v {
         Value::Array(a) => a.clone(),
@@ -538,8 +443,7 @@ pub fn parse_pods(qr: &Value) -> Vec<Pod> {
                 text,
             })
         })
-        // The echo of the question is not an answer, and it costs a pod slot
-        // that a real one needs.
+        // The question's echo is not an answer and would cost a pod slot.
         .filter(|p| p.id != "Input" && p.id != "InputInformation")
         .collect()
 }
@@ -554,8 +458,7 @@ pub fn parse_assumptions(qr: &Value, query: &str) -> Vec<ExploreOption> {
     let mut out = Vec::new();
     for group in raw {
         let values = as_list(&group["values"]);
-        // The first value is the reading Wolfram already used, so offering it
-        // back is offering to re-run the identical query.
+        // The first value is the reading Wolfram already used.
         for v in values.into_iter().skip(1) {
             let Some(input) = v["input"].as_str() else {
                 continue;
@@ -591,8 +494,7 @@ pub fn parse_didyoumeans(qr: &Value, _query: &str) -> Vec<ExploreOption> {
                 id: String::new(),
                 label: val.to_string(),
                 kind: ExploreKind::DidYouMean,
-                // A "did you mean" replaces the question rather than refining
-                // it, so the stored query is the suggestion itself.
+                // A "did you mean" replaces the question, so it is the stored query.
                 query: val.to_string(),
                 assumption: None,
                 pod_id: None,
@@ -628,8 +530,7 @@ fn resolve_compute_query(params: &ComputeParams) -> String {
             }
         }
     }
-    // Last resort: the user's own words, with the question framing stripped the
-    // same way the Wikipedia tools strip it.
+    // Last resort: the user's own words, stripped like the Wikipedia tools do.
     let msg = crate::last_user_message();
     if msg.is_empty() {
         return String::new();
@@ -651,17 +552,11 @@ pub enum ExploreTarget {
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
-// ── Tests ──────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Every test uses its own session name. That is not tidiness: the ring is
-    /// a process-global shared by the whole test binary, and scoping reads to
-    /// the session is the same mechanism production relies on, so exercising it
-    /// per test is exercising the real thing.
     const S: Option<&str> = Some("test-session");
 
     /// A two-pod success, shaped the way the Full Results API returns one.
@@ -700,8 +595,6 @@ mod tests {
     #[test]
     fn a_result_leads_with_the_answer_and_drops_the_echoed_question() {
         let pods = parse_pods(&distance_payload()["queryresult"]);
-        // "Input interpretation" is the question read back; it is not an answer
-        // and must not take one of the five pod slots.
         assert!(!pods.iter().any(|p| p.id == "Input"), "got: {pods:?}");
         assert_eq!(primary_of(&pods).map(|p| p.text.as_str()), Some("4.828 km"));
     }
@@ -723,16 +616,12 @@ mod tests {
         assert!(out.starts_with("[[[mcp-ui:wolfram:"), "got: {out}");
         assert!(out.contains("4.828 km"));
         assert!(out.contains("wolframalpha.com/input?i="));
-        // The website link is shown to the user and persisted in the turn, so
-        // it must never be the API endpoint that carries the key.
+        // The website link is persisted, so it must never be the keyed API endpoint.
         assert!(!out.contains("appid"), "got: {out}");
     }
 
     #[test]
     fn a_single_assumption_group_object_parses_like_a_list() {
-        // Wolfram returns one group as a bare object and several as an array.
-        // Reading only the array shape is a silent loss of every suggestion in
-        // the commonest case.
         let object_form = json!({"assumptions": {
             "values": [{"input": "a", "desc": "first"}, {"input": "b", "desc": "second"}]
         }});
@@ -755,9 +644,7 @@ mod tests {
         }});
         let out = render_query_result(&body, "integrat x2", session);
         assert!(out.contains("ask instead"), "got: {out}");
-        // A "did you mean" replaces the question rather than refining it, and
-        // the replacement has to be IN the text: with no id to resolve, the
-        // wording is the only thing the model can act on.
+        // With no id to resolve, the replacement wording is all the model can act on.
         assert!(out.contains("integrate x^2"), "got: {out}");
         assert!(
             out.contains("giap-knowledge__compute_answer"),
@@ -778,8 +665,6 @@ mod tests {
 
     #[test]
     fn an_unattributed_call_is_offered_no_ids_at_all() {
-        // No agent-session-id in _meta. Minting into a shared bucket is the
-        // giap-draft "default" bug; withholding the openers is not.
         let out = render_query_result(&mercury_payload(), "mercury", None);
         assert!(
             out.contains("the planet"),
@@ -857,8 +742,6 @@ mod tests {
         let out = render_query_result(&body, "matrix", S);
         let hint_end = out.find("]]]").expect("hint must terminate");
         let hint = &out["[[[mcp-ui:wolfram:".len()..hint_end];
-        // If the payload's own "]]]" ended the marker, this would not parse —
-        // which is exactly how the card would silently stop rendering.
         serde_json::from_str::<Value>(hint).expect("hint payload must be valid JSON");
     }
 
@@ -883,11 +766,7 @@ mod tests {
         assert_eq!(resolve_compute_query(&params), "right");
     }
 
-    /// Prints a real rendered result so the pond-api parser test can be pinned
-    /// against an actual payload rather than a hand-written approximation. That
-    /// test lives in another crate (`pond-api` does not depend on this one), so
-    /// its fixture is a copy — and a copy with no way to regenerate it rots.
-    ///
+    /// Regenerates the fixture the pond-api parser test keeps a copy of:
     /// `cargo test -p pond-mcp-server print_a_real_rendered_result -- --ignored --nocapture`
     #[test]
     #[ignore]
@@ -911,20 +790,9 @@ mod tests {
     }
 
     // ── The tool, end to end ──────────────────────────────────────────────
-    //
-    // Everything above tests a piece. These drive the real thing: a real
-    // reqwest call over a real socket, through the real MCP dispatch, into the
-    // real renderer. The only part of `compute_answer` they do not exercise is
-    // Wolfram's own response, which needs an AppID nobody has here — so the
-    // stub replies with a payload copied from the Full Results API's documented
-    // shape, and a live check against the real service is still owed.
+    // Real socket and MCP dispatch against a stub; no live check against Wolfram yet.
 
-    /// A one-shot HTTP server on a loopback port.
-    ///
-    /// `std::net` rather than `tokio::net` deliberately: this crate's tokio has
-    /// no `net` feature, and a blocking accept on its own thread needs none.
-    /// Returns the base URL and a channel carrying the request it received, so
-    /// a test can assert what actually went on the wire.
+    /// One-shot loopback HTTP server; `std::net` because this crate's tokio lacks `net`.
     fn stub_wolfram(
         status: u16,
         body: &'static str,
@@ -1006,8 +874,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_rejected_app_id_says_so_instead_of_reporting_a_network_fault() {
-        // 403 is what a wrong key and an exhausted monthly allowance both look
-        // like, and "HTTP 403" sends the user to check their wifi.
         let (base, _rx) = stub_wolfram(403, "Invalid appid");
         let server = KnowledgeMcpServer::new(crate::build_http_client());
         let result = server
@@ -1059,8 +925,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_dead_endpoint_degrades_without_leaking_the_key() {
-        // Nothing is listening on this port. reqwest's error Display carries
-        // the URL it failed on, which is where the AppID lives.
+        // Nothing listens on port 1; reqwest's error text carries the URL, AppID included.
         let server = KnowledgeMcpServer::new(crate::build_http_client());
         let result = server
             .run_wolfram(
@@ -1113,10 +978,7 @@ mod tests {
             .expect("list_tools must succeed");
         let names: Vec<&str> = listed.tools.iter().map(|t| t.name.as_ref()).collect();
 
-        // The Wolfram tools live in a SECOND #[tool_router] impl, composed onto
-        // this server in `new()`. If that composition were dropped the crate
-        // would still build, every unit test above would still pass, and the
-        // model would simply never be offered them.
+        // Wolfram's #[tool_router] is composed in `new()`; losing that would still compile.
         assert!(names.contains(&"compute_answer"), "got: {names:?}");
         // And the ones this file's sibling owns are still there.
         assert!(names.contains(&"get_wikipedia_article"), "got: {names:?}");
@@ -1137,8 +999,7 @@ mod tests {
         let schema = serde_json::to_value(&tool.input_schema).unwrap();
         assert_eq!(schema["type"], "object", "got: {schema}");
         assert!(schema["properties"]["query"].is_object(), "got: {schema}");
-        // The `extra` catch-all absorbs whatever key a small model invents, and
-        // it is #[schemars(skip)] precisely so it never reaches the prompt.
+        // `extra` is #[schemars(skip)] so it never reaches the prompt.
         assert!(schema["properties"]["extra"].is_null(), "got: {schema}");
         assert!(
             tool.description
@@ -1160,8 +1021,7 @@ mod tests {
         }))
         .unwrap();
 
-        // No secret store is installed in a test binary, so this is the real
-        // out-of-the-box path: the tool is offered, called, and has no key.
+        // No secret store in a test binary: the real out-of-the-box, no-key path.
         let result = server
             .call_tool(params, ctx_for(Some("s-nokey")).await)
             .await
@@ -1181,8 +1041,7 @@ mod tests {
             "arguments": {},
         }))
         .unwrap();
-        // Guards the assertion above from being vacuous: if the router accepted
-        // anything, "the tool is registered" would prove nothing.
+        // Vacuity guard: a router that accepted anything would prove nothing.
         assert!(server.call_tool(params, ctx_for(None).await).await.is_err());
     }
 

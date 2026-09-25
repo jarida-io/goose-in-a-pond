@@ -1,7 +1,4 @@
-//! Weather MCP Server — current weather and forecasts.
-//!
-//! Provides 2 tools: `get_current_weather`, `get_weather_forecast`.
-//! Depends on [`WeatherProvider`] (wrapped in `Option` for unconfigured instances).
+//! Weather MCP server: current weather and forecasts.
 
 use pond_adapters_weather::WeatherProvider;
 use rmcp::{
@@ -50,12 +47,7 @@ pub struct WeatherMcpServer {
 
 #[tool_router]
 impl WeatherMcpServer {
-    /// Every tool this server exposes, without constructing it or its deps.
-    ///
-    /// `tool_router()` is generated private to this module, so inventory code
-    /// outside it could not reach the real definitions and resorted to scanning
-    /// source text for `#[tool(` instead. This is the enumeration that scan was
-    /// standing in for.
+    /// Every tool this server exposes, without constructing it (`tool_router()` is private).
     pub(crate) fn tool_defs() -> Vec<rmcp::model::Tool> {
         Self::tool_router().list_all()
     }
@@ -88,11 +80,7 @@ which city. Never guess weather or shell out for it.")]
         );
 
         match &self.weather {
-            // An error, not a success. The household prompt's one anti-repeat
-            // rule is conditioned on a failure ("an error, an empty result or a
-            // 'not found' is NOT an answer ... never the same tool with the same
-            // parameters again"), so returning a failure as a success put the
-            // rule out of scope for exactly the results that needed it.
+            // An error, not a success: the prompt's anti-repeat rule only applies to failures.
             None => Ok(CallToolResult::error(vec![Content::text(
                 "Weather is not configured on this pond: no location is set in settings. \
                  No other tool, shell command or external request can supply it.",
@@ -158,8 +146,7 @@ location for the configured home. Never guess data.")]
         );
 
         match &self.weather {
-            // A failure, reported as one -- see the note on the current-weather
-            // tool above.
+            // A failure, reported as one (see the current-weather tool).
             None => Ok(CallToolResult::error(vec![Content::text(
                 "Weather is not configured on this pond: no location is set in settings. \
                  No other tool, shell command or external request can supply a forecast.",
@@ -176,12 +163,7 @@ location for the configured home. Never guess data.")]
                             data.days.len(),
                             data.location_name
                         );
-                        // Same `[[[mcp-ui:…]]]` marker the current-weather tool
-                        // emits. Without it `extract_ui_hint` returns no
-                        // `renderHint`, and the desktop deliberately refuses to
-                        // render a card it has no structured data for — which is
-                        // why a forecast used to arrive as a wall of text next to
-                        // a proper weather card.
+                        // `[[[mcp-ui:…]]]` marker, or the desktop has no data to render a card.
                         let ui_data = serde_json::json!({
                             "location": data.location_name,
                             "forecast": data.days.iter().map(|d| serde_json::json!({
@@ -238,14 +220,12 @@ impl ServerHandler for WeatherMcpServer {
 
 /// Extract location from WeatherParams, scanning extras as fallback.
 fn resolve_location(params: &WeatherParams) -> Option<String> {
-    // Direct param
     if let Some(ref loc) = params.location {
         let trimmed = loc.trim();
         if !trimmed.is_empty() {
             return Some(trimmed.to_string());
         }
     }
-    // Scan extras for common synonyms
     for key in &["location", "city", "place", "loc", "where"] {
         if let Some(val) = params.extra.get(*key) {
             if let Some(s) = val.as_str() {
@@ -283,7 +263,6 @@ fn resolve_forecast_location(params: &ForecastParams) -> Option<String> {
 // ── MCP App resource ─────────────────────────────────────────────────────
 
 /// Self-contained HTML weather card (MCP App).
-/// Embedded at compile time — no filesystem access required at runtime.
 const WEATHER_APP_HTML: &str = include_str!("../apps/weather-card.html");
 
 /// Resource URI for the weather MCP App.
@@ -312,10 +291,7 @@ pub fn init_weather_deps(weather: Option<Arc<dyn WeatherProvider>>) {
 
 /// Spawn function compatible with Goose's `SpawnServerFn` type.
 pub fn spawn_weather_server(reader: DuplexStream, writer: DuplexStream) {
-    // Missing deps = this path never initialised this extension (the voice/CLI
-    // binary vs `serve` install different families). A skipped extension is a
-    // logged, contained failure; a panic here took down every builtin server's
-    // startup at once (2026-08-27, giap-context in the voice child).
+    // No panic: a binary may not init this family, and a panic kills every builtin's startup.
     let Some(deps) = WEATHER_DEPS.get() else {
         tracing::error!(
             "spawn_weather_server called before init_weather_deps — extension will not start"
@@ -391,18 +367,9 @@ mod tests {
 
 #[cfg(test)]
 mod result_wording_tests {
-    //! A tool result is data the model reads, and the household prompt tells it
-    //! to act on what a result names. So a result that speaks to the model in
-    //! the second person about the user is an instruction in all but name --
-    //! which is how "suggest they try again shortly" became a reason to try
-    //! again, repeatedly.
+    //! The model acts on what a result names, so results state facts and never instruct it.
 
-    /// The tool bodies only -- everything before the first test module.
-    ///
-    /// The source is the record here because these strings are built inline in
-    /// the tool bodies and reaching them needs a live weather service. The cut
-    /// matters: without it this scans its own assertion list and fails on the
-    /// phrases it is looking for.
+    /// Source before the first test module; the cut keeps the assertion lists out of the scan.
     fn tool_bodies() -> &'static str {
         let src = include_str!("weather.rs");
         let end = src.find("#[cfg(test)]").unwrap_or(src.len());
@@ -425,9 +392,6 @@ mod result_wording_tests {
         }
     }
 
-    /// A failed fetch must be a failed tool result, not a successful one whose
-    /// text happens to describe a failure. goose branches on `is_error`, and
-    /// the prompt's anti-repeat rule is conditioned on the failure branch.
     #[test]
     fn every_weather_failure_path_returns_an_error_result() {
         let bodies = tool_bodies();

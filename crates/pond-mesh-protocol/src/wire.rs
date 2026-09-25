@@ -1,44 +1,4 @@
-//! Wire messages exchanged between mesh peers (#132).
-//!
-//! Fields are derived directly on plain Rust structs via `prost::Message` —
-//! no `.proto` file and no `protoc`/build-time codegen, which keeps this
-//! crate free of an extra native build tool (the Jetson cross-build already
-//! has to work around ggml's cmake probing; this crate deliberately doesn't
-//! add a second one).
-//!
-//! `Handshake` is what a peer presents on `MeshTransport::connect` so the
-//! receiving side can check the harness/model hash pin (an #132 acceptance
-//! criterion) before trusting the connection.
-//!
-//! `MeshFrame` is the one message type sent over `MeshTransport::send`/`recv`
-//! for anything application-level — `MeshTransport::recv()` is a single flat
-//! queue, so only one consumer (`pond-adapters-mesh-inference`'s
-//! `MeshInferenceService`) can own it, which means every message family that
-//! needs to travel over the mesh has to be a variant of this one wrapper
-//! rather than its own top-level message decoded by a second, competing
-//! `recv()` loop. Two families so far:
-//!
-//! - Mesh inference (#132 Milestone 3): `InferenceRequest` (the borrower's
-//!   ask) and `InferenceChunk` (the lender's streamed reply, correlated back
-//!   by `request_id` since `MeshTransport` itself has no request/response
-//!   correlation).
-//! - Invoice exchange (#132 Milestone 5): `InvoiceRequest`/`InvoiceResponse`
-//!   — `PaymentRail::batch_settle` needs *the peer's* invoice before it can
-//!   pay them, and issuing one is a call only the peer itself can make
-//!   against its own wallet, so the peer wanting to settle asks for one over
-//!   the mesh first.
-//! - Capability query (#132 Milestone 5): `CapabilityRequest`/
-//!   `CapabilityResponse` — "what do you offer right now?", queried live
-//!   (not persisted, unlike `PeerDirectory`'s trust scopes — a peer's
-//!   Lightning wallet or backing model can go up/down between two queries)
-//!   so the UI can show what a trusted peer actually offers.
-//!
-//! A single wrapper `oneof`, not independent top-level messages, because
-//! `InferenceRequest`/`InferenceChunk`/`InvoiceRequest`/`InvoiceResponse`/
-//! `CapabilityRequest`/`CapabilityResponse` all start with a
-//! `request_id: u64` at tag 1 — decoding one directly against another's
-//! bytes could silently "succeed" on a truncated/malformed frame instead of
-//! erroring.
+//! Mesh wire messages, `prost`-derived on plain structs so the build needs no `protoc`.
 
 use prost::Message;
 
@@ -68,9 +28,7 @@ impl Handshake {
         }
     }
 
-    /// The bytes a signer/verifier should sign/check over — deterministic
-    /// concatenation of the three identity fields, excluding the signature
-    /// itself.
+    /// The bytes to sign or verify: the three identity fields concatenated, no signature.
     pub fn signed_payload(&self) -> Vec<u8> {
         [
             &self.peer_id[..],
@@ -89,18 +47,11 @@ impl Handshake {
     }
 }
 
-/// A single message in a mesh-inference request, text-only for #132
-/// Milestone 3 — no image attachments or tool-call round-tripping.
-/// `pond_core::models::domain::message::ChatMessage` has both; mesh
-/// inference v1 is a plain chat completion, not a full agentic/multimodal
-/// relay across peers.
+/// One chat message in a mesh-inference request; text only (no images or tool calls).
 #[derive(Clone, PartialEq, Eq, Message)]
 pub struct ChatMessageWire {
-    /// One of "system" | "user" | "assistant" | "tool", lowercased from
-    /// `pond_core::models::domain::message::Role`. A plain string, not a
-    /// prost enum, so an unrecognized value from a future harness version
-    /// degrades to a decode-time mapping choice in the adapter rather than
-    /// a wire-level decode failure.
+    /// "system" | "user" | "assistant" | "tool". A string, not a prost enum, so an unknown
+    /// role from a newer peer is the adapter's call rather than a decode failure.
     #[prost(string, tag = "1")]
     pub role: String,
     #[prost(string, tag = "2")]
@@ -110,9 +61,7 @@ pub struct ChatMessageWire {
 /// The borrower's ask: run a completion against the lender's active model.
 #[derive(Clone, PartialEq, Eq, Message)]
 pub struct InferenceRequest {
-    /// Chosen by the borrower, echoed back on every `InferenceChunk` so the
-    /// borrower's `pond-adapters-mesh-inference` can demux replies from
-    /// multiple in-flight requests sharing one `MeshTransport::recv()`.
+    /// Borrower-chosen; echoed on every `InferenceChunk` to demux in-flight requests.
     #[prost(uint64, tag = "1")]
     pub request_id: u64,
     #[prost(string, tag = "2")]
@@ -123,32 +72,21 @@ pub struct InferenceRequest {
     pub max_tokens: u32,
 }
 
-/// Token usage for a completed request — always the payload of the
-/// *terminal* `InferenceChunk` on success, mirroring
-/// `pond_core::models::ports::provider::StreamToken::Usage`'s existing
-/// "emitted once as the last stream item" convention.
+/// Token usage; the payload of the terminal `InferenceChunk` on success.
 #[derive(Clone, PartialEq, Eq, Message)]
 pub struct UsageWire {
     #[prost(uint32, tag = "1")]
     pub prompt_tokens: u32,
-    /// The visible output the borrower actually received — what its own
-    /// context/token-budget accounting should use. Not necessarily what it
-    /// owes; see `charged_tokens`.
+    /// Visible output tokens, for context accounting; billing uses `charged_tokens`.
     #[prost(uint32, tag = "2")]
     pub completion_tokens: u32,
-    /// What the lender is actually billing for: `completion_tokens` plus
-    /// every discarded empty-completion attempt before it (compute spent
-    /// producing nothing was still spent). Can exceed `completion_tokens`.
-    /// The borrower's credit ledger must debit against this field, not
-    /// `completion_tokens` — otherwise it never sees the retries its own
-    /// balance is being charged for. `0` from an older peer that predates
-    /// this field means "use `completion_tokens`", not "nothing owed".
+    /// Billed tokens: `completion_tokens` plus discarded empty attempts; debit this. `0` (an
+    /// older peer) means "use `completion_tokens`", not "nothing owed".
     #[prost(uint32, tag = "3")]
     pub charged_tokens: u32,
 }
 
-/// One piece of the lender's streamed reply. `usage` and `error` are both
-/// terminal — the borrower stops waiting on either one, never on `text`.
+/// One piece of the lender's streamed reply; `usage` and `error` are terminal, `text` is not.
 #[derive(Clone, PartialEq, Eq, ::prost::Oneof)]
 pub enum ChunkKind {
     #[prost(string, tag = "3")]
@@ -164,31 +102,24 @@ pub struct InferenceChunk {
     /// Matches the `InferenceRequest::request_id` this chunk answers.
     #[prost(uint64, tag = "1")]
     pub request_id: u64,
-    /// Monotonic per request, from 0 — lets the borrower detect a dropped
-    /// or reordered chunk instead of silently splicing text out of order.
+    /// Monotonic per request from 0, so dropped or reordered chunks are detectable.
     #[prost(uint32, tag = "2")]
     pub seq: u32,
     #[prost(oneof = "ChunkKind", tags = "3, 4, 5")]
     pub kind: Option<ChunkKind>,
 }
 
-/// The borrower's ask: "issue an invoice for this many millisats so I can
-/// pay you." Sent ahead of `PaymentRail::batch_settle`, which needs the
-/// peer's invoice string and has no other way to get one.
+/// Asks a peer for its invoice; `PaymentRail::batch_settle` needs one only the peer can issue.
 #[derive(Clone, PartialEq, Eq, Message)]
 pub struct InvoiceRequest {
-    /// Echoed back on the matching `InvoiceResponse`, same demux purpose as
-    /// `InferenceRequest::request_id`.
+    /// Echoed back on the matching `InvoiceResponse` for demux.
     #[prost(uint64, tag = "1")]
     pub request_id: u64,
     #[prost(uint64, tag = "2")]
     pub amount_millisats: u64,
 }
 
-/// `invoice` is the peer's real BOLT11-shaped string from its own
-/// `PaymentRail::issue_invoice`; `error` covers the peer having no
-/// `PaymentRail` configured at all (Lightning is off by default) or its own
-/// `issue_invoice` call failing.
+/// A BOLT11 invoice from the peer's `issue_invoice`, or why not (e.g. Lightning is off).
 #[derive(Clone, PartialEq, Eq, ::prost::Oneof)]
 pub enum InvoiceResponseKind {
     #[prost(string, tag = "2")]
@@ -205,8 +136,7 @@ pub struct InvoiceResponse {
     pub kind: Option<InvoiceResponseKind>,
 }
 
-/// "What do you offer right now?" — no payload beyond the correlation id;
-/// the answer is the interesting part.
+/// "What do you offer right now?"; queried live, as wallets and models come and go.
 #[derive(Clone, PartialEq, Eq, Message)]
 pub struct CapabilityRequest {
     #[prost(uint64, tag = "1")]
@@ -223,9 +153,6 @@ pub struct CapabilityResponse {
     pub lightning_available: bool,
 }
 
-/// The one type ever passed to `MeshTransport::send`/`recv` — see the module
-/// doc comment for why every message family shares this wrapper instead of
-/// being sent as a bare top-level message.
 #[derive(Clone, PartialEq, Eq, ::prost::Oneof)]
 pub enum MeshFrameKind {
     #[prost(message, tag = "1")]
@@ -242,6 +169,8 @@ pub enum MeshFrameKind {
     CapabilityResponse(CapabilityResponse),
 }
 
+/// The one type passed to `MeshTransport::send`/`recv`: `recv()` has a single consumer, and
+/// all families share `request_id` at tag 1, so a bare-message decode could misparse.
 #[derive(Clone, PartialEq, Eq, Message)]
 pub struct MeshFrame {
     #[prost(oneof = "MeshFrameKind", tags = "1, 2, 3, 4, 5, 6")]
@@ -333,9 +262,6 @@ mod tests {
 
     #[test]
     fn decode_of_garbage_bytes_errors_not_panics() {
-        // A handful of random bytes are very unlikely to be a valid encoding,
-        // but even if a length happens to parse, decode() must never panic —
-        // this is exactly the "refuse a malformed peer" path.
         let result = Handshake::decode(&[0xff, 0x00, 0x01][..]);
         let _ = result; // either Ok or Err is acceptable; a panic is not.
     }
@@ -413,11 +339,6 @@ mod tests {
 
     #[test]
     fn request_and_chunk_are_never_confused_despite_sharing_a_request_id_tag() {
-        // Both InferenceRequest and InferenceChunk start with `request_id: u64`
-        // at tag 1 — the reason MeshFrame wraps them in a oneof instead of
-        // sending either as a bare top-level message (see the module doc
-        // comment). Decoding a request's bytes directly as an InferenceChunk
-        // must not silently produce a chunk with a bogus `kind`.
         let request = sample_request();
         let bytes = Message::encode_to_vec(&request);
         let decoded = InferenceChunk::decode(&bytes[..]);
@@ -474,8 +395,6 @@ mod tests {
 
     #[test]
     fn invoice_request_and_inference_request_are_never_confused() {
-        // Both start with `request_id: u64` at tag 1, same hazard the
-        // InferenceRequest/InferenceChunk test above documents.
         let invoice_req = InvoiceRequest {
             request_id: 9,
             amount_millisats: 1000,
