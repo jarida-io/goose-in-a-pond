@@ -1,7 +1,4 @@
-//! Ollama HTTP request/response types with tool-calling support.
-//!
-//! Standalone types — does not import from `pond-adapters-ollama`.
-//! Matches the Ollama `/api/chat` wire format for streaming + tools.
+//! Ollama `/api/chat` wire types, deliberately independent of `pond-adapters-ollama`.
 
 use serde::{Deserialize, Serialize};
 
@@ -30,7 +27,6 @@ pub struct OllamaOptions {
 
 // ── Message types ────────────────────────────────────────────────────────────
 
-/// A single message in the Ollama chat format.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct OllamaMessage {
     pub role: String,
@@ -39,13 +35,11 @@ pub struct OllamaMessage {
     pub tool_calls: Option<Vec<OllamaToolCall>>,
 }
 
-/// A tool call returned by the model in a message.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct OllamaToolCall {
     pub function: OllamaFunctionCall,
 }
 
-/// The function name and arguments within a tool call.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct OllamaFunctionCall {
     pub name: String,
@@ -54,7 +48,6 @@ pub struct OllamaFunctionCall {
 
 // ── Tool definition types ────────────────────────────────────────────────────
 
-/// A tool definition passed to the model so it knows what tools are available.
 #[derive(Serialize, Clone, Debug)]
 pub struct OllamaTool {
     #[serde(rename = "type")]
@@ -62,7 +55,6 @@ pub struct OllamaTool {
     pub function: OllamaFunctionDef,
 }
 
-/// The function schema within a tool definition.
 #[derive(Serialize, Clone, Debug)]
 pub struct OllamaFunctionDef {
     pub name: String,
@@ -72,9 +64,7 @@ pub struct OllamaFunctionDef {
 
 // ── Streaming response types ─────────────────────────────────────────────────
 
-/// A single NDJSON line from a streaming `/api/chat` response. Each carries a
-/// partial `message` with either `content` or `tool_calls`; the final line has
-/// `done: true` and the token usage counts.
+/// One NDJSON line of a streaming `/api/chat` response; the last has `done` and token counts.
 #[derive(Deserialize, Debug)]
 pub struct OllamaStreamChunk {
     /// Partial message — may contain text content or tool calls.

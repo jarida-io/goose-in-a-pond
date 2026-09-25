@@ -1,7 +1,4 @@
-//! `OpenMeteoWeatherAdapter` — current weather and forecasts from the free
-//! [Open-Meteo](https://open-meteo.com) API, no key required. Both the current and
-//! the daily call hit `GET https://api.open-meteo.com/v1/forecast` with
-//! `timezone=auto` and celsius/kmh/mm units. Results cached for `cache_ttl` (15 min).
+//! Weather from the free, keyless Open-Meteo API, cached for `cache_ttl` (15 min).
 
 use crate::geocoding::Geocoder;
 use crate::wmo;
@@ -127,10 +124,7 @@ impl OpenMeteoWeatherAdapter {
 
     // ── Internal fetch helpers ───────────────────────────────────────────
 
-    /// Coordinates for the configured default location, geocoding `location_name`
-    /// when latitude and longitude are both 0 (onboarding stores a name only).
-    /// Callers check their 15-minute weather cache first, so this adds no network
-    /// cost in the common case.
+    /// Configured coords, geocoding `location_name` if both are 0 (onboarding saves a name only).
     async fn default_location(&self) -> Result<(f64, f64, String)> {
         if self.latitude != 0.0 || self.longitude != 0.0 {
             return Ok((self.latitude, self.longitude, self.location_name.clone()));
@@ -580,9 +574,6 @@ mod tests {
 
     // ── Location-aware tests ─────────────────────────────────────────────
 
-    /// Onboarding stores a location *name* but leaves coordinates at 0. The
-    /// default-location path must geocode the name rather than fetching for
-    /// (0, 0) — the bug that left onboarded installs "not configured".
     #[tokio::test]
     async fn current_geocodes_the_default_name_when_coordinates_are_unset() {
         let server = MockServer::start().await;
@@ -605,8 +596,6 @@ mod tests {
         assert_eq!(data.temperature_c, 24.3);
     }
 
-    /// With no coordinates and no name there is nothing to fetch — surface a
-    /// clear error rather than silently querying (0, 0) in the ocean.
     #[tokio::test]
     async fn current_errors_when_neither_coordinates_nor_name_are_set() {
         let server = MockServer::start().await;

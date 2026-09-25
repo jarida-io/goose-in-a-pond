@@ -1,6 +1,4 @@
-//! Require Onboarding Completion Middleware
-//!
-//! Blocks access to protected API routes until onboarding is completed.
+//! Middleware blocking protected API routes until onboarding completes.
 
 use axum::{
     extract::State,
@@ -18,8 +16,7 @@ use crate::AppState;
 use pond_core::user_data::domain::onboarding::OnboardingStep;
 use pond_core::user_data::services::onboarding::OnboardingService;
 
-/// Checks whether onboarding is complete: HTTP 403 until it is, otherwise the
-/// request proceeds to the next handler.
+/// Responds 403 `onboarding_required` until onboarding completes.
 pub async fn require_onboarding_complete(
     State(state): State<Arc<AppState>>,
     req: Request<axum::body::Body>,
@@ -31,14 +28,11 @@ pub async fn require_onboarding_complete(
 
     let service = OnboardingService::new(state.onboarding_repo.clone());
 
-    // Get onboarding status
     let step: Option<OnboardingStep> = service.status().await;
 
     match step {
-        // Explicitly completed → allow
         Some(OnboardingStep::Completed) => Ok(next.run(req).await),
 
-        // None (not started) or any in-progress step → block
         None | Some(_) => Err((
             StatusCode::FORBIDDEN,
             Json(json!({

@@ -1,14 +1,9 @@
 //! Session history loading from `SessionStorage`.
-//!
-//! Loads recent messages for a session, converting `SessionMessage` to
-//! `ChatMessage` for injection into the inference context.
 
 use pond_core::models::domain::message::ChatMessage;
 use pond_core::user_data::ports::session_storage::SessionStorage;
 
-/// Load the most recent `limit` messages for a session, in chronological order
-/// (oldest first) as inference providers expect. Empty when the session does not
-/// exist or has no messages.
+/// The last `limit` messages, oldest first as providers expect; empty for an unknown session.
 pub async fn load_history(
     storage: &dyn SessionStorage,
     session_id: &str,
@@ -30,7 +25,6 @@ mod tests {
     use pond_core::user_data::domain::session::{Session, SessionMessage};
     use pond_core::user_data::ports::session_storage::SessionStorageError;
 
-    /// Mock session storage for testing.
     struct MockSessionStorage {
         messages: Vec<SessionMessage>,
     }

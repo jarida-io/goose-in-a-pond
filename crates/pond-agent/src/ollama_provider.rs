@@ -1,7 +1,5 @@
-//! OllamaInferenceProvider — implements `InferenceProvider` for Ollama HTTP.
-//! Streams NDJSON via `reqwest::Response::chunk()` for token-by-token delivery,
-//! and supports native tool calling when the model returns tool_calls. A 404 for
-//! the model triggers an automatic `/api/pull` and one retry.
+//! `InferenceProvider` over Ollama's NDJSON streaming chat, with native tool calls.
+//! A 404 for the model triggers one `/api/pull` and a retry.
 
 use crate::ollama_wire::{
     OllamaChatRequest, OllamaFunctionDef, OllamaMessage, OllamaOptions, OllamaPullRequest,
@@ -16,7 +14,6 @@ use pond_core::models::ports::inference::{
 use pond_core::models::ports::provider::UsageStats;
 use tracing;
 
-/// Ollama-based inference provider with NDJSON streaming and tool support.
 pub struct OllamaInferenceProvider {
     client: reqwest::Client,
     base_url: String,
@@ -24,8 +21,7 @@ pub struct OllamaInferenceProvider {
 }
 
 impl OllamaInferenceProvider {
-    /// Create a new provider targeting `base_url`, e.g.
-    /// `"http://localhost:11434"`, with `model` such as `"gemma4:latest"`.
+    /// `base_url` e.g. `"http://localhost:11434"`; `model` e.g. `"gemma4:latest"`.
     pub fn new(base_url: &str, model: &str) -> Self {
         Self {
             client: reqwest::Client::new(),
@@ -34,7 +30,6 @@ impl OllamaInferenceProvider {
         }
     }
 
-    /// Convert `ToolDefinition` list to Ollama's tool format.
     fn to_ollama_tools(tools: &[ToolDefinition]) -> Vec<OllamaTool> {
         tools
             .iter()
@@ -148,7 +143,6 @@ impl OllamaInferenceProvider {
             );
             self.pull_model(&self.model).await?;
 
-            // Retry after pull
             let retry_body = OllamaChatRequest {
                 model: &self.model,
                 messages: Self::to_ollama_messages(system_prompt, messages),
@@ -192,13 +186,11 @@ impl InferenceProvider for OllamaInferenceProvider {
         tools: &[ToolDefinition],
         options: &InferenceOptions,
     ) -> ChatEventStream {
-        // Clone everything needed for the async stream (moved into the future).
         let system_prompt = system_prompt.to_string();
         let messages = messages.to_vec();
         let tools = tools.to_vec();
         let options = options.clone();
 
-        // Clone self's fields for the async block.
         let client = self.client.clone();
         let base_url = self.base_url.clone();
         let model = self.model.clone();
@@ -238,7 +230,6 @@ impl InferenceProvider for OllamaInferenceProvider {
                         };
                         line_buf.push_str(text);
 
-                        // Process complete lines.
                         while let Some(newline_pos) = line_buf.find('\n') {
                             let line = line_buf[..newline_pos].trim().to_string();
                             line_buf = line_buf[newline_pos + 1..].to_string();
@@ -260,12 +251,10 @@ impl InferenceProvider for OllamaInferenceProvider {
                             };
 
                             if let Some(msg) = &chunk.message {
-                                // Emit text tokens.
                                 if !msg.content.is_empty() {
                                     yield Ok(ChatEvent::Text(msg.content.clone()));
                                 }
 
-                                // Emit tool calls.
                                 if let Some(ref calls) = msg.tool_calls {
                                     for call in calls {
                                         yield Ok(ChatEvent::ToolCall {

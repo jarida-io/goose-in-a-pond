@@ -1,15 +1,11 @@
-//! Frame → YOLOX input tensor. Pure (no ONNX runtime), unit-tested. YOLOX's
-//! released COCO models expect a square BGR image letterboxed onto a grey (114)
-//! canvas, as raw 0–255 floats in CHW order, with NO mean/std normalisation
-//! (removed upstream in v0.1.1).
+//! Frame → YOLOX input: square BGR on a grey (114) letterbox, as raw 0–255 CHW floats.
+//! No mean/std normalisation: YOLOX removed it upstream in v0.1.1.
 
 use anyhow::{bail, Result};
 use ndarray::Array4;
 use pond_core::user_data::domain::vision::Frame;
 
-/// Letterbox `frame` onto a `size`×`size` grey canvas and emit the
-/// `[1, 3, size, size]` BGR float tensor. The scale ratio is not returned:
-/// GIAP only needs labels, never box coordinates in source space.
+/// Letterboxed `[1, 3, size, size]` BGR tensor. No scale ratio: only labels are used.
 pub fn letterbox_bgr_chw(frame: &Frame, size: usize) -> Result<Array4<f32>> {
     if !frame.is_well_formed() || frame.width == 0 || frame.height == 0 {
         bail!("malformed frame ({}x{})", frame.width, frame.height);

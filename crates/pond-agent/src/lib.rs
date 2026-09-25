@@ -1,7 +1,4 @@
-//! pond-agent — GIAP's custom agent loop with sustained tool calling.
-//! Implements the [`Agent`](pond_core::models::ports::agent::Agent) port over an
-//! Ollama NDJSON provider: native tool_calls looped until a final text answer, a
-//! hot-swappable provider, and `PromptBuilder` prompts partitioned for KV reuse.
+//! GIAP's own [`Agent`](pond_core::models::ports::agent::Agent) loop over an Ollama provider.
 
 pub mod agent;
 pub mod history;

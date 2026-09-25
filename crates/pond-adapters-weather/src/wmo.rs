@@ -1,5 +1,4 @@
-//! WMO weather interpretation code → human-readable description.
-//! Reference: https://open-meteo.com/en/docs (section "WMO Weather Codes")
+//! WMO weather code → description, per https://open-meteo.com/en/docs ("WMO Weather Codes").
 
 pub fn describe(code: u32) -> &'static str {
     match code {

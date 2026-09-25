@@ -1,25 +1,5 @@
-//! Whisper ASR adapter for Goose In A Pond.
-//!
-//! Exports:
-//! - `WhisperRsInput`         — in-process `VoiceInput` port (whisper-rs, default)
-//! - `WhisperKeywordDetector` — `WakeWordDetector` port: poll mic until trigger phrase heard
-//! - `WhisperBackend`         — backend trait the detector uses to transcribe windows
-//!
-//! ## In-process (`WhisperRsInput`)
-//!
-//! Loads a ggml `.bin` model directly via the whisper.cpp bindings. No port,
-//! no subprocess, no multipart HTTP. Shares the ggml CUDA primary context with
-//! `llama-cpp-2` on Jetson. The HTTP `WhisperInput` this replaced was deleted
-//! in 2026-08; nothing here is selectable any more, so there is no default to
-//! name.
-//!
-//! ## Where the speech/silence decision comes from
-//!
-//! Not from here. Both capture paths take a `&mut dyn SpeechDetector` and the
-//! composition root decides which one — Silero by default, the energy gate
-//! when its model or the ONNX Runtime cannot be had. This crate is in CI's
-//! fast-crate set and must stay buildable without an ONNX Runtime, so it knows
-//! the trait and nothing else.
+//! Whisper ASR: `WhisperRsInput` (voice input) and `WhisperKeywordDetector` (wake word).
+//! Must build without ONNX Runtime (CI fast set): the composition root picks the detector.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -32,8 +12,7 @@ use std::sync::Arc;
 mod in_process;
 pub use in_process::WhisperRsInput;
 
-/// Play a short two-tone confirmation ping (C6→E6, ~220ms).
-/// Called when the wake word is detected so the user gets immediate audio feedback.
+/// Play a short two-tone wake-word confirmation ping (C6→E6, ~220ms).
 fn play_wake_ping() {
     std::thread::spawn(|| {
         use rodio::{OutputStream, Sink};
@@ -67,45 +46,26 @@ fn play_wake_ping() {
 
 // ── WhisperBackend trait ──────────────────────────────────────────────────────
 
-/// Synchronous transcription backend.
-///
-/// The `WhisperKeywordDetector` holds an `Arc<dyn WhisperBackend>` and calls
-/// `transcribe_pcm_blocking` on each window during the wake-word detection
-/// loop. `WhisperRsInput` is the only implementor in the tree; the trait earns
-/// its keep by letting the detector's tests run against a canned transcript,
-/// and by being the seam a different recogniser would arrive through.
-///
-/// Called from inside `tokio::task::spawn_blocking`, so a blocking call is fine.
+/// Synchronous transcription backend for the wake-word loop; always called in `spawn_blocking`.
 pub trait WhisperBackend: Send + Sync {
-    /// Transcribe 16 kHz mono f32 PCM. Implementations should pass the result
-    /// through `strip_whisper_artifacts`. Returns an empty string for silence /
-    /// no detected speech (never panics).
+    /// Transcribe 16 kHz mono PCM: artifacts stripped, `""` on silence, never panics.
     fn transcribe_pcm_blocking(&self, samples: &[f32]) -> Result<String>;
 }
 
-/// Whisper's non-speech annotations, stripped in the leaf crate so the
-/// desktop shell shares one implementation instead of carrying a copy.
 pub(crate) use pond_voice::text::strip_whisper_artifacts;
 
 // ── WAV decoding ─────────────────────────────────────────────────────────────
 
-/// Decode a 16-bit mono PCM WAV (as produced by `encode_wav_mono_16k`) back to
-/// f32 samples.  Returns `(samples, sample_rate)`.
+/// Decode a WAV to mono f32 samples; returns `(samples, sample_rate)`.
 pub(crate) fn decode_wav_mono_f32(wav: &[u8]) -> Result<(Vec<f32>, u32)> {
-    // Delegates to the real RIFF chunk walker in pond-voice. This backs
-    // POST /api/v1/transcribe, which phone recorders hit with LIST chunks, 18- or
-    // 40-byte fmt chunks, EXTENSIBLE, stereo and 24-bit; assuming a 16-bit mono
-    // payload at byte 44 decodes those to noise and whisper hallucinates.
+    // Phone uploads carry LIST chunks, odd fmt sizes, stereo and 24-bit; never assume byte 44.
     let decoded = pond_voice::dsp::decode_wav(wav).map_err(|e| anyhow!("{e}"))?;
     Ok((decoded.samples, decoded.sample_rate))
 }
 
 // ── Audio capture ─────────────────────────────────────────────────────────────
 
-/// Open the shared mic owner and block until it settles into `Open`, `Denied` or
-/// `Failed`. `MicHandle::open()` is fire-and-forget, so every capture entry point
-/// needs this handshake before trusting the mic; serializing opens and closes
-/// through the one owner thread is what stops two capture paths racing the device.
+/// Open the shared mic and block until `Open`, `Denied` or `Failed`: `open()` is fire-and-forget.
 fn open_mic_and_confirm(mic: &MicHandle) -> Result<u64> {
     let generation = mic.open_session();
     if !mic.wait_for(
@@ -124,10 +84,7 @@ fn open_mic_and_confirm(mic: &MicHandle) -> Result<u64> {
     }
 }
 
-/// Record from the microphone until the speaker stops talking.
-///
-/// Unlike `record_mono_f32_vad` it skips the speech-onset wait, assuming the speaker
-/// is already talking. Stops on `silence_ms` of silence or the `max_record_secs` cap.
+/// Record until `silence_ms` of silence or `max_record_secs`; no onset wait, unlike the VAD path.
 pub(crate) fn record_mono_f32_until_silence(
     mic: &MicHandle,
     max_record_secs: u32,
@@ -136,9 +93,7 @@ pub(crate) fn record_mono_f32_until_silence(
 ) -> Result<(Vec<f32>, u32)> {
     const POLL_MS: u64 = 30;
 
-    // Privacy gate: refuse to OPEN the device, so the OS microphone indicator
-    // stays dark. Filtering samples after capture would leave it lit and make
-    // the setting a lie.
+    // Privacy gate before open, so the OS mic indicator stays dark when the mic is disabled.
     pond_core::models::domain::mic_gate::ensure_mic_enabled()?;
     open_mic_and_confirm(mic)?;
 
@@ -146,7 +101,6 @@ pub(crate) fn record_mono_f32_until_silence(
     let mut reader = MicReader::new(mic.shared().clone());
     let mut samples: Vec<f32> = Vec::new();
 
-    // Record until silence or hard cap — no onset wait.
     let max_ms = max_record_secs as u64 * 1000;
     let mut elapsed_ms: u64 = 0;
     let mut silent_for: u64 = 0;
@@ -182,15 +136,12 @@ use pond_voice::dsp::VadEvent;
 
 use pond_voice::dsp::{SpeculativeVad, SpeechDetector};
 
-/// Spawns a background transcription of `samples` at `sample_rate`, returning
-/// a handle the caller can join once end-of-speech is confirmed.
+/// Starts a background transcription, joined once end-of-speech is confirmed.
 pub(crate) type SpeculativeSpawn =
     dyn Fn(Vec<f32>, u32) -> std::thread::JoinHandle<Result<String>> + Send + Sync;
 
-/// VAD-aware recording: wait up to `max_wait_secs` for onset, record until `silence_ms`
-/// of pause or the `max_record_secs` cap, return mono f32 PCM and the device rate
-/// (empty on no speech). `speculative_spawn` transcribes once per silence run, so a
-/// confirmed run returns it; `on_speculative_event` reports Ready/Invalidated (Q2-26).
+/// Wait for onset, record until `silence_ms` of pause or the cap; empty samples = no speech.
+/// `speculative_spawn` runs once per silence run; `on_speculative_event` gets Ready/Invalidated.
 pub(crate) fn record_mono_f32_vad(
     mic: &MicHandle,
     max_wait_secs: u32,
@@ -201,17 +152,12 @@ pub(crate) fn record_mono_f32_vad(
     audio_level_sink: Option<&ThrottledAudioLevelSink>,
     detector: &mut dyn SpeechDetector,
 ) -> Result<(Vec<f32>, u32, Option<String>)> {
-    // Onset only. The end-of-speech threshold moved into `detector`, which is
-    // why these are no longer a matched pair: onset stays an energy question on
-    // purpose. A model detector needs a window or two of context before it is
-    // trustworthy, so it under-reports at exactly the moment onset is decided
-    // and would clip the first word.
-    const SPEECH_RMS: f32 = 0.010; // onset threshold — lowered for better sensitivity
+    // Onset only, and energy-based on purpose: a model detector needs a window or two of
+    // context, so it under-reports at onset and would clip the first word.
+    const SPEECH_RMS: f32 = 0.010;
     const POLL_MS: u64 = 30;
 
-    // Privacy gate: refuse to OPEN the device, so the OS microphone indicator
-    // stays dark. Filtering samples after capture would leave it lit and make
-    // the setting a lie.
+    // Privacy gate before open, so the OS mic indicator stays dark when the mic is disabled.
     pond_core::models::domain::mic_gate::ensure_mic_enabled()?;
     open_mic_and_confirm(mic)?;
 
@@ -219,7 +165,7 @@ pub(crate) fn record_mono_f32_vad(
     let mut reader = MicReader::new(mic.shared().clone());
     let mut samples: Vec<f32> = Vec::new();
 
-    // ── Phase 1: wait for speech onset ──────────────────────────────────────
+    // ── Wait for speech onset ───────────────────────────────────────────────
     let max_wait_ms = max_wait_secs as u64 * 1000;
     let mut waited_ms: u64 = 0;
     let mut speech_detected = false;
@@ -247,15 +193,12 @@ pub(crate) fn record_mono_f32_vad(
         return Ok((samples, sample_rate, None)); // empty or just noise
     }
 
-    // ── Phase 2: record until end-of-speech ─────────────────────────────────
+    // ── Record until end-of-speech ──────────────────────────────────────────
     let max_record_ms = max_record_secs as u64 * 1000;
     let mut recorded_ms: u64 = 0;
     let mut vad = SpeculativeVad::new(silence_ms, POLL_MS);
     let mut speculative: Option<std::thread::JoinHandle<Result<String>>> = None;
-    // Set once the in-flight speculative job has been joined and the caller
-    // notified via `Ready` — retained so a later `Confirmed` can reuse it
-    // without re-joining, and so a later `DiscardSpeculative` knows to fire
-    // `Invalidated` (only needed if the caller already heard `Ready`).
+    // Set after `Ready`: reused on `Confirmed`; tells `DiscardSpeculative` to send `Invalidated`.
     let mut speculative_ready: Option<String> = None;
     let mut confirmed = false;
 
@@ -267,9 +210,6 @@ pub(crate) fn record_mono_f32_vad(
         let recent = (sample_rate as u64 * POLL_MS / 1000) as usize;
         let start = samples.len().saturating_sub(recent);
         let frame = &samples[start..];
-        // The level meter wants a number and the detector wants the samples, so
-        // this frame is walked twice. At 30 ms that is ~480 floats per poll —
-        // far below the cost of the branch that decides whether to say so.
         if let Some(sink) = audio_level_sink {
             sink.maybe_emit(rms_energy(frame));
         }
@@ -299,9 +239,7 @@ pub(crate) fn record_mono_f32_vad(
             VadEvent::None => {}
         }
 
-        // Poll the speculative job (non-blocking) and notify the caller the
-        // instant it's ready — this is what lets the LLM start before
-        // silence is confirmed, not just before the redundant re-transcribe.
+        // Notify as soon as the job finishes, so the LLM can start before silence is confirmed.
         if speculative_ready.is_none() {
             if let Some(handle) = &speculative {
                 if handle.is_finished() {
@@ -335,8 +273,7 @@ pub(crate) use pond_voice::dsp::resample_to_16k;
 
 // ── WAV encoding ──────────────────────────────────────────────────────────────
 
-/// Encode mono 16-bit PCM at 16 kHz as a WAV byte vector.
-/// Avoids any external WAV crate dependency.
+/// Encode mono 16-bit 16 kHz PCM as WAV bytes.
 pub(crate) use pond_voice::dsp::encode_wav_mono_16k;
 
 // ── WhisperKeywordDetector ────────────────────────────────────────────────────
@@ -344,45 +281,21 @@ pub(crate) use pond_voice::dsp::encode_wav_mono_16k;
 /// Configuration for the sliding-window wake-word detector.
 #[derive(Clone)]
 pub struct KeywordDetectorConfig {
-    /// Width of the audio window fed to whisper on each cycle (milliseconds).
-    ///
-    /// Wider than a wake word costs proportionally more to transcribe and gives
-    /// the model room to invent context, so it holds just a two-word phrase.
+    /// Window per cycle (ms): a two-word phrase; wider costs more and lets whisper invent context.
     pub window_ms: u64,
-    /// How far to advance the window on each detection cycle (milliseconds).
-    ///
-    /// Sets the floor on reaction time: the wake word cannot be noticed sooner
-    /// than the next slide, plus one transcription.
+    /// Window advance per cycle (ms); reaction time is at least this plus one transcription.
     pub slide_ms: u64,
-    /// Audio captured *before* the trigger fired (milliseconds).
-    ///
-    /// Covers the slide plus transcription that elapses before the loop notices;
-    /// the wake word comes off via [`pond_voice::text::strip_leading_wake_word`].
+    /// Audio kept from *before* the trigger (ms), covering the slide plus transcription lag.
     pub lookback_ms: u64,
-    /// Ceiling on audio captured after detection fires (milliseconds).
-    ///
-    /// A ceiling, not a target: [`Self::silence_threshold`] normally ends the
-    /// capture much sooner. It only binds when someone talks continuously.
+    /// Ceiling on post-trigger capture (ms); silence normally ends it much sooner.
     pub post_trigger_ms: u64,
-    /// Minimum RMS energy required to spend a transcription on a window.
-    ///
-    /// Below this, the window is skipped without waking whisper at all — which
-    /// is what keeps a quiet room from costing anything.
+    /// Min window RMS worth a transcription; keeps a quiet room from costing anything.
     pub energy_threshold: f32,
-    /// RMS below which the post-trigger capture counts a poll as silent.
-    ///
-    /// Kept separate from [`Self::energy_threshold`] and lower: the gate must be high
-    /// so room tone never reaches whisper, this must be low so endings are not clipped.
+    /// Post-trigger silence RMS; below [`Self::energy_threshold`] so quiet endings aren't clipped.
     pub silence_threshold: f32,
-    /// Consecutive silence (ms) that ends the post-trigger capture.
-    ///
-    /// Long enough to sit through the pause mid-sentence, short enough not to
-    /// feel like a wait. Set to 0 to always capture the full ceiling.
+    /// Silence (ms) ending the post-trigger capture; 0 always captures the full ceiling.
     pub post_trigger_silence_ms: u64,
-    /// Settling time (ms) before detection re-arms after an activation.
-    ///
-    /// Covers the speaker ringing out and the output device draining, so the
-    /// tail of the assistant's own reply cannot re-trigger the wake word.
+    /// Re-arm delay (ms) after an activation, so the reply's own tail can't re-trigger detection.
     pub cooldown_ms: u64,
 }
 
@@ -393,15 +306,13 @@ impl Default for KeywordDetectorConfig {
             window_ms: 1400,
             // Reaction floor: 200 ms + one transcription of a 1.4 s clip.
             slide_ms: 200,
-            // Covers a slide plus a slow transcription, so nothing said
-            // straight after the wake word is lost.
+            // A slide plus a slow transcription, so speech right after the wake word isn't lost.
             lookback_ms: 900,
             // A ceiling for uninterrupted speech; silence ends it far sooner.
             post_trigger_ms: 12_000,
             // ~-40 dBFS. Above a quiet room, below speech.
             energy_threshold: 0.010,
-            // ~-52 dBFS. Well under the gate so a fading sentence still counts
-            // as speech and is not clipped.
+            // ~-52 dBFS: well under the gate, so a fading sentence isn't clipped.
             silence_threshold: 0.0025,
             post_trigger_silence_ms: 800,
             cooldown_ms: 600,
@@ -409,32 +320,21 @@ impl Default for KeywordDetectorConfig {
     }
 }
 
-/// WakeWordDetector over a continuous ring buffer: a 1500 ms window sliding every
-/// 500 ms, a 200 ms re-check on a short match before firing, and trailing audio
-/// returned on detection so `VoiceInput::listen()` needs no second recording.
-/// Implements `StreamingWakeWordDetector`; the blanket impl gives `WakeWordDetector`.
+/// Sliding-window wake-word detector; returns the command audio so no second recording is needed.
 pub struct WhisperKeywordDetector {
-    /// Transcription backend — `WhisperRsInput` (in-process) by default,
-    /// Always `WhisperRsInput` since the HTTP backend was removed.
     backend: Arc<dyn WhisperBackend>,
     /// All normalized trigger variants. A transcript matching *any* of these fires detection.
     triggers: Vec<String>,
     prompt: String,
     config: KeywordDetectorConfig,
-    /// Optional live mic-level reporter, fed from the detection loop's own
-    /// RMS computation (wait state + post-trigger capture).
+    /// Optional live mic-level reporter, fed from the detection loop's RMS.
     audio_level_sink: Option<Arc<ThrottledAudioLevelSink>>,
-    /// The single shared microphone owner. Required, not optional — every
-    /// caller must go through it so this detector can never race another
-    /// capture path (the follow-up VAD listen, in particular) for the device.
+    /// Shared mic owner; all captures go through it so none races the follow-up VAD listen.
     mic: MicHandle,
 }
 
 impl WhisperKeywordDetector {
-    /// Create a detector that calls `backend` to transcribe each window.
-    /// `trigger` is the wake phrase (e.g. `"goose"`). `mic` must be the process's
-    /// single shared microphone owner (see `pond_audio`), so this detector and the
-    /// follow-up VAD capture cannot race the same device.
+    /// Detector for wake phrase `trigger`; `mic` must be the process's one shared mic owner.
     pub fn new(
         backend: Arc<dyn WhisperBackend>,
         trigger: impl Into<String>,
@@ -452,17 +352,13 @@ impl WhisperKeywordDetector {
         }
     }
 
-    /// Report live mic RMS level through `sink` while waiting for the wake
-    /// word and while capturing trailing command audio after it fires.
+    /// Report live mic RMS through `sink` while listening and capturing the command.
     pub fn with_audio_level_sink(mut self, sink: Arc<ThrottledAudioLevelSink>) -> Self {
         self.audio_level_sink = Some(sink);
         self
     }
 
-    /// Load calibrated transcription variants collected during onboarding.
-    ///
-    /// A non-empty `variants` matches any of them, absorbing Whisper's inconsistent
-    /// output; empty keeps the trigger from `new()` plus the built-in fuzzy variants.
+    /// Trigger on onboarding's calibrated variants; empty keeps `new()`'s trigger.
     pub fn with_transcriptions(mut self, variants: Vec<String>) -> Self {
         if !variants.is_empty() {
             self.triggers = variants
@@ -475,8 +371,7 @@ impl WhisperKeywordDetector {
                 self.triggers = vec![normalize_transcript(&self.prompt)];
             }
         }
-        // Always add built-in fuzzy variants for the primary trigger.
-        // Whisper frequently misheard common wake words.
+        // Always add the built-in mishearings of the primary trigger.
         let primary = self.triggers.first().cloned().unwrap_or_default();
         let builtins = builtin_fuzzy_variants(&primary);
         for variant in builtins {
@@ -493,19 +388,13 @@ impl WhisperKeywordDetector {
         self
     }
 
-    /// The normalized variants this detector fires on.
-    ///
-    /// Handed to the transcription adapter so the words that trigger a turn are
-    /// exactly the words stripped from the command; re-deriving them elsewhere drifts.
+    /// The normalized variants this detector fires on; also what the transcriber strips.
     pub fn triggers(&self) -> &[String] {
         &self.triggers
     }
 }
 
-/// Built-in fuzzy variants for common wake words.
-///
-/// Whisper (especially tiny and base) mishears short words; these catch the most
-/// common transcription errors without requiring user calibration.
+/// Common whisper mishearings of short wake words (worst on tiny/base models).
 fn builtin_fuzzy_variants(primary_trigger: &str) -> Vec<String> {
     match primary_trigger {
         "goose" => vec![
@@ -529,19 +418,12 @@ fn builtin_fuzzy_variants(primary_trigger: &str) -> Vec<String> {
     }
 }
 
-/// Normalization lives in `pond-voice`, beside the matcher that consumes it
-/// and the stripper that undoes it. All three have to agree on what a word is,
-/// and they only reliably agree if there is one implementation of it.
+/// One implementation, shared with the matcher and stripper so all agree on what a word is.
 use pond_voice::text::normalize_transcript;
 
-/// Root-mean-square energy of a mono f32 sample slice.
-/// Returns 0.0 for an empty slice.
+/// RMS energy of a mono f32 slice; 0.0 when empty.
 use pond_voice::dsp::rms as rms_energy;
 
-// ThrottledAudioLevelSink now lives in pond-core (shared::domain::agent) so
-// the piper adapter (TTS output amplitude) can reuse it too, without one
-// adapter crate depending on another. Re-exported here so existing call
-// sites in this file don't need to change their references.
 pub use pond_core::shared::domain::agent::ThrottledAudioLevelSink;
 
 #[async_trait]
@@ -553,10 +435,8 @@ impl StreamingWakeWordDetector for WhisperKeywordDetector {
         let audio_level_sink = self.audio_level_sink.clone();
         let mic = self.mic.clone();
 
-        // `run_loop` drops this future when the turn wins, and dropping a
-        // `spawn_blocking` handle DETACHES the task — so without this flag the
-        // thread keeps holding a cpal stream and firing whisper every `slide_ms`.
-        // A `CancellationToken` cannot help: it is async-only and this never awaits.
+        // Dropping a `spawn_blocking` handle only detaches it; this flag is what stops the thread.
+        // A `CancellationToken` can't help: the thread never awaits.
         let stop = Arc::new(AtomicBool::new(false));
         let _cancel_on_drop = StopOnDrop(stop.clone());
 
@@ -572,9 +452,7 @@ impl StreamingWakeWordDetector for WhisperKeywordDetector {
     }
 }
 
-/// Sets its flag on drop, so dropping a future cancels the blocking thread it
-/// spawned. Lives at module scope rather than inside the async fn so the drop
-/// behaviour is directly testable.
+/// Sets its flag on drop, so dropping the future stops the blocking thread it spawned.
 struct StopOnDrop(Arc<AtomicBool>);
 
 impl Drop for StopOnDrop {
@@ -583,10 +461,7 @@ impl Drop for StopOnDrop {
     }
 }
 
-/// Sleep `ms`, waking early if `stop` is set. Returns false when cancelled.
-///
-/// Every wait in the detection thread goes through this: a `spawn_blocking` task
-/// cannot be cancelled from outside, so the longest sleep bounds responsiveness.
+/// Sleep `ms`; false if `stop` cut it short. All detection waits use it to stay cancellable.
 fn sleep_unless_stopped(ms: u64, stop: &AtomicBool) -> bool {
     const SLICE_MS: u64 = 50;
     let mut remaining = ms;
@@ -601,10 +476,8 @@ fn sleep_unless_stopped(ms: u64, stop: &AtomicBool) -> bool {
     !stop.load(Ordering::SeqCst)
 }
 
-/// Blocking detection loop — runs inside `tokio::task::spawn_blocking`, sliding a
-/// window over the shared mic owner's ring buffer until the trigger is confirmed.
-/// The ring must be sized at `pond_audio::spawn` time to cover
-/// `window_ms.max(lookback_ms) + post_trigger_ms`; this loop only reads it.
+/// Blocking loop over the shared mic ring until a trigger is confirmed.
+/// `pond_audio::spawn` must size the ring for `window_ms.max(lookback_ms) + post_trigger_ms`.
 fn detection_loop(
     backend: Arc<dyn WhisperBackend>,
     triggers: Vec<String>,
@@ -613,21 +486,16 @@ fn detection_loop(
     audio_level_sink: Option<Arc<ThrottledAudioLevelSink>>,
     mic: MicHandle,
 ) -> Result<WakeWordActivation> {
-    // Privacy gate: refuse to OPEN the device, so the OS microphone indicator
-    // stays dark. Filtering samples after capture would leave it lit and make
-    // the setting a lie.
+    // Privacy gate before open, so the OS mic indicator stays dark when the mic is disabled.
     pond_core::models::domain::mic_gate::ensure_mic_enabled()?;
-    // Keep the generation this open claimed and scope every release below to it:
-    // this runs on a DETACHED blocking thread, so after a cancelled turn the
-    // device may already belong to the follow-up capture. An unconditional close
-    // there presents as a conversation that hears nothing after the wake word.
+    // Scope every close to this generation: after a cancelled turn this detached thread may
+    // no longer own the mic, and closing the follow-up capture's session would deafen it.
     let session = open_mic_and_confirm(&mic)?;
 
     let sample_rate = pond_audio::CAPTURE_RATE_HZ;
 
     // ── Cooldown — wait before re-arming (prevents TTS echo re-trigger) ───────
-    // Slept in slices so a cancelled turn is not stuck here for the full
-    // 2 s default still holding the microphone.
+    // Slept in slices so a cancelled turn doesn't sit out the cooldown holding the mic.
     if config.cooldown_ms > 0 {
         tracing::debug!("KWS: cooldown {}ms before arming", config.cooldown_ms);
         if !sleep_unless_stopped(config.cooldown_ms, &stop) {
@@ -647,7 +515,6 @@ fn detection_loop(
             return Err(anyhow!("wake-word detection cancelled"));
         }
 
-        // Snapshot the latest window_ms samples from the shared ring.
         let snapshot = mic.shared().recent(window_samples);
 
         if snapshot.len() < window_samples / 2 {
@@ -655,8 +522,7 @@ fn detection_loop(
         }
 
         // ── Energy gate — skip silent windows before hitting whisper ──────────
-        // RMS is computed unconditionally (not just when the gate is active)
-        // so the audio-level sink still gets readings when energy_threshold is 0.
+        // Computed even with the gate off (threshold 0), so the level sink still gets readings.
         let window_rms = rms_energy(&snapshot);
         if let Some(sink) = &audio_level_sink {
             sink.maybe_emit(window_rms);
@@ -669,9 +535,7 @@ fn detection_loop(
         // The shared ring is already normalised 16 kHz mono f32 — no resample.
         let transcript = match backend.transcribe_pcm_blocking(&snapshot) {
             Ok(t) if !t.is_empty() => {
-                // Backend implementations already strip artifacts, but call
-                // it again so a stray bracketed tag never makes it into the
-                // trigger-matching path.
+                // Re-strip: a stray bracketed tag must never reach trigger matching.
                 let cleaned = strip_whisper_artifacts(&t);
                 if cleaned.is_empty() {
                     tracing::debug!("KWS: artifact-only transcript stripped: {:?}", t);
@@ -689,9 +553,7 @@ fn detection_loop(
             }
         };
 
-        // Whole-word matching, not `contains` — see
-        // `pond_voice::text::find_trigger_words` for why the substring form
-        // both missed real activations and fired on "mongoose".
+        // Whole-word match, not `contains` (which fired on "mongoose").
         let matched = triggers
             .iter()
             .any(|t| pond_voice::text::contains_trigger(&transcript, t));
@@ -710,10 +572,7 @@ fn detection_loop(
             );
             play_wake_ping();
 
-            // VAD-gated post-trigger: poll every 50 ms and exit as soon as the
-            // microphone goes silent for `post_trigger_silence_ms` consecutive ms.
-            // Falls back to waiting the full `post_trigger_ms` if VAD is disabled
-            // or the user keeps speaking past the ceiling.
+            // Capture until `post_trigger_silence_ms` of silence or the `post_trigger_ms` ceiling.
             let poll_ms = 50u64;
             let mut elapsed_ms = 0u64;
             let mut silent_for_ms = 0u64;
@@ -725,9 +584,7 @@ fn detection_loop(
                 }
                 elapsed_ms += poll_ms;
 
-                // Computed unconditionally (not just when the VAD-silence gate
-                // below is active) so the audio-level sink keeps reporting
-                // through the whole post-trigger capture window.
+                // Computed even with the silence gate off, so the level sink reports throughout.
                 let recent_samples = (sample_rate as u64 * poll_ms / 1000) as usize;
                 let recent_rms = rms_energy(&mic.shared().recent(recent_samples));
                 if let Some(sink) = &audio_level_sink {
@@ -750,10 +607,7 @@ fn detection_loop(
                 }
             }
 
-            // Reach back past the trigger as well as forward: detection lags the
-            // wake word by a slide plus a transcription, and taking only the
-            // post-trigger audio clips the first words of the request. The wake
-            // word rides along in the clip and is stripped from the transcript.
+            // Add `lookback_ms`: detection lags, so post-trigger audio alone loses the first words.
             let captured_ms = elapsed_ms + config.lookback_ms;
             let captured_samples = (captured_ms * sample_rate as u64 / 1000) as usize;
             let command_audio = mic.shared().recent(captured_samples);
@@ -783,13 +637,8 @@ mod tests {
     use pond_voice::dsp::RmsDetector;
 
     // ── Detection tuning ──────────────────────────────────────────────────
-    //
-    // These assert the relationships between the knobs, not the numbers: a number
-    // can be retuned on hardware, a broken relationship is a silent regression.
+    // These check relationships between the knobs, not their (retunable) values.
 
-    /// The capture must be able to reach back over the detection latency, or
-    /// the first words after the wake word are lost — which is what made
-    /// "Goose, what's the weather" arrive as "the weather".
     #[test]
     fn the_lookback_covers_the_worst_case_detection_lag() {
         let c = KeywordDetectorConfig::default();
@@ -801,9 +650,7 @@ mod tests {
         );
     }
 
-    /// The ring is the only copy of the audio. If it holds less than a reader
-    /// asks for, the read silently returns a short clip — clipped speech, no
-    /// error, no way to tell from the transcript.
+    /// An undersized ring silently returns short clips, with no error.
     #[test]
     fn the_ring_holds_everything_both_readers_can_ask_for() {
         let c = KeywordDetectorConfig::default();
@@ -817,9 +664,6 @@ mod tests {
         );
     }
 
-    /// The gate keeps room tone away from whisper; the VAD decides when a
-    /// sentence ended. One value cannot serve both, and when it did, the
-    /// gate's value won and quiet sentence endings were cut off.
     #[test]
     fn ending_a_sentence_is_judged_more_leniently_than_waking_whisper() {
         let c = KeywordDetectorConfig::default();
@@ -835,8 +679,6 @@ mod tests {
         );
     }
 
-    /// Reaction time floor. A user who says the wake word and waits should
-    /// not be able to notice the wait.
     #[test]
     fn the_wake_word_is_noticed_within_a_slide_of_being_said() {
         let c = KeywordDetectorConfig::default();
@@ -848,9 +690,6 @@ mod tests {
         assert!(c.slide_ms >= 100, "under 100ms is duty cycle for no gain");
     }
 
-    /// The window exists to hold a wake phrase, not a sentence. Wider means
-    /// more for the model to invent context from and more to transcribe on
-    /// every single cycle.
     #[test]
     fn the_detection_window_is_sized_for_a_wake_phrase() {
         let c = KeywordDetectorConfig::default();
@@ -861,8 +700,6 @@ mod tests {
         );
     }
 
-    /// Long enough for the speaker to stop ringing, short enough that the
-    /// wake word works immediately after a reply.
     #[test]
     fn re_arming_is_quick_enough_to_answer_a_follow_up() {
         let c = KeywordDetectorConfig::default();
@@ -873,8 +710,6 @@ mod tests {
         );
     }
 
-    /// A ceiling, not a target — silence normally ends the capture. It has to
-    /// clear a real spoken request with a pause in the middle.
     #[test]
     fn the_capture_ceiling_allows_a_full_spoken_request() {
         let c = KeywordDetectorConfig::default();
@@ -895,8 +730,7 @@ mod tests {
         }
     }
 
-    /// A `MicHandle` backed by a scripted (no-hardware) device, for tests
-    /// that only need a valid handle to construct — not to actually capture.
+    /// A no-hardware `MicHandle`, for tests that only need one to construct, not to capture.
     fn test_mic() -> MicHandle {
         let (mic, _join) = pond_audio::spawn(
             Box::new(pond_audio::testing::ScriptedCapture::silence(0, 20)),
@@ -907,9 +741,7 @@ mod tests {
         mic
     }
 
-    /// The transcriber strips exactly what the detector matched, so the list
-    /// has to be reachable — and every entry normalized, or a variant with a
-    /// capital or a comma would match but never strip.
+    /// An unnormalized variant would match but never be stripped.
     #[test]
     fn the_resolved_triggers_are_exposed_and_all_normalized() {
         let d = WhisperKeywordDetector::new(Arc::new(DeafBackend), "goose", test_mic())
@@ -927,9 +759,6 @@ mod tests {
         }
     }
 
-    /// Calibration variants must survive alongside the built-in mishearings —
-    /// dropping either halves detection for someone whose accent whisper
-    /// renders unusually.
     #[test]
     fn calibrated_variants_and_builtin_mishearings_both_survive() {
         let d = WhisperKeywordDetector::new(Arc::new(DeafBackend), "goose", test_mic())
@@ -971,10 +800,7 @@ mod tests {
         assert!((out.len() as i32 - 32).abs() <= 1, "len was {}", out.len());
     }
 
-    /// Verify the full PCM pipeline against a real audio file.
-    ///
-    /// jfk.wav is the canonical whisper.cpp sample: 16-bit mono 16 kHz PCM. Parse,
-    /// run through the DSP helpers, re-encode, then check structure and length.
+    /// jfk.wav is whisper.cpp's canonical sample: 16-bit mono 16 kHz PCM.
     #[test]
     fn jfk_wav_round_trips_through_dsp_pipeline() {
         let wav_path =
@@ -1018,7 +844,7 @@ mod tests {
         );
     }
 
-    // ── SpeculativeVad (Q2-26) ──────────────────────────────────────────
+    // ── SpeculativeVad ──────────────────────────────────────────────────
 
     const SPEECH: f32 = 1.0;
     const QUIET: f32 = 0.0;
@@ -1086,8 +912,7 @@ mod tests {
             vad.on_speech(SPEECH >= THRESHOLD),
             VadEvent::DiscardSpeculative
         );
-        // New silence run after the false pause — spawns again, independent
-        // of the discarded one.
+        // A new silence run after the false pause spawns again.
         assert_eq!(
             vad.on_speech(QUIET >= THRESHOLD),
             VadEvent::SpawnSpeculative
@@ -1102,9 +927,6 @@ mod tests {
     }
 
     // ── wake-word cancellation ───────────────────────────────────────────
-    //
-    // `spawn_blocking` DETACHES when its handle is dropped, so without the stop
-    // flag the detection thread holds a cpal stream and runs whisper forever.
 
     #[test]
     fn stop_on_drop_sets_the_flag() {
@@ -1138,8 +960,6 @@ mod tests {
         );
     }
 
-    /// The cooldown default is 2000 ms. Cancellation must not have to wait it
-    /// out while still holding the microphone.
     #[test]
     fn a_long_wait_is_cut_short_by_cancellation_mid_sleep() {
         let stop = Arc::new(AtomicBool::new(false));
@@ -1162,10 +982,6 @@ mod tests {
 
     // ── Shared mic owner: the wake-word/VAD handoff race ────────────────────
 
-    /// The wake-word detector hands the mic back and a follow-up VAD capture
-    /// immediately reopens the same handle, which is what `run_loop` does between
-    /// turns. Both go through the one serialized owner, so the second open cannot
-    /// fail because the first had not finished closing.
     #[tokio::test]
     async fn wake_word_then_follow_up_capture_share_the_mic_without_racing() {
         struct AlwaysMatches;
@@ -1204,8 +1020,7 @@ mod tests {
             "a confirmed activation must carry captured command audio"
         );
 
-        // The detector's `mic.close()` and this follow-up `mic.open()` race
-        // exactly the way `run_loop` races them between turns.
+        // Races the detector's close against this open, as `run_loop` does between turns.
         let result = tokio::task::spawn_blocking(move || {
             let mut detector = RmsDetector::new(0.005);
             record_mono_f32_vad(&mic, 1, 1, 200, None, None, None, &mut detector)

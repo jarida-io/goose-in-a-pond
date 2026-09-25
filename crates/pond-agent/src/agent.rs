@@ -1,7 +1,4 @@
-//! PondAgent — the core agent loop with sustained tool calling, implementing the
-//! [`Agent`] trait from `pond-core`. A request hot-swaps the provider if the
-//! model changed, builds the system prompt and history, then streams LLM and
-//! tool rounds until a final text answer or the 10-round guard fires.
+//! `PondAgent`: an [`Agent`] that streams LLM and tool rounds until a final text answer.
 
 use crate::ollama_provider::OllamaInferenceProvider;
 use anyhow::{anyhow, Result};
@@ -33,27 +30,20 @@ use tokio::sync::{Mutex, RwLock};
 /// Maximum tool-calling loop iterations before the agent gives up.
 const MAX_TOOL_ITERATIONS: u32 = 10;
 
-/// Maximum conversation history messages to fetch per request before budgeting.
-/// The actual cut-off is determined by `CompactionProfile::history_token_budget`.
+/// Fetch cap before `CompactionProfile::history_token_budget` does the real cut-off.
 const HISTORY_LIMIT: usize = 60;
 
-/// The core GIAP agent with sustained tool-calling support. Wraps a
-/// hot-swappable `InferenceProvider` behind a `RwLock` and runs a multi-turn
-/// tool loop, using `PromptBuilder` when template repositories are available.
+/// The GIAP agent: a hot-swappable `InferenceProvider` driving a multi-turn tool loop.
 pub struct PondAgent {
     /// The active inference provider (hot-swappable at runtime).
     provider: RwLock<Arc<dyn InferenceProvider>>,
     /// Tool definitions cached from the MCP server at init time.
     tool_definitions: Vec<ToolDefinition>,
-    /// Settings persistence.
     settings_repo: Arc<dyn SettingsRepository>,
     /// Prompt template persistence (optional -- falls back to built-in).
     template_repo: Option<Arc<dyn PromptTemplateRepository>>,
-    /// Prompt extras persistence (optional).
     extras_repo: Option<Arc<dyn PromptExtraRepository>>,
-    /// User skills persistence (optional).
     skill_repo: Option<Arc<dyn UserSkillRepository>>,
-    /// Session message persistence (for cross-session history if needed).
     session_storage: Arc<dyn SessionStorage>,
     /// MCP tool dispatcher — routes tool calls to the correct MCP server.
     tool_dispatcher: Option<Arc<dyn ToolDispatcher>>,
@@ -62,10 +52,7 @@ pub struct PondAgent {
 }
 
 impl PondAgent {
-    /// Create a new PondAgent.
-    ///
-    /// The `provider` is the initial inference provider. It will be
-    /// hot-swapped if `settings.chat_provider:chat_model` changes.
+    /// Starts on `provider`; hot-swapped when `settings.chat_provider:chat_model` changes.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         provider: Arc<dyn InferenceProvider>,
@@ -97,10 +84,7 @@ impl PondAgent {
         }
     }
 
-    /// Check if the provider needs to be swapped based on current settings.
-    ///
-    /// Compares `chat_provider:chat_model` against the last known key.
-    /// If changed, creates a new `OllamaInferenceProvider` and swaps it in.
+    /// Swap in a new provider when `chat_provider:chat_model` differs from the last key.
     async fn ensure_provider_current(&self, settings: &Settings) -> Result<()> {
         let key = format!("{}:{}", settings.chat_provider, settings.chat_model);
 
@@ -111,9 +95,7 @@ impl PondAgent {
             }
         }
 
-        // If the provider is not configured yet (empty string from defaults),
-        // keep the injected provider as-is. The caller is responsible for
-        // providing a valid initial provider.
+        // Unconfigured (empty default): keep the injected provider.
         if settings.chat_provider.is_empty() {
             return Ok(());
         }
@@ -127,13 +109,10 @@ impl PondAgent {
             "llamafile" => {
                 let url = std::env::var("GIAP_LLAMAFILE_URL")
                     .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
-                // Llamafile uses an OpenAI-compatible API, but we can use the
-                // same Ollama provider structure for streaming.
+                // Reuses the Ollama provider although llamafile's API is OpenAI-compatible.
                 Arc::new(OllamaInferenceProvider::new(&url, &settings.chat_model))
             }
-            // "local" / "gguf" providers are injected at startup via
-            // build_pond_agent() or swap_provider(). Keep using whatever
-            // is currently loaded — the model was already loaded at init.
+            // "local"/"gguf" providers are injected via `swap_provider`; keep the loaded one.
             "local" | "gguf" => {
                 tracing::debug!(
                     "provider '{}' is managed externally — keeping current provider",
@@ -161,10 +140,7 @@ impl PondAgent {
         Ok(())
     }
 
-    /// Swap the inference provider externally (e.g. from `rebuild_llm_provider`).
-    ///
-    /// Used when the caller creates a provider (e.g. local GGUF) that
-    /// `ensure_provider_current` cannot construct internally.
+    /// Swap in a provider `ensure_provider_current` can't build itself (e.g. local GGUF).
     pub async fn swap_provider(&self, provider: Arc<dyn InferenceProvider>) {
         let key = format!("external:{}", provider.model_name());
         *self.provider.write().await = provider;
@@ -172,23 +148,15 @@ impl PondAgent {
     }
 
     /// Build the system prompt from settings, device state, and templates.
-    ///
-    /// Uses `PromptBuilder::build_prompt_partition()` when a template repo
-    /// is available. Falls back to a simple default otherwise.
     async fn build_system_prompt(&self, settings: &Settings, request: &AgentRequest) -> String {
-        // Determine thinking mode and tool calling capability.
         let provider = self.provider.read().await;
         let caps = provider.capabilities();
 
-        // When the model supports native tool calling, tools are passed through
-        // the Jinja chat template as structured definitions — NOT described in
-        // the system prompt. Including them in both places confuses the model
-        // into responding with text about tools instead of calling them.
+        // Native tool calling gets tools via the chat template only: also describing them here
+        // makes the model talk about tools instead of calling them.
         let available_tools: Vec<String> = if caps.tool_calling {
-            vec![] // Tools handled by the chat template
+            vec![]
         } else {
-            // Fallback: describe tools in the system prompt for models
-            // without native tool calling support.
             self.tool_definitions
                 .iter()
                 .map(|t| format!("{} -- {}", t.name, t.description))
@@ -200,7 +168,6 @@ impl PondAgent {
             _ => caps.thinking, // "auto"
         };
 
-        // Build temporal context.
         let now = chrono::Local::now();
         let current_date = now.format("%A, %-d %B %Y").to_string();
         let current_time = now.format("%H:%M").to_string();
@@ -212,14 +179,12 @@ impl PondAgent {
             available_tools,
             thinking_enabled,
             compact_prompt: false,
-            // TODO(Q2-05): derive from the provider like GooseAdapter does
-            // (matches "local" | "gguf") when PondAgent is stabilised.
+            // TODO: derive from the provider as GooseAdapter does ("local" | "gguf").
             native_tools_json: false,
             tools_offered: self.tool_dispatcher.is_some() || !self.tool_definitions.is_empty(),
             prefix_hash: None,
         };
 
-        // Try to load template from DB.
         let template_content = if let Some(ref repo) = self.template_repo {
             repo.get(&settings.prompt_style)
                 .await
@@ -236,14 +201,12 @@ impl PondAgent {
 
         let partition = prompt_builder::build_prompt_partition(settings, None, &state, template);
 
-        // Combine static prefix + dynamic suffix.
         let mut prompt = partition.static_prefix;
         if !partition.dynamic_suffix.is_empty() {
             prompt.push_str("\n\n");
             prompt.push_str(&partition.dynamic_suffix);
         }
 
-        // Append prompt extras from DB.
         if let Some(ref repo) = self.extras_repo {
             if let Ok(extras) = repo.list_active().await {
                 for extra in &extras {
@@ -253,8 +216,7 @@ impl PondAgent {
             }
         }
 
-        // Append user skills — name + description only (progressive disclosure).
-        // Full instructions load on demand via giap-device__load_skill.
+        // Skills: name + description only; full instructions load via giap-device__load_skill.
         if let Some(ref repo) = self.skill_repo {
             if let Ok(skills) = repo.list_active().await {
                 if !skills.is_empty() {
@@ -303,27 +265,19 @@ impl Agent for PondAgent {
         &self,
         request: AgentRequest,
     ) -> Result<BoxStream<'static, Result<AgentStreamEvent>>> {
-        // 1. Load settings.
         let settings = self.settings_repo.get().await?;
 
-        // 2. Hot-swap provider if needed.
         self.ensure_provider_current(&settings).await?;
 
-        // 3. Build system prompt.
         let system_prompt = self.build_system_prompt(&settings, &request).await;
 
-        // 4. Determine if tools should be offered.
-        //    Query the dispatcher LIVE each turn for pre-formatted JSON.
-        //    This produces the EXACT same format as Goose's format_tools() —
-        //    no intermediate conversion through ToolDefinition objects.
+        // Query the dispatcher live each turn: its JSON matches Goose's `format_tools()` exactly.
         let provider = self.provider.read().await;
         let caps = provider.capabilities();
         let (tools, tools_json_override, compact_json_override) = if caps.tool_calling {
             if let Some(ref disp) = self.tool_dispatcher {
-                // Get pre-formatted JSON directly from dispatcher (same as Goose's format_tools)
                 let full_json = disp.tools_json().await;
                 let compact_json = disp.compact_tools_json().await;
-                // Also get ToolDefinition vec for the provider interface
                 let defs = disp.available_tool_definitions().await;
                 let tool_defs: Vec<ToolDefinition> = defs
                     .into_iter()
@@ -347,10 +301,7 @@ impl Agent for PondAgent {
             (vec![], None, None)
         };
 
-        // 5. Context budget for history injection: whatever is left after the
-        //    system prompt and tool-schema overhead. Precedence lives in
-        //    pond-core's ContextGovernor so this loop cannot drift from the live
-        //    path (PAI-3); an explicit override wins outright over the caps.
+        // Precedence lives in `ContextGovernor` so this loop can't drift from the live path.
         let context_tokens = ContextGovernor::resolve(&ContextInputs {
             provider: &settings.chat_provider,
             model: &settings.chat_model,
@@ -366,9 +317,7 @@ impl Agent for PondAgent {
         let history_budget =
             available_history_chars(&profile, system_prompt.len(), tool_schema_chars);
 
-        // 6. Load history from SessionStorage and build the structured message array.
-        //    `HistoryManager` groups stored messages into atomic turns and trims
-        //    newest-first so a tool call and its result always stay together.
+        // `HistoryManager` trims whole turns newest-first, so a tool call keeps its result.
         let stored_messages = self
             .session_storage
             .get_recent_messages(request.session_id.as_str(), HISTORY_LIMIT)
@@ -386,9 +335,6 @@ impl Agent for PondAgent {
             "history loaded from session storage"
         );
 
-        // Append the current user message. It is *not* wrapped in <user-message>
-        // XML because the history is no longer flattened into one user turn —
-        // the model now receives a proper multi-turn conversation.
         messages.push(ChatMessage::user(request.message.clone()));
 
         let thinking_enabled = match settings.thinking_mode.as_str() {
@@ -405,14 +351,12 @@ impl Agent for PondAgent {
             compact_tools_json_override: compact_json_override.clone(),
         };
 
-        // 7. Clone what we need for the spawned task.
         let provider = Arc::clone(&*provider);
         let session_id = request.session_id.clone();
         let model_role = request.model_role.clone();
         let dispatcher = self.tool_dispatcher.clone();
         let storage = self.session_storage.clone();
 
-        // 8. Spawn the tool loop on a channel.
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentStreamEvent>>(64);
 
         tokio::spawn(async move {
@@ -442,22 +386,18 @@ impl Agent for PondAgent {
                         .await;
                 }
 
-                // Stream from the provider.
                 let mut stream = provider.stream_chat(&system_prompt, &messages, &tools, &options);
 
                 let mut text_buf = String::new();
                 let mut tool_calls: Vec<(String, String, serde_json::Value)> = Vec::new();
-                // Stream text tokens immediately so the ThoughtFilter in the SSE layer
-                // can capture thinking blocks in real-time. If tool calls follow, the
-                // text was preamble (e.g. "Let me check...") — harmless since the
-                // ThoughtFilter strips reasoning markup and the UI handles it.
+                // Stream text at once so the SSE layer's ThoughtFilter sees thinking live; any
+                // preamble before a tool call is harmless.
                 let mut streamed_any_text = false;
 
                 while let Some(event) = stream.next().await {
                     match event {
                         Ok(pond_core::models::ports::inference::ChatEvent::Text(t)) => {
                             text_buf.push_str(&t);
-                            // Stream immediately so ThoughtFilter sees tokens in real-time
                             let _ = tx.send(Ok(AgentStreamEvent::Text { content: t })).await;
                             streamed_any_text = true;
                         }
@@ -491,7 +431,6 @@ impl Agent for PondAgent {
                         .collect();
                     let calls_key = current_calls.join(",");
                     if last_tool_call.as_deref() == Some(&calls_key) {
-                        // Same tool(s) called twice in a row — break to prevent infinite loop.
                         if !text_buf.is_empty() {
                             let _ = tx
                                 .send(Ok(AgentStreamEvent::Text {
@@ -511,11 +450,6 @@ impl Agent for PondAgent {
                     break;
                 }
 
-                // Tool calls detected — dispatch ALL concurrently, then inject results.
-                // Parallel execution saves latency when multiple tools are called
-                // (e.g. weather + time, or multiple lookups).
-
-                // Emit all tool_call events immediately.
                 for (id, name, args) in &tool_calls {
                     let _ = tx
                         .send(Ok(AgentStreamEvent::ToolCall {
@@ -526,9 +460,6 @@ impl Agent for PondAgent {
                         .await;
                 }
 
-                // Push the assistant turn with structured tool_call metadata.
-                // The OpenAI-compatible message format preserves these on the
-                // next request so the model sees its own tool usage history.
                 let tool_call_records: Vec<ToolCallRecord> = tool_calls
                     .iter()
                     .map(|(id, name, args)| ToolCallRecord {
@@ -542,7 +473,6 @@ impl Agent for PondAgent {
                     tool_call_records,
                 ));
 
-                // Dispatch all tools in parallel.
                 let dispatch_futures: Vec<_> = tool_calls
                     .iter()
                     .map(|(id, name, args)| {
@@ -566,9 +496,6 @@ impl Agent for PondAgent {
 
                 let results = futures::future::join_all(dispatch_futures).await;
 
-                // Emit each result event and append a Role::Tool message that
-                // references the originating tool_call id. The model now sees a
-                // proper tool turn (no flat-text injection, no user-role nudge).
                 for (id, name, result_text) in &results {
                     let _ = tx
                         .send(Ok(AgentStreamEvent::ToolResult {
@@ -581,21 +508,14 @@ impl Agent for PondAgent {
                     messages.push(ChatMessage::tool_result(result_text.clone(), id.clone()));
                 }
 
-                // Small local models (Gemma 4 E4B/E2B) don't reliably synthesize
-                // after structured role:tool messages without an explicit prompt.
-                // This nudge keeps the structured history intact while giving the
-                // model a clear signal to produce a text answer.
+                // Small models (Gemma 4 E4B/E2B) need a nudge to answer after role:tool messages.
                 messages.push(ChatMessage::user(
                     "Using the tool results above, provide a helpful answer to the user's question.",
                 ));
-
-                // Loop back for next LLM call with tool results.
             }
 
-            // Persist this turn to SessionStorage: the user message pushed
-            // before the loop and every assistant/tool message from inside it.
-            // Skip the synthesis nudge, an internal artifact that would show as
-            // a user bubble. Fire-and-forget so persistence never blocks SSE.
+            // Persist the turn, minus the synthesis nudge (it would show as a user bubble).
+            // Fire-and-forget so persistence never blocks SSE.
             const SYNTHESIS_NUDGE: &str =
                 "Using the tool results above, provide a helpful answer to the user's question.";
             let turn_messages: Vec<ChatMessage> = messages[history_messages_len..]
@@ -626,7 +546,6 @@ impl Agent for PondAgent {
                 }
             });
 
-            // Emit done event.
             let _ = tx
                 .send(Ok(AgentStreamEvent::Done {
                     session_id,
@@ -790,10 +709,7 @@ mod tests {
                 images: vec![],
                 voice_mode: false,
                 canvas_mode: false,
-                // States what this fixture is, nothing more. This loop does not
-                // read either field -- it is quarantined (Q2-05) and its scope
-                // handling is unwritten, so Household here is a description of
-                // the fixture, not evidence the loop honours a scope.
+                // Descriptive only: this loop never reads the profile fields.
                 profile_scope: ProfileScope::Household,
                 profile_context: None,
                 tool_group_allowlist: None,
