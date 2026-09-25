@@ -91,7 +91,7 @@ pub fn parent_turn_permits(provider: &str) -> u32 {
     }
 }
 
-// ── The live-delegation ledger (PAI-6 P4) ───────────────────────────────────
+// ── The live-delegation ledger ──────────────────────────────────────────────
 
 /// What live delegations claim from their parents: a share of the history budget, and the device.
 /// Process-wide ([`process_device_ledger`]): per-instance would miss other instances' children.
@@ -274,7 +274,7 @@ pub async fn claim_device_for_turn(
     })
 }
 
-// ── The progress channel (PAI-6 P6) ─────────────────────────────────────────
+// ── The progress channel ────────────────────────────────────────────────────
 
 /// One thing a live delegation did, bound for its parent's chat stream. Separate from the stream
 /// event because it carries the routing key, which a client must never see.

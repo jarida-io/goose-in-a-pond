@@ -397,7 +397,7 @@ impl GooseAdapter {
         .await
     }
 
-    // ── PAI-4 P5: prefix-cache bookkeeping ────────────────────────────────
+    // ── Prefix-cache bookkeeping ──────────────────────────────────────────
     // Synchronous, guard dropped before return: safe to call from `async fn`s that `.await`.
 
     fn note_prefix_invalidated(&self, reason: InvalidationReason) {
@@ -721,7 +721,7 @@ impl GooseAdapter {
             return;
         }
 
-        // ── Phase F2: decide which historical images get real pixels ──────────
+        // ── Which historical images get real pixels ───────────────────────────
         // Counted only over messages that survived the budget cut.
         let attachment_counts: std::collections::HashMap<String, usize> = storage
             .list_session_attachments(giap_session_id)
@@ -1704,7 +1704,7 @@ impl GooseAdapter {
         }
     }
 
-    // ── Phase D2: per-session tool selection ────────────────────────────────
+    // ── Per-session tool selection ──────────────────────────────────────────
 
     /// Group-description vectors, cached on first success; `None` means "don't narrow".
     /// Failures aren't cached (the embedder may still be downloading), so a later session retries.
@@ -2621,7 +2621,7 @@ impl GooseAdapter {
             }
         };
 
-        // ── 6c. Phase D2: per-session tool relevance ─────────────────────────
+        // ── 6c. Per-session tool relevance ───────────────────────────────────
         // Goose always sends the full union, so narrowing is enforced by the shim per call.
         // It only picks which schemas ride the prompt (cost), not whether tools get used.
         let mut dormant_groups_note = String::new();
@@ -2687,7 +2687,7 @@ impl GooseAdapter {
             allowed_tools
         };
 
-        // ── 6d. PAI-1 P5, enforced in BOTH selection modes ───────────────────
+        // ── 6d. Guest tool subtraction, in BOTH selection modes ──────────────
         // The group-level pass only runs when narrowing (not the default "all"); this set is
         // what the shim gets, so every mode must subtract here.
         let allowed_tools = if turn_scope.excludes_everything() {
@@ -2815,7 +2815,7 @@ impl GooseAdapter {
         // Live handle for the tool-call guard inside the 'static stream closure.
         let guard_controls = session_controls.clone();
 
-        // ── C1: the deterministic in-turn trim is GONE ───────────────────
+        // ── History image cap ────────────────────────────────────────────
         // Goose owns compaction; the image cap stays because each replayed image re-runs the
         // mmproj encoder (0.7-2.7 s), a cost goose can't see.
         self.cap_history_images(&goose_sid).await;
@@ -2833,7 +2833,7 @@ impl GooseAdapter {
         let cancel_token = CancellationToken::new();
         let cancel_guard = cancel_token.clone().drop_guard();
 
-        // ── PAI-6 P3: this turn's delegation authority ────────────────────────
+        // ── This turn's delegation authority ──────────────────────────────────
         // Delegation ceiling: the unforgeable API-edge scope and the post-6d entitlement, so it
         // must stay after 6d. The lease dies with the stream.
         let authority_lease = self.turn_authorities.publish(
@@ -2854,7 +2854,7 @@ impl GooseAdapter {
         let turn_provider = settings.chat_provider.clone();
         let device_session_id = session_id.clone();
 
-        // ── PAI-6 P6: where this turn hears about its own delegations ────────
+        // ── Where this turn hears about its own delegations ──────────────────
         // Keyed by the GIAP session id (a `TaskSpec`'s parent); frames before subscribing are
         // dropped. Dies with the stream, taking its bus entry with it.
         let mut progress = crate::orchestrator::process_progress_bus().subscribe(&session_id);
@@ -2865,7 +2865,7 @@ impl GooseAdapter {
             // Dropped with the stream, revoking this turn's authority to delegate.
             let _authority_lease = authority_lease;
 
-            // ── PAI-6 P4 / invariant 3: this turn's claim on the device ───────
+            // ── Invariant 3: this turn's claim on the device ──────────────────
             // One KV prefix per model slot: a child replying mid-turn would overwrite ours.
             // Taken inside the stream so the client sees it waiting; `None` for remote providers.
             let _device = crate::orchestrator::claim_device_for_turn(
@@ -2884,7 +2884,7 @@ impl GooseAdapter {
             // Wall-clock start per tool call (keyed by Goose tool-call ID) for latency.
             let mut tool_call_starts: HashMap<String, std::time::Instant> = HashMap::new();
 
-            // ── Round-trip attribution (P0) ──────────────────────────────────
+            // ── Round-trip attribution ───────────────────────────────────────
             // What `AgentEvent::Usage` lacks: the gap since the last inference and the tools run
             // in between (telling tool round-trips from re-engagements or compactions).
             let mut last_inference_end: Option<std::time::Instant> = None;
@@ -3728,7 +3728,7 @@ impl AgentPort for GooseAdapter {
     }
 }
 
-// ── PAI-6 P2: driving a child agent ─────────────────────────────────────────
+// ── Driving a child agent ───────────────────────────────────────────────────
 //
 // Mechanism only: every policy decision is already made in `TaskSpec` / `ChildPlan`.
 // Lives here, not in `orchestrator.rs`, because it needs this type's private fields.
@@ -3838,7 +3838,7 @@ impl GooseAdapter {
         // The child gets its own `ModelConfig` on the same provider; the parent's is untouched.
         let model_config = crate::orchestrator::child_model_config(&plan.model, model_config);
 
-        // ── PAI-6 P3: the child's second tool layer, and its prompt ───────────
+        // ── The child's second tool layer, and its prompt ─────────────────────
         //
         // Before the child's first provider call: the shim is a no-op for a session with no entry.
         // The override stops `enforce_system` silently rebuilding away the delegation envelope.
@@ -4328,7 +4328,7 @@ mod tests {
         }
     }
 
-    // ── PAI-4 P5: which reason a provider swap records ────────────────────
+    // ── Which reason a provider swap records ──────────────────────────────
 
     #[test]
     fn the_same_model_behind_a_new_provider_is_a_rebuild_not_a_swap() {
@@ -4398,7 +4398,7 @@ mod tests {
         }
     }
 
-    // ── PAI-5 P1: the structured reasoning channel ────────────────────────
+    // ── The structured reasoning channel ──────────────────────────────────
 
     /// The producer is the only gate: downstream forwards `Thinking` frames unconditionally.
     #[test]
@@ -4812,7 +4812,7 @@ mod tests {
         );
     }
 
-    // ── PAI-5 P2: reasoning tokens ────────────────────────────────────────
+    // ── Reasoning tokens ──────────────────────────────────────────────────
 
     /// The shipped default hides thinking, and the output reserve is sized from this count.
     #[test]
@@ -5340,7 +5340,7 @@ mod tests {
         );
     }
 
-    // ── PAI-3 P5: the adapter builds ONE asymmetric profile per turn ─────
+    // ── One asymmetric profile per turn ──────────────────────────────────
 
     /// The ledger's share with no child delegating; named so `0.0` doesn't read as a tolerance.
     const NO_LIVE_CHILD: f32 = 0.0;
@@ -6067,7 +6067,7 @@ mod tests {
         assert!(!hit(""));
     }
 
-    // ── C2: env-knob decision table ──────────────────────────────────────
+    // ── Env-knob decision table ──────────────────────────────────────────
 
     fn knob(knobs: &[(&'static str, Option<String>)], key: &str) -> Option<String> {
         knobs

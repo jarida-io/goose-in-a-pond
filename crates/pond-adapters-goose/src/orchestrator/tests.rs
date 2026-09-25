@@ -1067,7 +1067,7 @@ async fn cancelling_a_different_parent_leaves_this_ones_children_alone() {
     );
 }
 
-// ── The prompt: THE respecification of this phase ───────────────────────────
+// ── The child prompt ────────────────────────────────────────────────────────
 
 #[test]
 fn the_child_prompt_is_giaps_own_and_states_the_limits_the_child_runs_under() {
@@ -1257,7 +1257,7 @@ fn eviction_never_removes_a_run_that_is_still_going() {
     );
 }
 
-// ── PAI-6 P3: scope inheritance at the edge ─────────────────────────────────
+// ── Scope inheritance at the edge ───────────────────────────────────────────
 
 #[tokio::test]
 async fn a_delegation_whose_parent_turn_has_ended_does_not_run() {
@@ -1681,7 +1681,7 @@ fn the_live_turn_claims_the_device_before_it_streams_anything() {
     );
 }
 
-// ── PAI-6 P4: the budget, and the other half of invariant 3 ─────────────────
+// ── The budget, and the other half of invariant 3 ───────────────────────────
 
 #[test]
 fn a_parent_turn_on_this_device_takes_the_whole_semaphore() {
@@ -2102,7 +2102,7 @@ fn nothing_in_this_adapter_can_construct_a_delegation_depth() {
     );
 }
 
-// ── PAI-6 P6: what a child may say, and how it reaches its parent ───────────
+// ── What a child may say, and how it reaches its parent ─────────────────────
 
 #[test]
 fn a_progress_frame_carries_the_tool_name_and_nothing_else() {
@@ -2470,7 +2470,7 @@ fn the_live_turn_subscribes_to_its_own_delegations() {
     }
 }
 
-// ── PAI-6 P7: the role's model ──────────────────────────────────────────────
+// ── The role's model ────────────────────────────────────────────────────────
 //
 // On-device a role model means a second GGUF load plus a re-prefill, so it is refused.
 
@@ -2676,7 +2676,7 @@ fn the_child_loop_slice_is_the_child_loop() {
     );
 }
 
-// ── PAI-6 P8: background delegations ────────────────────────────────────────
+// ── Background delegations ──────────────────────────────────────────────────
 
 /// A spec that asked to run in the background, for a named parent session.
 fn background_spec_for(role: &AgentRole, parent_groups: &[&str], parent: &str) -> TaskSpec {

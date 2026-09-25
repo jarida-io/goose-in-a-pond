@@ -285,7 +285,7 @@ impl ActivityObserver {
     }
 }
 
-// ── Presence (PAI-7 P2) ──────────────────────────────────────────────────
+// ── Presence ─────────────────────────────────────────────────────────────
 
 /// Which way a household member's presence changed: edges only, never the re-derived level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1566,7 +1566,7 @@ mod presence_tests {
         );
     }
 
-    // ── What the publisher used to decide for itself ─────────────────────
+    // ── PresenceInputs ───────────────────────────────────────────────────
 
     #[test]
     fn the_freshness_window_is_the_one_that_decides_idle() {

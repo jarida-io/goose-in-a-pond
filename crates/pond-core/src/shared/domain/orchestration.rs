@@ -45,7 +45,7 @@ pub fn max_concurrent_subagents(provider: &str) -> usize {
 /// Concurrent subagents allowed on a hosted provider; a guess, never measured.
 pub const REMOTE_SUBAGENT_CONCURRENCY: usize = 3;
 
-// ── Per-role model (PAI-6 P7) ───────────────────────────────────────────────
+// ── Per-role model ──────────────────────────────────────────────────────────
 
 /// Which model a child runs on; a role's model is honoured only on a hosted provider.
 /// Elsewhere the child runs on the resident model, as a second costs a reload plus re-prefill.
@@ -115,7 +115,7 @@ impl ChildModel {
     }
 }
 
-// ── Background delegation (PAI-6 P8) ────────────────────────────────────────
+// ── Background delegation ───────────────────────────────────────────────────
 
 /// Whether a delegation on `provider` may run in the background.
 /// With a single permit, a background child would only hold up the parent's next turn.

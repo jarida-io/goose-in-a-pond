@@ -290,7 +290,7 @@ pub struct Settings {
     #[serde(default = "Settings::default_weather_location_name")]
     pub weather_location_name: String,
 
-    // ── Vision (#130) ──────────────────────────────────────────────────────
+    // ── Vision ─────────────────────────────────────────────────────────────
     /// On-device camera capture + motion detection; needs a camera and ffmpeg.
     #[serde(default = "Settings::default_vision_enabled")]
     pub vision_enabled: bool,
@@ -316,7 +316,7 @@ pub struct Settings {
     #[serde(default = "Settings::default_vision_classifier_model")]
     pub vision_classifier_model: String,
 
-    // ── Matter (#195) ──────────────────────────────────────────────────────
+    // ── Matter ─────────────────────────────────────────────────────────────
     #[serde(default = "Settings::default_matter_ws_url")]
     pub matter_ws_url: String,
 
@@ -325,7 +325,7 @@ pub struct Settings {
     #[serde(default = "Settings::default_matter_ble_enabled")]
     pub matter_ble_enabled: bool,
 
-    // ── Private mesh (#132) ────────────────────────────────────────────────
+    // ── Private mesh ───────────────────────────────────────────────────────
     /// Starts the private P2P mesh transport; needs a `mesh` build.
     /// Its identity keypair is the `mesh_identity_secret` store key, never a `Settings` field.
     #[serde(default = "Settings::default_mesh_enabled")]
@@ -596,7 +596,7 @@ pub struct Settings {
     #[serde(default = "Settings::default_tool_request_detection")]
     pub tool_request_detection: bool,
 
-    // ── API keys: NOT HERE, deliberately (PAI-2 P2) ──────────────────────
+    // ── API keys: NOT HERE, deliberately ─────────────────────────────────
     // GET /api/v1/settings returns this struct whole, so credentials go in `SecretRepository`.
     /// Self-hosted SearXNG URL; an endpoint, not a credential (`user:pass@` belongs in secrets).
     #[serde(default)]

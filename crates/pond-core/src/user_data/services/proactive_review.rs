@@ -570,7 +570,7 @@ fn first_json_array(text: &str) -> Option<&str> {
     None
 }
 
-// ── P7: what the member already said ────────────────────────────────────────
+// ── What the member already said ────────────────────────────────────────────
 
 /// How long a rejection keeps suppressing: long enough to feel heard, not forever.
 pub const SUPPRESSION_WINDOW: Duration = Duration::days(30);
@@ -1314,7 +1314,7 @@ mod tests {
         );
     }
 
-    // ── P7: the feedback loop ──────────────────────────────────────────────
+    // ── The feedback loop ──────────────────────────────────────────────────
 
     fn decision_about(
         source: &str,

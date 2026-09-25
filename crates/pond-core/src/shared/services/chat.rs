@@ -60,7 +60,7 @@ fn truncate_tool_result(mut content: String) -> String {
     content
 }
 
-// ── PAI-7 P6: speaking first ─────────────────────────────────────────────────
+// ── Speaking first ───────────────────────────────────────────────────────────
 
 /// Local time of day as minutes past midnight, `[0, 1440)`; `new` is the only constructor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1641,7 +1641,7 @@ impl ChatService {
                 state: WorkflowState::Thinking,
             });
 
-            // ── Q2-26 phantom-turn gate ─────────────────────────────────────
+            // ── Phantom-turn gate ───────────────────────────────────────────
             // Reuse the speculative job only if its transcript matches: one persisted turn each.
             let reusable_speculative = match speculative {
                 Some((spec_transcript, handle)) if spec_transcript == input => Some(handle),
@@ -2011,7 +2011,7 @@ mod tests {
         assert!(out.chars().all(|c| c == 'é'));
     }
 
-    // ── derive_title_from_text / ensure_session_title (DEF-7) ────────────
+    // ── derive_title_from_text / ensure_session_title ────────────────────
 
     #[test]
     fn derive_title_takes_first_six_words() {
@@ -2121,7 +2121,7 @@ mod tests {
         assert!(!is_dismissal_or_exit_phrase(""));
     }
 
-    // ── listen_with_speculative_chat (Q2-26) ─────────────────────────────
+    // ── listen_with_speculative_chat ─────────────────────────────────────
 
     /// Fires scripted signals, pausing so `select!` can react, then returns `final_transcript`.
     struct ScriptedSpeculativeVoiceInput {
@@ -2235,7 +2235,7 @@ mod tests {
         );
     }
 
-    // ── Phantom-turn persistence invariant (Q2-26, data integrity) ───────
+    // ── Phantom-turn persistence invariant (data integrity) ──────────────
 
     #[tokio::test]
     async fn confirmed_turn_persists_exactly_once_user_and_assistant() {
@@ -3232,7 +3232,7 @@ mod tests {
         );
     }
 
-    // ── PAI-7 P6: speaking first ──────────────────────────────────────────
+    // ── Speaking first ────────────────────────────────────────────────────
 
     use crate::user_data::domain::settings::Settings;
 

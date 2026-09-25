@@ -1517,7 +1517,7 @@ async fn run_server(
             db.system.clone(),
         ));
 
-    // ── Face recognition (Phase 2) ──────────────────────────────────────────
+    // ── Face recognition ────────────────────────────────────────────────────
     // Needs the face-onnx feature and the model files on disk; otherwise `None`
     // (server starts normally; /api/v1/faces/* return 503).
     #[cfg(feature = "face-onnx")]
@@ -2407,7 +2407,7 @@ async fn run_server(
         });
     }
 
-    // ── Personal-context index maintenance (phases B + D) ────────────────────
+    // ── Personal-context index maintenance ───────────────────────────────────
     // `index_sweep_running` lets the rebuild route say whether anything will refill the index.
     let index_sweep_running = embedding_provider.is_some() && vector_model_id.is_some();
     if let (Some(provider), Some(_)) = (embedding_provider.clone(), vector_model_id.clone()) {
@@ -3179,7 +3179,7 @@ async fn run_server(
         });
     }
 
-    // ── PAI-7 P4: the proactive reviewer ─────────────────────────────────
+    // ── The proactive reviewer ───────────────────────────────────────────
     // A review is its own parent turn: it publishes a turn authority, whose token cascades
     // interruption. It reuses the `delegate` tool's orchestrator; no orchestrator, no review.
     {
@@ -3231,7 +3231,7 @@ async fn run_server(
         ));
     }
 
-    // ── PAI-8 P1: the personal-context corpus gets a producer ────────────
+    // ── The personal-context corpus producer ─────────────────────────────
     // `IngestPipeline::new` takes the redactor by value, so it can't be left out. Own bus
     // subscription, not the reviewer's ring: every event must be seen once, and rings wrap.
     // `account_syncer` is hoisted so the "check now" route and the timer share one syncer.
@@ -4906,7 +4906,7 @@ async fn newest_session_activity(
     pond_core::shared::domain::session_activity::human_activity(&sessions).newest_activity
 }
 
-// ── PAI-7 P1: clock and session-activity publishers on the event bus ────────
+// ── Clock and session-activity publishers on the event bus ──────────────────
 //
 // The rules engine skips these events (no `trigger_view`); the event-log bridge records them.
 
@@ -4998,7 +4998,7 @@ async fn run_session_activity_observer(
             bus.publish(BusEvent::Session(transition));
         }
 
-        // ── Presence (PAI-7 P2) ──────────────────────────────────────────
+        // ── Presence ─────────────────────────────────────────────────────
         //
         // Read-avoidance only (the observer re-checks); `list_sessions` is unbounded.
         let mut attributed = Vec::new();
@@ -6495,7 +6495,7 @@ async fn run_onboard(reset: bool) -> Result<()> {
     Ok(())
 }
 
-// ── Private mesh (#132 Milestone 2) ───────────────────────────────────────────
+// ── Private mesh ──────────────────────────────────────────────────────────────
 
 /// Starts the mesh if enabled; its key persists in the raw settings KV (a secret, not a field).
 #[cfg(feature = "mesh")]
