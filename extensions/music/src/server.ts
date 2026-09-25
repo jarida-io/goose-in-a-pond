@@ -1,15 +1,5 @@
 #!/usr/bin/env node
-/**
- * GIAP Music Extension — MCP server for Spotify playback.
- *
- * A small set of intent-shaped tools rather than one per endpoint (this was
- * once 14 tools, which was worse):
- *   play          — play a track, album or playlist; now or next in the queue
- *   playlists     — list the user's playlists, split by who created them
- *   devices       — list playback devices, or move playback to one
- *   status        — what's currently playing + queue
- *   control       — pause, resume, next, previous, volume, shuffle, seek, repeat
- */
+/** GIAP Music MCP server for Spotify: a few intent-shaped tools, not one per endpoint. */
 import * as readline from "readline";
 import { describeError, log } from "./log.js";
 import { isShortRelease, SpotifyProvider } from "./providers/spotify.js";
@@ -20,15 +10,7 @@ const provider = new SpotifyProvider();
 const TOOLS = [
   {
     name: "play",
-    // One tool with two enums, not three tools that each spend most of their
-    // description warning about the other two. `control` already proved the
-    // shape here: 13 actions in 314 tokens, where play/queue/play_playlist
-    // cost 895 for three. An enum is also a stronger steer than prose asking
-    // the model not to pick a sibling.
-    // The enums carry their own semantics; repeating them here cost ~90 tokens
-    // to say everything twice. What stays is what no parameter can express:
-    // that playback continues past the song it was asked for, and that the
-    // result may not be what was asked for.
+    // Enums, not sibling tools, to save tokens; the description says only what no parameter can.
     description:
       "Play music on Spotify. Music keeps playing afterwards: a song starts inside its album so the album follows on, and a single is topped up with more by the same artist — do not tell the user playback will stop after the song, and do not queue extra songs yourself to keep it going. Search picks the closest match, which is not always what was asked for — tell the user the track name and artist FROM THE RESULT, never the name they asked for.",
     inputSchema: {
@@ -161,12 +143,8 @@ async function handlePlay(args: Record<string, unknown>): Promise<string> {
   const query = args.query as string | undefined;
   const uri = args.uri as string | undefined;
 
-  // Direct URI play
   if (uri) {
-    // A bare track URI carries no album, so resolve it first — otherwise this
-    // path keeps the old "plays once, then silence" behaviour that the search
-    // path no longer has. Any failure falls back to playing the URI as given:
-    // a lookup is a nicety, playing the music is not.
+    // Resolve the album so playback continues; on any failure, play the URI as given.
     if (uri.startsWith("spotify:track:")) {
       try {
         const track = await provider.getTrack(uri);
@@ -194,15 +172,7 @@ async function handlePlay(args: Record<string, unknown>): Promise<string> {
     return await provider.play(uri);
   }
 
-  // Playlist: match one of the user's own by name and play it. provider.play
-  // sends a non-track URI as context_uri, so playback runs through the whole
-  // playlist rather than stopping after one song.
-  //
-  // The word "playlist" in the query counts even when `type` was left unset.
-  // Telling the model to set it did not work: asked to "play randoms playlist
-  // in my library" it still searched those words as a song title, played an
-  // unrelated track, and reported that it had started the playlist. A request
-  // that says "playlist" is not ambiguous enough to justify guessing wrong.
+  // A query saying "playlist" counts even with `type` unset: models often fail to set it.
   const saysPlaylist = !!query && /\bplaylists?\b/i.test(query);
   if (query && ((args.type as string | undefined) === "playlist" || saysPlaylist)) {
     const { uri: playlistUri, name } = await resolvePlaylist(query);
@@ -229,7 +199,6 @@ async function handlePlay(args: Record<string, unknown>): Promise<string> {
     return text;
   }
 
-  // Search and play
   if (query) {
     const tracks = await provider.searchTracks(query, 5);
     if (tracks.length === 0) {
@@ -237,18 +206,10 @@ async function handlePlay(args: Record<string, unknown>): Promise<string> {
     }
 
     const top = tracks[0];
-    // The whole TrackInfo, not `top.uri`: it carries the album, and a track
-    // played inside its album keeps going when it ends. A bare URI goes out as
-    // a one-element `uris` list, which is what used to leave Spotify silent.
+    // Pass the TrackInfo, not `top.uri`: its album lets playback continue past the track.
     await provider.play(top);
 
-    // A single defeats the album context -- track 1 of 1 runs out just as
-    // fast. Top it up with more of the same artist.
-    //
-    // Never at the cost of the play itself: the song has already started by
-    // this point, and a rate limit, a device going away, or an artist with
-    // nothing else in the catalogue must not turn a working request into an
-    // error. Logged and dropped.
+    // Top up a short release; the song has already started, so a failure here is only logged.
     let toppedUp: { queued: number; source: "artist" | "listener" } | null = null;
     if (isShortRelease(top)) {
       try {
@@ -262,14 +223,9 @@ async function handlePlay(args: Record<string, unknown>): Promise<string> {
     }
 
     const others = tracks.slice(1, 4);
-    // Say "track" outright. When the user asked for a playlist and this branch
-    // ran anyway, a bare "Now playing: X" was reported back as "I started your
-    // playlist"; naming what actually started makes the mismatch visible.
+    // "track" outright, so the model can't pass this off as the playlist it was asked for.
     let text = `Now playing track: ${top.name} by ${top.artist} (${top.album})`;
-    // Say what will follow, so the model does not have to guess and cannot
-    // claim the queue was cleared. Named precisely: the fallback queues the
-    // listener's own favourites, not this artist, and saying otherwise would
-    // be a lie about what is in the queue.
+    // Say what follows, naming the source: the fallback queues the listener's favourites.
     if (toppedUp && toppedUp.queued > 0) {
       text +=
         toppedUp.source === "artist"
@@ -313,8 +269,7 @@ async function handleQueue(args: Record<string, unknown>): Promise<string> {
   const top = tracks[0];
   await provider.addToQueue(top.uri);
 
-  // Name what was queued so a wrong pick is visible and can be skipped, and
-  // list the runners-up the way handlePlay does.
+  // Name the pick so a wrong one can be spotted and skipped.
   let text = `Queued: ${top.name} by ${top.artist} (${top.album}). Current track keeps playing.`;
   const others = tracks.slice(1, 4);
   if (others.length > 0) {
@@ -334,13 +289,7 @@ function normalizeName(s: string): string {
     .replace(/\s+/g, " ");
 }
 
-/**
- * Words people wrap around a playlist's actual name — "play the EDM playlist
- * from my library". Scored as content they drag the match around: they dilute
- * the real words, and "playlist" alone matched half of "Scratch Adventure - S*x
- * Playlist". Stripped from the query only; a playlist really called "... Playlist"
- * still matches on its remaining words.
- */
+/** Filler around a spoken playlist name, stripped from the query only (it dilutes the match). */
 const QUERY_FILLER = new Set([
   "the", "a", "an", "my", "our", "from", "in", "on", "of", "please", "playlist",
   "playlists", "list", "library", "spotify", "called", "named", "one",
@@ -352,15 +301,7 @@ function contentWords(normalized: string): string {
   return kept.length > 0 ? kept.join(" ") : normalized;
 }
 
-/**
- * Scores how well a spoken name matches a playlist's real one, 0 (no) to 1.
- *
- * Real playlist names are messy — "Sauti sol/Kenyan gold" with an emoji on the
- * end — and people say "sautisol". Plain substring matching fails on the missing
- * space alone, so compare with spaces removed as well, and fall back to how many
- * of the query's words the name actually contains, which survives a typo in one
- * of them.
- */
+/** 0–1 match score; compares without spaces too, since people say "sautisol" for "Sauti sol". */
 function playlistMatchScore(query: string, playlistName: string): number {
   const q = contentWords(normalizeName(query));
   const n = normalizeName(playlistName);
@@ -371,11 +312,7 @@ function playlistMatchScore(query: string, playlistName: string): number {
   const ns = n.replace(/ /g, "");
   if (qs === ns) return 0.95;
 
-  // Naming a playlist by its opening words is the common case: people say
-  // "R&B Classics" for "R&B Classics 90s & 2000s - Best Old School...". A flat
-  // score for any containment let a short unrelated name ("Classics") tie with
-  // that, and the tie-break then handed it to the wrong playlist — so weight by
-  // how much of the longer string the match actually covers.
+  // Prefix is the common case; weighting containment by coverage stops short names tying with it.
   if (ns.startsWith(qs)) return 0.92;
   if (ns.includes(qs)) return 0.75 + 0.15 * (qs.length / ns.length);
   if (qs.includes(ns)) return 0.7 + 0.15 * (ns.length / qs.length);
@@ -387,13 +324,7 @@ function playlistMatchScore(query: string, playlistName: string): number {
   return Math.min(0.65, overlap / qWords.length);
 }
 
-/**
- * Splits "RnB playlist by Arlene" into the name and the owner asked for.
- *
- * Only treats a trailing "by X" as an owner when X actually owns something in
- * the library — playlist names contain "by" too, and misreading one as an owner
- * would lose the real name.
- */
+/** Splits off a trailing "by X" owner, only when X owns something here: names contain "by" too. */
 function splitOwnerHint(
   query: string,
   playlists: { owner: string }[]
@@ -412,16 +343,12 @@ function splitOwnerHint(
     : { name: query, owner: null };
 }
 
-/**
- * Finds a playlist in the user's library by name. The model will have a name,
- * not an id, so requiring an id would make this unusable in practice.
- */
+/** Finds a library playlist by name; the model has names, not ids. */
 async function resolvePlaylist(query: string): Promise<{ uri: string; name: string }> {
   const playlists = await provider.getPlaylists();
   const { name, owner } = splitOwnerHint(query, playlists);
 
-  // "by <person>" narrows to that person's playlists. Ignoring it silently
-  // played the user's own lookalike instead of the one they named.
+  // Narrow to the named owner, or the own-playlist tie-break picks the user's lookalike.
   let pool = playlists;
   if (owner) {
     const wanted = normalizeName(owner);
@@ -436,9 +363,7 @@ async function resolvePlaylist(query: string): Promise<{ uri: string; name: stri
 
   const ranked = pool
     .map(p => ({ p, score: playlistMatchScore(name, p.name) }))
-    // On a genuine tie, prefer a playlist the user made — libraries hold both a
-    // followed "EDM" and their own, and the stranger's copy is the wrong guess.
-    // Only a tie: a better-matching playlist wins regardless of who owns it.
+    // On a tie only, prefer the user's own playlist over a followed one.
     .sort((a, b) => b.score - a.score || Number(b.p.is_own) - Number(a.p.is_own));
 
   const best = ranked[0];
@@ -449,10 +374,7 @@ async function resolvePlaylist(query: string): Promise<{ uri: string; name: stri
     .map(r => r.p.name)
     .join(", ");
   const scope = owner ? ` from ${owner}` : "";
-  // Spotify only lets us see playlists the user owns or follows: browsing
-  // someone else's is 403 for this app. So a playlist they have merely opened
-  // in Spotify is invisible here, and the way out is worth stating rather than
-  // leaving them to conclude the name matching is broken.
+  // Other users' playlists are 403 for this app, so explain the way out.
   throw new Error(
     `No playlist matching "${name}"${scope} in this library. ` +
       `Closest${scope}: ${suggestions || "(none)"}. ` +
@@ -462,9 +384,7 @@ async function resolvePlaylist(query: string): Promise<{ uri: string; name: stri
 }
 
 async function handlePlayPlaylist(args: Record<string, unknown>): Promise<string> {
-  // A link or URI plays even when the playlist is not in the library, which is
-  // the only way to reach someone else's playlist — Spotify refuses to list
-  // another user's playlists for this app.
+  // A link or URI is the only way to reach a playlist outside the library.
   const given = (args.uri ?? args.url) as string | undefined;
   if (given) {
     const id = given.match(/playlist[/:]([A-Za-z0-9]+)/)?.[1];
@@ -557,9 +477,7 @@ async function handleDevices(args: Record<string, unknown>): Promise<string> {
     );
   }
 
-  // Reuse the playlist name matcher: "my phone" against "SM-A576B" is the same
-  // loose-name problem, and the device type is worth matching on too, since
-  // people say "the speaker" far more often than a device's actual name.
+  // Also match on device type: people say "the speaker" more than a device's name.
   const ranked = devices
     .map(d => ({ d, score: Math.max(playlistMatchScore(target, d.name), playlistMatchScore(target, d.type)) }))
     .sort((a, b) => b.score - a.score);
@@ -579,8 +497,6 @@ async function handlePlaylists(): Promise<string> {
   const playlists = await provider.getPlaylists();
   if (playlists.length === 0) return "No playlists found on this Spotify account.";
 
-  // Split them: "which of these did I make" is a question the raw list cannot
-  // answer, and Spotify hands us the owner on every entry anyway.
   const mine = playlists.filter(p => p.is_own);
   const followed = playlists.filter(p => !p.is_own);
 
@@ -685,11 +601,6 @@ function parsePosition(value: unknown): number | null {
 }
 
 // ── Logging ───────────────────────────────────────────────────
-//
-// Structured, levelled and redacted, in the same shape as the Matter controller
-// — see `src/log.ts`. `debug` keeps its old call sites: JSON-RPC traffic is
-// per-message chatter and belongs at debug, while anything that FAILED now says
-// so at a level that can be found.
 function debug(...args: unknown[]) {
   const [first, ...rest] = args;
   log.debug(
@@ -750,21 +661,11 @@ async function handleRequest(
       try {
         let text: string;
         switch (toolName) {
-          // One tool, routed on its enums. The three handlers stay as they
-          // were -- the merge is at the tool surface, which is where the
-          // tokens were, not in the Spotify logic.
           case "play": {
             const target = (args.target as string | undefined) ?? "track";
             const when = (args.when as string | undefined) ?? "now";
             debug(`play → ${target}/${when}`, String(args.query ?? args.uri ?? "(resume)"));
             if (target === "playlist") {
-              // `handlePlayPlaylist` reads `name`; the merged surface calls it
-              // `query`, so map rather than duplicating the handler.
-              //
-              // `when` is ignored here and the schema says so: Spotify has no
-              // call that queues a whole playlist. Splitting the enums made the
-              // request EXPRESSIBLE for the first time, so it has to be
-              // answered rather than silently doing something else.
               text = await handlePlayPlaylist({ ...args, name: args.name ?? args.query });
               if (when === "next") {
                 text += "\n\n(Played now — Spotify cannot add a whole playlist to the queue.)";
@@ -818,9 +719,6 @@ async function handleRequest(
           result: { content: [{ type: "text", text }] },
         };
       } catch (err) {
-        // Reported to the model AND logged. It was only ever reported, so a
-        // tool that failed the same way every time left no trace anyone could
-        // find afterwards — the model relayed a sentence and it was gone.
         const msg = describeError(err);
         log.warn("tool_failed", `${toolName} failed`, {
           tool: toolName,

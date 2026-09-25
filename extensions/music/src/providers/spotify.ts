@@ -4,21 +4,9 @@ import { describeError, log } from '../log.js';
 interface SpotifyTrack {
   id: string;
   name: string;
-  /**
-   * `id` matters as much as `name`: it is the only reliable way to tell this
-   * artist's tracks from covers and same-titled songs when following up a
-   * search by artist name.
-   */
+  /** `id` is the only reliable way to tell this artist's tracks from covers and namesakes. */
   artists: Array<{ id?: string; name: string }>;
-  /**
-   * Everything but `name` was previously declared away, which is how the bug
-   * happened: the fields arrive on every search response, but a narrowed type
-   * made them invisible and `parseTrack` dropped them. `uri` is what lets a
-   * track play inside its album instead of alone.
-   *
-   * All optional because `GET /me/player` and `GET /me/player/queue` return a
-   * thinner track object than `/search` does.
-   */
+  /** All but `name` optional: player and queue endpoints return a thinner track than `/search`. */
   album: {
     name: string;
     id?: string;
@@ -31,39 +19,14 @@ interface SpotifyTrack {
 }
 
 /**
- * The body for `PUT /v1/me/player/play`.
- *
- * Pure, and exported, so the one decision that caused the "Spotify goes
- * silent" bug can be pinned by tests without a fake Spotify. The rest of this
- * file is I/O; this is the part worth asserting on.
- *
- * Spotify's play endpoint takes **either** shape, never both:
- *
- * - `uris` — an ad-hoc list. Spotify plays exactly those tracks and then
- *   STOPS. A one-element list is a playlist of one song, which is why asking
- *   for a single track used to end in silence with nothing left in the queue.
- * - `context_uri` — an album, playlist or artist. Playback runs through the
- *   context and, on Premium, Spotify's own autoplay carries on past the end.
- *
- * So a track is played *inside* its album, positioned with `offset`.
- *
- * The constraint that shapes all of this: **`offset` is only valid when the
- * context is an album or a playlist.** Spotify rejects it for an artist
- * context, so "play this song within the artist" cannot be expressed — the
- * album is the only context that both starts on the requested track and
- * continues afterwards. `an_offset_is_never_sent_with_an_artist_context` pins
- * that.
- *
- * A track whose album is unknown still falls back to `uris`. That is the old
- * behaviour, kept deliberately: a missing field should cost the continuation,
- * not the music.
+ * Body for `PUT /v1/me/player/play`. A `uris` list stops when it ends, so a track plays inside
+ * its album via `offset`, which Spotify accepts only for album and playlist contexts.
  */
 export function buildPlayBody(target?: PlayTarget): Record<string, unknown> {
   if (!target) return {};
 
   if (typeof target === 'string') {
-    // A bare track URI has no album to play inside; anything else already is
-    // a context.
+    // Anything but a track URI is already a context.
     return target.startsWith('spotify:track:')
       ? { uris: [target] }
       : { context_uri: target };
@@ -75,15 +38,6 @@ export function buildPlayBody(target?: PlayTarget): Record<string, unknown> {
   return { uris: [target.uri] };
 }
 
-/**
- * A Spotify track object mapped to our own shape.
- *
- * Exported and module-level because this mapping is where the "Spotify goes
- * silent" bug actually lived: the album fields arrive on every search
- * response, but a narrowed type hid them and this function dropped them, so
- * the album context never reached the point where playback was started.
- * Keeping it testable is the guard against that happening again.
- */
 export function parseTrack(track: SpotifyTrack): TrackInfo {
     return {
       id: track.id,
@@ -92,11 +46,7 @@ export function parseTrack(track: SpotifyTrack): TrackInfo {
       album: track.album.name,
       duration_ms: track.duration_ms,
       uri: track.uri,
-      // The album context, carried rather than dropped. `album_uri` is what
-      // `buildPlayBody` needs to keep playback going after the requested
-      // track; the other three decide whether a release is too short to be
-      // worth continuing. None costs an extra request -- they are already in
-      // the response we just parsed.
+      // `album_uri` keeps playback going past this track; the rest drive the short-release top-up.
       album_uri: track.album.uri,
       album_total_tracks: track.album.total_tracks,
       album_type: track.album.album_type,
@@ -104,18 +54,7 @@ export function parseTrack(track: SpotifyTrack): TrackInfo {
     };
 }
 
-/**
- * Whether a release is too short for "the rest of the album" to mean anything.
- *
- * A single is the case that defeats an album context: playing track 1 of 1 and
- * continuing through the album still leaves silence one song later. Both
- * signals come free with the search response, so asking costs no request.
- *
- * `total_tracks` is checked as well as `album_type` because compilations and
- * two-track releases are typed `album` yet run out just as fast, and because
- * `album_type` is absent from the thinner track object the player endpoints
- * return.
- */
+/** Whether album playback would run out almost at once: singles and two-track releases. */
 export function isShortRelease(track: TrackInfo): boolean {
   if (track.album_type === 'single') return true;
   return track.album_total_tracks !== undefined && track.album_total_tracks <= SHORT_RELEASE_TRACKS;
@@ -130,26 +69,14 @@ const FOLLOW_UP_LIMIT = 10;
 /** How many candidates to fetch before filtering them down to the artist's own. */
 const FOLLOW_UP_SEARCH_LIMIT = 20;
 
-/**
- * Follow-up tracks to queue behind a short release, newest search first.
- *
- * Pure so the filtering can be tested: it is the part that goes wrong. Keeps
- * only tracks that genuinely share an artist id with the seed, which is what
- * stops covers, tributes and same-titled songs by other artists from being
- * queued as though they were the artist's own work. Falls back to matching on
- * the artist *name* only when the seed carried no ids, since the player
- * endpoints omit them.
- */
+/** The seed artist's own tracks, matched by id (by name if the seed has none), to queue next. */
 export function pickFollowUps(
   seed: TrackInfo,
   candidates: TrackInfo[],
   limit: number,
 ): TrackInfo[] {
   const seedIds = new Set(seed.artist_ids ?? []);
-  // Seeded with the requested track: a single and its album cut are the same
-  // recording under two ids, and the single is precisely the case that reaches
-  // this function, so without the seed in here the song the user asked for gets
-  // queued behind itself and plays twice.
+  // Seeded so the requested single's album cut (same song, other id) isn't queued behind it.
   const seen = new Set([seed.name]);
   const out: TrackInfo[] = [];
 
@@ -189,25 +116,9 @@ interface SpotifyPlaylist {
 }
 
 /**
- * Endpoints Spotify withdrew from apps created after 2024-11-27, which includes
- * GIAP's. Verified against a live token — these are not a scope problem and
- * asking for more permissions will not bring them back:
- *
- *   GET /recommendations                     404
- *   GET /recommendations/available-genre-seeds  404
- *   GET /audio-features/{id}                 403
- *   GET /audio-analysis/{id}                 403
- *   GET /artists/{id}/related-artists        403
- *   GET /artists/{id}/top-tracks             403
- *   GET /browse/featured-playlists           403
- *   GET /browse/new-releases                 403
- *   GET /me/tracks/contains                  403
- *   PUT / DELETE /me/tracks                  403  (library writes, even
- *                                                 with user-library-modify)
- *   track.preview_url                        always null
- *
- * So there is no "play me something like this", no mood or tempo matching, and
- * no 30-second previews. Do not build features that depend on them.
+ * Endpoints Spotify withdrew from apps created after 2024-11-27, GIAP's included, whatever the
+ * scopes: /recommendations, /audio-features, /audio-analysis, /artists/{id}/related-artists and
+ * /top-tracks, /browse, /me/tracks/contains, PUT/DELETE /me/tracks; `preview_url` is always null.
  */
 export class SpotifyProvider implements MusicProvider {
   name = 'Spotify';
@@ -218,8 +129,6 @@ export class SpotifyProvider implements MusicProvider {
 
   private get token(): string {
     if (!this.accessToken) {
-      // The one failure a user can fix in ten seconds, and the one that looked
-      // exactly like a broken extension when nothing reported it.
       log.warn('no_token', 'no Spotify token — the extension has never been signed in', {
         hint: 'sign in to Spotify from the Extensions tab',
       });
@@ -231,16 +140,9 @@ export class SpotifyProvider implements MusicProvider {
   /** GIAP server URL for OAuth refresh requests. */
   private readonly giapUrl = process.env.GIAP_SERVER_URL || 'http://127.0.0.1:4000';
 
-  /**
-   * Ask GIAP to refresh the Spotify token, then update the in-memory
-   * token from the response so we can retry without a process restart.
-   */
+  /** Asks GIAP to refresh the token and updates it in memory, so retries need no restart. */
   private async refreshToken(): Promise<boolean> {
-    // Every arm below says which one it was. This function used to end in
-    // `catch { /* GIAP may be unreachable */ }` and three silent `return false`s,
-    // so an expired token, a GIAP that could not be reached, a rejected refresh
-    // and a malformed response were one symptom: music stopped working and
-    // nothing anywhere said why. They need different fixes from the user.
+    // Each failure arm logs distinctly: they need different fixes from the user.
     const started = Date.now();
     log.debug('token_refresh_started', 'asking GIAP to refresh the Spotify token');
 
@@ -257,8 +159,7 @@ export class SpotifyProvider implements MusicProvider {
       if (!refreshResp.ok) {
         log.warn('token_refresh_rejected', 'GIAP refused to refresh the Spotify token', {
           status: refreshResp.status,
-          // 401 here is GIAP's own internal token, not Spotify's — a different
-          // fault entirely from the one that sent us here.
+          // A 401 here rejects GIAP's internal token, not Spotify's.
           hint: refreshResp.status === 401
             ? 'the extension\'s internal token was rejected'
             : 'sign in to Spotify again from the Extensions tab',
@@ -290,15 +191,9 @@ export class SpotifyProvider implements MusicProvider {
     return false;
   }
 
-  /**
-   * Issues a request, refreshing the token and retrying once on a 401.
-   *
-   * Returns the raw `Response` and reads nothing from it — whether there is a
-   * body, and what it means, is the caller's business.
-   */
+  /** Sends a request, refreshing the token and retrying once on 401; the body is left unread. */
   private async request(method: string, path: string, body?: unknown): Promise<Response> {
-    // Re-read the `token` getter on each attempt: a refresh replaces the token
-    // in place, and the retry has to send the new one.
+    // `this.token` is read per attempt so the retry sends the refreshed token.
     const send = () => fetch(`${this.baseUrl}${path}`, {
       method,
       headers: {
@@ -315,8 +210,7 @@ export class SpotifyProvider implements MusicProvider {
     if (resp.status === 401) {
       log.debug('token_expired', 'Spotify rejected the token; refreshing', { method, path });
       if (!await this.refreshToken()) {
-        // The refresh path has already said which way it failed; this is the
-        // consequence, and the sentence the user reads.
+        // refreshToken() has logged the cause; this logs the consequence.
         log.warn('request_unauthorised', 'a Spotify request could not be authorised', {
           method,
           path,
@@ -336,16 +230,12 @@ export class SpotifyProvider implements MusicProvider {
         path,
         status: resp.status,
         after_refresh: afterRefresh !== '',
-        // Bounded: an error body can be long, and the first line carries the
-        // reason. Redaction happens in the logger.
+        // The reason comes first in an error body; the logger redacts secrets.
         body: body.slice(0, 300),
         duration_ms: Date.now() - started,
       });
 
-      // A scope the token was never granted. Distinct from the withdrawn
-      // endpoints above, which answer 403 with a bare "Forbidden" and stay
-      // broken however many times the user signs in — this one is fixed by
-      // re-authorising, so say that instead of surfacing a raw 403.
+      // A missing scope, fixed by re-authorising; withdrawn endpoints give a bare 403 "Forbidden".
       if (resp.status === 403 && body.includes('Insufficient client scope')) {
         throw new Error(
           'Spotify has not granted GIAP this permission yet. Sign in to Spotify again ' +
@@ -365,26 +255,12 @@ export class SpotifyProvider implements MusicProvider {
     return resp;
   }
 
-  /**
-   * Issues a request whose response body is of no interest.
-   *
-   * The player-control endpoints are documented to answer 204, but Spotify
-   * actually answers `POST /me/player/next` with a 200 that carries no
-   * content-type and a 27-byte opaque token. Parsing that as JSON is what made
-   * every skip fail with `Unexpected token ... is not valid JSON` — on a body
-   * no caller has ever read.
-   */
+  /** Ignores the body: `POST /me/player/next` answers 200 with a non-JSON token, not 204. */
   private async command(method: string, path: string, body?: unknown): Promise<void> {
     await this.request(method, path, body);
   }
 
-  /**
-   * Issues a request and parses a JSON body, tolerating a bodyless success.
-   *
-   * Reads the body as text first: `Response.json()` throws on an empty body,
-   * and an empty 200 or a 204 is a legitimate answer to several of these calls.
-   * A non-empty body that is not JSON is still an error worth surfacing.
-   */
+  /** Parses a JSON body; an empty 200 or 204 yields `{}`, while non-JSON text throws. */
   private async api<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
     const resp = await this.request(method, path, body);
     const text = await resp.text();
@@ -410,9 +286,6 @@ export class SpotifyProvider implements MusicProvider {
       id: playlist.id,
       name: playlist.name,
       description: playlist.description || '',
-      // `tracks` is not always present. /me/playlists returns some entries with
-      // an `items` array and no `tracks` object at all, so reading
-      // `playlist.tracks.total` outright throws on a perfectly ordinary account.
       track_count: playlist.tracks?.total ?? playlist.items?.length ?? 0,
       uri: playlist.uri,
       owner: owner?.display_name || owner?.id || 'unknown',
@@ -488,8 +361,7 @@ export class SpotifyProvider implements MusicProvider {
 
     const data = await this.api<DevicesResponse>('GET', '/me/player/devices');
     return (data.devices || [])
-      // A device with no id cannot be targeted for transfer, so it is not worth
-      // offering as somewhere to send playback.
+      // Spotify can list devices without an id; those can't be targeted.
       .filter(d => d.id)
       .map(d => ({
         id: d.id as string,
@@ -501,16 +373,13 @@ export class SpotifyProvider implements MusicProvider {
   }
 
   async transferPlayback(deviceId: string, deviceName: string): Promise<string> {
-    // `play: true` keeps it playing across the move; without it Spotify can
-    // hand the device the track in a paused state, which reads as a failure.
+    // Without `play: true` Spotify may transfer in a paused state.
     await this.command('PUT', '/me/player', { device_ids: [deviceId], play: true });
     return `Playback moved to ${deviceName}`;
   }
 
   // ── Library and listening history ──────────────────────────
-  // All of these need scopes added after the extension first shipped, so on an
-  // install that has not re-authorised they fail with the re-sign-in message
-  // from `request`, not a bare 403.
+  // These need scopes older sign-ins lack; `request` then asks the user to sign in again.
 
   async getSavedTracks(limit: number = 20): Promise<TrackInfo[]> {
     const clamped = Math.max(1, Math.min(50, limit));
@@ -578,12 +447,7 @@ export class SpotifyProvider implements MusicProvider {
       device?: { volume_percent: number };
     }
 
-    // Errors deliberately propagate. `null` here means one thing only —
-    // Spotify answered, and nothing is playing — because that is exactly how
-    // the caller reports it ("Nothing is currently playing on Spotify"). A
-    // `catch` returning null made an expired token, a failed refresh and an
-    // unreachable Spotify all indistinguishable from an idle player, which is
-    // the most misleading answer available.
+    // Errors propagate: `null` must mean only "nothing is playing", as the caller reports it.
     const data = await this.api<PlayerState>('GET', '/me/player');
     if (!data || !data.item) return null;
 
@@ -594,14 +458,7 @@ export class SpotifyProvider implements MusicProvider {
     return track;
   }
 
-  /**
-   * Looks up one track, so a bare URI can be played inside its album too.
-   *
-   * `GET /tracks/{id}` is a catalog read: unscoped, and not one of the
-   * endpoints Spotify withdrew. Only used on the URI-given path, where there
-   * is no search response to take the album from — the common path already has
-   * it and spends no request here.
-   */
+  /** Fetches a track so a bare URI can play inside its album (`/tracks/{id}` is unscoped). */
   async getTrack(uri: string): Promise<TrackInfo | null> {
     const id = uri.startsWith('spotify:track:') ? uri.slice('spotify:track:'.length) : uri;
     if (!id) return null;
@@ -611,28 +468,9 @@ export class SpotifyProvider implements MusicProvider {
     return parseTrack(track);
   }
 
-  /**
-   * Queues more of the same artist behind a short release.
-   *
-   * An album context is enough for an album, but not for a single: playing
-   * track 1 of 1 and running to the end of the album still leaves silence one
-   * song later. This fills that gap.
-   *
-   * Deliberately NOT `GET /artists/{id}/top-tracks`, which would be the
-   * obvious source — see the withdrawn-endpoint list above. It answers 403 for
-   * this app, permanently, and no amount of re-consenting changes that. Plain
-   * `/search` is unscoped and unaffected, so the artist's catalogue is reached
-   * with a field-filtered query instead. `fieldFilteredQuery` only rewrites
-   * "title by artist", so an `artist:"…"` filter passes through to Spotify
-   * untouched.
-   *
-   * Returns how many tracks were queued, so the caller can say so — or say
-   * nothing, if none were.
-   */
+  /** Tops up a short release with the artist's tracks, via `/search` (`top-tracks` is withdrawn). */
   async queueFollowUps(seed: TrackInfo, limit: number = FOLLOW_UP_LIMIT): Promise<FollowUpResult> {
-    // The joined `artist` string can hold several names; Spotify indexes the
-    // primary one, and the id filter in `pickFollowUps` does the real work of
-    // rejecting wrong matches.
+    // `artist` may join several names; search the primary and let `pickFollowUps` filter by id.
     const primaryArtist = seed.artist.split(',')[0].trim();
     let picks: TrackInfo[] = [];
     let source: FollowUpResult['source'] = 'artist';
@@ -644,9 +482,7 @@ export class SpotifyProvider implements MusicProvider {
 
     if (picks.length === 0) {
       source = 'listener';
-      // Nothing found for the artist -- fall back to what this listener
-      // actually likes. `/me/top/tracks` is granted (`user-top-read`) and is
-      // not one of the withdrawn endpoints.
+      // Fall back to the listener's top tracks (`user-top-read`, not withdrawn).
       const top = await this.getTopTracks('medium_term', FOLLOW_UP_SEARCH_LIMIT);
       picks = top.filter(t => t.uri !== seed.uri).slice(0, limit);
     }
@@ -657,10 +493,7 @@ export class SpotifyProvider implements MusicProvider {
         await this.addToQueue(track.uri);
         queued += 1;
       } catch (err) {
-        // Stop at the first refusal rather than hammering. `request()` has no
-        // 429 handling and no Retry-After respect, and this loop is the
-        // largest burst this extension makes, so a rate limit or a device
-        // going away must end the loop, not repeat into it.
+        // Stop at the first failure: `request()` has no 429 handling and this is the biggest burst.
         log.warn('follow_up_queue_stopped', 'stopped queueing follow-ups', {
           queued,
           remaining: picks.length - queued,
@@ -679,19 +512,12 @@ export class SpotifyProvider implements MusicProvider {
     return { queued, source };
   }
 
-  /**
-   * Appends a track to the queue, leaving current playback untouched.
-   *
-   * This is the only insert Spotify offers: the endpoint takes a `uri` and an
-   * optional `device_id` but no position, and there is no reorder endpoint, so
-   * "play next" cannot be built on it. Do not let a caller imply otherwise.
-   */
+  /** Appends to the queue; Spotify has no positioned insert or reorder, so no "play next". */
   async addToQueue(uri: string): Promise<string> {
     try {
       await this.command('POST', `/me/player/queue?uri=${encodeURIComponent(uri)}`);
     } catch (err) {
-      // Spotify answers 404 when no device is active, which reads as "not
-      // found" but means "nothing is open to queue onto" — the common case.
+      // Spotify answers 404 when no device is active.
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('Spotify API 404')) {
         throw new Error('No active Spotify device. Open Spotify on a device first.');
@@ -723,24 +549,13 @@ export class SpotifyProvider implements MusicProvider {
     return tracks;
   }
 
-  /**
-   * Turns "Nairobi by Bensoul" into `track:"Nairobi" artist:"Bensoul"`.
-   *
-   * Spotify's search has no notion of natural language: every word in `q` is
-   * matched as a term, so "by" and a featured artist are scored as if the user
-   * had asked for them. "nairobi by bensoul" returns Extravaganza by Sauti Sol;
-   * "Intro by quality control ft gucci mane" returns Easy by Nicki Minaj. The
-   * field-filtered form returns the right track first in both cases.
-   *
-   * Returns `null` when the query has no "by", leaving it to be sent as-is.
-   */
+  /** "X by Y" → `track:"X" artist:"Y"` (else null); Spotify scores every word, "by" included. */
   private fieldFilteredQuery(query: string): string | null {
     const split = query.match(/^(.*?)\s+by\s+(.*)$/i);
     if (!split) return null;
 
     const title = split[1].trim();
-    // Drop a featured-artist tail: the primary artist is what Spotify indexes
-    // under artist:, and the guest usually appears in the track title anyway.
+    // Drop "feat. X": Spotify indexes only the primary artist under `artist:`.
     const artist = split[2]
       .replace(/\s+(feat\.?|ft\.?|featuring|with)\s+.*$/i, '')
       .trim();
@@ -765,9 +580,7 @@ export class SpotifyProvider implements MusicProvider {
       return (data.tracks?.items || []).map(t => parseTrack(t));
     };
 
-    // Try the precise form first, but never let it lose results: a strict
-    // filter finds nothing when the user misremembers a title, and the loose
-    // query still would.
+    // Precise form first, then the loose query: a misremembered title defeats the filter.
     const filtered = this.fieldFilteredQuery(query);
     if (filtered) {
       const hits = await run(filtered);
@@ -793,14 +606,7 @@ export class SpotifyProvider implements MusicProvider {
     return (data.albums?.items || []).map(a => this.parseAlbum(a));
   }
 
-  /**
-   * Every playlist in the user's library, followed ones included.
-   *
-   * Spotify caps a page at 50, so a library larger than that has to be paged
-   * through: asking for one page silently hid 19 of this account's 69, which
-   * meant "which playlists do I have" was wrong and a playlist past the first
-   * page could never be found by name.
-   */
+  /** Every playlist in the library, followed ones included, paged at Spotify's 50-per-page cap. */
   async getPlaylists(limit: number = 200): Promise<PlaylistInfo[]> {
     interface PlaylistsResponse {
       items: SpotifyPlaylist[];

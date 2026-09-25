@@ -1,11 +1,4 @@
-/**
- * The matter.js side: fabric lifecycle, peers, subscriptions, and the four things the
- * protocol can ask a controller to do.
- *
- * Everything that touches the network lives here. The mappings under `mapping/` are
- * pure functions over a `NodeSnapshot`, so this file's job is to keep snapshots
- * current and to turn a `Plan` into real Matter traffic.
- */
+/** The matter.js side: keeps snapshots current for the pure `mapping/` code and runs its plans. */
 
 import { Endpoint, Environment, Seconds, ServerNode, type ClientNode } from "@matter/main";
 // Not re-exported by `@matter/main`, which forwards only `@matter/types/datatype`.
@@ -42,73 +35,27 @@ import {
   type Reading,
 } from "./protocol.js";
 
-/**
- * How long `discover` browses before answering.
- *
- * The probe is a local mDNS browse, so it answers in well under a second when anything
- * is advertising. Bounded low on purpose: its whole value is being cheaper than the
- * commissioning discovery timeout it saves, and a probe that hangs must not add to the
- * wait.
- */
+/** How long `discover` browses mDNS; low, since the probe must cost less than the discovery it saves. */
 const DISCOVER_TIMEOUT = Seconds(8);
 
 /**
- * How often to say, again, which devices are reachable.
- *
- * `device_availability` is a LEVEL report, not an edge. matter.js's
- * `lifecycle.online` fires on a transition and only on a transition — the comment on
- * `#retryWiring` records the trap: a node already online when the controller connects
- * never fires it at all. So the Rust bridge's set of devices it vouches for was seeded
- * once, from a `subscribe` snapshot that reads `peer.lifecycle.isOnline`, which is
- * false until a CASE session exists. A snapshot taken inside that window recorded a
- * working device as offline, nothing ever said otherwise, its `last_seen` aged past the
- * five-minute threshold, and the card went offline while readings kept arriving from
- * matter.js's cache. Four bridge reconnects in one test session are four chances to
- * land in that window.
- *
- * Repeating the level fixes it whatever the cause: a missed, mistimed or lost
- * transition self-heals within one tick. Thirty seconds is well inside both the
- * bridge's sixty-second heartbeat and the five-minute freshness threshold, and costs
- * one boolean read per peer.
+ * Period for re-sending `device_availability` as a level: matter.js's `lifecycle.online` fires only
+ * on transitions, which can be missed. Inside the bridge's 60 s heartbeat and 5 min freshness window.
  */
 const AVAILABILITY_TICK_MS = 30_000;
 
-/**
- * Which clusters a snapshot reads.
- *
- * Bounded rather than "every supported cluster": a snapshot is rebuilt on every node
- * event, and reading all the clusters a composed device may expose would make a busy
- * fabric expensive for data nothing consumes.
- *
- * The named set is DERIVED from the mappings rather than written here: each module
- * declares the clusters it reads, so a cluster's name lives in the file that uses it and
- * there is no second place to remember. The `*Mode` rule is what keeps appliances working
- * without any list at all: Matter's ModeBase derivatives are consistently named that way,
- * and `settingsOf` reads them by shape, so a washer, a dishwasher, an oven and whatever
- * ships next all arrive without a code change. Without that rule the promise was empty --
- * the snapshot dropped those clusters by name before anything could look at their shape.
- */
+/** What snapshots read, from the mappings' own lists; bounded, as snapshots rebuild on every event. */
 const SNAPSHOT_CLUSTERS: ReadonlySet<string> = new Set([
-  // Endpoint 0's own plumbing, and the only entry not owned by a mapping: `deviceTypes`
-  // is read straight off the endpoint rather than out of the snapshot's cluster map.
+  // Owned by no mapping; in the set so descriptor changes (new bridge children) are watched.
   "descriptor",
-  // Derived, not listed. Each mapping module names the clusters it reads, because the
-  // hand-written version of this list was a second place to remember and it was
-  // forgotten: `mediaPlayback`, `mediaInput` and `audioOutput` were declared in
-  // settings.ts as module-private constants, so `readClusters` dropped all three and
-  // every television reported nothing but power and volume -- while 158 tests passed,
-  // because the fixtures build snapshots by hand and never cross this filter. That is
-  // the same failure, in the same file, that once made a paired washer report nothing
-  // but power.
+  // Fixtures bypass this filter: a cluster a mapping reads but doesn't declare fails only live.
   ...deviceClusters(),
   ...settingClusters(),
   ...sensorClusters(),
 ]);
 
-/** Is this cluster worth putting in a snapshot? */
 export function isSnapshotCluster(clusterId: string): boolean {
-  // Every ModeBase derivative: laundryWasherMode, dishwasherMode, rvcRunMode,
-  // ovenMode, and the ones that do not exist yet.
+  // Any ModeBase derivative, including future ones; `settingsOf` reads them by shape.
   return SNAPSHOT_CLUSTERS.has(clusterId) || clusterId.endsWith("Mode");
 }
 
@@ -123,14 +70,7 @@ export interface ControllerEvents {
 export class Controller {
   #node: ServerNode;
   #events: ControllerEvents;
-  /**
-   * The devices each peer last held, so one that goes can be reported.
-   *
-   * Node-level churn was rare enough that `peers.deleted` covered it. Bridged-child
-   * churn is not: users add and remove bulbs in the vendor's own app constantly, and
-   * nothing about that touches the fabric — the node stays, so `peers.deleted` never
-   * fires and the row would live forever.
-   */
+  /** Each peer's last device set: a child removed in the vendor's app fires no `peers.deleted`. */
   #lastDevices = new Map<string, Set<string>>();
 
   /** Peers already wired for events, so a re-sync does not double-subscribe. */
@@ -143,15 +83,7 @@ export class Controller {
     this.#events = events;
   }
 
-  /**
-   * Bring the controller online, storing the fabric under `storagePath`.
-   *
-   * The path is set on the environment explicitly rather than left to matter.js's own
-   * `--storage-path` argv parsing: that parser reads the flag as a boolean, so the
-   * fabric landed in a directory called `true` beside the process's cwd. A fabric in
-   * the wrong place is not a cosmetic fault — it is every commissioned device lost on
-   * the next start, from a working-directory change nobody would connect to it.
-   */
+  /** Sets `storagePath` explicitly: matter.js's own argv parsing reads `--storage-path` as a boolean. */
   static async start(
     storagePath: string,
     matterPort: number,
@@ -159,19 +91,7 @@ export class Controller {
   ): Promise<Controller> {
     Environment.default.vars.set("storage.path", storagePath);
 
-    // NOT the default 5540.
-    //
-    // matter.js models a controller as a `ServerNode`, which binds the Matter
-    // operational port — and 5540 is well-known precisely so that COMMISSIONABLE
-    // DEVICES can be found on it. A controller squatting it means no Matter
-    // device can start on the same machine: Google's Matter Virtual Device dies
-    // with "OS Error 0x02000030: Address already in use ... UDP::Init
-    // bind&listen port=5540" and shows an empty Controller tab, with nothing in
-    // either place pointing back at the controller that took the port.
-    //
-    // A controller has no need of a well-known port. It initiates the
-    // connections; devices answer whatever source port it used. Verified by
-    // commissioning successfully from controllers on several non-standard ports.
+    // Not 5540: that would stop Matter devices on this host binding it; controllers need no fixed port.
     const node = await ServerNode.create({
       id: "giap-controller",
       network: { port: matterPort },
@@ -185,15 +105,12 @@ export class Controller {
     const controller = new Controller(node, events);
     controller.#watchPeers();
 
-    // Five seconds: fast enough that a person changing something on the device and
-    // then asking about it gets the new value, slow enough to be a handful of
-    // comparisons over an idle house.
+    // 5 s: fresh enough for "I just changed it" questions, cheap on an idle house.
     const sweep = setInterval(
       () =>
         guard("sweep_readings", () => {
           controller.#sweepReadings();
-          // Same tick: a bridge's child list changes when the user changes it in the
-          // vendor's app, which GIAP hears about only as a structure change.
+          // Bridge children changed in the vendor's app arrive only as structure changes, so poll too.
           controller.#reconcileDevices();
         }),
       5_000,
@@ -216,8 +133,7 @@ export class Controller {
   /** The controller's fabric, for the operator reading logs. */
   fabricId(): number | null {
     for (const peer of this.#node.peers) {
-      // Guarded for the same reason as `peerNodeId`: reading the address of a
-      // node that has not joined a fabric throws.
+      // Reading the address of a node not on a fabric throws (see `peerNodeId`).
       try {
         const index = peer.peerAddress?.fabricIndex;
         if (index !== undefined) return Number(index);
@@ -228,14 +144,7 @@ export class Controller {
     return null;
   }
 
-  /**
-   * Wire up every commissioned peer that is not already wired.
-   *
-   * Called on each `subscribe`, which the bridge sends on every connect and
-   * reconnect. Belt and braces for the peers that never pass through the `added`
-   * handler in a commissioned state: one discovered as commissionable and then
-   * paired arrives as `added` before it has a node id, and is skipped there.
-   */
+  /** Wires unwired commissioned peers, including ones `added` skipped for lacking a node id then. */
   observeCommissioned(): void {
     for (const peer of this.#node.peers) {
       if (peerNodeId(peer) !== undefined) this.#observe(peer);
@@ -249,26 +158,14 @@ export class Controller {
     );
   }
 
-  /**
-   * Everything every node currently reports.
-   *
-   * Sent with the `subscribe` result so a sensor sitting at a steady value is knowable
-   * immediately. Without it a device exists in the list while every question about its
-   * reading is answered "none recorded", which reads as "that device is not here".
-   */
+  /** All current readings; sent with `subscribe` so a steady sensor's value is known at once. */
   readings(): Reading[] {
     const out: Reading[] = [];
     for (const [, snapshot] of this.#peerSnapshots()) {
-      // Per slice, not per node: two bridged thermometers reporting under one node
-      // id are indistinguishable downstream, and they collide in the dedupe caches
-      // on both sides of the socket -- each sweep then sees the other's value as a
-      // change and republishes, forever, on a house where nothing is moving.
+      // Per slice: bridged children sharing a node id would collide in both sides' dedupe caches.
       for (const slice of deviceSlices(snapshot)) {
         const deviceId = deviceIdForNode(slice.nodeId, slice.rootEndpoint);
-        // Application endpoints only. Endpoint 0 is on every slice and belongs to
-        // the hub, so walking it per slice would report the same reading once per
-        // bridged device -- true of nothing today, since endpoint 0 carries no
-        // sensor cluster, and a trap for the first one that lands there.
+        // Skip endpoint 0: it is on every slice, so its readings would repeat per bridged device.
         for (const endpoint of applicationEndpoints(slice)) {
           for (const [cluster, attributes] of Object.entries(endpoint.clusters)) {
             for (const [attribute, value] of Object.entries(attributes)) {
@@ -280,8 +177,7 @@ export class Controller {
                 value,
                 new Date(),
                 attributes["measurementUnit"],
-                // Boolean State's meaning is the endpoint's device type, not the
-                // cluster's -- see `deviceType` on `SensorMapping`.
+                // Boolean State means whatever the device type says (see `SensorMapping.deviceType`).
                 endpoint.deviceTypes,
               );
               if (reading !== undefined) out.push(reading);
@@ -295,35 +191,8 @@ export class Controller {
 
 
   /**
-   * Re-read every sensor value periodically and publish what changed.
-   *
-   * The event path is the one that should carry these, and on this fabric it wires
-   * nothing: at the moment a peer is walked, a cluster's events object holds a
-   * single key and no observables, and retrying as the node settles still attaches
-   * none. Rather than leave freshness resting on a mechanism that cannot be shown
-   * to work, readings are also swept from the snapshots — which are demonstrably
-   * live, since `state` and `describe` read them and have been right throughout.
-   *
-   * Without this a reading only ever refreshed when the bridge re-subscribed: a
-   * thermostat measuring 47.33 answered 100, the value from the last reconnect,
-   * and it would have kept answering 100 for as long as the process stayed up.
-   *
-   * Only changes are published, so a quiet house costs one comparison per value.
-   * Should the event path start working, this sweep finds nothing left to say and
-   * becomes a cheap backstop rather than a second source of truth.
-   */
-  /**
-   * Report devices a peer no longer holds.
-   *
-   * A bridged child unpaired in the vendor's own app disappears from the node's
-   * structure without anything touching the fabric, so `peers.deleted` never fires
-   * and the registry row would outlive the device forever.
-   *
-   * Only for a node that still shows an Aggregator, which is the guard that matters.
-   * A snapshot whose descriptors are momentarily unreadable collapses to one slice —
-   * indistinguishable, by device count alone, from a hub whose every child was just
-   * removed. Requiring the Aggregator to still be visible means an empty child list
-   * is a fact rather than a gap, so a blink cannot announce a dozen devices as gone.
+   * Reports devices a peer no longer holds (vendor-app unpairs fire no `peers.deleted`). Only while
+   * the node still shows an Aggregator: an unreadable snapshot looks like every child removed.
    */
   #reconcileDevices(): void {
     for (const [peer, snapshot] of this.#peerSnapshots()) {
@@ -348,6 +217,7 @@ export class Controller {
     }
   }
 
+  /** Publishes snapshot readings that changed, so freshness doesn't rest on the event path alone. */
   #sweepReadings(): void {
     for (const reading of this.readings()) {
       const key = `${reading.device_id}/${reading.sensor_type}`;
@@ -357,17 +227,7 @@ export class Controller {
     }
   }
 
-  /**
-   * Say which devices are reachable, whether or not that changed.
-   *
-   * Unconditional, and that is the point — see `AVAILABILITY_TICK_MS`. The transition
-   * handlers in `#observe` stay because they are prompt, but they are the only thing
-   * that ever spoke, and matter.js fires them on a transition it may never make. A
-   * device recorded offline by one badly-timed snapshot had no route back.
-   *
-   * Both branches on the receiving side are idempotent: the bridge inserts into a set
-   * and heartbeats a row, or removes from a set. Repetition costs a set operation.
-   */
+  /** Reports reachability unconditionally (see `AVAILABILITY_TICK_MS`); the receiver is idempotent. */
   #reportAvailability(): void {
     for (const { deviceId, online } of availabilityReports(this.#node.peers)) {
       this.#events.availabilityChanged(deviceId, online);
@@ -381,15 +241,7 @@ export class Controller {
     return found.length;
   }
 
-  /**
-   * Pair a device by its setup code.
-   *
-   * All three forms find the device over mDNS. A manual pairing code or a QR payload
-   * carries a discriminator so matter.js can narrow the browse; a bare passcode cannot,
-   * so that form pairs with whatever is in commissioning mode — which is how
-   * development devices such as Google's Matter Virtual Device are paired when they
-   * show only a passcode.
-   */
+  /** A bare passcode carries no discriminator, so it pairs whatever device is in pairing mode. */
   async commission(code: string, name?: string): Promise<Device> {
     const trimmed = code.trim();
     const kind = setupCodeKind(trimmed);
@@ -401,8 +253,7 @@ export class Controller {
     try {
       peer = await this.#node.peers.commission(options);
     } catch (error) {
-      // matter.js and the CHIP layer beneath it echo what they were given, so this
-      // message is redacted before it becomes an error the user reads.
+      // Redacted by `describeError`: matter.js echoes the setup code in its errors.
       throw new OpError("commission_failed", describeError(error));
     }
 
@@ -411,9 +262,7 @@ export class Controller {
       throw new OpError("commission_failed", "the device joined the fabric without a node id");
     }
 
-    // A user-chosen name is written to the device itself, so any controller sees it.
-    // Best effort: a failed write does not unwind a successful pairing, because the
-    // device is commissioned either way and GIAP's own registry still holds the name.
+    // Best effort: the device is paired either way, and GIAP's registry keeps the name too.
     if (name !== undefined && name.trim().length > 0) {
       try {
         await peer.endpoints.for(0).setStateOf("basicInformation", { nodeLabel: name.trim() });
@@ -440,15 +289,7 @@ export class Controller {
     return device;
   }
 
-  /**
-   * Remove a node from the fabric.
-   *
-   * A node the controller no longer knows is already in the desired end state, so this
-   * succeeds rather than refusing — that is what lets an interrupted earlier removal be
-   * cleaned up. An unreachable node falls back to a local delete: `decommission` tries
-   * to tell the device, which cannot work if it is unplugged, and refusing to forget an
-   * unplugged device would strand it in the list forever.
-   */
+  /** Removes a node; succeeds if it's already gone, and deletes locally if it can't be reached. */
   async decommission(deviceId: string): Promise<void> {
     const peer = this.#peerFor(deviceId);
     if (peer === undefined) {
@@ -467,26 +308,13 @@ export class Controller {
     }
   }
 
-  /**
-   * What a device can be told to do and what it measures.
-   *
-   * Read live rather than stored: a description is derived from what the device
-   * currently reports, and a cached copy would go stale exactly when a device is
-   * upgraded or reconfigured — the moment its description matters most.
-   */
+  /** What a device can be told to do and what it measures, derived live rather than cached. */
   describe(deviceId: string): DeviceDescription {
     const [, slice] = this.#sliceFor(deviceId);
     return describeNode(slice);
   }
 
-  /**
-   * What the device currently is.
-   *
-   * The counterpart to `describe`: that says what a device can be told to do, this
-   * says what it is doing, in the same names. Read from the same snapshot the
-   * controller keeps current from subscription reports, so it costs no fabric
-   * traffic and reflects the last thing the device said about itself.
-   */
+  /** Current state in `describe`'s terms, from the subscription-fed snapshot (no fabric traffic). */
   state(deviceId: string): DeviceState {
     const [, slice] = this.#sliceFor(deviceId);
     return stateOf(slice);
@@ -498,15 +326,9 @@ export class Controller {
     const nodeId = slice.nodeId;
     const rootEndpoint = slice.rootEndpoint;
 
-    // Planned from the SLICE, so the endpoint chosen is this device's. The dispatch
-    // below was already endpoint-addressed (`Action.endpoint`, `endpoints.for`) --
-    // only the choice of endpoint was node-wide, which is why a bridge could be
-    // driven at all but only ever its lowest-numbered child.
+    // Planned from the slice so a bridge's command targets this child's endpoint.
     const plan = planControl(slice, deviceId, verb, value);
-    // Captured BEFORE the write, so the settle below can tell "the device has reported
-    // its new value" from "the report has not arrived yet". Without a baseline the two
-    // are indistinguishable and the first read wins, which is the state before the
-    // command.
+    // Baseline taken before the write, so the settle can tell a new report from a stale one.
     const before = observedFor(slice, verb);
 
     for (const action of plan.actions) {
@@ -521,13 +343,8 @@ export class Controller {
               `Matter device '${deviceId}' does not accept ${action.command}`,
             );
           }
-          // A command taking no fields must be invoked with NO argument. matter.js
-          // validates the request against the cluster schema and rejects `{}` with
-          // "Expected void, got object" — so On, Off, LockDoor and UnlockDoor all
-          // failed while the commands that do take fields worked, which is a very
-          // confusing half-working state to debug from the outside.
-          // Cast because the untyped `commandsOf` signature demands an argument
-          // while the cluster schema for these commands forbids one.
+          // Field-less commands must get NO argument: matter.js rejects `{}` ("Expected void, got object").
+          // The cast is because `commandsOf`'s untyped signature demands one.
           const invoke = command as (args?: Record<string, unknown>) => Promise<unknown>;
           const hasFields = Object.keys(action.payload).length > 0;
           assertAccepted(
@@ -544,8 +361,7 @@ export class Controller {
       }
     }
 
-    // What the device is now, not what it was asked to be. The command response
-    // above proves it accepted the command; this is how it describes the result.
+    // Report what the device now says, not what it was asked for.
     if (verb === "operation") {
       const observed = await settledOperation(peer, nodeId, rootEndpoint, plan.applied.operation);
       if (observed !== undefined) plan.applied.operation = observed;
@@ -565,23 +381,14 @@ export class Controller {
     const out: [ClientNode, NodeSnapshot][] = [];
     for (const peer of this.#node.peers) {
       const nodeId = peerNodeId(peer);
-      // Commissionable-but-not-commissioned nodes live in the same collection and
-      // have no node id. They are not devices until they join the fabric.
+      // Merely commissionable nodes share the collection but have no node id yet.
       if (nodeId === undefined) continue;
       out.push([peer, snapshotOf(peer, nodeId)]);
     }
     return out;
   }
 
-  /**
-   * The peer and the slice a device id names, or the reason there is none.
-   *
-   * `describe`, `state` and `control` all want a DEVICE — one bridged child of a
-   * hub, not the whole node — because every mapping they call reads "the first
-   * endpoint carrying this cluster" and would otherwise answer for whichever child
-   * the hub numbered lowest. `decommission` is the exception and keeps resolving to
-   * the peer: Matter commissions nodes, so there is nothing else it could act on.
-   */
+  /** Peer and slice for a device (or throws): on a whole node, mappings would read its lowest child. */
   #sliceFor(deviceId: string): [ClientNode, NodeSnapshot] {
     const peer = this.#peerFor(deviceId);
     const nodeId = peer === undefined ? undefined : peerNodeId(peer);
@@ -596,9 +403,7 @@ export class Controller {
     const slices = deviceSlices(snapshotOf(peer, nodeId));
     const slice = slices.find(candidate => candidate.rootEndpoint === wanted);
     if (slice === undefined) {
-      // The node is here and this endpoint is not one of its devices — a bridged
-      // child that has been unpaired from the hub in the vendor's own app, which is
-      // an ordinary thing for a user to do and not the same as an unknown node.
+      // Usually a bridged child unpaired in the vendor's app; distinct from an unknown node.
       throw new OpError(
         "device_unknown",
         `Matter device '${deviceId}' is no longer one of the devices on node ${nodeId}`,
@@ -618,15 +423,9 @@ export class Controller {
 
   #watchPeers(): void {
     this.observeCommissioned();
-    // Both handlers are wrapped, and both run on matter.js's own callbacks: an
-    // exception escaping one does not merely lose an event, it takes down the
-    // discovery or subscription that fired it.
     this.#node.peers.added.on(peer =>
       guard("peer_added", () => {
-        // Commissionable-but-not-commissioned nodes arrive here during every
-        // discovery. They are not devices, and they are not merely uninteresting
-        // — reading their structure throws, and this handler runs inside
-        // matter.js's mDNS listener, so throwing here fails the discovery.
+        // Commissionable nodes arrive here on every discovery; reading their structure would throw.
         const nodeId = peerNodeId(peer);
         if (nodeId === undefined) return;
 
@@ -645,13 +444,7 @@ export class Controller {
     );
   }
 
-  /**
-   * Wire one peer's attribute and lifecycle changes onto the protocol's events.
-   *
-   * Guarded by `#observed` because peers are re-walked whenever the collection changes,
-   * and a second listener on the same observable would double every reading — which
-   * downstream reads as a sensor that fires twice per change.
-   */
+  /** Wires a peer's changes onto protocol events, once: `#observed` stops a re-walk doubling readings. */
   #observe(peer: ClientNode): void {
     if (!this.#observed.has(peer.id)) {
       this.#observed.set(peer.id, new Set());
@@ -659,8 +452,7 @@ export class Controller {
       peer.lifecycle.online.on(() =>
         guard("peer_online", () => {
           this.#announceAvailability(peer, true);
-          // A node that has just come online has only now finished populating its
-          // behaviors, which is the whole reason wiring is attempted more than once.
+          // Only now are its behaviors populated, hence the repeated wiring.
           this.#wireChanges(peer);
         }),
       );
@@ -673,20 +465,7 @@ export class Controller {
     this.#retryWiring(peer);
   }
 
-  /**
-   * Try again shortly, because "ready" is not an event we can rely on.
-   *
-   * `lifecycle.online` only helps a node that was offline when we started watching;
-   * one already online when the controller connects never fires it again, and that
-   * is the ordinary case on a restart. Measured on the Matter Virtual Device: at the
-   * first attempt a cluster offers one key and no observables, and forty-five a
-   * second or so later.
-   *
-   * A short schedule rather than a poll: each attempt only walks clusters not yet
-   * wired, so once everything is attached the remaining passes cost a set lookup
-   * each and stop mattering. Unreferenced so a controller with nothing else to do
-   * can still exit.
-   */
+  /** Rewires on a schedule: an already-online node never fires `lifecycle.online` to trigger it. */
   #retryWiring(peer: ClientNode): void {
     for (const delay of [1_000, 3_000, 10_000, 30_000]) {
       const timer = setTimeout(
@@ -697,28 +476,12 @@ export class Controller {
     }
   }
 
-  /**
-   * Attach change handlers to every cluster worth watching, for whatever is ready.
-   *
-   * Called again whenever a peer comes online, because the first attempt runs while
-   * the node is still assembling itself: at that moment a cluster's events object
-   * holds one key and no observables, and the same cluster offers forty-five a
-   * second later. The old code wired once, found nothing, raised nothing, and left
-   * every device in the house without live updates — visible only as readings that
-   * refreshed on reconnect and at no other time.
-   *
-   * A cluster is recorded as done only once it has actually yielded a handler, so an
-   * attempt that was too early is retried rather than remembered as finished. The
-   * record is what keeps a second attempt from doubling every reading.
-   */
+  /** Wires ready clusters; one counts as done only once it yields a handler, as early ones have none. */
   #wireChanges(peer: ClientNode): void {
     const wired = this.#observed.get(peer.id);
     if (wired === undefined) return;
 
-    // Every cluster this pass declined to watch, reported once at the end rather than
-    // per cluster. Before this the allowlist was silent, so a device carrying a control
-    // GIAP cannot see left no trace anywhere -- the only way to find out was to read
-    // `SNAPSHOT_CLUSTERS` and compare by hand.
+    // Clusters this pass declined to watch, logged once at the end.
     const skipped: string[] = [];
 
     for (const endpoint of peer.endpoints) {
@@ -743,7 +506,7 @@ export class Controller {
 
   #observeCluster(peer: ClientNode, endpoint: Endpoint, cluster: string): number {
     const observables = clusterEvents(endpoint, cluster);
-    if (observables === undefined) return 0; // nothing to watch
+    if (observables === undefined) return 0;
 
     let attached = 0;
 
@@ -761,9 +524,7 @@ export class Controller {
           const nodeId = peerNodeId(peer);
           if (nodeId === undefined) return;
 
-          // Read from the live cluster rather than carried in the event: the
-          // change is one attribute, and the unit is a different one on the same
-          // cluster.
+          // The unit is a separate attribute, so read it from the live cluster.
           let declaredUnit: unknown;
           try {
             declaredUnit = (endpoint.stateOf(cluster) as Record<string, unknown>)[
@@ -773,10 +534,7 @@ export class Controller {
             declaredUnit = undefined;
           }
 
-          // Which DEVICE published this. The endpoint was already in scope and
-          // thrown away, so on a bridge every child's reading arrived stamped with
-          // the hub's id — indistinguishable downstream, and colliding in the
-          // dedupe cache so each one republished the other's value forever.
+          // Attribute the reading to the child device, not the hub.
           const slices = deviceSlices(snapshotOf(peer, nodeId));
           const owner = sliceForEndpoint(slices, Number(endpoint.number));
 
@@ -793,19 +551,8 @@ export class Controller {
             this.#events.reading(reading);
             return;
           }
-          // Not a sensor value, but a change to a cluster that shapes what the
-          // device IS — a name, a device type, a newly reported cluster. The
-          // device is republished so the registry's typing and capabilities
-          // stay true.
-          //
-          // `bridgedDeviceBasicInformation` joins them: it carries a bridged
-          // device's name and its reachability, so without it a child coming back
-          // after a battery change would never be republished as present.
-          //
-          // Republished for every device on the node, because a descriptor change is
-          // how a bridge announces a child it has just acquired — and `device_added`
-          // and `device_updated` are the same arm on the Rust side, so a new child
-          // registers through this path for free.
+          // Identity changes (name, type, reachability, children) republish every device on the node: a
+          // descriptor change is how a bridge adds a child, and Rust treats added/updated alike.
           if (
             cluster === "basicInformation" ||
             cluster === "descriptor" ||
@@ -821,17 +568,7 @@ export class Controller {
     return attached;
   }
 
-  /**
-   * Report reachability for every device on a peer, not for the peer.
-   *
-   * A hub unplugged is a dozen devices gone. One event naming the node would leave
-   * the children being vouched for by the Rust side's liveness tick, so the UI would
-   * show twelve online bulbs behind a dead hub.
-   *
-   * A child can also be unreachable while its hub is fine — a Zigbee bulb whose
-   * battery died — which is what `bridgedDeviceBasicInformation.reachable` says and
-   * `nodeToDevice` already folds into `online`.
-   */
+  /** Reachability per device, not per peer: a dead hub takes all its children with it. */
   #announceAvailability(peer: ClientNode, online: boolean): void {
     const nodeId = peerNodeId(peer);
     if (nodeId === undefined) return;
@@ -845,19 +582,8 @@ export class Controller {
 }
 
 /**
- * What to hand matter.js for a code of this kind.
- *
- * A QR payload has to be decoded HERE, and that is the whole of this function's
- * reason to exist. matter.js's `commission({pairingCode})` runs
- * `ManualPairingCodeCodec.decode` unconditionally, and that codec strips every
- * non-digit before it checks the length — so `MT:` + base-38 collapses to a dozen
- * stray digits and dies with "Invalid pairing code" in two milliseconds, before
- * anything reaches the network. The QR form therefore never worked, while GIAP's
- * validator accepted it, this controller logged it as a pairing code, and the
- * Register-device dialog offered one as an example.
- *
- * Uppercasing is lossless: Matter's base-38 alphabet is `0-9 A-Z - .`, and the QR
- * codec matches its `MT:` prefix case-sensitively.
+ * QR payloads are decoded here: matter.js's `commission({pairingCode})` always uses the manual
+ * decoder. Uppercasing is lossless in base-38 and needed, as the QR codec's `MT:` is case-sensitive.
  */
 export function commissioningOptions(
   code: string,
@@ -868,9 +594,7 @@ export function commissioningOptions(
     try {
       payloads = QrPairingCodeCodec.decode(code.replace(/\s/g, "").toUpperCase());
     } catch (error) {
-      // Nothing was attempted, so this is not a failure to commission. Saying
-      // `commission_failed` for a code that never left the process is what put
-      // "Invalid pairing code: commission_failed" in front of the user.
+      // Not `commission_failed`: the code never left the process.
       throw new OpError("invalid_setup_code", describeError(error));
     }
     const [payload] = payloads;
@@ -880,9 +604,7 @@ export function commissioningOptions(
         `that QR payload carries ${payloads.length} devices; commission them one at a time`,
       );
     }
-    // The QR form carries the LONG discriminator, so the browse narrows to one
-    // device. The manual form carries only a short one, which is why matter.js
-    // takes that route itself and this one does not.
+    // The QR form carries the long discriminator, narrowing the browse to one device.
     return { passcode: payload.passcode, discriminator: payload.discriminator };
   }
 
@@ -890,22 +612,11 @@ export function commissioningOptions(
     return { passcode: Number(code.replace(/[\s-]/g, "")) };
   }
 
-  // A manual pairing code, or something GIAP could not classify: matter.js's own
-  // decoder gets the last word rather than this one guessing.
+  // Manual codes and anything unclassified: matter.js's decoder decides.
   return { pairingCode: code.replace(/\s/g, "") };
 }
 
-/**
- * Every peer's reachability, as the `device_availability` event carries it.
- *
- * Every peer, unconditionally — the level, not the change. Pulled out of the class
- * so the property that matters is a test rather than a claim: a device the last
- * report called offline is named again in the next one, which is the whole of what
- * makes a missed transition recoverable.
- *
- * Peers with no node id are dropped. Discovery adds merely-commissionable nodes to
- * the same collection, and those are not devices on this fabric.
- */
+/** Every commissioned peer's reachability, unconditionally: the level, not the change. */
 export function availabilityReports(
   peers: Iterable<ClientNode>,
 ): { deviceId: string; online: boolean }[] {
@@ -919,17 +630,8 @@ export function availabilityReports(
 }
 
 /**
- * The peer's Matter node id, or `undefined` while it is only commissionable.
- *
- * The `try` is load-bearing, and this is worth reading before anyone removes it.
- * `peerAddress` reads a private cached field, and on a node that has not joined
- * a fabric matter.js THROWS ("Cannot read private member #cachedPeerAddress…")
- * rather than returning undefined. Discovery adds exactly such nodes to the peer
- * collection, so an unguarded read here threw inside matter.js's own mDNS
- * listener — which killed the discovery that raised it. The symptom was
- * `discover` reporting nothing and every commission failing with "discovery of
- * node discovery failed", on a device that `dns-sd` could see perfectly well.
- * Commissioning could not succeed at all.
+ * Node id, or `undefined` while only commissionable. The `try` is load-bearing: matter.js throws
+ * reading `peerAddress` off a node not on a fabric, which would kill discovery from its listener.
  */
 function peerNodeId(peer: ClientNode): bigint | undefined {
   try {
@@ -940,14 +642,7 @@ function peerNodeId(peer: ClientNode): bigint | undefined {
   }
 }
 
-/**
- * Run `body`, logging rather than propagating anything it throws.
- *
- * Every caller is a matter.js observer, and matter.js invokes those from inside
- * its own operations — so an exception that escapes does not just lose one
- * event, it fails the discovery or subscription that raised it. Losing an event
- * and logging why is strictly better than that.
- */
+/** Logs instead of throwing: an error escaping a matter.js observer fails the op that fired it. */
 function guard(kind: string, body: () => void): void {
   try {
     body();
@@ -970,29 +665,11 @@ function snapshotOf(peer: ClientNode, nodeId: bigint): NodeSnapshot {
   return { nodeId, online: peer.lifecycle.isOnline, endpoints };
 }
 
-/**
- * How long to let a device's state catch up with the command it just took.
- *
- * A cluster's state here is whatever the subscription last reported, and the report
- * carrying a change arrives after the command returns -- measured against Google's
- * Matter Virtual Device, the command answered in 13ms and the new state landed
- * within 500ms. Reading straight after the invocation therefore returns the state
- * BEFORE the command, which reported a washer that started perfectly well as having
- * stayed stopped. That is a worse failure than the echo it replaced: an echo is
- * merely uninformative, while this contradicts a device that did as it was told.
- */
+/** Max wait for a command's effect to be reported (MVD: answer in 13 ms, new state within 500 ms). */
 const OPERATION_SETTLE_MS = 2000;
 const OPERATION_POLL_MS = 100;
 
-/** The state each operation asks the device to reach. */
-/**
- * The state each operation asks the device to reach, in every vocabulary that means it.
- *
- * Two clusters answer this verb and they do not share words: OperationalState says
- * "stopped" where MediaPlayback says "not playing". Listing both is what lets one verb
- * serve an appliance and a television without either waiting out the full window for a
- * word the device is never going to say.
- */
+/** Target state per operation, in every cluster's vocabulary ("stopped" / "not playing"). */
 const INTENDED_STATE: Record<string, readonly string[]> = {
   start: ["running"],
   resume: ["running"],
@@ -1001,14 +678,7 @@ const INTENDED_STATE: Record<string, readonly string[]> = {
   play: ["playing"],
 };
 
-/**
- * Wait for `read` to report `wanted`, or give up and return whatever it last said.
- *
- * Returns as soon as the state appears, so a device that obeys is not delayed past
- * its own report. A device that never gets there costs the full window and is then
- * reported as whatever it actually is -- which is the honest answer for one that
- * took the command and did nothing.
- */
+/** Polls `read` until it reports `wanted` or time runs out, then returns what it last said. */
 export async function settleTo(
   wanted: string | readonly string[] | undefined,
   read: () => string | undefined,
@@ -1019,8 +689,6 @@ export async function settleTo(
   // Nothing to wait for: a verb with no state of its own to reach.
   if (wanted === undefined) return seen;
 
-  // One target or several: the same idea can have a different word per cluster, and
-  // arriving at any of them is arriving.
   const accepted = typeof wanted === "string" ? [wanted] : wanted;
   const deadline = Date.now() + waitMs;
   while (!(seen !== undefined && accepted.includes(seen)) && Date.now() < deadline) {
@@ -1030,21 +698,13 @@ export async function settleTo(
   return seen;
 }
 
-/** The device's state once it has had a chance to report the command's effect. */
-/**
- * The current snapshot of one device on a peer.
- *
- * The settle loops below have to re-read as the device reports, and each read has to
- * be narrowed to the same device the command went to — on a bridge, the whole node's
- * snapshot would settle against whichever child holds the lowest endpoint, so a
- * command to the second lamp would wait two seconds and then report the first lamp's
- * unchanged value as the result. Which is worse than the echo the settle replaced.
- */
+/** A fresh snapshot of one device, so settle loops read the child the command went to. */
 function sliceOf(peer: ClientNode, nodeId: bigint, rootEndpoint: number | undefined): NodeSnapshot {
   const slices = deviceSlices(snapshotOf(peer, nodeId));
   return slices.find(slice => slice.rootEndpoint === rootEndpoint) ?? slices[0]!;
 }
 
+/** The device's state once it has had a chance to report the command's effect. */
 async function settledOperation(
   peer: ClientNode,
   nodeId: bigint,
@@ -1057,17 +717,8 @@ async function settledOperation(
 }
 
 /**
- * What the device reports for this verb once it has had a chance to report it.
- *
- * Returns as soon as the reading MOVES, so a device that obeys is not held up: measured
- * against Google's Matter Virtual Device the command answers in ~13ms and the new state
- * lands within ~500ms. A device already sitting at the requested value has nothing to
- * report, so it is not waited on at all — otherwise every no-op command would cost the
- * full window.
- *
- * Where the device reports nothing for the verb, the plan's own `applied` stands. That is
- * the request echoed back, which is what this exists to replace — but an absent reading
- * is not evidence of a different one, and inventing a value would be worse than echoing.
+ * The verb's reading once it moves, or at timeout; no wait if already there. Reporting nothing
+ * leaves the plan's `applied` standing: an absent reading is not evidence of another value.
  */
 async function settledObservation(
   peer: ClientNode,
@@ -1081,7 +732,6 @@ async function settledObservation(
   const keys = Object.keys(read()) as (keyof DeviceStatePatch)[];
   if (keys.length === 0) return {};
 
-  // Already there: the device has nothing to move to, so there is nothing to wait for.
   if (keys.every(k => before[k] !== undefined && before[k] === requested[k])) return before;
 
   const deadline = Date.now() + OPERATION_SETTLE_MS;
@@ -1091,20 +741,11 @@ async function settledObservation(
     seen = read();
     if (keys.some(k => seen[k] !== before[k])) return seen;
   }
-  // Never moved. Reporting what it still says is the honest answer for a device that
-  // took the command and did nothing -- the same choice `settleTo` makes.
+  // Never moved: report what it still says, as `settleTo` does.
   return seen;
 }
 
-/**
- * Matter status codes a device answers a write with, rather than a fault.
- *
- * A device saying no is not a device that cannot be reached, and calling it
- * unreachable sends the reader looking at the network for a fault that is not
- * there. A thermostat answering "Constraint error" to a setpoint it will not take
- * was reported as `device_unreachable` while sitting on the same machine,
- * responding in milliseconds.
- */
+/** Matter statuses meaning the device refused, not that it was unreachable. */
 const REFUSALS: ReadonlyMap<string, string> = new Map([
   ["constraint error", "the value is outside what it will accept right now"],
   ["invalid action", "it will not do that in its current state"],
@@ -1114,37 +755,19 @@ const REFUSALS: ReadonlyMap<string, string> = new Map([
   ["invalid in state", "it will not do that in its current state"],
   ["needs timed interaction", "it requires a timed interaction"],
   ["write ignored", "it ignored the write"],
-  // Last, so every specific meaning above wins over it.
-  //
-  // Matter's generic Failure (0x01), which matter.js also returns for a command a
-  // device declares and has not implemented. It says nothing about WHY -- but it is
-  // a status the device sent, over a session that was up, and a device that answers
-  // is a device that can be reached. Measured against a valve whose firmware has no
-  // handler for `open`: the command was addressed correctly, delivered, and answered
-  // "not implemented", and GIAP reported the valve as UNREACHABLE -- sending the
-  // reader to look at the network for a device sitting there responding in
-  // milliseconds. That is the exact failure this table's own note describes.
+  // Last, so specific meanings win. Generic Failure (0x01), also matter.js's answer for a declared
+  // but unimplemented command: still a reply, so the device is reachable.
   ["received error status", "it answered with an error of its own rather than acting"],
 ]);
 
-/**
- * Tell a refusal from a fault, and word it as one.
- *
- * The distinction is the whole diagnostic value: a refusal means ask for something
- * else, a fault means look at the network. Anything unrecognised stays a fault
- * carrying the device's own words, because guessing that an unfamiliar error was a
- * refusal would hide a real outage.
- */
+/** Refusal or fault? Unrecognised errors stay faults, so a real outage is never hidden. */
 export function refusalOrFault(deviceId: string, error: unknown, accepts?: string): OpError {
   const said = describeError(error);
   const lowered = said.toLowerCase();
 
   for (const [needle, meaning] of REFUSALS) {
     if (lowered.includes(needle)) {
-      // What it WILL take, on the refusal itself. A caller that did not read the
-      // description first is exactly the caller who gets here, and telling it only
-      // that the value was wrong leaves it to guess again -- which is what a
-      // thermostat refusing 30 with no mention of 23.5 produced.
+      // Say what it will accept: callers that land here skipped the description.
       const offer = accepts === undefined ? "" : ` It accepts ${accepts}.`;
       return new OpError(
         "device_refused",
@@ -1189,11 +812,7 @@ export function wordValueSpec(spec: ValueSpec): string | undefined {
               ? `from ${spec.min}${unit}`
               : undefined;
 
-      // The step is as much a part of what will be accepted as the ends are. A
-      // refusal that names only the range answers "49 to 82 C" to a request for
-      // 50.5 -- true, and no use at all, because it does not say what was wrong
-      // with 50.5. The description already carries this; the refusal knowing less
-      // than the description is how a caller ends up guessing twice.
+      // Include the step: a range alone doesn't say what's wrong with 50.5 in 49–82.
       const step = spec.step === undefined ? undefined : `in steps of ${spec.step}`;
       const accepted =
         range === undefined
@@ -1205,9 +824,7 @@ export function wordValueSpec(spec: ValueSpec): string | undefined {
             ? range
             : `${range}, ${step}`;
 
-      // And what it is true of, where that moves: a thermostat refusing 24 accepts
-      // a different range a mode later, so a refusal quoting one without its
-      // condition is wrong as soon as it is repeated.
+      // Add the condition: a thermostat's accepted range can change with its mode.
       if (accepted === undefined) return undefined;
       return spec.when === undefined ? accepted : `${accepted} (${spec.when})`;
     }
@@ -1219,24 +836,8 @@ export function wordValueSpec(spec: ValueSpec): string | undefined {
 }
 
 /**
- * The live change observables for a cluster on a peer.
- *
- * `endpoint.events` is keyed by cluster and holds the real Observables — objects
- * with an `on` to subscribe through. `eventsOf(cluster)` looks like the same thing
- * and is not: it hands back a wrapper whose single key is `events`, and even after
- * reaching inside, every one of its 45 `$Changed` keys reads back `undefined`. It
- * enumerates names without carrying the objects.
- *
- * So the old wiring failed twice over: it iterated the outer level, where no key
- * ends in `$Changed`, and had it looked one level deeper it would have found
- * nothing subscribable anyway. Nothing was ever wired, for any cluster, with no
- * error raised — the `typeof on !== "function"` check quietly skipped all of them.
- *
- * The cost was invisible because snapshots read state directly: `state` and
- * `describe` were always current, while stored readings only refreshed when the
- * bridge re-subscribed. A thermostat measuring 47.33 reported 100, the value from
- * the last reconnect, and every sensor carried the same staleness with nothing
- * looking broken.
+ * The level of `source` holding `$Changed` keys, unwrapping `eventsOf`'s `events` wrapper. Only
+ * `endpoint.events[cluster]` holds live Observables; `eventsOf`'s keys read back `undefined`.
  */
 export function changeObservables(source: Record<string, unknown>): Record<string, unknown> {
   const holdsChanges = (record: Record<string, unknown>) =>
@@ -1260,8 +861,7 @@ function clusterEvents(endpoint: Endpoint, cluster: string): Record<string, unkn
     return live as Record<string, unknown>;
   }
 
-  // Fall back rather than assume: a matter.js that moves these again should wire
-  // nothing rather than wire the wrong thing.
+  // Fallback; if matter.js moves these again, wire nothing rather than the wrong thing.
   try {
     return changeObservables(endpoint.eventsOf(cluster) as Record<string, unknown>);
   } catch {
@@ -1276,17 +876,7 @@ const OPERATIONAL_ERRORS: Record<number, string> = {
   3: "that command is not valid in its current state",
 };
 
-/**
- * Fail if the device refused the command it just answered.
- *
- * Matter commands do not only succeed or throw. Operational State answers every
- * Start/Stop/Pause/Resume with an `ErrorStateID`, and ModeBase answers
- * `changeToMode` with a `status` — and a refusal comes back as a perfectly
- * successful invocation carrying a non-zero code. Discarding that response is why
- * a washer that never started was reported as running: nothing threw, so nothing
- * looked. The device's own `errorStateLabel` or `statusText` is preferred over
- * anything we could word ourselves, because it knows why it said no.
- */
+/** Throws on a refusal hidden in a successful response (OperationalState/ModeBase non-zero codes). */
 export function assertAccepted(deviceId: string, command: string, response: unknown): void {
   if (typeof response !== "object" || response === null) return;
 
@@ -1330,29 +920,14 @@ function readClusters(endpoint: Endpoint): ClusterState {
     try {
       clusters[cluster] = { ...endpoint.stateOf(cluster) } as Record<string, unknown>;
     } catch {
-      // A cluster present in `supported` but not yet populated by the subscription.
-      // Recording it empty keeps "this endpoint has this cluster" true, which is what
-      // the capability and endpoint lookups actually ask.
+      // Not yet populated; recorded empty so "endpoint has this cluster" stays true.
       clusters[cluster] = {};
     }
   }
   return clusters;
 }
 
-/**
- * The manufacturer-specific clusters this endpoint has.
- *
- * Free: matter.js already built a behavior for every entry in the Descriptor's
- * ServerList, including the clusters its own model cannot name, so the id is in hand.
- * Nothing is read from the device and nothing is subscribed — which is what lets this
- * sit outside `SNAPSHOT_CLUSTERS` without paying the cost that bound exists to avoid.
- *
- * The id is all there is. Measured against a live commissioned device, such a
- * behavior is named `cluster$fff1fc01` and its schema carries no attributes at all:
- * matter.js discovers no shape for a cluster it does not know. So there is nothing to
- * count, and reporting a count of zero for a device showing two controls would be the
- * same silent falsehood this whole record exists to remove.
- */
+/** Vendor cluster ids (free; no reads), which is all matter.js knows of a cluster it can't name. */
 function readVendorClusters(endpoint: Endpoint): VendorCluster[] {
   const vendor: VendorCluster[] = [];
   for (const behavior of Object.values(endpoint.behaviors.supported)) {
@@ -1364,19 +939,7 @@ function readVendorClusters(endpoint: Endpoint): VendorCluster[] {
   return vendor;
 }
 
-/**
- * The Matter device type ids this endpoint claims, from the Descriptor cluster's
- * DeviceTypeList. Empty when the endpoint has no Descriptor or has not been read yet,
- * in which case the cluster-based fallback decides the type.
- */
-/**
- * This endpoint's children, from matter.js's resolved tree.
- *
- * `endpoint.parts` and not `descriptor.partsList` — see `EndpointSnapshot.parts`
- * for why the raw attribute is the wrong source. Guarded like `peerNodeId`: reading
- * the structure of an endpoint matter.js has not finished building can throw, and
- * this runs inside `snapshotOf`, which every op calls.
- */
+/** Child endpoint numbers from `endpoint.parts`, not `partsList`; reading a half-built one throws. */
 function readParts(endpoint: Endpoint): number[] {
   try {
     return [...endpoint.parts].map(part => Number(part.number));
@@ -1385,6 +948,7 @@ function readParts(endpoint: Endpoint): number[] {
   }
 }
 
+/** Descriptor device type ids; empty when unread, so the cluster-based fallback picks the type. */
 function readDeviceTypes(endpoint: Endpoint): number[] {
   const descriptor = endpoint.maybeStateOf("descriptor");
   const list = descriptor?.deviceTypeList;
