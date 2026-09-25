@@ -39,7 +39,7 @@ jobs:
 
       # Prebuilt binary — installs in seconds vs minutes for cargo install.
       - name: Install cargo-audit
-        uses: taiki-e/install-action@v2.87.11
+        uses: taiki-e/install-action@v2.87.15
         with:
           tool: cargo-audit
 
@@ -96,7 +96,7 @@ jobs:
       # aggregates both (cargo-deny would not: same RustSec data). Lockfiles are named explicitly
       # so vendor/temporal_rs and templates/extensions/rust do not add noise; add new ones here.
       - name: osv-scanner
-        uses: google/osv-scanner-action/osv-scanner-action@v2.5.1
+        uses: google/osv-scanner-action/osv-scanner-action@v2.6.0
         with:
           scan-args: |-
             --lockfile=Cargo.lock
