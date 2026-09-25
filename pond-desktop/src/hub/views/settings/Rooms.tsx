@@ -15,7 +15,6 @@ const SICN = {
 } as const;
 
 // ─── Room → icon key mapping ───────────────────────────────────
-// Maps common room name fragments to HP_PATHS icon keys.
 function roomIconKey(name: string): keyof typeof HP_PATHS | null {
   const n = name.toLowerCase();
   if (n.includes("living"))  return "sofa";
@@ -293,7 +292,7 @@ export function RoomsDetail({ go }: RoomsDetailProps) {
                 </span>
               }
               right={
-                /* TODO Phase 8 wave 5: open room-editor modal — no edit-room API yet */
+                /* TODO: open a room-editor modal once there is an edit-room API. */
                 <button
                   className="mrow__btn"
                   type="button"

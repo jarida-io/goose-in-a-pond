@@ -1,9 +1,5 @@
 /**
- * Strip `<think>…</think>` reasoning blocks from streaming text chunks.
- *
- * Ported from pond-core/services/chat.rs `filter_thinking()`.
- * Handles blocks that span multiple chunks via the `inBlock` carry-over state.
- *
+ * Strips `<think>…</think>` blocks from streamed chunks, carrying `inBlock` across chunk boundaries.
  * @returns [visibleText, updatedInBlock]
  */
 export function filterThinking(

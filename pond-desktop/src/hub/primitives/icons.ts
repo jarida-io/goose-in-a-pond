@@ -1,8 +1,5 @@
 // ─── HP Icon Dictionary ────────────────────────────────────────
-// Ported verbatim from home-v2-components.jsx HP constant.
-// Values are SVG path strings (d attribute) unless noted with JSX comment.
-// For icons that were JSX fragments in the design (multiple elements),
-// use the exported React components in HubIco.tsx instead.
+// SVG `d` path strings unless noted; multi-element icons are components in HubIco.tsx.
 
 export const HP_PATHS = {
   bulb:        "M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.2 1 2V17h6v-.3c0-.8.4-1.5 1-2A7 7 0 0 0 12 2z",
@@ -41,10 +38,10 @@ export const HP_PATHS = {
   bell:        "M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0",
   goose:       "M15.5 7.5a3.5 3.5 0 0 0-7 0c0 1 .3 1.7.8 2.5L4 16c-.6 1 .2 2.3 1.4 2.3H15a4 4 0 0 0 4-4c0-2.2-1.5-3.5-3.5-3.5M16 7h.01",
   mic:         "rect:9,2,6,12,3 path:M5 10a7 7 0 0 0 14 0M12 17v4M8 21h8", // compound — use HubIco's micEl
-  // Extra icons used in home view header (HX in goose-hub-home.jsx)
+  // Home header icons
   chat:        "M21 12a8 8 0 0 1-11.5 7.2L4 21l1.8-5.4A8 8 0 1 1 21 12z",
   keyboard:    "M4 6h16a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1zM7 10h.01M11 10h.01M15 10h.01M17 10h.01M7 13h.01M17 13h.01M9 13h6",
-  // Rail icons (exact RAIL paths from goose-hub-shell.jsx)
+  // Rail icons (from goose-hub-shell.jsx)
   railHome:     "M3 9.6L12 3l9 6.6V20a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z",
   railChat:     "M21 11.5a8.4 8.4 0 0 1-12.6 7.3L3 21l2.2-5.4A8.4 8.4 0 1 1 21 11.5z",
   railCanvas:   "M4 4h7v7H4zM13 4h7v7h-7zM13 13h7v7h-7zM4 13h7v7H4z",
@@ -52,7 +49,7 @@ export const HP_PATHS = {
   railSettings: "M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM19.4 13a7.7 7.7 0 0 0 0-2l2-1.5-2-3.5-2.4 1a7.5 7.5 0 0 0-1.7-1L15 3H9l-.3 2.5a7.5 7.5 0 0 0-1.7 1l-2.4-1-2 3.5 2 1.5a7.7 7.7 0 0 0 0 2l-2 1.5 2 3.5 2.4-1a7.5 7.5 0 0 0 1.7 1L9 21h6l.3-2.5a7.5 7.5 0 0 0 1.7-1l2.4 1 2-3.5z",
   x:           "M18 6L6 18M6 6l12 12",
   pencil:      "M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M18.5 2.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4z",
-  // Phase 9 (overlays)
+  // Overlays
   alert:       "M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01",
   minus:       "M5 12h14",
   bolt:        "M13 2L3 14h7l-1 8 11-12h-7z",
@@ -61,8 +58,7 @@ export const HP_PATHS = {
   max:         "M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M16 21h3a2 2 0 0 0 2-2v-3M8 21H5a2 2 0 0 1-2-2v-3",
   person:      "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM5 21a8 8 0 0 1 14 0",
   speaker:     "M11 5L6 9H2v6h4l5 4zM19 5a10 10 0 0 1 0 14M15.5 8.5a5 5 0 0 1 0 7",
-  // Generic device-kind icons (Devices section "Register device" types that
-  // aren't a light/lock/thermostat/plug — host, sensor, mobile, edge, …)
+  // Generic device-kind icons (host, sensor, mobile, edge, …)
   cpu:         "M20 17a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H9.5a2 2 0 0 0-2 1.57L5 14.5A2 2 0 0 0 7 17M16 17H7M12 17v4M8 21h8",
   pulse:       "M22 12h-4l-3 9L9 3l-3 9H2",
   phone:       "M17 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2zM12 18h.01",

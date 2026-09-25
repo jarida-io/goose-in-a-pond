@@ -23,11 +23,7 @@ function parseClock(t: string): number | null {
   return Number(m[1]) * 60 + Number(m[2]);
 }
 
-/**
- * Derives the visual time-of-day phase from real sunrise/sunset times
- * (already location- and season-accurate from the backend) compared
- * against the device's current local clock.
- */
+/** Day phase from the backend's location-accurate sunrise/sunset vs the device's local clock. */
 export function dayPhaseFor(sunrise: string, sunset: string, now = new Date()): DayPhase {
   const sr = parseClock(sunrise);
   const ss = parseClock(sunset);
@@ -45,24 +41,13 @@ export function dayPhaseFor(sunrise: string, sunset: string, now = new Date()): 
 /** What the sky is doing, as opposed to what time it is. */
 export type SkyCondition = "clear" | "cloud" | "rain" | "snow" | "storm";
 
-/**
- * Read the condition from what the pond already reports.
- *
- * Matched on the forecast ICON first and the prose second. The icon is a small
- * closed vocabulary the weather adapter controls; `cond` is free text that
- * varies by provider and by locale, so it is the fallback rather than the
- * source. Anything unrecognised is "cloud" — the neutral sky, and the one that
- * claims least.
- */
+/** Sky from the forecast icon plus prose; anything unrecognised is "cloud", the sky that claims least. */
 export function skyConditionFor(icon: string, cond: string): SkyCondition {
   const hay = `${icon} ${cond}`.toLowerCase();
   if (/thunder|storm|lightning/.test(hay)) return "storm";
   if (/snow|sleet|flurr|blizzard/.test(hay)) return "snow";
   if (/rain|drizzle|shower|pour/.test(hay)) return "rain";
-  // Cloud BEFORE clear, and the order is the whole rule. The icon vocabulary
-  // includes `cloudSun`, and "Partly cloudy" is the commonest sky there is —
-  // testing for sun first made both of them "clear" and the card rendered a
-  // cloudless noon over an overcast afternoon.
+  // Cloud before clear: `cloudSun` and "Partly cloudy" must read as cloud.
   if (/cloud|overcast|fog|mist|haze/.test(hay)) return "cloud";
   if (/clear|sunny|\bsun\b/.test(hay)) return "clear";
   return "cloud";
@@ -70,21 +55,15 @@ export function skyConditionFor(icon: string, cond: string): SkyCondition {
 
 export function WeatherWidget({ variant = "card" }: WeatherWidgetProps) {
   const w = useHomeData().weather;
-  // Ticked rather than read once, so the card crosses into dusk/night on its
-  // own on a dashboard that is never reloaded.
+  // Ticks, so a never-reloaded dashboard still crosses into dusk/night.
   const now = useNow();
   const phase = dayPhaseFor(w.sunrise, w.sunset, now);
-  // Two axes, not one. The hour sets the sky's light and the condition sets
-  // its weather; a clear night and an overcast night are the same hour and
-  // very different things to look at.
   const sky = skyConditionFor(w.icon, w.cond);
 
   return (
     <div
       className={`wx wx--${variant} wx--${phase} wx--sky-${sky}`}
-      // Said in words as well as in colour. The sky is a signal, and a signal
-      // only available to someone who can see it is decoration for everyone
-      // else (DESIGN.md §6).
+      // In words as well as colour, for anyone who can't see the sky (DESIGN.md §6).
       aria-label={`${w.cond}, ${w.temp} degrees, ${phase}`}
     >
       <div className="wx__main">

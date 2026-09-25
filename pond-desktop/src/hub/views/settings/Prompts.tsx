@@ -18,16 +18,11 @@ const PRESET_LABELS: Record<string, string> = {
   technical: "Technical",
 };
 
-/** Display order for the known presets. */
 const PRESET_ORDER = ["balanced", "concise", "warm", "technical"];
 
 /**
- * Template variables the backend interpolates — purely documentation.
- *
- * From `render_jinja_template` in `crates/pond-core/src/prompts.rs`.
- * `current_date`/`current_time` are deliberately absent: `build_prompt_partition`
- * blanks both in the static prefix to keep the KV cache stable, so a template
- * using them renders an empty string. This list advertised `current_date`.
+ * Variables `render_jinja_template` (pond-core prompts.rs) interpolates; display only. No
+ * `current_date`/`current_time`: the static prefix blanks them to keep the KV cache stable.
  */
 const VARS = [
   "{{assistant_name}}",
@@ -142,7 +137,6 @@ export function PromptsDetail({ go }: PromptsDetailProps) {
     setLoading(true);
     setError(null);
     try {
-      // Fetch prompt list and active style in parallel
       const [list, settings] = await Promise.all([
         api.listPrompts(),
         api.getSettings(),
@@ -151,7 +145,6 @@ export function PromptsDetail({ go }: PromptsDetailProps) {
       const sorted = sortPrompts(arr);
       setPrompts(sorted);
 
-      // Seed body map from list
       const bodyMap: Record<string, string> = {};
       const origMap: Record<string, string> = {};
       for (const p of sorted) {
@@ -161,7 +154,6 @@ export function PromptsDetail({ go }: PromptsDetailProps) {
       setBodies(bodyMap);
       setOriginals(origMap);
 
-      // Select the active preset from settings.prompt_style, or first available
       const preferred = settings?.prompt_style?.toLowerCase();
       const defaultActive =
         preferred && sorted.some((p) => p.name === preferred)

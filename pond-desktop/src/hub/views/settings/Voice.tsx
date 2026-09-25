@@ -40,10 +40,7 @@ const STT_OPTIONS: SttOption[] = [
   { label: "Whisper large-v3-turbo", value: "ggml-large-v3-turbo.bin" },
 ];
 
-// Voices are whatever is installed — read from the model catalogue rather than
-// hardcoded, so a newly downloaded voice appears without a frontend change.
-// Their display names come from the id (`af_heart` → American Female "Heart"),
-// which is why there is no table of them here.
+// Installed voices come from the model catalogue; names derive from ids (`af_heart` → "Heart").
 const TTS_PROVIDERS = ["tts", "tts_piper", "tts_kokoro", "tts_http"];
 
 // ─── Mock fallback ────────────────────────────────────────────
@@ -95,10 +92,7 @@ export function VoiceDetail({ go }: VoiceDetailProps) {
     setError(null);
     try {
       const s = await api.getSettings();
-      // Guarded: a 404 or an empty body resolves to `undefined`, and assigning
-      // that to state made every later `settings.x` read throw — one bad
-      // response white-screened the whole panel behind the error boundary
-      // instead of degrading to the offline view two lines below.
+      // A 404 or empty body resolves to `undefined`, which would make every `settings.x` read throw.
       if (s && typeof s === "object") {
         setSettings(s);
       } else {
@@ -112,8 +106,7 @@ export function VoiceDetail({ go }: VoiceDetailProps) {
     }
   }, []);
 
-  // Voices are a separate, non-blocking read: the panel is still usable when
-  // the catalogue is unreachable, it just cannot offer alternatives.
+  // Separate, non-blocking read: without the catalogue the panel still works, minus alternatives.
   const loadVoices = useCallback(async () => {
     try {
       const models: ModelEntry[] = await api.listModels();
@@ -137,9 +130,7 @@ export function VoiceDetail({ go }: VoiceDetailProps) {
   }, [loadSettings, loadVoices]);
 
   // ── Hands-free toggle ──────────────────────────────────────
-  // voice_hands_free is not yet in Settings type — wired as a local state with
-  // TODO comment; backend field will be `voice_hands_free` when added.
-  // TODO Phase 8 wave 4: add voice_hands_free to Settings type + wire updateSettings
+  // TODO: add `voice_hands_free` to Settings and wire updateSettings; local-only until then.
   const [handsFreePending, setHandsFreePending] = useState(false);
   const handsFree = false; // placeholder — replace with settings.voice_hands_free ?? false
 
@@ -147,8 +138,7 @@ export function VoiceDetail({ go }: VoiceDetailProps) {
     if (handsFreePending) return;
     setHandsFreePending(true);
     try {
-      // TODO Phase 8 wave 4: await api.updateSettings({ voice_hands_free: on });
-      // For now we log and show a flash so the UX is not completely silent.
+      // TODO: persist with api.updateSettings({ voice_hands_free: on }); log and flash until then.
       console.info("[VoiceDetail] hands-free toggled:", on, "(not persisted — field pending in backend)");
       showFlash(on ? "Hands-free enabled (coming in wave 4)" : "Hands-free disabled (coming in wave 4)", true);
     } finally {
@@ -175,9 +165,7 @@ export function VoiceDetail({ go }: VoiceDetailProps) {
     setSettings((prev) => ({ ...prev, voice_tts_voice: value }));
     try {
       await api.updateSettings({ voice_tts_voice: value });
-      // Speak straight away. Choosing a voice from a list of names is guessing
-      // until you hear it, and the sample costs a 522 KB style-table swap —
-      // the model itself is not reloaded.
+      // Play a sample at once; it's cheap (a 522 KB style-table swap, no model reload).
       void preview.play();
     } catch (e) {
       setSettings((prev) => ({ ...prev, voice_tts_voice: previous }));
@@ -214,8 +202,7 @@ export function VoiceDetail({ go }: VoiceDetailProps) {
   }
 
   // ── Speaking rate slider (debounced) ───────────────────────
-  // Debounced: a slider drag emits a value per pixel, and each one would
-  // otherwise be a settings write and a synthesis.
+  // A drag emits a value per pixel; each would be a settings write and a synthesis.
   function handlePaceChange(next: number) {
     const pace = clampPace(next);
     setSettings((prev) => ({ ...prev, voice_tts_speed: pace }));
@@ -256,8 +243,7 @@ export function VoiceDetail({ go }: VoiceDetailProps) {
 
   const sttLabel  = STT_OPTIONS.find((o) => o.value === currentStt)?.label ?? currentStt;
 
-  // Always offer the saved voice even when the catalogue has not answered, so
-  // the select never renders blank and silently reassigns on the next change.
+  // Always offer the saved voice, or the select renders blank and reassigns it on the next change.
   const offeredVoices = voiceIds.includes(currentVoice) ? voiceIds : [currentVoice, ...voiceIds];
   const voiceGroups = groupVoices(offeredVoices);
   const voiceInfo = describeVoice(currentVoice);
@@ -530,11 +516,7 @@ export function VoiceDetail({ go }: VoiceDetailProps) {
           label="Sound while it thinks"
           sub="A soft pulse between your question and the answer"
           control={
-            // `key` on purpose: Toggle seeds its own state from `on` via
-            // useState and never re-reads the prop. Settings arrive one render
-            // AFTER mount, so without a remount a stored `false` would draw as
-            // ON — the switch would lie about a setting the user had already
-            // changed.
+            // `key` forces a remount: Toggle reads `on` only once, and settings arrive after mount.
             <Toggle
               key={`thinking-tone-${thinkingTone}`}
               on={thinkingTone}

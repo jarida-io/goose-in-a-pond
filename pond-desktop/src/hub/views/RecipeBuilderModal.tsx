@@ -10,8 +10,7 @@ interface RecipeBuilderModalProps {
   onCreated?: () => void;
 }
 
-// Goose recipe names are unique slugs. Convert display text to lowercase
-// snake_case keeping only [a-z0-9_].
+// Goose recipe names are unique slugs: lowercase snake_case, [a-z0-9_] only.
 function slugify(input: string): string {
   return input
     .toLowerCase()
@@ -20,8 +19,7 @@ function slugify(input: string): string {
     .replace(/^_+|_+$/g, "");
 }
 
-// JSON strings are valid YAML scalars — JSON.stringify handles escaping for
-// us, including embedded quotes and newlines.
+// JSON strings are valid YAML scalars, so JSON.stringify does the escaping.
 function buildYaml(title: string, description: string, prompt: string): string {
   return [
     `title: ${JSON.stringify(title)}`,

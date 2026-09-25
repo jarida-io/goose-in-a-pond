@@ -17,13 +17,13 @@ export interface DeviceState {
 
 export type DevicePatch = Partial<DeviceState>;
 
-// ─── Store implementation (mirrors HUBSTORE from design) ───────
+// ─── Store implementation ──────────────────────────────────────
 
 type Subscriber = () => void;
 
 interface HubStoreInternals {
   data: Record<string, DeviceState>;
-  /** Snapshot is a new object reference each mutation so useSyncExternalStore detects the change */
+  /** New reference on every mutation, so useSyncExternalStore sees the change. */
   snapshot: Record<string, DeviceState>;
   subs: Set<Subscriber>;
 }
@@ -34,7 +34,6 @@ const store: HubStoreInternals = {
   subs: new Set(),
 };
 
-// Initialise from mock data — also set snapshot to the same initial object
 HOME.devices.forEach((d) => {
   store.data[d.id] = {
     on:         d.on ?? false,
@@ -47,7 +46,6 @@ HOME.devices.forEach((d) => {
     mode:       "Heat",
   };
 });
-// Initial snapshot is a shallow copy of data
 store.snapshot = { ...store.data };
 
 function getDevice(id: string): DeviceState {
@@ -59,7 +57,6 @@ function getDevice(id: string): DeviceState {
 
 function setDevice(id: string, patch: DevicePatch): void {
   store.data[id] = { ...getDevice(id), ...patch };
-  // Shallow-copy data so useSyncExternalStore detects a new snapshot reference
   store.snapshot = { ...store.data };
   store.subs.forEach((f) => f());
 }
@@ -69,8 +66,6 @@ function subscribe(f: Subscriber): () => void {
   return () => store.subs.delete(f);
 }
 
-// Returns a new object reference on every mutation so useSyncExternalStore
-// detects the change via Object.is comparison.
 function getSnapshot(): Record<string, DeviceState> {
   return store.snapshot;
 }
@@ -78,11 +73,8 @@ function getSnapshot(): Record<string, DeviceState> {
 // ─── Backend actuation ─────────────────────────────────────────
 
 /**
- * Actuate a device through the backend device-control MCP tool, bypassing the
- * LLM via `POST /api/v1/tools/invoke`. Optimistic: the patch is applied locally
- * immediately, then reverted if the call fails. Patches with no actuatable field
- * (e.g. color-temp or mode only) stay local and skip the round-trip.
- * Returns true on success (or local-only), false if the backend call failed.
+ * Optimistic actuation via `POST /api/v1/tools/invoke` (no LLM), reverted on failure. Patches with
+ * nothing actuatable stay local. False only when the backend call failed.
  */
 export async function controlDevice(id: string, patch: DevicePatch): Promise<boolean> {
   const prev = getDevice(id);
@@ -112,10 +104,7 @@ export async function controlDevice(id: string, patch: DevicePatch): Promise<boo
 
 // ─── React hook ────────────────────────────────────────────────
 
-/**
- * Returns [deviceState, setDeviceState] for a given device id.
- * Reactive: any call to setDeviceState re-renders all subscribers.
- */
+/** [state, set locally, actuate via backend] for a device id; every set re-renders all subscribers. */
 export function useDeviceState(
   id: string,
 ): [DeviceState, (patch: DevicePatch) => void, (patch: DevicePatch) => Promise<boolean>] {
@@ -126,8 +115,7 @@ export function useDeviceState(
   return [state, set, control];
 }
 
-// Expose raw setDevice + backend actuation for non-React contexts — event
-// handlers that toggle several devices at once and are not inside a component.
+// For non-React callers, e.g. handlers that toggle several devices at once.
 export {
   setDevice as hubSetDevice,
   getDevice as hubGetDevice,

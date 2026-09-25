@@ -20,9 +20,7 @@ const PREVIEW_DEVICE: DeviceData = {
   on: true,
 };
 
-// Register the preview device in hubStore at module load so its tile renders
-// as active (the store is the source of truth — without this it falls back to
-// the default off/locked DeviceState).
+// Seed hubStore so the preview tile renders on; an unknown id defaults to off/locked.
 hubSetDevice(PREVIEW_DEVICE.id, { on: true, brightness: 80 });
 
 // ─── Segmented control ────────────────────────────────────────────────────────

@@ -23,10 +23,7 @@ const CHART_PATH  = "M22 12h-4l-3 9L9 3l-3 9H2";
 const UP_ARROW    = "M23 6l-9.5 9.5-5-5L1 18";
 const DOWN_ARROW  = "M23 18l-9.5-9.5-5 5L1 6";
 
-/**
- * Crypto card — 4 coin rows with sparklines + price + % change.
- * Source: giap-finance.get_crypto_price (mock data for Phase 5).
- */
+/** Crypto card for giap-finance.get_crypto_price; mock data for now. */
 export function CryptoCard(): React.ReactElement {
   return (
     <div className="mc">

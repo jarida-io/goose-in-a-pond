@@ -20,17 +20,14 @@ function fakeImage(byteSize: number): PreparedImage {
 
 describe("decodedBase64Length", () => {
   it("computes length for a full block with no padding", () => {
-    // "AAAA" -> 3 zero bytes
     expect(decodedBase64Length("AAAA")).toBe(3);
   });
 
   it("computes length with one padding char", () => {
-    // "AAA=" decodes to 2 bytes
     expect(decodedBase64Length("AAA=")).toBe(2);
   });
 
   it("computes length with two padding chars", () => {
-    // "AA==" decodes to 1 byte
     expect(decodedBase64Length("AA==")).toBe(1);
   });
 

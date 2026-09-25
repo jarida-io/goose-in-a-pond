@@ -155,7 +155,7 @@ function MarketplaceModal({ installedNames, onClose, onInstalled }: MarketplaceM
     setInstalling(id);
     try {
       const ext = await api.installMarketplaceExtension(id);
-      // TODO wave 3: handle required_secrets before install
+      // TODO: handle required_secrets before install
       setJustInstalled((prev) => new Set(prev).add(id));
       onInstalled(ext);
     } catch {
@@ -470,16 +470,9 @@ function AddServerModal({ onClose, onAdded }: AddServerModalProps) {
 }
 
 
-// ─── Tool loading mode (Phase D) ──────────────────────────────
-// On-device the tool SCHEMAS are the single largest fixed cost in the prompt:
-// every tool is roughly 100 tokens through the chat template, re-sent on every
-// fresh turn. "Relevant" loads a small always-on core plus the groups a
-// conversation actually needs, chosen once when the conversation starts so the
-// prompt stays cacheable. Goose can still load any other group itself mid-chat,
-// so nothing becomes unreachable.
-// "Minimal" sends neither: the model gets only the two toolkit tools and asks
-// for a group when it wants one. 2.7% of an 8K prompt budget against 40.8% for
-// "All tools" -- the only setting that fits a 4% ceiling.
+// ─── Tool loading mode ────────────────────────────────────────
+// Tool schemas (~100 tokens each, re-sent every turn) dominate an on-device prompt. "Relevant" picks
+// groups once per conversation so the prompt stays cacheable; Goose can load any other group mid-chat.
 const TOOL_MODE_LABELS: Record<string, string> = {
   all: "All tools",
   relevant: "Only relevant",

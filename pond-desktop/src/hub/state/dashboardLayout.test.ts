@@ -24,11 +24,6 @@ beforeEach(() => {
 });
 
 describe("the default", () => {
-  /**
-   * Home was pared back deliberately, and this file is where that decision
-   * still lives. A card arriving in the default is a product decision; a card
-   * arriving on one household's Home is theirs.
-   */
   it("is the pared-back Home and nothing more", () => {
     expect(getDashboardLayout().order).toEqual([
       "suggestion",
@@ -46,22 +41,11 @@ describe("the default", () => {
 });
 
 describe("a layout written by an older release", () => {
-  /**
-   * A stored layout outlives the release that wrote it. Reconciling on read
-   * rather than versioning the payload means a card removed from the catalogue
-   * cannot strand a household on a Home that renders nothing.
-   */
   it("drops cards this release no longer has", () => {
     store({ order: ["devices", "stockTicker"], hidden: [] });
     expect(getDashboardLayout().order).toEqual(["devices"]);
   });
 
-  /**
-   * The other direction matters more. A card added since they last saved
-   * should appear in the sheet as something they MAY turn on — arriving on
-   * their Home unannounced is the behaviour that makes people stop trusting a
-   * layout they arranged.
-   */
   it("offers a card added since, without placing it on Home", () => {
     store({ order: ["devices"], hidden: [] });
     const l = getDashboardLayout();
@@ -90,11 +74,6 @@ describe("a layout written by an older release", () => {
 });
 
 describe("an empty Home", () => {
-  /**
-   * The failure this guards is circular: a Home with no cards also has no
-   * visible route to the sheet that would put one back, so the household is
-   * left with a blank panel and no way out except clearing storage.
-   */
   it("is not a preference the store will hold", () => {
     store({ order: [], hidden: CARDS.map((c) => c.id) });
     expect(getDashboardLayout()).toEqual(DEFAULT_LAYOUT);
@@ -150,11 +129,6 @@ describe("persistence", () => {
     expect(getDashboardLayout().order).toContain("routines");
   });
 
-  /**
-   * Storage that refuses to write should cost the preference, never the
-   * interaction — a panel in a private window still rearranges, it just does
-   * not remember.
-   */
   it("still applies when storage refuses the write", () => {
     const original = Storage.prototype.setItem;
     Storage.prototype.setItem = () => {

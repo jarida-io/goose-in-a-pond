@@ -17,7 +17,6 @@ const SICN = {
 } as const;
 
 // ─── Fallback cameras (shown while offline / loading) ─────────
-// Matches the design's Front Door / Driveway / Backyard cards.
 interface CameraState {
   id: string;
   name: string;
@@ -102,18 +101,12 @@ export function CamerasDetail({ go }: CamerasDetailProps) {
     setError(null);
     try {
       const devices = await api.listDevices();
-      // Filter to camera-type devices. The Device.device_type field carries
-      // the category string ("camera") from the pond-server device registry.
       const cameraDevices = devices.filter(
         (d: Device) => d.device_type === "camera",
       );
 
       if (cameraDevices.length > 0) {
-        // Convert API devices to display state, seeding toggle defaults from
-        // local initial values. Per-camera settings are not yet in the Settings
-        // type (no camera_${id}_motion_alerts etc.), so toggle state is held
-        // locally. TODO: persist via api.updateSettings({ [`camera_${d.id}_motion_alerts`]: v })
-        // once per-camera settings land in the Settings type.
+        // Toggle state is local: the Settings type has no per-camera fields yet (see setToggle).
         setCameras(
           cameraDevices.map((d: Device) => ({
             id:           d.id,
@@ -127,8 +120,7 @@ export function CamerasDetail({ go }: CamerasDetailProps) {
           })),
         );
       } else {
-        // No cameras registered — use offline fallback so the screen still
-        // renders meaningfully rather than showing an empty state.
+        // No cameras registered: show the fallback cards rather than an empty state.
         setCameras(MOCK_CAMERA_STATES);
       }
     } catch (e) {
@@ -156,8 +148,7 @@ export function CamerasDetail({ go }: CamerasDetailProps) {
     setCameras((prev) =>
       prev.map((c) => (c.id === id ? { ...c, [field]: value } : c)),
     );
-    // TODO: persist via api.updateSettings({ [`camera_${id}_${field}`]: value })
-    // once per-camera settings land in the Settings type.
+    // TODO: persist as `camera_${id}_${field}` once the Settings type has per-camera fields.
     showFlash(`Saved.`);
   }
 
@@ -191,7 +182,7 @@ export function CamerasDetail({ go }: CamerasDetailProps) {
             type="button"
             style={{ background: "#0EA5E9", boxShadow: "0 6px 16px rgba(14,165,233,.28)" }}
             onClick={() => {
-              // TODO Phase 8 wave 5: open add-camera wizard
+              // TODO: open the add-camera wizard.
             }}
           >
             <Plus size={15} color="#fff" strokeWidth={2.2} /> Add camera

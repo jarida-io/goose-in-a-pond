@@ -1,8 +1,7 @@
 import { ChevronLeft } from "lucide-react";
 
 // ─── DetailShell ──────────────────────────────────────────────
-// Shared wrapper for every settings sub-screen.
-// Provides the back button, title row, and scrollable body slot.
+// Shared wrapper for every settings sub-screen: back button, title row, scrollable body.
 
 interface DetailShellProps {
   title: string;

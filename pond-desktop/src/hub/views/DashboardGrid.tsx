@@ -1,26 +1,5 @@
-// ────────────────────────────────────────────────────────────
-// Home — what needs me, then what's on, arranged by the household.
-//
-// One component, rendered by BOTH surfaces: `hub/views/Home.tsx` (touch panel)
-// and `sections/Dashboard.tsx` (desktop). They were already deliberate twins —
-// same primitives, same order, same header comment — so a redesign that landed
-// on one of them would give a household two different Homes depending on how
-// they got in.
-//
-// Three things are new and each answers a real question:
-//
-//   SEARCH  — reaching a device that is deliberately NOT on Home. The screen
-//             was pared back on purpose; search is what makes that affordable
-//             without putting every device back on it.
-//   ROOMS   — `devices[].room` and `rooms[]` are real data, so grouping by room
-//             asserts nothing the pond does not know (DESIGN.md §3).
-//   EDIT    — the pared-back Home is one household's compromise. Which cards
-//             belong is a question only they can answer; see
-//             `state/dashboardLayout.ts` for why the DEFAULT is unchanged.
-//
-// What is deliberately NOT here: a results page, a drag-only reorder, and any
-// card backed by data the pond does not have.
-// ────────────────────────────────────────────────────────────
+// Home, shared by `hub/views/Home.tsx` (panel) and `sections/Dashboard.tsx` (desktop) so the two
+// can't drift. Search reaches devices kept off Home; the layout lives in `state/dashboardLayout.ts`.
 
 import { useMemo, useState } from "react";
 import { Mic, Pencil, Search as SearchIcon, X } from "lucide-react";
@@ -57,22 +36,14 @@ import "./dashboard-grid.css";
 /** Devices shown before the household has narrowed anything. More than this is a list, not a glance. */
 const GLANCE_LIMIT = 8;
 
-/**
- * At or below this many devices, the report cards spread out instead of leaving
- * empty columns. Four is one row of tiles at every size this screen supports.
- */
+/** At or below this many devices the report cards spread out; four is one tile row at every size. */
 const SPARSE_LIMIT = 4;
 
 /** The room filter's "everything" option. Not a room id, so it cannot collide with one. */
 const ALL_ROOMS = "__all__";
 
 export interface DashboardGridProps {
-  /**
-   * Where the empty state sends people. Typed as `GuiSection` rather than
-   * `string` on purpose: the first draft used `string` and pointed two cards at
-   * "routines" and "cameras", neither of which is a section. The union caught
-   * it; a looser type would have shipped two buttons that navigate nowhere.
-   */
+  /** Where the empty state sends people. */
   onNavigate: (section: GuiSection) => void;
   /** Starts a voice turn. The surfaces reach voice mode differently. */
   onTalk: () => void;
@@ -91,9 +62,7 @@ export function DashboardGrid({ onNavigate, onTalk, sessionId }: DashboardGridPr
 
   const searching = query.trim().length > 0;
 
-  // Only rooms that actually hold a device. A room the household created and
-  // then emptied is not a filter worth offering, and an option that always
-  // yields nothing teaches people the filter is broken.
+  // Only rooms holding a device: an option that always yields nothing looks broken.
   const rooms = useMemo(() => {
     const populated = new Set(home.devices.map((d) => d.room).filter(Boolean));
     return home.rooms.filter((r) => populated.has(r.name) || populated.has(r.id));
@@ -106,9 +75,7 @@ export function DashboardGrid({ onNavigate, onTalk, sessionId }: DashboardGridPr
 
   const greeting = greetingForHour(now.getHours());
 
-  // "Few" rather than "none": a house with two lamps has the same problem as a
-  // house with none — a devices card that occupies two columns to show one row
-  // of tiles, and three empty ones beside it.
+  // "Few", not "none": two lamps leave a wide devices card as empty as zero do.
   const sparse = home.devices.length <= SPARSE_LIMIT;
   const playing = home.nowPlaying.connected && home.nowPlaying.playing;
   const line = homeLine({
@@ -119,9 +86,7 @@ export function DashboardGrid({ onNavigate, onTalk, sessionId }: DashboardGridPr
   });
 
   return (
-    // Two raised surfaces is the budget (DESIGN.md §3, "spend the offset about
-    // twice per screen"). Held here rather than remembered: InkBudget warns in
-    // development when a third card mounts raised.
+    // Two raised surfaces per screen (DESIGN.md §3); InkBudget warns in development when a third mounts.
     <InkBudget max={2}>
       <div className="dash" data-editing={editing || undefined}>
         <header className="dash__head">
@@ -222,15 +187,7 @@ export function DashboardGrid({ onNavigate, onTalk, sessionId }: DashboardGridPr
   );
 }
 
-/**
- * Match a device against what the household typed.
- *
- * Name, room and kind, because those are the three things a person says out
- * loud about a device — "the hall lamp", "kitchen", "the locks". Substring and
- * case-insensitive; no fuzzy matching, because a near-miss that silently
- * returns the wrong lamp is worse than no match on a screen whose whole job is
- * to be trusted at a glance.
- */
+/** Case-insensitive substring match on name, room and kind; never fuzzy, as a near-miss picks the wrong lamp. */
 function filterDevices(devices: DeviceData[], query: string, room: string): DeviceData[] {
   const q = query.trim().toLowerCase();
   return devices.filter((d) => {
@@ -259,15 +216,11 @@ interface DashCardProps {
   onNavigate: (section: GuiSection) => void;
 }
 
-/**
- * One card. Every branch is backed by a slice of `HomeData` that the pond
- * actually populates — there is no placeholder card for data we do not have.
- */
+/** One card; every branch is backed by `HomeData` the pond actually populates. */
 function DashCard({ id, devices, playing, sparse, line, searching, query, sessionId, onNavigate }: DashCardProps) {
   switch (id) {
     case "suggestion":
-      // The only element on the screen that asks for anything, and one of the
-      // two that may spend the offset.
+      // The only card that asks, and one of the two that may spend the offset.
       return searching ? null : (
         <section className="dash__cell dash__cell--wide">
           <Suggestion
@@ -290,8 +243,7 @@ function DashCard({ id, devices, playing, sparse, line, searching, query, sessio
               ))}
             </div>
           ) : searching ? (
-            // An empty result is not an error and does not offer to fix itself
-            // — the household knows what they typed.
+            // Not an error, and no offer to fix it: the household knows what they typed.
             <InkCard raised={false}>
               <InkText>Nothing here matches that. Try a room, or part of a name.</InkText>
             </InkCard>
@@ -304,10 +256,7 @@ function DashCard({ id, devices, playing, sparse, line, searching, query, sessio
       );
 
     case "weather":
-      // A house with nothing paired still has a sky. Rather than leaving three
-      // empty columns beside a single "add a device" prompt, the weather takes
-      // the room — it is the one card that is always true, and a new household
-      // should meet a screen that looks finished rather than unfurnished.
+      // With few devices the weather takes the spare width: it is the one card that is always true.
       return searching ? null : (
         <section className={`dash__cell${sparse ? " dash__cell--wide" : ""}`}>
           <WeatherWidget />
@@ -315,10 +264,7 @@ function DashCard({ id, devices, playing, sparse, line, searching, query, sessio
       );
 
     case "nowPlaying":
-      // Form carries data (DESIGN.md §3): the card is wide while something is
-      // actually playing and ordinary when it is not. A music card that is
-      // always large is decoration; one that grows when there is a track to
-      // show is reporting.
+      // Wide only while something plays: form carries data (DESIGN.md §3).
       return searching ? null : (
         <section
           className={`dash__cell${playing ? " dash__cell--wide" : ""}`}
@@ -328,9 +274,7 @@ function DashCard({ id, devices, playing, sparse, line, searching, query, sessio
         </section>
       );
 
-    // Cards the household can add. Each opens its own destination rather than
-    // duplicating it here — Home stopped being a copy of the rail, and adding a
-    // card should not undo that.
+    // Cards the household can add.
     case "scenes":
     case "cameras":
     case "routines":
@@ -346,19 +290,7 @@ function DashCard({ id, devices, playing, sparse, line, searching, query, sessio
   }
 }
 
-/**
- * The cards a household can add, each showing what it is named for.
- *
- * These were links at first — a card that said "Cameras" and navigated. Two of
- * them pointed at sections that do not exist, which the `GuiSection` union
- * caught, and fixing the type made the deeper problem obvious: a card whose
- * whole content is its own title earns none of the space it takes. Every one
- * now reports from `HomeData`, or does not render at all.
- *
- * A card with nothing to say renders nothing rather than an empty frame. An
- * empty frame on a panel read from across a room is indistinguishable from a
- * card that failed to load.
- */
+/** An addable card reporting from `HomeData`; with nothing to say it renders nothing, not an empty frame. */
 function ExtraCard({ id }: { id: CardId }) {
   const home = useHomeData();
   const routines = useRoutines();
@@ -431,15 +363,7 @@ function ExtraCard({ id }: { id: CardId }) {
   return null;
 }
 
-/**
- * Arranging Home.
- *
- * Move up / move down / show / hide, as buttons. A drag would be fewer taps for
- * someone holding a mouse and unusable for everyone else: DESIGN.md §6 makes
- * keyboard operability a floor, and a thumb dragging a card on a 480px-tall
- * panel is a worse gesture than two taps. Drag can be added over this later; it
- * cannot replace it.
- */
+/** Arranging Home with move/show/hide buttons: drag alone fails keyboards (DESIGN.md §6) and thumbs. */
 function ArrangeSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
   const layout = useDashboardLayout();
   const spec = (id: CardId) => CARDS.find((c) => c.id === id);

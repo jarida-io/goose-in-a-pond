@@ -1,11 +1,5 @@
-/**
- * Shared color constants for GIAP Desktop.
- *
- * These hex values mirror the CSS custom properties in design-tokens.css.
- * Use CSS variables (var(--color-*)) in DOM/JSX wherever possible.
- * Import these hex constants ONLY for canvas-based drawing (AudioWaves)
- * where CSS variables cannot be used as fillStyle values.
- */
+// Hex mirrors of design-tokens.css for canvas drawing, where a fillStyle can't take a CSS variable;
+// use var(--color-*) in DOM/JSX.
 
 import type { VoiceState } from "../state/reducer";
 

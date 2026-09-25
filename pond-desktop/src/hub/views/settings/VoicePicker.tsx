@@ -28,27 +28,13 @@ interface Props {
   onPaceChange: (pace: number) => void;
   preview: Preview;
   loading: boolean;
-  /**
-   * Voices already on disk. Anything offered but absent is a download on
-   * selection — marked, so the choice is honest about what it costs rather
-   * than pausing without explanation.
-   */
+  /** Voices on disk; any other offered voice is marked as a download on selection. */
   installed?: Set<string>;
   /** True while the engine is being fetched or reconfigured. */
   applying?: boolean;
-  /**
-   * Transfers in flight, from the same feed the rest of the page polls.
-   * Shown so a 326 MB tier change reads as progress rather than a spinner.
-   */
+  /** In-flight transfers from the page's shared feed, so a 326 MB tier change shows progress. */
   transfers?: { filename: string; downloaded: number; total: number | null }[];
-  /**
-   * Show at most this many voices per accent, best-graded first.
-   *
-   * For setup, where twenty American voices is a decision nobody asked to
-   * make before they have heard the assistant speak once. The selected voice
-   * is always kept, so a saved choice outside the top few never vanishes from
-   * the list it is selected in.
-   */
+  /** Max voices per accent, best-graded first (for setup); the selected voice is always kept. */
   maxPerAccent?: number;
   /** Quality tier, and the memory reading that says whether to move off it. */
   quality?: string;
@@ -75,23 +61,8 @@ function accentsOf(voices: string[]): string[] {
 const pctOf = (pace: number) => Math.round(clampPace(pace) * 100);
 
 /**
- * Choosing the pond's voice by hearing it.
- *
- * Shaped after Apple's Siri voice picker — orb, a row of voices, a pace
- * slider — but built in the house material rather than its palette: paper, a
- * 2px ink outline, and the hard offset in `--border-ink`. Selection is
- * ELEVATION, not hue, following the same rule the device tiles set, which
- * leaves the page's one real colour to the control that actually asks a
- * question: the preview button.
- *
- * Two deliberate departures from the reference:
- *
- * - **No expressivity slider.** Kokoro exposes exactly one continuous control,
- *   `speed`. A second slider would be a control that does nothing, which is
- *   the "switches that were not switches" defect by another name.
- * - **The grade is shown.** Kokoro publishes an overall grade per voice in its
- *   own `VOICES.md`, from **A** down to **F+**, and it is the one thing a name
- *   and an accent cannot tell you. Hiding it makes this a guess.
+ * Picks the pond's voice by ear; selection is elevation, not hue. No expressivity slider: Kokoro's
+ * only continuous control is `speed`. Shows each voice's grade from Kokoro's `VOICES.md` (A to F+).
  */
 export function VoicePicker({
   voices,
@@ -118,8 +89,7 @@ export function VoicePicker({
       .sort((a, b) => gradeRank(a) - gradeRank(b) || a.localeCompare(b));
     if (!maxPerAccent || ranked.length <= maxPerAccent) return ranked;
     const top = ranked.slice(0, maxPerAccent);
-    // Never drop what is selected: a capped list that hides the current voice
-    // would read as the pond having silently changed it.
+    // Never drop the selected voice, or the pond looks to have silently changed it.
     return top.includes(selected) || !ranked.includes(selected)
       ? top
       : [...top.slice(0, maxPerAccent - 1), selected];
@@ -207,9 +177,7 @@ export function VoicePicker({
                   data-on={on}
                   disabled={loading}
                   onClick={() => {
-                    // Move to that accent's best-graded voice, so switching
-                    // accent lands somewhere worth hearing rather than on
-                    // whichever id happens to sort first.
+                    // Switching accent selects its best-graded voice, not whichever id sorts first.
                     const best = voices
                       .filter((v) => describeVoice(v).language === a)
                       .sort((x, y) => gradeRank(x) - gradeRank(y))[0];

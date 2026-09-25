@@ -25,9 +25,7 @@ import { ROUTINES as MOCK_ROUTINES, type RoutineDetail } from "../data/routines"
 import { sunEl, filmEl, focusEl } from "../primitives/HubIco";
 import { HP_PATHS } from "../primitives/icons";
 
-// Reactive store that loads real data from PondApiClient and exposes it in the
-// HomeData shape used by Hub primitives. Falls back to mock data when the API
-// is offline so the UI is always renderable.
+// Reactive store of real PondApiClient data in the HomeData shape; mock data while the API is offline.
 
 type Subscriber = () => void;
 
@@ -81,13 +79,11 @@ function inferKind(d: Device): DeviceKind | "camera" {
   const t = (d.device_type ?? "").toLowerCase();
   if (t === "camera") return "camera";
   if (KIND_FROM_TYPE[t]) return KIND_FROM_TYPE[t];
-  // Try metadata.kind
   const meta = d.metadata ?? {};
   const mk = typeof meta.kind === "string" ? meta.kind.toLowerCase() : "";
   if (mk === "camera") return "camera";
   if (KIND_FROM_TYPE[mk]) return KIND_FROM_TYPE[mk];
-  // Unrecognized types (host, sensor, gotg, smart_speaker, pond, edge, …) still
-  // need a room tile — fall back to a generic kind instead of dropping the device.
+  // Unrecognised types (host, sensor, gotg, …) still get a room tile, as a generic kind.
   return "other";
 }
 
@@ -222,14 +218,12 @@ function recipeIdHash(name: string): number {
 function routinesFromRecipes(recipes: AgentRecipe[]): RoutineDetail[] {
   if (!recipes.length) return MOCK_ROUTINES;
   return recipes.map((r) => {
-    // Re-use the mock visual template when the recipe name matches a known one
     const known = MOCK_ROUTINES.find((m) => m.name.toLowerCase() === r.name.toLowerCase());
     const template = known ?? {
       iconPath: ROUTINE_TEMPLATES[recipeIdHash(r.name) % ROUTINE_TEMPLATES.length].iconPath,
       color:    ROUTINE_TEMPLATES[recipeIdHash(r.name) % ROUTINE_TEMPLATES.length].color,
       bg:       ROUTINE_TEMPLATES[recipeIdHash(r.name) % ROUTINE_TEMPLATES.length].bg,
     };
-    // Pull `does` chips from description (split on commas/semicolons), fallback to known
     const desc = (r.description ?? "").trim();
     const does = known
       ? known.does
@@ -267,13 +261,7 @@ function weatherFromApi(w: WeatherApiResponse | null): WeatherData {
   };
 }
 
-/**
- * Why the now-playing poll has backed off, or `null` while it runs normally.
- *
- * Module state rather than store state: nothing renders it, and putting it in
- * `state.data` would make every change an extra re-render of the whole
- * dashboard.
- */
+/** Why the now-playing poll backed off, or null. Module state: in `state.data` it would re-render the dashboard. */
 let nowPlayingBackoff: string | null = null;
 
 /** Ticks elapsed since the last attempt while backed off. */
@@ -282,26 +270,10 @@ let backoffTicks = 0;
 /** How often the widget asks when everything is healthy. */
 const NOW_PLAYING_TICK_MS = 10_000;
 
-/**
- * Ticks to skip while backed off — five minutes at the tick above.
- *
- * A flat slow retry rather than a hard stop, because a stop is not recoverable
- * without somebody pressing something: a full reload only happens on app start
- * or server reconnect, `visibilitychange` is unreliable in a desktop webview,
- * and the transport controls are disabled in exactly the state that would need
- * them. Backing off keeps the ~97% saving (8,640 requests a day down to 288)
- * while a Spotify that gets fixed is noticed on its own within five minutes.
- */
+/** Ticks to skip between attempts while backed off: five minutes at the tick above. */
 const BACKOFF_TICKS = 30;
 
-/**
- * Consecutive 4XX answers before the poll stops entirely.
- *
- * A 4XX from Spotify is a refusal that waits on a person: sign in again, add
- * the account to the app, set a client id. Retrying it on a timer cannot fix
- * it, and a dashboard left open for days spends ~8,600 requests a day finding
- * that out.
- */
+/** Consecutive 4XX answers before the poll stops: a Spotify refusal waits on a person, not a timer. */
 const STOP_AFTER_4XX = 5;
 
 /** Consecutive 4XX answers seen so far. */
@@ -310,30 +282,13 @@ let fourXxRun = 0;
 /** True once the run hit the limit; only an interaction clears it. */
 let nowPlayingStopped = false;
 
-/**
- * Is this answer a real 4XX?
- *
- * Deliberately narrower than "did it fail". `upstream_status` is only present
- * when Spotify actually answered, so a transport failure (`np === null`), a
- * refused egress call, or a 5xx outage all return false and leave the counter
- * where it is. Stopping on those would mean a pond restarting mid-poll
- * silences its own music widget until somebody notices and taps it.
- */
+/** A real Spotify 4XX; `upstream_status` is set only when Spotify answered, so outages never count. */
 function isClientRefusal(np: NowPlayingApiResponse | null): boolean {
   const status = np?.upstream_status;
   return typeof status === "number" && status >= 400 && status < 500;
 }
 
-/**
- * Resume polling, and forget the run that stopped it.
- *
- * Two callers, and they are the two the stop rule depends on existing: the
- * widget's own controls (somebody touched it, so they are watching and can see
- * the result) and a Music MCP tool call (the pond just engaged the service, so
- * whatever was refusing may not be any more). Without both of these a stop is
- * unrecoverable — the transport controls are disabled in exactly the state
- * that would need them, and a webview reload only happens on app start.
- */
+/** Clears a stop, which can't clear on its own; call it when a person engages the widget. */
 export function resumeNowPlayingPolling(): void {
   fourXxRun = 0;
   nowPlayingStopped = false;
@@ -342,9 +297,7 @@ export function resumeNowPlayingPolling(): void {
 }
 
 function dueForNowPlayingPoll(): boolean {
-  // Stopped is stopped. Unlike the backoff below this never lets a tick
-  // through, because the condition cannot clear on its own — see
-  // `resumeNowPlayingPolling`.
+  // A stop lets no tick through; only `resumeNowPlayingPolling` clears it.
   if (nowPlayingStopped) return false;
   if (!nowPlayingBackoff) return true;
   backoffTicks += 1;
@@ -353,12 +306,7 @@ function dueForNowPlayingPoll(): boolean {
   return true;
 }
 
-/**
- * Record what this answer did to the poll, and say so once when it changes.
- *
- * A run of 4XX stops it; anything else resets the run, so five refusals spread
- * across a week of healthy polling never accumulate into a stop.
- */
+/** Counts consecutive 4XX toward a stop (logged once); any other answer resets the run. */
 function setNowPlayingBackoff(np: NowPlayingApiResponse | null): void {
   if (isClientRefusal(np)) {
     fourXxRun += 1;
@@ -373,16 +321,13 @@ function setNowPlayingBackoff(np: NowPlayingApiResponse | null): void {
     }
     return;
   }
-  // Any non-4XX answer — healthy, transport failure, 5xx — breaks the run.
   fourXxRun = 0;
 }
 
 
 function nowPlayingFromApi(np: NowPlayingApiResponse | null): NowPlayingData {
   if (!np || !np.connected) return { ...MOCK_HOME.nowPlaying, connected: false };
-  // Spotify answered but refused the request. This is NOT "nothing playing" —
-  // the account is linked, so silently showing an idle player hides a problem
-  // the user has to act on (and the transport controls would fail too).
+  // Spotify refused: show that, not an idle player, since the user has to act on it.
   if (np.error) {
     return {
       track: np.error === "forbidden" ? "Spotify not authorised" : "Spotify unavailable",
@@ -395,9 +340,7 @@ function nowPlayingFromApi(np: NowPlayingApiResponse | null): NowPlayingData {
       message: np.message,
     };
   }
-  // Connected but nothing actively playing (Spotify's 204 case) — show an
-  // honest idle state instead of the mock/demo track, so a real connection
-  // never gets mistaken for the decorative filler.
+  // Connected but nothing playing (Spotify's 204): an honest idle state, never the demo track.
   const progress = np.progress_ms ?? 0;
   const duration = np.duration_ms ?? 0;
   return {
@@ -432,11 +375,9 @@ async function load() {
     const rcOK = recipes.status === "fulfilled" ? recipes.value : [];
     const wOK = weather.status === "fulfilled" ? weather.value : null;
     const npOK = nowPlaying.status === "fulfilled" ? nowPlaying.value : null;
-    // A full dashboard load is a fresh verdict on whether the poll should run —
-    // it is the other route by which a fixed Spotify gets noticed.
+    // The load's answer counts toward the 4XX run like any poll's.
     setNowPlayingBackoff(npOK);
 
-    // Partition devices into controllable + cameras
     const ctlDevices: DeviceData[] = [];
     const cams: CameraData[] = [];
     for (const d of dOK) {
@@ -479,28 +420,22 @@ async function load() {
   }
 }
 
-/** How often the weather slice is re-fetched. The server caches upstream
- *  responses for 15 minutes, so most of these polls are answered locally. */
+/** The server caches upstream weather for 15 minutes, so most of these polls are answered locally. */
 const WEATHER_POLL_MS = 10 * 60_000;
 
 // Kick off load once on first import in a browser; safe to call again.
 if (typeof window !== "undefined") {
   // Fire-and-forget; UI renders mock until load resolves.
   void load();
-  // Now-playing changes on its own (user starts/stops playback elsewhere),
-  // unlike the rest of the dashboard — poll it so the widget catches up
-  // without requiring a manual refresh action.
+  // Playback changes outside the app, so poll it.
   setInterval(() => {
     if (dueForNowPlayingPoll()) void refreshNowPlaying();
   }, NOW_PLAYING_TICK_MS);
-  // Weather changes on its own too, and a GIAP dashboard is typically left
-  // open for days — without this the card keeps showing whatever the sky was
-  // doing when the app started.
+  // A GIAP dashboard stays open for days, so the weather must refresh itself.
   setInterval(() => {
     void refreshWeather();
   }, WEATHER_POLL_MS);
-  // Timers do not fire while the machine sleeps or the window is hidden, so
-  // catch up as soon as the dashboard is looked at again.
+  // Timers don't fire while asleep or hidden; catch up when the dashboard is seen again.
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "visible") return;
     void refreshWeather();
@@ -542,20 +477,8 @@ export async function refreshWeather(): Promise<void> {
 }
 
 /**
- * Re-fetches just the now-playing snapshot, without the full dashboard reload.
- *
- * Always runs when called directly — the halt only gates the timer. That is
- * what makes coming back to the dashboard, refreshing it, or pressing a
- * transport control the way to resume: each of them routes through here and
- * re-evaluates.
- */
-/**
- * Fetch the playback snapshot.
- *
- * `userInitiated` must be true ONLY when a person asked — the widget's Try
- * again. It resumes a stopped poll, and the automatic tick calls this same
- * function: resuming unconditionally here reset the 4XX counter on every tick,
- * so the breaker could never trip at all. The tests caught exactly that.
+ * Fetches now-playing even while the poll is stopped. Only a person's Try again may pass
+ * `userInitiated`: it resumes the poll, and the timer calls this too.
  */
 export async function refreshNowPlaying(userInitiated = false): Promise<void> {
   if (userInitiated) resumeNowPlayingPolling();
@@ -565,15 +488,13 @@ export async function refreshNowPlaying(userInitiated = false): Promise<void> {
     setNowPlayingBackoff(np);
     emit();
   } catch {
-    // Keep whatever was last known. A throw here is the server being
-    // unreachable, not Spotify refusing, so the poll deliberately continues.
+    // Server unreachable, not Spotify refusing: keep the last state and keep polling.
   }
 }
 
 /** Sends a playback control action, then re-syncs from Spotify's actual state. */
 export async function controlNowPlaying(action: MusicControlAction): Promise<void> {
-  // Pressing play/next is the clearest "I am here and I want this working"
-  // there is — one of the two signals the stop rule depends on.
+  // Someone is using the widget, so a stopped poll resumes.
   resumeNowPlayingPolling();
   try {
     await api.controlMusic(action);
@@ -583,18 +504,15 @@ export async function controlNowPlaying(action: MusicControlAction): Promise<voi
   await refreshNowPlaying();
 }
 
-// Test hook: reset to mock data and clear subscribers — used by vitest tests.
+/** Test hook: reset to mock data and clear the poll state. */
 export function __resetHubDataForTests(): void {
   state.data = MOCK_HOME;
   state.routines = MOCK_ROUTINES;
   state.loaded = false;
   state.loading = false;
-  // Module state, so it outlives a test without this and the next test starts
-  // with the poll already halted.
+  // Poll state is module state and would otherwise leak into the next test.
   nowPlayingBackoff = null;
   backoffTicks = 0;
-  // The 4XX counter and the stopped flag are module state too; a test that
-  // left them set would leak a stopped poll into the next one.
   resumeNowPlayingPolling();
 }
 

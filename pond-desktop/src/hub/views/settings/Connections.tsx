@@ -1,6 +1,4 @@
-// The settings-hub home for connected accounts. Same panel as the sections UI:
-// two copies of a credential form is two places for one of them to stop
-// matching the backend.
+// Connected accounts in the settings hub: the sections UI's panel, so there is one credential form.
 import { DetailShell } from "./DetailShell";
 import { useAppState } from "../../../state/AppContext";
 import { ConnectionsPanel } from "../../../connections/ConnectionsPanel";

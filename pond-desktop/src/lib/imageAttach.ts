@@ -1,8 +1,5 @@
-// Client-side preparation of image attachments for the chat vision pipeline
-// (Phase F1). Downscaling and MIME/size validation happen here, BEFORE
-// anything reaches the network, so an oversized or unsupported image never
-// costs a round trip to find out. Mirrors the server-side limits in
-// pond-core (models/domain/image_limits.rs).
+// Chat image attachments, downscaled and validated before anything is sent. The limits mirror
+// pond-core's models/domain/image_limits.rs.
 
 export const MAX_IMAGES_PER_TURN = 4;
 export const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // 4 MiB, decoded, per image
@@ -15,12 +12,7 @@ export const SUPPORTED_IMAGE_MIME_TYPES = [
   "image/bmp",
 ] as const;
 
-// A 2B-class vision encoder (the on-device Jetson target) gains essentially
-// nothing above ~1024px on the longest edge — the encoder resamples to a
-// fixed patch grid regardless — while a modern phone photo (12 MP+) decoded
-// at full resolution would blow well past the 8GB Jetson's memory budget
-// just to hold the RGB buffer. Downscaling client-side keeps the wire
-// payload small AND keeps the server-side decode cheap.
+// The encoder resamples to a fixed patch grid, so beyond 1024px only costs decode memory (8 GB Jetson).
 export const MAX_IMAGE_EDGE_PX = 1024;
 
 export type SupportedImageMimeType = (typeof SUPPORTED_IMAGE_MIME_TYPES)[number];
@@ -37,13 +29,7 @@ export interface PreparedImage {
   byteSize: number;
 }
 
-/**
- * Compute the decoded byte length of a base64 string WITHOUT decoding it —
- * used to size-check an image before doing any real decode work. Handles
- * both padded ("...==" / "...=") and unpadded base64, and tolerates a
- * `data:...;base64,` prefix even though callers are expected to pass raw
- * base64.
- */
+/** Decoded length of padded or unpadded base64, without decoding; tolerates a `data:` prefix. */
 export function decodedBase64Length(b64: string): number {
   const commaIdx = b64.indexOf(",");
   const raw = b64.startsWith("data:") && commaIdx !== -1 ? b64.slice(commaIdx + 1) : b64;
@@ -74,11 +60,7 @@ function readAsDataUrl(blob: Blob): Promise<string> {
   });
 }
 
-/**
- * DOM-dependent decode step, isolated so the pure helpers above (and
- * validateAttachmentSet below) stay unit-testable in jsdom/happy-dom without
- * a real image decoder.
- */
+/** The DOM decode step, isolated so the pure helpers stay testable without an image decoder. */
 function decodeImageElement(objectUrl: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -105,22 +87,14 @@ function downscaleToJpeg(
   canvas.height = height;
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("Canvas 2D context unavailable");
-  // Animated GIFs: an <img>/canvas draw only ever captures the CURRENTLY
-  // decoded frame (the first, at load time), so re-encoding here
-  // intentionally flattens an animated GIF to a single still frame — there
-  // is no meaningful "motion" to preserve within one vision-model turn.
+  // Canvas captures only the current frame, so an animated GIF flattens to a still; fine for one turn.
   ctx.drawImage(img, 0, 0, width, height);
   return { dataUrl: canvas.toDataURL("image/jpeg", quality), width, height };
 }
 
 /**
- * Validate, downscale (if needed) and base64-encode a file/blob for the chat
- * vision pipeline. Throws a human-readable Error for unsupported MIME types.
- *
- * If the image is already within both the edge and byte limits, the
- * original bytes and MIME type are kept as-is (this is what preserves GIF
- * animation for small GIFs). Otherwise it's downscaled to at most
- * MAX_IMAGE_EDGE_PX on the longest edge and re-encoded as JPEG.
+ * Validates, downscales if needed and base64-encodes an image; throws a readable Error on bad MIME.
+ * An image within both limits keeps its original bytes, so small GIFs stay animated.
  */
 export async function prepareImage(file: File | Blob): Promise<PreparedImage> {
   const mime = file.type;
@@ -169,11 +143,7 @@ export async function prepareImage(file: File | Blob): Promise<PreparedImage> {
   };
 }
 
-/**
- * Check a prospective attachment set (already-pending + newly picked)
- * against the per-turn caps. Returns a human-readable error message, or null
- * when the set is within limits.
- */
+/** Checks pending plus newly picked images against the per-turn caps: an error message, or null. */
 export function validateAttachmentSet(
   existing: PreparedImage[],
   incoming: PreparedImage[],

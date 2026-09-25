@@ -26,8 +26,6 @@ describe("zones", () => {
     expect(zones.map((z) => z.zone)).toContain("Africa/Kampala");
   });
 
-  /** A picker that empties itself when the pond is offline is worse than one
-   *  with a short list: the household cannot even see what is set. */
   it("falls back to this device's own catalogue when the server is unreachable", async () => {
     mockApi.listTimeZones.mockRejectedValue(new Error("offline"));
     const zones = await allZones();
@@ -35,8 +33,6 @@ describe("zones", () => {
     expect(zones.every((z) => typeof z.offset === "string")).toBe(true);
   });
 
-  /** Whatever else happens, the zone this device is set to must be offerable,
-   *  or the household most affected by the fallback cannot pick where it is. */
   it("always offers the device's own zone", async () => {
     mockApi.listTimeZones.mockRejectedValue(new Error("offline"));
     vi.stubGlobal("Intl", {
@@ -74,8 +70,7 @@ describe("placeFromZone", () => {
 });
 
 describe("detectPlace", () => {
-  /** The normal case inside Tauri: no geolocation at all. The old detection
-   *  depended on it and so usually produced nothing usable. */
+  /** The normal case inside Tauri. */
   it("still detects when the webview has no geolocation", async () => {
     vi.stubGlobal("navigator", { geolocation: undefined });
     mockApi.detectLocation.mockResolvedValue({ name: "Nairobi, Kenya", has_coordinates: true });
@@ -96,14 +91,10 @@ describe("detectPlace", () => {
     mockApi.detectLocation.mockResolvedValue({ name: "Nairobi", has_coordinates: true });
     await detectPlace();
     const sent = mockApi.detectLocation.mock.calls[0][0];
-    // Four decimals — finer than weather needs, and it keeps the stored value
-    // from reading like a tracking fix.
     expect(sent.latitude).toBe(-1.2864);
     expect(sent.longitude).toBe(36.8172);
   });
 
-  /** A webview that never calls either callback would otherwise hang the
-   *  button forever, which is what "Detecting…" sticking on screen looked like. */
   it("gives up on a geolocation that never answers", async () => {
     vi.useFakeTimers();
     vi.stubGlobal("navigator", { geolocation: { getCurrentPosition: () => {} } });

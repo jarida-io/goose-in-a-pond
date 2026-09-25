@@ -27,12 +27,7 @@ const MCP_CARDS: McpCardDef[] = [
 
 const PLUS_PATH = "M12 5v14M5 12h14";
 
-/**
- * Canvas Hub view — masonry board of MCP result cards.
- * Each card is wrapped in <CardChrome> which renders the source-app dot + kebab.
- * Phase 5: all card data is mock. SmartHomeCard is the only live-wired card
- * (room toggles sync to hubStore → Home tiles update instantly).
- */
+/** Masonry board of MCP result cards; all mock except SmartHomeCard, whose toggles sync to hubStore. */
 export function CanvasHubView(): React.ReactElement {
   return (
     <div className="mcpc">
@@ -48,7 +43,7 @@ export function CanvasHubView(): React.ReactElement {
           type="button"
           className="primary-btn"
           onClick={() => {
-            /* Phase 7: open Add Card dialog */
+            // TODO: open the Add Card dialog.
           }}
           style={{ display: "flex", alignItems: "center", gap: 6 }}
         >

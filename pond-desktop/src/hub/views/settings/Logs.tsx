@@ -68,9 +68,7 @@ export function LogsDetail({ go }: LogsDetailProps) {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ── Fetch ──────────────────────────────────────────────────
-  // Pass level to the API so the server can pre-filter large log sets.
-  // Client-side filter still applies for instant tab switching without a
-  // round-trip (the server may not honour the level param on all builds).
+  // The server pre-filters by level, but may not honour it on every build.
   const loadData = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     setError(null);
@@ -104,16 +102,13 @@ export function LogsDetail({ go }: LogsDetailProps) {
   }, [loadData]);
 
   // ── Client-side filter ────────────────────────────────────
-  // If the server returned all levels (e.g. when level was undefined), we
-  // still filter client-side so tab switches are instant.
+  // Filtered here too, so tab switches are instant.
   const rows: LogEntry[] = filter === "All"
     ? entries
     : entries.filter((e) => e.level.toUpperCase() === filter.toUpperCase());
 
   // ── Export ────────────────────────────────────────────────
   function handleExport() {
-    // api.exportLogsUrl() returns the direct download URL from the server.
-    // We create a temporary <a> to trigger the browser's native download.
     try {
       const url = api.exportLogsUrl();
       const a = document.createElement("a");
