@@ -25,19 +25,12 @@ use uuid::Uuid;
 
 // ── Voice helpers ─────────────────────────────────────────────────────────────
 
-/// Voice mode always uses the "chat" role. The LLM handles tool routing
-/// natively via MCP — no pre-classification needed.
+/// Always "chat": the LLM routes tools natively via MCP, so nothing is pre-classified.
 fn resolve_voice_role(_message: &str) -> String {
     "chat".to_string()
 }
 
-/// The bare tool name, stripping any MCP server prefix
-/// (`giap-weather__get_current_weather` -> `get_current_weather`).
-///
-/// MCP tool ids are `<server>__<tool>` (see `parse_tool_name` in
-/// pond-mcp-server). The egress tracker (#113) already records the bare name via
-/// `set_current_tool`, so recording it here too keeps the activity feed
-/// consistent between a tool's `tool.call` event and its `egress.http` events.
+/// Strips the MCP `<server>__` prefix, matching the bare name the egress tracker records.
 fn bare_tool_name(tool: &str) -> String {
     match tool.split_once("__") {
         Some((_, bare)) if !bare.is_empty() => bare.to_string(),
@@ -45,34 +38,22 @@ fn bare_tool_name(tool: &str) -> String {
     }
 }
 
-/// Voice-loop control phrases live in `pond-voice` so the desktop shell — a
-/// separate cargo workspace that cannot see `pond-core` — matches the same
-/// list. It was duplicated there, and a phrase added here did not work there.
+/// Control phrases live in `pond-voice` so the desktop shell (separate workspace) shares them.
 use pond_voice::control::{classify as classify_voice_command, VoiceCommand};
 
 use crate::user_data::domain::profile::ProfileScope;
 use pond_voice::control::is_control_phrase as is_dismissal_or_exit_phrase;
 
-/// Truncate a tool-result payload to the NDJSON contract's 2000-char cap.
-///
-/// The contract specifies `content` is "truncated to 2000 chars". We count
-/// Unicode scalar values (chars), not bytes, and cut on a char boundary so the
-/// serialized JSON is always valid. Sub-cap payloads are returned unchanged.
+/// The NDJSON contract's cap on tool-result `content`, in chars, not bytes.
 const TOOL_RESULT_MAX_CHARS: usize = 2000;
 
-/// Consecutive microphone failures tolerated before voice mode gives up.
-///
-/// With [`MIC_RETRY_BACKOFF_MS`] rising linearly, this is roughly a minute of
-/// a genuinely absent device.
+/// Consecutive mic failures before voice mode gives up; ~1 minute at the linear backoff.
 const MIC_RETRY_BUDGET: u32 = 10;
 /// Base backoff between microphone retries; multiplied by the attempt number.
 const MIC_RETRY_BACKOFF_MS: u64 = 1_000;
 
+/// Truncates to `TOOL_RESULT_MAX_CHARS` on a char boundary, so the JSON stays valid.
 fn truncate_tool_result(mut content: String) -> String {
-    // Find the byte offset of the (MAX+1)-th char. `char_indices().nth(N)`
-    // early-exits after N+1 chars, so sub-cap payloads pay at most a bounded
-    // scan and never a full `chars().count()`; the caller owns the String, so we
-    // truncate in place with zero extra allocation on either branch.
     if let Some((byte_idx, _)) = content.char_indices().nth(TOOL_RESULT_MAX_CHARS) {
         content.truncate(byte_idx);
     }
@@ -81,13 +62,7 @@ fn truncate_tool_result(mut content: String) -> String {
 
 // ── PAI-7 P6: speaking first ─────────────────────────────────────────────────
 
-/// Local wall-clock time of day, `[0, 1440)` minutes past local midnight.
-///
-/// A newtype rather than an `(u32, u32)` pair, because `time_tick.rs` already
-/// records what two positional `u32`s cost inside a timer loop: they swap
-/// silently. `LocalTimeOfDay::new` is the only constructor and it refuses
-/// anything outside a real clock face, so a caller cannot hand the gate minute
-/// 90 and have the window quietly answer "not quiet hours".
+/// Local time of day as minutes past midnight, `[0, 1440)`; `new` is the only constructor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LocalTimeOfDay(u16);
 
@@ -106,35 +81,27 @@ impl LocalTimeOfDay {
     }
 }
 
-/// Why the pond stayed quiet. Every variant is a refusal; there is no variant
-/// meaning "spoke anyway".
+/// Why the pond stayed quiet; every variant is a refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpeechRefusal {
     /// The settings read failed, so nothing is known about consent. Silence.
     SettingsUnreadable,
     /// `unprompted_speech_enabled` is off. The default, and the common case.
     NotEnabled,
-    /// Inside the quiet-hours window. PAI-7 invariant 6: absolute.
+    /// Inside the quiet-hours window, which is absolute.
     QuietHours,
-    /// The quiet-hours bounds could not be parsed, so the window is treated as
-    /// covering everything. A separate variant from [`Self::QuietHours`]
-    /// because one of them is the user's choice and the other is a broken row
-    /// somebody has to fix.
+    /// Unparseable quiet-hours bounds, read as always quiet: a broken row, not a choice.
     QuietHoursUnreadable,
     /// This notification's category is not one the household enabled.
     CategoryNotEnabled,
-    /// A turn is in flight. PAI-7 3.4: never mid-conversation.
+    /// A turn is in flight; never speak mid-conversation.
     MidConversation,
-    /// The utterance is addressed to `Guest`. PAI-7 invariant 5.
+    /// The utterance is addressed to `Guest`.
     GuestSession,
-    /// The utterance is addressed to `Household`, which is not an address.
-    /// PAI-7 invariant 4 -- speaking to the room is the broadcast this
-    /// workstream exists to avoid.
+    /// Addressed to `Household`, i.e. the room: the broadcast this gate exists to prevent.
     NotAddressedToAMember,
-    /// The member it is for is not present. Speaking into an empty room is
-    /// worse than not speaking: nobody is helped and somebody else may hear it.
+    /// The member it is for is not present; anyone who hears it is the wrong person.
     MemberNotPresent,
-    /// There is nothing to say.
     NothingToSay,
 }
 
@@ -159,19 +126,11 @@ impl SpeechRefusal {
 /// What the pond did when it considered speaking first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnpromptedSpeech {
-    /// Spoken aloud.
     Spoken,
-    /// Not spoken, for this reason.
     Refused(SpeechRefusal),
 }
 
-/// One thing the pond is considering saying without having been asked.
-///
-/// Every input the decision depends on is a field here, and none of them is an
-/// `Option` the gate could fill in for itself. That is deliberate: PAI-5 P7 and
-/// PAI-1 P5 were both one ordering mistake from shipping a widening default
-/// reached by construction order, and the shape that prevents it is a struct
-/// the caller cannot finish building without having answered every question.
+/// Something the pond might say unasked; no field is optional, so the gate defaults nothing.
 pub struct UnpromptedUtterance<'a> {
     /// Who this is for. Only [`ProfileScope::Owner`] can be spoken to.
     pub audience: &'a ProfileScope,
@@ -179,44 +138,16 @@ pub struct UnpromptedUtterance<'a> {
     pub category: &'a str,
     /// What would be said.
     pub text: &'a str,
-    /// Members the pond currently believes are here, from PAI-7 P2's presence
-    /// events. An empty slice is an empty room, which is a refusal.
+    /// Members believed present, per presence events; empty is an empty room, so a refusal.
     pub present_members: &'a [String],
-    /// The local wall clock, read by the caller from the same clock the rules
-    /// engine evaluates its time windows against.
+    /// The local wall clock, from the same clock the rules engine evaluates its windows against.
     pub now: LocalTimeOfDay,
     /// Whether a turn is currently being served.
     pub turn_in_flight: bool,
 }
 
-/// `true` when `now` falls inside the `[start, end)` quiet window.
-///
-/// Wraps midnight when `start > end`, which is the normal case and the one the
-/// `22:00` / `07:00` default takes. `None` when either bound is not `HH:MM`.
-///
-/// **The malformed answer is deliberately the opposite of the rules engine's.**
-/// `schedule.rs :: in_time_window` answers `false` for a malformed bound, and
-/// that is correct there: its window says when a rule MAY fire, so false means
-/// the rule does not fire. This window says when the pond MUST NOT speak, so
-/// false would mean it speaks. Both are the same principle -- on unreadable
-/// input, do less -- and they are opposite booleans because the two windows
-/// mean opposite things. Returning `Option` rather than a bare `bool` is what
-/// keeps a reader from "fixing" one to match the other.
-///
-/// # Equal bounds are decided here, on the parsed times
-///
-/// A zero-length window is indistinguishable from "no quiet hours at all", and
-/// the narrowing reading of an ambiguous setting is the quiet one: switching
-/// quiet hours off is what `unprompted_speech_enabled` is for.
-///
-/// That decision was originally the caller's, taken as `start == end` on the
-/// two setting strings, and it was wrong -- `%H` accepts an unpadded hour, so
-/// `"9:00"` and `"09:00"` are one instant written two ways. Compared as text
-/// they read as `start < end`, take the non-wrapping arm as
-/// `now >= 9:00 && now < 9:00`, and answer NEVER QUIET: the exact inversion of
-/// what the household asked for, produced by how they spelled it. Both bounds
-/// are free text out of the settings table, so both spellings are reachable.
-/// Deciding it after the parse is what makes the two spellings one answer.
+/// Whether `now` is inside the `[start, end)` quiet window, which may wrap midnight.
+/// `None` if a bound isn't `HH:MM`. Equal bounds (compared parsed: `9:00` = `09:00`) are all day.
 fn quiet_hours_cover(start: &str, end: &str, now: LocalTimeOfDay) -> Option<bool> {
     let parse = |s: &str| {
         let t = chrono::NaiveTime::parse_from_str(s.trim(), "%H:%M").ok()?;
@@ -224,7 +155,6 @@ fn quiet_hours_cover(start: &str, end: &str, now: LocalTimeOfDay) -> Option<bool
     };
     let (start, end) = (parse(start)?, parse(end)?);
     Some(if start == end {
-        // Zero length, so quiet all day. See the note above.
         true
     } else if start < end {
         now >= start && now < end
@@ -233,12 +163,7 @@ fn quiet_hours_cover(start: &str, end: &str, now: LocalTimeOfDay) -> Option<bool
     })
 }
 
-/// Whether `category` is one the household enabled for speech.
-///
-/// Splits on commas, trims, and lowercases. An empty list enables nothing, a
-/// blank entry is not a category, and an unrecognised entry matches nothing --
-/// so every way of getting the setting wrong ends in less speech rather than
-/// more.
+/// Whether `category` is in the comma-separated `enabled` list; any bad entry means less speech.
 fn category_is_speakable(enabled: &str, category: &str) -> bool {
     let wanted = category.trim().to_ascii_lowercase();
     if wanted.is_empty() {
@@ -250,18 +175,8 @@ fn category_is_speakable(enabled: &str, category: &str) -> bool {
         .any(|c| !c.is_empty() && c == wanted)
 }
 
-/// Decide whether the pond may say this, unasked.
-///
-/// `settings` is `None` when the read FAILED. That is a refusal and not a
-/// fallback to [`Settings::default`], even though the default would also be
-/// silent today: the default is a value somebody may change, and a gate that
-/// launders an unreadable store through it would start speaking the day
-/// somebody flipped that default, with nothing in this function to review.
-///
-/// **Quiet hours are checked before consent, presence and category**, so no
-/// combination of the other inputs can produce speech inside the window.
-/// Invariant 6 says quiet hours are absolute, and "absolute" is a statement
-/// about ordering as much as about the condition.
+/// Decide whether the pond may say this, unasked; quiet hours are checked before all else.
+/// `None` settings (a failed read) refuse rather than fall back to a default that may change.
 pub fn decide_unprompted_speech(
     settings: Option<&crate::user_data::domain::settings::Settings>,
     utterance: &UnpromptedUtterance<'_>,
@@ -277,10 +192,7 @@ pub fn decide_unprompted_speech(
     let end = settings.quiet_hours_end.trim();
     match quiet_hours_cover(start, end, utterance.now) {
         None => return Refused(SpeechRefusal::QuietHoursUnreadable),
-        // Equal bounds describe a zero-length window, and a zero-length window
-        // is indistinguishable from "no quiet hours at all". Taking it as
-        // silence-all-day is the narrowing reading: switching quiet hours OFF
-        // is what `unprompted_speech_enabled` is for.
+        // Equal bounds: quiet all day (disabling speech is `unprompted_speech_enabled`'s job).
         Some(_) if start == end => return Refused(SpeechRefusal::QuietHours),
         Some(true) => return Refused(SpeechRefusal::QuietHours),
         Some(false) => {}
@@ -308,9 +220,7 @@ pub fn decide_unprompted_speech(
         ProfileScope::Household => return Refused(SpeechRefusal::NotAddressedToAMember),
     };
 
-    // 6. Present. PAI-7 P2's presence is keyed on when somebody last SPOKE, so
-    //    this is "the pond has recent evidence this member is here", never a
-    //    claim about the room.
+    // 6. Present, i.e. spoke recently: evidence the member is here, not a claim about the room.
     if !utterance.present_members.iter().any(|p| p == member) {
         return Refused(SpeechRefusal::MemberNotPresent);
     }
@@ -322,30 +232,14 @@ pub fn decide_unprompted_speech(
     UnpromptedSpeech::Spoken
 }
 
-/// The tone that plays while the assistant is working, stopped exactly once.
-///
-/// It is the only feedback between the request and the answer, so it has two
-/// jobs that pull in opposite directions: it must not stop early, and it must
-/// never outlive the turn. A tone still playing after the assistant has gone
-/// quiet is the worst of the failure modes — nothing is coming, and the sound
-/// says something is.
-///
-/// A plain flag could not promise the second half. Every early return in the
-/// turn — the `?` on a stream error most of all — skipped the stop and left
-/// the tone thread running for the life of the process. Tying the stop to the
-/// guard's scope means the compiler places it on paths nobody remembered to
-/// write.
+/// Guard for the working tone: stopping on drop means no early return leaves it playing.
 struct WorkingTone {
     output: Arc<dyn VoiceOutput>,
     stopped: bool,
 }
 
 impl WorkingTone {
-    /// `enabled` is `settings.voice_thinking_tone_enabled`. When it is false the
-    /// guard is still constructed and still runs `stop()` on drop: stopping a
-    /// tone that never started is a no-op on every `VoiceOutput`, and building
-    /// the disabled case out of the same guard means switching the tone back on
-    /// cannot reintroduce a path where it outlives the turn.
+    /// Always returns a guard, even when disabled: stopping a tone that never started is a no-op.
     fn start(output: Arc<dyn VoiceOutput>, enabled: bool) -> Self {
         if enabled {
             output.start_thinking_tone();
@@ -356,8 +250,7 @@ impl WorkingTone {
         }
     }
 
-    /// Stop the tone now — the answer has started. Idempotent, because the
-    /// first speakable sentence can arrive down several different paths.
+    /// Stop the tone; idempotent, since the first speakable sentence has several paths.
     fn stop(&mut self) {
         if !self.stopped {
             self.stopped = true;
@@ -372,24 +265,13 @@ impl Drop for WorkingTone {
     }
 }
 
-// TTS text handling lives in the `pond-voice` leaf crate so the desktop shell
-// (a separate cargo workspace, no pond-core) shares one implementation instead
-// of carrying its own port. Re-exported below to keep call sites unchanged.
+// TTS text handling is in `pond-voice` so the desktop shell (separate workspace) shares it.
 use pond_voice::text::{split_sentences, strip_markdown_for_speech};
 
-/// Re-exported for backwards compatibility: this was `pub` here before the
-/// move, so removing the path would be a breaking change to pond-core's API.
+/// Re-exported to keep pond-core's public API path.
 pub use pond_voice::text::filter_thinking;
 
-/// Derive a short, deterministic session title from a user message.
-///
-/// Takes the first ~6 whitespace-separated words, trims surrounding
-/// punctuation/quotes, and caps the result at 60 chars. Returns an empty
-/// string when the input has no usable words (caller skips the update).
-///
-/// This is the no-LLM fallback used by `ChatService::ensure_session_title`
-/// so sessions always get a human-readable title even when no provider is
-/// attached (the common HTTP-handler path).
+/// No-LLM fallback title for `ensure_session_title`; empty means no usable words.
 fn derive_title_from_text(text: &str) -> String {
     const MAX_WORDS: usize = 6;
     const MAX_CHARS: usize = 60;
@@ -405,26 +287,13 @@ fn derive_title_from_text(text: &str) -> String {
     if title.chars().count() <= MAX_CHARS {
         title.to_string()
     } else {
-        // Cap at MAX_CHARS on a char boundary and add an ellipsis.
         let truncated: String = title.chars().take(MAX_CHARS).collect();
         format!("{}…", truncated.trim_end())
     }
 }
 
-/// Domain Service: ChatService
-///
-/// Orchestrates the Wait → Listen → Thinking → Speak workflow loop.
-/// Also persists messages to session storage for conversation history.
-///
-/// All inference is routed through the `Agent` port (GooseAdapter in production).
-/// An optional `LlmProvider` may be attached solely for session title generation.
-///
-/// Input is abstracted via the `VoiceInput` port.  The default is
-/// `StdinInput` (reads from stdin).  Override with `with_voice_input()`.
-///
-/// `Clone` is cheap — every field is an `Arc`, `Option<Arc>`, `String`, or a
-/// small `Clone` value. The Q2-26 speculative path clones the service into a
-/// spawned task so a provisional transcript can start inference early.
+/// Runs the Wait → Listen → Thinking → Speak loop and owns turn persistence.
+/// `provider` is only for titles. Keep `Clone` cheap: the speculative path clones the service.
 #[derive(Clone)]
 pub struct ChatService {
     agent: Arc<dyn Agent>,
@@ -432,72 +301,39 @@ pub struct ChatService {
     voice_input: Arc<dyn VoiceInput>,
     voice_output: Arc<dyn VoiceOutput>,
     speech_energy: Arc<dyn SpeechEnergy>,
-    /// Wake-word detector.  Defaults to `InstantActivation` (keyboard / stdin mode).
-    /// All detectors implement `StreamingWakeWordDetector`; `run_loop` always calls
-    /// `wait_for_activation_with_audio()` so captured command audio is available for
-    /// the one-breath flow when the detector supports it.
+    /// Defaults to `InstantActivation` (keyboard/stdin mode).
     wake_word_detector: Arc<dyn StreamingWakeWordDetector>,
     session_id: String,
     session_storage: Arc<dyn SessionStorage>,
-    /// System prompt sent to the LLM on every completion call.
-    /// Defaults to `SYSTEM_PROMPT`; override with `with_system_prompt()`.
+    /// Sent on every completion; defaults to `SYSTEM_PROMPT`.
     system_prompt: String,
     /// Optional Answer Reviewer — adversarial post-inference quality gate.
     answer_reviewer: Option<Arc<dyn crate::models::ports::answer_reviewer::AnswerReviewer>>,
-    /// Optional memory extraction pipeline. When all three are set,
-    /// `persist_assistant_turn` spawns extraction automatically so handlers
-    /// cannot accidentally omit it.
+    /// With all three memory fields set, `persist_assistant_turn_with_extraction` runs extraction.
     memory_extractor: Option<Arc<dyn MemoryExtractor>>,
     memory_extraction_service: Option<Arc<MemoryExtractionService>>,
     memory_repo: Option<Arc<dyn MemoryRepository>>,
-    /// Optional unified activity log. When set, `persist_assistant_turn` records
-    /// one Agent event, one Inference event (when token usage is known), and one
-    /// Tool event per tool call — so the activity feed reflects chat activity,
-    /// not just Auth/Network. `None` in tests and the CLI path.
+    /// When set, `persist_assistant_turn` records Agent, Inference and per-tool events.
     event_log: Option<Arc<dyn EventLog>>,
-    /// Optional workflow-event sink. When set (e.g. the `--json-events` NDJSON
-    /// writer), `emit_event` forwards every event to it in addition to tracing.
-    /// `None` is zero-cost — `emit_event` only ever traces. `Arc` keeps clone
-    /// cheap so the Q2-26 speculative task (which clones the service) carries
-    /// the same sink and streams `Token` events from the spawned job.
+    /// `emit_event` also forwards here, e.g. to the `--json-events` NDJSON writer.
     event_sink: Option<WorkflowEventSink>,
-    /// Whether `run_loop` prints its human-facing banners/prompts to stdout.
-    /// Defaults to `true` (the interactive terminal experience). Set `false`
-    /// in `--json-events` mode so stdout carries NOTHING but NDJSON lines —
-    /// human diagnostics still go to stderr via `eprintln!`/tracing.
+    /// Human banners on stdout; `false` in `--json-events` mode, where stdout is NDJSON only.
     stdout_diagnostics: bool,
-    /// Optional per-turn telemetry sink. When set, confirmed voice turns
-    /// record a `TurnMetrics` row exactly like the REST path does.
+    /// When set, confirmed voice turns record a `TurnMetrics` row, as the REST path does.
     telemetry: Option<Arc<dyn crate::security::ports::telemetry::TelemetryPort>>,
     /// Model identifier for telemetry rows (the CLI knows `--model`).
     model_name: Option<String>,
     /// Whose turns these are. See [`with_profile_scope`](Self::with_profile_scope).
     profile_scope: ProfileScope,
-    /// Whether the ambient working tone plays while inference runs. Mirrors
-    /// `settings.voice_thinking_tone_enabled`; the composition root reads the
-    /// setting and passes it via [`with_thinking_tone`](Self::with_thinking_tone).
-    /// Defaults TRUE to match the settings default, so a caller that predates
-    /// the switch behaves the way the pond did before it existed.
+    /// Mirrors `settings.voice_thinking_tone_enabled`; defaults true, like that setting.
     thinking_tone: bool,
-    /// PAI-5 P6. Whether reasoning text may be written to storage at all.
-    /// FALSE unless [`with_thinking`](Self::with_thinking) says otherwise, so a
-    /// handler that never heard of this feature persists nothing.
+    /// Whether reasoning text may be stored at all; off unless `with_thinking` turns it on.
     persist_thinking: bool,
-    /// Reasoning passages accumulated during the turn in flight, drained by
-    /// `persist_assistant_turn`.
-    ///
-    /// Interior mutability, and the reason is the whole reason this seam works:
-    /// the assistant message's id is minted INSIDE `persist_assistant_turn`
-    /// (`Uuid::new_v4()`), so a handler cannot key these rows to it. The
-    /// handler therefore hands over the TEXT as it streams and this service
-    /// does the keying. Widening `persist_assistant_turn`'s signature was the
-    /// alternative; it would have moved every caller for a value only one of
-    /// them has.
+    /// This turn's reasoning, drained by `persist_assistant_turn`, which mints the id to key it.
     thinking_blocks: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
-/// Result of one non-persisting agent stream: the streamed/spoken text plus
-/// the usage and performance stats carried by the agent's `Done` event.
+/// Result of one non-persisting agent stream, with the stats from its `Done` event.
 #[derive(Debug)]
 struct TurnOutcome {
     text: String,
@@ -516,9 +352,7 @@ impl Drop for BargeInWatch {
     }
 }
 
-/// A pluggable workflow-event observer. `run_chat`'s `--json-events` mode wires
-/// an NDJSON stdout writer here; the desktop shell parses those lines. Kept as a
-/// bare `Fn` so `pond-core` stays framework-free.
+/// Workflow-event observer, e.g. the `--json-events` NDJSON writer the desktop shell parses.
 pub type WorkflowEventSink = Arc<dyn Fn(&WorkflowEvent) + Send + Sync>;
 
 impl ChatService {
@@ -553,40 +387,20 @@ impl ChatService {
         }
     }
 
-    /// Play (or suppress) the ambient working tone for this service's turns.
-    ///
-    /// Takes the setting rather than being an opt-out marker method, for the
-    /// same reason as [`with_thinking`](Self::with_thinking): the call site
-    /// reads as "whatever the household chose", and switching the tone off does
-    /// not depend on a composition root remembering to stop calling something.
+    /// Play (or suppress) the working tone; pass the household's setting, not a literal.
     pub fn with_thinking_tone(mut self, enabled: bool) -> Self {
         self.thinking_tone = enabled;
         self
     }
 
-    /// PAI-5 P6. Allow this turn's reasoning text to be persisted.
-    ///
-    /// Takes the setting rather than being an opt-in marker method so the call
-    /// site reads as "whatever the user chose", and so turning the setting off
-    /// does not depend on a handler remembering to stop calling something.
+    /// Allow this turn's reasoning text to be persisted; pass the user's setting, not a literal.
     pub fn with_thinking(mut self, enabled: bool) -> Self {
         self.persist_thinking = enabled;
         self
     }
 
-    /// Offer one reasoning passage from the turn in flight.
-    ///
-    /// **The gate is here, not at the call site.** Handlers call this
-    /// unconditionally from their `AgentStreamEvent::Thinking` arm; if
-    /// `persist_thinking` is false the text is dropped on the floor and never
-    /// enters this process's heap for longer than the call. Putting the `if` in
-    /// the handler would have meant two copies of a privacy decision in two
-    /// stream loops, and PAI-5's own recorded failure was a gate whose second
-    /// input nobody tested.
-    ///
-    /// `&self` on purpose: the SSE handlers hold the service inside an
-    /// `async_stream!` block where a `&mut` borrow across an await point is
-    /// exactly what does not compile.
+    /// Offer one reasoning passage; the privacy gate is here, so handlers call it unconditionally.
+    /// `&self` because SSE handlers hold the service across awaits inside `async_stream!`.
     pub fn record_thinking(&self, block: impl Into<String>) {
         if !self.persist_thinking {
             return;
@@ -600,9 +414,7 @@ impl ChatService {
         }
     }
 
-    /// Attach the unified activity log so `persist_assistant_turn` records
-    /// Agent / Inference / Tool events for each turn. Handlers that omit this
-    /// simply record nothing — best-effort, never fatal.
+    /// Attach the activity log; recording is best-effort and never fatal.
     pub fn with_event_log(mut self, event_log: Arc<dyn EventLog>) -> Self {
         self.event_log = Some(event_log);
         self
@@ -623,40 +435,14 @@ impl ChatService {
         self
     }
 
-    /// Attach the memory extraction pipeline so `persist_assistant_turn`
-    /// automatically triggers extraction. Handlers that omit this call simply
-    /// skip extraction — no silent data loss, no handler-level boilerplate.
-    /// The scope this session's turns are attributed to.
-    ///
-    /// Set by the handler from the same resolution that fills
-    /// `AgentRequest.profile_scope`, so a turn's memory is written under the
-    /// same identity it was read under. Defaults to `Household`, which is what
-    /// every path did before PAI-1.
+    /// Scope this session's turns are written under; must match `AgentRequest.profile_scope`.
     pub fn with_profile_scope(mut self, scope: ProfileScope) -> Self {
         self.profile_scope = scope;
         self
     }
 
-    /// Say something the user did not ask for -- or, far more often, decline to
-    /// (PAI-7 P6).
-    ///
-    /// **This is the only door.** Every other `voice_output.speak()` in this
-    /// file is downstream of a user utterance, and that is what makes the gate
-    /// meaningful: a second unprompted speaking path would not be gated by
-    /// having this one, so if one is ever added it belongs here rather than
-    /// beside it.
-    ///
-    /// `settings` is `None` when the settings read failed. The gate refuses on
-    /// that rather than falling back to a default -- see
-    /// [`decide_unprompted_speech`].
-    ///
-    /// Returns the decision rather than a `Result`, because "the pond stayed
-    /// quiet" is not an error and typing it as one invites a caller to retry it.
-    /// A synthesis or playback failure IS logged, and still reports
-    /// [`UnpromptedSpeech::Spoken`]: the decision to speak was taken and
-    /// carried out: whether the speaker worked is the audio stack's problem,
-    /// and reporting it as a refusal would make a broken speaker look like a
-    /// privacy gate doing its job.
+    /// Speak unasked, or (usually) decline; the only unprompted speech path, so add any here.
+    /// A playback failure is logged but still reports `Spoken`: it is not a gate refusal.
     pub async fn speak_unprompted(
         &self,
         settings: Option<&crate::user_data::domain::settings::Settings>,
@@ -680,6 +466,7 @@ impl ChatService {
         decision
     }
 
+    /// Attach memory extraction, which `persist_assistant_turn_with_extraction` then spawns.
     pub fn with_memory_extraction(
         mut self,
         extractor: Arc<dyn MemoryExtractor>,
@@ -706,8 +493,7 @@ impl ChatService {
         &self.provider
     }
 
-    /// Attach a real LLM provider. When set, `chat_once` calls the provider
-    /// with the full conversation history instead of the echo agent.
+    /// Attach an LLM provider, used only for session title generation.
     pub fn with_provider(mut self, provider: Arc<dyn LlmProvider>) -> Self {
         self.provider = Some(provider);
         self
@@ -733,9 +519,6 @@ impl ChatService {
     fn watch_for_barge_in(&self) -> Option<BargeInWatch> {
         use pond_voice::barge;
 
-        // Nothing to listen with. Starting the poll anyway would wake a task
-        // ten times a second for the length of every reply to be told there
-        // is no microphone, which it already knows.
         if self.speech_energy.is_inert() {
             return None;
         }
@@ -771,53 +554,32 @@ impl ChatService {
         Some(BargeInWatch { handle })
     }
 
-    /// Set the wake-word detector.  Defaults to `InstantActivation` (no wait).
-    ///
-    /// All detectors implement `StreamingWakeWordDetector`.  `run_loop` always calls
-    /// `wait_for_activation_with_audio()`, so detectors that capture command audio
-    /// (e.g. `WhisperKeywordDetector`) enable the one-breath flow automatically.
+    /// Set the wake-word detector; defaults to `InstantActivation` (no wait).
     pub fn with_wake_word_detector(mut self, detector: Arc<dyn StreamingWakeWordDetector>) -> Self {
         self.wake_word_detector = detector;
         self
     }
 
-    /// Override the system prompt sent to the LLM.
-    ///
-    /// Use `pond_core::prompts::build_system_prompt()` to build a personalised
-    /// prompt from `Settings`.  The default is the static `SYSTEM_PROMPT` constant.
+    /// Override the system prompt; `prompts::build_system_prompt()` builds one from `Settings`.
     pub fn with_system_prompt(mut self, prompt: String) -> Self {
         self.system_prompt = prompt;
         self
     }
 
-    /// Attach a workflow-event sink. Every `emit_event` call forwards to it in
-    /// addition to tracing. Used by `pond-server chat --json-events` to write
-    /// the NDJSON contract to stdout.
-    ///
-    /// The sink is invoked synchronously from the loop, so keep it cheap
-    /// (a buffered line write + flush). It is cloned into the speculative task,
-    /// so `Token` deltas from a speculative stream reach it too.
+    /// Attach a workflow-event sink; it runs synchronously in the loop, so keep it cheap.
     pub fn with_event_sink(mut self, sink: WorkflowEventSink) -> Self {
         self.event_sink = Some(sink);
         self
     }
 
-    /// Control whether `run_loop` prints human-facing banners/prompts to stdout.
-    ///
-    /// Pass `false` in `--json-events` mode so stdout carries only NDJSON lines;
-    /// diagnostics continue to reach stderr (`eprintln!`) and tracing.
+    /// Whether `run_loop` prints banners to stdout; `false` for `--json-events` (NDJSON only).
     pub fn with_stdout_diagnostics(mut self, enabled: bool) -> Self {
         self.stdout_diagnostics = enabled;
         self
     }
 
-    /// Single-shot chat (useful for tests and non-interactive callers).
-    ///
-    /// All inference is routed through the `Agent` port (GooseAdapter in production).
-    /// Goose manages conversation history and context compaction internally.
-    /// Our `SessionStorage` is used only for the REST API's history/listing endpoints.
+    /// Single-shot chat; Goose keeps its own history, so `SessionStorage` only feeds the REST API.
     pub async fn chat_once(&self, message: String) -> Result<String> {
-        // Persist the user message first
         let user_msg = ChatMessage::user(message.clone());
         let session_msg = SessionMessage::new(
             Uuid::new_v4().to_string(),
@@ -828,9 +590,6 @@ impl ChatService {
             .add_message(self.session_id.clone(), session_msg)
             .await?;
 
-        // Always route through the Agent port (GooseAdapter in production), which manages
-        // its own history, system prompt, and MCP tools internally.
-        // The optional `self.provider` is kept solely for session title generation.
         let request = AgentRequest {
             message: message.clone(),
             session_id: self.session_id.clone(),
@@ -838,20 +597,15 @@ impl ChatService {
             images: Vec::new(),
             voice_mode: false,
             canvas_mode: false,
-            // Whatever the caller set. `chat_once` serves BOTH the
-            // non-streaming REST /chat handler and the voice loop, so a
-            // hardcoded Household here made one endpoint disagree with
-            // /chat/stream about the same speaker. The builder decides.
+            // From the builder: this serves both REST /chat and the voice loop.
             profile_scope: self.profile_scope.clone(),
-            // Voice has no speaker identification, so there is no member
-            // whose preferences these would be.
+            // Voice has no speaker identification, so no member's preferences apply.
             profile_context: None,
             tool_group_allowlist: None,
             warmup: false,
         };
         let response_text = self.agent.chat(request).await?.text;
 
-        // Persist the assistant response
         let assistant_msg = ChatMessage::assistant(response_text.clone());
         let session_msg = SessionMessage::new(
             Uuid::new_v4().to_string(),
@@ -862,63 +616,28 @@ impl ChatService {
             .add_message(self.session_id.clone(), session_msg)
             .await?;
 
-        // Auto-generate a session title after the first exchange
         self.maybe_generate_title(&message, &response_text).await;
 
         Ok(response_text)
     }
 
-    /// Auto-generate a title for the session after the very first exchange.
-    ///
-    /// Only fires when:
-    ///   1. An `LlmProvider` is available (title generation needs an LLM)
-    ///   2. The session has no title yet
-    ///   3. This is the first user+assistant pair (2 messages total)
-    ///
-    /// The title is generated by sending the user message and assistant
-    /// response to the LLM with the shared [`TITLE_SYSTEM_PROMPT`], then
-    /// stored with [`set_generated_title`] so its provenance is recorded.
-    ///
-    /// It uses the same prompt and the same normalisation as the idle
-    /// re-titling service, deliberately: two paths naming the same thing by
-    /// different rules is how one of them ends up producing titles the other
-    /// would reject.
-    ///
-    /// **This names a conversation from its first two messages**, which is all
-    /// there is at the time — so the name is a guess about where the
-    /// conversation is going. Recording it as `model` rather than `user` is
-    /// what lets the idle pass correct that guess later, once the conversation
-    /// has actually gone somewhere.
-    ///
-    /// Failures are logged but never bubble up — title generation is
-    /// best-effort and must never break the chat flow.
-    ///
-    /// [`TITLE_SYSTEM_PROMPT`]: crate::shared::services::session_title::TITLE_SYSTEM_PROMPT
-    /// [`set_generated_title`]: crate::user_data::ports::session_storage::SessionStorage::set_generated_title
+    /// Best-effort title after the first exchange, using the idle re-titler's prompt and rules.
+    /// Stored as `model` provenance so the idle pass may correct this early guess later.
     async fn maybe_generate_title(&self, user_text: &str, assistant_text: &str) {
         use crate::shared::services::session_title::{normalise_title, TITLE_SYSTEM_PROMPT};
-        // Only generate if we have an LLM provider
         let provider = match &self.provider {
             Some(p) => p,
             None => return,
         };
 
-        // Check if session already has a title
         if let Ok(session) = self.session_storage.get_session(&self.session_id).await {
             if session.title.is_some() {
                 return;
             }
         }
 
-        // Check if this is the first exchange (exactly 2 messages: user + assistant).
-        // Fetch only 3 to avoid loading the entire history just for a count check.
-        //
-        // The id of the newest message is kept: it is how far the resulting name
-        // reaches, and without it the idle pass cannot tell whether the
-        // conversation has since outgrown its title. A failed read now returns
-        // rather than falling through — previously it generated a title anyway,
-        // which cannot record an honest reach, and the deterministic fallback
-        // still names the session either way.
+        // First exchange only (2 messages; fetch 3 to tell). The newest id is how far the
+        // title reaches, which the idle pass needs to tell if the chat outgrew it.
         let through_message_id = match self
             .session_storage
             .get_messages_paginated(&self.session_id, 3, 0)
@@ -928,17 +647,12 @@ impl ChatService {
             _ => return,
         };
 
-        // Build context for the title generation LLM call
         let context = format!("User: {}\nAssistant: {}", user_text, assistant_text);
         let messages = vec![ChatMessage::user(&context)];
 
         match provider.complete(TITLE_SYSTEM_PROMPT, messages).await {
             Ok(response) => {
-                // The shared normaliser, not a local trim: it enforces the same
-                // ten-word ceiling, strips the same decorations, and refuses
-                // prose rather than truncating it into a confident-looking
-                // fragment. A local copy would let this path emit titles the
-                // re-titling service would have rejected.
+                // Shared normaliser, so this path can't emit titles the re-titler would reject.
                 let Some(title) = normalise_title(&response.content) else {
                     tracing::debug!(
                         session_id = %self.session_id,
@@ -947,10 +661,7 @@ impl ChatService {
                     return;
                 };
 
-                // `set_generated_title`, not `update_title`: the latter records
-                // a human rename and would put this session permanently beyond
-                // the reach of the idle pass, freezing a name guessed from two
-                // messages for the life of the conversation.
+                // Not `update_title`: that marks a human rename, which the idle pass won't touch.
                 if let Err(e) = self
                     .session_storage
                     .set_generated_title(&self.session_id, &title, &through_message_id)
@@ -979,25 +690,15 @@ impl ChatService {
         }
     }
 
-    /// Persist the user side of a turn. Call before starting the agent stream
-    /// so the message is saved even if the stream errors out.
+    /// Persist the user side of a turn; call before streaming so it survives a stream error.
     pub async fn persist_user_message(&self, message: &str) -> Result<()> {
         self.persist_user_message_with_images(message, Vec::new())
             .await
             .map(|_| ())
     }
 
-    /// Persist the user side of a turn along with its image attachments
-    /// (phase F2).
-    ///
-    /// The storage adapter decides where the bytes land; this service only has
-    /// to stop dropping them. Attachment order is the order given.
-    /// Returns the id of the row written.
-    ///
-    /// The caller needs it because this row is committed BEFORE inference
-    /// starts, so a turn that is cancelled or dies before it says anything
-    /// leaves a question with no answer behind it. Only whoever holds the id
-    /// can take it back.
+    /// Persist the user side of a turn with its images, returning the row id.
+    /// The row commits before inference, so the caller needs the id to retract an aborted turn.
     pub async fn persist_user_message_with_images(
         &self,
         message: &str,
@@ -1015,9 +716,8 @@ impl ChatService {
         Ok(id)
     }
 
-    /// Persist the assistant side of a turn. Call after the agent stream drains.
-    /// `tool_results` is raw JSON strings (one per tool call, in call order).
-    /// `usage` is `(prompt_tokens, completion_tokens)`; pass `None` if unavailable.
+    /// Persist the assistant side of a turn, after the agent stream drains.
+    /// `tool_results` is one JSON string per call, in order; `usage` is `(prompt, completion)`.
     pub async fn persist_assistant_turn(
         &self,
         tool_results: Vec<String>,
@@ -1025,13 +725,7 @@ impl ChatService {
         usage: Option<(u32, u32)>,
         model_name: Option<&str>,
     ) -> Result<()> {
-        // Each entry is JSON carrying `tool`, `tool_call_id` and `arguments`
-        // (built in the chat handler). Parsed ONCE here: the same fields feed
-        // the activity events, the tool rows' `tool_call_id`, and the assistant
-        // row's tool-call records.
-        //
-        // An entry that does not parse is skipped rather than fatal, and still
-        // persists its content -- a malformed blob must not lose the result.
+        // Entries carry `tool`, `tool_call_id`, `arguments`; an unparseable one still persists.
         let parsed: Vec<Option<serde_json::Value>> = tool_results
             .iter()
             .map(|s| serde_json::from_str::<serde_json::Value>(s).ok())
@@ -1049,12 +743,7 @@ impl ChatService {
             .filter_map(|v| field(v, "tool").map(|t| bare_tool_name(&t)))
             .collect();
 
-        // The calls this turn made, linked to the results below by id.
-        //
-        // Written because nothing wrote them: across a real installation's whole
-        // history there were 508 assistant rows, 0 with tool calls, against 488
-        // tool rows -- every stored result an orphan with no record of who asked
-        // for it. The read path in the REST API has always served both fields.
+        // The calls this turn made, linked to the tool rows below by id.
         let tool_calls: Vec<ToolCallRecord> = parsed
             .iter()
             .filter_map(|v| {
@@ -1087,15 +776,8 @@ impl ChatService {
             .add_message(self.session_id.clone(), sm)
             .await?;
 
-        // PAI-5 P6. AFTER the assistant row commits, never before: the
-        // `session_thinking` rows carry a foreign key onto it, and writing them
-        // first would either fail or -- on a connection without
-        // `PRAGMA foreign_keys` -- leave reasoning pointing at a message that
-        // does not exist.
-        //
-        // Best-effort, deliberately. This is a UI convenience; a storage error
-        // here must not cost the user the assistant turn that is already
-        // committed above.
+        // After the assistant row commits: `session_thinking` has a foreign key onto it.
+        // Best-effort; a failure here must not cost the committed turn.
         self.persist_thinking_blocks(&assistant_id).await;
 
         if let Some((prompt, completion)) = usage {
@@ -1107,37 +789,22 @@ impl ChatService {
             }
         }
 
-        // Ensure the session has a title. Handlers build ChatService without a
-        // provider, so the LLM-based `maybe_generate_title` never fires; without
-        // this fallback every session stays `title = null`. This derives a
-        // cheap, deterministic title from the first user message — no LLM call.
+        // Handlers attach no provider, so this no-LLM fallback is what titles most sessions.
         self.ensure_session_title().await;
 
-        // Record the turn's activity in the unified log (best-effort). Uses the
-        // tool names already carried in `tool_results` and the token usage, so
-        // the activity feed reflects chat activity, not just Auth/Network.
         self.record_turn_activity(&tool_names, usage, model_name)
             .await;
 
         Ok(())
     }
 
-    /// Drain the turn's reasoning passages into storage, keyed to the assistant
-    /// row they produced.
-    ///
-    /// The buffer is drained whether or not the write succeeds, and drained
-    /// even when the gate is off (where it is always empty, because
-    /// `record_thinking` refuses to fill it). Both matter for the same reason:
-    /// a `ChatService` that outlived one turn -- the terminal voice loop keeps
-    /// one for the life of the process -- must not attach turn 1's reasoning to
-    /// turn 2's answer.
+    /// Drain the turn's reasoning into storage, keyed to its assistant row.
+    /// Always drains, even on failure: a long-lived service must not carry it into the next turn.
     async fn persist_thinking_blocks(&self, assistant_message_id: &str) {
         let blocks: Vec<String> = match self.thinking_blocks.lock() {
             Ok(mut buf) => std::mem::take(&mut *buf),
             Err(poisoned) => {
-                // A poisoned lock means a panic happened while holding it. Take
-                // what is there and clear it; leaving stale text behind is the
-                // worse failure of the two.
+                // Still clear a poisoned buffer: stale text leaking into the next turn is worse.
                 let mut buf = poisoned.into_inner();
                 std::mem::take(&mut *buf)
             }
@@ -1157,12 +824,8 @@ impl ChatService {
         }
     }
 
-    /// Append the Agent / Inference / Tool events for one completed turn.
-    ///
-    /// Best-effort: a failed append is logged and swallowed — observability must
-    /// never fail a turn (same contract as the auth-event and egress emitters).
-    /// Metadata only (counts, model, tool names); message content already lives
-    /// in `session_messages`, so these events stay `Internal`.
+    /// Append the turn's Agent / Inference / Tool events; best-effort, never fails the turn.
+    /// Metadata only (content lives in `session_messages`), so the events stay `Internal`.
     async fn record_turn_activity(
         &self,
         tool_names: &[String],
@@ -1175,7 +838,6 @@ impl ChatService {
 
         let mut events = Vec::with_capacity(2 + tool_names.len());
 
-        // The turn itself.
         events.push(
             Event::new(EventCategory::Agent, "agent.turn")
                 .attr("tool_count", tool_names.len() as i64)
@@ -1196,7 +858,6 @@ impl ChatService {
             events.push(ev);
         }
 
-        // One per tool call.
         for tool in tool_names {
             events.push(
                 Event::new(EventCategory::Tool, "tool.call")
@@ -1213,24 +874,15 @@ impl ChatService {
         }
     }
 
-    /// Set a session title if one is not already present, deriving it
-    /// deterministically from the first user message (first ~6 words).
-    ///
-    /// This is the reliable fallback for the common path where no
-    /// `LlmProvider` is attached (all HTTP handlers). It is best-effort:
-    /// failures are logged, never bubbled, and it runs inside the
-    /// persistence owner so the ChatService contract is preserved.
+    /// Best-effort: title an untitled session from its first user message, without an LLM.
     async fn ensure_session_title(&self) {
-        // Skip if a title already exists (either set here previously or by the
-        // LLM path). A missing session is treated as "no title" — the update
-        // below is a no-op for a non-existent row.
+        // A missing session counts as untitled; the update is a no-op for it.
         if let Ok(session) = self.session_storage.get_session(&self.session_id).await {
             if session.title.is_some() {
                 return;
             }
         }
 
-        // Find the first user message to derive a title from.
         let first_user_text = match self
             .session_storage
             .get_messages_paginated(&self.session_id, 20, 0)
@@ -1252,10 +904,7 @@ impl ChatService {
             return;
         }
 
-        // `set_derived_title`, not `update_title`: the latter now records a
-        // human rename and puts the session permanently beyond the reach of
-        // the idle re-titling job. This is the machine's own guess at a name
-        // and is explicitly the thing that job exists to improve on.
+        // Not `update_title`: that marks a human rename, which the idle re-titler won't touch.
         if let Err(e) = self
             .session_storage
             .set_derived_title(&self.session_id, &title)
@@ -1275,9 +924,7 @@ impl ChatService {
         }
     }
 
-    /// Like `persist_assistant_turn` but also triggers memory extraction in a
-    /// background task. Use this instead of the inline `tokio::spawn` pattern
-    /// in HTTP handlers — the extraction cannot be accidentally omitted.
+    /// `persist_assistant_turn` plus background memory extraction, so handlers can't omit it.
     pub async fn persist_assistant_turn_with_extraction(
         &self,
         tool_results: Vec<String>,
@@ -1314,25 +961,10 @@ impl ChatService {
         Ok(())
     }
 
-    /// Streaming chat — routes through the Agent, chunks TTS by sentence,
-    /// AND persists the turn (user + assistant) to session storage.
-    ///
-    /// Differences from `chat_once`:
-    /// - Calls `agent.chat_stream()` so text arrives token-by-token.
-    /// - Speaks each completed sentence immediately (low-latency TTS).
-    /// - Announces MCP tool calls with a short spoken phrase before execution.
-    /// - Speaking happens *inside* this method; callers must NOT call
-    ///   `voice_output.speak()` on the returned text.
-    ///
-    /// This is the persisting entry point used for a *confirmed* transcript.
-    /// The Q2-26 speculative path must NOT call this — it calls
-    /// `stream_response_inner` (no persistence) so a provisional transcript
-    /// that later turns out wrong never lands a phantom turn in
-    /// `pond_system.db`. `run_loop` persists the confirmed turn exactly once
-    /// via `persist_confirmed_turn`.
+    /// Stream, speak by sentence, and persist a confirmed turn; don't `speak()` the result again.
+    /// Speculative transcripts must use the non-persisting `stream_response_inner` instead.
     pub async fn chat_stream_once(&self, message: String) -> Result<String> {
         let fired_at = std::time::Instant::now();
-        // Persist user message
         let user_msg = ChatMessage::user(message.clone());
         let session_msg = SessionMessage::new(
             Uuid::new_v4().to_string(),
@@ -1348,7 +980,6 @@ impl ChatService {
             .stream_response_inner(message.clone(), fired_at)
             .await?;
 
-        // Persist the assistant response and generate a title if needed.
         self.persist_assistant_response(&outcome.text, outcome.usage.as_ref())
             .await?;
         self.maybe_generate_title(&message, &outcome.text).await;
@@ -1356,22 +987,14 @@ impl ChatService {
         Ok(outcome.text)
     }
 
-    /// Streams a response through the Agent and speaks it, returning the full
-    /// assistant text. Performs **no persistence** — the caller owns that.
-    ///
-    /// Used directly by the Q2-26 speculative path (which must be able to run
-    /// on a provisional transcript and be discarded without side effects) and
-    /// by `chat_stream_once` (which wraps it with persistence). `fired_at`
-    /// timestamps when inference was kicked off, purely for TTFT telemetry.
+    /// Stream and speak a response with no persistence, so a speculative run can be discarded.
+    /// `fired_at` is when inference was kicked off, for TTFT telemetry only.
     async fn stream_response_inner(
         &self,
         message: String,
         fired_at: std::time::Instant,
     ) -> Result<TurnOutcome> {
-        // The LLM handles tool routing natively via MCP — no pre-classification needed.
-        // This path is only ever reached via run_loop (the voice CLI loop),
-        // so voice_mode is unconditionally true here — this gets the TTS-friendly
-        // prompt and suppressed thinking that desktop's voice path already gets.
+        // Only the voice loop reaches this, hence `voice_mode: true` (TTS-friendly prompt).
         let request = AgentRequest {
             message: message.clone(),
             session_id: self.session_id.clone(),
@@ -1379,35 +1002,19 @@ impl ChatService {
             images: Vec::new(),
             voice_mode: true,
             canvas_mode: false,
-            // As above -- the builder decides. Voice callers leave it at the
-            // Household default because there is no speaker identification
-            // (PAI-1 section 3.8); the REST handlers set a resolved scope.
+            // From the builder; voice leaves it at `Household`.
             profile_scope: self.profile_scope.clone(),
-            // Voice has no speaker identification, so there is no member
-            // whose preferences these would be.
+            // Voice has no speaker identification, so no member's preferences apply.
             profile_context: None,
             tool_group_allowlist: None,
             warmup: false,
         };
 
-        // Clear any interrupt left over from the previous turn. Exactly once
-        // per turn, before any speech: interrupt state is a property of the
-        // turn, and clearing it per-utterance made a barge-in stop one sentence
-        // and then let the rest of the reply play out.
+        // Clear interrupts once per turn, not per sentence, so a barge-in stops the whole reply.
         self.voice_output.begin_utterance();
 
         // ── Working tone ──────────────────────────────────────────────────
-        // The one signal that the request was heard and is being worked on.
-        // It starts before inference and runs until the first real sentence
-        // is ready to speak.
-        //
-        // A spoken filler ("Skimming the surface.") used to play first. It
-        // said the same thing the tone says, but took a full synthesis and
-        // playback to say it — delaying the answer to announce that the
-        // answer was coming. One signal, and the cheaper one.
-        //
-        // Households that would rather have silence here switch it off with
-        // `voice_thinking_tone_enabled`; the guard is built either way.
+        // Plays from before inference until the first speakable sentence.
         let mut tone = WorkingTone::start(self.voice_output.clone(), self.thinking_tone);
 
         let mut stream = self.agent.chat_stream(request).await?;
@@ -1419,10 +1026,7 @@ impl ChatService {
         let mut barge_in: Option<BargeInWatch> = None;
         let mut thought_filter = crate::models::services::thought_filter::ThoughtFilter::new();
 
-        // Pipelined TTS: synthesize the next sentence while the current one plays.
-        // `pending_audio` holds WAV bytes ready for playback while we synthesize ahead.
-        // `first_sentence_spoken` gates clause-boundary speak() for the first sentence
-        // so audio starts before sentence 2's synthesis completes.
+        // Pipelined TTS: `pending_audio` (WAV) plays while the next sentence is synthesized.
         let mut pending_audio: Option<Vec<u8>> = None;
         let mut first_sentence_spoken = false;
 
@@ -1430,8 +1034,7 @@ impl ChatService {
             ($self:expr, $text:expr, $pending:expr, $first_spoken:expr) => {{
                 let text = $text;
                 if !*$first_spoken {
-                    // First sentence: speak() with clause-boundary splitting so the
-                    // user hears audio immediately rather than waiting for S2 synth.
+                    // First sentence: plain speak() (clause-split) so audio starts at once.
                     *$first_spoken = true;
                     if let Err(e) = $self.voice_output.speak(&text).await {
                         tracing::warn!("TTS failed: {}", e);
@@ -1465,14 +1068,7 @@ impl ChatService {
         while let Some(event_result) = stream.next().await {
             match event_result? {
                 AgentStreamEvent::ToolCall { id, tool, .. } => {
-                    // Visible to the UI, silent to the ear. Tool use is part
-                    // of working on the request, and the working tone already
-                    // says that — narrating each step ("Checking the
-                    // weather.") interrupted the tone to repeat it, and on a
-                    // multi-tool turn the user heard a stream of announcements
-                    // before hearing a single word of the actual answer.
-                    //
-                    // The tone deliberately keeps playing here.
+                    // Shown, not spoken: the working tone covers tool use, and keeps playing.
                     self.emit_event(WorkflowEvent::ToolCall {
                         tool: tool.clone(),
                         id: id.clone(),
@@ -1486,9 +1082,7 @@ impl ChatService {
                     }
 
                     if !spoken_first {
-                        // From-fire, user-perceived first-text latency (includes
-                        // quip/tone time). The engine-level TTFT arrives in the
-                        // Done event's TurnStats and is what the summary prints.
+                        // User-perceived latency; the engine's own TTFT comes in `Done`.
                         tracing::debug!(
                             "[Q2-26 TTFT] {}ms from-fire",
                             fired_at.elapsed().as_millis()
@@ -1498,10 +1092,7 @@ impl ChatService {
                         });
                         spoken_first = true;
                     }
-                    // Stream the (thought-filtered) delta to the event sink so the
-                    // desktop caption feed updates token-by-token. Emitted before
-                    // buffering so a partial that never completes a sentence still
-                    // reaches the UI.
+                    // Emitted before buffering so an unfinished sentence still reaches the UI.
                     self.emit_event(WorkflowEvent::Token {
                         content: content.clone(),
                     });
@@ -1516,9 +1107,6 @@ impl ChatService {
                             continue;
                         }
                         tone.stop();
-                        // Start barge-in mic monitoring before first TTS playback.
-                        // If the user speaks during TTS, the listener sets the
-                        // interrupt flag and playback stops immediately.
                         if barge_in.is_none() {
                             barge_in = self.watch_for_barge_in();
                         }
@@ -1533,17 +1121,10 @@ impl ChatService {
                 AgentStreamEvent::Done { usage, stats, .. } => {
                     turn_usage = usage;
                     turn_stats = stats;
-                    // Flush any tail held back by the thought filter. Also append to
-                    // full_text so the returned + persisted message includes the
-                    // withheld lookahead bytes — otherwise the tail is spoken but
-                    // dropped from history. (#153)
+                    // The filter's held-back tail goes into `full_text` too, or history drops it.
                     let tail = thought_filter.flush();
                     if !tail.is_empty() {
-                        // Emit the tail as a Token too, so the desktop caption/
-                        // transcript (built solely from `Token` events) matches the
-                        // text that is spoken and persisted — otherwise the UI bubble
-                        // ends short of the reply. Mirror the streamed-delta path:
-                        // ensure Speak has fired first so Token never precedes it.
+                        // UI transcripts are built from `Token`s only; `Speak` must come first.
                         if !spoken_first {
                             self.emit_event(WorkflowEvent::StateChanged {
                                 state: WorkflowState::Speak,
@@ -1556,7 +1137,6 @@ impl ChatService {
                         full_text.push_str(&tail);
                         sentence_buf.push_str(&tail);
                     }
-                    // Flush any remaining buffer
                     let remainder = sentence_buf.trim().to_string();
                     if !remainder.is_empty() {
                         let spoken = strip_markdown_for_speech(&remainder);
@@ -1577,9 +1157,7 @@ impl ChatService {
                     return Err(anyhow::anyhow!("Agent stream error: {}", content));
                 }
                 AgentStreamEvent::ToolResult { id, tool, content } => {
-                    // Surface the tool result to the event sink (NDJSON).
-                    // Not spoken — informational only. Truncate to the contract's
-                    // 2000-char cap so a huge tool payload cannot bloat one line.
+                    // Not spoken; truncated so a huge payload cannot bloat one NDJSON line.
                     let content = truncate_tool_result(content);
                     self.emit_event(WorkflowEvent::ToolResult { tool, id, content });
                 }
@@ -1587,37 +1165,24 @@ impl ChatService {
                 | AgentStreamEvent::Thinking { .. }
                 | AgentStreamEvent::ReviewStatus { .. }
                 | AgentStreamEvent::ReviewRevision { .. }
-                // The engine's cap message itself arrives as Text and IS spoken;
-                // this structured marker is for clients that can offer a
-                // continue affordance, which a voice turn cannot.
+                // The cap message itself arrives (and is spoken) as Text; this marker is for UIs.
                 | AgentStreamEvent::TurnLimitReached { .. }
-                // PAI-6 P6. A voice turn has no tree to draw, and narrating a
-                // delegation ("the researcher is calling recall_memories") is
-                // the same mistake the ToolCall arm above already refuses:
-                // announcements the user hears instead of an answer. It is also
-                // deliberately not appended to `full_text` here or anywhere —
-                // that string is what gets persisted, and invariant 4 keeps a
-                // subagent's activity out of the parent's history.
+                // Never added to `full_text`: subagent activity stays out of the parent's history.
                 | AgentStreamEvent::SubagentProgress { .. } => {
                     // Not spoken during streaming — informational only
                 }
             }
         }
 
-        // Play any remaining synthesized audio
         if let Some(last) = pending_audio.take() {
             if let Err(e) = self.voice_output.play_audio(last).await {
                 tracing::warn!("TTS final playback failed: {}", e);
             }
         }
 
-        // Flush thought filter tail if stream ended without Done. Same as the Done
-        // branch, the tail must also reach full_text so the persisted message is
-        // complete on this path too — the second, previously-unfixed flush. (#153)
+        // If the stream ended without Done, its filter tail must reach `full_text` here too.
         let tail = thought_filter.flush();
         if !tail.is_empty() {
-            // Emit the tail as a Token too (see the Done branch): keep the caption
-            // feed in sync with the spoken/persisted text on the no-Done path.
             if !spoken_first {
                 self.emit_event(WorkflowEvent::StateChanged {
                     state: WorkflowState::Speak,
@@ -1629,7 +1194,6 @@ impl ChatService {
             full_text.push_str(&tail);
             sentence_buf.push_str(&tail);
         }
-        // Flush anything left if stream ended without Done
         let remainder = sentence_buf.trim().to_string();
         if !remainder.is_empty() {
             let spoken = strip_markdown_for_speech(&remainder);
@@ -1644,15 +1208,9 @@ impl ChatService {
         // A turn that produced no speakable text still has to stop the tone.
         tone.stop();
 
-        // Stop watching the microphone: all TTS for this turn is done, so
-        // there is nothing left to interrupt. Dropping the watch is what stops
-        // it, hence the explicit `drop` rather than letting it fall out of
-        // scope — the ordering relative to the tone above is deliberate.
+        // Explicit drop: stop the barge-in watch now that TTS is done, after the tone.
         drop(barge_in.take());
 
-        // No persistence here — the caller (chat_stream_once for a confirmed
-        // transcript, or run_loop's persist_confirmed_turn for the reused
-        // speculative result) owns writing this turn to session storage.
         Ok(TurnOutcome {
             text: full_text,
             usage: turn_usage,
@@ -1661,9 +1219,7 @@ impl ChatService {
         })
     }
 
-    /// Record a completed turn's usage + performance: session token totals,
-    /// an optional `TurnMetrics` row, and the console summary line. Failures
-    /// are logged, never fatal — the reply was already delivered.
+    /// Record a turn's usage, metrics and summary line; failures are logged, never fatal.
     async fn record_turn_outcome(&self, outcome: &TurnOutcome) {
         if let Some(usage) = &outcome.usage {
             if let Err(e) = self
@@ -1717,8 +1273,7 @@ impl ChatService {
         self.print_turn_summary(outcome);
     }
 
-    /// One clean console line per turn — the "inference = summaries" contract.
-    /// Suppressed in `--json-events` mode (stdout is NDJSON-only there).
+    /// One console line per turn; suppressed in `--json-events` mode (NDJSON-only stdout).
     fn print_turn_summary(&self, outcome: &TurnOutcome) {
         if !self.stdout_diagnostics {
             return;
@@ -1730,8 +1285,7 @@ impl ChatService {
         if let Some(ttft) = stats.ttft_ms {
             parts.push(format!("ttft {ttft}ms"));
         }
-        // The prompt and the WORK are different numbers, and printing the prompt
-        // beside a prefill duration read as a throughput that was never measured.
+        // Prefilled tokens, not prompt size: only the former matches the prefill time.
         match (stats.prefill_ms, stats.prefill_tok_per_sec) {
             (Some(prefill), Some(rate)) => parts.push(format!(
                 "prefill {} of {} tok in {:.1}s ({:.0} tok/s)",
@@ -1740,12 +1294,7 @@ impl ChatService {
                 prefill as f32 / 1000.0,
                 rate
             )),
-            // No rate, for either of the two reasons `finalize_rates` withholds
-            // one: nothing was decoded, or it took no measurable time. Print
-            // what was actually decoded rather than assuming the first --
-            // hardcoding 0 here claimed "all cached" for a turn that had
-            // prefilled tokens and a sub-millisecond prefill, which is a lie in
-            // the one line this exists to make honest.
+            // No rate: nothing prefilled, or no measurable time. Only the former is "all cached".
             (Some(prefill), None) => parts.push(format!(
                 "prefill {} of {} tok in {:.1}s{}",
                 stats.prefilled_tokens,
@@ -1770,10 +1319,7 @@ impl ChatService {
                 rate
             ));
         }
-        // PAI-5 P2. Its own part, next to decode rather than folded into it —
-        // this number is GIAP's count of the thinking channel, not the engine's,
-        // and printing it inside the decode figure would imply the engine
-        // reported it. Absent when nothing counted; "0" when nothing was thought.
+        // Separate from decode: this is GIAP's count of the thinking channel, not the engine's.
         if let Some(reasoning) = stats.reasoning_tokens {
             parts.push(format!("reasoning {reasoning} tok"));
         }
@@ -1796,10 +1342,7 @@ impl ChatService {
         }
     }
 
-    /// Persist a single assistant message to session storage. Split out of
-    /// `chat_stream_once` so the Q2-26 speculative path can persist the
-    /// assistant turn *after* the transcript is confirmed, not during the
-    /// speculative stream.
+    /// Persist one assistant message; separate so a speculative turn persists only once confirmed.
     async fn persist_assistant_response(
         &self,
         full_text: &str,
@@ -1813,31 +1356,17 @@ impl ChatService {
                     usage.map(|u| u.prompt_tokens),
                     usage.map(|u| u.completion_tokens),
                 )
-                // PAI-5 P2. Carried only where the caller hands over a whole
-                // `UsageStats`. `persist_assistant_turn`'s `(prompt, completion)` tuple
-                // — which is what `/chat/stream` passes — cannot express it, so rows
-                // written by that route keep NULL rather than a wrong zero.
+                // `persist_assistant_turn`'s tuple can't carry this: its rows stay NULL, not zero.
                 .with_reasoning_tokens(usage.and_then(|u| u.reasoning_tokens));
         self.session_storage
             .add_message(self.session_id.clone(), session_msg)
             .await?;
-        // PAI-5 P6. The terminal voice loop keeps ONE `ChatService` for the life
-        // of the process, so this drain is not optional even though no caller on
-        // this path currently records anything: an undrained buffer would carry
-        // turn 1's reasoning onto turn 2's row the moment one did.
+        // Must drain: the voice loop reuses one service, so leftovers would reach the next turn.
         self.persist_thinking_blocks(&assistant_id).await;
         Ok(())
     }
 
-    /// Persist a confirmed voice turn (user message + assistant response) that
-    /// was produced by a speculative stream, and generate a title if needed.
-    ///
-    /// The Q2-26 speculative path runs `stream_response_inner` (no
-    /// persistence) on a *provisional* transcript. Once `run_loop` confirms
-    /// the final transcript matches, it calls this to write exactly one turn —
-    /// keyed to the confirmed transcript — preserving the single-source-of-
-    /// truth invariant (`pond_system.db` is authoritative; ChatService is the
-    /// sole persistence owner).
+    /// Persist a confirmed voice turn exactly once, keyed to the confirmed transcript.
     async fn persist_confirmed_turn(
         &self,
         confirmed_message: &str,
@@ -1856,38 +1385,15 @@ impl ChatService {
 
         self.persist_assistant_response(response_text, usage)
             .await?;
-        // Prefer an LLM-summarized title when a provider is attached; otherwise
-        // (the live GooseAdapter voice path builds ChatService WITHOUT a
-        // provider) fall back to the deterministic first-message-derived title
-        // so the chat sidebar shows a readable topic, never a raw session id.
-        // `ensure_session_title` is guarded on `title.is_none()`, so it no-ops
-        // when the LLM path already set one.
+        // LLM title when a provider exists; else the derived fallback, which no-ops once titled.
         self.maybe_generate_title(confirmed_message, response_text)
             .await;
         self.ensure_session_title().await;
         Ok(())
     }
 
-    /// Q2-26: listen for the next utterance while *speculatively* starting the
-    /// LLM response as soon as a provisional transcript is available, to hide
-    /// whisper + first-token latency inside the end-of-speech silence wait.
-    ///
-    /// Returns `(confirmed_transcript, speculative)` where `speculative`, when
-    /// present, is a still-running job that streamed a response for the
-    /// **provisional** transcript `spec_transcript`. The job runs
-    /// `stream_response_inner`, which performs **no persistence** — so if the
-    /// provisional transcript turns out wrong, discarding the job leaves no
-    /// phantom turn in `pond_system.db`.
-    ///
-    /// The caller (`run_loop`) must:
-    ///   - race the job against the wake-word interrupt (barge-in parity), and
-    ///   - only commit (persist) the job's result if `spec_transcript` equals
-    ///     the `confirmed_transcript`; otherwise discard it and process the
-    ///     confirmed transcript through the normal persisting path.
-    ///
-    /// A `SpeculativeSignal::Ready` for an empty or dismissal/exit phrase never
-    /// starts a job — those are intercepted by `run_loop` before the LLM sees
-    /// them, and a speculative call would bypass that.
+    /// Listen while speculatively streaming a non-persisting reply to the provisional transcript.
+    /// The caller must persist the job's result only if its `spec_transcript` is the final one.
     #[allow(clippy::type_complexity)]
     async fn listen_with_speculative_chat(
         &self,
@@ -1903,9 +1409,7 @@ impl ChatService {
         let listen_fut = self.voice_input.listen_with_speculative(callback);
         tokio::pin!(listen_fut);
 
-        // `(spec_transcript, handle)` — the transcript the job was fired on is
-        // retained so `run_loop` can confirm it matches the final transcript
-        // before persisting anything.
+        // Keeps the fired-on transcript so `run_loop` can match it to the final one.
         let mut speculative: Option<(String, tokio::task::JoinHandle<Result<TurnOutcome>>)> = None;
 
         loop {
@@ -1919,10 +1423,7 @@ impl ChatService {
                         SpeculativeSignal::Ready(text)
                             if !text.is_empty() && !is_dismissal_or_exit_phrase(&text) =>
                         {
-                            // Fire the LLM early on the provisional transcript.
-                            // NOTE: uses stream_response_inner (NO persistence),
-                            // so an incorrect provisional transcript can be
-                            // discarded without leaving a phantom turn.
+                            // Non-persisting: a wrong provisional transcript leaves no turn.
                             let svc = self.clone();
                             let spec_text = text.clone();
                             let fired_at = std::time::Instant::now();
@@ -1934,10 +1435,7 @@ impl ChatService {
                         // Empty / dismissal / exit — let run_loop handle it normally.
                         SpeculativeSignal::Ready(_) => {}
                         SpeculativeSignal::Invalidated => {
-                            // The provisional transcript covered a too-short
-                            // clip (speech resumed). Abort the job and silence
-                            // any audio it may have started. No persistence
-                            // happened, so nothing to roll back.
+                            // Speech resumed: abort the job and silence anything it started.
                             if let Some((_, handle)) = speculative.take() {
                                 handle.abort();
                                 self.voice_output.stop_speaking();
@@ -1950,23 +1448,8 @@ impl ChatService {
         }
     }
 
-    /// Run the interactive workflow loop.
-    ///
-    /// State machine:
-    ///   Wait → Listen → Thinking → Speak → (back to Wait)
-    ///
-    /// Input is obtained via the `VoiceInput` port (stdin by default).
-    /// Wait for the wake word, surviving a microphone that comes and goes.
-    ///
-    /// Retries with a backoff rather than failing the session. Gives up only
-    /// after [`MIC_RETRY_BUDGET`] consecutive failures, which at this backoff
-    /// is roughly a minute of a genuinely absent device — long enough to
-    /// outlast anything transient, short enough that a permanently missing
-    /// microphone still reports itself instead of retrying in silence forever.
-    ///
-    /// Each failure is reported once on the console, because a voice assistant
-    /// that has quietly stopped listening is indistinguishable from one that
-    /// is listening and hearing nothing.
+    /// Wait for the wake word, retrying a missing mic up to [`MIC_RETRY_BUDGET`] times.
+    /// Each failure is printed: silently not listening looks like hearing nothing.
     async fn wait_for_activation_resiliently(&self) -> Result<WakeWordActivation> {
         let mut last_error = None;
 
@@ -2000,22 +1483,15 @@ impl ChatService {
             .context("the microphone did not become available; voice mode cannot continue"))
     }
 
+    /// Run the interactive Wait → Listen → Thinking → Speak loop.
     pub async fn run_loop(&self) -> Result<()> {
-        // First interaction always requires the wake word.
-        // After that, conversational turn-taking: Goose listens for the user's
-        // next turn directly after speaking, no wake word needed.
-        // If the user doesn't speak (empty transcription), fall back to wake word.
+        // Wake word for the first turn, and again after any turn where nothing was heard.
         let mut first_turn = true;
 
-        // Pre-captured input from a wake-word interrupt.  When set, the next
-        // loop iteration skips the listen/wake-word phase and processes this
-        // text directly — but still wrapped in `tokio::select!` so it remains
-        // interruptible.
+        // Text captured by a wake-word interrupt; the next iteration skips listening for it.
         let mut pending_input: Option<String> = None;
 
-        // Human-facing stdout print, suppressed in `--json-events` mode so
-        // stdout carries NOTHING but NDJSON lines. Diagnostics still reach
-        // stderr (`eprintln!`) and tracing regardless of this flag.
+        // Human-facing stdout; suppressed in `--json-events` mode, where stdout is NDJSON only.
         macro_rules! diag {
             ($($arg:tt)*) => {
                 if self.stdout_diagnostics {
@@ -2033,13 +1509,9 @@ impl ChatService {
         }
 
         loop {
-            // `speculative`, when present, is a (provisional_transcript, job)
-            // pair: an LLM response already streaming for a provisional
-            // transcript (Q2-26). It is reused ONLY if the confirmed transcript
-            // matches; otherwise it is discarded without persisting anything.
+            // `speculative`: a (provisional transcript, job) already streaming a reply.
             let (input, speculative) = if let Some(text) = pending_input.take() {
-                // Interrupt gave us pre-captured text — skip listen phase.
-                // Emit events so the UI/state machine stays consistent.
+                // Interrupt text: skip listening, but still emit Listen for the UI.
                 self.emit_event(WorkflowEvent::StateChanged {
                     state: WorkflowState::Listen,
                 });
@@ -2055,15 +1527,7 @@ impl ChatService {
                     diag!("\n  {prompt}");
                 }
 
-                // A microphone that fails to open must not end the session.
-                //
-                // This `?` used to be fatal, so a transient device error —
-                // another process taking the input device, a Bluetooth
-                // headset switching profile, a USB mic re-enumerating — killed
-                // voice mode outright with "The requested stream configuration
-                // is not supported by the device" and no way back short of
-                // restarting. Devices come and go; an assistant that waits for
-                // one to come back is worth more than one that exits correctly.
+                // A mic that fails to open must not end the session; devices come and go.
                 let activation = match self.wait_for_activation_resiliently().await {
                     Ok(a) => a,
                     Err(e) => {
@@ -2095,9 +1559,7 @@ impl ChatService {
                 self.listen_with_speculative_chat().await?
             };
 
-            // Any early-return path (no speech / dismissal / exit) must abort a
-            // live speculative job so it stops speaking and never persists.
-            // Helper: aborts + silences the speculative job if one is running.
+            // Every early exit (no speech / dismissal / exit) must abort a live speculative job.
             let abort_speculative =
                 |spec: Option<(String, tokio::task::JoinHandle<Result<TurnOutcome>>)>| {
                     if let Some((_, handle)) = spec {
@@ -2168,9 +1630,7 @@ impl ChatService {
             // Conversation is active — subsequent turns skip the wake word
             first_turn = false;
 
-            // Confirmed user utterance — surface to the event sink (NDJSON
-            // `transcript`) before the LLM starts. Legacy UserInput retained
-            // for the tracing hook.
+            // NDJSON `transcript` before the LLM starts; `UserInput` is kept for the tracing hook.
             self.emit_event(WorkflowEvent::Transcript {
                 text: input.clone(),
             });
@@ -2182,17 +1642,11 @@ impl ChatService {
             });
 
             // ── Q2-26 phantom-turn gate ─────────────────────────────────────
-            // A speculative job (if any) streamed a response for a *provisional*
-            // transcript with NO persistence. Reuse it ONLY if the confirmed
-            // transcript matches; otherwise discard it and fall through to the
-            // normal persisting path on the confirmed transcript. This
-            // guarantees exactly ONE persisted turn per utterance, always keyed
-            // to the confirmed transcript (single-source-of-truth invariant).
+            // Reuse the speculative job only if its transcript matches: one persisted turn each.
             let reusable_speculative = match speculative {
                 Some((spec_transcript, handle)) if spec_transcript == input => Some(handle),
                 Some((_, handle)) => {
-                    // Mismatch: provisional transcript was wrong. Abort the job
-                    // and silence any audio it started — nothing was persisted.
+                    // Mismatch: abort and silence the job; nothing was persisted.
                     handle.abort();
                     self.voice_output.stop_speaking();
                     self.voice_output.stop_thinking_tone();
@@ -2201,16 +1655,6 @@ impl ChatService {
                 None => None,
             };
 
-            // Race the agent response against the wake word detector.
-            // If the user says the wake word during inference or TTS playback,
-            // interrupt immediately: stop TTS, drop the stream, and process
-            // the new speech as a fresh request.
-            //
-            // `chat_handle` is either the reusable speculative job (already
-            // streaming, NO persistence) or a fresh non-persisting stream.
-            // Either way it is raced against the wake interrupt identically, so
-            // barge-in works the same. Persistence happens AFTER it completes,
-            // via persist_confirmed_turn — so exactly one confirmed turn lands.
             let input_for_task = input.clone();
             let chat_handle = reusable_speculative.unwrap_or_else(|| {
                 let svc = self.clone();
@@ -2220,13 +1664,7 @@ impl ChatService {
             });
 
             // ── InstantActivation race guard ─────────────────────────────────
-            // The wake-word interrupt race is ONLY correct for detectors that
-            // actually wait for real audio. `InstantActivation` (stdin /
-            // --no-wake-word / whisper-load-failure fallback) resolves instantly
-            // and would win the race before any turn could complete, aborting
-            // EVERY turn. When the detector cannot interrupt, await the turn
-            // directly — no race, no phantom abort. Real streaming detectors
-            // keep the barge-in race below.
+            // `InstantActivation` would win the race and abort every turn: await directly.
             if !self.wake_word_detector.supports_interruption() {
                 let chat_result = chat_handle.await;
                 if !self.finalize_confirmed_turn(chat_result, &input).await {
@@ -2235,16 +1673,7 @@ impl ChatService {
                 continue;
             }
 
-            // Race the agent response against the wake word detector.
-            // If the user says the wake word during inference or TTS playback,
-            // interrupt immediately: stop TTS, drop the stream, and process
-            // the new speech as a fresh request.
-            //
-            // `chat_handle` is either the reusable speculative job (already
-            // streaming, NO persistence) or a fresh non-persisting stream.
-            // Either way it is raced against the wake interrupt identically, so
-            // barge-in works the same. Persistence happens AFTER it completes,
-            // via persist_confirmed_turn — so exactly one confirmed turn lands.
+            // Race the turn against the wake word; persistence happens only after it completes.
             let wake_fut = self.wake_word_detector.wait_for_activation_with_audio();
 
             tokio::pin!(chat_handle);
@@ -2261,25 +1690,13 @@ impl ChatService {
                     // Wake word detected during inference/TTS — INTERRUPT
                     diag!("\n  interrupted");
 
-                    // Stop any in-progress TTS playback and background listeners
                     self.voice_output.stop_speaking();
                     self.voice_output.stop_thinking_tone();
 
-                    // `chat_handle` is a spawned task (fresh or reused speculative).
-                    // Aborting it propagates the same drop-based cancellation into
-                    // Goose's spawn_blocking inference, causing TokenAction::Stop
-                    // within one token cycle. Crucially, the interrupted task ran
-                    // `stream_response_inner` (NO persistence), so an interrupted
-                    // response never leaves a partial turn in pond_system.db —
-                    // persistence only happens on normal completion above.
-                    // No TurnComplete is emitted either — the turn was never
-                    // committed.
+                    // Stops Goose's inference within a token (drop-based); nothing was persisted.
                     chat_handle.abort();
 
-                    // Capture the user's new speech (wake word may include trailing audio).
-                    // Instead of processing inline (which would be non-interruptible),
-                    // stash the text in `pending_input` and `continue` the loop so
-                    // the next iteration wraps it in tokio::select! again.
+                    // Stash the new speech for the next iteration, which keeps it interruptible.
                     match wake_result {
                         Ok(activation) => {
                             self.emit_event(WorkflowEvent::StateChanged {
@@ -2293,7 +1710,6 @@ impl ChatService {
 
                             match self.voice_input.listen().await {
                                 Ok(Some(new_text)) if !new_text.is_empty() => {
-                                    // Stash for the next loop iteration (interruptible path)
                                     pending_input = Some(new_text);
                                 }
                                 _ => {
@@ -2315,21 +1731,8 @@ impl ChatService {
         Ok(())
     }
 
-    /// Finalize a completed (non-interrupted) chat turn: persist it exactly
-    /// once, then emit the terminal events. Shared by both the raced and the
-    /// non-raced (`supports_interruption() == false`) paths so persistence and
-    /// event emission never drift between them.
-    ///
-    /// Returns `true` when the loop should stay in conversational mode, `false`
-    /// on a stream/join error (the caller then resets to wake-word mode).
-    ///
-    /// On a stream/join error NOTHING is persisted. On a *persistence* failure the
-    /// reply was already fully streamed and spoken to the user, so we do NOT reset
-    /// to wake-word mode (that would kick the user out mid-conversation for a reply
-    /// they just heard): we log + emit an `Error` for observability, SKIP
-    /// `TurnComplete` (persistence is that event's contract — the turn is absent
-    /// from history), and return `true` to keep the loop alive. `TurnComplete` is
-    /// still emitted exactly once, and only when the turn actually persisted.
+    /// Persist a finished turn once, then emit its events; `false` means reset to wake word.
+    /// A persist failure keeps the conversation (the reply was heard) but skips `TurnComplete`.
     async fn finalize_confirmed_turn(
         &self,
         chat_result: std::result::Result<Result<TurnOutcome>, tokio::task::JoinError>,
@@ -2338,16 +1741,11 @@ impl ChatService {
         match chat_result {
             Ok(Ok(outcome)) => {
                 let response_text = outcome.text.clone();
-                // Persist the confirmed turn exactly once (user + assistant),
-                // keyed to the confirmed transcript.
                 if let Err(e) = self
                     .persist_confirmed_turn(input, &response_text, outcome.usage.as_ref())
                     .await
                 {
-                    // Persistence failed (e.g. transient SQLITE_BUSY from serve +
-                    // child both writing the WAL). The reply is already spoken, so
-                    // surface the error but keep the conversation going — no
-                    // TurnComplete (nothing landed in history), no wake-word reset.
+                    // E.g. SQLITE_BUSY: serve and the child both write the WAL.
                     tracing::warn!("Failed to persist confirmed turn: {}", e);
                     self.emit_event(WorkflowEvent::Error {
                         message: format!("failed to persist turn: {e}"),
@@ -2378,8 +1776,7 @@ impl ChatService {
         }
     }
 
-    /// Emit a workflow event: trace it, then forward to the optional sink
-    /// (e.g. the `--json-events` NDJSON writer). `None` sink is zero-cost.
+    /// Trace a workflow event, then forward it to the optional sink.
     fn emit_event(&self, event: WorkflowEvent) {
         match &event {
             WorkflowEvent::StateChanged { state } => {
@@ -2486,8 +1883,7 @@ mod tests {
 
         service
             .persist_assistant_turn(
-                // Prefixed MCP ids as the stream delivers them; events record
-                // the bare names.
+                // Prefixed ids, as streamed; events record the bare names.
                 vec![
                     tool_result("giap-weather__get_current_weather"),
                     tool_result("giap-memory__save_memory"),
@@ -2505,7 +1901,6 @@ mod tests {
         assert_eq!(by_cat(EventCategory::Inference), 1);
         assert_eq!(by_cat(EventCategory::Tool), 2);
 
-        // Everything is Internal and carries the session id.
         assert!(events
             .iter()
             .all(|e| e.privacy_sensitivity == PrivacySensitivity::Internal
@@ -2544,8 +1939,7 @@ mod tests {
         assert!(tools.contains(&"save_memory".into()));
     }
 
-    /// No token usage (the agent_chat_stream path) → an Agent event but no
-    /// Inference event, since there is nothing to report.
+    /// The `agent_chat_stream` path reports no token usage.
     #[tokio::test]
     async fn turn_without_usage_emits_no_inference_event() {
         let (service, log) = service_with_log("sess-b").await;
@@ -2572,8 +1966,6 @@ mod tests {
         );
     }
 
-    /// Without an event log attached, persistence still succeeds and records
-    /// nothing — the feature is opt-in and never fatal.
     #[tokio::test]
     async fn turn_without_event_log_records_nothing_and_succeeds() {
         let storage = Arc::new(InMemorySessionStorage::new());
@@ -2596,7 +1988,6 @@ mod tests {
 
     #[test]
     fn truncate_tool_result_returns_exactly_cap_chars_unchanged() {
-        // Exactly TOOL_RESULT_MAX_CHARS chars — must not be truncated.
         let s = "x".repeat(TOOL_RESULT_MAX_CHARS);
         let out = truncate_tool_result(s.clone());
         assert_eq!(out.chars().count(), TOOL_RESULT_MAX_CHARS);
@@ -2612,8 +2003,7 @@ mod tests {
 
     #[test]
     fn truncate_tool_result_cuts_on_utf8_boundary_not_mid_codepoint() {
-        // Multi-byte chars straddling the cap must not corrupt the string.
-        // "é" is 2 bytes; a naive byte cut at 2000 could split one.
+        // "é" is 2 bytes: a naive byte cut could split one.
         let s = "é".repeat(TOOL_RESULT_MAX_CHARS + 10);
         let out = truncate_tool_result(s);
         assert_eq!(out.chars().count(), TOOL_RESULT_MAX_CHARS);
@@ -2733,11 +2123,7 @@ mod tests {
 
     // ── listen_with_speculative_chat (Q2-26) ─────────────────────────────
 
-    /// Drives `listen_with_speculative`'s callback through a scripted
-    /// sequence of signals (yielding briefly after each so the caller's
-    /// `tokio::select!` loop gets a chance to react), then resolves with
-    /// `final_transcript` — mirroring how `record_mono_f32_vad` behaves for
-    /// a confirmed recording.
+    /// Fires scripted signals, pausing so `select!` can react, then returns `final_transcript`.
     struct ScriptedSpeculativeVoiceInput {
         signals: Vec<SpeculativeSignal>,
         final_transcript: Option<String>,
@@ -2792,8 +2178,6 @@ mod tests {
         let response = handle.await.unwrap().unwrap();
         assert_eq!(response.text, "Echo: hello");
 
-        // The speculative stream persists NOTHING — the run_loop gate owns
-        // persistence after confirmation. Storage must still be empty here.
         let msgs = storage.get_messages(&session_id).await.unwrap();
         assert!(
             msgs.is_empty(),
@@ -2855,9 +2239,7 @@ mod tests {
 
     #[tokio::test]
     async fn confirmed_turn_persists_exactly_once_user_and_assistant() {
-        // The persisting entry point (chat_stream_once) writes exactly two
-        // messages: the user turn and the assistant turn. This is the ground
-        // truth the speculative path must match — no more, no less.
+        // The ground truth the speculative path must match.
         let agent = Arc::new(MockAgent::new());
         let storage = Arc::new(InMemorySessionStorage::new());
         let session_id = "test-session".to_string();
@@ -2879,9 +2261,6 @@ mod tests {
 
     #[tokio::test]
     async fn stream_response_inner_persists_nothing() {
-        // The non-persisting core used by the speculative path must never
-        // touch storage — that is what makes discarding a wrong provisional
-        // transcript safe (no phantom turn).
         let agent = Arc::new(MockAgent::new());
         let storage = Arc::new(InMemorySessionStorage::new());
         let session_id = "test-session".to_string();
@@ -2904,10 +2283,7 @@ mod tests {
 
     #[tokio::test]
     async fn persist_confirmed_turn_writes_confirmed_transcript_only() {
-        // Simulates the run_loop gate: a speculative stream ran on a provisional
-        // transcript ("weath"), but the CONFIRMED transcript ("what's the
-        // weather") is what gets persisted — never the provisional one. Exactly
-        // one user + one assistant message, keyed to the confirmed text.
+        // Simulates the run_loop gate after a mismatched provisional transcript.
         let agent = Arc::new(MockAgent::new());
         let storage = Arc::new(InMemorySessionStorage::new());
         let session_id = "test-session".to_string();
@@ -2941,10 +2317,6 @@ mod tests {
 
     #[tokio::test]
     async fn chat_stream_once_sets_voice_mode_true() {
-        // chat_stream_once is only ever reached via run_loop, the voice CLI
-        // loop — regression test for Q2-23 (voice_mode was hardcoded false,
-        // silently dropping the TTS-friendly prompt + thinking suppression
-        // that desktop's voice path already gets).
         let agent = Arc::new(MockAgent::new());
         let storage = Arc::new(InMemorySessionStorage::new());
         let session_id = "test-session".to_string();
@@ -2992,10 +2364,8 @@ mod tests {
 
         let service = ChatService::new(agent, session_id.clone(), storage.clone());
 
-        // First iteration
         service.chat_once("Message 1".to_string()).await.unwrap();
 
-        // Second iteration
         service.chat_once("Message 2".to_string()).await.unwrap();
 
         let messages = storage.get_messages(&session_id).await.unwrap();
@@ -3015,7 +2385,6 @@ mod tests {
         let service =
             ChatService::new(agent, session_id.clone(), storage.clone()).with_provider(provider);
 
-        // First message → triggers title generation
         service
             .chat_once("What is the weather?".to_string())
             .await
@@ -3042,7 +2411,6 @@ mod tests {
         let service =
             ChatService::new(agent, session_id.clone(), storage.clone()).with_provider(provider);
 
-        // First message → generates title
         service.chat_once("Hello".to_string()).await.unwrap();
         let first_title = storage
             .get_session(&session_id)
@@ -3051,7 +2419,6 @@ mod tests {
             .title
             .clone();
 
-        // Second message → should NOT overwrite title
         service.chat_once("How are you?".to_string()).await.unwrap();
         let second_title = storage
             .get_session(&session_id)
@@ -3066,14 +2433,7 @@ mod tests {
         );
     }
 
-    /// The first-exchange title is a guess made from two messages, and it must
-    /// be recorded as the machine's guess.
-    ///
-    /// Marking it `user` — which is what writing it through `update_title`
-    /// does — freezes that guess for the life of the conversation, because the
-    /// idle pass refuses to touch anything a person named. A chat that opens
-    /// about milk and becomes about bitcoin would keep the milk name forever,
-    /// and nothing in the interface would explain why.
+    /// A `user`-marked title would be frozen: the idle pass never touches what a person named.
     #[tokio::test]
     async fn a_first_exchange_title_is_recorded_as_the_models_guess() {
         let agent = Arc::new(MockAgent::new());
@@ -3099,9 +2459,6 @@ mod tests {
         );
     }
 
-    /// Whatever the model says, the stored title obeys the same ceiling the
-    /// re-titling service enforces. Before both paths shared a normaliser this
-    /// one kept 80 characters of whatever came back.
     #[tokio::test]
     async fn a_first_exchange_title_obeys_the_shared_ten_word_ceiling() {
         use crate::shared::services::session_title::MAX_TITLE_WORDS;
@@ -3131,7 +2488,6 @@ mod tests {
         let session_id = "no-provider".to_string();
         storage.create_session(session_id.clone()).await.unwrap();
 
-        // No provider → title stays None
         let service = ChatService::new(agent, session_id.clone(), storage.clone());
         service.chat_once("Hello".to_string()).await.unwrap();
 
@@ -3168,13 +2524,9 @@ mod tests {
 
     // ── InstantActivation race fix + event sink (terminal-voice-in-desktop) ──
     //
-    // These are the CI-visible regressions for the class of bug where the
-    // run_loop select! interrupt race fired before every turn could complete
-    // whenever the wired detector resolved instantly (InstantActivation).
-    // pond-server is check-only in CI, so this coverage lives in pond-core.
+    // pond-server is check-only in CI, so this `run_loop` coverage lives here.
 
-    /// Plays a scripted list of utterances, then `None` (EOF) so `run_loop`
-    /// exits cleanly. Mirrors the pond-server pipeline test's double.
+    /// Plays scripted utterances, then `None` (EOF) so `run_loop` exits cleanly.
     struct ScriptedListenInput {
         script: std::sync::Mutex<std::collections::VecDeque<Option<String>>>,
     }
@@ -3183,7 +2535,7 @@ mod tests {
         fn new(lines: impl IntoIterator<Item = &'static str>) -> Self {
             let mut deque: std::collections::VecDeque<Option<String>> =
                 lines.into_iter().map(|s| Some(s.to_string())).collect();
-            deque.push_back(None); // trailing None → end-of-input (stdin EOF)
+            deque.push_back(None);
             Self {
                 script: std::sync::Mutex::new(deque),
             }
@@ -3241,9 +2593,7 @@ mod tests {
         }
     }
 
-    /// The switch is the whole feature: `voice_thinking_tone_enabled = false`
-    /// must reach `start_thinking_tone` and stop it being called at all. A tone
-    /// that starts and is immediately stopped is not "off" -- it is a click.
+    /// Start-then-stop is not "off": it is an audible click.
     #[test]
     fn a_disabled_tone_never_starts() {
         let out = Arc::new(CountingTone::default());
@@ -3257,18 +2607,14 @@ mod tests {
         );
     }
 
-    /// The half that was deleted in 0136f8c5 and is being restored: with the
-    /// setting ON the tone must actually play. Asserting the count rather than
-    /// "no panic" is the point -- the regression this guards was a silent
-    /// no-op, which every looser assertion would have passed.
+    /// Asserts counts, not "no panic": the failure this guards is a silent no-op.
     #[test]
     fn an_enabled_tone_starts_once_and_stops_once() {
         let out = Arc::new(CountingTone::default());
         {
             let mut tone = WorkingTone::start(out.clone(), true);
             assert_eq!(out.counts(), (1, 0), "tone did not start when enabled");
-            // The first speakable sentence can arrive down several paths, so
-            // stop() is called more than once in practice.
+            // stop() runs more than once in practice (several paths to the first sentence).
             tone.stop();
             tone.stop();
             assert_eq!(out.counts(), (1, 1), "stop() is not idempotent");
@@ -3280,8 +2626,7 @@ mod tests {
         );
     }
 
-    /// Dropping without an explicit `stop()` -- the `?`-on-stream-error path
-    /// that motivated the guard -- must still silence the tone.
+    /// Covers the `?`-on-stream-error path, which never calls `stop()`.
     #[test]
     fn dropping_the_guard_stops_a_running_tone() {
         let out = Arc::new(CountingTone::default());
@@ -3310,7 +2655,6 @@ mod tests {
         }
 
         fn ndjson_events(&self) -> Vec<WorkflowEvent> {
-            // Only the events that map to an NDJSON contract line.
             self.events
                 .lock()
                 .unwrap()
@@ -3321,9 +2665,7 @@ mod tests {
         }
     }
 
-    /// Session storage whose `add_message` always fails — simulates a transient
-    /// persist failure (e.g. SQLITE_BUSY from serve + child WAL contention).
-    /// Everything else delegates to an in-memory store so setup/reads work.
+    /// Storage whose `add_message` always fails (a simulated SQLITE_BUSY); the rest delegates.
     struct FailingAddStorage {
         inner: InMemorySessionStorage,
     }
@@ -3443,12 +2785,6 @@ mod tests {
         }
     }
 
-    /// A microphone that fails and then recovers must not end the session.
-    ///
-    /// This killed a live session: another process took the input device, the
-    /// detector could not open a stream, and the `?` propagated straight out
-    /// of `run_loop` — "The requested stream configuration is not supported by
-    /// the device", process gone. Devices come and go; the loop waits.
     #[tokio::test]
     async fn a_microphone_that_fails_then_recovers_does_not_end_the_session() {
         use async_trait::async_trait;
@@ -3502,8 +2838,6 @@ mod tests {
         );
     }
 
-    /// A microphone that never comes back must still report itself, rather
-    /// than retrying in silence for the life of the process.
     #[tokio::test(start_paused = true)]
     async fn a_microphone_that_never_recovers_reports_instead_of_hanging() {
         use async_trait::async_trait;
@@ -3541,9 +2875,6 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_completes_turn_under_instant_activation() {
-        // REGRESSION (InstantActivation race): with the default InstantActivation
-        // detector (stdin / --no-wake-word), run_loop used to abort every turn
-        // via the interrupt race. The turn must now complete and reach speak().
         let agent = Arc::new(MockAgent::new());
         let storage = Arc::new(InMemorySessionStorage::new());
         let session_id = "instant-race".to_string();
@@ -3568,8 +2899,6 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_persists_exactly_one_turn_under_instant_activation() {
-        // The completed turn must persist exactly one user + one assistant
-        // message — no phantom turns, no double-persist.
         let agent = Arc::new(MockAgent::new());
         let storage = Arc::new(InMemorySessionStorage::new());
         let session_id = "instant-persist".to_string();
@@ -3592,10 +2921,6 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_derives_deterministic_session_title_without_provider() {
-        // The live GooseAdapter voice path builds ChatService WITHOUT a
-        // provider, so the LLM title path never runs. persist_confirmed_turn
-        // must still derive a readable deterministic title from the first
-        // utterance so the chat sidebar never shows a raw session id.
         let agent = Arc::new(MockAgent::new());
         let storage = Arc::new(InMemorySessionStorage::new());
         let session_id = "title-voice-session".to_string();
@@ -3621,9 +2946,6 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_emits_contract_event_sequence_for_a_turn() {
-        // Asserts the NDJSON event sequence for a single scripted turn:
-        // state changes in order, transcript exactly once, tokens streamed,
-        // turn_complete exactly once on completion, exit stdin_eof at the end.
         let agent = Arc::new(MockAgent::new());
         let storage = Arc::new(InMemorySessionStorage::new());
         let session_id = "seq-session".to_string();
@@ -3640,9 +2962,7 @@ mod tests {
 
         let events = collector.ndjson_events();
 
-        // The turn's states must appear in order Wait → Listen → Thinking →
-        // Speak. (After the turn the loop keeps cycling Wait/Listen while the
-        // script drains to EOF, so assert the ordered prefix, not equality.)
+        // A prefix, not equality: the loop keeps cycling Wait/Listen until the script hits EOF.
         let states: Vec<WorkflowState> = events
             .iter()
             .filter_map(|e| match e {
@@ -3661,7 +2981,6 @@ mod tests {
             ],
             "the turn's state transitions must be Wait→Listen→Thinking→Speak; got {states:?}"
         );
-        // Thinking must precede Speak, and both occur exactly once for one turn.
         assert_eq!(
             states
                 .iter()
@@ -3679,7 +2998,6 @@ mod tests {
             "exactly one Speak for one turn"
         );
 
-        // Exactly one transcript, carrying the confirmed utterance.
         let transcripts: Vec<&str> = events
             .iter()
             .filter_map(|e| match e {
@@ -3689,7 +3007,6 @@ mod tests {
             .collect();
         assert_eq!(transcripts, vec!["tell me a joke"], "one transcript event");
 
-        // At least one token streamed.
         let token_count = events
             .iter()
             .filter(|e| matches!(e, WorkflowEvent::Token { .. }))
@@ -3699,7 +3016,6 @@ mod tests {
             "tokens must be streamed; got {token_count}"
         );
 
-        // Exactly one turn_complete on completion.
         let turn_complete_count = events
             .iter()
             .filter(|e| matches!(e, WorkflowEvent::TurnComplete { .. }))
@@ -3709,8 +3025,7 @@ mod tests {
             "exactly one turn_complete on completion"
         );
 
-        // Ready is NOT emitted by run_loop (the CLI emits it after model load);
-        // exit(stdin_eof) is the last contract event.
+        // `Ready` comes from the CLI after model load, not from run_loop.
         match events.last() {
             Some(WorkflowEvent::Exit { reason }) => assert_eq!(reason, "stdin_eof"),
             other => panic!("last event must be exit(stdin_eof); got {other:?}"),
@@ -3719,16 +3034,7 @@ mod tests {
 
     #[tokio::test]
     async fn thought_filter_tail_is_emitted_as_token_and_matches_persisted_text() {
-        // REGRESSION (#153, event stream): when ThoughtFilter's lookahead holds
-        // back the final bytes of a response, the flushed tail is appended to the
-        // persisted/spoken text but was NOT emitted as a Token — so the desktop
-        // caption (built solely from Token events) ended short of the reply.
-        //
-        // The response text here ends in a partial sentinel prefix ("<end_of_tu"),
-        // which the filter withholds in Normal state until flush(). MockAgent
-        // echoes the user message, so we drive the tail deterministically via the
-        // utterance. The invariant we lock: the concatenation of all Token event
-        // contents equals the persisted assistant message text.
+        // MockAgent echoes this; the partial marker "<end_of_tu" is withheld until flush().
         let agent = Arc::new(MockAgent::new());
         let storage = Arc::new(InMemorySessionStorage::new());
         let session_id = "tail-token-session".to_string();
@@ -3745,7 +3051,6 @@ mod tests {
 
         let events = collector.events.lock().unwrap().clone();
 
-        // Concatenate every Token event's content (in emit order).
         let streamed: String = events
             .iter()
             .filter_map(|e| match e {
@@ -3754,7 +3059,6 @@ mod tests {
             })
             .collect();
 
-        // The persisted assistant message is the ground truth for the reply text.
         let msgs = storage.get_messages(&session_id).await.unwrap();
         let assistant = msgs
             .iter()
@@ -3766,8 +3070,6 @@ mod tests {
             "the streamed Token events must reconstruct the full persisted reply, \
              including the ThoughtFilter tail flushed at stream end"
         );
-        // Sanity: the reply's trailing bytes (withheld by the filter's lookahead
-        // and released only at flush) reached the Token stream.
         assert!(
             streamed.ends_with("<end_of_tu"),
             "the withheld tail must reach the Token stream; got {streamed:?}"
@@ -3776,17 +3078,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_tail_is_withheld_when_the_reply_ends_on_ordinary_text() {
-        // The sibling #153 never got. That fix guaranteed the withheld tail is
-        // released at stream END; it left the filter withholding a fixed 16
-        // bytes on every push regardless of content, so the caption trailed
-        // generation for the whole reply and froze mid-word whenever generation
-        // slowed. A reply that ends on ordinary text must now leave the filter
-        // with nothing to flush at all.
-        //
-        // Deliberately the mirror of the test above: same harness, same
-        // assertion on reconstruction, but an utterance whose tail CANNOT begin
-        // a marker. Together they pin both halves -- an ambiguous tail is still
-        // held, an unambiguous one never is.
+        // Mirror of the test above: a tail that cannot begin a marker must never be held.
         let agent = Arc::new(MockAgent::new());
         let storage = Arc::new(InMemorySessionStorage::new());
         let session_id = "no-tail-session".to_string();
@@ -3822,19 +3114,11 @@ mod tests {
             streamed, assistant.message.content,
             "the streamed Token events must reconstruct the full persisted reply"
         );
-        // The load-bearing half: the first Token already carries the reply's
-        // opening bytes. Under the old fixed lookahead the first 16 bytes were
-        // withheld, so a reply this short emitted NOTHING until flush.
         assert!(
             !tokens.is_empty(),
             "an ordinary reply must produce at least one Token before flush"
         );
-        // The load-bearing assertion. MockAgent delivers this reply as a single
-        // chunk, so with no holdback the FIRST Token is the whole reply and
-        // flush contributes nothing. Under the old fixed 16-byte lookahead the
-        // first Token would have been the reply minus its last 16 bytes, with
-        // the remainder arriving only at flush -- i.e. two Tokens, the first
-        // one truncated mid-word.
+        // MockAgent sends the reply as one chunk, so without holdback the first Token is all of it.
         assert_eq!(
             tokens[0], assistant.message.content,
             "the first Token must carry the whole single-chunk reply, not a \
@@ -3850,12 +3134,6 @@ mod tests {
 
     #[tokio::test]
     async fn finalize_persist_failure_keeps_loop_alive_and_skips_turn_complete() {
-        // REGRESSION: a transient persist failure (SQLITE_BUSY from serve + child
-        // WAL contention) used to hard-fail the turn — resetting to wake-word mode
-        // mid-conversation for a reply the user already heard. Now finalize must:
-        //   - emit an Error event (observability),
-        //   - NOT emit TurnComplete (persistence is that event's contract),
-        //   - return true so the loop stays in conversational mode.
         let agent = Arc::new(MockAgent::new());
         let storage = Arc::new(FailingAddStorage::new());
         let session_id = "persist-fail-session".to_string();
@@ -3866,8 +3144,6 @@ mod tests {
             .with_voice_output(Arc::new(CapturingSpeak::default()))
             .with_event_sink(collector.sink());
 
-        // Drive finalize_confirmed_turn directly with a successfully-streamed reply
-        // whose persistence will fail (add_message always errors).
         let stayed_conversational = svc
             .finalize_confirmed_turn(
                 Ok(Ok(TurnOutcome {
@@ -3903,9 +3179,7 @@ mod tests {
         );
     }
 
-    /// A detector that supports interruption and interrupts immediately, to
-    /// prove the interrupt path (interruptible detector) emits ZERO
-    /// turn_complete and persists NOTHING.
+    /// An interruptible detector that activates at once, so every race is an interrupt.
     struct AlwaysInterruptDetector;
 
     #[async_trait::async_trait]
@@ -3913,8 +3187,6 @@ mod tests {
         async fn wait_for_activation_with_audio(
             &self,
         ) -> Result<crate::models::ports::wake_word::WakeWordActivation> {
-            // First call (Wait phase): return quickly so the loop enters Listen.
-            // The interrupt race then re-enters here and wins immediately.
             Ok(crate::models::ports::wake_word::WakeWordActivation {
                 captured_audio: None,
             })
@@ -3926,17 +3198,12 @@ mod tests {
 
     #[tokio::test]
     async fn interrupted_turn_persists_nothing_and_emits_no_turn_complete() {
-        // With an interruptible detector that fires instantly, the in-flight
-        // turn is aborted: NO persistence, NO turn_complete. This is the
-        // exactly-once / none-on-interrupt invariant on the interrupt path.
         let agent = Arc::new(MockAgent::new());
         let storage = Arc::new(InMemorySessionStorage::new());
         let session_id = "interrupt-session".to_string();
         storage.create_session(session_id.clone()).await.unwrap();
 
         let collector = EventCollector::default();
-        // Listen returns text on the first turn, then None so the loop can end
-        // after the interrupt stashes/discards.
         let input = Arc::new(ScriptedListenInput::new(["a long question"]));
         let svc = ChatService::new(agent, session_id.clone(), storage.clone())
             .with_voice_input(input)
@@ -3944,11 +3211,9 @@ mod tests {
             .with_wake_word_detector(Arc::new(AlwaysInterruptDetector))
             .with_event_sink(collector.sink());
 
-        // MockAgent sleeps 300ms before streaming, so the instant wake future
-        // wins the race deterministically.
+        // MockAgent sleeps 300ms before streaming, so the instant wake always wins.
         svc.run_loop().await.unwrap();
 
-        // Nothing persisted — the interrupted turn never committed.
         let msgs = storage.get_messages(&session_id).await.unwrap();
         assert!(
             msgs.is_empty(),
@@ -3956,7 +3221,6 @@ mod tests {
             msgs.len()
         );
 
-        // No turn_complete emitted for the interrupted turn.
         let turn_complete_count = collector
             .ndjson_events()
             .iter()
@@ -3998,8 +3262,7 @@ mod tests {
     }
 
     impl Utt {
-        /// The case that SHOULD speak: Liz is here, it is the afternoon, an
-        /// alert, nobody mid-turn. Every test below is this minus one thing.
+        /// The case that should speak; each test below changes one thing.
         fn speakable() -> Self {
             Self {
                 audience: liz(),
@@ -4026,9 +3289,7 @@ mod tests {
         decide_unprompted_speech(settings, &u.as_utterance())
     }
 
-    /// The positive case, and the vacuity control for every refusal test in
-    /// this section: without it they would all pass against a gate whose body
-    /// was `Refused(NotEnabled)`.
+    /// The vacuity control for every refusal test in this section.
     #[test]
     fn an_enabled_present_member_outside_quiet_hours_is_spoken_to() {
         assert_eq!(
@@ -4037,11 +3298,7 @@ mod tests {
         );
     }
 
-    /// PAI-7 invariant 6. "Absolute" is a claim about ORDERING as much as about
-    /// the condition, so this asserts the reason is quiet hours rather than
-    /// merely that nothing was said -- a gate that refused for some other
-    /// reason first would pass a "did it stay quiet" assertion while leaving
-    /// the window overridable by whatever it checked first.
+    /// Asserts the refusal reason, not mere silence: quiet hours must be checked first.
     #[test]
     fn quiet_hours_refuse_before_anything_else_can_permit() {
         let mut spoke_outside = 0;
@@ -4074,9 +3331,7 @@ mod tests {
                                  turn_in_flight={turn_in_flight} enabled={enabled}"
                             );
 
-                            // The vacuity control, and it is load-bearing: the
-                            // sweep above proves nothing unless the SAME
-                            // combinations can speak when the clock moves.
+                            // Vacuity control: some of these must speak by day.
                             u.now = at(14, 30);
                             if decide(Some(&settings), &u) == UnpromptedSpeech::Spoken {
                                 spoke_outside += 1;
@@ -4094,11 +3349,7 @@ mod tests {
         );
     }
 
-    /// A failed settings read is silence, and NOT a fall back to
-    /// `Settings::default()` -- even though today's default is also silent.
-    /// The default is a value somebody can change; an unreadable store is not
-    /// consent, and laundering one through the other would start speaking the
-    /// day that default moved, with nothing in the gate to review.
+    /// The default is silent today too, but it may change; an unreadable store is never consent.
     #[test]
     fn an_unreadable_settings_read_is_silence_rather_than_a_default() {
         assert_eq!(
@@ -4116,9 +3367,7 @@ mod tests {
         );
     }
 
-    /// PAI-7 invariants 4 and 5. `Household` is refused for the same reason a
-    /// targeted notification is never broadcast: speaking into the room is
-    /// addressed to nobody and heard by everybody.
+    /// Speaking to `Household` is addressed to nobody and heard by everybody.
     #[test]
     fn only_a_named_member_is_ever_spoken_to() {
         for (audience, expected) in [
@@ -4138,8 +3387,6 @@ mod tests {
         }
     }
 
-    /// Speaking into an empty room is worse than saying nothing: nobody is
-    /// helped, and whoever IS in the room is not the person it was for.
     #[test]
     fn a_member_the_pond_cannot_see_is_not_spoken_to() {
         for present in [vec![], vec!["jerry".to_string()]] {
@@ -4163,8 +3410,7 @@ mod tests {
         );
     }
 
-    /// The shipped list is `alert` alone, so the category that carries every
-    /// completed scheduled task is exactly the one that stays silent.
+    /// The shipped list is `alert` alone.
     #[test]
     fn a_category_the_household_did_not_enable_is_not_spoken() {
         for category in ["info", "action_required", "", "  ", "ALERTS"] {
@@ -4182,10 +3428,7 @@ mod tests {
         assert_eq!(decide(Some(&speech_on()), &u), UnpromptedSpeech::Spoken);
     }
 
-    /// The fail-closed direction, and the one that is the OPPOSITE of the rules
-    /// engine's. `schedule.rs :: in_time_window` answers `false` for a
-    /// malformed bound, because there false means a rule does not fire. Here
-    /// false would mean the pond speaks, so a malformed bound is quiet.
+    /// Deliberately the opposite of `in_time_window`'s `false`: here false would mean speaking.
     #[test]
     fn quiet_hours_that_cannot_be_read_mean_quiet_rather_than_no_window() {
         for (start, end) in [
@@ -4210,9 +3453,6 @@ mod tests {
         }
     }
 
-    /// A zero-length window is indistinguishable from "no quiet hours", and the
-    /// narrowing reading of an ambiguous setting is the quiet one. Turning
-    /// quiet hours off is what `unprompted_speech_enabled` is for.
     #[test]
     fn equal_quiet_bounds_are_quiet_all_day_rather_than_never() {
         let settings = Settings {
@@ -4253,18 +3493,7 @@ mod tests {
         assert!(!daytime(17));
     }
 
-    /// The same defect as the test above, reached by a route the string
-    /// comparison could not see. `"9:00"` and `"09:00"` are the same instant and
-    /// two different strings, and `%H` accepts both -- so a zero-length window
-    /// decided on the raw text reads as `start < end`, gives the non-wrapping
-    /// arm `now >= 9:00 && now < 9:00`, and answers NEVER QUIET. That is a
-    /// scope-widening default reached by spelling: the household asked for the
-    /// window the other test pins and got the opposite of it.
-    ///
-    /// Both bounds are free text. `sqlite_settings::apply_key` stores them
-    /// verbatim on purpose (a parse there would have to pick a value for a
-    /// malformed row) so `PUT /api/v1/settings` can put any of these pairs in
-    /// the table, and every one of them is a plausible thing to type.
+    /// `%H` accepts unpadded hours; compared as stored text, these would read as never quiet.
     #[test]
     fn two_spellings_of_one_time_are_still_a_zero_length_window() {
         for (start, end) in [
@@ -4294,14 +3523,9 @@ mod tests {
         }
     }
 
-    /// The vacuity control for the test above: a window whose bounds really are
-    /// two different instants must still be read as a window, so the assertions
-    /// there are about equal times spelled differently and not about a
-    /// `quiet_hours_cover` that answers "quiet" to everything.
+    /// Vacuity control for the test above: unpadded, distinct bounds still form a window.
     #[test]
     fn an_unpadded_bound_is_still_read_as_the_time_it_names() {
-        // "9:00".."17:00" -- the same window as the padded spelling, and the
-        // one the wrap test pins with `09:00`.
         assert_eq!(quiet_hours_cover("9:00", "17:00", at(8, 59)), Some(false));
         assert_eq!(quiet_hours_cover("9:00", "17:00", at(9, 0)), Some(true));
         assert_eq!(quiet_hours_cover("9:00", "17:00", at(16, 59)), Some(true));
@@ -4313,9 +3537,7 @@ mod tests {
         assert!(LocalTimeOfDay::new(24, 0).is_none());
         assert!(LocalTimeOfDay::new(0, 60).is_none());
         assert_eq!(at(23, 59).minutes(), 23 * 60 + 59);
-        // Vacuity control: the constructor really does accept the edges it
-        // should, so the two `is_none` assertions above are about the range and
-        // not about a constructor that refuses everything.
+        // Vacuity control: the edges are accepted.
         assert!(LocalTimeOfDay::new(23, 59).is_some());
         assert!(LocalTimeOfDay::new(0, 0).is_some());
     }
@@ -4343,10 +3565,7 @@ mod tests {
         );
     }
 
-    /// The behavioural half, and the one that matters: the gate is only worth
-    /// anything if a refusal never reaches the speaker. This drives the real
-    /// `ChatService` with a capturing `VoiceOutput`, so it fails if
-    /// `speak_unprompted` is ever rearranged to speak first and decide after.
+    /// Drives the real `ChatService`, so it fails if `speak_unprompted` speaks before deciding.
     #[tokio::test]
     async fn no_refusal_ever_reaches_the_speaker_and_the_allowed_case_does() {
         async fn service_with(output: Arc<CapturingSpeak>) -> ChatService {
@@ -4416,9 +3635,7 @@ mod tests {
             );
         }
 
-        // And the control: the allowed case really does reach it, so the ten
-        // assertions above are about the gate and not about a `speak_unprompted`
-        // that never speaks.
+        // Vacuity control: the allowed case does reach the speaker.
         let output = Arc::new(CapturingSpeak::default());
         let service = service_with(output.clone()).await;
         let allowed = Utt::speakable();
