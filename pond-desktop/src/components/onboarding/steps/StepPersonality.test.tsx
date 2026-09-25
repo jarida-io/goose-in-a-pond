@@ -24,12 +24,7 @@ function renderStep() {
   );
 }
 
-/**
- * The voice buttons the picker is offering.
- *
- * Scoped to the picker's own group: the conversation-style cards above are
- * also radios, and a bare `getAllByRole("radio")` counts those too.
- */
+/** The picker's voice buttons, scoped to its group (the style cards above are radios too). */
 function voiceOptions(): HTMLButtonElement[] {
   const group = document.querySelector(".vpick__voices");
   return group ? (Array.from(group.querySelectorAll("button")) as HTMLButtonElement[]) : [];
@@ -42,8 +37,7 @@ beforeEach(() => {
   vi.mocked(api.updateSettings).mockResolvedValue({} as never);
   vi.mocked(api.synthesizeSpeech).mockResolvedValue(new ArrayBuffer(8) as never);
   vi.mocked(api.getDownloadProgress).mockResolvedValue({ downloads: [] } as never);
-  // The server echoes back the tier it actually put in force. Normally that is
-  // the one it was asked for; see the substitution test below for when it isn't.
+  // The server echoes the tier it put in force (see the substitution test for when it differs).
   vi.mocked(api.applyTtsSettings).mockResolvedValue({
     voice: "af_bella",
     speed: 1,
@@ -61,10 +55,6 @@ beforeEach(() => {
   ] as never);
 });
 
-// Onboarding used to ship four hardcoded voice cards whose ids — "amy",
-// "kathleen", "libritts" — named nothing that existed, so every new install
-// wrote a `voice_tts_voice` the resolver could never match. It now uses the
-// same picker as the Models page, driven by the real catalogue.
 describe("Onboarding voice step", () => {
   it("offers real catalogued voices, not a hardcoded list", async () => {
     renderStep();
@@ -92,8 +82,6 @@ describe("Onboarding voice step", () => {
     await waitFor(() => expect(vi.mocked(api.synthesizeSpeech)).toHaveBeenCalled());
   });
 
-  // The rate was collected by a slider and then dropped on the floor — the
-  // wizard never wrote it anywhere.
   it("persists the pace it collects", async () => {
     renderStep();
     await waitFor(() => expect(voiceOptions().length).toBeGreaterThan(0));
@@ -106,8 +94,6 @@ describe("Onboarding voice step", () => {
     );
   });
 
-  // Twenty American voices is a decision nobody asked to make before hearing
-  // the assistant speak once. Setup shows the three best-graded per accent.
   it("offers at most three voices per accent, best-graded first", async () => {
     vi.mocked(api.listModels).mockResolvedValue([
       // Deliberately out of grade order, and more than three.
@@ -128,8 +114,6 @@ describe("Onboarding voice step", () => {
     expect(names.some((n) => n.includes("Adam"))).toBe(false);
   });
 
-  // Setup commits to the smallest tier, and every preview must come from it —
-  // judging a voice on one tier and living with another is the trap.
   it("uses the compact tier and applies it with every sample", async () => {
     renderStep();
     await waitFor(() => expect(voiceOptions().length).toBeGreaterThan(0));
@@ -147,11 +131,7 @@ describe("Onboarding voice step", () => {
     );
   });
 
-  // Some tiers cannot produce audio on some machines: asked for q8f16, a Jetson
-  // answers q4f16, because q8f16 synthesises pure silence there. Setup has to
-  // store what is running rather than what it requested, or the household ends
-  // up with a saved tier the engine is not using — and every later preview
-  // would be judged on the wrong one.
+  // e.g. a Jetson answers q4f16 when asked for q8f16, which synthesises silence there.
   it("stores the tier the server actually used, not the one it asked for", async () => {
     vi.mocked(api.applyTtsSettings).mockResolvedValue({
       voice: "af_heart",
@@ -188,8 +168,6 @@ describe("Onboarding voice step", () => {
     expect(bella.getAttribute("title")).toContain("downloads when selected");
   });
 
-  /// Offline, the step must still let someone through rather than blocking
-  /// setup on a catalogue it could not reach.
   it("still renders when the catalogue is unreachable", async () => {
     vi.mocked(api.listModels).mockRejectedValue(new Error("offline"));
     renderStep();

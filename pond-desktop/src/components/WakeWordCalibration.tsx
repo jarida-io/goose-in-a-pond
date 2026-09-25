@@ -25,10 +25,7 @@ const COUNTDOWN_TICK_MS = 800;
 const MIN_SAMPLES_FOR_DONE = 3;
 
 // ── Calibration sentences ─────────────────────────────────────
-// Instead of asking the user to say the bare wake word 5 times (unnatural),
-// generate short sentences that contain the wake word in varied contexts.
-// Whisper transcribes each sentence, and the server extracts the wake-word
-// portion as a calibration variant. This captures natural pronunciation.
+// Sentences containing the wake word capture natural pronunciation; the server extracts it.
 
 function buildCalibrationPrompts(phrase: string): string[] {
   const p = phrase.trim();
@@ -47,7 +44,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// ── Component ──────────────────────────────────────���───────────
+// ── Component ──────────────────────────────────────────────────
 
 export function WakeWordCalibration({ phrase, onComplete, onCancel }: Props) {
   const [phase, setPhase] = useState<Phase>("idle");
@@ -61,21 +58,14 @@ export function WakeWordCalibration({ phrase, onComplete, onCancel }: Props) {
 
   const [pendingWav, setPendingWav] = useState<ArrayBuffer | null>(null);
 
-  // Calibration prompts — short sentences the user reads aloud
   const [prompts] = useState(() => buildCalibrationPrompts(phrase));
 
   const prevSampleCount = useRef(0);
   const abortedRef = useRef(false);
   const recorderRef = useRef<FixedRecorder | null>(null);
 
-  // The level used to arrive as an `audio-level` event from the Rust shell.
-  // Now the recorder reports it directly, so there is no listener to own and
-  // no event that can fire between mount and subscription.
-
   // ── Cleanup on unmount ────────────────────────────────────────
-  // Reset on each mount: React 18 StrictMode reuses the same ref object across
-  // its simulated unmount/remount pair, so the cleanup's `true` would survive
-  // into the live mount and silently short-circuit every startSample call.
+  // Reset on mount: StrictMode's remount reuses the ref, so a stale `true` would block sampling.
   useEffect(() => {
     abortedRef.current = false;
     return () => {
@@ -101,10 +91,7 @@ export function WakeWordCalibration({ phrase, onComplete, onCancel }: Props) {
     }
     if (abortedRef.current) return;
 
-    // 2. A live voice session owns the microphone exclusively, and would also
-    //    hear the calibration utterance. Refuse rather than fight it. This
-    //    replaces the old stop_wake_listener call, which existed for the same
-    //    reason when the shell owned the mic.
+    // 2. Stop any live voice session: it holds the mic exclusively and would hear the sample.
     if (isDesktopShell()) {
       try {
         await invoke("stop_voice_session");
@@ -154,7 +141,7 @@ export function WakeWordCalibration({ phrase, onComplete, onCancel }: Props) {
       setTargetCount(result.target_count);
       setVariants(result.all_variants);
 
-      // Check if sample_count didn't increase (duplicate variant)
+      // Unchanged sample_count means a duplicate variant.
       if (result.sample_count === prevSampleCount.current && !result.complete) {
         setSampleCount(result.sample_count);
         setErrorMsg("Already have that transcription. Try the next sentence — the different context helps capture a new variant.");
@@ -204,7 +191,7 @@ export function WakeWordCalibration({ phrase, onComplete, onCancel }: Props) {
     setPhase("idle");
   }, []);
 
-  // ── Render ───────────────────────────────────────��────────────
+  // ── Render ────────────────────────────────────────────────────
 
   return (
     <div style={styles.root}>

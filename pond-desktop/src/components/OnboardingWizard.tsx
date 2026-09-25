@@ -1,8 +1,3 @@
-// ────────────────────────────────────────────────────────────
-// OnboardingWizard — Re-export shim
-//
-// The canonical implementation lives in ./onboarding/.
-// This file exists for backwards compatibility only.
-// ────────────────────────────────────────────────────────────
+// Re-export shim; the implementation lives in ./onboarding/.
 
 export { OnboardingWizard } from "./onboarding";

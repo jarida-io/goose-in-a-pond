@@ -9,8 +9,7 @@ interface DeviceTileProps {
   size?: "md" | "lg";
 }
 
-// Icon + friendly label for devices that aren't a smart-home light/lock/thermostat/plug
-// (host, sensor, gotg, smart_speaker, pond, edge — the Devices section's register types).
+/** Icons for non-smart-home devices, keyed by the Devices section's register types. */
 export const SUBTYPE_ICON: Record<string, string> = {
   host: HP_PATHS.cpu,
   sensor: HP_PATHS.pulse,
@@ -34,16 +33,7 @@ export function DeviceTile({ device, size = "md" }: DeviceTileProps) {
   const k = device.kind;
   const { on, locked, target = 70 } = st;
 
-  // Resolve visual state.
-  //
-  // One material, two states. An active tile is INK — the same near-black on
-  // every kind — and an inactive one is paper. The four saturated gradients
-  // this replaced (amber lights, blue locks, orange thermostat, teal plugs)
-  // encoded kind, which the icon and the name already say, while leaving the
-  // thing you actually scan for — is it on? — to be inferred from which hue
-  // happened to be showing. Inversion reads at a glance and needs nothing
-  // learned, and it hands the page's only colour back to the one control that
-  // asks for a decision.
+  // One look for every kind; state shows via `data-active` (see hub.css) and the accent icon.
   let active = false;
   let bg = "var(--tile-bg,#fff)";
   let fg = "var(--tile-fg,#18181B)";
@@ -95,10 +85,7 @@ export function DeviceTile({ device, size = "md" }: DeviceTileProps) {
   }
 
   return (
-    // A "..." controls button can't be nested inside the tile's own button
-    // (nested interactive controls are invalid a11y-wise). They're siblings
-    // instead: the tile is the primary toggle, the dots button is absolutely
-    // positioned over its corner via .dtile-wrap in hub.css.
+    // The "..." button can't nest in the tile button (a11y); .dtile-wrap overlays it as a sibling.
     <div className="dtile-wrap">
       <button
         className="dtile"

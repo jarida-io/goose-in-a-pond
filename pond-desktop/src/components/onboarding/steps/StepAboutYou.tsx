@@ -1,7 +1,4 @@
-// ────────────────────────────────────────────────────────────
-// Step 1 — About You (merged Basics + Accessibility)
-// REQUIRED: userName must be non-empty to proceed
-// ────────────────────────────────────────────────────────────
+// Step 1, About You (Basics + Accessibility); userName is required.
 
 import { MessageCircle, Turtle, Contrast, CircleSlash } from "lucide-react";
 import { useOnboarding } from "../OnboardingContext";

@@ -1,6 +1,4 @@
-// ────────────────────────────────────────────────────────────
-// Step 6 — All Set (merged Extensions + Done)
-// ────────────────────────────────────────────────────────────
+// Step 6, All Set (Extensions + Done).
 
 import { useMemo, Fragment } from "react";
 import { motion } from "framer-motion";

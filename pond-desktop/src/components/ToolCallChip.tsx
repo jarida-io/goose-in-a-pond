@@ -5,35 +5,20 @@ import { findCardByHint, findCardRenderer } from "../mcp-ui";
 
 interface Props {
   card: ContextCardType;
-  /**
-   * Send a follow-up message on the user's behalf, for cards that offer one.
-   * Chat wires this to its own composer; a surface without one omits it and the
-   * card falls back to static labels.
-   */
+  /** Sends a card's follow-up message as the user; without it, cards show static labels. */
   onAction?: (prompt: string) => void;
 }
 
-/**
- * Inline chip showing a single tool call result inside a chat bubble.
- * Collapsed by default — click to reveal the result.
- *
- * The expanded body is the registered MCP-UI card when one matches, and the
- * truncated text only when none does. Chat used to always show the text: every
- * card in `mcp-ui/cards/` rendered in Canvas and in the context rail and
- * nowhere in the conversation, which is the one place the result is actually
- * being read.
- */
+/** Collapsible tool-result chip in a chat bubble: the matching MCP-UI card, else truncated text. */
 export function ToolCallChip({ card, onAction }: Props) {
   const [expanded, setExpanded] = useState(false);
   const name = friendlyToolName(card.tool);
   const result = extractResultText(card.data);
 
-  // The server's own hint wins over a name match: `renderHint` is what
-  // `extract_ui_hint` decided this result is, and the tool name is a guess.
+  // The server's `renderHint` (from `extract_ui_hint`) wins over a tool-name guess.
   const registration =
     (card.renderHint ? findCardByHint(card.renderHint) : null) ?? findCardRenderer(card.tool);
-  // A card with no structured data behind it would render its own empty state,
-  // which is worse than the text — the hint only arrives on `tool_result`.
+  // No hint until `tool_result`; before that a card would render empty, so show the text.
   const Renderer = card.renderHint && registration ? registration.component : null;
   const hasBody = Boolean(Renderer) || Boolean(result);
 
@@ -65,9 +50,7 @@ export function ToolCallChip({ card, onAction }: Props) {
           className="tool-call-card"
           role="region"
           aria-label={`${name} result`}
-          // The card owns its own interactions (links, suggestion chips), and
-          // the chip's own click handler toggles the panel shut. Without this
-          // every click inside the card would collapse it.
+          // Keep clicks off the chip's toggle, or any click inside the card would collapse it.
           onClick={(e) => e.stopPropagation()}
           onKeyDown={(e) => e.stopPropagation()}
         >
@@ -135,10 +118,7 @@ export function friendlyToolName(raw: string): string {
 
 // ── Result text extraction ───────────────────────────────────────────────────
 
-/**
- * Pull a readable string out of whatever shape `card.data` has.
- * Returns null if there is nothing useful to show.
- */
+/** A readable string from whatever shape `card.data` has, or null. */
 function extractResultText(data: Record<string, unknown> | null): string | null {
   if (!data) return null;
 

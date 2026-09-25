@@ -306,7 +306,6 @@ function DailyBriefingCard({
     }
   }, [done]);
 
-  // Try to extract structured data from result (only if the LLM returned JSON)
   const parsed = tryParseJson(run.result);
   const hasParsedStats = parsed != null && (
     parsed["meetings"] != null || parsed["tasks"] != null || parsed["emails"] != null

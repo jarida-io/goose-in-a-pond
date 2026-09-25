@@ -1,9 +1,6 @@
 import { AlertTriangle, RefreshCw } from "lucide-react";
 
-/**
- * Maps raw JS error strings to short, user-readable messages.
- * Falls back to a generic message so users never see a raw stack trace.
- */
+/** Maps a raw error string to a short user-facing message, falling back to a generic one. */
 export function friendlyMessage(raw: string): string {
   const s = raw.toLowerCase();
   if (s.includes("network") || s.includes("fetch") || s.includes("failed to fetch"))

@@ -1,7 +1,4 @@
-// ────────────────────────────────────────────────────────────
-// Step 2 — Language & Location
-// REQUIRED: timezone is pre-populated from Intl, user must confirm
-// ────────────────────────────────────────────────────────────
+// Step 2, Language & Location; timezone is pre-filled from Intl and must be confirmed.
 
 import { useState } from "react";
 import { MapPin, CloudSun } from "lucide-react";
@@ -18,14 +15,7 @@ export function StepLocale() {
   const [detecting, setDetecting] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
-  /**
-   * The same cascade Settings runs, on the server.
-   *
-   * What was here before did not detect anything: it split the time-zone
-   * string on "/", waited 400ms so it looked like work, and produced NO
-   * COORDINATES — then switched weather on regardless, so setup finished with
-   * a forecast that could never be fetched.
-   */
+  /** Runs the server's place-detection cascade, the same one Settings uses. */
   async function detect() {
     setDetecting(true);
     setNote(null);
@@ -36,9 +26,7 @@ export function StepLocale() {
         timezone: at.timezone,
         latitude: at.latitude,
         longitude: at.longitude,
-        // Only offer weather when there is something to ask about. Turning it
-        // on with no coordinates and no name is how the old button left every
-        // onboarded pond with weather enabled and permanently unconfigured.
+        // Enable weather only with coordinates or a name, or it stays on but unconfigurable.
         enableWeather: at.has_coordinates || Boolean(at.name),
       });
       setNote(

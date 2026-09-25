@@ -1,20 +1,5 @@
-/**
- * The goose. A shared illustration, not a chat decoration.
- *
- * Lives in `components/` rather than under the chat views because it is meant
- * to be reused wherever the pond needs a face: the empty chat, a working
- * indicator while the agent runs, an empty list, an error state. Anything that
- * needs "the assistant, doing something" should reach for this instead of
- * drawing its own.
- *
- * The artwork is built from separate parts — body, wing, neck, head, beak —
- * so `state` can animate them on different phases. A single silhouette can
- * only ever be translated as a lump, which is what made the first version read
- * as a sticker rather than a bird.
- *
- * All motion is in `styles/goose.css`, keyed off `data-state`, so a caller
- * picks behaviour rather than wiring keyframes.
- */
+/** The goose: a shared illustration for anywhere the pond needs a face. Built from parts so
+ *  `state` can animate each; all motion is in `styles/goose.css`, keyed off `data-state`. */
 
 export type GooseState =
   /** Afloat and waiting. Slow bob, occasional head dip. */
@@ -28,10 +13,7 @@ interface GooseProps {
   state?: GooseState;
   /** Rendered width in px; height follows the viewBox. */
   size?: number;
-  /**
-   * Draw the waterline and ripples. Off for inline use — an avatar or a status
-   * strip wants the bird, not the pond, and the viewBox crops to suit.
-   */
+  /** Draw the waterline and ripples; off for inline use, where the viewBox crops to the bird. */
   water?: boolean;
   /** Decorative by default — pass a label when it carries meaning. */
   label?: string;
@@ -39,8 +21,6 @@ interface GooseProps {
 }
 
 export function Goose({ state = "idle", size = 132, water = true, label, className }: GooseProps) {
-  // Cropped to the bird when there is no water to sit on, so a small render
-  // does not waste half its box on empty pond.
   const viewBox = water ? "0 0 160 120" : "38 6 108 96";
   const ratio = water ? 120 / 160 : 96 / 108;
   return (

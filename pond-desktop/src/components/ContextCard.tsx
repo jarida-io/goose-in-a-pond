@@ -41,7 +41,7 @@ function ToolContent({ toolName, data, renderHint }: { toolName: string; data: R
     return <Renderer data={safe} toolName={toolName} variant="compact" />;
   }
 
-  // 3. Legacy fallbacks for backward compatibility
+  // 3. Fallbacks by tool name
   if (toolName === "list_registered_devices") return <DevicesContent data={safe} />;
   if (toolName === "recall_memories" || toolName === "save_memory") return <MemoryContent data={safe} />;
   if (toolName === "list_schedules") return <SchedulesContent data={safe} />;

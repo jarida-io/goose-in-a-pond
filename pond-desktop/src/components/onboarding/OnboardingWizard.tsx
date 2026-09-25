@@ -1,9 +1,4 @@
-// ────────────────────────────────────────────────────────────
-// Onboarding Wizard — Thin Orchestrator
-//
-// Manages step index, persistence on advance, validation,
-// and wires step components + Framer Motion transitions.
-// ────────────────────────────────────────────────────────────
+// Onboarding wizard orchestrator: step index, persist-on-advance, validation, transitions.
 
 import { useState, useCallback, useEffect } from "react";
 import { AnimatePresence, motion } from "framer-motion";
@@ -87,9 +82,7 @@ function WizardInner({ onComplete }: { onComplete: () => void }) {
   const { persist, isPersisting, error, clearError } = useOnboardingPersist();
   const [stepIndex, setStepIndex] = useState(0);
 
-  // Resume-from-N: if the backend has persisted progress from a prior session,
-  // start the wizard at the furthest step reached instead of Welcome. Runs
-  // once; ignores failures (fresh setups just start at 0).
+  // Resume at the furthest step the backend has recorded; on failure start at 0.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -122,7 +115,6 @@ function WizardInner({ onComplete }: { onComplete: () => void }) {
 
   const next = useCallback(async () => {
     clearError();
-    // Persist step data to backend before advancing
     const ok = await persist(currentStep.id, draft);
     if (ok) {
       setStepIndex((i) => Math.min(i + 1, STEPS.length - 1));
@@ -154,7 +146,6 @@ function WizardInner({ onComplete }: { onComplete: () => void }) {
     default:            body = null;
   }
 
-  // Respect reduceMotion preference
   const motionDuration = draft.reduceMotion ? 0 : 0.2;
 
   if (loading) {

@@ -1,6 +1,5 @@
 // ─── Notification center — type defs + mock data ─────────────────────────────
-// Backend-backed categories (schedule debrief) are fetched live in Notifications.tsx.
-// All other categories use mock data from this file until the EventLog port (Q2-32) lands.
+// Only schedule debriefs are live (Notifications.tsx); other categories are mock data for now.
 
 import type { ScheduleRunNotification } from "../../api/types";
 
@@ -44,8 +43,7 @@ export const CATEGORY_COLOR: Record<NotificationCategory, { fg: string; bg: stri
 };
 
 // ─── Mock notifications (non-schedule categories) ─────────────────────────────
-// Timestamps are relative; the view groups them into Today / Yesterday / Earlier.
-// "Today" = 2026-06-04, "Yesterday" = 2026-06-03.
+// Fixed dates: "Today" is 2026-06-04, "Yesterday" 2026-06-03; the view does the grouping.
 
 export const MOCK_NOTIFICATIONS: Notification[] = [
   // Today — security

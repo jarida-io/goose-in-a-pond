@@ -88,7 +88,6 @@ export function AudioWaves({ state, audioLevel, size = "lg", style }: AudioWaves
         const x = gap + i * (barW + gap);
         let heightFraction: number;
 
-        // Center-weighted index (-1 … 0 … 1)
         const norm = (i / (n - 1)) * 2 - 1; // -1 at leftmost, +1 at rightmost
         const centerWeight = 1 - Math.abs(norm) * 0.4; // center bars are taller
 
@@ -131,20 +130,18 @@ export function AudioWaves({ state, audioLevel, size = "lg", style }: AudioWaves
         }
 
         const barH = Math.max(minH, Math.min(maxH, heightFraction * H));
-        const y = (H - barH) / 2; // vertically centered
+        const y = (H - barH) / 2;
 
-        // Draw rounded rect — polyfill for environments missing roundRect
+        // Some environments lack ctx.roundRect.
         if (ctx.roundRect) {
           ctx.beginPath();
           ctx.roundRect(x, y, barW, barH, radius);
           ctx.fill();
         } else {
-          // Fallback: simple rect
           ctx.fillRect(x, y, barW, barH);
         }
       }
 
-      // Advance phase
       phaseRef.current += PHASE_STEP[state];
 
       rafRef.current = requestAnimationFrame(frame);
@@ -156,7 +153,7 @@ export function AudioWaves({ state, audioLevel, size = "lg", style }: AudioWaves
       cancelAnimationFrame(rafRef.current);
       ro.disconnect();
     };
-  }, [state, size]); // restart loop only when state or size changes
+  }, [state, size]);
 
   const cfg = CONFIG[size];
 

@@ -1,29 +1,8 @@
 import { CornerDownRight, Wrench } from "lucide-react";
 import type { ChatEvent, SubagentStatus } from "../api/types";
 
-/**
- * PAI-6 P6. The client half of subagent progress.
- *
- * A delegating turn used to be a spinner and nothing else: the parent is parked
- * inside one `delegate` tool call for the whole of a child's run — minutes, on a
- * Jetson — and until this phase nothing reached the browser until the tool
- * result did. The server now streams a `subagent_progress` frame per lifecycle
- * transition and per tool the child calls, and this is what draws them.
- *
- * Three decisions worth keeping:
- *
- * 1. **The fold lives here, not in a chat surface.** Both surfaces render this
- *    tree, and a fold copied into each is the drift this repository keeps
- *    paying for. `applySubagentProgress` is the only place a frame becomes
- *    state.
- * 2. **Grouped by `task_id`, not by role.** One turn may delegate the same role
- *    twice; grouping by name would merge two runs into one node whose status
- *    flickers between them.
- * 3. **It renders WHILE streaming.** Every other note on a message
- *    (`turn_limit`, the context-pressure line) is gated on `!streaming`,
- *    because it is about a finished turn. This one is the opposite: a tree
- *    nobody sees until the turn ends is the spinner again.
- */
+/** Draws `subagent_progress` frames as a tree. Folds only here (`applySubagentProgress`), groups
+ *  by `task_id` (a role can repeat), and renders WHILE streaming, unlike other message notes. */
 
 export interface SubagentRun {
   taskId: string;
@@ -35,12 +14,7 @@ export interface SubagentRun {
   detail?: string;
 }
 
-/**
- * Fold one `subagent_progress` frame into the runs of a turn.
- *
- * Returns the same array when the frame is not one (or carries no run to
- * attach to), so a caller can hand it every event without branching twice.
- */
+/** Folds a `subagent_progress` frame into a turn's runs; other events return `runs` as-is. */
 export function applySubagentProgress(
   runs: SubagentRun[],
   ev: ChatEvent,
@@ -56,12 +30,8 @@ export function applySubagentProgress(
     tools: [],
   };
 
-  // A `tool` frame says what the child is DOING; every other status says where
-  // the run has got to. Only the second kind touches `detail`, and it
-  // overwrites rather than merging: `detail` is the reason a run ended, and
-  // carrying a previous one forward would caption a finished run with the
-  // sentence from an earlier failure. The render below has no second gate for
-  // that -- clearing here is the only mechanism, so it is the one thing tested.
+  // `tool` frames only append to `tools`. Other statuses overwrite `detail` (never merge): it is
+  // why a run ended, and nothing else clears a stale one.
   const next: SubagentRun =
     ev.status === "tool"
       ? {

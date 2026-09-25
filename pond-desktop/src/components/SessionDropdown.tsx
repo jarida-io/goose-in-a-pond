@@ -14,14 +14,7 @@ function timeAgo(iso: string): string {
   return `${days}d`;
 }
 
-/**
- * Human-readable label for a conversation row.
- *
- * The backend already supplies a derived title (first user-message snippet)
- * when a session has no stored title, so `title` is usually populated. This
- * chain is the last line of defence: stored/derived title → id short-slug.
- * It never renders a raw full session id.
- */
+/** Row label: the stored or server-derived title, else a short id slug; never the full id. */
 function sessionLabel(s: SessionSummary): string {
   const t = s.title?.trim();
   if (t) return t;
@@ -85,7 +78,6 @@ export function SessionDropdown({
     return () => document.removeEventListener("mousedown", handleClick);
   }, [isOpen, onClose]);
 
-  // Reset any in-progress edit/confirm state whenever the panel closes.
   useEffect(() => {
     if (!isOpen) {
       setEditingId(null);
@@ -93,7 +85,6 @@ export function SessionDropdown({
     }
   }, [isOpen]);
 
-  // Focus + select the rename input when editing begins.
   useEffect(() => {
     if (editingId) {
       editInputRef.current?.focus();

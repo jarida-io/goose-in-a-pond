@@ -1,6 +1,4 @@
-// ────────────────────────────────────────────────────────────
-// Onboarding Wizard — Constants & Static Data
-// ────────────────────────────────────────────────────────────
+// Onboarding wizard constants and static data.
 
 import type {
   StepMeta,
@@ -22,13 +20,8 @@ export const STEPS: StepMeta[] = [
 ];
 
 // ── FE / BE step mapping ───────────────────────────────────
-//
-// The wizard has 7 visible steps; the backend `OnboardingStep` enum has 10
-// variants (Welcome, Basics, Location, Accessibility, Personality,
-// GooseIdentity, WakeWord, Model, Extensions, Completed). `Completed` is set
-// only by POST /onboard/complete. Accessibility prefs are folded into the
-// about-you step (stored in localStorage); the merged Personality+GooseIdentity
-// FE step reports the furthest of the two (GooseIdentity).
+// 7 wizard steps vs 10 backend `OnboardingStep` variants; `Completed` is set only by
+// POST /onboard/complete, and the merged personality step reports GooseIdentity.
 
 /** FE step id → backend `OnboardingStep` name to POST when that step persists. */
 export const FE_STEP_TO_BE: Record<string, string> = {
@@ -55,10 +48,7 @@ const BE_TO_FE_INDEX: Record<string, number> = {
   Completed:     6, // handled separately; keep at the last visible step
 };
 
-/**
- * Map a backend `OnboardingStep` name to the FE step index the wizard should
- * resume at. Unknown / not-started names resume at the beginning.
- */
+/** FE step index to resume at for a backend `OnboardingStep` name; unknown names give 0. */
 export function beStepToFeIndex(beStep: string | undefined | null): number {
   if (!beStep) return 0;
   return BE_TO_FE_INDEX[beStep] ?? 0;
@@ -91,9 +81,6 @@ export const PROMPT_STYLES: PromptStyle[] = [
   { value: "warm",      label: "Warm",       icon: "", desc: "Conversational, like a helpful neighbour." },
 ];
 
-// ── TTS voices ─────────────────────────────────────────────
-
-
 // ── Wake word presets ──────────────────────────────────────
 
 export const WAKE_PRESETS: WakePreset[] = [
@@ -124,8 +111,7 @@ export const DEFAULT_DRAFT: OnboardingDraft = {
   personality: "friendly and helpful",
   assistantName: "Goose",
   ttsVoice: "af_heart",
-  // Percent of the voice's natural pace, matching the settings screen so the
-  // two surfaces mean the same thing by the same number.
+  // Percent of natural pace, as on the settings screen.
   ttsRate: 100,
   wakeWord: "goose",
   wakeWordCustom: "",

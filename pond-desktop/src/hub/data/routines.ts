@@ -1,7 +1,5 @@
 // ─── Routines Data ─────────────────────────────────────────────
-// Ported from goose-hub-settings.jsx ROUTINE_DETAIL constant.
-// Routines are on-demand scenes/macros that execute immediately on tap.
-// They are NOT time-triggered schedules — see Phase 6 notes in scratchpad.md.
+// On-demand scenes that run on tap; not time-triggered schedules.
 
 import { sunEl, filmEl, focusEl } from "../primitives/HubIco";
 import { HP_PATHS } from "../primitives/icons";
@@ -12,10 +10,7 @@ export type RoutineId = "morning" | "night" | "movie" | "away" | "focus";
 export interface RoutineDetail {
   id: RoutineId;
   name: string;
-  /**
-   * SVG icon content — either a path string (d attribute) or a ReactNode for
-   * multi-path compound icons. HubIco handles both via typeof check.
-   */
+  /** SVG path `d` string, or a ReactNode for multi-path icons (HubIco handles both). */
   iconPath: string | React.ReactNode;
   /** Primary accent color (for Run button border + filled state) */
   color: string;

@@ -1,11 +1,4 @@
-// ────────────────────────────────────────────────────────────
-// FitBadge — memory-fit verdict badge (Phase 6)
-//
-// Renders a warning badge when a model will spill to CPU on THIS device
-// (i.e. its residency size exceeds the LLM memory budget minus headroom).
-// Renders nothing for "fits" or "unknown" verdicts so it stays quiet on
-// Mac/dev where the budget is unavailable and on models that fit comfortably.
-// ────────────────────────────────────────────────────────────
+// FitBadge: warns when a model would spill to CPU on this device; silent for "fits" and "unknown".
 
 import { AlertTriangle } from "lucide-react";
 import { modelFitFor } from "../../api/modelFit";

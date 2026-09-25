@@ -52,8 +52,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
     setPending(null);
   }, [pending]);
 
-  // Focus lands on Confirm (not the first focusable element) so Enter
-  // triggers the default action, matching standard dialog convention.
+  // Focus Confirm, not the first focusable element, so Enter confirms.
   const dialogRef = useDialogFocusTrap<HTMLDivElement>(!!pending, handleCancel, confirmBtnRef);
 
   const { title, confirmLabel, cancelLabel, destructive } = pending?.options ?? {};

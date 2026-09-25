@@ -1,8 +1,4 @@
-// ────────────────────────────────────────────────────────────
-// Step 4 — Wake Word
-// Optional — defaults to "goose". Real mic calibration is deferred to
-// Settings → Voice so onboarding never blocks on microphone permissions.
-// ────────────────────────────────────────────────────────────
+// Step 4, Wake Word. Calibration lives in Settings → Voice so setup never waits on mic permission.
 
 import { Mic, Settings2 } from "lucide-react";
 import { useOnboarding } from "../OnboardingContext";

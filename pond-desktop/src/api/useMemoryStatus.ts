@@ -1,10 +1,4 @@
-// ────────────────────────────────────────────────────────────
-// useMemoryStatus — fetches the device LLM memory budget once.
-//
-// Wraps GET /api/v1/models/memory-status. Degrades gracefully: on any error
-// (endpoint absent, server offline, Mac/dev) it returns null and never throws,
-// so the memory-fit guard simply renders no verdict rather than crashing.
-// ────────────────────────────────────────────────────────────
+// useMemoryStatus: GET /api/v1/models/memory-status once; null on any error, never throws.
 
 import { useState, useEffect } from "react";
 import { api } from "./PondApiClient";

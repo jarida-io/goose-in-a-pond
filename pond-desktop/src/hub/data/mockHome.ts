@@ -1,5 +1,4 @@
 // ─── Mock Home Data ────────────────────────────────────────────
-// Ported verbatim from home-v2-components.jsx lines 64-120
 
 export interface WeatherForecastDay {
   d: string;
@@ -33,7 +32,7 @@ export interface DeviceData {
   id: string;
   name: string;
   kind: DeviceKind;
-  /** Raw backend device_type (host, sensor, gotg, smart_speaker, pond, edge, …), used to pick an icon when kind is "other". */
+  /** Raw backend device_type (host, sensor, gotg, …); picks the icon when kind is "other". */
   subtype?: string;
   on?: boolean;
   locked?: boolean;
@@ -70,15 +69,12 @@ export interface NowPlayingData {
   artist: string;
   elapsed: number;
   hue: number;
-  /** Spotify's cover-art URL for the current track, when available. Falls back to the hue gradient when null/absent. */
+  /** Spotify cover-art URL; the hue gradient is used when absent. */
   albumArt?: string | null;
   /** Whether Spotify is connected — gates real playback controls vs. the cosmetic demo toggle. */
   connected: boolean;
   playing: boolean;
-  /**
-   * Set when Spotify answered but refused the request. Distinct from "nothing
-   * playing": the account is linked, so playback controls would fail too.
-   */
+  /** Spotify refused the request (not "nothing playing"); playback controls would fail too. */
   error?: string;
   /** Human-readable explanation for `error`. */
   message?: string;

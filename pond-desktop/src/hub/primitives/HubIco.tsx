@@ -85,10 +85,7 @@ interface HubIcoProps {
   className?: string;
 }
 
-/**
- * Thin SVG icon wrapper matching the design's HIco component.
- * Accepts either a path string or a ReactNode (multi-element icons).
- */
+/** Thin SVG icon wrapper (the design's HIco). */
 export function HubIco({
   d,
   size = 20,

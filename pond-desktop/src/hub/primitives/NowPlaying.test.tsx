@@ -35,9 +35,7 @@ describe("NowPlaying", () => {
     expect(vi.mocked(controlNowPlaying)).toHaveBeenCalledWith("pause");
   });
 
-  /// Polling stops on a refusal that cannot clear itself, so the timer is not
-  /// coming back on its own. Three dimmed transport buttons that do nothing
-  /// would leave the widget with no way out short of restarting the app.
+  // Polling has stopped on this refusal, so nothing else will bring the widget back.
   it("replaces the dead transport controls with a way to ask again", () => {
     store.nowPlaying = {
       track: "Spotify not authorised",
