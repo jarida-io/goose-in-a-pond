@@ -1,7 +1,4 @@
-//! Universal loop routing tests for POST /api/v1/chat/stream: classification
-//! metadata stays correct for chat, think and task messages while every request
-//! executes through the Agent port. A wiremock server stands in for the llamafile
-//! backend. Run: cargo test -p pond-api --test provider_routing_test
+//! `/api/v1/chat/stream` routes every message through the Agent port; wiremock plays llamafile.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -42,10 +39,7 @@ impl OnboardingRepository for CompletedOnboarding {
     async fn reset(&self) -> anyhow::Result<()> {
         Ok(())
     }
-    // PAI-2 P7 made this a required trait method rather than a defaulted one:
-    // a default would have to answer from `get_current_step`, and a stub that
-    // answers "not onboarded" makes every onboarding write route public
-    // wherever it is used. The name of this stub is the answer.
+    // Answering "not onboarded" would make every onboarding write route public.
     async fn is_complete(&self) -> anyhow::Result<bool> {
         Ok(true)
     }
@@ -178,7 +172,6 @@ fn sse_body_with_usage(tokens: &[&str], usage: Option<(u32, u32)>) -> String {
             "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{escaped}\"}},\"finish_reason\":null}}]}}\n\n"
         ));
     }
-    // Final chunk — includes usage if requested
     if let Some((prompt, completion)) = usage {
         body.push_str(&format!(
             "data: {{\"choices\":[{{\"delta\":{{\"content\":\"\"}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":{prompt},\"completion_tokens\":{completion},\"total_tokens\":{}}}}}\n\n",
@@ -425,8 +418,7 @@ async fn task_message_uses_single_provider() {
     assert_eq!(done["model_role"].as_str(), Some("chat"));
 }
 
-/// Even when the wired provider would return 503, /chat/stream executes via
-/// the Agent port and should still return a normal text response.
+/// /chat/stream runs via the Agent port, so a 503 from the wired provider does not matter.
 #[tokio::test]
 async fn provider_failure_does_not_break_universal_agent_path() {
     let server = MockServer::start().await;
@@ -540,8 +532,6 @@ async fn done_event_has_usage_shape_for_agent_path() {
     );
 }
 
-/// With universal agent routing, non-task messages still succeed even when
-/// llm_provider is not configured.
 #[tokio::test]
 async fn no_provider_still_returns_agent_response_for_non_task_messages() {
     let tmp = tempfile::tempdir().unwrap();
@@ -660,8 +650,6 @@ async fn no_provider_still_returns_agent_response_for_non_task_messages() {
     assert_eq!(done["model_role"].as_str(), Some("chat"));
 }
 
-/// When task routing is active and Goose extensions are available, task
-/// requests run through the agent loop even if llm_provider is None.
 #[tokio::test]
 async fn task_message_uses_agent_with_tool_call_events_without_provider() {
     let tmp = tempfile::tempdir().unwrap();

@@ -1,7 +1,5 @@
-//! #164 follow-up: pairing outcomes reach connected devices as security
-//! notifications and land in the unified event log under category `Auth`, as
-//! `auth.pairing_verify_failed` or `auth.device_paired`. Failure alerts are
-//! debounced process-wide to one per 10 minutes, so this binary has one such test.
+//! Pairing outcomes become security notifications and `Auth` events. Failure alerts are
+//! debounced process-wide (one per 10 min), so this binary has only one failure test.
 
 use std::sync::Arc;
 
@@ -40,11 +38,7 @@ use pond_infra::sqlite_session_storage::SqliteSessionStorage;
 use pond_infra::sqlite_skill::SqliteSkillRepository;
 use tower::ServiceExt;
 
-/// Handshake stub that rejects cleanly, the way a wrong code actually does:
-/// `Ok(HandshakeResponse { accepted: false, rejection_reason: Some(..) })`,
-/// which is a 200 carrying a refusal rather than the 500 `MockHandshake` gives.
-/// This is the path an operator hits while pairing, so it is the one whose
-/// reason has to survive into the record.
+/// Rejects like a real wrong code: a 200 with `accepted: false` and a reason, not a 500.
 struct RejectingHandshake;
 
 #[async_trait]
@@ -72,9 +66,7 @@ impl Handshake for RejectingHandshake {
     }
 }
 
-/// Handshake stub whose `verify_handshake` always accepts — the success path.
-/// (`MockHandshake`'s trait-default `verify_handshake` errors, which is the
-/// failure path.)
+/// Always accepts; `MockHandshake`'s default `verify_handshake` errors instead.
 struct AcceptingHandshake;
 
 #[async_trait]
@@ -215,8 +207,7 @@ async fn make_app(handshake: Arc<dyn Handshake>) -> Harness {
         mesh_rebuild: None,
     });
 
-    // `/handshake/verify` extracts `ConnectInfo` (per-IP rate limiting); the
-    // oneshot test path has no real socket, so inject one.
+    // `/handshake/verify` extracts `ConnectInfo` for rate limiting; oneshot has no socket.
     let router = build_router(state, std::path::PathBuf::from("pond-desktop/dist")).layer(
         MockConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 40000))),
     );
@@ -271,18 +262,9 @@ async fn successful_pairing_notifies_devices_and_records_an_auth_event() {
     assert_eq!(auth_actions(&h.event_log).await, vec!["auth.device_paired"]);
 }
 
-/// Every failure-path assertion lives in this one test on purpose.
-///
-/// The failure ALERT is debounced by a process-wide `static` with a ten-minute
-/// window, so across a test binary only the first failure anywhere can observe a
-/// broadcast. Split across two tests, whichever happened to run first would take
-/// the alert and the other would fail on ordering alone. Keeping them together
-/// makes the order explicit -- and lets the debounce itself be asserted rather
-/// than merely worked around.
+/// All failure-path assertions share one test: only the first failure per binary gets an alert.
 #[tokio::test]
 async fn failed_pairing_alerts_once_records_why_and_debounces() {
-    // A real wrong code: `Ok(accepted: false)` with a reason, which is a 200
-    // carrying a refusal. This is the path an operator actually hits.
     let mut rejected = make_app(Arc::new(RejectingHandshake)).await;
     assert_eq!(
         post_verify(&rejected.router, "Amina's Phone").await,
@@ -307,18 +289,15 @@ async fn failed_pairing_alerts_once_records_why_and_debounces() {
         .unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].action, "auth.pairing_verify_failed");
-    // The reason is the point. Without it the log records that a pairing failed
-    // but not what went wrong, which is the one thing worth going back for.
+    // The log must say why the pairing failed.
     assert_eq!(
         events[0].attributes.get("rejection_reason"),
         Some(&AttributeValue::Text("invalid_mac".into())),
     );
-    // Sensitive (visible to the audit tools) — never Secret, and carrying no
-    // MAC or token material.
+    // Sensitive, so audit tools see it; never Secret, and no MAC or token material.
     assert_eq!(events[0].privacy_sensitivity, PrivacySensitivity::Sensitive);
 
-    // A handshake that errors outright is the other failure shape: still a
-    // recorded auth event, and still no alert, because the window is spent.
+    // An erroring handshake: still recorded, but no alert since the window is spent.
     let mut errored = make_app(Arc::new(MockHandshake::new())).await;
     assert_eq!(
         post_verify(&errored.router, "intruder").await,

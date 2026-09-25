@@ -1,7 +1,4 @@
-//! #99 acceptance: a paired device opens `GET /api/v1/notifications/stream` and
-//! receives notifications — including ones queued while it was offline. Drives
-//! the real router with a live `BroadcastNotificationSender` + offline queue +
-//! `SqliteDeviceRegistry` (a device is seeded so the existence check passes).
+//! A paired device's notification stream delivers live and offline-queued notifications.
 
 use std::sync::Arc;
 
@@ -277,13 +274,10 @@ async fn stream_flushes_offline_queue_on_connect() {
     let text = String::from_utf8_lossy(&frame);
     assert!(text.contains("While you were away"), "got: {text}");
 
-    // async-stream runs the post-yield `mark_delivered` only on the next poll;
-    // drive it once more (it then awaits live events, so this poll times out —
-    // expected) before closing the stream.
+    // async-stream runs the post-yield `mark_delivered` only on the next poll (which times out).
     let _ = tokio::time::timeout(std::time::Duration::from_millis(300), data.next()).await;
     drop(data);
 
-    // The flushed notification is now marked delivered.
     assert!(
         h.queue
             .list_undelivered(&h.device_id)

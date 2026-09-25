@@ -1,7 +1,4 @@
-//! #95 acceptance: a paired device can register/unregister its push token over
-//! `POST/DELETE /api/v1/devices/{id}/push-token`, and the token is persisted.
-//! Drives the real router with a live `SqlitePushTokenRepository` +
-//! `SqliteDeviceRegistry` (a device is seeded so the existence check passes).
+//! A paired device registers and unregisters a persisted push token over the real router.
 
 use std::sync::Arc;
 
@@ -27,9 +24,7 @@ use pond_infra::sqlite_session_storage::SqliteSessionStorage;
 use pond_infra::sqlite_skill::SqliteSkillRepository;
 use tower::ServiceExt;
 
-/// Build the router with a live push-token repo + device registry, seeding one
-/// device. Returns the router, the push-token repo (to assert persistence), the
-/// seeded device id, and the tempdir guard.
+/// Router with live push-token and device stores, plus one seeded device.
 async fn make_app() -> (
     axum::Router,
     Arc<dyn PushTokenRepository>,
@@ -211,7 +206,6 @@ async fn register_then_delete_push_token_persists() {
         .expect("token persisted");
     assert_eq!(stored.token, "ExponentPushToken[abc]");
 
-    // DELETE removes it.
     let (status, _) = send(&app, Method::DELETE, &uri, true, None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(repo.get(&device_id).await.unwrap().is_none());
@@ -259,8 +253,7 @@ async fn register_push_token_oversized_token_400() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
-/// Non-printable-ASCII tokens are refused at the boundary: they are never
-/// real push tokens, and downstream the relays truncate the token for logging.
+/// Refused at the boundary: never real tokens, and relays truncate tokens for logging.
 #[tokio::test]
 async fn register_push_token_non_ascii_token_400() {
     let (app, repo, device_id, _tmp) = make_app().await;

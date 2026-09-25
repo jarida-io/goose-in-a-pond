@@ -1,7 +1,4 @@
-//! PAI-5 P2's tail: the reasoning count reaches a client. Asserts that
-//! `reasoning_tokens` rides the `turn_stats` frame on both stream routes and
-//! before `done`, sits alongside `completion_tokens` rather than inside it, and
-//! that `/usage/summary` reports counted turns so `null` can be told from `0`.
+//! The reasoning count reaches clients via `turn_stats` on both stream routes and `/usage/summary`.
 
 use std::sync::Arc;
 
@@ -67,14 +64,10 @@ impl DeviceRegistry for NoDevices {
     }
 }
 
-/// An engine that finishes a turn with the numbers `GooseAdapter` reports.
-///
-/// `reasoning: None` is the provider that counted nothing — the case a
-/// `unwrap_or(0)` anywhere on the way to the client would erase.
+/// Finishes a turn with `GooseAdapter`'s numbers; `reasoning: None` means nothing was counted.
 struct StatsAgent {
     reasoning: Option<u32>,
-    /// Attempts beyond the first this turn needed. Not an `Option`: every turn
-    /// that reaches the handler was observed, so 0 is a fact and not a gap.
+    /// Attempts beyond the first; not an `Option`, since every turn here was observed.
     reengagements: u32,
 }
 
@@ -284,9 +277,7 @@ fn turn_stats_of(frames: &[Value], route: &str) -> Value {
         .clone()
 }
 
-/// The two routes, so every assertion below is quantified over both rather than
-/// written twice. `/chat/stream` had the frame and `/agent/chat/stream` did not,
-/// which is precisely the drift a per-route test cannot see.
+/// Every assertion runs over both routes, so they cannot drift apart.
 const STREAM_ROUTES: [&str; 2] = ["/api/v1/chat/stream", "/api/v1/agent/chat/stream"];
 
 // ── The frame ────────────────────────────────────────────────────────────────
@@ -308,8 +299,7 @@ async fn both_stream_routes_report_the_reasoning_count_beside_the_completion_cou
              `count_reasoning_tokens`, it rides `AgentStreamEvent::Done`, and this \
              frame is the only place a client can see it. Frame: {stats}"
         );
-        // The alongside rule. If a future change ever subtracts the estimate
-        // from the engine's own number, this is where it shows up.
+        // Alongside, not inside: the estimate must not be subtracted from the engine's count.
         assert_eq!(
             stats["completion_tokens"], 88,
             "the reasoning estimate moved the engine-reported completion count. \
@@ -328,8 +318,7 @@ async fn both_stream_routes_report_the_reasoning_count_beside_the_completion_cou
     }
 }
 
-/// `None` and `Some(0)` are different facts, and only one of them is "this turn
-/// did no thinking".
+/// `None` and `Some(0)` differ: only `Some(0)` means "no thinking".
 #[tokio::test]
 async fn a_turn_nobody_counted_reads_as_null_and_not_as_zero() {
     for (i, route) in STREAM_ROUTES.iter().enumerate() {
@@ -341,10 +330,7 @@ async fn a_turn_nobody_counted_reads_as_null_and_not_as_zero() {
         let frames = drive(&h.app, route, &format!("uncounted-{i}")).await;
         let stats = turn_stats_of(&frames, route);
 
-        // The key must be PRESENT and null, not missing. `Value::index` returns
-        // `Null` for an absent key, so `is_null()` alone is equally satisfied by a
-        // frame that dropped the field altogether, which is the regression the
-        // test above exists for.
+        // Present and null: `Value::index` also yields `Null` for a missing key.
         let reported = stats
             .as_object()
             .and_then(|o| o.get("reasoning_tokens"))
@@ -357,18 +343,13 @@ async fn a_turn_nobody_counted_reads_as_null_and_not_as_zero() {
              model thought nothing, which is what PAI-5 P5 will size \
              `output_reserve_tokens` from; `null` says nobody counted. Frame: {stats}"
         );
-        // Vacuity control for the assertion above: the frame is a real frame
-        // with real numbers in it, so `is_null` is not passing against an empty
-        // object or a missing key on a frame that was never emitted.
+        // Vacuity control: a real frame with real numbers.
         assert_eq!(stats["ttft_ms"], 412, "frame: {stats}");
         assert_eq!(stats["completion_tokens"], 88, "frame: {stats}");
     }
 }
 
-/// The other half of what thinking cost. `inference_count` cannot derive it: a
-/// turn that ran twice for a tool call and one steered back by `EMPTY_TURN_STEER`
-/// read the same there. Only `reengagements` separates them, and the second is a
-/// whole extra turn paid at full price, prefill and tools included.
+/// `inference_count` can't tell a tool-call rerun from an `EMPTY_TURN_STEER` retry; this can.
 #[tokio::test]
 async fn both_stream_routes_report_what_the_empty_turn_recovery_cost() {
     for (i, route) in STREAM_ROUTES.iter().enumerate() {
@@ -386,9 +367,7 @@ async fn both_stream_routes_report_what_the_empty_turn_recovery_cost() {
              and was steered back twice; a client reading this frame would see a \
              slow turn with no reason for it. Frame: {stats}"
         );
-        // The count must be its own fact, not a restatement of one already in
-        // the frame. `inference_count` is 1 here while `reengagements` is 2 --
-        // if a future change ever derives one from the other, this parts them.
+        // `inference_count` 1 vs `reengagements` 2: neither may be derived from the other.
         assert_eq!(
             stats["inference_count"], 1,
             "re-engagements leaked into the inference count. Frame: {stats}"
@@ -396,10 +375,7 @@ async fn both_stream_routes_report_what_the_empty_turn_recovery_cost() {
     }
 }
 
-/// Zero is a measurement, not an absence, and the ordinary turn is the one that
-/// reports it. A frame that omits the field for the common case teaches every
-/// client to treat missing as zero, and then the count that matters cannot be
-/// distinguished from a client that never learned to read it.
+/// Zero is a measurement: omitting it would teach clients that missing means zero.
 #[tokio::test]
 async fn an_ordinary_turn_reports_zero_re_engagements_rather_than_nothing() {
     for (i, route) in STREAM_ROUTES.iter().enumerate() {
@@ -422,14 +398,12 @@ async fn an_ordinary_turn_reports_zero_re_engagements_rather_than_nothing() {
             "{route} reported an ordinary turn's re-engagement count as {reported}. \
              Frame: {stats}"
         );
-        // Vacuity control: this is a real frame with real numbers, so the
-        // assertion above is not passing against an empty object.
+        // Vacuity control: a real frame with real numbers.
         assert_eq!(stats["ttft_ms"], 412, "frame: {stats}");
     }
 }
 
-/// A frame after `done` is a frame no client reads: the desktop closes the
-/// EventSource on `done` and reloads the session.
+/// The desktop closes the EventSource on `done`, so later frames are never read.
 #[tokio::test]
 async fn the_stats_frame_arrives_before_the_stream_closes_on_both_routes() {
     for (i, route) in STREAM_ROUTES.iter().enumerate() {
@@ -478,9 +452,7 @@ async fn usage_summary(app: &axum::Router) -> Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 
-/// Persist an assistant row the way `ChatService::persist_assistant_response`
-/// does on the `pond chat` and voice paths — the only paths that carry a
-/// reasoning count into `session_messages` today.
+/// As `ChatService::persist_assistant_response` does: the only path storing a reasoning count.
 async fn persist_assistant(
     storage: &Arc<SqliteSessionStorage>,
     session_id: &str,
@@ -509,13 +481,10 @@ async fn the_usage_summary_totals_reasoning_and_says_how_many_turns_counted_one(
     }))
     .await;
 
-    // Two sessions, so the sum is really a sum across sessions and not one
-    // session's number reported twice.
+    // Two sessions, so the sum is really across sessions.
     for session in ["sess-a", "sess-b"] {
         h.storage.create_session(session.to_string()).await.unwrap();
-        // Real provider totals on the session row, so the `total_tokens`
-        // assertion below is checked against non-zero numbers rather than
-        // being satisfied by 0 == 0 + 0.
+        // Non-zero provider totals, so the `total_tokens` check cannot pass as 0 == 0 + 0.
         h.storage
             .increment_usage(session, 1000, 88, Some("test-model"))
             .await
@@ -524,9 +493,7 @@ async fn the_usage_summary_totals_reasoning_and_says_how_many_turns_counted_one(
     persist_assistant(&h.storage, "sess-a", "m-1", Some(240)).await;
     persist_assistant(&h.storage, "sess-a", "m-2", Some(60)).await;
     persist_assistant(&h.storage, "sess-b", "m-3", Some(100)).await;
-    // The row a `/chat/stream` turn writes: counted by nobody, because
-    // `persist_assistant_turn` takes a `(prompt, completion)` tuple that cannot
-    // carry a third number. It must contribute neither tokens nor a turn.
+    // A `/chat/stream` row carries no reasoning count and must add neither tokens nor a turn.
     persist_assistant(&h.storage, "sess-b", "m-4", None).await;
 
     let summary = usage_summary(&h.app).await;
@@ -541,8 +508,7 @@ async fn the_usage_summary_totals_reasoning_and_says_how_many_turns_counted_one(
         "a NULL row must not be counted as a turn that thought nothing. \
          Summary: {summary}"
     );
-    // The pre-existing figures are untouched: the reasoning estimate is not
-    // folded into `total_tokens`, which is what the cloud prices multiply.
+    // The estimate stays out of `total_tokens`, which cloud prices multiply.
     assert_eq!(summary["session_count"], 2, "summary: {summary}");
     assert_eq!(summary["total_prompt_tokens"], 2000, "summary: {summary}");
     assert_eq!(
@@ -559,10 +525,7 @@ async fn the_usage_summary_totals_reasoning_and_says_how_many_turns_counted_one(
     );
 }
 
-/// The half that makes a zero readable: where nothing has ever counted, both
-/// figures are zero TOGETHER. Without `counted_reasoning_turns` that state is
-/// indistinguishable from a pond whose models never think, which is the reading
-/// PAI-5 P5 must not take from an empty corpus.
+/// Without `counted_reasoning_turns`, "nothing counted" looks like "models never think".
 #[tokio::test]
 async fn a_pond_where_nothing_counted_reports_zero_turns_not_just_zero_tokens() {
     let h = make_app(Arc::new(StatsAgent {
@@ -583,8 +546,7 @@ async fn a_pond_where_nothing_counted_reports_zero_turns_not_just_zero_tokens() 
         "zero tokens over zero counted turns is `nobody counted`; zero over a \
          positive count would be `the models did no thinking`. Summary: {summary}"
     );
-    // Vacuity control: the summary really did see the session and its row, so
-    // the two zeros above are not the answer to an empty database.
+    // Vacuity control: the summary saw the session and its row.
     assert_eq!(summary["session_count"], 1, "summary: {summary}");
     assert_eq!(summary["total_completion_tokens"], 0, "summary: {summary}");
 }

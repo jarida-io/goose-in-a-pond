@@ -1,7 +1,4 @@
-//! PAI-4 P6: `ContextMonitor::reset_session` is wired to `DELETE
-//! /api/v1/sessions/:id`, the one route where a session stops existing. A wiring
-//! test, not a logic test: without the call the growth map only grows, and a
-//! recycled session id inherits the utilisation and cooldown of its predecessor.
+//! Deleting a session must reset its `ContextMonitor` state, or a recycled id inherits it.
 
 use std::sync::Arc;
 
@@ -37,10 +34,7 @@ impl OnboardingRepository for CompletedOnboarding {
     async fn reset(&self) -> anyhow::Result<()> {
         Ok(())
     }
-    // PAI-2 P7 made this a required trait method rather than a defaulted one:
-    // a default would have to answer from `get_current_step`, and a stub that
-    // answers "not onboarded" makes every onboarding write route public
-    // wherever it is used. The name of this stub is the answer.
+    // Answering "not onboarded" would make every onboarding write route public.
     async fn is_complete(&self) -> anyhow::Result<bool> {
         Ok(true)
     }
@@ -80,8 +74,7 @@ impl DeviceRegistry for MockDeviceRegistry {
 
 // ── Test fixture ───────────────────────────────────────────────────────────────
 
-/// Build a test router backed by a real tempdir SQLite database.
-/// All chat goes through MockAgent (GooseAdapter in production).
+/// Router over a tempdir SQLite database; chat goes through MockAgent.
 async fn make_app() -> (axum::Router, Arc<AppState>, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let db = pond_infra::db::Database::init(tmp.path()).await.unwrap();
@@ -198,10 +191,7 @@ fn delete_session_request(session_id: &str) -> Request<Body> {
         .unwrap()
 }
 
-/// A saturated session that is then deleted must leave nothing behind. The
-/// observable proxy for "nothing behind" is the compaction claim: a session with
-/// recorded turns above 75% grants one, and a session the monitor has never seen
-/// grants none.
+/// Proxy for "nothing left": a session above 75% grants a compaction claim, an unseen one none.
 #[tokio::test]
 async fn deleting_a_session_clears_its_context_monitor_state() {
     let (app, state, _tmp) = make_app().await;

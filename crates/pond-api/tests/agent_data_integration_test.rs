@@ -1,6 +1,4 @@
-//! Integration tests for the agent data management REST API: the /api/v1 routes for prompt
-//! templates, prompt extras, memory fragments, user skills and agent recipes. Every test
-//! uses a real SQLite database in a tempdir, with no mocking of persistence.
+//! Agent-data `/api/v1` routes over a tempdir SQLite database.
 
 use std::sync::Arc;
 
@@ -43,10 +41,7 @@ impl OnboardingRepository for CompletedOnboarding {
     async fn reset(&self) -> anyhow::Result<()> {
         Ok(())
     }
-    // PAI-2 P7 made this a required trait method rather than a defaulted one:
-    // a default would have to answer from `get_current_step`, and a stub that
-    // answers "not onboarded" makes every onboarding write route public
-    // wherever it is used. The name of this stub is the answer.
+    // Answering "not onboarded" would make every onboarding write route public.
     async fn is_complete(&self) -> anyhow::Result<bool> {
         Ok(true)
     }
@@ -114,9 +109,7 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
     make_app_with_dispatcher(None).await
 }
 
-/// Same app, plus a handle on session storage. Sessions have no create endpoint -- they are
-/// born from a chat turn -- so a test about session attribution seeds one through the port.
-/// Profiles do have one, so the foreign key is exercised the way production exercises it.
+/// Same app plus session storage: sessions have no create endpoint, so tests seed them directly.
 async fn make_app_with_sessions() -> (axum::Router, Arc<SqliteSessionStorage>, tempfile::TempDir) {
     make_app_full(None).await
 }
@@ -155,12 +148,9 @@ async fn make_app_full(
         llamafile_url: "http://127.0.0.1:8080".into(),
         tts: None,
         tts_control: None,
-        // Real repository, not the mock: these tests assert that deleting the
-        // primary member clears the settings row that names them, and an
-        // in-memory settings store cannot show that.
+        // Real repository: primary-member deletion must clear this row, which a mock cannot show.
         settings_repo: Arc::new(SqliteSettingsRepository::new(pool.clone())),
-        // Real repository, not the mock: `sessions.profile_id` is a foreign key
-        // into `profiles`, and an in-memory profile store cannot satisfy it.
+        // Real repository: `sessions.profile_id` is a foreign key into `profiles`.
         profile_repo: Arc::new(SqliteProfileRepository::new(pool.clone())),
         device_registry: Arc::new(NoDevices),
         matter: None,
@@ -313,7 +303,6 @@ async fn prompt_templates_upsert_then_get_then_list() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // GET by name
     let resp = app
         .clone()
         .oneshot(get("/api/v1/prompts/custom"))
@@ -326,16 +315,12 @@ async fn prompt_templates_upsert_then_get_then_list() {
     assert_eq!(body["description"], "Test template");
     assert_eq!(body["is_system"], false);
 
-    // GET list
     let resp = app.oneshot(get("/api/v1/prompts")).await.unwrap();
     let list = body_json(resp).await;
     assert_eq!(list.as_array().unwrap().len(), 1);
 }
 
-/// A save returns the saved row, and an omitted description keeps the stored one. The handler
-/// must not answer `{"name","status":"ok"}` when the desktop client types it
-/// `Promise<PromptTemplate>` and reads `updated.content`, and an omitted `description` must
-/// not blank the stored one. Either makes the Prompts tab destructive: the edit vanishes.
+/// The desktop client reads `updated.content` from the PUT response.
 #[tokio::test]
 async fn saving_a_template_returns_it_and_keeps_the_description() {
     let (app, _tmp) = make_app().await;
@@ -421,7 +406,6 @@ async fn prompt_template_delete_system_returns_403() {
     let db = Database::init(tmp.path()).await.unwrap();
     let pool = db.system.clone();
 
-    // Seed a system template directly
     let repo = SqlitePromptTemplateRepository::new(pool.clone());
     repo.upsert(&PromptTemplate {
         name: "balanced".into(),
@@ -659,7 +643,6 @@ async fn memories_delete_returns_204() {
 async fn skills_full_lifecycle() {
     let (app, _tmp) = make_app().await;
 
-    // Create
     let resp = app
         .clone()
         .oneshot(post(
@@ -679,13 +662,11 @@ async fn skills_full_lifecycle() {
     // No icon supplied — defaults to "sparkles" rather than an empty string.
     assert_eq!(created["icon"], "sparkles");
 
-    // List
     let resp = app.clone().oneshot(get("/api/v1/skills")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let skills = body_json(resp).await;
     assert_eq!(skills.as_array().unwrap().len(), 1);
 
-    // Update — disable
     let resp = app
         .clone()
         .oneshot(put(
@@ -697,10 +678,8 @@ async fn skills_full_lifecycle() {
     assert_eq!(resp.status(), StatusCode::OK);
     let updated = body_json(resp).await;
     assert_eq!(updated["active"], false);
-    // content should be preserved
     assert_eq!(updated["name"], "light-control");
 
-    // Update — rename to a human-readable title, and change the description
     let resp = app
         .clone()
         .oneshot(put(
@@ -713,16 +692,13 @@ async fn skills_full_lifecycle() {
     let renamed = body_json(resp).await;
     assert_eq!(renamed["name"], "Light Control");
     assert_eq!(renamed["description"], "Controls the lights");
-    // active and content should be preserved, untouched by this PUT
     assert_eq!(renamed["active"], false);
     assert_eq!(
         renamed["content"],
         "Call giap__list_registered_devices when asked about lights."
     );
-    // icon untouched by this PUT either
     assert_eq!(renamed["icon"], "sparkles");
 
-    // Update — change just the icon
     let resp = app
         .clone()
         .oneshot(put(
@@ -734,10 +710,8 @@ async fn skills_full_lifecycle() {
     assert_eq!(resp.status(), StatusCode::OK);
     let recolored = body_json(resp).await;
     assert_eq!(recolored["icon"], "lightbulb");
-    // everything else untouched
     assert_eq!(recolored["name"], "Light Control");
 
-    // Delete
     let resp = app
         .oneshot(delete(&format!("/api/v1/skills/{id}")))
         .await
@@ -778,7 +752,6 @@ async fn recipes_full_lifecycle() {
     let (app, _tmp) = make_app().await;
     let yaml = "title: Morning Brief\nprompt: Give me weather and schedule.";
 
-    // Create
     let resp = app
         .clone()
         .oneshot(post(
@@ -797,13 +770,11 @@ async fn recipes_full_lifecycle() {
     assert_eq!(created["name"], "morning_brief");
     assert_eq!(created["active"], true);
 
-    // List
     let resp = app.clone().oneshot(get("/api/v1/recipes")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let recipes = body_json(resp).await;
     assert_eq!(recipes.as_array().unwrap().len(), 1);
 
-    // Update — change description and disable
     let resp = app
         .clone()
         .oneshot(put(
@@ -819,10 +790,8 @@ async fn recipes_full_lifecycle() {
     let updated = body_json(resp).await;
     assert_eq!(updated["description"], "Updated description");
     assert_eq!(updated["active"], false);
-    // yaml should be preserved
     assert_eq!(updated["yaml"], yaml);
 
-    // Delete
     let resp = app
         .oneshot(delete(&format!("/api/v1/recipes/{id}")))
         .await
@@ -915,9 +884,7 @@ async fn run_recipe_streams_sse_for_existing_recipe() {
         body.contains("\"done\":true"),
         "expected a done event in SSE body, got: {body}"
     );
-    // MockAgent echoes the input — the resolved prompt should reach the agent.
-    // The text stream is chunked, so we look for a fragment unlikely to straddle
-    // a chunk boundary instead of the whole prompt.
+    // MockAgent echoes its input, chunked; match a fragment unlikely to straddle a chunk.
     assert!(
         body.contains("lights on please"),
         "expected the recipe prompt to be echoed by MockAgent, got: {body}"
@@ -928,8 +895,7 @@ async fn run_recipe_streams_sse_for_existing_recipe() {
 async fn run_recipe_falls_back_when_yaml_invalid() {
     let (app, _tmp) = make_app().await;
 
-    // create_recipe doesn't validate yaml, so we can persist garbage and still
-    // run the recipe — the handler must fall back to the literal prompt.
+    // create_recipe doesn't validate yaml; running garbage must fall back to the literal prompt.
     let resp = app
         .clone()
         .oneshot(post(
@@ -1134,10 +1100,7 @@ async fn invoke_tool_400_when_tool_missing() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-// ── Session identity (PAI-1 P2) ──────────────────────────────────────────────
-//
-// These go through the router, not the repository: P2 replaced an in-memory map the
-// repository layer never saw, so a test below the HTTP boundary proves nothing.
+// ── Session identity ─────────────────────────────────────────────────────────
 
 /// Create a household member through the API and return their generated id.
 async fn seed_profile(app: &axum::Router, display_name: &str) -> String {
@@ -1168,9 +1131,6 @@ async fn session_user_reads_nobody_for_a_session_never_identified() {
     assert_eq!(body["identification_source"], "unknown");
 }
 
-/// The old handler answered from a process-local map, so a restart erased the
-/// binding. This asserts the replacement is actually durable: a second router
-/// over the same database sees what the first one wrote.
 #[tokio::test]
 async fn a_binding_survives_the_process_that_made_it() {
     let (app, storage, tmp) = make_app_with_sessions().await;
@@ -1243,10 +1203,6 @@ async fn clearing_a_binding_releases_it_and_reports_whether_there_was_one() {
     assert_eq!(body["cleared"], false);
 }
 
-/// The old map accepted any session id, because it was a `HashMap`. Writing to
-/// a row that does not exist has to be an error, not a silent success -- an
-/// attribution accepted and then discarded is the exact failure PAI-1 exists to
-/// end.
 #[tokio::test]
 async fn clearing_a_binding_on_an_unknown_session_is_404() {
     let (app, _storage, _tmp) = make_app_with_sessions().await;
@@ -1257,8 +1213,7 @@ async fn clearing_a_binding_on_an_unknown_session_is_404() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-/// Reading is deliberately more forgiving than writing: "whose session is
-/// this" has a correct answer for a session that does not exist.
+/// Deliberately laxer than writes: "nobody" is a correct answer for an unknown session.
 #[tokio::test]
 async fn reading_the_user_of_an_unknown_session_is_ok_and_says_nobody() {
     let (app, _storage, _tmp) = make_app_with_sessions().await;
@@ -1270,8 +1225,6 @@ async fn reading_the_user_of_an_unknown_session_is_ok_and_says_nobody() {
     assert_eq!(body_json(resp).await["profile_id"], serde_json::Value::Null);
 }
 
-/// `Explicit` had no producer before this route existed, so the resolution
-/// chain could only ever reach its face rung.
 #[tokio::test]
 async fn a_member_can_say_who_they_are_and_it_sticks() {
     let (app, storage, _tmp) = make_app_with_sessions().await;
@@ -1300,8 +1253,6 @@ async fn a_member_can_say_who_they_are_and_it_sticks() {
     );
 }
 
-/// The strength rule, over HTTP. Somebody typing a name must not displace a
-/// device that proved who it was.
 #[tokio::test]
 async fn saying_who_you_are_cannot_displace_a_paired_device() {
     let (app, storage, _tmp) = make_app_with_sessions().await;
@@ -1368,7 +1319,7 @@ async fn an_empty_profile_id_is_rejected() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-// ── Member deletion (PAI-1 P7) ───────────────────────────────────────────────
+// ── Member deletion ──────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn deleting_a_member_reports_what_went_and_what_stayed() {
@@ -1397,23 +1348,16 @@ async fn deleting_a_member_reports_what_went_and_what_stayed() {
 
     assert_eq!(body["profile_id"], jerry);
     assert_eq!(body["display_name"], "Jerry");
-    // Sessions are RELEASED, never deleted -- a conversation is not solely the
-    // speaker's. Reporting it under "deleted" would misdescribe what happened.
+    // Sessions are released, never deleted: a conversation is not solely the speaker's.
     assert_eq!(body["released"]["sessions"], 1);
-    // No equality assertion here: the fixture wires MockMemoryRepository, which does not
-    // override `count_for_profile` and returns the port default of 0 whatever the state, so
-    // asserting 0 would pass against a repository that cannot answer. The real count is
-    // covered in pond-infra, against SQL.
+    // Type only: the mock memory repo always counts 0; pond-infra covers the real count.
     assert!(body["deleted"]["memories"].is_number());
 
-    // and the session itself survived, unattributed
     let identity = storage.get_session_identity("sess-1").await.unwrap();
     assert_eq!(identity.profile_id, None);
     assert!(storage.get_session("sess-1").await.is_ok());
 }
 
-/// This used to return 204 for an id that never existed, which made "did I
-/// delete the right person" unanswerable.
 #[tokio::test]
 async fn deleting_a_member_who_does_not_exist_is_404() {
     let (app, _storage, _tmp) = make_app_with_sessions().await;
@@ -1424,10 +1368,7 @@ async fn deleting_a_member_who_does_not_exist_is_404() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-/// `settings.primary_profile_id` is a key-value row, not a foreign key, so no
-/// cascade can reach it. Deleting the primary member used to leave an id
-/// pointing at nobody -- and the single production reader silently got `None`
-/// from the lookup, so nothing ever surfaced the dangling reference.
+/// `settings.primary_profile_id` is a key-value row, not a foreign key, so no cascade reaches it.
 #[tokio::test]
 async fn deleting_the_primary_member_clears_the_setting_that_named_them() {
     let (app, _storage, _tmp) = make_app_with_sessions().await;
@@ -1460,7 +1401,6 @@ async fn deleting_the_primary_member_clears_the_setting_that_named_them() {
     );
 }
 
-/// The counterpart: deleting a NON-primary member must leave the setting alone.
 #[tokio::test]
 async fn deleting_someone_else_does_not_touch_the_primary_setting() {
     let (app, _storage, _tmp) = make_app_with_sessions().await;
@@ -1488,11 +1428,8 @@ async fn deleting_someone_else_does_not_touch_the_primary_setting() {
     assert_eq!(settings["primary_profile_id"], jerry);
 }
 
-// ── Profile context follows the speaker (PAI-1 P6) ───────────────────────────
+// ── Profile context follows the speaker ──────────────────────────────────────
 
-/// Before P6 the built prompt was bound as `_system_prompt` and the adapter
-/// passed `None`, so nothing profile-derived reached the model on either engine
-/// path. These assert the resolution that now feeds it.
 #[tokio::test]
 async fn profile_context_follows_the_identified_member_not_the_primary() {
     let (app, storage, _tmp) = make_app_with_sessions().await;
@@ -1552,10 +1489,9 @@ async fn profile_context_follows_the_identified_member_not_the_primary() {
     assert_ne!(body["profile_id"], jerry);
 }
 
-// ── PAI-1 P4 / PAI-2 P1: the identity-assertion policy ──────────────────────
+// ── The identity-assertion policy ───────────────────────────────────────────
 
-/// The default is `audit`, and audit must never block. Every other test in this
-/// file binds a session without a token and would fail if it did.
+/// Audit must never block; every other test here binds sessions without a token.
 #[tokio::test]
 async fn identifying_a_session_is_permitted_in_the_default_audit_mode() {
     let (app, storage, _tmp) = make_app_with_sessions().await;
@@ -1581,9 +1517,7 @@ async fn identifying_a_session_is_permitted_in_the_default_audit_mode() {
     assert_eq!(body_json(resp).await["bound"], true);
 }
 
-/// The gate actually bites: a check nobody has seen fire is indistinguishable from one that
-/// cannot. Nothing links a paired device to a member, so no remote caller can prove the
-/// identity it asserts, which is why the shipped default is `audit` and not this.
+/// No remote caller can prove a member identity yet, which is why `audit` is the default.
 #[tokio::test]
 async fn identifying_a_session_is_refused_in_enforce_mode() {
     let (app, storage, _tmp) = make_app_with_sessions().await;
@@ -1628,14 +1562,9 @@ async fn identifying_a_session_is_refused_in_enforce_mode() {
     );
 }
 
-// ── PAI-1 P4 / PAI-2 P1: the policy's first production call site ────────────
-// `PUT /sessions/{id}/user` binds a profile_id from the request BODY, so without an ownership
-// check any paired device could claim any member's memories. Driven through the router: the
-// check sits between the auth middleware, which supplies the Principal, and the handler.
+// ── The policy's first production call site ─────────────────────────────────
+// Unchecked, `PUT /sessions/{id}/user` would let any device claim any member's memories.
 
-/// The gate bites. Without this test the check is a rule nobody has watched
-/// fire — and a `SecurityPolicy` that has never denied anything is exactly the
-/// shape of the inert `Ok(true)` this phase exists to replace.
 #[tokio::test]
 async fn enforce_mode_refuses_an_identity_the_caller_cannot_prove() {
     let (app, storage, _tmp) = make_app_with_sessions().await;
@@ -1655,8 +1584,7 @@ async fn enforce_mode_refuses_an_identity_the_caller_cannot_prove() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "could not switch to enforce");
 
-    // The caller holds a valid token and has proved no membership, which is
-    // every remote caller today: nothing links a device to a member.
+    // Valid token, no proven membership: every remote caller today.
     let resp = app
         .clone()
         .oneshot(put(
@@ -1676,8 +1604,6 @@ async fn enforce_mode_refuses_an_identity_the_caller_cannot_prove() {
     assert_eq!(body_json(resp).await["profile_id"], serde_json::Value::Null);
 }
 
-/// The shipped default. The SAME assertion the test above refuses must succeed
-/// here, or `audit` is silently enforcing and the rollout plan is a fiction.
 #[tokio::test]
 async fn audit_mode_allows_the_very_assertion_enforce_refuses() {
     let (app, storage, _tmp) = make_app_with_sessions().await;
@@ -1702,8 +1628,7 @@ async fn audit_mode_allows_the_very_assertion_enforce_refuses() {
         "audit mode must not block -- that is the whole point of landing in it"
     );
 
-    // Assert the positive case too. "Not a 403" would also hold if the handler
-    // had stopped binding anything at all.
+    // "Not a 403" would also hold if the handler bound nothing.
     let resp = app
         .oneshot(get("/api/v1/sessions/sess-audit/user"))
         .await

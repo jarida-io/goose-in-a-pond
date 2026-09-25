@@ -1,7 +1,4 @@
-//! PAI-1 P9's HTTP half: a pairing code is bound to a household member at ISSUANCE. The code
-//! must reach `pairing_codes.profile_id`; a non-loopback peer is refused even with a member
-//! named; an unknown member mints nothing (migration 0043's foreign key); an unparsable body
-//! is refused, not defaulted. The code to `devices.profile_id` step lives in sqlite_handshake.
+//! Pairing codes are bound to a household member at issuance (HTTP half).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -48,9 +45,7 @@ async fn make_app() -> Harness {
         onboarding_repo: Arc::new(pond_infra::onboarding::SqlxOnboardingRepository::new(
             pool.clone(),
         )),
-        // The real adapter: the whole point is that the route reaches
-        // `issue_pairing_code_for`, and a mock would answer whatever it was
-        // told to.
+        // Real adapter: the route must reach `issue_pairing_code_for`.
         handshake: Arc::new(SqliteHandshakeAdapter::new(pool.clone())),
         whisper_url: "http://127.0.0.1:9000".into(),
         transcribe_audio: None,
@@ -153,9 +148,7 @@ async fn make_app() -> Harness {
     }
 }
 
-/// `POST /handshake/pairing-code` with a raw body. `body: None` sends no body
-/// and no content type at all, which is what the CLI and the desktop dashboard
-/// have done since #93 and must keep working.
+/// `POST /handshake/pairing-code`; `body: None` sends no body or content type, as the CLI does.
 async fn issue(router: &axum::Router, body: Option<&str>) -> (StatusCode, Value) {
     let req = Request::builder()
         .method(Method::POST)
@@ -176,10 +169,7 @@ async fn issue(router: &axum::Router, body: Option<&str>) -> (StatusCode, Value)
     (status, json)
 }
 
-/// The live pairing code as `GET /handshake/pairing-code` reports it. A genuine read-back,
-/// not an echo: `current_pairing_code` runs a fresh `SELECT`, so `profile_id` is the value
-/// the row holds and the one `verify_handshake` later copies onto the device. `code: null`
-/// means nothing was minted.
+/// The live code from `GET /handshake/pairing-code`, re-read from the row; `code: null` = none.
 async fn live_code(router: &axum::Router) -> Value {
     let resp = router
         .clone()
@@ -241,8 +231,7 @@ async fn a_code_issued_for_a_member_carries_that_member_into_the_row() {
     );
 }
 
-/// The backwards-compatible path, and the vacuity control for every "no code
-/// was issued" assertion below: issuance really does work in this harness.
+/// Also the vacuity control for every "no code was issued" assertion below.
 #[tokio::test]
 async fn a_code_issued_with_no_body_at_all_is_unattributed_as_it_always_was() {
     let h = make_app().await;
@@ -266,10 +255,7 @@ async fn a_code_issued_with_no_body_at_all_is_unattributed_as_it_always_was() {
 
 // ── The sole-member default ──────────────────────────────────────────────────
 
-/// `issue_pairing_code_for` takes a member, and a caller that passes none leaves every device
-/// on the pond paired unattributed. Such a device falls through the paired-device rung on
-/// every turn, so `sessions.profile_id` is never written and the summary corpus is
-/// unretrievable.
+/// An unattributed device never writes `sessions.profile_id`, leaving its summaries unreachable.
 #[tokio::test]
 async fn a_sole_member_household_binds_the_code_without_being_asked() {
     let h = make_app().await;
@@ -289,9 +275,7 @@ async fn a_sole_member_household_binds_the_code_without_being_asked() {
     assert_eq!(stored["profile_id"].as_str(), Some(jerry.as_str()));
 }
 
-/// The escape hatch, and the reason the default above is safe to have. Without it a
-/// one-member pond could not pair a guest's phone without that phone becoming the member's,
-/// and every turn it sent would inherit an identity nobody claimed.
+/// The escape hatch that makes the sole-member default safe.
 #[tokio::test]
 async fn a_sole_member_household_can_still_pair_a_guests_phone() {
     let h = make_app().await;
@@ -309,8 +293,6 @@ async fn a_sole_member_household_can_still_pair_a_guests_phone() {
     assert!(stored["profile_id"].is_null());
 }
 
-/// Two members is no answer, not a coin flip. Binding to whoever was created
-/// first would attribute a phone by row order, which is evidence of nothing.
 #[tokio::test]
 async fn two_members_still_require_the_operator_to_name_one() {
     let h = make_app().await;
@@ -327,8 +309,7 @@ async fn two_members_still_require_the_operator_to_name_one() {
 
 // ── The security argument the capture point rests on ─────────────────────────
 
-/// If this ever passes as a 200, capture-at-issuance has become capture-from-a-
-/// client, which is the hole PAI-1 P4 closed one rung lower down.
+/// A 200 here would turn capture-at-issuance into capture-from-a-client.
 #[tokio::test]
 async fn a_remote_peer_naming_a_member_is_refused_and_mints_nothing() {
     let h = make_app().await;
@@ -351,8 +332,7 @@ async fn a_remote_peer_naming_a_member_is_refused_and_mints_nothing() {
 #[tokio::test]
 async fn a_member_who_does_not_exist_is_refused_and_mints_nothing() {
     let h = make_app().await;
-    // A real member exists, so the refusal below is about THIS id and not about
-    // an empty `profiles` table.
+    // A real member exists, so the refusal is about this id, not an empty table.
     let _liz = a_member(&h, "Liz").await;
 
     let (status, body) = issue(&h.loopback, Some(r#"{"profile_id":"ghost"}"#)).await;
@@ -387,9 +367,7 @@ async fn a_blank_member_is_refused_rather_than_stored() {
     assert!(live_code(&h.loopback).await["code"].is_null());
 }
 
-/// The typo case, the one that would otherwise be silent. `deny_unknown_fields` turns a
-/// misspelt `profileId` into a 400; without it the operator is told the code was issued,
-/// the code is unattributed, and nothing surfaces until a paired phone gets no proposals.
+/// `deny_unknown_fields` makes a misspelt `profileId` a 400 instead of a silent unattributed code.
 #[tokio::test]
 async fn a_body_this_route_does_not_understand_is_refused_not_defaulted() {
     let h = make_app().await;
@@ -416,8 +394,7 @@ async fn a_body_this_route_does_not_understand_is_refused_not_defaulted() {
 
 // ── The read-back ────────────────────────────────────────────────────────────
 
-/// `GET /handshake/pairing-code` re-displays the live code, and now says whose
-/// it is. An operator who cannot see the binding cannot notice a wrong one.
+/// An operator who cannot see the binding cannot notice a wrong one.
 #[tokio::test]
 async fn re_displaying_the_code_names_the_member_it_is_bound_to() {
     let h = make_app().await;

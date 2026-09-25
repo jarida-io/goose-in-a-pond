@@ -1,7 +1,4 @@
-//! Integration tests for the scheduler REST routes under /api/v1/schedules: list,
-//! create, upcoming, delete, and the per-id actions pause, resume, run-now and
-//! runs.
-//! Run: cargo test -p pond-api --test schedule_integration_test
+//! Scheduler REST routes under `/api/v1/schedules`, against an in-memory scheduler.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -42,10 +39,7 @@ impl OnboardingRepository for CompletedOnboarding {
     async fn reset(&self) -> anyhow::Result<()> {
         Ok(())
     }
-    // PAI-2 P7 made this a required trait method rather than a defaulted one:
-    // a default would have to answer from `get_current_step`, and a stub that
-    // answers "not onboarded" makes every onboarding write route public
-    // wherever it is used. The name of this stub is the answer.
+    // Answering "not onboarded" would make every onboarding write route public.
     async fn is_complete(&self) -> anyhow::Result<bool> {
         Ok(true)
     }
@@ -481,7 +475,6 @@ async fn pause_and_resume_schedule() {
         .await
         .unwrap();
 
-    // Pause
     let pause_resp = app
         .clone()
         .oneshot(auth_post(
@@ -492,7 +485,6 @@ async fn pause_and_resume_schedule() {
         .unwrap();
     assert_eq!(pause_resp.status(), StatusCode::OK);
 
-    // Verify paused
     let list_resp = app
         .clone()
         .oneshot(auth_get("/api/v1/schedules"))
@@ -507,7 +499,6 @@ async fn pause_and_resume_schedule() {
         .expect("task not found");
     assert_eq!(task.get("paused").and_then(|v| v.as_bool()), Some(true));
 
-    // Resume
     let resume_resp = app
         .clone()
         .oneshot(auth_post(
@@ -518,7 +509,6 @@ async fn pause_and_resume_schedule() {
         .unwrap();
     assert_eq!(resume_resp.status(), StatusCode::OK);
 
-    // Verify unpaused
     let list_resp2 = app.oneshot(auth_get("/api/v1/schedules")).await.unwrap();
     let json2 = json_body(list_resp2).await;
     let task2 = json2

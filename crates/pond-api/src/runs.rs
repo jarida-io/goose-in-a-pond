@@ -1,7 +1,5 @@
-//! Agent turns that outlive the connection that asked for them: a turn is a task driving a
-//! [`RunHandle`], and every SSE body — the original POST and each reattach — is a subscriber that
-//! replays the sequenced frame ring then tails the broadcast. The default [`RunPolicy::Ephemeral`]
-//! is load-bearing. Nothing survives a process restart; [`RunSupervisor::epoch`] says so honestly.
+//! Agent turns that outlive their connection: every SSE body (the POST and each reattach)
+//! replays the [`RunHandle`] frame ring, then tails its broadcast. Runs die with the process.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,22 +9,17 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-/// Identifier for one agent turn. A UUID, string-shaped because it is only ever
-/// compared, logged, and put in a URL.
+/// A UUID, kept as a string because it is only compared, logged and put in URLs.
 pub type RunId = String;
 
-/// How many frames a run keeps for replay. Sized for the failure it exists for, a desktop reload of
-/// seconds: 2048 frames is a long answer's worth of tokens plus its tool and thinking frames, and
-/// it bounds what one abandoned run can hold.
+/// Replay ring length: a long answer's tokens plus tool and thinking frames, across a reload.
 const MAX_FRAMES: usize = 2048;
 
-/// Byte ceiling for the same ring, because frame COUNT is a poor proxy for
-/// memory once a tool result arrives carrying a base64 image.
+/// Byte cap on the ring too: one tool result can carry a base64 image.
 const MAX_BYTES: usize = 1024 * 1024;
 
-/// Live fan-out depth. Must stay smaller than [`MAX_FRAMES`]: that is what makes a lagging
-/// subscriber recoverable, since anything the broadcast queue drops is still in the replay ring,
-/// so `RecvError::Lagged` means "re-read from where you are" rather than a hole in the transcript.
+/// Live fan-out depth. Must stay below [`MAX_FRAMES`] so whatever a lagging subscriber misses
+/// is still in the ring: `RecvError::Lagged` means "re-read", not a transcript hole.
 const BROADCAST_CAP: usize = 256;
 
 const _: () = assert!(
@@ -35,9 +28,7 @@ const _: () = assert!(
      or a lagging subscriber has no way back"
 );
 
-/// Where a finished run stops being reattachable. A reload takes one to three seconds and a full
-/// restart with re-authentication perhaps twenty, so 120s leaves an order of magnitude spare while
-/// still keeping finished turns from accumulating.
+/// How long a finished run stays reattachable; a client restart with re-auth takes ~20s.
 pub const DEFAULT_RETENTION: Duration = Duration::from_secs(120);
 
 /// How many detached runs may be in flight at once.
@@ -45,7 +36,6 @@ pub const DEFAULT_MAX_RUNS: usize = 8;
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
-/// What a run is doing, or what it did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunState {
@@ -64,27 +54,20 @@ impl RunState {
     }
 }
 
-/// Who may reattach to a run.
-///
-/// Captured from the ORIGINAL request, so a reattach is checked against whoever
-/// actually started the turn rather than whoever happens to be asking.
+/// Who may reattach to a run, captured from the request that started it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunOwner {
     /// The bearer token named a paired device.
     Device(String),
-    /// The pond could not name a device: the loopback development bypass, or a token the handshake
-    /// could not attribute. Reattach then needs only a valid token, the same rung the original
-    /// request was granted, since no finer rule exists for a caller that was never named.
+    /// No device named (loopback dev bypass, unattributed token): reattach needs any valid token.
     Unattributed,
 }
 
 /// Whether being abandoned ends a run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunPolicy {
-    /// Last subscriber out cancels the turn. The voice path depends on it: `WebVoiceBackend` fires
-    /// a speculative `/chat/stream` at the first trailing silence and aborts it when speech
-    /// resumes, and under `Detached` that turn would finish and persist a question and answer for
-    /// a half-sentence nobody said.
+    /// Last subscriber out cancels the turn. Voice needs this: `WebVoiceBackend` aborts
+    /// speculative `/chat/stream` turns, which must not persist an answer to a half-sentence.
     Ephemeral,
     /// Nobody listening is not a reason to stop.
     Detached,
@@ -92,16 +75,12 @@ pub enum RunPolicy {
 
 // ── Frames ────────────────────────────────────────────────────────────────────
 
-/// One SSE frame, exactly as a client receives it.
-///
-/// `payload` is the `data:` line the frame builders produce and is never re-parsed; the sequence
-/// number rides in the SSE `id:` field, so no frame shape changes and the hot path stays JSON-free.
+/// One SSE frame as sent; `payload` is the `data:` line (never re-parsed), `seq` rides in `id:`.
 #[derive(Clone, Debug)]
 pub struct RunFrame {
     pub seq: u64,
     pub payload: Arc<str>,
-    /// The last frame this run will ever send. A subscriber that sees one is
-    /// done and may close.
+    /// The run's last frame; a subscriber that sees it may close.
     pub terminal: bool,
 }
 
@@ -109,9 +88,7 @@ pub struct RunFrame {
 #[derive(Debug)]
 pub struct Snapshot {
     pub frames: Vec<RunFrame>,
-    /// `Some(first_still_held)` when the caller asked for a position the ring
-    /// has already evicted. The caller has genuinely lost frames and needs to
-    /// reload the session rather than pretend it is caught up.
+    /// `Some(first_still_held)` when the asked-for position was evicted: the caller must reload.
     pub gap: Option<u64>,
     pub state: RunState,
     pub last_seq: u64,
@@ -123,8 +100,7 @@ struct RunBuffer {
     frames: VecDeque<RunFrame>,
     bytes: usize,
     next_seq: u64,
-    /// Lowest sequence still held. Rises as the ring evicts, and is what turns
-    /// "you asked for 41" into an honest gap rather than a silent skip.
+    /// Lowest sequence still held; lets a request for an evicted one report a gap.
     first_seq: u64,
     state: RunState,
     finished_at: Option<Instant>,
@@ -139,9 +115,8 @@ pub struct RunHandle {
     pub owner: RunOwner,
     pub policy: RunPolicy,
     pub started_at: chrono::DateTime<chrono::Utc>,
-    /// Fired by an explicit cancel, and by the last subscriber leaving an
-    /// `Ephemeral` run. The turn task selects on it; dropping the agent stream
-    /// afterwards is what fires the adapter's own `DropGuard`.
+    /// Fired by an explicit cancel or the last subscriber leaving an `Ephemeral` run. The turn
+    /// task selects on it; dropping the agent stream then fires the adapter's `DropGuard`.
     pub cancel: CancellationToken,
     tx: broadcast::Sender<RunFrame>,
     attached: AtomicUsize,
@@ -163,10 +138,7 @@ impl RunHandle {
             buf: Mutex::new(RunBuffer {
                 frames: VecDeque::new(),
                 bytes: 0,
-                // Sequences are 1-based, so `after_seq = 0` unambiguously means
-                // "from the beginning". With 0-based frames it would have meant
-                // both that AND "I have seen frame 0", and a reattach that was
-                // already current would replay the first frame forever.
+                // 1-based so `after_seq = 0` can only mean "from the beginning".
                 next_seq: 1,
                 first_seq: 1,
                 state: RunState::Running,
@@ -175,10 +147,7 @@ impl RunHandle {
         })
     }
 
-    /// Record a frame and hand it to whoever is listening.
-    ///
-    /// Returns the sequence assigned. A send error means nobody is attached,
-    /// which is the normal case this module exists for and not a failure.
+    /// Record a frame, broadcast it and return its sequence; nobody listening is not an error.
     pub fn push(&self, payload: impl Into<Arc<str>>, terminal: bool) -> u64 {
         let payload: Arc<str> = payload.into();
         let frame = {
@@ -208,8 +177,6 @@ impl RunHandle {
     /// Everything after `after_seq` that is still held.
     pub fn snapshot(&self, after_seq: u64) -> Snapshot {
         let buf = self.buf.lock().expect("run buffer poisoned");
-        // `after_seq` is exclusive and sequences start at 1, so 0 asks for
-        // everything and needs no special case.
         let want_from = after_seq + 1;
         let gap = (want_from < buf.first_seq).then_some(buf.first_seq);
         let frames: Vec<RunFrame> = buf
@@ -227,8 +194,7 @@ impl RunHandle {
         }
     }
 
-    /// Mark the run over. Idempotent: the first terminal state wins, so a cancel
-    /// that lands while the tail is already running does not relabel it.
+    /// Mark the run over. Idempotent: the first terminal state wins.
     pub fn finish(&self, state: RunState) {
         let mut buf = self.buf.lock().expect("run buffer poisoned");
         if buf.state.is_terminal() {
@@ -262,8 +228,7 @@ impl RunHandle {
         self.attached.load(Ordering::SeqCst)
     }
 
-    /// Register a subscriber. The returned guard decrements on drop, and is what
-    /// cancels an `Ephemeral` run when the last one leaves.
+    /// Register a subscriber; dropping the last guard cancels an `Ephemeral` run.
     pub fn attach(self: &Arc<Self>) -> AttachGuard {
         let now = self.attached.fetch_add(1, Ordering::SeqCst) + 1;
         tracing::debug!(
@@ -275,8 +240,7 @@ impl RunHandle {
         AttachGuard { run: self.clone() }
     }
 
-    /// Subscribe to the live tail. Take this BEFORE reading a snapshot, or a
-    /// frame produced between the two is lost by both paths.
+    /// Subscribe to the live tail. Call BEFORE `snapshot`, or a frame between the two is lost.
     pub fn subscribe(&self) -> broadcast::Receiver<RunFrame> {
         self.tx.subscribe()
     }
@@ -319,16 +283,12 @@ pub enum RegistryFull {
 
 struct RegistryInner {
     runs: HashMap<RunId, Arc<RunHandle>>,
-    /// Most recent run per session — the discovery index. A restarted client
-    /// knows its session id and nothing else, so lookup by session is not a
-    /// convenience, it is the only way back in.
+    /// Most recent run per session: a restarted client knows only its session id.
     by_session: HashMap<String, RunId>,
 }
 
-/// Every run this process is driving, plus the ones it has recently finished.
-///
-/// `std::sync::Mutex` rather than a concurrent map: it is touched per run start, reattach and
-/// sweep, never per token, and it makes holding the lock across an `.await` a compile error.
+/// Every run this process is driving or recently finished. A `std::sync::Mutex`: it is never
+/// touched per token, and holding it across an `.await` is then a compile error.
 pub struct RunRegistry {
     inner: Mutex<RegistryInner>,
     max_runs: usize,
@@ -347,17 +307,12 @@ impl RunRegistry {
         }
     }
 
-    /// Take ownership of a run, sweeping expired ones first so a pond that has
-    /// been idle does not refuse a turn on the strength of runs that ended
-    /// minutes ago.
+    /// Register a run; errs when `max_runs` runs are still in flight.
     pub fn insert(&self, handle: Arc<RunHandle>) -> Result<(), RegistryFull> {
         let mut inner = self.inner.lock().expect("run registry poisoned");
         Self::sweep_locked(&mut inner, self.retention);
 
-        // A session has one turn at a time, so a new one supersedes whatever
-        // that session left behind. Without this, every finished turn holds its
-        // slot for the whole retention window and an ordinary conversation --
-        // nine messages inside two minutes -- starts being refused.
+        // A session runs one turn at a time, so a new turn supersedes its finished one.
         if let Some(previous) = inner.by_session.get(&handle.session_id).cloned() {
             if inner
                 .runs
@@ -368,9 +323,7 @@ impl RunRegistry {
             }
         }
 
-        // The cap is about work in flight, not about history kept for a
-        // reconnecting client. Counting retained runs would make the ceiling
-        // drift down as a pond is used and back up again as it idles.
+        // Cap work in flight only; retained runs are history for reconnecting clients.
         let active = inner
             .runs
             .values()
@@ -428,8 +381,7 @@ impl RunRegistry {
                     attached = handle.attached(),
                     "run evicted from the registry"
                 );
-                // Only clear the session index if it still points at this run;
-                // a newer turn on the same session has already replaced it.
+                // A newer turn on the same session may already own the index.
                 if inner.by_session.get(&handle.session_id) == Some(id) {
                     inner.by_session.remove(&handle.session_id);
                 }
@@ -447,18 +399,13 @@ impl RunRegistry {
     }
 }
 
-/// Everything the API layer needs to own detached runs, as ONE `AppState` field rather than three:
-/// roughly thirty integration-test fixtures spell `AppState` out as a struct literal, so every
-/// extra field costs thirty mechanical edits.
+/// Detached-run state, one `AppState` field because ~30 test fixtures build `AppState` literally.
 pub struct RunSupervisor {
     pub registry: RunRegistry,
-    /// Bounds concurrent DETACHED runs. Deliberately not `sse_semaphore`: one counter cannot mean
-    /// both "clients reading" and "runs in flight", and since a detached run outlives its
-    /// connection, sharing the small interactive pool would let a few abandoned runs starve chat.
+    /// Bounds concurrent detached runs. Separate from `sse_semaphore` so abandoned runs, which
+    /// outlive their connection, cannot starve interactive chat.
     pub permits: Arc<tokio::sync::Semaphore>,
-    /// Identifies THIS process. A run id minted under a different epoch names a run that died with
-    /// the last process; saying so lets the client distinguish a restart from "your run finished
-    /// and aged out", which a bare 404 cannot.
+    /// Identifies this process, so a client can tell "pond restarted" from "run aged out".
     pub epoch: String,
 }
 
@@ -617,9 +564,6 @@ mod tests {
 
     #[test]
     fn a_finished_run_does_not_hold_a_slot_against_the_cap() {
-        // The cap is about turns in flight. A ten-message conversation inside
-        // the retention window must not start being refused halfway through,
-        // which is exactly what counting retained runs would do.
         let reg = RunRegistry::new(2, Duration::from_secs(300));
         for i in 0..10 {
             let run = RunHandle::new(
@@ -715,8 +659,7 @@ mod tests {
     async fn a_lagging_subscriber_can_recover_everything_it_missed() {
         let run = handle(RunPolicy::Detached);
         let mut rx = run.subscribe();
-        // Overrun the broadcast queue without overrunning the ring — the
-        // relationship BROADCAST_CAP < MAX_FRAMES is what makes this possible.
+        // Overrun the broadcast queue but not the ring (BROADCAST_CAP < MAX_FRAMES).
         for i in 0..(BROADCAST_CAP + 50) {
             run.push(format!("f{i}"), false);
         }

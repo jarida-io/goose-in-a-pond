@@ -1,19 +1,4 @@
-//! A credential change that cannot reach the extension must say so.
-//!
-//! `POST /extensions/{name}/secrets` used to store the values and return
-//! `{"stored": n}`, restarting nothing — so the desktop reported "Credentials
-//! updated" over an extension still running with the old ones. The OAuth
-//! callback did restart, but only inside an `if let (Some(mgr), Some(mp),
-//! Some(repo))` with no `else`, so on a backend without an extension manager
-//! it skipped silently and rendered a green "Connected" page over a dead
-//! extension.
-//!
-//! Both paths now go through `restart_extension_with_secrets`, which reports
-//! why it could not act. These tests pin the two halves of that contract: a
-//! restart that cannot happen is surfaced, and an extension the user has not
-//! installed is left alone.
-//!
-//! Run: cargo test -p pond-api --test extension_secret_restart
+//! A secrets change must report a restart it could not do, and leave uninstalled extensions alone.
 
 use std::sync::Arc;
 
@@ -81,8 +66,7 @@ impl DeviceRegistry for NoDevices {
     }
 }
 
-/// Accepts and remembers whatever is stored, so the handler's own storage step
-/// succeeds and the assertions are only ever about the restart.
+/// Always succeeds, so the assertions are only ever about the restart.
 #[derive(Default)]
 struct InMemorySecrets {
     values: RwLock<std::collections::HashMap<String, String>>,
@@ -112,8 +96,7 @@ impl SecretRepository for InMemorySecrets {
     }
 }
 
-/// Reports a fixed set of installed extensions — the handler reads this to
-/// decide whether the extension is one the user actually runs.
+/// A fixed set of installed extensions, which decides whether a restart is attempted.
 struct Installed(Vec<McpServerConfig>);
 
 impl Installed {

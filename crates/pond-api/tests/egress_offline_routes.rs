@@ -1,7 +1,5 @@
-//! PAI-2 P6b: `routes.rs` holds sixteen `.send()` sites while `egress_guard.rs` only demands
-//! one gated call per file, so this file is the other half: every send is paired with its own
-//! gate in source, and under `Offline` the routes must REFUSE rather than merely fail. NOTE:
-//! `set_network_mode` is process-global: every test here installs `Offline`, none may use `Open`.
+//! Every `.send()` in `routes.rs` pairs with its own egress gate, and `Offline` routes refuse.
+//! `set_network_mode` is process-global: every test here installs `Offline`; none may use `Open`.
 
 use std::sync::Arc;
 
@@ -27,15 +25,11 @@ use tower::ServiceExt;
 
 const ROUTES_RS: &str = "src/routes.rs";
 
-/// Any of these, called in code, opens a gated hop. Call forms with the opening paren, and
-/// the source has its comments stripped first, or the guard certifies comment prose that
-/// merely mentions `egress::begin`. The entries MUST NOT overlap: a superstring entry counts
-/// one real call twice, which left every test here green with a real gate deleted.
+/// Calls that open a gated hop, matched in comment-stripped source. Entries MUST NOT overlap:
+/// a superstring entry counts one real call twice.
 const GATE_CALLS: &[&str] = &["egress::begin(", "egress::check_egress("];
 
-/// The sends that are deliberately ungated, each with the loopback literal that is the
-/// reason. Named individually and pinned by count: a heuristic exemption does not merely
-/// miss a new hole, it LOCKS IT OUT of the question.
+/// Deliberately ungated sends, named and pinned by count: a heuristic exemption hides new holes.
 struct UngatedSend {
     /// Prefix of the enclosing top-level `fn` line.
     function: &'static str,
@@ -58,14 +52,11 @@ const UNGATED_LOOPBACK_SENDS: &[UngatedSend] = &[
     },
 ];
 
-/// Total `.send()` sites in `routes.rs` production source. A vacuity control:
-/// if the detector breaks, the pairing loop finds nothing and reports success.
+/// `.send()` sites in `routes.rs` production source; pinned so a broken detector can't pass.
 const EXPECTED_SENDS: usize = 16;
 
-/// Remove every `#[cfg(test)]` ITEM. Line-based for the same reason `egress_guard.rs` is: a
-/// `format!("{{")` inside a test desynchronises a brace counter, and rustfmt guarantees an
-/// item's closing brace sits at its own indentation. Truncating at the FIRST `#[cfg(test)]`
-/// would be wrong -- this file has several, with production code between them.
+/// Remove every `#[cfg(test)]` item, line-based (rustfmt puts the closing brace at the item's
+/// indent) since `format!("{{")` fools a brace counter. There are several, with code between.
 fn production_source(src: &str) -> String {
     let lines: Vec<&str> = src.lines().collect();
     let mut out = String::with_capacity(src.len());
@@ -97,8 +88,7 @@ fn production_source(src: &str) -> String {
     out
 }
 
-/// Strip `//` line comments, string-literal aware so a `"https://…"` does not
-/// eat the rest of its line.
+/// Strip `//` line comments, string-literal aware so `"https://…"` survives.
 fn strip_line_comments(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
     for line in src.lines() {
@@ -148,10 +138,7 @@ fn offsets_of(hay: &str, needle: &str) -> Vec<usize> {
     out
 }
 
-/// Every `.send()` in `routes.rs` is preceded by a gate of its OWN. "This function contains a
-/// gate somewhere" is the weaker claim, and it stays true when a second request is
-/// copy-pasted under an existing gated one. So the pairing is sequential: walking a function,
-/// the Nth send must be preceded by at least N gates.
+/// Sequential pairing: within a function, the Nth send must follow at least N gates.
 #[test]
 fn every_send_in_routes_rs_pairs_with_its_own_gate() {
     let chunks = routes_fn_chunks();
@@ -174,10 +161,7 @@ fn every_send_in_routes_rs_pairs_with_its_own_gate() {
             .find(|e| name.starts_with(e.function))
         {
             exempt_hits += 1;
-            // The exemption has to keep being true. Same polarity as
-            // `egress_guard.rs :: loopback_exemptions_contain_no_third_party_url`:
-            // "it only talks to Ollama" must not be a claim in a comment, and
-            // comments are stripped above, so this reads the real literal.
+            // The exemption must stay true: its loopback literal must still be in the code.
             assert!(
                 chunk.contains(exempt.loopback_literal),
                 "`{}` is exempt from the egress gate because it only talks to \
@@ -282,10 +266,7 @@ impl DeviceRegistry for NoDevices {
     }
 }
 
-/// A secret store that already holds a Spotify token pair, so `spotify_api_call` gets past
-/// its "not connected" early returns and reaches the gate. Without a stored token the routes
-/// return "not connected" before touching the network, and a test asserting "no request left
-/// the pond" would pass against a handler that has no gate at all.
+/// Holds a Spotify token pair so `spotify_api_call` gets past "not connected" to the gate.
 struct ConnectedSpotify;
 
 #[async_trait::async_trait]
@@ -307,10 +288,7 @@ impl SecretRepository for ConnectedSpotify {
     }
 }
 
-/// `whisper_url` is deliberately a REMOTE host here. It is a free-text setting
-/// (`voice_whisper_url`) that merely defaults to loopback, so a pond pointed at
-/// a remote ASR box ships raw household audio to a third party -- and both the
-/// `/transcribe` forward and the `/test` diagnostics probe used it ungated.
+/// Remote on purpose: `voice_whisper_url` merely defaults to loopback and can ship audio away.
 const REMOTE_WHISPER: &str = "https://asr.example.com";
 
 async fn make_app() -> (axum::Router, tempfile::TempDir) {
@@ -451,8 +429,7 @@ fn post(path: &str, json: serde_json::Value) -> Request<Body> {
         .unwrap()
 }
 
-/// A refusal, not a failure. Both leave the caller with no data; only one of
-/// them tells the user which setting produced that.
+/// A refusal, not a failure: it must name the setting responsible.
 fn assert_is_refusal(text: &str, host: &str) {
     assert!(
         text.contains("network_mode"),
@@ -474,8 +451,7 @@ fn assert_is_refusal(text: &str, host: &str) {
 async fn hugging_face_model_search_is_refused_offline() {
     let (app, _tmp) = offline_app().await;
     let (status, body) = send(app, get("/api/v1/models/search/gguf?q=gemma")).await;
-    // Status first: a body predicate on an error payload reports whatever the
-    // absence of a key means, which is the opposite of the truth.
+    // Status first: a body predicate can pass on an error payload.
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["models"], serde_json::json!([]));
     assert_is_refusal(body["error"].as_str().unwrap_or_default(), "huggingface.co");
@@ -498,8 +474,7 @@ async fn github_llamafile_release_listing_is_refused_offline() {
     assert_is_refusal(body["error"].as_str().unwrap_or_default(), "api.github.com");
 }
 
-/// The one route that takes an arbitrary caller-supplied URL, so it is the one
-/// place in the file where "which host" is not decided by GIAP.
+/// The one route whose host is caller-supplied rather than chosen by GIAP.
 #[tokio::test]
 async fn a_model_download_by_url_is_refused_offline_before_it_spawns() {
     let (app, _tmp) = offline_app().await;
@@ -515,8 +490,7 @@ async fn a_model_download_by_url_is_refused_offline_before_it_spawns() {
         ),
     )
     .await;
-    // 502, not 202. A refusal that still returns "downloading" and fails inside
-    // a detached task is not an answer to "why is nothing downloading".
+    // 502, not 202: a refusal must not report "downloading" and fail later in a detached task.
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert_is_refusal(body["error"].as_str().unwrap_or_default(), "huggingface.co");
 }
@@ -526,9 +500,7 @@ async fn spotify_now_playing_reports_a_refusal_not_a_disconnection() {
     let (app, _tmp) = offline_app().await;
     let (status, body) = send(app, get("/api/v1/music/now-playing")).await;
     assert_eq!(status, StatusCode::OK);
-    // The distinction is the point. Before P6b a refusal came back as a bare
-    // `{"connected": false}`, which sends the user to re-run an OAuth flow that
-    // cannot possibly succeed while the mode is what it is.
+    // Not `{"connected": false}`, which would send the user to re-run a doomed OAuth flow.
     assert_eq!(body["error"], "network_refused");
     assert_is_refusal(
         body["message"].as_str().unwrap_or_default(),
@@ -555,10 +527,7 @@ async fn spotify_control_is_refused_offline() {
     );
 }
 
-/// The diagnostics probe, and with it the whole `voice_whisper_url` question.
-/// `/api/v1/test` probes three URLs: the two 127.0.0.1 literals must stay unaffected under
-/// `Offline`, since a privacy control that reports the local model server as blocked gets
-/// switched off, and the third, the setting, is the one that has to be refused.
+/// Loopback probes stay green under `Offline`, or users switch the privacy control off.
 #[tokio::test]
 async fn the_diagnostics_probe_refuses_a_remote_whisper_and_leaves_loopback_alone() {
     let (app, _tmp) = offline_app().await;
@@ -575,9 +544,7 @@ async fn the_diagnostics_probe_refuses_a_remote_whisper_and_leaves_loopback_alon
         "asr.example.com",
     );
 
-    // The vacuity control for the whole file: loopback still passes the gate.
-    // Without this, an `egress_verdict` that refused everything would make every
-    // assertion above pass while breaking the pond.
+    // Vacuity control for the file: a gate that refused everything would pass all else.
     for local in ["llamafile", "ollama"] {
         assert_ne!(
             body[local]["status"], "refused",

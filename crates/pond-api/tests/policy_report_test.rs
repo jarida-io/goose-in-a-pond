@@ -1,7 +1,5 @@
-//! PAI-2 P8a: `GET /api/v1/security/policy-report` answers what flipping
-//! `security_policy_mode` to `enforce` would break. In `audit` mode a would-deny
-//! still proceeds, so `ok` is `true` for exactly the requests `enforce` blocks and
-//! the effect alone cannot answer it. Run: cargo test -p pond-api --test policy_report_test
+//! `GET /api/v1/security/policy-report` shows what `enforce` would break: in `audit` mode a
+//! would-deny still succeeds, so the response alone cannot tell.
 
 use std::sync::Arc;
 
@@ -44,9 +42,7 @@ impl OnboardingRepository for CompletedOnboarding {
     }
 }
 
-/// A router whose policy actually writes somewhere. `security_policy: None`
-/// would make every assertion below pass against a handler that audits nothing,
-/// which is the shape of vacuity this file is guarding against.
+/// A router whose policy really records; with `security_policy: None` nothing is audited.
 async fn make_app() -> (axum::Router, Arc<SqliteSessionStorage>, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let db = Database::init(tmp.path()).await.unwrap();
@@ -73,8 +69,7 @@ async fn make_app() -> (axum::Router, Arc<SqliteSessionStorage>, tempfile::TempD
         llamafile_url: "http://127.0.0.1:8080".into(),
         tts: None,
         tts_control: None,
-        // Real settings, so `security_policy_mode` is whatever the product
-        // actually ships as its default rather than whatever a mock returns.
+        // Real settings, so `security_policy_mode` is the shipped default.
         settings_repo: Arc::new(SqliteSettingsRepository::new(pool.clone())),
         // Real profiles: `sessions.profile_id` is a foreign key.
         profile_repo: Arc::new(SqliteProfileRepository::new(pool.clone())),
@@ -197,9 +192,7 @@ async fn body_json(resp: axum::response::Response) -> serde_json::Value {
     serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
 }
 
-/// Fetch the report, asserting the status before touching the body. A body
-/// predicate run against an error payload reads every field as absent and
-/// reports the opposite of the truth.
+/// Fetch the report, asserting the status first: an error payload reads as all zeros.
 async fn report(app: &axum::Router) -> serde_json::Value {
     let resp = app
         .clone()
@@ -214,10 +207,7 @@ async fn report(app: &axum::Router) -> serde_json::Value {
     body_json(resp).await
 }
 
-/// `POLICY_COUNTERS` is a process-global and `cargo test` runs this file's
-/// functions concurrently, so two decisions taken at once corrupt each other's
-/// deltas. Every test below that causes a policy decision must hold this first,
-/// or it flakes with counts like `process.would_deny` 2 vs 1.
+/// `POLICY_COUNTERS` is process-global: every test that causes a policy decision holds this.
 static DECISION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn n(v: &serde_json::Value, block: &str, key: &str) -> u64 {
@@ -226,9 +216,7 @@ fn n(v: &serde_json::Value, block: &str, key: &str) -> u64 {
         .unwrap_or_else(|| panic!("missing {block}.{key} in {v}"))
 }
 
-/// The behavioural guard. The vacuity control lives inside it rather than in a
-/// sibling test, so the "zeros before, one after" pair is a single serial
-/// sequence over one router and cannot be satisfied by whichever half ran.
+/// The vacuity control is inline so "zeros before, one after" runs serially on one router.
 #[tokio::test]
 async fn an_unproved_identity_assertion_shows_up_as_a_would_deny_in_both_halves() {
     let _serial = DECISION_LOCK.lock().await;
@@ -267,8 +255,7 @@ async fn an_unproved_identity_assertion_shows_up_as_a_would_deny_in_both_halves(
     assert_eq!(resp.status(), StatusCode::CREATED);
     let liz = body_json(resp).await["id"].as_str().unwrap().to_string();
 
-    // A Bearer token principal has no proved profile -- nothing links a paired
-    // device to a household member yet -- so this is a refusal that proceeds.
+    // A Bearer principal has no proved profile, so this is a refusal that proceeds.
     let resp = app
         .clone()
         .oneshot(put(
@@ -314,10 +301,7 @@ async fn an_unproved_identity_assertion_shows_up_as_a_would_deny_in_both_halves(
     );
 }
 
-/// The two halves are reported separately because they answer over different
-/// windows and one of them is erasable. If a future change collapses them into
-/// one number, this is what says so: clearing the activity log must take the
-/// event half to zero and leave the process half standing.
+/// The halves stay separate: they span different windows, and only the event half is erasable.
 #[tokio::test]
 async fn clearing_the_activity_log_cannot_zero_the_process_counters() {
     let _serial = DECISION_LOCK.lock().await;
@@ -377,7 +361,6 @@ async fn clearing_the_activity_log_cannot_zero_the_process_counters() {
     );
 }
 
-/// A bad window is a client error, not a silent fallback to some other span.
 #[tokio::test]
 async fn an_unrecognised_window_is_rejected_rather_than_quietly_widened() {
     let (app, _storage, _tmp) = make_app().await;
@@ -388,10 +371,7 @@ async fn an_unrecognised_window_is_rejected_rather_than_quietly_widened() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-/// Registration in `protected_routes` is what makes this route auth-gated; the
-/// two compile-time middleware guards enforce that block wholesale. This asserts
-/// the consequence over a real request, because "it is in the right block" is a
-/// claim about source text and 401 is a claim about behaviour.
+/// Being in `protected_routes` is what gates this; checked with a real request, not source.
 #[tokio::test]
 async fn the_report_is_not_readable_without_a_token() {
     let (app, _storage, _tmp) = make_app().await;

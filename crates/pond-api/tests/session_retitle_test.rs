@@ -1,7 +1,4 @@
-//! `POST /api/v1/sessions/retitle`, the attended half of conversation naming.
-//! The gate, normalisation and persistence are unit-tested elsewhere; what only a
-//! route test reaches is that the button does something, that the manual path
-//! still refuses to overwrite a typed name, and that a refusal says which one.
+//! `POST /api/v1/sessions/retitle` at the route level; the gate itself is unit-tested elsewhere.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -32,8 +29,7 @@ use pond_infra::sqlite_skill::SqliteSkillRepository;
 use serde_json::Value;
 use tower::ServiceExt;
 
-/// Answers every naming request with the same line, and counts how often it was
-/// asked — the count is how the tests prove a refusal cost no inference.
+/// Fixed reply, counting calls so tests can prove a refusal cost no inference.
 struct StubProvider {
     reply: String,
     calls: AtomicUsize,
@@ -246,8 +242,6 @@ async fn a_press_renames_a_conversation_still_on_its_fallback_name() {
     );
 }
 
-/// Pressing a button must never destroy a name somebody chose. Asserting the
-/// model was not even asked makes the guarantee cheap as well as safe.
 #[tokio::test]
 async fn a_press_never_overwrites_a_name_somebody_typed() {
     let provider = StubProvider::new("Something else entirely");
@@ -348,10 +342,7 @@ async fn retitle_one(app: &axum::Router, session_id: &str) -> (StatusCode, Value
     (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
 }
 
-/// The deliberate asymmetry, and the one worth stating plainly: the sweep
-/// refuses to touch a name somebody typed, and this replaces it. Asking for
-/// one named conversation is consent about that conversation, and a button
-/// that quietly declined would be indistinguishable from a broken one.
+/// Deliberately unlike the sweep: asking for one conversation is consent to rename it.
 #[tokio::test]
 async fn asking_for_one_conversation_replaces_even_a_name_typed_by_hand() {
     let provider = StubProvider::new("Wake word fires twice on the Jetson");
@@ -405,8 +396,7 @@ async fn asking_for_one_conversation_rebuilds_a_name_that_still_fits() {
     assert_eq!(body["title"], "A freshly considered name");
 }
 
-/// Forcing overrides permission, not possibility. A two-message conversation
-/// has nothing to describe, and no amount of asking changes that.
+/// Forcing overrides permission, not possibility.
 #[tokio::test]
 async fn asking_for_a_conversation_too_short_to_describe_says_so() {
     let provider = StubProvider::new("A name");
@@ -430,9 +420,7 @@ async fn asking_for_a_conversation_that_does_not_exist_is_a_404() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-/// The reply is a contract with the desktop client, which types every field.
-/// A rename that reported nothing countable would leave the button unable to
-/// say what it did.
+/// The desktop client types every field of this reply.
 #[tokio::test]
 async fn the_reply_carries_every_field_the_client_reads() {
     let provider = StubProvider::new("A name");

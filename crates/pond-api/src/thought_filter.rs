@@ -1,37 +1,26 @@
-//! Streaming filter that strips Harmony-style reasoning-channel preambles, inline `<|tool_call>`
-//! markup and stray `<eos>` sentinels before tokens reach SSE: llamafile and ollama implement
-//! `stream_complete` natively, so per-token output bypasses `strip_thinking_tokens`. The holdback
-//! must stay conditional on content, or the visible answer trails generation and freezes mid-word.
+//! Strips reasoning blocks, inline `<|tool_call>` markup and `<eos>` sentinels from streamed
+//! tokens: llamafile and ollama stream natively, bypassing `strip_thinking_tokens`.
 
-/// The marker tables, owned by `pond-core` and shared by both streaming filters.
-/// Never keep a local copy here: the two vocabularies drift, and a marker learned once has to be
-/// learned by both filters.
+/// Owned by `pond-core` and shared by both streaming filters; never keep a local copy.
 use pond_core::models::services::thought_filter::{PAIRED_TAGS, STANDALONE_SENTINELS};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum State {
     Normal,
-    /// Inside a paired-tag block. The `&'static str` holds the close tag we
-    /// are looking for, so we don't have to remember which open tag matched.
+    /// Inside a paired-tag block; holds the close tag being looked for.
     InsideBlock(&'static str),
 }
 
-/// Stateful per-stream filter. Reuse a single instance across all chunks of
-/// one response; allocate a new one per response.
+/// Stateful filter: one instance per response, fed every chunk of it.
 pub struct ThoughtFilter {
     state: State,
     buf: String,
-    /// Per-block accumulator for a paired-tag envelope body. A `<|channel>thought ...` block is
-    /// discarded; a `<|tool_call> ...` block is kept here so the SSE handler can report an
-    /// off-protocol tool call instead of dropping it silently.
+    /// Current block's body, kept for tool calls (reported by the SSE handler) and thinking.
     block_body: String,
-    /// Open tag of the block we are currently inside, so we can decide
-    /// whether to keep the body (tool_call) or discard it (channel/thought).
     inside_open_tag: Option<&'static str>,
     /// Tool-call envelope bodies completed since the last `take_tool_calls`.
     captured_tool_calls: Vec<String>,
-    /// When true, thinking/reasoning blocks are captured (not just discarded)
-    /// so they can be forwarded as SSE thinking events.
+    /// Capture thinking blocks for SSE thinking events instead of discarding them.
     capture_thinking: bool,
     /// Thinking blocks captured since the last `take_thinking`.
     captured_thinking: Vec<String>,
@@ -62,32 +51,26 @@ impl ThoughtFilter {
         self
     }
 
-    /// Feed a chunk; returns the (possibly empty) substring that should be
-    /// forwarded downstream right now. Tokens that overlap a partial tag are
-    /// held back until the next call resolves the ambiguity.
+    /// Feed a chunk; returns what can be forwarded now, holding back only a possible partial tag.
     pub fn push(&mut self, chunk: &str) -> String {
         self.buf.push_str(chunk);
         let mut out = String::new();
         loop {
             match &self.state {
                 State::Normal => {
-                    // Find the earliest open tag among the paired set.
                     let earliest_pair = PAIRED_TAGS
                         .iter()
                         .filter_map(|&(open, close)| self.buf.find(open).map(|i| (i, open, close)))
                         .min_by_key(|&(i, _, _)| i);
 
                     if let Some((i, open, close)) = earliest_pair {
-                        // Strip standalone sentinels from the chunk we're about
-                        // to emit (they can appear anywhere in Normal text).
                         out.push_str(&strip_standalones(&self.buf[..i]));
                         self.buf.drain(..i + open.len());
                         self.inside_open_tag = Some(open);
                         self.block_body.clear();
                         self.state = State::InsideBlock(close);
                     } else {
-                        // No paired tag visible. Hold back only a tail that
-                        // could still become one -- normally nothing at all.
+                        // Hold back only a tail that could still become a marker; usually none.
                         let safe = safe_emit_len(&self.buf, &NORMAL_MARKERS);
                         out.push_str(&strip_standalones(&self.buf[..safe]));
                         self.buf.drain(..safe);
@@ -97,9 +80,6 @@ impl ThoughtFilter {
                 State::InsideBlock(close) => {
                     let close_tag = *close;
                     if let Some(i) = self.buf.find(close_tag) {
-                        // Capture the body of paired-tag envelopes:
-                        // - tool_call: always captured for UI surfacing
-                        // - channel/thought: captured only when capture_thinking is on
                         self.block_body.push_str(&self.buf[..i]);
                         if matches!(self.inside_open_tag, Some("<|tool_call>")) {
                             let body = std::mem::take(&mut self.block_body);
@@ -108,7 +88,6 @@ impl ThoughtFilter {
                                 self.captured_tool_calls.push(trimmed.to_string());
                             }
                         } else if self.capture_thinking {
-                            // Thinking block — capture for SSE thinking events
                             let body = std::mem::take(&mut self.block_body);
                             let trimmed = body
                                 .trim()
@@ -127,8 +106,6 @@ impl ThoughtFilter {
                     } else {
                         // Discard everything but a tail that may start close.
                         let safe = safe_emit_len(&self.buf, &[close_tag]);
-                        // Accumulate the safely-discarded portion for tool_call
-                        // envelopes so we can surface it once close arrives.
                         self.block_body.push_str(&self.buf[..safe]);
                         self.buf.drain(..safe);
                         break;
@@ -139,16 +116,13 @@ impl ThoughtFilter {
         out
     }
 
-    /// Stream-end flush. Anything still buffered in Normal state is emitted
-    /// (after stripping standalone sentinels); anything buffered inside a
-    /// paired-tag block is dropped (the model never closed it).
+    /// Stream-end flush: emits buffered text, but drops an unclosed block's body.
     pub fn flush(&mut self) -> String {
         let pending = std::mem::take(&mut self.buf);
         match self.state {
             State::Normal => strip_standalones(&pending),
             State::InsideBlock(close) => {
-                // The stream ended with an envelope still open, so bytes are being discarded.
-                // Warn: dropping model output silently is what made this class of bug invisible.
+                // Never drop model output silently.
                 tracing::warn!(
                     close_marker = close,
                     dropped_bytes = pending.len() + self.block_body.len(),
@@ -159,28 +133,21 @@ impl ThoughtFilter {
         }
     }
 
-    /// Drain any tool-call envelopes captured since the last call. Returns
-    /// the raw body text (everything between `<|tool_call>` and `<tool_call|>`),
-    /// without the wrapping markers. Use [`parse_tool_envelope`] to extract
-    /// the tool name and JSON arguments.
+    /// Drain raw tool-call bodies captured so far; see [`parse_tool_envelope`].
     pub fn take_tool_calls(&mut self) -> Vec<String> {
         std::mem::take(&mut self.captured_tool_calls)
     }
 
-    /// Drain any thinking/reasoning blocks captured since the last call.
-    /// Only populated when `with_thinking_capture()` was called. Returns
-    /// the reasoning text with the "thought" prefix stripped.
+    /// Drain captured thinking, "thought" prefix stripped; empty without `with_thinking_capture`.
     pub fn take_thinking(&mut self) -> Vec<String> {
         std::mem::take(&mut self.captured_thinking)
     }
 }
 
-/// Best-effort parser for the body of a Harmony-style `<|tool_call>...<tool_call|>` envelope.
-/// Recognises `call:NAME{ARGS}`, `NAME{ARGS}`, `NAME(ARGS)`, `{"name": ..., "arguments": {...}}`,
-/// returning `(tool_name, args_json_str)` with the args left as raw text for the caller to parse.
+/// Best-effort `(name, raw_args)` from a tool-call body: `call:NAME{ARGS}`, `NAME{ARGS}`,
+/// `NAME(ARGS)` or `{"name": ..., "arguments": {...}}`.
 pub fn parse_tool_envelope(body: &str) -> Option<(String, String)> {
     let s = body.trim();
-    // Strip an optional `call:` prefix.
     let s = s.strip_prefix("call:").unwrap_or(s);
 
     // Form 1/2/3: NAME followed by ({...}) or {...}
@@ -213,10 +180,7 @@ pub fn parse_tool_envelope(body: &str) -> Option<(String, String)> {
     None
 }
 
-/// Every marker that can begin in `State::Normal`: paired-tag OPEN markers plus the standalone
-/// sentinels. Close markers are absent on purpose; inside a block only the one known close matters.
-/// Derived from the two tables so adding a tag cannot leave a stale copy, and built once because
-/// `push` runs per token.
+/// Markers that can begin in `State::Normal`: open tags and standalone sentinels (no close tags).
 static NORMAL_MARKERS: std::sync::LazyLock<Vec<&'static str>> = std::sync::LazyLock::new(|| {
     PAIRED_TAGS
         .iter()
@@ -225,8 +189,6 @@ static NORMAL_MARKERS: std::sync::LazyLock<Vec<&'static str>> = std::sync::LazyL
         .collect()
 });
 
-/// Remove every occurrence of every standalone sentinel from the input.
-/// Cheap because the sentinel set is tiny.
 fn strip_standalones(s: &str) -> String {
     let mut out = s.to_string();
     for sentinel in STANDALONE_SENTINELS {
@@ -237,20 +199,14 @@ fn strip_standalones(s: &str) -> String {
     out
 }
 
-/// Byte index up to which `s` can be emitted now: everything but the longest suffix that is a
-/// *proper* prefix of some marker, the only text that could still become one. Complete markers must
-/// not match, or they would be withheld forever; `buf.find` and [`strip_standalones`] handle those.
-/// The index is always a UTF-8 char boundary, and this runs per token, so keep it cheap.
+/// Emittable byte length of `s`: all but the longest suffix that is a *proper* marker prefix
+/// (complete markers would be withheld forever). Always a char boundary; runs per token.
 fn safe_emit_len(s: &str, markers: &[&str]) -> usize {
     let longest = markers.iter().map(|m| m.len()).max().unwrap_or(0);
-    // A proper prefix is at most `longest - 1` bytes, so nothing before this
-    // point can be part of a partial marker.
+    // A proper prefix is at most `longest - 1` bytes.
     let earliest = s.len().saturating_sub(longest.saturating_sub(1));
 
-    // Walk forwards from the earliest possible start and take the FIRST hit,
-    // which is the longest withheld tail. `i < s.len()` keeps the empty suffix
-    // out of the running -- every marker "starts with" it, and matching it
-    // would withhold the whole buffer.
+    // The first hit from the left is the longest withheld tail.
     for i in earliest..s.len() {
         if !s.is_char_boundary(i) {
             continue;
@@ -308,7 +264,6 @@ mod tests {
 
     #[test]
     fn strips_thought_split_token_boundaries() {
-        // Mimic real per-token streaming where each chunk is a few chars.
         let raw = "<|channel>thought The user said hi.<channel|>Hello! I am Goose.";
         let chunks: Vec<String> = raw.chars().map(|c| c.to_string()).collect();
         let refs: Vec<&str> = chunks.iter().map(|s| s.as_str()).collect();
@@ -317,7 +272,6 @@ mod tests {
 
     #[test]
     fn drops_unclosed_thought_block_on_flush() {
-        // No closing tag — model misbehaved; we conservatively drop the buffer.
         assert_eq!(run(&["<|channel>thought never closes"]), "");
     }
 
@@ -331,8 +285,7 @@ mod tests {
 
     #[test]
     fn strips_inline_tool_call_markup() {
-        // Real-world leak: model emits the Harmony tool-call envelope as
-        // plain text instead of using the structural tool-call mechanism.
+        // Models do emit the Harmony tool-call envelope as plain text.
         let raw = "<|tool_call>call:giap__get_current_weather{}<tool_call|>";
         assert_eq!(run(&[raw]), "");
     }
@@ -429,7 +382,6 @@ mod tests {
 
     #[test]
     fn strips_orphaned_close_think_tag() {
-        // Orphaned </think> without open — stripped as standalone sentinel.
         assert_eq!(run(&["Hello!</think>"]), "Hello!");
     }
 
@@ -475,28 +427,21 @@ mod tests {
 
     #[test]
     fn idempotent_on_empty_chunks() {
-        // An empty push emits nothing and changes nothing. Note that `push("hi")`
-        // now emits "hi" immediately -- it cannot begin a marker, so there is
-        // nothing to hold back. The buffer is only non-empty between a partial
-        // marker and its resolution.
+        // "hi" cannot begin a marker, so it is emitted at once.
         let mut f = ThoughtFilter::new();
         assert_eq!(f.push(""), "");
         assert_eq!(f.push("hi"), "hi");
         assert_eq!(f.push(""), "");
-        // Combined emitted + flush == original input.
         let mut g = ThoughtFilter::new();
         let mut total = g.push("hi");
         total.push_str(&g.flush());
         assert_eq!(total, "hi");
     }
     // ── Holdback behaviour ─────────────────────────────────────────────────
-    // These pin that `safe_emit_len` withholds only bytes that could still become a marker: a
-    // fixed holdback makes the visible answer trail generation and freezes the chat mid-word.
+    // A fixed holdback makes the answer trail generation and freeze mid-word.
 
     #[test]
     fn ordinary_text_is_emitted_with_no_holdback_on_the_very_first_push() {
-        // The two strings the bug report caught frozen on screen. Both are
-        // returned whole, before any flush().
         let mut f = ThoughtFilter::new();
         assert_eq!(f.push("Just let me kno"), "Just let me kno");
 
@@ -506,17 +451,12 @@ mod tests {
             "The current president of the United States",
         );
 
-        // Down to a single character, which is what a real token stream looks
-        // like at the start of a turn.
         let mut h = ThoughtFilter::new();
         assert_eq!(h.push("T"), "T");
     }
 
     #[test]
     fn every_prefix_of_tag_free_text_is_emitted_as_it_arrives() {
-        // Kills the class rather than the instance: after feeding k characters,
-        // the filter must have emitted exactly those k characters -- never
-        // lagging behind by a lookahead window.
         let raw = "Hello! I can help with reminders, sensors and the news.";
         let mut f = ThoughtFilter::new();
         let mut emitted = String::new();
@@ -530,8 +470,6 @@ mod tests {
 
     #[test]
     fn holds_back_only_a_suffix_that_could_begin_a_marker() {
-        // A bare angle bracket followed by text that no marker starts with is
-        // fully resolved, so none of it is withheld.
         let mut f = ThoughtFilter::new();
         assert_eq!(f.push("a < b"), "a < b");
 
@@ -543,8 +481,6 @@ mod tests {
 
     #[test]
     fn holds_the_longest_matching_suffix_not_a_shorter_one() {
-        // "<think" is six bytes of a live partial; withholding only the final
-        // "<" would emit "think" as text and then fail to match the tag.
         let mut f = ThoughtFilter::new();
         assert_eq!(f.push("ok <think"), "ok ");
         assert_eq!(f.push(">reasoning</think>done"), "done");
@@ -552,17 +488,13 @@ mod tests {
 
     #[test]
     fn a_complete_sentinel_is_not_withheld_as_a_partial() {
-        // `<eos>` is a whole sentinel and no marker extends it, so it is
-        // stripped immediately rather than held back forever.
         let mut f = ThoughtFilter::new();
         assert_eq!(f.push("bye<eos>"), "bye");
     }
 
     #[test]
     fn a_complete_close_tag_that_extends_into_a_longer_one_resolves_next_push() {
-        // "</think>" is complete, but it is also a proper prefix of
-        // "</thinking>", so it must be held for exactly one push and then
-        // resolved once the next byte proves which one it was.
+        // "</think>" is also a proper prefix of "</thinking>".
         let mut f = ThoughtFilter::new();
         assert_eq!(f.push("done</think>"), "done");
         assert_eq!(f.push(" more"), " more");
@@ -570,8 +502,6 @@ mod tests {
 
     #[test]
     fn multibyte_text_is_never_split_mid_character() {
-        // A non-ASCII tail cannot begin a marker (every marker is ASCII), so it
-        // must pass straight through rather than being snapped to a boundary.
         let mut f = ThoughtFilter::new();
         assert_eq!(f.push("Grüße, 世界"), "Grüße, 世界");
 
@@ -588,10 +518,7 @@ mod tests {
 
     #[test]
     fn every_marker_is_ascii_so_a_partial_never_starts_mid_character() {
-        // `safe_emit_len` relies on this: because every marker is pure ASCII,
-        // a suffix matching a marker prefix can never begin inside a multi-byte
-        // character. Adding a non-ASCII marker would invalidate that reasoning,
-        // and this test is what would catch it.
+        // `safe_emit_len` relies on this.
         for (open, close) in PAIRED_TAGS {
             assert!(open.is_ascii(), "non-ASCII open marker: {open}");
             assert!(close.is_ascii(), "non-ASCII close marker: {close}");
@@ -603,8 +530,6 @@ mod tests {
 
     #[test]
     fn holdback_never_exceeds_the_longest_marker() {
-        // Whatever the input, the withheld tail is bounded by the longest
-        // marker, so the filter cannot accumulate unbounded state in Normal.
         let longest = NORMAL_MARKERS.iter().map(|m| m.len()).max().unwrap();
         for probe in ["plain text", "a < b", "x <thi", "<|channel", "<end_of_tur"] {
             let held = probe.len() - safe_emit_len(probe, &NORMAL_MARKERS);
@@ -612,7 +537,7 @@ mod tests {
         }
     }
 
-    // ── The `<thinking>` spelling, previously missing from this filter ─────
+    // ── The `<thinking>` spelling ──────────────────────────────────────────
 
     #[test]
     fn strips_the_long_thinking_spelling() {
@@ -631,8 +556,6 @@ mod tests {
 
     #[test]
     fn the_two_thinking_spellings_stay_disjoint() {
-        // `<think>` requires `>` at index 6, so it can never match the head of
-        // `<thinking>`. Each spelling must close with its own tag.
         assert_eq!(run(&["<think>a</think>X<thinking>b</thinking>Y"]), "XY");
     }
 }

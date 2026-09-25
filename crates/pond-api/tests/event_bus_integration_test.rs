@@ -1,7 +1,4 @@
-//! #91 acceptance: a subscriber receives an event when a sensor reading is
-//! POSTed. Drives a real `POST /api/v1/sensors` through the router with a live
-//! `InProcessEventBus` wired into `AppState`, then asserts the published
-//! `BusEvent::Sensor` arrives on a subscription.
+//! A sensor reading POSTed through the router is published on a live `InProcessEventBus`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,8 +25,7 @@ use pond_infra::sqlite_session_storage::SqliteSessionStorage;
 use pond_infra::sqlite_skill::SqliteSkillRepository;
 use tower::ServiceExt;
 
-/// Build the router with a real event bus wired into `AppState`. Returns the
-/// router, the bus (so the test can subscribe), and the tempdir guard.
+/// Router with a real event bus, returned so the test can subscribe.
 async fn make_app_with_bus() -> (axum::Router, Arc<InProcessEventBus>, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let db = Database::init(tmp.path()).await.unwrap();
@@ -163,7 +159,6 @@ async fn sensor_post_publishes_to_event_bus() {
         "sensor POST should persist"
     );
 
-    // The subscriber must receive the published reading.
     let event = tokio::time::timeout(Duration::from_secs(2), subscription.next())
         .await
         .expect("bus event within timeout")

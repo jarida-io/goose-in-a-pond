@@ -1,7 +1,4 @@
-//! #132 Milestone 6: the `/api/v1/mesh/peers` and `/api/v1/mesh/self` routes,
-//! driven through a real router with real SQLite `PeerDirectory`/`CreditLedger`
-//! in `AppState`. `mesh_transport` stays `None`, as in every other test AppState:
-//! trust-circle CRUD needs no live networking.
+//! Mesh routes over real SQLite `PeerDirectory`/`CreditLedger`; no `mesh_transport` needed.
 
 use std::sync::Arc;
 
@@ -67,9 +64,7 @@ async fn make_app_with_mesh_provider_and_capabilities(
         session_storage: Arc::new(SqliteSessionStorage::new(pool.clone())),
         http_client: reqwest::Client::new(),
         agent: Arc::new(MockAgent::new()),
-        // In a real server, selecting chat_provider="mesh" writes the *same*
-        // provider into llm_provider. Mirror that rather than leaving it empty:
-        // GET /api/v1/test reads llm_provider directly, never mesh_provider.
+        // Mirrors the server: chat_provider="mesh" also fills llm_provider, which /test reads.
         llm_provider: Arc::new(tokio::sync::RwLock::new(mesh_provider.clone())),
         llamafile_url: "http://127.0.0.1:8080".into(),
         tts: None,
@@ -153,9 +148,7 @@ async fn make_app_with_mesh_provider_and_capabilities(
     )
 }
 
-/// For `/mesh/settlement` tests — needs a real `usage_tally` (to seed
-/// pending usage) and a real `settings_repo` (to set the exchange rate),
-/// neither of which the other helpers above hand back.
+/// For `/mesh/settlement` tests: also returns `usage_tally` and `settings_repo` to seed.
 async fn make_app_with_settlement_deps() -> (
     axum::Router,
     Arc<SqliteUsageTally>,
@@ -386,10 +379,8 @@ async fn add_peer_rejects_malformed_peer_id() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
-// ── mesh_provider wiring (#132 Milestone 3.5) ─────────────────────────────
-// App-level wiring only; pond-adapters-mesh-inference tests its own round-trip.
-// With chat_provider="mesh" resolved into both mesh_provider and llm_provider,
-// GET /api/v1/test must genuinely round-trip rather than silently report nothing.
+// ── mesh_provider wiring ──────────────────────────────────────────────────
+// App-level only; pond-adapters-mesh-inference tests its own round-trip.
 
 #[tokio::test]
 async fn test_endpoint_reports_ok_through_the_wired_mesh_provider() {
@@ -401,9 +392,7 @@ async fn test_endpoint_reports_ok_through_the_wired_mesh_provider() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["llm"]["status"], "ok");
     assert_eq!(body["llm"]["provider"], "mock-v1");
-    // test_services always sends ChatMessage::user("pong") — MockProvider's
-    // canned reply for that is deterministic, so this proves the request
-    // really went through the wired provider, not a stub.
+    // test_services sends "pong"; MockProvider's canned reply proves the wired provider ran.
     assert_eq!(body["llm"]["response"], "Mock response to: pong");
 }
 
@@ -415,7 +404,7 @@ async fn test_endpoint_reports_not_configured_when_mesh_provider_is_absent() {
     assert_eq!(body["llm"]["status"], "not_configured");
 }
 
-// ── Credit top-up (#132) ───────────────────────────────────────────────────
+// ── Credit top-up ──────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn crediting_a_trusted_peer_increases_the_balance_it_reports() {
@@ -592,9 +581,7 @@ async fn settlement_status_reports_the_fixed_rate() {
 
     let (status, body) = json_request(&app, Method::GET, "/api/v1/mesh/settlement", None).await;
     assert_eq!(status, StatusCode::OK);
-    // The rate is a fixed constant now, so there is no "unconfigured" state left
-    // to report: `configured` is true on a pond that has never touched mesh
-    // settlement, because the rate it would settle at is already decided.
+    // The rate is a fixed constant, so `configured` is true even on an untouched pond.
     assert_eq!(body["configured"], true);
     assert_eq!(
         body["millisats_per_token"],
@@ -638,10 +625,7 @@ async fn settlement_status_reports_pending_usage_per_peer() {
     );
 }
 
-/// The rate is no longer a per-Pond setting, though the `Settings` field outlived
-/// the change. Writing it must move nothing: if the handler is ever re-wired to
-/// read settings again this fails here, rather than a household quietly settling
-/// at a rate the mesh does not honour.
+/// The `Settings` rate field is vestigial; writing it must not change the settlement rate.
 #[tokio::test]
 async fn the_legacy_per_pond_setting_no_longer_moves_the_rate() {
     let (app, usage_tally, settings_repo, _peer_directory, _tmp) =
@@ -670,8 +654,7 @@ async fn the_legacy_per_pond_setting_no_longer_moves_the_rate() {
     let (status, body) = json_request(&app, Method::GET, "/api/v1/mesh/settlement", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["configured"], true);
-    // 5 was written to settings just above and is deliberately NOT what comes
-    // back: the constant wins.
+    // Not the 5 written above: the constant wins.
     assert_eq!(
         body["millisats_per_token"],
         MESH_SETTLEMENT_MILLISATS_PER_TOKEN

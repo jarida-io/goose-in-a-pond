@@ -1,7 +1,4 @@
-//! PAI-8 P1: a household member can connect a sensor or camera as personal
-//! context, and nobody else can. The phase's security decision is that the owner
-//! is RESOLVED, never supplied: no `profile_id` in the body, because every item
-//! inherits it and migration 0044 refuses to let it change afterwards.
+//! Members connect personal context sources; the owner is resolved, never taken from the body.
 
 use std::sync::Arc;
 
@@ -74,10 +71,7 @@ struct Harness {
     _tmp: tempfile::TempDir,
 }
 
-/// A secret store that only remembers, so a test can assert what was written
-/// WITHOUT reaching into the encrypted file adapter. What matters here is that
-/// the route stores the password somewhere the source can find it again, and
-/// that it never comes back out of the API.
+/// In-memory secret store, so a test can assert what was written.
 #[derive(Default)]
 struct MemorySecrets {
     inner: tokio::sync::Mutex<std::collections::HashMap<String, String>>,
@@ -240,16 +234,13 @@ async fn member(h: &Harness, name: &str) -> String {
         .id
 }
 
-/// A session that nobody has identified. Resolves to `Household` on a
-/// one-member pond and `Guest` once there are two — the posture PAI-1 P3 chose,
-/// reached the way production reaches it.
+/// An unidentified session: `Household` on a one-member pond, `Guest` with two or more.
 async fn unidentified_session(h: &Harness, id: &str) -> String {
     h.storage.create_session(id.to_string()).await.unwrap();
     id.to_string()
 }
 
-/// A session bound to a member, at `Explicit` strength — what
-/// `PUT /sessions/{id}/user` writes.
+/// A session bound at `Explicit` strength, as `PUT /sessions/{id}/user` writes it.
 async fn session_of(h: &Harness, id: &str, profile_id: &str) -> String {
     h.storage.create_session(id.to_string()).await.unwrap();
     h.storage
@@ -290,8 +281,6 @@ async fn get_json(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
         serde_json::from_slice(&bytes).unwrap_or(Value::Null),
     )
 }
-
-// ── Invariant 4: one member's proposals, and nobody else's ───────────────────
 
 async fn post_json(app: &axum::Router, uri: &str, body: Value) -> (StatusCode, Value) {
     let resp = app
@@ -359,10 +348,7 @@ async fn a_member_connects_a_camera_and_it_is_theirs() {
     assert_eq!(body["id"], "camera:front-door");
 }
 
-/// The security claim, and it is structural rather than checked: there is no
-/// `profile_id` field on the request type, so this body cannot name an owner.
-/// `deny_unknown_fields` is not what stops it -- serde ignores unknown keys
-/// here -- so what this asserts is that the extra key changes NOTHING.
+/// Structural: the request type has no `profile_id`, and serde ignores unknown keys here.
 #[tokio::test]
 async fn a_body_that_names_an_owner_does_not_get_one() {
     let h = make_app().await;
@@ -411,8 +397,7 @@ async fn a_guest_cannot_connect_a_source_and_sees_none() {
         "an unidentified speaker connected a context source"
     );
 
-    // Vacuity control: the same request from a member DOES work, so the refusal
-    // above is the scope and not a broken fixture.
+    // Vacuity control: the same request from a member works.
     let owned = session_of(&h, "chat-liz", &liz).await;
     let (ok, _) = post_json(
         &h.app,
@@ -458,10 +443,7 @@ async fn the_whole_household_is_not_an_owner() {
     );
 }
 
-/// The same scope, and the opposite answer, because the household is one person:
-/// `Household` and `Owner(the-only-member)` denote the same set of people, so
-/// there is nothing to refuse. This is a sole-member rule, not a Household rule;
-/// the multi-member refusal above is the part that survives.
+/// With one member, `Household` and `Owner(that member)` are the same people: nothing to refuse.
 #[tokio::test]
 async fn a_one_member_household_is_that_member() {
     let h = make_app().await;
@@ -482,10 +464,7 @@ async fn a_one_member_household_is_that_member() {
     );
 }
 
-// No "a guest is refused in a one-member household" test exists because that
-// state is unreachable: `identity_resolution::resolve` answers `Guest` only above
-// one member and `Household` otherwise. The residual exposure is bounded by the
-// caller still needing an authenticated, paired device.
+// No one-member guest test: `identity_resolution::resolve` never yields `Guest` there.
 
 // ── A connector that does not exist is refused up front ────────────────────
 
@@ -600,11 +579,9 @@ async fn one_member_never_sees_another_members_sources() {
     );
 }
 
-// ── PAI-8 P4: connecting an account ──────────────────────────────────────────
+// ── Connecting an account ────────────────────────────────────────────────────
 
-/// A calendar source with no credentials would be a row that looks connected
-/// and can never sync -- the empty-source shape `availability` exists to
-/// prevent, arriving through the front door instead of around it.
+/// Without credentials a calendar source would look connected but never sync.
 #[tokio::test]
 async fn a_calendar_without_a_password_is_refused() {
     let h = make_app_with_secrets().await;
@@ -627,9 +604,7 @@ async fn a_calendar_without_a_password_is_refused() {
     );
 }
 
-/// The mirror. A sensor is already on the pond, so sign-in details for one are
-/// a sign the caller has confused two things, and storing them would put a
-/// credential in the store that nothing will ever read or delete.
+/// A stored sensor password would be a credential nothing ever reads or deletes.
 #[tokio::test]
 async fn a_sensor_with_a_password_is_refused_too() {
     let h = make_app_with_secrets().await;
@@ -654,8 +629,7 @@ async fn a_connected_calendar_keeps_its_password_in_the_secret_store_and_not_in_
     let (status, resp) = post_json(&h.app, "/api/v1/context/sources", body).await;
     assert_eq!(status, StatusCode::OK, "body: {resp}");
 
-    // The owner is in the id, so two members can each connect their own account
-    // instead of the second colliding with the first.
+    // The owner is in the id, so two members' accounts cannot collide.
     let id = resp["id"].as_str().expect("id");
     assert!(
         id.contains(&jerry),
@@ -680,8 +654,7 @@ async fn a_connected_calendar_keeps_its_password_in_the_secret_store_and_not_in_
     );
 }
 
-/// A pond with no encrypted store must refuse rather than drop the password
-/// (a source that can never sync) or put it somewhere unencrypted (invariant 4).
+/// Dropping the password breaks sync; storing it unencrypted breaks invariant 4.
 #[tokio::test]
 async fn a_pond_with_no_secret_store_refuses_to_hold_a_password() {
     let h = make_app().await;
