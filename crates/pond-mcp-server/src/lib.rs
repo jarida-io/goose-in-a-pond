@@ -1,4 +1,4 @@
-// ── Modular MCP servers (Phase 1 split) ─────────────────────────────────────
+// ── Modular MCP servers ─────────────────────────────────────────────────────
 pub mod context;
 pub mod device;
 pub mod device_control;
@@ -29,10 +29,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 // -- User message and current session: set by GooseAdapter before each turn --
 static LAST_USER_MESSAGE: RwLock<String> = RwLock::new(String::new());
 
-// Per-turn request context (session + in-flight tool) and the egress sink now
-// live in `pond-core` so outboard adapters (e.g. pond-adapters-weather) can
-// report egress into the same store without depending on this crate (#113).
-// Re-exported here so existing engine call sites stay unchanged.
+// In `pond-core` so outboard adapters can report egress without depending on this crate.
 pub use pond_core::shared::services::egress::{
     current_session_id, current_tool, set_current_session_id, set_current_tool, set_egress_sink,
 };
@@ -50,10 +47,7 @@ pub fn last_user_message() -> String {
         .unwrap_or_default()
 }
 
-// -- ToolCaller specialist: generates structured params for tool calls --
-// When configured (e.g. FunctionGemma 270M), ALL tool calls use this to
-// generate params. The main LLM decides WHEN to call tools; the ToolCaller
-// decides WHAT params to send. Set once at startup, never changes.
+// -- ToolCaller specialist: the main LLM picks WHEN to call a tool, this picks the params --
 static TOOL_CALLER: OnceLock<Option<Arc<dyn ToolCaller>>> = OnceLock::new();
 
 /// Set the tool-calling specialist. Call once at startup.
@@ -61,14 +55,11 @@ pub fn set_tool_caller(tc: Option<Arc<dyn ToolCaller>>) {
     let _ = TOOL_CALLER.set(tc);
 }
 
-/// Get the tool-calling specialist, if configured.
 pub fn tool_caller() -> Option<Arc<dyn ToolCaller>> {
     TOOL_CALLER.get().and_then(|opt| opt.clone())
 }
 
-// -- Notification sender (#99): set once at startup so the `send_notification`
-// tool can push to connected phones (foreground SSE) in addition to the local
-// desktop popup. Unset (tests, standalone) → the tool is desktop-only.
+// -- Notification sender: lets `send_notification` push to phones; unset → desktop-only --
 static NOTIFICATION_SENDER: OnceLock<
     Arc<dyn pond_core::mcp::ports::notification::NotificationSender>,
 > = OnceLock::new();
@@ -80,17 +71,12 @@ pub fn init_notification_sender(
     let _ = NOTIFICATION_SENDER.set(sender);
 }
 
-/// The configured notification sender, if installed.
 pub fn notification_sender(
 ) -> Option<Arc<dyn pond_core::mcp::ports::notification::NotificationSender>> {
     NOTIFICATION_SENDER.get().cloned()
 }
 
-/// Generate tool params via the ToolCaller specialist.
-///
-/// When a ToolCaller is configured, this is the PRIMARY param generator —
-/// the main LLM's params are ignored. Returns `None` if no ToolCaller is
-/// configured or if the user message is empty.
+/// Generate tool params via the ToolCaller; when one is configured they replace the LLM's.
 pub async fn generate_params(
     tool_name: &str,
     schema: &str,
@@ -136,7 +122,6 @@ pub async fn generate_params(
     }
 }
 
-// Re-export key types for downstream crates
 pub use device::DeviceMcpServer;
 pub use device_control::DeviceControlMcpServer;
 pub use knowledge::{clean_query_for_search, KnowledgeMcpServer};
@@ -148,15 +133,11 @@ pub use system::SystemMcpServer;
 pub use toolkit::ToolkitMcpServer;
 pub use weather::WeatherMcpServer;
 
-// Re-export init + spawn functions for Goose builtin extension registration
 pub use device::{init_device_deps, spawn_device_server};
 pub use device_control::{init_device_control_deps, spawn_device_control_server};
 pub use knowledge::{init_knowledge_deps, spawn_knowledge_server};
 pub use memory::{init_memory_deps, spawn_memory_server};
-// PAI-6 P5. `init_orchestrator_deps` is deliberately NOT called from
-// `register_giap_extensions`: the orchestrator is a Goose adapter and this crate
-// is built before it, so pond-server installs the handle once the adapter
-// exists — the same shape as `init_toolkit_deps`.
+// Installed by pond-server once the Goose adapter exists, not by `register_giap_extensions`.
 pub use orchestrator::{
     init_orchestrator_deps, installed_orchestrator_deps, spawn_orchestrator_server,
     OrchestratorDeps,
@@ -170,40 +151,22 @@ pub use toolkit::{init_toolkit_deps, spawn_toolkit_server};
 pub use weather::{init_weather_deps, spawn_weather_server, WEATHER_APP_URI};
 
 // ── MCP App resources ─────────────────────────────────────────────────────
-// Collects all embedded HTML resources from MCP servers that support UI apps.
 
-/// Returns all `(uri, html_content)` pairs from every MCP server that provides
-/// an embedded MCP App resource. Used by pond-api to populate the static
-/// resource registry in AppState.
+/// All embedded MCP App resources as `(uri, html_content)` pairs, for pond-api's registry.
 pub fn all_app_resources() -> Vec<(&'static str, &'static str)> {
     let mut resources = Vec::new();
     resources.extend(weather::app_resources());
-    // Future MCP servers with apps add their resources here:
-    // resources.extend(schedule::app_resources());
     resources
 }
 
-// Re-export shared utilities for downstream Knowledge-family servers
 pub use format::{
     format_api_error, format_dead_end, format_list_result, format_no_results,
     format_not_configured, truncate_to_budget,
 };
 pub use http::{build_http_client, traced_get, traced_get_with};
 
-// Re-export the direct tool dispatcher
-/// Serve one builtin MCP server on a duplex pair, and say something when it
-/// stops.
-///
-/// Every `spawn_*_server` had the same seven lines, and all seventeen of them
-/// dropped the exit on the floor: `Ok(running) => { let _ = running.waiting().await; }`.
-/// `waiting()` returns when the server has STOPPED — a handler that panicked,
-/// a transport that closed, a peer that went away — and nothing was logged, so
-/// a dead extension presented as "the model stopped using that tool".
-///
-/// This does not restart it, and cannot: the duplex halves are consumed by
-/// `serve`, and only goose's extension manager can hand out a fresh pair. What
-/// it does is make the death visible and greppable, which is the difference
-/// between a diagnosable failure and folklore.
+/// Serve one builtin MCP server on a duplex pair and log when it stops. No restart: `serve`
+/// consumes the halves and only goose's extension manager can hand out a fresh pair.
 pub fn serve_builtin<S>(
     extension: &'static str,
     server: S,

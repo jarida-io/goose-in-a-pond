@@ -1,17 +1,4 @@
-//! McpToolDispatcher — routes tool calls directly to GIAP's builtin MCP servers.
-//!
-//! Implements [`ToolDispatcher`] by holding instances of all MCP servers and
-//! routing calls by tool name prefix (e.g. "giap-weather__get_current_weather").
-//! This bypasses Goose's extension manager, enabling the PondAgent to call
-//! GIAP tools without a running Goose session.
-//!
-//! # Peer Construction
-//!
-//! rmcp's `RequestContext<RoleServer>` requires a `Peer` which can only be
-//! obtained from a running service. We use `serve_directly_with_ct` with a
-//! DuplexStream to create a minimal background service, extract the peer,
-//! and reuse it for all tool dispatch calls. Since GIAP's MCP handlers never
-//! access `ctx.peer`, the peer's transport being a no-op is safe.
+//! Direct dispatch of tool calls to GIAP's builtin MCP servers, bypassing Goose.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -44,18 +31,14 @@ const PREFIX_SYSTEM: &str = "giap-system__";
 const PREFIX_DEVICE: &str = "giap-device__";
 const PREFIX_DEVICE_CONTROL: &str = "giap-device-control__";
 
-// No hardcoded tool list — all tools discovered dynamically via ServerHandler::list_tools().
-
 // ── Dispatcher ───────────────────────────────────────────────────────────────
 
-/// A registered MCP server with its tool-name prefix.
 struct RegisteredServer {
     prefix: &'static str,
     server: Box<dyn McpServerBridge>,
 }
 
-/// Object-safe bridge for calling MCP server methods we need.
-/// Wraps rmcp's `ServerHandler` (which isn't object-safe due to `impl Future`).
+/// Object-safe wrapper over rmcp's `ServerHandler`, whose `impl Future` methods aren't.
 #[async_trait]
 trait McpServerBridge: Send + Sync {
     async fn list_tools_bridged(
@@ -70,7 +53,6 @@ trait McpServerBridge: Send + Sync {
     ) -> Result<RmcpCallToolResult>;
 }
 
-/// Blanket impl for any rmcp ServerHandler.
 #[async_trait]
 impl<T: ServerHandler + Send + Sync> McpServerBridge for T {
     async fn list_tools_bridged(
@@ -110,24 +92,17 @@ impl<T: ServerHandler + Send + Sync> McpServerBridge for T {
     }
 }
 
-/// Concrete dispatcher that routes tool calls to GIAP's builtin MCP servers.
-///
-/// Servers are registered dynamically — adding a new MCP server only requires
-/// pushing it into the `servers` vec with its prefix. Tool schemas are queried
-/// from each server at runtime via `list_tools()`, not hardcoded.
+/// Routes each tool call to the builtin server that owns its name prefix.
 pub struct McpToolDispatcher {
     servers: Vec<RegisteredServer>,
     /// Cloned peer from a minimal running service — used to construct RequestContext.
     peer: Peer<RoleServer>,
-    /// Keeps the background peer-provider service alive. Dropped on dispatcher drop.
+    /// Keeps the peer-providing service alive.
     _peer_service: RunningService<RoleServer, SystemMcpServer>,
 }
 
 impl McpToolDispatcher {
-    /// Construct the dispatcher with the same dependencies used by
-    /// `register_giap_extensions()`.
-    ///
-    /// This spawns a minimal background task to maintain a valid rmcp `Peer`.
+    /// Same dependencies as `register_giap_extensions()`; spawns a service to supply the `Peer`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         memory_repo: Arc<dyn MemoryRepository>,
@@ -149,16 +124,12 @@ impl McpToolDispatcher {
         let device_server =
             DeviceMcpServer::new(device_registry.clone(), settings_repo.clone(), skill_repo);
         let device_control_server = DeviceControlMcpServer::new(device_control, device_registry);
-        // Create a dummy peer via serve_directly on a DuplexStream.
-        // The system server is lightweight (no deps) — we use it as the service
-        // backing the peer. The DuplexStream client side is immediately dropped
-        // so no real traffic flows; we just need the Peer for RequestContext.
+        // rmcp mints a `Peer` only from a running service; the dep-free system server backs it.
         let (_client_stream, server_stream) = tokio::io::duplex(64);
         let running = rmcp::service::serve_directly(SystemMcpServer::new(), server_stream, None);
         let peer = running.peer().clone();
 
-        // Register all servers dynamically. Adding a new MCP server only
-        // requires pushing it here — schemas come from list_tools() automatically.
+        // A new server only needs pushing here; its schemas come from `list_tools()`.
         let mut servers: Vec<RegisteredServer> = vec![
             RegisteredServer {
                 prefix: PREFIX_WEATHER,
@@ -199,10 +170,7 @@ impl McpToolDispatcher {
         }
     }
 
-    /// Build a `RequestContext<RoleServer>` for dispatching a tool call.
-    ///
-    /// Uses the shared peer. GIAP handlers never access the peer so the
-    /// closed transport is irrelevant.
+    /// Context on the shared peer; its closed transport is fine as GIAP handlers never use it.
     fn make_context(&self) -> RequestContext<RoleServer> {
         RequestContext::new(RequestId::Number(0), self.peer.clone())
     }
@@ -217,17 +185,15 @@ impl ToolDispatcher for McpToolDispatcher {
     ) -> Result<ToolCallResult> {
         let (server_prefix, bare_name) = parse_tool_name(tool_name)?;
 
-        // Attribute any outbound HTTP this tool makes to the tool itself (#113).
+        // Attribute any outbound HTTP this tool makes to the tool itself.
         crate::set_current_tool(bare_name);
 
-        // Find the server that owns this prefix.
         let server = self
             .servers
             .iter()
             .find(|s| s.prefix == server_prefix)
             .ok_or_else(|| anyhow!("No server registered for prefix '{}'", server_prefix))?;
 
-        // Convert arguments to rmcp format.
         let args_map = match arguments {
             serde_json::Value::Object(map) => Some(map),
             serde_json::Value::Null => None,
@@ -254,7 +220,6 @@ impl ToolDispatcher for McpToolDispatcher {
     }
 
     async fn available_tools(&self) -> Vec<String> {
-        // Dynamically query all registered servers.
         let mut tools = Vec::new();
         for reg in &self.servers {
             let ctx = self.make_context();
@@ -267,16 +232,13 @@ impl ToolDispatcher for McpToolDispatcher {
     }
 
     async fn available_tool_definitions(&self) -> Vec<(String, String, serde_json::Value)> {
-        // Query each registered server for its tool schemas dynamically.
-        // Adding a new MCP server only requires pushing it in the constructor —
-        // schemas come from list_tools() automatically, no hardcoding needed.
         let mut all_defs = Vec::new();
         for reg in &self.servers {
             let ctx = self.make_context();
             let defs = reg.server.list_tools_bridged(ctx).await;
             let count = defs.len();
             if count > 0 {
-                // Log ALL tools with their full schemas so you can verify what the model sees.
+                // Full schemas, to check what the model sees.
                 for (name, desc, schema) in &defs {
                     tracing::debug!(
                         prefix = reg.prefix,
@@ -302,13 +264,10 @@ impl ToolDispatcher for McpToolDispatcher {
     }
 }
 
-// Removed: tool_param_schema() — schemas now come dynamically from ServerHandler::list_tools().
-// This dead code is kept temporarily for reference during the transition.
 #[allow(dead_code)]
 fn _tool_param_schema_removed(tool_name: &str) -> serde_json::Value {
     use serde_json::json;
     match tool_name {
-        // Weather
         "giap-weather__get_current_weather" => json!({
             "type": "object",
             "properties": {
@@ -322,7 +281,6 @@ fn _tool_param_schema_removed(tool_name: &str) -> serde_json::Value {
                 "days": { "type": "integer", "description": "Number of days (1-7, default 3)." }
             }
         }),
-        // Knowledge
         "giap-knowledge__get_wikipedia_article" => json!({
             "type": "object",
             "properties": {
@@ -337,7 +295,6 @@ fn _tool_param_schema_removed(tool_name: &str) -> serde_json::Value {
             },
             "required": ["query"]
         }),
-        // Memory
         "giap-memory__save_memory" => json!({
             "type": "object",
             "properties": {
@@ -360,7 +317,6 @@ fn _tool_param_schema_removed(tool_name: &str) -> serde_json::Value {
             },
             "required": ["id"]
         }),
-        // Schedule
         "giap-schedule__create_schedule" => json!({
             "type": "object",
             "properties": {
@@ -399,7 +355,6 @@ fn _tool_param_schema_removed(tool_name: &str) -> serde_json::Value {
                 "timezones": { "type": "array", "items": { "type": "string" }, "description": "IANA timezone names. Omit for user's timezone." }
             }
         }),
-        // System
         "giap-system__get_current_time" => json!({ "type": "object", "properties": {} }),
         "giap-system__get_system_info" => json!({ "type": "object", "properties": {} }),
         "giap-system__send_notification" => json!({
@@ -426,25 +381,18 @@ fn _tool_param_schema_removed(tool_name: &str) -> serde_json::Value {
             },
             "required": ["path", "content"]
         }),
-        // Device
         "giap-device__list_registered_devices"
         | "giap-device__get_user_profile"
         | "giap-device__list_skills" => {
             json!({ "type": "object", "properties": {} })
         }
-        // News
-        // Finance
-        // Discovery
-        // Draft
-        // Fallback
         _ => json!({ "type": "object", "properties": {} }),
     }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Parse a tool name like "giap-weather__get_current_weather" into
-/// (prefix = "giap-weather__", bare_name = "get_current_weather").
+/// Split "giap-weather__get_current_weather" into ("giap-weather__", "get_current_weather").
 fn parse_tool_name(tool_name: &str) -> Result<(&str, &str)> {
     if let Some(pos) = tool_name.find("__") {
         let prefix = &tool_name[..pos + 2]; // include the "__"
@@ -508,27 +456,23 @@ mod tests {
 
     #[test]
     fn parse_tool_name_with_ext_prefix() {
-        // External MCP servers use "ext-{name}__" prefix format.
         let (prefix, bare) = parse_tool_name("ext-filesystem__read_file").unwrap();
         assert_eq!(prefix, "ext-filesystem__");
         assert_eq!(bare, "read_file");
     }
 
-    /// Diagnostic: call list_tools on ALL MCP servers and show what the dispatcher collects.
-    /// Run with `cargo test -p pond-mcp-server -- --nocapture inspect_mcp_tool_schemas`
+    /// Diagnostic: `cargo test -p pond-mcp-server -- --nocapture inspect_mcp_tool_schemas`.
     #[tokio::test]
     async fn inspect_mcp_tool_schemas() {
         use crate::{KnowledgeMcpServer, SystemMcpServer, WeatherMcpServer};
 
-        // Create peer for RequestContext
         let (_client, server_stream) = tokio::io::duplex(64);
         let running = rmcp::service::serve_directly(SystemMcpServer::new(), server_stream, None);
         let peer = running.peer().clone();
 
         let http_client = crate::build_http_client();
 
-        // Mock settings repo
-        // All servers that don't require complex real deps
+        // Only servers that need no heavy real deps.
         let servers: Vec<(&str, Box<dyn McpServerBridge>)> = vec![
             (
                 "giap-system__",
@@ -557,7 +501,7 @@ mod tests {
                     name, has_props, has_type
                 );
 
-                // Build OpenAI format (same as tools_to_json in pond-inference)
+                // OpenAI format, as `tools_to_json` in pond-inference builds it.
                 all_tools_json.push(serde_json::json!({
                     "type": "function",
                     "function": {
@@ -576,10 +520,7 @@ mod tests {
             eprintln!("{}\n", serde_json::to_string_pretty(tool).unwrap());
         }
 
-        // Sanity floor: the 6 core servers here (system/weather/knowledge/news/
-        // knowledge) total ~10 tools after the 2026-09-10 group deletions; assert
-        // a floor that catches a server returning nothing (list_tools error)
-        // without being brittle to +-1 tool.
+        // A floor that catches a server returning nothing without breaking on ±1 tool.
         assert!(
             total_tools >= 7,
             "Expected 7+ tools from the core servers, got {}",

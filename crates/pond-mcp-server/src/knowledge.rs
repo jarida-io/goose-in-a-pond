@@ -1,17 +1,4 @@
-//! Knowledge MCP Server — Wikipedia, dictionary, book search, and computation.
-//!
-//! Six tools. Four live here: `search_wikipedia`, `get_wikipedia_article`,
-//! `define_word`, `search_books`. Two more — `compute_answer` and
-//! `explore_computation` — are a second `#[tool_router]` impl on this same
-//! server in [`crate::wolfram`], composed in [`KnowledgeMcpServer::new`].
-//! Depends only on a `reqwest::Client` for HTTP fetches.
-//!
-//! There used to be a fifth tool here, `instant_answer`, over DuckDuckGo's
-//! Instant Answer API. DuckDuckGo is gone, and Wolfram|Alpha took its place
-//! rather than inheriting its job: what DuckDuckGo returned was overwhelmingly a
-//! Wikipedia abstract, which `get_wikipedia_article` already fetches in full, so
-//! the tool cost a schema in every turn's prompt to reach a worse copy of a
-//! sibling's source. Wolfram computes, which nothing in this pond could do.
+//! Knowledge MCP server: Wikipedia lookup, plus the Wolfram tools from [`crate::wolfram`].
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -72,27 +59,15 @@ const WIKI_UA: &str =
 
 #[derive(Clone)]
 pub struct KnowledgeMcpServer {
-    // `pub(crate)` because the Wolfram tools are a second `#[tool_router]` impl
-    // on this same server (see `wolfram.rs`) and share its client pool.
+    // `pub(crate)`: the Wolfram router in `wolfram.rs` shares this client pool.
     pub(crate) http_client: reqwest::Client,
-    // Read by the generated `tool_handler` code, which is pointed at this field
-    // explicitly — see the note on the `ServerHandler` impl below.
+    // Read via `router = self.tool_router` (see the `ServerHandler` impl).
     tool_router: ToolRouter<Self>,
 }
 
 #[tool_router]
 impl KnowledgeMcpServer {
-    /// Every tool this server exposes, without constructing it or its deps.
-    ///
-    /// `tool_router()` is generated private to this module, so inventory code
-    /// outside it could not reach the real definitions and resorted to scanning
-    /// source text for `#[tool(` instead. This is the enumeration that scan was
-    /// standing in for.
-    /// BOTH routers. `KnowledgeMcpServer` is the one server built from two
-    /// `#[tool_router]` impl blocks (`Self::tool_router() + Self::wolfram_tool_router()`,
-    /// see `new`), so enumerating only the first silently drops `compute_answer`
-    /// — which is exactly what it did until the prefix oracle counted 26 tools
-    /// against a known 27.
+    /// Every tool from BOTH routers, without constructing the server or its deps.
     pub(crate) fn tool_defs() -> Vec<rmcp::model::Tool> {
         let mut tools = Self::tool_router().list_all();
         tools.extend(Self::wolfram_tool_router().list_all());
@@ -102,9 +77,7 @@ impl KnowledgeMcpServer {
     pub fn new(http_client: reqwest::Client) -> Self {
         Self {
             http_client,
-            // Two routers, one server: the Wolfram tools live in `wolfram.rs`
-            // so this file stays about reference lookups, but they belong to
-            // the same extension because they answer the same kind of question.
+            // One extension, two routers: the Wolfram tools live in `wolfram.rs`.
             tool_router: Self::tool_router() + Self::wolfram_tool_router(),
         }
     }
@@ -119,7 +92,6 @@ verbatim.")]
         params: Parameters<WikipediaQueryParams>,
     ) -> Result<CallToolResult, ErrorData> {
         crate::set_current_tool("get_wikipedia_article");
-        // Definitive: what did the MCP server receive from Goose?
         eprintln!("[wikipedia] ╔═══ MCP SERVER RECEIVED ═══");
         eprintln!("[wikipedia] ║ params.topic: {:?}", params.0.topic);
         eprintln!("[wikipedia] ║ params.extra: {:?}", params.0.extra);
@@ -140,14 +112,12 @@ verbatim.")]
             )]));
         }
 
-        // Try direct lookup first
         match self.fetch_article_summary(&topic).await {
             Ok(text) => {
                 let full_result = prepend_knowledge_hint(&topic, &text);
                 Ok(CallToolResult::success(vec![Content::text(full_result)]))
             }
             Err(WikiFetchError::NotFound) => {
-                // Auto-fallback: search for the topic and fetch the top result
                 eprintln!(
                     "[wikipedia] exact title not found, searching for '{}'",
                     topic
@@ -165,12 +135,8 @@ verbatim.")]
     }
 }
 
-// `router = self.tool_router` is load-bearing. The default is
-// `Self::tool_router()`, the macro-generated function for THIS impl block only —
-// so with a bare `#[tool_handler]` the composed field built in `new()` is
-// ignored and the four tools below are the only ones `list_tools` ever reports.
-// The Wolfram tools compiled, unit-tested and were never offered to the model;
-// `both_tools_are_actually_exposed_by_the_server` is what caught it.
+// `router = self.tool_router` is load-bearing: the default is this impl block's router
+// alone, which would drop the composed Wolfram tools from `list_tools`.
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for KnowledgeMcpServer {
     fn get_info(&self) -> ServerInfo {
@@ -203,11 +169,7 @@ impl ServerHandler for KnowledgeMcpServer {
 
 // ── MCP-UI hint helpers ───────────────────────────────────────────────────
 
-/// Prepend a `[[[mcp-ui:knowledge:{...}]]]` hint to a Wikipedia article result.
-///
-/// Extracts the article title from the `# Title` header line and the source
-/// URL from `Source: <url>` at the end. If the text doesn't follow the
-/// expected format, returns it unchanged (no hint).
+/// Prepend a `[[[mcp-ui:knowledge:{...}]]]` card hint to a Wikipedia article result.
 fn prepend_knowledge_hint(topic: &str, text: &str) -> String {
     // Article format: "# Title\n\nExtract...\n\nSource: URL"
     let title = text
@@ -220,7 +182,6 @@ fn prepend_knowledge_hint(topic: &str, text: &str) -> String {
         .map(|(_, url)| url.trim())
         .unwrap_or("");
 
-    // Extract the first ~300 chars of the article body as a summary
     let body_start = text.find("\n\n").map(|i| i + 2).unwrap_or(0);
     let body_end = text.rfind("\n\nSource:").unwrap_or(text.len());
     let summary: String = text[body_start..body_end].chars().take(300).collect();
@@ -236,18 +197,9 @@ fn prepend_knowledge_hint(topic: &str, text: &str) -> String {
 
 // ── Wikipedia helpers (outside the #[tool_router] block) ───────────────────
 
-/// Extract the search topic from params.
-///
-/// Extract the search topic from tool call params.
-///
-/// Resolve the search topic for a Wikipedia lookup.
-///
-/// When a ToolCaller specialist is configured, it ALWAYS generates the topic
-/// from the user's message — the main LLM's params are ignored. When no
-/// ToolCaller is configured (capable models like Ollama), the model's params
-/// are used directly.
 const WIKI_TOPIC_SCHEMA: &str = r#"{"type":"object","properties":{"topic":{"type":"string","description":"The person, place, event, or concept to look up on Wikipedia"}},"required":["topic"]}"#;
 
+/// Resolve the Wikipedia topic; a configured ToolCaller overrides the model's params.
 async fn resolve_topic(params: &WikipediaQueryParams, tool_name: &str) -> String {
     // 1. ToolCaller specialist — PRIMARY when configured
     if let Some(args) = crate::generate_params(tool_name, WIKI_TOPIC_SCHEMA).await {
@@ -307,11 +259,7 @@ async fn resolve_topic(params: &WikipediaQueryParams, tool_name: &str) -> String
     String::new()
 }
 
-/// Strip common question prefixes to extract the core topic for search.
-///
-/// "who is Wangari Maathai?" -> "Wangari Maathai"
-/// "tell me about black holes" -> "black holes"
-/// "Nairobi" -> "Nairobi" (unchanged)
+/// Strip question prefixes to get the topic: "who is Wangari Maathai?" -> "Wangari Maathai".
 pub fn clean_query_for_search(raw: &str) -> String {
     let stripped = raw
         .trim()
@@ -380,11 +328,7 @@ pub enum WikiFetchError {
 }
 
 impl KnowledgeMcpServer {
-    /// Fetch the full article content for an exact Wikipedia title.
-    ///
-    /// Uses the MediaWiki `action=query&prop=extracts` endpoint which returns
-    /// the complete article as plain text (no HTML). Falls back to the REST
-    /// summary API if the full extract is empty.
+    /// Full plain-text article for an exact title (MediaWiki `prop=extracts`); empty is `NotFound`.
     pub async fn fetch_article_summary(&self, title: &str) -> Result<String, WikiFetchError> {
         let url = format!(
             "https://en.wikipedia.org/w/api.php?action=query&titles={}&prop=extracts|info&explaintext=1&inprop=url&format=json&redirects=1",
@@ -450,8 +394,7 @@ impl KnowledgeMcpServer {
             return Err(WikiFetchError::NotFound);
         }
 
-        // Cap article length to fit within context alongside tool schemas + system prompt.
-        // 4000 chars ~ 1000 tokens — on a 16K context there's plenty of room for the response.
+        // ~1000 tokens: room for the schemas, system prompt and reply on a 16K context.
         let extract = crate::format::truncate_to_budget(extract, 4000);
 
         eprintln!(
@@ -553,10 +496,7 @@ pub fn init_knowledge_deps(http_client: reqwest::Client) {
 
 /// Spawn function compatible with Goose's `SpawnServerFn` type.
 pub fn spawn_knowledge_server(reader: DuplexStream, writer: DuplexStream) {
-    // Missing deps = this path never initialised this extension (the voice/CLI
-    // binary vs `serve` install different families). A skipped extension is a
-    // logged, contained failure; a panic here took down every builtin server's
-    // startup at once (2026-08-27, giap-context in the voice child).
+    // No deps = this binary didn't install this family: skip, as a panic kills every builtin.
     let Some(deps) = KNOWLEDGE_DEPS.get() else {
         tracing::error!(
             "spawn_knowledge_server called before init_knowledge_deps — extension will not start"
@@ -644,7 +584,6 @@ mod tests {
 
     #[test]
     fn prepend_knowledge_hint_missing_source_uses_empty_string() {
-        // When there's no "Source: " line, source_url should be "" not the full text.
         let text = "# Test\n\nSome article with no source line.";
         let result = prepend_knowledge_hint("Test", text);
         assert!(result.contains("\"source_url\":\"\""));
@@ -652,14 +591,12 @@ mod tests {
 
     #[test]
     fn fetch_article_truncation_is_applied() {
-        // Simulate what happens when extract exceeds 4000 chars.
         let long_extract = "x".repeat(5000);
         let truncated = crate::format::truncate_to_budget(&long_extract, 4000);
         assert!(truncated.len() < 5000);
         assert!(truncated.contains("[Truncated"));
     }
 
-    /// Exact title -> direct fetch succeeds.
     #[tokio::test]
     #[ignore] // requires internet
     async fn live_fetch_exact_title() {
@@ -674,7 +611,6 @@ mod tests {
         assert!(text.contains("Source:"), "should include source URL");
     }
 
-    /// Vague query that doesn't match an exact title -> auto-search fallback.
     #[tokio::test]
     #[ignore] // requires internet
     async fn live_vague_query_finds_article() {
@@ -687,7 +623,6 @@ mod tests {
         );
     }
 
-    /// The full get_wikipedia_article flow: vague input -> 404 -> search -> fetch.
     #[tokio::test]
     #[ignore] // requires internet
     async fn live_get_article_auto_resolves_vague_topic() {
@@ -700,7 +635,6 @@ mod tests {
         );
     }
 
-    /// Completely nonsensical query returns a graceful "not found" message.
     #[tokio::test]
     #[ignore] // requires internet
     async fn live_nonsense_query_returns_not_found() {
@@ -716,7 +650,6 @@ mod tests {
         );
     }
 
-    /// Misspelled topic still finds a relevant article via search.
     #[tokio::test]
     #[ignore] // requires internet
     async fn live_misspelled_topic_resolved() {
@@ -740,13 +673,11 @@ mod tests {
     #[test]
     fn clean_query_strips_define_prefix() {
         assert_eq!(clean_query_for_search("define serendipity"), "serendipity");
-        // "what does" is not a stripped prefix — only "what is", "what are" etc.
-        // The function returns the full string minus trailing punctuation.
+        // "what does" is not a stripped prefix, so only the "?" goes.
         assert_eq!(
             clean_query_for_search("what does ephemeral mean?"),
             "what does ephemeral mean"
         );
-        // "what is" IS stripped:
         assert_eq!(clean_query_for_search("what is ephemeral?"), "ephemeral");
     }
 

@@ -1,15 +1,5 @@
-//! Schedule MCP Server — manage cron-based scheduled tasks and
-//! sensor/event-triggered rules (#92).
-//!
-//! Provides 12 tools: `list_schedules`, `create_schedule`, `update_schedule`,
-//! `delete_schedule`, `pause_schedule`, `resume_schedule`, `run_schedule_now`,
-//! `get_schedule_runs`, `world_clock`.
-//!
-//! Sensor RULES moved to `giap-sensors` (they are about sensors, and a
-//! household reaching for a timer should not pay ~437 tokens of schema for
-//! them). `sensor_rule_summary` stays here because `list_schedules` renders
-//! them too — a rule is still a scheduled task underneath.
-//! Depends on [`SchedulerPort`] and [`SettingsRepository`].
+//! Schedule MCP server: cron tasks, one-shot timers and world clock. Sensor rules live in
+//! `giap-sensors`; `sensor_rule_summary` stays here because `list_schedules` renders them too.
 
 use pond_core::user_data::domain::schedule::{SensorTriggerSpec, TaskKind, TriggerSourceKind};
 use pond_core::user_data::ports::scheduler::{
@@ -49,12 +39,8 @@ pub struct SetTimerParams {
     pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
-/// Parse a human duration into a `chrono::Duration`.
-///
-/// Accepts "10 minutes", "10 min", "10m", "1h30m", "90 seconds", "2 hours".
-/// Returns `None` for anything it cannot read, because a timer set for the
-/// wrong moment is worse than one that was refused: the user finds out at the
-/// wrong time, by which point the thing they wanted reminding about has passed.
+/// Parse a human duration ("10 min", "1h30m", "90 seconds"). Anything unreadable is `None`:
+/// a timer set for the wrong moment is worse than a refused one.
 pub fn parse_duration(text: &str) -> Option<chrono::Duration> {
     let lower = text.trim().to_lowercase();
     if lower.is_empty() {
@@ -69,10 +55,7 @@ pub fn parse_duration(text: &str) -> Option<chrono::Duration> {
             i += 1;
             continue;
         }
-        // A sign is never skipped past. Non-digits are otherwise ignored so
-        // "1h 30m" and "in 10 minutes" both read, but ignoring a MINUS turns
-        // "-5m" into five minutes from now — a nonsense input silently becoming
-        // a plausible one.
+        // Other non-digits are skipped, but a skipped minus would turn "-5m" into five minutes.
         if i > 0 && bytes[i - 1] == '-' {
             return None;
         }
@@ -81,7 +64,6 @@ pub fn parse_duration(text: &str) -> Option<chrono::Duration> {
             i += 1;
         }
         let n: i64 = bytes[start..i].iter().collect::<String>().parse().ok()?;
-        // Skip separators to reach the unit.
         while i < bytes.len() && (bytes[i] == ' ' || bytes[i] == '-') {
             i += 1;
         }
@@ -92,8 +74,7 @@ pub fn parse_duration(text: &str) -> Option<chrono::Duration> {
         let unit: String = bytes[unit_start..i].iter().collect();
         let seconds = match unit.as_str() {
             u if u.starts_with('h') => n * 3600,
-            // "m" alone is minutes; "mo"/"month" is not a timer unit and is
-            // refused rather than guessed at.
+            // "m" alone is minutes; "mo"/"month" is refused, not guessed.
             u if u.starts_with("min") || u == "m" => n * 60,
             u if u.starts_with('s') || u.is_empty() => n,
             _ => return None,
@@ -211,12 +192,7 @@ pub struct ScheduleMcpServer {
 
 #[tool_router]
 impl ScheduleMcpServer {
-    /// Every tool this server exposes, without constructing it or its deps.
-    ///
-    /// `tool_router()` is generated private to this module, so inventory code
-    /// outside it could not reach the real definitions and resorted to scanning
-    /// source text for `#[tool(` instead. This is the enumeration that scan was
-    /// standing in for.
+    /// All tools, without constructing the server; the generated `tool_router()` is private.
     pub(crate) fn tool_defs() -> Vec<rmcp::model::Tool> {
         Self::tool_router().list_all()
     }
@@ -265,7 +241,6 @@ impl ScheduleMcpServer {
                         .collect::<Vec<_>>()
                         .join("\n")
                 };
-                // Build UI hint with structured schedule data
                 let ui_schedules: Vec<serde_json::Value> = tasks
                     .iter()
                     .map(|t| {
@@ -362,9 +337,7 @@ One-shot timer or reminder: fires ONCE after a delay, then deletes itself \
         let req = pond_core::user_data::ports::scheduler::CreateScheduleRequest {
             id: id.clone(),
             label: label.clone(),
-            // Sentinel for display — a one-shot is never cron-registered, and a
-            // 6-field cron cannot express "once" anyway: it has no year field,
-            // so the nearest thing is an ANNUAL alarm.
+            // Display-only sentinel: a 6-field cron has no year, so it can't express "once".
             cron: pond_core::user_data::domain::schedule::CRON_ONCE.to_string(),
             fire_at: Some(fire_at),
             once: false,
@@ -383,10 +356,6 @@ One-shot timer or reminder: fires ONCE after a delay, then deletes itself \
         }
     }
 
-    // create and update were two tools over near-identical schemas -- name,
-    // cron, prompt, timezone, differing only in whether `id` was present and
-    // whether the fields were optional. `id` is the whole distinction, so it
-    // is now the parameter that carries it.
     #[tool(
         description = "Create a scheduled task that sends a prompt to the agent on a cron. Pass an existing id to change one instead; omitted fields keep their current value."
     )]
@@ -463,12 +432,8 @@ One-shot timer or reminder: fires ONCE after a delay, then deletes itself \
                 Some(c) => c,
                 None => {
                     return Ok(CallToolResult::success(vec![Content::text(format!(
-                        // The field ORDER is what the model gets wrong, so that is
-                        // what this teaches. It used to give two ready-made cron
-                        // strings, and a copied one creates a real recurring
-                        // schedule at a time nobody asked for — persistent state
-                        // the user has to discover and delete, unlike a wrong
-                        // sentence they can simply ignore.
+                        // Teach the field ORDER, never a ready-made cron: a copied one
+                        // creates a real schedule at a time nobody asked for.
                         "Could not parse a schedule from: \"{}\". \
                          Retry with cron in the order: sec min hr dom mon dow. \
                          Build it from the time the user actually said.",
@@ -511,7 +476,6 @@ One-shot timer or reminder: fires ONCE after a delay, then deletes itself \
                     }
                 });
 
-            // Default timezone to user's setting if not provided.
             let timezone = match &c.timezone {
                 Some(tz) if !tz.is_empty() => tz.clone(),
                 _ => self
@@ -559,7 +523,6 @@ One-shot timer or reminder: fires ONCE after a delay, then deletes itself \
 
             // ── Resolve ID: model param > extract from user message ──
             let id = if u.id.is_empty() {
-                // Try to find a UUID-shaped string in the user message
                 user_msg
                     .split_whitespace()
                     .find(|w| uuid::Uuid::parse_str(w).is_ok())
@@ -577,7 +540,7 @@ One-shot timer or reminder: fires ONCE after a delay, then deletes itself \
             }
 
             // ── Resolve cron: natural language parse > validated literal ──
-            // Same validation as create_schedule — reject strings that aren't valid 6-field cron.
+            // Same check as the create branch; keep the two in sync.
             let looks_like_cron = |s: &str| {
                 let parts: Vec<&str> = s.split_whitespace().collect();
                 parts.len() == 6
@@ -591,7 +554,6 @@ One-shot timer or reminder: fires ONCE after a delay, then deletes itself \
                 if c.is_empty() {
                     return None;
                 }
-                // Try natural language first, then validated literal
                 parse_cron_from_message(&c.to_lowercase()).or_else(|| {
                     if looks_like_cron(c) {
                         Some(c.clone())
@@ -663,12 +625,7 @@ One-shot timer or reminder: fires ONCE after a delay, then deletes itself \
         }
     }
 
-    // One tool with an action enum, replacing delete/pause/resume/run_now.
-    //
-    // Those four were 78 tokens between them, so this is not really a token
-    // change -- it is a COUNT change. Four tools that differ only in a verb
-    // are four things the model has to tell apart, and the same reasoning that
-    // gave `control` thirteen playback actions applies here.
+    // One tool with an action verb: fewer near-identical tools for the model to tell apart.
     #[tool(
         description = "Act on an existing schedule by ID: delete it, pause it, resume a paused one, or run it now regardless of its cron."
     )]
@@ -724,7 +681,6 @@ One-shot timer or reminder: fires ONCE after a delay, then deletes itself \
                 tzs.iter().filter(|s| !s.is_empty()).cloned().collect()
             }
             _ => {
-                // Fall back to user's configured timezone
                 let tz = self
                     .settings_repo
                     .get()
@@ -807,8 +763,7 @@ impl ServerHandler for ScheduleMcpServer {
 
 // ── Cron parsing helpers (public for use by other crates) ──────────────────
 
-/// Parse a 6-field cron expression from a natural language time description.
-/// Returns `None` if no recognizable time pattern is found.
+/// A 6-field cron from a natural-language time ("every morning at 9"), or `None`.
 pub fn parse_cron_from_message(lower: &str) -> Option<String> {
     let hour = extract_hour(lower);
 
@@ -820,7 +775,6 @@ pub fn parse_cron_from_message(lower: &str) -> Option<String> {
         return Some(format!("0 {min} * * * *"));
     }
 
-    // "every morning" / "every day" / "daily"
     if lower.contains("every morning")
         || lower.contains("every day")
         || lower.contains("daily")
@@ -832,14 +786,12 @@ pub fn parse_cron_from_message(lower: &str) -> Option<String> {
         return Some(format!("0 {m} {h} * * *"));
     }
 
-    // "every evening" / "every night"
     if lower.contains("every evening") || lower.contains("every night") {
         let h = hour.unwrap_or(20); // default 8 PM
         let m = extract_minute(lower).unwrap_or(0);
         return Some(format!("0 {m} {h} * * *"));
     }
 
-    // "every week" / "weekly" / "every monday" etc.
     if lower.contains("every week") || lower.contains("weekly") {
         let h = hour.unwrap_or(8);
         let m = extract_minute(lower).unwrap_or(0);
@@ -900,7 +852,7 @@ pub fn extract_hour(s: &str) -> Option<u32> {
     None
 }
 
-/// Extract minute from "HH:MM" or ":MM".
+/// Extract the minute from "HH:MM".
 pub fn extract_minute(s: &str) -> Option<u32> {
     for (i, _) in s.match_indices(':') {
         if i > 0 && s.as_bytes()[i - 1].is_ascii_digit() {
@@ -946,8 +898,7 @@ pub fn extract_day_of_week(s: &str) -> Option<u32> {
     None
 }
 
-/// Extract the action prompt from a scheduling message.
-/// Strips scheduling-related prefixes to get the core task description.
+/// The task part of a scheduling message, with scheduling and time words stripped.
 pub fn extract_prompt_from_message(lower: &str, original: &str) -> String {
     let strip_patterns = [
         "schedule to ",
@@ -972,14 +923,12 @@ pub fn extract_prompt_from_message(lower: &str, original: &str) -> String {
 
     let mut work = lower.to_string();
 
-    // Strip leading scheduling/time words
     for pat in &strip_patterns {
         if let Some(rest) = work.strip_prefix(pat) {
             work = rest.to_string();
         }
     }
 
-    // Strip "at HH am/pm" and "every X" from middle
     let time_re_patterns = [
         "at ",
         "every morning",
@@ -997,7 +946,6 @@ pub fn extract_prompt_from_message(lower: &str, original: &str) -> String {
         work = work.replace(pat, " ");
     }
 
-    // Strip am/pm and digits that look like times
     let cleaned: String = work
         .split_whitespace()
         .filter(|w| {
@@ -1012,12 +960,10 @@ pub fn extract_prompt_from_message(lower: &str, original: &str) -> String {
 
     let trimmed = cleaned.trim().to_string();
 
-    // If extraction left nothing useful, use the original message as the prompt
     if trimmed.len() < 5 {
         return original.trim().to_string();
     }
 
-    // Capitalize first letter
     let mut chars = trimmed.chars();
     match chars.next() {
         Some(c) => format!("{}{}", c.to_uppercase(), chars.collect::<String>()),
@@ -1025,10 +971,7 @@ pub fn extract_prompt_from_message(lower: &str, original: &str) -> String {
     }
 }
 
-/// Build a context block of upcoming scheduled tasks for system prompt injection.
-///
-/// Takes an explicit `SchedulerPort` reference instead of using a global.
-/// Returns `Some("## Upcoming Scheduled Tasks\n- ...")` or `None` if no active tasks.
+/// Upcoming tasks as a system-prompt block (`## Upcoming Scheduled Tasks`), or `None` if none.
 pub async fn try_upcoming_schedules_context(scheduler: &dyn SchedulerPort) -> Option<String> {
     let tasks = scheduler.list_upcoming(5).await.ok()?;
     if tasks.is_empty() {
@@ -1102,10 +1045,7 @@ pub fn init_schedule_deps(
 
 /// Spawn function compatible with Goose's `SpawnServerFn` type.
 pub fn spawn_schedule_server(reader: DuplexStream, writer: DuplexStream) {
-    // Missing deps = this path never initialised this extension (the voice/CLI
-    // binary vs `serve` install different families). A skipped extension is a
-    // logged, contained failure; a panic here took down every builtin server's
-    // startup at once (2026-08-27, giap-context in the voice child).
+    // No deps = this binary didn't install this family: skip, as a panic kills every builtin.
     let Some(deps) = SCHEDULE_DEPS.get() else {
         tracing::error!(
             "spawn_schedule_server called before init_schedule_deps — extension will not start"
@@ -1215,24 +1155,14 @@ mod tests {
     }
     // ── One-shot timers ───────────────────────────────────────────────────
 
-    /// A 6-field cron CANNOT express "once", and that is why `fire_at` exists.
-    ///
-    /// The form is `<sec> <min> <hour> <dom> <month> <dow>` — no year. So even a
-    /// fully specified expression like `0 35 14 9 8 *` means *every* 9 August at
-    /// 14:35. A ten-minute timer written as cron is an annual alarm, and it looks
-    /// correct until roughly a year later.
-    ///
-    /// This pins the shape of the fix rather than the arithmetic: a timer must
-    /// carry `fire_at`, and must NOT be represented as a cron expression.
+    /// A 6-field cron has no year field, so a timer written as cron is an annual alarm.
     #[test]
     fn a_timer_is_not_expressible_as_cron() {
         use pond_core::user_data::domain::schedule::CRON_ONCE;
-        // The sentinel is not a parseable expression, on purpose — nothing
-        // should ever be tempted to evaluate it.
+        // Deliberately unparseable, so nothing is tempted to evaluate it.
         assert!(CRON_ONCE.starts_with('@'));
         assert_eq!(CRON_ONCE.split_whitespace().count(), 1);
-        // And it is distinct from the event sentinel, so a list can tell a
-        // timer from a sensor rule.
+        // Distinct from the event sentinel, so a list can tell a timer from a sensor rule.
         assert_ne!(CRON_ONCE, "@event");
     }
 
@@ -1258,9 +1188,6 @@ mod tests {
         }
     }
 
-    /// Refused, not guessed. A timer set for the wrong moment is worse than one
-    /// that was never set: the user finds out at the wrong time, when whatever
-    /// they wanted reminding about has already passed.
     #[test]
     fn an_unreadable_duration_is_refused_rather_than_guessed() {
         for text in ["", "   ", "soon", "later", "tomorrow", "0 minutes", "-5m"] {
@@ -1268,9 +1195,6 @@ mod tests {
         }
     }
 
-    /// "m" is minutes; "month" is not a timer unit. Reading "3 months" as three
-    /// minutes would fire 43,000 times too early and look like a bug in the
-    /// scheduler rather than in the parser.
     #[test]
     fn month_is_not_silently_read_as_minutes() {
         assert_eq!(parse_duration("3 months"), None);

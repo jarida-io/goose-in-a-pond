@@ -1,10 +1,5 @@
-//! Device Control MCP Server — actuation.
-//!
-//! Provides one tool: `set_device_state`, which actuates a device through the
-//! [`DeviceControlPort`] (power / brightness / target temperature / lock). The
-//! agent and the desktop Hub (via `POST /api/v1/tools/invoke`) both reach
-//! devices through this single tool surface. Backends are pluggable behind the
-//! port (logging stub today; MQTT/HTTP/IR or a Home-Assistant MCP-client later).
+//! Device Control MCP server: describe, read and set devices via [`DeviceControlPort`]. The
+//! desktop Hub drives devices through these same tools (`POST /api/v1/tools/invoke`).
 
 use pond_core::user_data::ports::device_control::{
     DeviceControlPort, DeviceDescription, DeviceState, ValueSpec,
@@ -25,8 +20,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 // ── Parameter struct ─────────────────────────────────────────────────────────
-// All params optional with serde(default) + a flatten extra absorber so a small
-// model sending `{}` (or unexpected fields) never breaks deserialization.
+// All optional with a flatten absorber, so `{}` or stray fields from a small model still parse.
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct DescribeDeviceParams {
@@ -103,24 +97,15 @@ pub struct SetDeviceStateParams {
 #[derive(Clone)]
 pub struct DeviceControlMcpServer {
     control: Arc<dyn DeviceControlPort + Send + Sync>,
-    /// Registry used to resolve natural references ("the light", a friendly
-    /// name) to the device id backends expect — what lets the user say
-    /// "turn off the light" instead of quoting an internal id.
+    /// Resolves natural references ("the light", a friendly name) to backend device ids.
     registry: Arc<dyn DeviceRegistry + Send + Sync>,
     #[allow(dead_code)] // accessed by rmcp's generated tool_handler code
     tool_router: ToolRouter<Self>,
 }
 
-/// The description as a sentence a model can act on. JSON would be smaller and
-/// worse: the point is that the next tool call is obvious from reading it.
 /// Device-reference resolution, shared by every tool that takes a `device_id`.
 impl DeviceControlMcpServer {
     /// The registered id for a caller's reference, or the guidance to send instead.
-    ///
-    /// Callers name devices the way people do — "the fan", a room name, a partial
-    /// title — and every tool has to answer the same three questions: which device,
-    /// which of several, or none of them. Kept in one place so a third tool cannot
-    /// answer them slightly differently from the first two.
     async fn resolve_or_explain(
         &self,
         reference: &str,
@@ -145,8 +130,7 @@ impl DeviceControlMcpServer {
                     }))
                 }
             },
-            // The registry being unavailable is not the caller's problem: pass the
-            // reference through so a backend that understands it can still act.
+            // Registry down: pass the reference through; a backend may still understand it.
             Err(e) => {
                 tracing::warn!(error = %e, tool, "device list unavailable");
                 Ok(reference.to_string())
@@ -155,25 +139,15 @@ impl DeviceControlMcpServer {
     }
 }
 
-/// A device's current state, as the model reads it.
-/// One reading, as `render_state` writes it.
-///
-/// Its own constant because the desktop parses these lines. `get_device_state` is on
-/// the direct-dispatch allowlist so the Devices card can label its power button from
-/// what the device IS rather than from whether it is reachable, and the only channel
-/// a dispatched tool has is text -- `ToolCallResult` carries `{content, success}` and
-/// nothing structured. So the format is a contract with `powerStateOf` in
-/// `pond-desktop/src/sections/Devices.tsx`, and `a_state_line_is_the_shape_the_desktop_parses`
-/// fails if it drifts. Same discipline as the sensor-vocabulary tripwire: an
-/// undeclared coupling is the one that breaks silently.
+/// One `render_state` line; pond-desktop's `powerStateOf` (`Devices.tsx`) parses it.
 fn state_line(name: &str, value: &str) -> String {
     format!("\n    {name}: {value}")
 }
 
+/// A device's current state, as the model reads it.
 fn render_state(state: &DeviceState) -> String {
     if state.values.is_empty() {
-        // Distinct from "it is off": the device reported nothing at all, and saying
-        // so is more useful than an empty list the reader has to interpret.
+        // Distinct from "off": the device reported nothing at all.
         return format!("{} reports nothing about its state.", state.device_id);
     }
 
@@ -184,11 +158,7 @@ fn render_state(state: &DeviceState) -> String {
     out
 }
 
-/// The state each operation is asking the device to reach.
-///
-/// A verb and the state it produces are different words for the same success:
-/// Start ends in Running, Pause in Paused. Comparing the two directly reports
-/// every successful start as a mismatch.
+/// The state an operation aims for: verbs and states are different words ("start" → "running").
 fn state_intended_by(operation: &str) -> Option<&'static str> {
     match operation.to_ascii_lowercase().as_str() {
         "start" | "resume" => Some("running"),
@@ -198,12 +168,7 @@ fn state_intended_by(operation: &str) -> Option<&'static str> {
     }
 }
 
-/// Is this one of the states Operational State itself defines?
-///
-/// Separate from the verbs above because they are different vocabularies: "stop"
-/// is a verb and "stopped" is a state, and a device may name a state neither list
-/// contains. Only a standard state can contradict a verb; a device's own word for
-/// what it is doing cannot.
+/// Whether Operational State defines this state; only such a state can contradict a verb.
 fn is_standard_state(state: &str) -> bool {
     matches!(
         state.to_ascii_lowercase().as_str(),
@@ -215,25 +180,11 @@ fn is_standard_state(state: &str) -> bool {
 enum OperationNote {
     /// The device reached the state the verb asks for.
     Reached(String),
-    /// It did not, and this says so.
     Missed(String),
 }
 
-/// How an operation's result reads.
-///
-/// The state the device ended up in, which need not be the one that was asked for:
-/// a device may accept Start and stay Stopped -- Google's Matter Virtual Device
-/// washer does exactly that -- and reporting "operation=start" there states the
-/// request as the result.
-///
-/// A miss is returned separately rather than as another item in the applied list.
-/// Flattened in with the settings, "asked it to start, but it reports being
-/// stopped" trails a comma list of things that did work and reads as though it
-/// qualifies all of them, which is how a reader ends up doubting a temperature
-/// that was set correctly.
-///
-/// A device wording a state its own way ("washing" rather than "running") is taken
-/// at that word: only a state the cluster itself defines can contradict a verb.
+/// Report the state an operation reached, not the request: a device may accept Start and
+/// stay Stopped (Google's Matter Virtual Device washer does). A miss is its own sentence.
 fn render_operation(requested: &str, became: Option<&str>) -> OperationNote {
     let Some(became) = became else {
         // Nothing said about where it ended up: the request is all that is known.
@@ -254,6 +205,7 @@ fn render_operation(requested: &str, became: Option<&str>) -> OperationNote {
     }
 }
 
+/// A device's description as prose, not JSON, so the next tool call is obvious from it.
 fn render_description(d: &DeviceDescription) -> String {
     let mut out = format!("{} ({})", d.device_id, d.device_type);
 
@@ -262,10 +214,7 @@ fn render_description(d: &DeviceDescription) -> String {
     } else {
         out.push_str("\n  Accepts:");
         for capability in &d.capabilities {
-            // The setting name is not decoration: an appliance has several `mode`
-            // capabilities, and the name is the parameter that tells them apart.
-            // Rendered without it, a washer offered four identical `mode` lines and
-            // the only sane reading was that its controls did not exist.
+            // The setting name is what tells an appliance's several `mode` capabilities apart.
             match &capability.setting {
                 Some(setting) => out.push_str(&format!(
                     "\n    {} (setting: \"{}\") — {}",
@@ -291,10 +240,7 @@ fn render_description(d: &DeviceDescription) -> String {
         }
     }
 
-    // Named separately from Accepts and Measures because it is neither, and the
-    // difference is the whole point: asked to shut the door, an agent that read these
-    // as settable would try, and a lock refusing a write it never offered is a worse
-    // answer than "I can see it and cannot change it".
+    // Its own heading, neither Accepts nor Measures, so the agent never tries to set these.
     if !d.states.is_empty() {
         out.push_str("\n  Reports, and cannot be told to change:");
         for state in &d.states {
@@ -306,15 +252,8 @@ fn render_description(d: &DeviceDescription) -> String {
         }
     }
 
-    // Printed only when there is one, which is nearly never. A "Manufacturer-specific:
-    // nothing." line on every description in the house would be paid for by every
-    // reader to inform none of them.
-    //
-    // The sentence has to carry both halves — that the control is there, and that
-    // nothing here can work it — because either half alone is a wrong answer. Silence
-    // told a user their light had no emoji setting while the maker's app showed one;
-    // naming it without the caveat would have the agent promise a control it cannot
-    // reach.
+    // Only when present (rarely), or every description pays for an empty line. It must say
+    // both that the control exists and that nothing here can drive it.
     if !d.vendor_clusters.is_empty() {
         out.push_str(
             "\n  Has manufacturer-specific controls that cannot be named or driven from \
@@ -353,15 +292,12 @@ fn render_value(value: &ValueSpec) -> String {
                 (None, None) => format!("a number in {unit}"),
             };
             let range = range.trim_end().to_string();
-            // A stated increment is part of what will be accepted: 50.5 into a
-            // dishwasher taking whole degrees is refused, and the refusal is
-            // avoidable by saying so first.
+            // The step is part of what's accepted: 50.5 into a whole-degree dishwasher is refused.
             let range = match step {
                 Some(step) => format!("{range} in steps of {step}"),
                 None => range,
             };
-            // The circumstances travel with the number, so a range quoted back
-            // later carries what it was true of.
+            // The condition travels with the range, so a quote of it stays accurate.
             match when {
                 Some(when) => format!("{range} ({when})"),
                 None => range,
@@ -372,12 +308,7 @@ fn render_value(value: &ValueSpec) -> String {
 
 #[tool_router]
 impl DeviceControlMcpServer {
-    /// Every tool this server exposes, without constructing it or its deps.
-    ///
-    /// `tool_router()` is generated private to this module, so inventory code
-    /// outside it could not reach the real definitions and resorted to scanning
-    /// source text for `#[tool(` instead. This is the enumeration that scan was
-    /// standing in for.
+    /// All tools, without constructing the server; the generated `tool_router()` is private.
     pub(crate) fn tool_defs() -> Vec<rmcp::model::Tool> {
         Self::tool_router().list_all()
     }
@@ -497,8 +428,6 @@ impl DeviceControlMcpServer {
             ))]));
         }
 
-        // Resolve natural references ("the light", a friendly name) to the
-        // registered device id — backends receive ids, users speak names.
         let device_id = match self.registry.list_devices().await {
             Ok(devices) => match resolve_device(device_id, &devices) {
                 DeviceResolution::Resolved(id) => id,
@@ -521,8 +450,7 @@ impl DeviceControlMcpServer {
                 }
             },
             Err(e) => {
-                // Registry unavailable: pass the raw reference through so a
-                // backend that understands it can still act.
+                // Registry down: pass the reference through; a backend may still understand it.
                 tracing::warn!(error = %e, "device resolution unavailable; using raw id");
                 device_id.to_string()
             }
@@ -579,8 +507,7 @@ impl DeviceControlMcpServer {
                 }
             }
         }
-        // Colour: hue and saturation are one action. If only one is given, keep
-        // the other at a sensible default (full saturation for a bare hue).
+        // Hue and saturation are one action, so a missing half takes a default.
         if p.hue.is_some() || p.saturation.is_some() {
             let hue = p.hue.unwrap_or(0) % 360;
             let sat = p.saturation.unwrap_or(100).min(100);
@@ -593,9 +520,6 @@ impl DeviceControlMcpServer {
                 }
             }
         }
-        // Its own action, not a variant of colour. A device may take one, both, or
-        // neither, and setting hue on a tunable-white bulb is a rejection rather than a
-        // near miss -- so the two are never substituted for one another here.
         if let Some(level) = p.volume {
             let pct = level.min(100);
             match self.control.set_volume(device_id, pct).await {
@@ -607,6 +531,7 @@ impl DeviceControlMcpServer {
                 }
             }
         }
+        // Its own action, never substituted for hue: hue on a tunable-white bulb is rejected.
         if let Some(kelvin) = p.color_temp {
             match self.control.set_color_temp(device_id, kelvin).await {
                 Ok(_) => applied.push(format!("color_temp={kelvin}K")),
@@ -639,9 +564,7 @@ impl DeviceControlMcpServer {
             }
         }
         if let Some(setting) = p.setting.as_deref() {
-            // Both halves or neither: a setting with no value is a question, not
-            // an instruction, and guessing which value was meant is how a wash
-            // ends up on the wrong cycle.
+            // A setting without a value is a question: ask rather than guess the cycle.
             let Some(value) = p.setting_value.as_deref() else {
                 return Ok(guidance(format!(
                     "Which value for '{setting}' on '{device_id}'? Pass setting_value. \
@@ -649,8 +572,7 @@ impl DeviceControlMcpServer {
                 )));
             };
             match self.control.set_mode(device_id, setting, value).await {
-                // Reported in the device's own words: it answers with the label it
-                // uses, which need not be the spelling the caller typed.
+                // Reported in the device's own label, which may differ from what was typed.
                 Ok(outcome) => match outcome.applied.mode {
                     Some(mode) => applied.push(format!("{}={}", mode.setting, mode.value)),
                     None => applied.push(format!("{setting}={value}")),
@@ -664,11 +586,6 @@ impl DeviceControlMcpServer {
         }
         if let Some(operation) = p.operation.as_deref() {
             match self.control.set_operation(device_id, operation).await {
-                // The state the device ended up in, which need not be the one that
-                // was asked for: a device may accept Start and stay Stopped, and
-                // saying "operation=start" there reports the request as the result.
-                // Said plainly, because a model told only "stopped" after asking to
-                // start has to guess whether that is the answer or an error.
                 Ok(outcome) => {
                     match render_operation(operation, outcome.applied.operation.as_deref()) {
                         OperationNote::Reached(text) => applied.push(text),
@@ -699,8 +616,7 @@ impl DeviceControlMcpServer {
         }
 
         if applied.is_empty() && notes.is_empty() {
-            // Nothing was asked for. Previously this answered "Set <device>: .",
-            // which reads as a successful change that cannot be named.
+            // Nothing was asked for; don't report it as a change.
             return Ok(guidance(format!(
                 "Nothing to set on '{device_id}' — no state was given. \
                  describe_device lists what it accepts."
@@ -741,8 +657,7 @@ pub(crate) enum DeviceResolution {
     NotFound,
 }
 
-/// Normalise a spoken reference: lowercase, strip a leading article and a
-/// trailing plural 's' ("the lights" → "light").
+/// Lowercase, drop a leading "the "/"my " and a plural 's' ("the lights" → "light").
 fn normalize_reference(input: &str) -> String {
     let lower = input.trim().to_lowercase();
     let stripped = lower
@@ -752,14 +667,8 @@ fn normalize_reference(input: &str) -> String {
     stripped.strip_suffix('s').unwrap_or(stripped).to_string()
 }
 
-/// Resolve `input` to a registered device id. Matching tiers, strictest
-/// first — the first tier with hits decides:
-/// 1. exact id (backends' canonical form, e.g. `"matter-2"`)
-/// 2. exact name, case-insensitive ("Living Room Light")
-/// 3. name containing the reference ("living room" → Living Room Light)
-/// 4. device type ("the light" → the only device_type == "light")
-///
-/// A unique hit resolves; several hits in the same tier are ambiguous.
+/// Resolve `input` to a device id by the first tier with hits: exact id, exact name
+/// (case-insensitive), name containing it, then device type. Several hits are ambiguous.
 pub(crate) fn resolve_device(input: &str, devices: &[Device]) -> DeviceResolution {
     let raw = input.trim();
     if let Some(device) = devices.iter().find(|d| d.id == raw) {
@@ -833,10 +742,7 @@ pub fn init_device_control_deps(
 
 /// Spawn function compatible with Goose's `SpawnServerFn` type.
 pub fn spawn_device_control_server(reader: DuplexStream, writer: DuplexStream) {
-    // Missing deps = this path never initialised this extension (the voice/CLI
-    // binary vs `serve` install different families). A skipped extension is a
-    // logged, contained failure; a panic here took down every builtin server's
-    // startup at once (2026-08-27, giap-context in the voice child).
+    // No deps = this binary didn't install this family: skip, as a panic kills every builtin.
     let Some(deps) = DEVICE_CONTROL_DEPS.get() else {
         tracing::error!(
             "spawn_device_control_server called before init_device_control_deps — extension will not start"
@@ -864,16 +770,7 @@ mod tests {
 
     #[test]
     fn a_state_line_is_the_shape_the_desktop_parses() {
-        // A declared coupling, not an accidental one. `get_device_state` is on the
-        // direct-dispatch allowlist so the Devices card can label its power button
-        // from what the device IS -- it used to read `is_online`, which is
-        // reachability, and offered "Turn on" to a contact sensor. A dispatched tool
-        // has only text to answer with (`ToolCallResult` is `{content, success}`), so
-        // `powerStateOf` in `pond-desktop/src/sections/Devices.tsx` reads these lines.
-        //
-        // Four newline-separated spaces, the name, a colon, a space, the value. If
-        // this changes, that parser has to change with it -- which is the whole
-        // reason this assertion is here rather than left to be discovered.
+        // Parsed by `powerStateOf` in pond-desktop's `Devices.tsx`: change both together.
         assert_eq!(state_line("power", "on"), "\n    power: on");
 
         let rendered = render_state(&DeviceState {
@@ -909,10 +806,6 @@ mod tests {
         }
     }
 
-    /// The failure this pins: a washer described its four settings, the renderer
-    /// dropped every name, and the model was shown four identical `mode` lines with
-    /// no way to say which one it meant. It reported the controls as unavailable,
-    /// which was the only sane reading of what it had been given.
     #[test]
     fn capabilities_sharing_a_verb_are_told_apart_by_their_setting() {
         let rendered = render_description(&DeviceDescription {
@@ -940,8 +833,7 @@ mod tests {
             states: vec![],
         });
 
-        // The name is what `set_device_state` is called with, so it has to be in the
-        // text the model reads.
+        // The model passes this name to `set_device_state`, so it must be in the text.
         assert!(
             rendered.contains(r#"mode (setting: "laundry washer mode") — one of: Normal, Heavy"#),
             "{rendered}"
@@ -954,8 +846,6 @@ mod tests {
         assert!(rendered.contains("power — true or false"), "{rendered}");
     }
 
-    /// What the model reads. The whole point of the tool is that the next call is
-    /// obvious from the text, so the text is what gets asserted.
     #[test]
     fn a_description_names_the_values_a_device_accepts() {
         let rendered = render_description(&DeviceDescription {
@@ -977,8 +867,7 @@ mod tests {
         });
 
         assert!(rendered.contains("matter-18 (fan)"), "{rendered}");
-        // The modes are the reason this tool exists: "fan_mode" alone sends the
-        // model back to guessing which words are accepted.
+        // Without the modes, "fan_mode" leaves the model guessing which words are accepted.
         assert!(rendered.contains("one of: off, low, high"), "{rendered}");
         assert!(rendered.contains("0-100 percent"), "{rendered}");
         assert!(rendered.contains("Measures: nothing."), "{rendered}");
@@ -1026,8 +915,6 @@ mod tests {
         assert!(!silent.contains("from"), "no range is implied: {silent}");
     }
 
-    /// A sensor is describable before it has ever reported, which is the question
-    /// "what does this measure?" that readings alone could not answer.
     #[test]
     fn a_sensor_lists_what_it_measures_with_units() {
         let rendered = render_description(&DeviceDescription {
@@ -1050,14 +937,9 @@ mod tests {
 
         assert!(rendered.contains("carbon_dioxide (ppm)"), "{rendered}");
         assert!(rendered.contains("pm2_5 (ug/m3)"), "{rendered}");
-        // And it says plainly that there is nothing to drive, rather than leaving
-        // the model to infer it from an empty list.
         assert!(rendered.contains("Cannot be controlled"), "{rendered}");
     }
 
-    /// A range that only holds in one mode has to say so, or it is read as a fact
-    /// about the device: asked twice minutes apart, the same thermostat answered
-    /// "7 to 23.5" and then "7 to 32", with nothing to explain either.
     #[test]
     fn a_conditional_range_carries_its_condition() {
         let rendered = render_description(&DeviceDescription {
@@ -1100,9 +982,6 @@ mod tests {
         assert_eq!(rendered, "a number from 0 to 100 %");
     }
 
-    /// The gap this closes: asked "what is the state of the laundry washer?", the
-    /// only honest answer was "I do not have a tool to report that" -- the state was
-    /// in the controller the whole time, with nothing to ask for it.
     #[test]
     fn a_state_reads_as_names_that_can_be_set() {
         let rendered = render_state(&DeviceState {
@@ -1124,13 +1003,11 @@ mod tests {
         });
 
         assert!(rendered.contains("power: on"), "{rendered}");
-        // Named exactly as describe_device names it, so the call that changes it
-        // follows from the reading without a second lookup.
+        // Named as describe_device names it, so no second lookup is needed to change it.
         assert!(rendered.contains("spin speed: High"), "{rendered}");
         assert!(rendered.contains("operation: running"), "{rendered}");
     }
 
-    /// A device that reported nothing is not the same as a device that is off.
     #[test]
     fn a_silent_device_says_so_rather_than_rendering_an_empty_list() {
         let rendered = render_state(&DeviceState {
@@ -1143,15 +1020,9 @@ mod tests {
         );
     }
 
-    /// The last place the request was being reported as the result. GIAP said the
-    /// washer was running while the washer said Stopped -- the controller had been
-    /// fixed to answer honestly, and this layer overwrote its answer with the verb
-    /// it had sent.
     #[test]
     fn an_operation_reports_the_state_reached_not_the_one_requested() {
-        // What the Matter Virtual Device washer actually does: Start is accepted,
-        // and the state stays Stopped. Kept out of the applied list so it cannot
-        // read as a caveat on the settings that did take effect.
+        // The Matter Virtual Device washer accepts Start and stays Stopped.
         let Missed(text) = render_operation("start", Some("stopped")) else {
             panic!("a washer that stayed stopped is not a reached state");
         };
@@ -1162,14 +1033,12 @@ mod tests {
         };
         assert_eq!(text, "It was asked to pause, but reports being running.");
 
-        // A verb and the state it produces are different words for one success, so
-        // none of these is a miss.
+        // A verb and its resulting state are different words for one success.
         for (verb, state, expected) in [
             ("start", "running", "operation=running"),
             ("stop", "stopped", "operation=stopped"),
             ("resume", "running", "operation=running"),
-            // A device wording a state its own way is taken at its word rather
-            // than accused of disobeying.
+            // A device's own word for its state is accepted, not read as a miss.
             ("start", "washing", "operation=washing"),
         ] {
             let Reached(text) = render_operation(verb, Some(state)) else {
@@ -1234,8 +1103,7 @@ mod tests {
         }
     }
 
-    /// Inline empty registry (this crate's tests use local stubs, not
-    /// pond-core's feature-gated mocks).
+    /// Local stub: pond-core's mocks are feature-gated.
     struct EmptyRegistry;
     #[async_trait]
     impl DeviceRegistry for EmptyRegistry {
@@ -1285,8 +1153,6 @@ mod tests {
         }
     }
 
-    /// The production ask: "turn off the light" resolves to the one light,
-    /// whatever it is called and whichever backend registered it.
     #[test]
     fn the_light_resolves_by_type_when_unique() {
         let devices = [
@@ -1342,10 +1208,6 @@ mod tests {
         );
     }
 
-    /// The report this came from: asked what a light with a Flip-Flop toggle and an
-    /// Emoticon field could do, the agent answered "power and brightness". True of
-    /// what it had been given, and read by the user as a claim that the two controls
-    /// in front of them did not exist.
     #[test]
     fn a_control_that_cannot_be_driven_is_still_disclosed() {
         let rendered = render_description(&DeviceDescription {
@@ -1363,8 +1225,7 @@ mod tests {
             states: vec![],
         });
 
-        // Both halves, because either alone is a wrong answer: naming it without the
-        // caveat has the agent promise a control it cannot reach.
+        // Both halves: naming the control without the caveat promises what can't be reached.
         assert!(
             rendered.contains("cluster 0xfff1fc01 on endpoint 1"),
             "{rendered}"
@@ -1376,9 +1237,6 @@ mod tests {
         assert!(!rendered.contains("0xfff1fc01 — "), "{rendered}");
     }
 
-    /// Nearly every device, and the reason the block is conditional: a
-    /// "Manufacturer-specific: nothing." line on all of them would be paid for by
-    /// every reader to inform none of them.
     #[test]
     fn a_device_with_no_vendor_cluster_says_nothing_about_them() {
         let rendered = render_description(&DeviceDescription {
@@ -1394,9 +1252,6 @@ mod tests {
         assert!(!rendered.contains("cluster"), "{rendered}");
     }
 
-    /// The report this came from: asked what the Door Lock could do, GIAP answered
-    /// "locked or unlocked. It does not measure any data" — for a device whose own app
-    /// showed a door state and a PIN requirement beside the lock state.
     #[test]
     fn a_reading_that_cannot_be_set_is_named_as_one() {
         let rendered = render_description(&DeviceDescription {
@@ -1429,15 +1284,12 @@ mod tests {
             rendered.contains("pin_required — one of: required, not required"),
             "{rendered}"
         );
-        // The distinction the block exists for. Read as settable, an agent would try to
-        // shut the door, and the refusal is a worse answer than the honest one.
         assert!(rendered.contains("cannot be told to change"), "{rendered}");
         // And it is not in Accepts, which is what `set_device_state` reads.
         let accepts = rendered.split("Reports").next().unwrap_or_default();
         assert!(!accepts.contains("pin_required"), "{rendered}");
     }
 
-    /// Nearly every device, and the reason the block is conditional.
     #[test]
     fn a_device_that_reports_nothing_read_only_says_nothing_about_it() {
         let rendered = render_description(&DeviceDescription {
@@ -1452,10 +1304,6 @@ mod tests {
         assert!(!rendered.contains("Reports"), "{rendered}");
     }
 
-    /// The report this came from: asked what the Extended Color Light could do, GIAP
-    /// answered power, brightness and hue/saturation — for a device whose own Color mode
-    /// dropdown offered hue/saturation, XY and colour temperature. Temperature is the
-    /// one a person actually asks for, and it was missing from every layer.
     #[test]
     fn a_colour_temperature_range_reads_in_kelvin() {
         let rendered = render_description(&DeviceDescription {
@@ -1484,8 +1332,7 @@ mod tests {
             rendered.contains("color_temp — a number from 2000 to 6536 K"),
             "{rendered}"
         );
-        // Both colour controls, named separately: a white cannot be asked for as a hue,
-        // so collapsing them would lose the one the user wanted.
+        // Named separately: a white cannot be asked for as a hue.
         assert!(
             rendered.contains("color — hue 0-360 with saturation 0-100"),
             "{rendered}"
@@ -1497,7 +1344,6 @@ mod tests {
         let p: SetDeviceStateParams =
             serde_json::from_str(r#"{"device_id":"lamp","color_temp":2700}"#).unwrap();
         assert_eq!(p.color_temp, Some(2700));
-        // And it is not confused with the hue/saturation pair beside it.
         assert!(p.hue.is_none() && p.saturation.is_none());
     }
 

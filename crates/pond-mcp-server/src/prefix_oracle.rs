@@ -1,58 +1,11 @@
-//! The tool block, exactly as it reaches the model — pinned.
-//!
-//! # Why this exists
-//!
-//! Every phase of the goose-parity work moves something that touches the tool
-//! list, and the tool list IS the prompt prefix: on the Gemma template the tool
-//! schemas are ~90% of a fresh turn. A prefix that moves invalidates the
-//! retained KV cache and the on-disk snapshot, which costs a full re-prefill —
-//! measured at ~3.7 s for an 8,192-token prompt on the Orin.
-//!
-//! "Any tool-list change moves the KV prefix" is a warning nobody can act on.
-//! This turns it into a failing diff.
-//!
-//! # What it pins, and why that is the right thing
-//!
-//! Three properties, in the order the prefix depends on them:
-//!
-//! 1. **Which tools.** A tool added or removed changes the prefix outright.
-//! 2. **In what order.** `prefix_sort_key` puts core groups first so two
-//!    conversations differing in half their tools still share most of the
-//!    preamble (measured 70% → 85% when the differing tools sort last). Order is
-//!    therefore load-bearing, not cosmetic.
-//! 3. **Their serialized size.** A schema that grows moves every byte after it.
-//!
-//! It deliberately does NOT pin the schema text itself. A description reworded
-//! for the model's benefit should not fail a test about cache stability — but it
-//! must show up as a size change, which it does.
-//!
-//! # Which byte count this is
-//!
-//! The RAW router form, before the provider shim minifies it. The shim strips
-//! `$schema`, `title`, `format`, `minimum` and `maximum`
-//! (`pond-adapters-goose/src/provider_shim.rs::minify_schema_object`), which on
-//! the current surface takes **14,478 bytes down to 13,358** — about 7.7%.
-//!
-//! So this number is not the one the model receives, and the two must not be
-//! conflated: quote 13,358 (~3,339 tok, 40.8% of the 8,192-token prompt budget)
-//! when talking about prompt cost, and this one only when talking about
-//! movement. It pins the raw form because `pond-mcp-server` must not depend on
-//! `pond-adapters-goose` — that is the hexagonal direction, and the CI "fast
-//! crates" list is what enforces it. A constant offset detects every movement
-//! just as well as an absolute one.
-//!
-//! # Reading a failure
-//!
-//! A diff here is not automatically a bug. It says: the prefix moved, so the
-//! next cold turn on the device pays for it. Accept it deliberately and update
-//! the fixture, or find out why it moved. What it forbids is moving by accident.
+//! The tool block as the model sees it (tools, order, sizes), pinned: it is the KV prompt
+//! prefix, so any move costs a full re-prefill. Sizes are the RAW pre-minify router form,
+//! since this crate must not depend on `pond-adapters-goose`; don't quote them as prompt cost.
 
 use pond_core::mcp::domain::tool_group::prefix_sort_key;
 use rmcp::model::Tool;
 
-/// Every tool GIAP can offer, from the real routers rather than a source scan.
-///
-/// Returned unordered; callers that care about the prefix use [`ordered_tools`].
+/// Every tool GIAP can offer, from the real routers, unordered (see [`ordered_tools`]).
 pub fn all_tools() -> Vec<(&'static str, Tool)> {
     let mut out: Vec<(&'static str, Tool)> = Vec::new();
     let mut push = |ext: &'static str, tools: Vec<Tool>| {
@@ -109,11 +62,7 @@ pub struct PrefixEntry {
     pub bytes: usize,
 }
 
-/// The tool block in prompt order, with each entry's serialized size.
-///
-/// `groups` is the set whose tools are offered; passing every group yields the
-/// `"all"` surface. Ordering matches what the provider shim applies before the
-/// payload goes out (`prefix_sort_key`, then name).
+/// `groups`' tools in the order the provider shim sends them (`prefix_sort_key`, then name).
 pub fn ordered_tools(groups: &[&str]) -> Vec<PrefixEntry> {
     let mut kept: Vec<(String, usize)> = all_tools()
         .into_iter()
@@ -132,7 +81,6 @@ pub fn ordered_tools(groups: &[&str]) -> Vec<PrefixEntry> {
         .collect()
 }
 
-/// Total serialized bytes of a tool block — the number the prompt budget spends.
 pub fn total_bytes(entries: &[PrefixEntry]) -> usize {
     entries.iter().map(|e| e.bytes).sum()
 }
@@ -141,8 +89,7 @@ pub fn total_bytes(entries: &[PrefixEntry]) -> usize {
 mod tests {
     use super::*;
 
-    /// The nine groups registered by default. `giap-context` and
-    /// `giap-orchestrator` exist but are off, so they are not in the prefix.
+    /// Groups registered by default; `giap-context` and `giap-orchestrator` are off.
     const DEFAULT_GROUPS: &[&str] = &[
         "giap-memory",
         "giap-weather",
@@ -155,11 +102,7 @@ mod tests {
         "giap-toolkit",
     ];
 
-    /// **The fixture.** Names in prompt order, with serialized sizes.
-    ///
-    /// Regenerate deliberately, never reflexively — see the module docs. A
-    /// change here is a statement that the next cold turn on the Orin pays for
-    /// a moved prefix.
+    /// The fixture. Regenerate deliberately: a change means the next cold turn re-prefills.
     #[test]
     fn the_default_tool_prefix_is_unchanged() {
         let entries = ordered_tools(DEFAULT_GROUPS);
@@ -168,9 +111,7 @@ mod tests {
             .map(|e| format!("{} {}", e.bytes, e.name))
             .collect();
 
-        // Core groups first (`prefix_sort_key` tier 0), then by name. Two
-        // conversations that differ only in non-core groups share everything
-        // above the first tier-1 entry.
+        // Core groups first (`prefix_sort_key` tier 0), then by name.
         let expected_head = [
             "giap-memory__forget_memory",
             "giap-memory__recall_memories",
@@ -195,9 +136,7 @@ mod tests {
             rendered.join("\n")
         );
 
-        // The whole block, as one number. Tighter than a count and looser than
-        // pinning schema text: a reworded description is allowed, a bigger one
-        // is not silent.
+        // One number for the whole block: a reworded description passes, a bigger one fails.
         let total = total_bytes(&entries);
         assert_eq!(
             total,
@@ -212,8 +151,6 @@ mod tests {
         assert_eq!(entries.len(), 27, "tool count moved");
     }
 
-    /// The property the ordering exists for, asserted rather than assumed:
-    /// dropping a non-core group must not disturb the core block.
     #[test]
     fn dropping_a_non_core_group_leaves_the_core_block_byte_identical() {
         let full = ordered_tools(DEFAULT_GROUPS);
@@ -230,7 +167,6 @@ mod tests {
             .take_while(|(a, b)| a == b)
             .count();
 
-        // Everything before the first non-core entry must survive unchanged.
         let core_len = full
             .iter()
             .take_while(|e| prefix_sort_key(&e.name).0 == 0)
@@ -244,7 +180,6 @@ mod tests {
         );
     }
 
-    /// Vacuity control: the enumeration must actually reach the routers.
     #[test]
     fn the_oracle_reads_real_tools_not_an_empty_list() {
         let all = all_tools();
