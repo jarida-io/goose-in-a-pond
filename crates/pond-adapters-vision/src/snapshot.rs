@@ -1,7 +1,5 @@
-//! Snapshot persistence for vision events (#175 follow-up). Saves the frame that
-//! triggered an event as a JPEG, writing the file that
-//! `camera_events.snapshot_path` (migration 0003) points at. Disk use is bounded:
-//! every write retains only the newest [`SnapshotConfig::keep`] per camera.
+//! JPEG snapshots behind `camera_events.snapshot_path`, pruned to the newest
+//! [`SnapshotConfig::keep`] per camera on every write.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,8 +11,7 @@ use pond_core::user_data::domain::vision::Frame;
 pub struct SnapshotConfig {
     /// Directory snapshots are written into (created on first write).
     pub dir: PathBuf,
-    /// Newest snapshots retained per camera; older ones are deleted after
-    /// each write so a busy camera can't fill the disk.
+    /// Newest snapshots kept per camera; older ones are deleted after each write.
     pub keep: usize,
 }
 
@@ -24,9 +21,7 @@ impl SnapshotConfig {
     }
 }
 
-/// `camera_id` comes from settings, so it must not be able to steer the
-/// write path (`../`, separators, drive letters). Anything outside
-/// `[A-Za-z0-9_-]` becomes `-`; empty ids get a stable fallback.
+/// `camera_id` comes from settings and must not steer the path: non-`[A-Za-z0-9_-]` becomes `-`.
 fn sanitize_camera_id(camera_id: &str) -> String {
     let cleaned: String = camera_id
         .chars()
@@ -45,9 +40,7 @@ fn sanitize_camera_id(camera_id: &str) -> String {
     }
 }
 
-/// Encode `frame` as JPEG under `cfg.dir`, prune older snapshots for the
-/// camera, and return the written path. The filename embeds the camera id and
-/// a millisecond timestamp, so lexicographic order == chronological order.
+/// Save `frame` as a JPEG named `<camera>-<UTC ms timestamp>.jpg` (sorts by time) and prune.
 pub fn write_snapshot(cfg: &SnapshotConfig, camera_id: &str, frame: &Frame) -> Result<PathBuf> {
     if !frame.is_well_formed() {
         anyhow::bail!("malformed frame ({}x{})", frame.width, frame.height);
@@ -70,9 +63,7 @@ pub fn write_snapshot(cfg: &SnapshotConfig, camera_id: &str, frame: &Frame) -> R
     Ok(path)
 }
 
-/// Delete all but the newest `keep` snapshots for `camera` (matching the
-/// filename convention of [`write_snapshot`]). Newest-by-filename, which the
-/// timestamp format makes chronological.
+/// Delete all but the newest `keep` snapshots for `camera`, by [`write_snapshot`]'s names.
 fn prune_snapshots(dir: &Path, camera: &str, keep: usize) -> Result<()> {
     let prefix = format!("{camera}-");
     let mut mine: Vec<PathBuf> = fs::read_dir(dir)?

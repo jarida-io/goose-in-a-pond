@@ -21,10 +21,7 @@
 use pond_adapters_silero::{SileroDetector, WINDOW};
 use pond_voice::dsp::{decode_wav, RmsDetector, SpeechDetector};
 
-/// What the capture loop hands over per poll: ~30 ms at 16 kHz. Deliberately
-/// not a multiple of the model's 512-sample window — that mismatch is the
-/// thing `Windower` exists to absorb, so measuring at any other size would
-/// measure a path the pond never takes.
+/// The capture loop's per-poll size (~30 ms at 16 kHz); deliberately not a multiple of 512.
 const CAPTURE_CHUNK: usize = 480;
 
 /// `END_OF_SPEECH_RMS` in `WhisperRsInput` — the gate Silero was added beside.
@@ -64,8 +61,7 @@ fn wav(bytes: &[u8]) -> Vec<f32> {
     d.samples
 }
 
-/// Steady broadband noise at 0.01 — a fan, a laptop under load. Twice the
-/// energy threshold, which is the whole problem.
+/// Steady broadband noise at 0.01 (a fan), twice the energy threshold.
 fn fan_noise() -> Vec<f32> {
     let mut seed = 1u32;
     (0..WINDOW * 60)
@@ -76,8 +72,7 @@ fn fan_noise() -> Vec<f32> {
         .collect()
 }
 
-/// A 120 Hz tone at 0.02 — a fridge compressor. Periodic where the fan is not,
-/// so it fails the energy gate for a different reason and is worth its own row.
+/// A 120 Hz tone at 0.02 (a fridge compressor): periodic, unlike the fan.
 fn fridge_hum() -> Vec<f32> {
     (0..WINDOW * 60)
         .map(|i| (2.0 * std::f32::consts::PI * 120.0 * i as f32 / 16_000.0).sin() * 0.02)
@@ -99,10 +94,7 @@ fn it_fires_on_speech() {
     ] {
         let (silero, rms) = sweep(&wav(bytes));
         println!("{name:<22} silero {silero:>5.1}%   rms {rms:>5.1}%");
-        // Measured 92.0% and 91.7%. The floor is well under that because the
-        // clips open and close on silence and the leading window after a reset
-        // is deliberately untrustworthy — but a detector that had stopped
-        // firing would be near zero, which is what this is here to catch.
+        // Measured ~92%; the floor allows for the clips' silent edges and the first window.
         assert!(
             silero >= 75.0,
             "{name}: silero called only {silero:.1}% of frames speech"
@@ -126,11 +118,7 @@ fn it_is_not_fooled_by_the_room() {
             "{name}: silero called {silero:.1}% of steady noise speech"
         );
 
-        // The control, and the reason this crate exists. Measured 100.0%: the
-        // energy gate calls a fan speech on every single frame, so the endpoint
-        // never fires and the microphone stays open to the hard cap. Asserted
-        // rather than described — if the gate ever stops doing this, the
-        // premise for running a model here has moved and someone should look.
+        // The control (measured 100%): if the gate stops failing here, the premise has moved.
         assert!(
             rms >= 95.0,
             "{name}: the energy gate called only {rms:.1}% speech — it used to \

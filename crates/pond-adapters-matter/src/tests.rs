@@ -1,7 +1,5 @@
-//! Integration tests against an in-process mock controller (a real WebSocket server speaking
-//! `giap-matter`), so the adapter is CI-green with no controller installed and no hardware. They
-//! assert the adapter's half of the contract only; which cluster a verb becomes is the
-//! controller's, tested in `matter-server/test/control.test.ts`.
+//! Adapter tests against an in-process mock `giap-matter` WebSocket controller. Verb-to-cluster
+//! mapping is the controller's half, tested in `matter-server/test/control.test.ts`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -56,10 +54,7 @@ fn greeting() -> Message {
 /// How the mock should answer one op.
 type Answer = Arc<dyn Fn(&Value) -> Value + Send + Sync>;
 
-/// `apply` with BLE off, which is what every test here means.
-///
-/// A helper rather than a `MatterConfig { .. }` literal at thirteen call sites: none of these
-/// tests is about the transport.
+/// `apply` config with BLE off; no test here is about the transport.
 fn ip_only(url: impl Into<String>) -> MatterConfig {
     MatterConfig {
         url: url.into(),
@@ -67,10 +62,8 @@ fn ip_only(url: impl Into<String>) -> MatterConfig {
     }
 }
 
-/// A mock controller: greets, answers `subscribe` with `snapshot`, pushes `events`, and answers
-/// everything else with `answer`. Accepts in a loop and tolerates a failed handshake, because
-/// `is_running` probes the port with a bare TCP connect first and would otherwise consume the
-/// mock's only connection.
+/// Mock controller: greets, answers `subscribe` with `snapshot`, pushes `events`, else `answer`.
+/// Accepts in a loop, tolerating failed handshakes: `is_running` probes with a bare TCP connect.
 async fn mock_controller(
     snapshot: Value,
     events: Vec<Value>,
@@ -133,9 +126,7 @@ async fn mock_controller(
     (url, received)
 }
 
-/// A mock that accepts several connections and drops the FIRST one right after
-/// its `subscribe`, to force a reconnect. Returns the url and a shared count of
-/// `subscribe` calls across all connections.
+/// Drops the first connection after its `subscribe`; returns the url and a `subscribe` count.
 async fn mock_reconnecting_controller(snapshot: Value) -> (String, Arc<Mutex<u32>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}/giap", listener.local_addr().unwrap());
@@ -285,8 +276,7 @@ impl DeviceRegistry for MockRegistry {
     }
 }
 
-/// Connect, run the bridge to completion of its initial sync, and hand back the
-/// pieces a test needs.
+/// Connect and run the bridge through its initial sync.
 async fn start_adapter(
     url: &str,
 ) -> (
@@ -298,9 +288,7 @@ async fn start_adapter(
     start_adapter_with(url, Arc::new(MockRegistry::default())).await
 }
 
-/// The same, over a registry the test has already put rows in — which is the only
-/// way to reach `sync_device`'s KNOWN-device branch, since a device the registry has
-/// never heard of takes the `register` path instead.
+/// The same, over a pre-filled registry: the only route to `sync_device`'s known-device branch.
 async fn start_adapter_with(
     url: &str,
     registry: Arc<MockRegistry>,
@@ -335,9 +323,7 @@ async fn start_adapter_with(
     (control, registry, bus, received)
 }
 
-/// The next event on the bus, or `None` if nothing arrives promptly. The bus
-/// hands back a stream, so "nothing was published" is a short wait rather than an
-/// immediate answer.
+/// The next bus event, or `None` if nothing arrives promptly.
 async fn next_event(stream: &mut BusStream) -> Option<BusEvent> {
     tokio::time::timeout(Duration::from_millis(200), stream.next())
         .await
@@ -373,14 +359,12 @@ async fn the_bridge_syncs_the_fabric_into_the_device_registry() {
 
 #[tokio::test]
 async fn a_device_nobody_touches_keeps_reading_as_present() {
-    // `is_online` means `last_seen` fresher than five minutes, and an idle Matter device sends no
-    // events, so without a liveness tick it reads offline five minutes after the server started.
+    // An idle Matter device sends no events, so without a liveness tick it ages offline in 5 min.
     let (url, _) = mock_controller(snapshot(vec![light()], vec![]), vec![], None).await;
     let (_control, registry, _bus, _rx) = start_adapter(&url).await;
 
     let synced = registry.heartbeats.lock().unwrap().len();
 
-    // No events at all in this window: the device just sits there, as devices do.
     tokio::time::sleep(Duration::from_millis(180)).await;
 
     let beats = registry.heartbeats.lock().unwrap();
@@ -396,9 +380,7 @@ async fn a_device_nobody_touches_keeps_reading_as_present() {
 
 #[tokio::test]
 async fn a_device_the_controller_has_lost_stops_being_vouched_for_until_it_says_otherwise() {
-    // Once the controller says a device is gone the bridge must stop vouching for it, or
-    // `last_seen` never ages and the card never turns offline. The test below covers the
-    // "until it says otherwise" half: being marked offline must not be a latch.
+    // A vouched-for device's `last_seen` never ages, so its card would never turn offline.
     let (url, _) = mock_controller(
         snapshot(vec![light()], vec![]),
         vec![json!({
@@ -423,9 +405,8 @@ async fn a_device_the_controller_has_lost_stops_being_vouched_for_until_it_says_
 
 #[tokio::test]
 async fn a_device_the_controller_can_see_again_is_vouched_for_again() {
-    // `present.remove` must not latch: a single `online: false`, from a subscription lapse or a
-    // snapshot taken before matter.js had a CASE session, would drop the device for good while
-    // readings kept arriving. Availability is a repeated level, so a later `true` is a recovery.
+    // One `online: false` (a subscription lapse, a snapshot before matter.js has a CASE session)
+    // must not latch: availability is a level, so a later `true` recovers.
     let (url, _) = mock_controller(
         snapshot(vec![light()], vec![]),
         vec![
@@ -455,9 +436,8 @@ async fn a_device_the_controller_can_see_again_is_vouched_for_again() {
 
 #[tokio::test]
 async fn a_device_the_snapshot_reports_offline_is_not_given_a_reprieve() {
-    // A heartbeat for a device the snapshot reports offline would hand it a fresh five minutes of
-    // looking present at every connect. Registered first, because that heartbeat is on the
-    // known-device branch: an unknown device is registered instead, which writes `last_seen`.
+    // A heartbeat would give it five more minutes of looking present per connect. Registered
+    // first: that heartbeat is on the known-device branch.
     let mut absent = light();
     absent["online"] = json!(false);
     let (url, _) = mock_controller(snapshot(vec![absent], vec![]), vec![], None).await;
@@ -487,9 +467,7 @@ async fn a_device_the_snapshot_reports_offline_is_not_given_a_reprieve() {
 
 #[tokio::test]
 async fn a_sensor_reports_its_current_value_as_soon_as_it_is_synced() {
-    // Without the snapshot's readings a steady sensor exists in the device list
-    // while every question about its reading is answered "none recorded", which
-    // reads as "that device is not here".
+    // A steady sensor sends no events, so without the snapshot's readings it has none recorded.
     let (url, _) = mock_controller(
         snapshot(vec![sensor()], vec![reading("matter-4", "occupancy", 1.0)]),
         vec![],
@@ -540,9 +518,7 @@ async fn a_device_added_event_registers_the_device() {
 
 #[tokio::test]
 async fn an_already_registered_device_is_retyped_on_sync() {
-    // Re-derived typing has to reach a device that already exists, or an
-    // improvement to typing only ever applies to devices commissioned after it
-    // shipped.
+    // Otherwise a typing improvement only reaches devices commissioned after it shipped.
     let (url, _) = mock_controller(snapshot(vec![light()], vec![]), vec![], None).await;
     let (client, events) = MatterClient::connect(&url).await.unwrap();
 
@@ -585,9 +561,7 @@ async fn an_already_registered_device_is_retyped_on_sync() {
 
 #[tokio::test]
 async fn an_unchanged_device_is_not_rewritten_on_every_sync() {
-    // This runs on the initial sync and on every reconnect, so an unconditional
-    // UPDATE would be a write per device per reconnect for a value that almost
-    // never changes.
+    // Sync runs on every reconnect; an unconditional UPDATE would write every device each time.
     let (url, _) = mock_controller(snapshot(vec![light()], vec![]), vec![], None).await;
     let (_control, registry, _bus, _rx) = start_adapter(&url).await;
 
@@ -599,8 +573,6 @@ async fn an_unchanged_device_is_not_rewritten_on_every_sync() {
 
 #[tokio::test]
 async fn every_verb_sends_one_control_op_naming_itself() {
-    // The adapter's half of the contract. Which cluster each verb becomes is
-    // asserted in the controller's own tests, against the same devices.
     let (url, received) = mock_controller(snapshot(vec![light()], vec![]), vec![], None).await;
     let (control, _registry, _bus, _rx) = start_adapter(&url).await;
 
@@ -641,7 +613,6 @@ async fn every_verb_sends_one_control_op_naming_itself() {
         json!({"hue": 180, "saturation": 50})
     );
     assert_eq!(frames[6]["params"]["value"], json!("auto"));
-    // Every frame names the device it is for.
     assert!(frames
         .iter()
         .all(|f| f["params"]["device_id"] == "matter-2"));
@@ -649,9 +620,7 @@ async fn every_verb_sends_one_control_op_naming_itself() {
 
 #[tokio::test]
 async fn the_outcome_is_what_the_device_did_not_what_was_asked_for() {
-    // A dimmer that clamps to its own minimum is the ordinary case. Reporting
-    // the request back as the result is how a device that did something else
-    // still got described to the user as having obeyed.
+    // E.g. a dimmer clamping to its own minimum: echoing the request would claim it obeyed.
     let answer: Answer = Arc::new(
         |_frame| json!({"ok": true, "result": { "applied": { "brightness": 10, "on": true } }}),
     );
@@ -692,8 +661,7 @@ async fn a_refused_command_fails_with_the_controllers_reason() {
 
 #[tokio::test]
 async fn control_follows_a_swapped_client() {
-    // The reconnect supervisor replaces the client in place, so a control port
-    // built before a drop keeps working after one without being rebuilt.
+    // The supervisor swaps the client in place; a control port built earlier must follow it.
     let (first_url, _) = mock_controller(snapshot(vec![light()], vec![]), vec![], None).await;
     let (second_url, second_received) =
         mock_controller(snapshot(vec![light()], vec![]), vec![], None).await;
@@ -750,8 +718,7 @@ async fn the_supervisor_reconnects_after_the_connection_drops() {
 
 #[tokio::test]
 async fn a_controller_that_is_not_ours_is_refused_by_name() {
-    // The failure this exists for: an address pointing at some other WebSocket
-    // server, greeting with a frame of its own shape.
+    // Some other WebSocket server, greeting with a frame of its own shape.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}/giap", listener.local_addr().unwrap());
     tokio::spawn(async move {
@@ -777,8 +744,6 @@ async fn a_controller_that_is_not_ours_is_refused_by_name() {
 
 #[tokio::test]
 async fn a_request_honours_its_timeout() {
-    // A controller that accepts a frame and never answers must not wedge the
-    // caller forever.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}/giap", listener.local_addr().unwrap());
     tokio::spawn(async move {
@@ -810,8 +775,6 @@ async fn mock_commissioning_controller(commissionable: u32, device: Value) -> (S
 
 #[tokio::test]
 async fn commissioning_with_nothing_in_pairing_mode_says_so_and_says_it_early() {
-    // The most common way commissioning fails, and the one failure a user can
-    // fix in ten seconds — if anything tells them what it is.
     let (url, received) = mock_commissioning_controller(0, light()).await;
     let (client, _events) = MatterClient::connect(&url).await.unwrap();
     let commissioner = MatterCommissioner::new(client, MatterNotifier::disabled());
@@ -836,10 +799,6 @@ async fn commissioning_with_nothing_in_pairing_mode_says_so_and_says_it_early() 
 
 #[tokio::test]
 async fn a_rejected_setup_code_reaches_the_user_as_one_sentence() {
-    // What the user actually read: "commissioning failed: Invalid pairing code:
-    // commission_failed". Three fragments, and only the middle one says anything
-    // — the first restates the endpoint they were already looking at, and the
-    // third is the wire code, which is bookkeeping this crate consumes itself.
     let answer: Answer = Arc::new(|frame: &Value| match frame["op"].as_str() {
         Some("discover") => json!({"ok": true, "result": {"commissionable": 1}}),
         Some("commission") => json!({
@@ -986,10 +945,7 @@ fn runtime_for() -> Arc<MatterRuntime> {
     )
 }
 
-/// A runtime nobody has asked for anything sits still.
-///
-/// The regression this pins: the reconciler's first pass ran with an empty URL, failed to connect
-/// and parked in `Unreachable` before any `apply`, which startup's bounded wait read as "settled".
+/// Before any `apply` it must not park in `Unreachable`, which startup's wait reads as settled.
 #[tokio::test]
 async fn a_runtime_that_has_been_asked_for_nothing_does_nothing() {
     let runtime = runtime_for();
@@ -1005,8 +961,6 @@ async fn a_runtime_that_has_been_asked_for_nothing_does_nothing() {
     assert!(runtime.commissioner().await.is_none());
 }
 
-/// And the wait waits for THIS request, rather than for any state that happens
-/// to look settled.
 #[tokio::test]
 async fn settle_waits_for_the_apply_that_was_just_made() {
     let (url, _) = mock_controller(snapshot(vec![light()], vec![]), vec![], None).await;
@@ -1035,9 +989,7 @@ async fn enabling_connects_and_exposes_a_commissioner() {
     assert!(runtime.commissioner().await.is_some());
 }
 
-/// Matter has no off switch, so a second apply of the same address while
-/// connected must change nothing rather than tearing the fabric down and
-/// rebuilding it — every settings save that touches the address arrives here.
+/// Every settings save touching the address re-applies it; that must not rebuild the fabric.
 #[tokio::test]
 async fn re_applying_the_same_address_while_connected_does_not_churn() {
     let (url, received) = mock_controller(snapshot(vec![light()], vec![]), vec![], None).await;
@@ -1064,12 +1016,8 @@ async fn re_applying_the_same_address_while_connected_does_not_churn() {
 
 #[tokio::test]
 async fn an_unreachable_controller_reports_the_failure_not_off() {
-    // "Off" and "the controller is unreachable" need different actions from the
-    // user, and the agent relays whichever it is.
     let runtime = runtime_for();
-    // A name that cannot resolve, so this fails promptly and — being non-loopback
-    // — never sends the runtime off to install a controller for someone else's
-    // address. A blackholed IP would do neither: it would hang on the connect.
+    // Unresolvable and non-loopback: fails fast and never triggers a local install.
     runtime.apply(ip_only("ws://controller.invalid:5580/giap".to_string()));
 
     let status = wait_for(&runtime, |s| matches!(s, MatterState::Unreachable { .. })).await;
@@ -1078,8 +1026,7 @@ async fn an_unreachable_controller_reports_the_failure_not_off() {
 
 #[tokio::test]
 async fn an_empty_controller_address_is_reported_plainly() {
-    // An install predating the Matter section could have been enabled with no
-    // address. The fix is to fill the field in, so say that.
+    // Installs predating the Matter section can be enabled with no address.
     let runtime = runtime_for();
     runtime.apply(ip_only(String::new()));
 
@@ -1095,8 +1042,7 @@ async fn an_empty_controller_address_is_reported_plainly() {
 
 #[tokio::test]
 async fn re_applying_after_a_failure_retries() {
-    // Identical values while connected are a no-op, but the same values while
-    // unreachable are a retry — which is what the UI's retry affordance sends.
+    // Same values while unreachable are a retry: it is what the UI's retry button sends.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let url = format!("ws://127.0.0.1:{port}/giap");
@@ -1185,10 +1131,7 @@ impl DeviceControlPort for RecordingControl {
 
 #[tokio::test]
 async fn a_matter_device_is_refused_while_matter_is_off_but_others_fall_back() {
-    // The stub answers every verb with success, so routing `matter-18` to it
-    // while Matter was off reported the fan as switched on when nothing had been
-    // sent anywhere — and the agent then told the user so, truthfully relaying a
-    // lie it had been handed.
+    // The stub reports success for every verb, so a Matter id routed to it would lie.
     let fallback = Arc::new(RecordingControl::default());
     let runtime = runtime_for();
     let control = runtime.device_control(fallback.clone());
@@ -1200,18 +1143,14 @@ async fn a_matter_device_is_refused_while_matter_is_off_but_others_fall_back() {
         "a Matter device must not fall back"
     );
 
-    // A device on some other transport still falls back, which is what the stub
-    // is for.
+    // Other transports still fall back, which is what the stub is for.
     control.set_power("mqtt-lamp", true).await.unwrap();
     assert_eq!(fallback.calls(), vec!["power mqtt-lamp true"]);
 }
 
 #[tokio::test]
 async fn a_matter_id_never_falls_back_to_the_stub_however_malformed() {
-    // The property, stated so it cannot quietly change: routing that asks "does this id parse as
-    // a node id" answers `false` for any Matter id the grammar cannot read, and `false` means the
-    // stub, which reports success for every verb. The grammar is about to grow an endpoint
-    // component for bridged devices, so every id shape it has not learned lands here.
+    // Routing on "parses as a node id" would send any id the grammar can't read to the stub.
     let fallback = Arc::new(RecordingControl::default());
     let runtime = runtime_for();
     let control = runtime.device_control(fallback.clone());
@@ -1245,10 +1184,7 @@ async fn control_switches_to_matter_once_connected() {
     assert!(fallback.calls().is_empty());
 }
 
-/// The bridge dedupes readings so a level-based rule does not re-fire on a steady sensor. The
-/// cache doing it must outlive one connection, since re-subscribing is exactly when the same
-/// values arrive again. Two full bridge runs against a controller serving the same snapshot
-/// twice, which is what a controller restart looks like from here.
+/// The dedupe cache must outlive a connection: re-subscribing replays the same values.
 #[tokio::test]
 async fn a_reconnect_does_not_republish_a_reading_that_has_not_changed() {
     let (url, _) = mock_controller(
@@ -1267,8 +1203,7 @@ async fn a_reconnect_does_not_republish_a_reading_that_has_not_changed() {
 
     for run in 1..=2 {
         let (client, events) = MatterClient::connect(&url).await.unwrap();
-        // Each run ends when its connection's event stream closes, which is the
-        // shape of a dropped connection.
+        // A run ends when its event stream closes, i.e. a dropped connection.
         let _ = tokio::time::timeout(
             Duration::from_millis(250),
             run_matter_bridge_with_cache(

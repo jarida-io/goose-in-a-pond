@@ -1,7 +1,6 @@
-//! YOLOX raw-output decoding and non-maximum suppression, pure so the path is
-//! unit-testable without an ONNX runtime. The exported ONNX applies sigmoid
-//! in-graph but leaves grid/stride decode to the caller: output rows are
-//! `[cx, cy, w, h, obj, cls...]`, `xy = (raw_xy + grid) * stride`, `wh = exp(raw_wh) * stride`.
+//! YOLOX output decoding and NMS. The exported model sigmoids in-graph but leaves grid decode:
+//! rows are `[cx, cy, w, h, obj, cls...]`, `xy = (raw_xy + grid) * stride`,
+//! `wh = exp(raw_wh) * stride`.
 
 /// One decoded box in letterboxed-input coordinates.
 #[derive(Debug, Clone, PartialEq)]
@@ -26,9 +25,7 @@ pub fn expected_rows(input_size: usize) -> usize {
         .sum()
 }
 
-/// Decode raw YOLOX predictions into scored boxes, keeping rows whose best
-/// class score clears `score_thresh`. `preds` must be the flattened
-/// `[N, 5 + num_classes]` tensor for a square `input_size` input.
+/// Scored boxes clearing `score_thresh`, from a flat `[N, 5 + num_classes]` square-input tensor.
 pub fn decode_yolox(
     preds: &[f32],
     num_classes: usize,
@@ -116,8 +113,7 @@ fn iou(a: &RawDetection, b: &RawDetection) -> f32 {
     }
 }
 
-/// Class-aware non-maximum suppression: within each class, keep the highest
-/// scoring box of any overlapping cluster (IoU > `iou_thresh`).
+/// Class-aware NMS: per class, keep the best box of each cluster with IoU > `iou_thresh`.
 pub fn nms(mut dets: Vec<RawDetection>, iou_thresh: f32) -> Vec<RawDetection> {
     dets.sort_by(|a, b| b.score.total_cmp(&a.score));
     let mut kept: Vec<RawDetection> = Vec::new();

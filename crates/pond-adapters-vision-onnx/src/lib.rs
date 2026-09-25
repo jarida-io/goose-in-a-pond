@@ -1,7 +1,5 @@
-//! ONNX vision classifier (#130 follow-up): labels motion as person/pet/package
-//! on-device with YOLOX-Nano (Apache-2.0) from `<data_dir>/models/vision/`,
-//! degrading to unlabelled motion when absent. Ultralytics YOLO is avoided, its
-//! AGPL-3.0 being incompatible with Apache-2.0. Runtime is `ort` `load-dynamic`.
+//! Labels motion as person/pet/package with YOLOX-Nano from `<data_dir>/models/vision/`, via
+//! `ort` `load-dynamic`. Not Ultralytics YOLO: AGPL-3.0 is incompatible with Apache-2.0.
 
 mod classifier;
 mod decode;

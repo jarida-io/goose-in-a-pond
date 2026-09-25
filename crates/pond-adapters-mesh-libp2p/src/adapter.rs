@@ -18,17 +18,11 @@ pub struct Libp2pMeshTransportConfig {
     pub harness_hash: HarnessHash,
     pub model_hash: ModelHash,
     pub keypair: MeshKeypair,
-    /// Who this Pond trusts. Required, not optional: `PeerDirectory`'s port docs
-    /// say a peer absent from the directory is not trusted at all, and an
-    /// `Option` would let a caller opt out of the only check that separates a
-    /// trust circle from the open internet.
+    /// Who this Pond trusts. Not optional: it is the only check between a circle and the internet.
     pub peer_directory: Arc<dyn PeerDirectory>,
 }
 
-/// Real `MeshTransport` over libp2p. `Swarm` runs on a dedicated background
-/// task (see `swarm_task`); this struct just holds the channels to talk to
-/// it, so it stays cheaply `Clone`-free but `Send + Sync` via interior
-/// mutability on the receiver only.
+/// Real `MeshTransport` over libp2p: channels to the `Swarm`'s background task (`swarm_task`).
 pub struct Libp2pMeshTransport {
     local_peer_id: PeerId,
     command_tx: tokio::sync::mpsc::UnboundedSender<Command>,
@@ -52,10 +46,8 @@ impl Libp2pMeshTransport {
         })
     }
 
-    /// Reserve a relay slot through an already-reachable peer, so this node
-    /// becomes dialable via `.../p2p/<relay_peer>/p2p-circuit/p2p/<self>`
-    /// even without a direct inbound path. Test/setup helper, not part of
-    /// the `MeshTransport` port.
+    /// Reserve a relay slot through a reachable peer, making this node dialable via
+    /// `.../p2p/<relay_peer>/p2p-circuit/p2p/<self>`. Not part of the port.
     pub async fn reserve_relay(
         &self,
         relay_peer: PeerId,

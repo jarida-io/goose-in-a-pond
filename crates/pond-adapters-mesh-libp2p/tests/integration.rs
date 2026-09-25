@@ -1,6 +1,4 @@
-//! In-process, loopback-only integration tests for `Libp2pMeshTransport`.
-//! Nothing here touches real hardware or the public network, so no test is
-//! `#[ignore]`d.
+//! Loopback-only integration tests for `Libp2pMeshTransport`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,8 +25,7 @@ fn other_model() -> ModelHash {
     ModelHash::from([9u8; 32])
 }
 
-/// A node plus the directory that decides who it will speak to, so a test can
-/// grant trust after the node exists (the peer ids are only known then).
+/// A node and its trust directory, so trust can be granted once peer ids exist.
 struct Node {
     transport: Libp2pMeshTransport,
     directory: Arc<MockPeerDirectory>,
@@ -65,15 +62,13 @@ async fn spawn_node(model_hash: ModelHash) -> Node {
     }
 }
 
-/// Put two nodes in each other's trust circle. Trust is not symmetric in the
-/// domain, so both directions are stated rather than assumed.
+/// Trust both ways; trust is not symmetric.
 async fn trust_each_other(a: &Node, b: &Node) {
     a.trust(b.local_peer_id()).await;
     b.trust(a.local_peer_id()).await;
 }
 
-/// Poll `listen_addresses()` until at least one address is confirmed —
-/// binding to `tcp/0` resolves the actual port asynchronously.
+/// Poll until a listen address is confirmed: `tcp/0` resolves its port asynchronously.
 async fn wait_for_listen_address(node: &Node) -> String {
     for _ in 0..200 {
         let addrs = node.listen_addresses().await.unwrap();
@@ -101,8 +96,7 @@ async fn connect_send_recv_roundtrip() {
     a.connect(b.local_peer_id(), b_addr).await.unwrap();
 
     assert_eq!(a.connected_peers().await.unwrap(), vec![b.local_peer_id()]);
-    // The listener side only learns about a peer once its handshake request
-    // arrives — give the event loop a beat to process it.
+    // The listener only learns of a peer once its handshake arrives.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         if b.connected_peers().await.unwrap() == vec![a.local_peer_id()] {
@@ -128,9 +122,7 @@ async fn connect_send_recv_roundtrip() {
 async fn mismatched_model_hash_is_refused() {
     let a = spawn_node(model()).await;
     let b = spawn_node(other_model()).await;
-    // Fully trusted on both sides, so the refusal below can only be the hash
-    // pin -- otherwise this test would pass for the wrong reason once the
-    // trust gate landed.
+    // Fully trusted, so the refusal below can only be the hash pin.
     trust_each_other(&a, &b).await;
     let b_addr = wait_for_listen_address(&b).await;
 
@@ -140,8 +132,6 @@ async fn mismatched_model_hash_is_refused() {
         "connect should be refused on hash mismatch"
     );
 
-    // Give any in-flight state a moment to settle, then confirm neither side
-    // considers the other connected.
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(a.connected_peers().await.unwrap().is_empty());
     assert!(b.connected_peers().await.unwrap().is_empty());
@@ -152,8 +142,7 @@ async fn relay_mediated_connect() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
-    // A and B never learn each other's direct address — only C's (the
-    // relay). B reserves a slot on C; A dials B purely via C's circuit.
+    // A and B only know relay C's address: B reserves a slot on C, A dials B through it.
     let a = spawn_node(model()).await;
     let b = spawn_node(model()).await;
     let c = spawn_node(model()).await;
@@ -163,15 +152,10 @@ async fn relay_mediated_connect() {
     trust_each_other(&a, &c).await;
     let c_addr = wait_for_listen_address(&c).await;
 
-    // A relay reservation is sent over an existing connection to the relay —
-    // establish one first (this also happens to prove C treats B as an
-    // ordinary verified peer, not anything relay-specific).
+    // A reservation needs an existing connection to the relay.
     b.connect(c.local_peer_id(), c_addr.clone()).await.unwrap();
 
-    // The reservation is rejected until B has learned at least one external
-    // address to advertise, which arrives asynchronously via an `identify`
-    // exchange with C — so retry until it lands rather than relying on a
-    // single well-timed attempt.
+    // Rejected until `identify` with C gives B an external address, so retry.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         let _ = b.reserve_relay(c.local_peer_id(), c_addr.clone()).await;
@@ -198,14 +182,7 @@ async fn relay_mediated_connect() {
 }
 
 // ── What the handshake is actually for ───────────────────────────────────
-// The three tests below fail if the authentication work is reverted. They are
-// behaviour at the port, not unit tests of `verify_handshake`: the defect was in
-// what that function was never asked, not in its arithmetic.
 
-/// An untrusted peer is refused, even though it is running exactly this build
-/// and exactly this model. The handshake only proves "same harness, same model,
-/// holds the key it claims", which is true of every GIAP pond on this release.
-/// Trust is what makes a mesh private, and it lives in `PeerDirectory`.
 #[tokio::test]
 async fn an_untrusted_peer_is_refused_even_on_a_matching_build() {
     let a = spawn_node(model()).await;
@@ -231,10 +208,7 @@ async fn an_untrusted_peer_is_refused_even_on_a_matching_build() {
     );
 }
 
-/// Trust is directional, and the listener enforces its own. A gate that ran only
-/// on the dialer would still pass the test above, since both sides end up empty.
-/// Here A trusts B and B does not trust A, so only B applying its own directory
-/// to an inbound handshake can keep B's peer list empty.
+/// A dialer-only gate would pass the test above; here only B's own check keeps B's list empty.
 #[tokio::test]
 async fn the_listener_refuses_a_peer_it_does_not_trust_itself() {
     let a = spawn_node(model()).await;
@@ -252,10 +226,7 @@ async fn the_listener_refuses_a_peer_it_does_not_trust_itself() {
     );
 }
 
-/// Revoking trust means the peer cannot come back. The handshake carries no
-/// nonce and no timestamp, so every peer this Pond has ever dialled holds a
-/// replayable copy; unless the transport re-consults the directory, revocation
-/// is advisory.
+/// Handshakes replay (no nonce), so revocation holds only if the directory is re-consulted.
 #[tokio::test]
 async fn a_revoked_peer_cannot_reconnect() {
     let a = spawn_node(model()).await;
@@ -273,8 +244,7 @@ async fn a_revoked_peer_cannot_reconnect() {
         .unwrap();
 
     let a2 = spawn_node(model()).await;
-    // A2 stands in for A reconnecting from a fresh process: it is trusted BY
-    // nobody on B's side, exactly as A now is.
+    // A2 plays A reconnecting from a fresh process, untrusted by B as A now is.
     a2.trust(b.local_peer_id()).await;
     let result = a2.connect(b.local_peer_id(), b_addr).await;
     assert!(

@@ -1,7 +1,4 @@
-//! Ollama LLM provider adapter: the GIAP `LlmProvider` port against a local
-//! Ollama instance at `http://localhost:11434` via `/api/chat`. A model that is
-//! not downloaded yet makes `complete()` call `POST /api/pull` and then retry,
-//! so no manual `ollama pull` is needed.
+//! `LlmProvider` over a local Ollama `/api/chat`; a missing model is pulled, then retried.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -10,10 +7,8 @@ use pond_core::models::ports::provider::{LlmProvider, StreamToken, TokenStream, 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-/// Default Ollama base URL.
 pub const DEFAULT_HOST: &str = "http://localhost:11434";
 
-/// Default model to use when none is specified.
 pub const DEFAULT_MODEL: &str = "llama3.2";
 
 // ── Ollama /api/chat request/response types ───────────────────────────────────
@@ -70,9 +65,6 @@ pub struct OllamaProvider {
 }
 
 impl OllamaProvider {
-    /// Create a provider targeting the given host (e.g. `"http://localhost:11434"`).
-    /// Defaults to [`DEFAULT_HOST`] when `host` is `None`.
-    /// The `model` parameter selects the Ollama model (e.g. `"llama3.2"`, `"gemma2"`).
     pub fn new(host: Option<&str>, model: Option<&str>) -> Self {
         let base = host.unwrap_or(DEFAULT_HOST).trim_end_matches('/');
         Self {
@@ -85,22 +77,17 @@ impl OllamaProvider {
         }
     }
 
-    /// Override the maximum number of tokens to generate.
     pub fn with_max_tokens(mut self, n: u32) -> Self {
         self.max_tokens = Some(n);
         self
     }
 
-    /// Override the sampling temperature.
     pub fn with_temperature(mut self, t: f32) -> Self {
         self.temperature = Some(t);
         self
     }
 
-    /// Pull (download) a model from the Ollama registry.
-    ///
-    /// Blocks until the pull is complete. With `stream: false` Ollama returns
-    /// a single JSON response when done.
+    /// Download a model; with `stream: false` Ollama answers once, when the pull is done.
     async fn pull_model(&self, model: &str) -> Result<()> {
         let url = format!("{}/api/pull", self.base_url);
         let body = PullRequest {
@@ -130,7 +117,6 @@ impl OllamaProvider {
         Ok(())
     }
 
-    /// Build the Ollama message list from a system prompt + conversation history.
     fn build_messages(&self, system_prompt: &str, messages: &[ChatMessage]) -> Vec<OllamaMessage> {
         let mut out = vec![OllamaMessage {
             role: "system".to_string(),
@@ -151,7 +137,6 @@ impl OllamaProvider {
         out
     }
 
-    /// Build the options struct from configured max_tokens / temperature.
     fn build_options(&self) -> Option<OllamaOptions> {
         if self.max_tokens.is_some() || self.temperature.is_some() {
             Some(OllamaOptions {
@@ -163,7 +148,6 @@ impl OllamaProvider {
         }
     }
 
-    /// Send a single chat request and return the assistant response.
     async fn send_chat(
         &self,
         system_prompt: &str,
@@ -198,7 +182,6 @@ impl OllamaProvider {
         Ok(ChatMessage::assistant(parsed.message.content))
     }
 
-    /// Like `send_chat` but also returns token usage stats.
     async fn send_chat_with_usage(
         &self,
         system_prompt: &str,
@@ -233,8 +216,7 @@ impl OllamaProvider {
         let usage = UsageStats {
             prompt_tokens: parsed.prompt_eval_count,
             completion_tokens: parsed.eval_count,
-            // Ollama's /api/chat reports no reasoning counter, and this adapter
-            // feeds the quarantined PondAgent loop rather than the serving path.
+            // Ollama's /api/chat reports no reasoning counter.
             reasoning_tokens: None,
         };
         Ok((ChatMessage::assistant(parsed.message.content), usage))
@@ -254,12 +236,10 @@ impl LlmProvider for OllamaProvider {
         system_prompt: &str,
         messages: Vec<ChatMessage>,
     ) -> Result<ChatMessage> {
-        // First attempt
         match self.send_chat(system_prompt, &messages).await {
             Ok(msg) => Ok(msg),
             Err(e) => {
                 let err_str = e.to_string();
-                // Check if this is a "model not found" error — auto-pull and retry
                 if err_str.contains("not found") || err_str.contains("no such model") {
                     tracing::info!(
                         "Ollama: model '{}' not found — attempting auto-pull...",
@@ -267,7 +247,6 @@ impl LlmProvider for OllamaProvider {
                     );
                     self.pull_model(&self.model).await?;
 
-                    // Retry inference after pull
                     self.send_chat(system_prompt, &messages).await
                 } else {
                     Err(e)
@@ -280,20 +259,18 @@ impl LlmProvider for OllamaProvider {
         self.model.clone()
     }
 
-    /// Override default: call `send_chat_with_usage` so usage stats are emitted.
+    /// Overridden so usage stats are emitted.
     fn stream_complete<'a>(
         &'a self,
         system_prompt: &'a str,
         messages: Vec<ChatMessage>,
     ) -> TokenStream<'a> {
         Box::pin(async_stream::stream! {
-            // First attempt
             let result = match self.send_chat_with_usage(system_prompt, &messages).await {
                 Ok(r) => r,
                 Err(e) => {
                     let err_str = e.to_string();
                     if err_str.contains("not found") || err_str.contains("no such model") {
-                        // Auto-pull then retry
                         if let Err(pull_err) = self.pull_model(&self.model).await {
                             yield Err(pull_err);
                             return;
@@ -508,7 +485,6 @@ mod tests {
 
         assert_eq!(reply.content, "Options work!");
 
-        // Verify the request body includes options
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1);
         let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();

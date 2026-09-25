@@ -1,15 +1,6 @@
-//! `MistralRsProvider` — a streaming client for a mistral.rs server's
-//! OpenAI-compatible surface.
-//!
-//! Two stream APIs, one implementation. [`MistralRsProvider::stream_raw`]
-//! keeps thinking separate from the answer, which is what
-//! [`MistralRsAgent`](crate::MistralRsAgent) wants; the
-//! [`InferenceProvider`] impl folds thinking back into the text stream wrapped
-//! in Gemma's `<|channel>thought … <channel|>` markers, because that port has
-//! no thinking variant and `pond-api`'s `ThoughtFilter` already strips exactly
-//! those markers at the edge. Adding a variant to `ChatEvent` would have been
-//! the tidier fix and is deliberately not done here: this crate is a
-//! checkpoint, and it should be removable without a `pond-core` revert.
+//! Streaming client for mistral.rs's OpenAI surface. [`MistralRsProvider::stream_raw`] keeps
+//! thinking apart; the [`InferenceProvider`] impl re-wraps it in Gemma's thought markers, which
+//! `ThoughtFilter` strips, so this crate needs no `ChatEvent` variant and stays removable.
 
 use crate::wire::{
     ChatRequest, Delta, ModelsResponse, StreamChunk, StreamOptions, WireMessage, WireUsage,
@@ -27,8 +18,7 @@ use std::pin::Pin;
 use std::sync::Mutex;
 use tokio::sync::OnceCell;
 
-/// Gemma 4's thinking markers. Repeated here rather than imported because the
-/// only other definition is a private constant behind `pond-api`'s filter.
+/// Gemma 4's thinking markers, copied: `pond-api`'s filter keeps its own private.
 const THOUGHT_OPEN: &str = "<|channel>thought";
 const THOUGHT_CLOSE: &str = "<channel|>";
 
@@ -49,19 +39,16 @@ pub enum MrEvent {
     Usage(UsageStats),
 }
 
-/// A pinned stream of [`MrEvent`].
 pub type MrEventStream = Pin<Box<dyn futures::Stream<Item = Result<MrEvent>> + Send>>;
 
 pub struct MistralRsProvider {
     client: reqwest::Client,
     base_url: String,
-    /// What GIAP calls the model. Used for capability detection and as the
-    /// fallback when `/v1/models` cannot be reached.
+    /// GIAP's model name: for capability detection, and the fallback if `/v1/models` fails.
     configured_model: String,
     /// What the server calls it. Resolved once, lazily.
     served_model: OnceCell<String>,
-    /// Reported by the server at resolution time, for `TurnStats`. There is no
-    /// context field on `/v1/models`, so this stays whatever GIAP configured.
+    /// For `TurnStats`: whatever GIAP configured, as `/v1/models` has no context field.
     context_window: Mutex<u32>,
 }
 
@@ -79,9 +66,7 @@ impl MistralRsProvider {
         }
     }
 
-    /// Declare the context window GIAP resolved for this model. mistral.rs
-    /// exposes none, so nothing else can supply it, and a `TurnStats` with a
-    /// `context_used` and no limit renders as a percentage of nothing.
+    /// Declare the context window GIAP resolved; mistral.rs exposes none.
     pub fn with_context_window(self, tokens: u32) -> Self {
         if tokens > 0 {
             *self
@@ -103,14 +88,8 @@ impl MistralRsProvider {
         &self.base_url
     }
 
-    /// Ask the server what it serves.
-    ///
-    /// mistral.rs answers a name it does not serve with a 400 instead of
-    /// falling back to its single loaded model, so sending GIAP's own model id
-    /// — which carries a quant tag the server never saw — fails every request.
-    /// Resolved once and cached; on any error the configured name is used, so
-    /// an unreachable server fails at the chat call with a real message rather
-    /// than here with a misleading one.
+    /// The served model id, cached: mistral.rs 400s on GIAP's own (quant-tagged) id. On error,
+    /// the configured name, so an unreachable server fails at the chat call instead.
     pub async fn resolve_model(&self) -> &str {
         self.served_model
             .get_or_init(|| async {
@@ -152,9 +131,7 @@ impl MistralRsProvider {
             .ok_or_else(|| anyhow!("mistral.rs reports no models"))
     }
 
-    /// Build the wire message array. The system prompt leads; everything after
-    /// it is GIAP's own history, tool calls and results included, so the model
-    /// sees its prior tool usage the way it produced it.
+    /// System prompt, then GIAP's history with tool calls and results, as the model produced them.
     pub(crate) fn to_wire_messages(
         system_prompt: &str,
         messages: &[ChatMessage],
@@ -195,9 +172,7 @@ impl MistralRsProvider {
         out
     }
 
-    /// Parse the pre-formatted tools JSON the dispatcher produced. On a parse
-    /// failure the turn runs WITHOUT tools rather than failing: a pond that
-    /// answers without acting is degraded, one that errors is down.
+    /// The dispatcher's pre-formatted tools JSON, else (also on a parse failure) the definitions.
     fn tools_array(options: &InferenceOptions, tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
         if let Some(ref json) = options.tools_json_override {
             match serde_json::from_str::<Vec<serde_json::Value>>(json) {
@@ -222,13 +197,7 @@ impl MistralRsProvider {
             .collect()
     }
 
-    /// The request body for one completion.
-    ///
-    /// Factored out so the capture hook writes the bytes that are actually
-    /// sent. A dump reassembled from the same inputs by a second code path is
-    /// worth nothing: the moment the two drift, the lab replays a prompt this
-    /// pond never sent, and every number taken from it is wrong in a way
-    /// nothing reports.
+    /// One completion's request body; shared so the capture hook dumps exactly what is sent.
     fn build_request<'a>(
         model: &'a str,
         system_prompt: &str,
@@ -254,11 +223,7 @@ impl MistralRsProvider {
         }
     }
 
-    /// The request body as JSON, ready to POST at `/v1/chat/completions`.
-    ///
-    /// `stream` is a parameter because a replay harness usually wants
-    /// `false` while the live path always wants `true`; everything else is
-    /// identical to what [`stream_raw`](Self::stream_raw) sends.
+    /// The JSON body [`stream_raw`](Self::stream_raw) sends, but with `stream` chosen for replay.
     pub async fn request_body_json(
         &self,
         system_prompt: &str,
@@ -307,8 +272,7 @@ impl MistralRsProvider {
         Ok(Box::pin(async_stream::stream! {
             let mut resp = resp;
             let mut buf = String::new();
-            // Keyed by `index` so multiple calls in one turn stay separate;
-            // BTreeMap so they are emitted in the order the model produced them.
+            // By `index`, so concurrent calls stay separate and are emitted in order.
             let mut pending: BTreeMap<usize, PendingCall> = BTreeMap::new();
             let mut usage: Option<WireUsage> = None;
 
@@ -341,8 +305,7 @@ impl MistralRsProvider {
                         }
                     };
 
-                    // The 200-with-an-error case. Surfacing it is the whole
-                    // reason `WireError` exists — see wire.rs.
+                    // The 200-with-an-error-body case (see wire.rs).
                     if let Some(err) = parsed.error {
                         yield Err(anyhow!("mistral.rs reported: {}", err.message));
                         return;
@@ -358,8 +321,7 @@ impl MistralRsProvider {
                 }
             }
 
-            // Tool calls are complete only at end of stream: `arguments` arrives
-            // in fragments and nothing marks the last one.
+            // Only complete at end of stream: nothing marks an `arguments` fragment as last.
             for (_, call) in std::mem::take(&mut pending) {
                 if call.name.is_empty() {
                     continue;
@@ -388,8 +350,7 @@ pub(crate) struct PendingCall {
     pub arguments: String,
 }
 
-/// Turn one delta into the events it carries, folding tool-call fragments into
-/// `pending` rather than emitting them (they are not complete yet).
+/// One delta's events; tool-call fragments are folded into `pending` instead, being incomplete.
 pub(crate) fn drain_delta(
     delta: Delta,
     pending: &mut BTreeMap<usize, PendingCall>,
@@ -454,8 +415,7 @@ impl InferenceProvider for MistralRsProvider {
                     return;
                 }
             };
-            // Thinking is re-wrapped in the markers `ThoughtFilter` strips, so a
-            // consumer of this port sees the same shape the local engine emits.
+            // Re-wrap thinking in the markers `ThoughtFilter` strips, as the local engine emits.
             let mut in_thought = false;
             while let Some(item) = inner.next().await {
                 match item {
@@ -499,10 +459,7 @@ impl InferenceProvider for MistralRsProvider {
 
     fn capabilities(&self) -> ModelCapabilities {
         let mut caps = ModelCapabilities::from_model_name(&self.configured_model);
-        // Not a guess about the model: mistral.rs takes OpenAI `tools` on every
-        // model it serves and returns structured `tool_calls`. Whether the model
-        // is any good at it is a different question, and one the tool-call
-        // reliability workload answers.
+        // A server property: mistral.rs takes `tools` and returns `tool_calls` for any model.
         caps.tool_calling = true;
         caps.context_window_tokens = self.context_window();
         caps
@@ -528,8 +485,7 @@ mod tests {
         assert_eq!(wire[2].role, "assistant");
     }
 
-    /// An empty system prompt must not become an empty system message: some
-    /// templates render one as a blank turn the model then answers.
+    /// Some templates render an empty system message as a blank turn the model answers.
     #[test]
     fn an_empty_system_prompt_adds_no_message() {
         let wire = MistralRsProvider::to_wire_messages("", &[ChatMessage::user("hi")]);
@@ -537,8 +493,6 @@ mod tests {
         assert_eq!(wire[0].role, "user");
     }
 
-    /// A prior turn's tool call and its result both survive the round trip —
-    /// this is what lets the model see what it already did.
     #[test]
     fn prior_tool_calls_and_results_round_trip_onto_the_wire() {
         let history = vec![
@@ -566,9 +520,6 @@ mod tests {
         assert_eq!(wire[2].tool_call_id.as_deref(), Some("call_7"));
     }
 
-    /// The capture hook and the live request must be the same body. This is the
-    /// property that makes a dumped payload worth replaying, so it is asserted
-    /// on the shared builder rather than on either caller.
     #[test]
     fn the_captured_body_differs_from_the_sent_one_only_in_the_stream_flag() {
         let options = InferenceOptions {
@@ -603,9 +554,7 @@ mod tests {
         assert_eq!(captured["messages"][0]["content"], "you are a duck");
         assert_eq!(captured["chat_template_kwargs"]["enable_thinking"], false);
 
-        // Everything else identical, checked by making the one known
-        // difference go away rather than by listing the fields — a field added
-        // to `ChatRequest` is then covered without a second edit here.
+        // Erase the one known difference rather than list fields, so new fields are covered.
         captured["stream"] = serde_json::json!(true);
         assert_eq!(captured, sent);
     }
@@ -624,7 +573,6 @@ mod tests {
         assert_eq!(arr[0]["function"]["name"], "a");
     }
 
-    /// A malformed override must degrade to a toolless turn, never abort it.
     #[test]
     fn a_malformed_tools_override_falls_back_to_the_definitions() {
         let options = InferenceOptions {
@@ -641,8 +589,7 @@ mod tests {
         assert_eq!(arr[0]["function"]["name"], "giap-device__list_devices");
     }
 
-    /// Fragments keyed by index accumulate into whole calls, and only the first
-    /// fragment carries the name.
+    /// Only the first fragment carries the name.
     #[test]
     fn tool_call_fragments_accumulate_by_index() {
         let mut pending = BTreeMap::new();
@@ -661,7 +608,6 @@ mod tests {
         assert_eq!(call.arguments, r#"{"a":1}"#);
     }
 
-    /// Two concurrent calls must not merge into one set of arguments.
     #[test]
     fn two_tool_calls_in_one_turn_stay_separate() {
         let mut pending = BTreeMap::new();
@@ -689,8 +635,6 @@ mod tests {
         assert!(matches!(&events[1], MrEvent::Text(t) if t == "hello"));
     }
 
-    /// mistral.rs serves whatever it serves; tool calling is a property of the
-    /// server, not of the model name.
     #[test]
     fn tool_calling_is_reported_regardless_of_the_model_name() {
         let p = MistralRsProvider::new("http://127.0.0.1:9002", "some-unknown-gguf");

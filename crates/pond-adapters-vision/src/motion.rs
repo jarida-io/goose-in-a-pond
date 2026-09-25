@@ -1,12 +1,8 @@
-//! On-device motion detection (#130) — pure-Rust frame differencing. Each frame
-//! is downsampled onto a small luma grid; motion is declared when the fraction of
-//! cells whose brightness changed by more than `pixel_delta` exceeds
-//! `changed_fraction`. No models, no native deps, cheap enough for the Jetson.
+//! Pure-Rust motion detection by differencing a small luma grid; cheap enough for the Jetson.
 
 use pond_core::user_data::domain::vision::Frame;
 
-/// Tuning knobs for [`MotionDetector`]. Defaults suit indoor/outdoor cameras
-/// at ~2 fps: a 64×36 grid, 25/255 luma delta, 5% of cells changed.
+/// Tuning for [`MotionDetector`]; the defaults suit cameras at ~2 fps.
 #[derive(Debug, Clone)]
 pub struct MotionConfig {
     /// Downsample grid width (cells).
@@ -30,9 +26,7 @@ impl Default for MotionConfig {
     }
 }
 
-/// Stateful frame-differencing detector. Feed frames in order via
-/// [`MotionDetector::observe`]; it reports the changed-cell fraction whenever
-/// it crosses the configured threshold.
+/// Frame-differencing detector; feed frames in order to [`MotionDetector::observe`].
 pub struct MotionDetector {
     cfg: MotionConfig,
     prev: Option<Vec<u8>>,
@@ -43,9 +37,7 @@ impl MotionDetector {
         Self { cfg, prev: None }
     }
 
-    /// Observe the next frame. Returns `Some(changed_fraction)` when motion is
-    /// detected relative to the previous frame; `None` for the first frame,
-    /// still frames, or malformed frames (fail closed).
+    /// `Some(changed_fraction)` on motion since the last frame, else `None` (malformed too).
     pub fn observe(&mut self, frame: &Frame) -> Option<f64> {
         if !frame.is_well_formed() || frame.width == 0 || frame.height == 0 {
             return None;
@@ -69,8 +61,7 @@ impl MotionDetector {
         (fraction >= self.cfg.changed_fraction).then_some(fraction)
     }
 
-    /// Downsample the frame to a `grid_w`×`grid_h` luma grid by point-sampling
-    /// one pixel per cell (integer BT.601 luma).
+    /// Point-sample one pixel per cell into a `grid_w`×`grid_h` BT.601 luma grid.
     fn luma_grid(&self, frame: &Frame) -> Vec<u8> {
         let (gw, gh) = (self.cfg.grid_w.max(1), self.cfg.grid_h.max(1));
         let mut grid = Vec::with_capacity((gw * gh) as usize);

@@ -1,7 +1,5 @@
-//! The vision pipeline (#130): frames → motion → (optional classifier) →
-//! `CameraEvent` persisted via [`CameraStorage`] and published on the
-//! [`EventBus`] — the same persist-then-publish contract as the external
-//! `POST /api/v1/camera/events` route, so downstream consumers react identically.
+//! Frames → motion → optional classifier → `CameraEvent`, persisted then published exactly as
+//! `POST /api/v1/camera/events` does.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,21 +12,17 @@ use pond_core::user_data::ports::vision::{FrameSource, VisionClassifier};
 
 use crate::motion::{MotionConfig, MotionDetector};
 
-/// Minimum classifier confidence for a labelled event; below it the event
-/// falls back to plain `"motion"`.
+/// Below this classifier confidence the event is plain `"motion"`.
 const MIN_CLASSIFIER_CONFIDENCE: f64 = 0.5;
 
 #[derive(Debug, Clone)]
 pub struct VisionPipelineConfig {
-    /// The `camera_id` stamped on emitted events (and matched by #92 rules).
+    /// The `camera_id` on emitted events, which automation rules match on.
     pub camera_id: String,
     pub motion: MotionConfig,
-    /// Minimum interval between emitted events — continuous motion produces
-    /// one event per interval, not one per frame.
+    /// Minimum gap between events, so continuous motion is one event per interval.
     pub min_event_interval: Duration,
-    /// When set, the triggering frame is saved as a JPEG and the event's
-    /// `snapshot_path` points at it (bounded per-camera retention). `None`
-    /// keeps the pipeline write-free (tests, RAM-only deployments).
+    /// Save the triggering frame as the event's `snapshot_path` JPEG; `None` writes nothing.
     pub snapshots: Option<crate::snapshot::SnapshotConfig>,
 }
 
@@ -43,8 +37,7 @@ impl Default for VisionPipelineConfig {
     }
 }
 
-/// Run the pipeline until the frame source ends. Spawn once per camera from
-/// `pond-server` startup when vision is enabled.
+/// Run until the frame source ends; spawn once per camera.
 pub async fn run_vision_pipeline(
     mut source: Box<dyn FrameSource>,
     classifier: Option<Arc<dyn VisionClassifier>>,
@@ -69,7 +62,6 @@ pub async fn run_vision_pipeline(
         let Some(changed_fraction) = detector.observe(&frame) else {
             continue;
         };
-        // Rate-limit: continuous motion → one event per interval.
         if let Some(at) = last_event {
             if at.elapsed() < cfg.min_event_interval {
                 continue;
@@ -93,8 +85,7 @@ pub async fn run_vision_pipeline(
             None => ("motion".to_string(), Some(changed_fraction.min(1.0))),
         };
 
-        // Best-effort snapshot of the triggering frame: a failed write (full
-        // disk, bad mount) must never suppress the event itself.
+        // Best-effort: a failed snapshot write must never suppress the event.
         let snapshot_path = cfg.snapshots.as_ref().and_then(|snap_cfg| {
             match crate::snapshot::write_snapshot(snap_cfg, &cfg.camera_id, &frame) {
                 Ok(path) => Some(path.to_string_lossy().into_owned()),
@@ -218,16 +209,13 @@ mod tests {
         }
     }
 
-    /// #130 acceptance: a camera frame triggers a detected event that an
-    /// automation (#92 rule) can act on — all on-device.
     #[tokio::test]
     async fn frame_motion_persists_publishes_and_matches_a_rule() {
         use pond_core::user_data::domain::schedule::{
             SensorTriggerSpec, TriggerAction, TriggerCondition, TriggerSource, TriggerSourceKind,
         };
 
-        // still, still (baseline), square appears (motion), square again
-        // within the rate-limit window (suppressed).
+        // Still, still, square appears (motion), square gone within the rate limit (suppressed).
         let frames = VecDeque::from(vec![flat(20), flat(20), with_square(20), flat(20)]);
         let storage = Arc::new(MockCameraStorage::new());
         let bus = Arc::new(InProcessEventBus::new());
@@ -254,7 +242,7 @@ mod tests {
             .expect("camera event on the bus");
         assert_eq!(event.camera_id, "backyard-cam");
 
-        // …and a #92 automation rule matches it (the acceptance chain).
+        // …and an automation rule matches it.
         let rule = SensorTriggerSpec {
             source: TriggerSource {
                 kind: TriggerSourceKind::Camera,
@@ -299,8 +287,6 @@ mod tests {
         assert_eq!(stored[0].confidence, Some(0.9));
     }
 
-    /// #175 follow-up: with snapshots configured, the emitted event carries a
-    /// `snapshot_path` pointing at a real JPEG of the triggering frame.
     #[tokio::test]
     async fn motion_event_carries_a_snapshot_of_the_triggering_frame() {
         let tmp = tempfile::tempdir().unwrap();

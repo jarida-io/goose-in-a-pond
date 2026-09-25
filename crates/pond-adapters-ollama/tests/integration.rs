@@ -1,7 +1,4 @@
-//! Integration tests for `OllamaProvider`, driving a wiremock HTTP server in
-//! place of a real Ollama and inspecting the outgoing request body: system prompt
-//! first, history order, `options.num_predict` and `options.temperature`, and no
-//! `options` key when neither is set. The live smoke test below is `#[ignore]`d.
+//! `OllamaProvider` against a wiremock server; the live smoke test is `#[ignore]`d.
 
 use pond_adapters_ollama::OllamaProvider;
 use pond_core::models::domain::message::ChatMessage;
@@ -29,8 +26,6 @@ async fn mount_ok(server: &MockServer, content: &str) {
 
 // ── Request structure ─────────────────────────────────────────────────────────
 
-/// The system prompt must appear as the very first message in the Ollama
-/// request so the model receives its instructions before any user turn.
 #[tokio::test]
 async fn system_prompt_is_first_message_in_request() {
     let server = MockServer::start().await;
@@ -62,8 +57,6 @@ async fn system_prompt_is_first_message_in_request() {
     );
 }
 
-/// All turns of a conversation must arrive at Ollama in chronological order
-/// so the model has correct context.
 #[tokio::test]
 async fn multi_turn_history_sent_in_order() {
     let server = MockServer::start().await;
@@ -90,8 +83,6 @@ async fn multi_turn_history_sent_in_order() {
 
 // ── Options serialisation ─────────────────────────────────────────────────────
 
-/// When `with_max_tokens()` is configured, `options.num_predict` must be
-/// present in the request body.
 #[tokio::test]
 async fn max_tokens_sent_in_options_when_configured() {
     let server = MockServer::start().await;
@@ -113,8 +104,6 @@ async fn max_tokens_sent_in_options_when_configured() {
     );
 }
 
-/// When `with_temperature()` is configured, `options.temperature` must be
-/// present in the request body.
 #[tokio::test]
 async fn temperature_sent_in_options_when_configured() {
     let server = MockServer::start().await;
@@ -140,8 +129,7 @@ async fn temperature_sent_in_options_when_configured() {
     );
 }
 
-/// When neither `with_max_tokens()` nor `with_temperature()` is called, the
-/// `options` key must be absent so Ollama uses its own defaults.
+/// Absent `options` lets Ollama use its own defaults.
 #[tokio::test]
 async fn options_absent_when_not_configured() {
     let server = MockServer::start().await;
@@ -166,8 +154,6 @@ async fn options_absent_when_not_configured() {
 
 // ── Error paths ───────────────────────────────────────────────────────────────
 
-/// When Ollama returns HTTP 500 the provider must propagate an error
-/// rather than returning a partial or empty response.
 #[tokio::test]
 async fn server_error_propagates_as_err() {
     let server = MockServer::start().await;
@@ -185,8 +171,6 @@ async fn server_error_propagates_as_err() {
     assert!(result.is_err(), "expected Err on HTTP 500, got Ok");
 }
 
-/// When Ollama is unreachable (connection refused) the provider must return
-/// an error, not panic or hang.
 #[tokio::test]
 async fn connection_refused_propagates_as_err() {
     // Port 1 is reserved and will always refuse connections.
@@ -230,7 +214,6 @@ async fn model_name_in_request_body_matches_configured_model() {
 
 // ── stream_complete + usage ───────────────────────────────────────────────────
 
-/// stream_complete should yield the assistant text as a single Text token.
 #[tokio::test]
 async fn stream_complete_yields_full_text_as_one_chunk() {
     use futures::StreamExt;
@@ -252,8 +235,6 @@ async fn stream_complete_yields_full_text_as_one_chunk() {
     assert_eq!(texts, vec!["Hello from Ollama!".to_string()]);
 }
 
-/// When the response includes prompt_eval_count and eval_count, stream_complete
-/// must yield a final Usage token with the parsed counts.
 #[tokio::test]
 async fn stream_complete_yields_usage_from_response() {
     use futures::StreamExt;
@@ -290,7 +271,6 @@ async fn stream_complete_yields_usage_from_response() {
 // ── Live smoke test ───────────────────────────────────────────────────────────
 
 /// Run with `cargo test -p pond-adapters-ollama -- --ignored live_ollama`.
-/// Requires `ollama serve` on localhost:11434 and `ollama pull llama3.2`.
 #[tokio::test]
 #[ignore = "requires local Ollama instance with llama3.2 pulled"]
 async fn live_ollama_completion() {

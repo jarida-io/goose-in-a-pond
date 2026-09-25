@@ -1,34 +1,10 @@
-//! OpenAI chat-completions wire types, as mistral.rs actually speaks them.
-//!
-//! Two departures from the OpenAI schema are load-bearing here, and both were
-//! found by measurement rather than by reading a spec:
-//!
-//! 1. **`delta.reasoning_content`.** Gemma 4 through mistral.rs puts its
-//!    thinking there, not in `delta.content`. A parser that reads only
-//!    `content` records a turn that produced nothing — the first run of the
-//!    bake-off harness reported 0 tool calls and 0 tok/s across every engine
-//!    for exactly this reason.
-//! 2. **Explicit `null` where a list is expected.** Every delta frame carries
-//!    `"tool_calls":null` rather than omitting the field, and `#[serde(default)]`
-//!    does not cover that — it fills a *missing* field, not a null one. A
-//!    `Vec` there fails to deserialize, so EVERY frame is skipped and the turn
-//!    produces nothing at all: no text, no error, no usage. See
-//!    [`nullable`]. The unit tests below missed this for one round because
-//!    they were written from the OpenAI schema instead of from a frame this
-//!    server actually sent.
-//! 3. **An `error` object inside a 200 response body.** When mistral.rs fails
-//!    mid-stream it still returns `200 OK` and writes
-//!    `data: {"error":{...}}` into the SSE body. Its own `/metrics` counts
-//!    that as a healthy request, so a caller that trusts the status code sees
-//!    a server with a perfect record and a chat that does not work. Parsing
-//!    this field is the only way the failure becomes visible.
+//! OpenAI chat-completions types as mistral.rs speaks them. Quirks: Gemma 4's thinking is in
+//! `delta.reasoning_content`; absent lists arrive as explicit `null` (see [`nullable`]); a
+//! mid-stream failure is an `error` object inside a `200 OK` SSE body.
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-/// Read a field that may be `null` into its default.
-///
-/// `#[serde(default)]` alone is not enough: it fills a field the payload left
-/// out, and mistral.rs sends the field with a `null` in it.
+/// Read a `null` field as its default; `#[serde(default)]` only covers a missing one.
 fn nullable<'de, D, T>(d: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
@@ -48,9 +24,7 @@ pub struct ChatRequest<'a> {
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
-    /// Raw tool specs, passed through as JSON. They come from
-    /// `ToolDispatcher::tools_json`, which already emits the OpenAI shape, so
-    /// re-typing them here would only add a place for the schema to drift.
+    /// Raw tool specs, already OpenAI-shaped by `ToolDispatcher::tools_json`; not re-typed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -65,11 +39,7 @@ pub struct StreamOptions {
     pub include_usage: bool,
 }
 
-/// One message on the wire.
-///
-/// `content` is always present, empty string included: an assistant turn that
-/// produced only tool calls has no text, and `null` there is accepted by the
-/// OpenAI spec but not by every template that renders it.
+/// One message; `content` is never `null` (some chat templates reject it on tool-call turns).
 #[derive(Debug, Serialize)]
 pub struct WireMessage {
     pub role: &'static str,
@@ -162,9 +132,7 @@ pub struct WireError {
     pub message: String,
 }
 
-/// `GET /v1/models`. mistral.rs answers `{"data":[{"id":…}]}` and rejects a
-/// model name it does not serve with a 400 rather than defaulting to the one
-/// model it loaded — so the served id has to be asked for, not assumed.
+/// `GET /v1/models`; needed because mistral.rs 400s on any model name it doesn't serve.
 #[derive(Debug, Deserialize)]
 pub struct ModelsResponse {
     #[serde(default)]
@@ -181,8 +149,6 @@ pub struct ModelEntry {
 mod tests {
     use super::*;
 
-    /// The failure that a 200 hides. If this ever stops deserializing, a broken
-    /// mistral.rs looks healthy again.
     #[test]
     fn an_error_frame_inside_a_200_body_still_parses_as_an_error() {
         let raw = r#"{"error":{"message":"Internal server error.","type":"server_error"}}"#;
@@ -203,8 +169,7 @@ mod tests {
         assert_eq!(delta.reasoning_content.as_deref(), Some("weighing it up"));
     }
 
-    /// Tool-call arguments arrive as fragments keyed by `index`, and the first
-    /// fragment is the only one carrying the name.
+    /// Only the first fragment of a call carries its name.
     #[test]
     fn tool_call_fragments_carry_an_index_and_a_partial_argument_string() {
         let raw = r#"{"choices":[{"delta":{"tool_calls":[
@@ -219,10 +184,7 @@ mod tests {
         assert_eq!(f.arguments.as_deref(), Some("{\"ci"));
     }
 
-    /// A real frame, copied verbatim off the wire on 2026-09-10 rather than
-    /// written from the OpenAI schema. The difference is `"tool_calls":null`,
-    /// which made every frame fail to deserialize while the invented ones in
-    /// this module passed — a whole turn that produced nothing, silently.
+    /// A frame copied verbatim off the wire; note its `"tool_calls":null`.
     #[test]
     fn a_frame_this_server_actually_sent_deserializes() {
         let raw = r#"{"id":"2","choices":[{"finish_reason":null,"index":0,"delta":{"content":"I","role":"assistant","tool_calls":null},"logprobs":null}],"created":1788992752,"model":"/models","system_fingerprint":"local","object":"chat.completion.chunk","usage":null}"#;
@@ -232,7 +194,6 @@ mod tests {
         assert!(chunk.usage.is_none());
     }
 
-    /// Null everywhere a list is expected, in one frame.
     #[test]
     fn explicit_nulls_read_as_empty_rather_than_failing() {
         let chunk: StreamChunk = serde_json::from_str(r#"{"choices":null,"usage":null}"#).unwrap();
@@ -248,7 +209,6 @@ mod tests {
         assert_eq!(chunk.usage.unwrap().prompt_tokens, 7212);
     }
 
-    /// An assistant turn with only tool calls still serializes `content`.
     #[test]
     fn an_assistant_message_with_no_text_still_sends_a_content_field() {
         let msg = WireMessage {
