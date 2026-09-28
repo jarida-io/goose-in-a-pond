@@ -1,3 +1,4 @@
+import { EDITORIAL_OWNER } from '../match.js';
 import type { MusicProvider, TrackInfo, PlaylistInfo, AlbumInfo, DeviceInfo, RepeatState, ArtistInfo, TimeRange, PlayTarget, FollowUpResult } from './types.js';
 import { describeError, log } from '../log.js';
 
@@ -290,6 +291,8 @@ export class SpotifyProvider implements MusicProvider {
       uri: playlist.uri,
       owner: owner?.display_name || owner?.id || 'unknown',
       is_own: currentUserId !== undefined && owner?.id === currentUserId,
+      // owner.id, not the display name: any listener may call themselves Spotify.
+      is_editorial: owner?.id === EDITORIAL_OWNER,
     };
   }
 

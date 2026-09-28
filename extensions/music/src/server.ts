@@ -3,6 +3,12 @@
 import * as readline from "readline";
 import { describeError, log } from "./log.js";
 import { isShortRelease, SpotifyProvider } from "./providers/spotify.js";
+import {
+  claimsEditorialOwner,
+  normalizeName,
+  playlistMatchScore,
+  splitOwnerHint,
+} from "./match.js";
 import type { TimeRange } from "./providers/types.js";
 
 const provider = new SpotifyProvider();
@@ -25,7 +31,7 @@ const TOOLS = [
           type: "string",
           enum: ["track", "playlist"],
           description:
-            "'playlist' matches the user's own playlists loosely by name, preferring ones they created. Default 'track' searches songs, artists and albums.",
+            "'playlist' matches the user's own playlists loosely by name, preferring ones they created. Only playlists they created or follow are visible — Spotify's own editorial playlists cannot be searched, and asking for one by name returns an error rather than a substitute. Default 'track' searches songs, artists and albums.",
         },
         when: {
           type: "string",
@@ -50,7 +56,7 @@ const TOOLS = [
   {
     name: "library",
     description:
-      "The user's own Spotify library and listening history: their liked songs, what they listen to most, and what they played recently. Read-only — Spotify does not let this app change what is liked. Use for 'what are my liked songs', 'what do I listen to most', 'what was I playing yesterday'.",
+      "THIS USER'S OWN Spotify library and listening history: their liked songs, what THEY listen to most, and what THEY played recently. Read-only — Spotify does not let this app change what is liked. Use for 'what are my liked songs', 'what do I listen to most', 'what was I playing yesterday'. Never present these as Spotify's charts or top artists — they are one listener's history. Global charts, featured playlists and recommendations are unavailable to this app: if asked what is popular on Spotify, say it cannot be answered rather than answering with this.",
     inputSchema: {
       type: "object",
       properties: {
@@ -174,7 +180,12 @@ async function handlePlay(args: Record<string, unknown>): Promise<string> {
 
   // A query saying "playlist" counts even with `type` unset: models often fail to set it.
   const saysPlaylist = !!query && /\bplaylists?\b/i.test(query);
-  if (query && ((args.type as string | undefined) === "playlist" || saysPlaylist)) {
+  // `target` is what the schema publishes; this read `args.type`, for which there
+  // is no property, so an explicit target:"playlist" was ignored. A named owner
+  // makes it a playlist request whatever `target` said.
+  const requested = (args.target ?? args.type) as string | undefined;
+  const claimsOwner = !!query && claimsEditorialOwner(query);
+  if (query && (requested === "playlist" || saysPlaylist || claimsOwner)) {
     const { uri: playlistUri, name } = await resolvePlaylist(query);
     await provider.play(playlistUri);
     return `Now playing playlist: ${name}`;
@@ -280,77 +291,25 @@ async function handleQueue(args: Record<string, unknown>): Promise<string> {
   return text;
 }
 
-/** Lowercase, drop emoji and punctuation, collapse runs of whitespace. */
-function normalizeName(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/[^\p{Letter}\p{Number}]+/gu, " ")
-    .trim()
-    .replace(/\s+/g, " ");
-}
-
-/** Filler around a spoken playlist name, stripped from the query only (it dilutes the match). */
-const QUERY_FILLER = new Set([
-  "the", "a", "an", "my", "our", "from", "in", "on", "of", "please", "playlist",
-  "playlists", "list", "library", "spotify", "called", "named", "one",
-]);
-
-/** Drops filler, keeping the original if that would leave nothing to match on. */
-function contentWords(normalized: string): string {
-  const kept = normalized.split(" ").filter(w => w && !QUERY_FILLER.has(w));
-  return kept.length > 0 ? kept.join(" ") : normalized;
-}
-
-/** 0–1 match score; compares without spaces too, since people say "sautisol" for "Sauti sol". */
-function playlistMatchScore(query: string, playlistName: string): number {
-  const q = contentWords(normalizeName(query));
-  const n = normalizeName(playlistName);
-  if (!q || !n) return 0;
-  if (q === n) return 1;
-
-  const qs = q.replace(/ /g, "");
-  const ns = n.replace(/ /g, "");
-  if (qs === ns) return 0.95;
-
-  // Prefix is the common case; weighting containment by coverage stops short names tying with it.
-  if (ns.startsWith(qs)) return 0.92;
-  if (ns.includes(qs)) return 0.75 + 0.15 * (qs.length / ns.length);
-  if (qs.includes(ns)) return 0.7 + 0.15 * (ns.length / qs.length);
-
-  const qWords = q.split(" ");
-  const nSet = new Set(n.split(" "));
-  const overlap = qWords.filter(w => nSet.has(w)).length;
-  // Kept below the containment band so a partial word match never outranks one.
-  return Math.min(0.65, overlap / qWords.length);
-}
-
-/** Splits off a trailing "by X" owner, only when X owns something here: names contain "by" too. */
-function splitOwnerHint(
-  query: string,
-  playlists: { owner: string }[]
-): { name: string; owner: string | null } {
-  const m = query.match(/^(.*?)\s+by\s+([^,]+)$/i);
-  if (!m) return { name: query, owner: null };
-
-  const candidate = normalizeName(m[2]);
-  const known = playlists.some(p => {
-    const o = normalizeName(p.owner);
-    return o === candidate || o.includes(candidate) || candidate.includes(o);
-  });
-
-  return known && m[1].trim()
-    ? { name: m[1].trim(), owner: m[2].trim() }
-    : { name: query, owner: null };
-}
 
 /** Finds a library playlist by name; the model has names, not ids. */
 async function resolvePlaylist(query: string): Promise<{ uri: string; name: string }> {
   const playlists = await provider.getPlaylists();
-  const { name, owner } = splitOwnerHint(query, playlists);
+  const { name, owner, editorial } = splitOwnerHint(query, playlists);
 
   // Narrow to the named owner, or the own-playlist tie-break picks the user's lookalike.
   let pool = playlists;
-  if (owner) {
+  if (editorial) {
+    // Matched by account id. Answering with one of the user's own is the bug this guards.
+    pool = playlists.filter(p => p.is_editorial);
+    if (pool.length === 0) {
+      throw new Error(
+        `Spotify's own playlists cannot be searched by this app — only ones the user created ` +
+          `or already follows are visible, and none here are Spotify's. To play "${name}", the ` +
+          `user can follow it in Spotify, or paste its link. Do not substitute one of their own.`
+      );
+    }
+  } else if (owner) {
     const wanted = normalizeName(owner);
     pool = playlists.filter(p => {
       const o = normalizeName(p.owner);
@@ -364,7 +323,11 @@ async function resolvePlaylist(query: string): Promise<{ uri: string; name: stri
   const ranked = pool
     .map(p => ({ p, score: playlistMatchScore(name, p.name) }))
     // On a tie only, prefer the user's own playlist over a followed one.
-    .sort((a, b) => b.score - a.score || Number(b.p.is_own) - Number(a.p.is_own));
+    // Prefer the user's own only on a tie, and not when an owner was named:
+    // the pool is already theirs, so it would rank the user above the person asked for.
+    .sort((a, b) =>
+      owner ? b.score - a.score : b.score - a.score || Number(b.p.is_own) - Number(a.p.is_own)
+    );
 
   const best = ranked[0];
   if (best && best.score >= 0.5) return { uri: best.p.uri, name: best.p.name };
@@ -374,6 +337,18 @@ async function resolvePlaylist(query: string): Promise<{ uri: string; name: stri
     .map(r => r.p.name)
     .join(", ");
   const scope = owner ? ` from ${owner}` : "";
+
+  // Daily Mix, Discover Weekly and Release Radar are generated per listener and never
+  // appear through this API, so "check the spelling" invites a retype that cannot work.
+  if (editorial) {
+    throw new Error(
+      `"${name}" is not among the Spotify-owned playlists in this library. Spotify's own are ` +
+        `visible only once followed, and the generated ones — Daily Mix, Discover Weekly, ` +
+        `Release Radar — never appear through this API. Here: ${suggestions || "(none)"}. ` +
+        `Pasting its link is the way to play it. Not a spelling problem: do not ask for the ` +
+        `name again, and do not play one of the user's own instead.`
+    );
+  }
   // Other users' playlists are 403 for this app, so explain the way out.
   throw new Error(
     `No playlist matching "${name}"${scope} in this library. ` +
@@ -411,9 +386,9 @@ async function handleLibrary(args: Record<string, unknown>): Promise<string> {
   switch (action) {
     case "saved": {
       const tracks = await provider.getSavedTracks(limit);
-      if (tracks.length === 0) return "No liked songs in this Spotify account.";
+      if (tracks.length === 0) return "The user has no liked songs in this Spotify account.";
       return (
-        `${tracks.length} liked song(s):\n` +
+        `The user's ${tracks.length} liked song(s):\n` +
         tracks.map((t, i) => `${i + 1}. ${t.name} by ${t.artist}`).join("\n")
       );
     }
@@ -421,18 +396,18 @@ async function handleLibrary(args: Record<string, unknown>): Promise<string> {
 
     case "top_tracks": {
       const tracks = await provider.getTopTracks(range, limit);
-      if (tracks.length === 0) return "Spotify has no top tracks for this period yet.";
+      if (tracks.length === 0) return "The user has no top tracks for this period yet.";
       return (
-        `Top ${tracks.length} track(s) (${describeRange(range)}):\n` +
+        `The user's top ${tracks.length} track(s) (${describeRange(range)}):\n` +
         tracks.map((t, i) => `${i + 1}. ${t.name} by ${t.artist}`).join("\n")
       );
     }
 
     case "top_artists": {
       const artists = await provider.getTopArtists(range, limit);
-      if (artists.length === 0) return "Spotify has no top artists for this period yet.";
+      if (artists.length === 0) return "The user has no top artists for this period yet.";
       return (
-        `Top ${artists.length} artist(s) (${describeRange(range)}):\n` +
+        `The user's top ${artists.length} artist(s) (${describeRange(range)}):\n` +
         artists
           .map((a, i) => `${i + 1}. ${a.name}${a.genres.length ? ` - ${a.genres.slice(0, 3).join(", ")}` : ""}`)
           .join("\n")
@@ -441,9 +416,9 @@ async function handleLibrary(args: Record<string, unknown>): Promise<string> {
 
     case "recent": {
       const tracks = await provider.getRecentlyPlayed(limit);
-      if (tracks.length === 0) return "No recent listening history.";
+      if (tracks.length === 0) return "The user has no recent listening history.";
       return (
-        `${tracks.length} recently played:\n` +
+        `The user's ${tracks.length} recently played:\n` +
         tracks.map((t, i) => `${i + 1}. ${t.name} by ${t.artist}`).join("\n")
       );
     }

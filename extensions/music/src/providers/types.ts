@@ -60,6 +60,8 @@ export interface PlaylistInfo {
   owner: string;
   /** True when the signed-in user created it, false when they only follow it. */
   is_own: boolean;
+  /** Spotify itself owns it — an editorial playlist, not one made by a listener. */
+  is_editorial: boolean;
 }
 
 export interface MusicProvider {
