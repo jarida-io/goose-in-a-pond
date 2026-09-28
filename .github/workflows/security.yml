@@ -34,7 +34,7 @@ jobs:
       # This new module has its own blocking gate. Existing Rust advisory
       # deferrals must not suppress findings in shipped networking dependencies.
       - name: Embedded networking dependencies
-        uses: google/osv-scanner-action/osv-scanner-action@v2.5.1
+        uses: google/osv-scanner-action/osv-scanner-action@v2.6.0
         with:
           scan-args: --lockfile=native/pondnet/go.mod
 
@@ -51,7 +51,7 @@ jobs:
 
       # Prebuilt binary — installs in seconds vs minutes for cargo install.
       - name: Install cargo-audit
-        uses: taiki-e/install-action@v2.87.15
+        uses: taiki-e/install-action@v2.87.20
         with:
           tool: cargo-audit
 
