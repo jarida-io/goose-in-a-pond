@@ -292,6 +292,40 @@ jobs:
       - name: Vitest (unit tests)
         run: npx vitest run
 
+  music-extension:
+    name: Music extension — tsc / node:test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extensions/music
+    steps:
+      - uses: actions/checkout@v7
+
+      # The same floor the Matter controller builds against. This extension is
+      # launched by the server as `npx -y tsx extensions/music/src/server.ts`
+      # (marketplace_registry.json), so it runs on whatever Node the Pond has,
+      # not on the newest the runner offers.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20.19
+          cache: npm
+          cache-dependency-path: extensions/music/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Nothing else type-checks it: there is no build step, tsx strips the
+      # types at load and an error would first appear as a tool failing on a
+      # live Pond.
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Pure functions over recorded Spotify payloads -- no token, no network.
+      # security.yml already audits and OSV-scans this package, so CI knew it
+      # existed while never running a line of it.
+      - name: Tests (node:test via tsx)
+        run: npm test
+
   frontend:
     name: Frontend — vitest / playwright
     runs-on: ubuntu-latest
