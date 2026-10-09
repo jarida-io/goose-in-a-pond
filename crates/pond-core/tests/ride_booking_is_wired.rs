@@ -62,12 +62,28 @@ fn startup_installs_every_piece_that_booking_needs() {
         "pond_api::rides::install(",
         "init_ride_accounts(",
         "tracking::track_once(",
-        // Rides live in memory; without this a trip under way at a restart is never followed.
+        // A trip booked outside the pond is followed only through this.
         ".take_over_current(",
+        // Without these, a restart loses every quote and repeats updates already sent.
+        ".with_store(",
+        ".restore(",
     ] {
         assert!(
             STARTUP.contains(piece),
             "ride_booking.rs no longer calls {piece}; booking would be half on"
         );
     }
+}
+
+/// The store must reach `start`, or `with_store` and `restore` above never run in the server.
+#[test]
+fn the_server_keeps_rides_in_its_database() {
+    let call = MAIN
+        .find("ride_booking::start(")
+        .expect("main.rs no longer starts ride booking");
+    let args = &MAIN[call..call + MAIN[call..].find(".await").unwrap_or(0)];
+    assert!(
+        args.contains("SqliteRideStore::new("),
+        "main.rs starts ride booking without the rides table, so a restart loses every quote"
+    );
 }

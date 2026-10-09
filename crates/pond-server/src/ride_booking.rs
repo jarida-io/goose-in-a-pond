@@ -8,6 +8,7 @@ use pond_adapters_uber::accounts::{SignInRelay, UberAccounts};
 use pond_adapters_uber::{UberConfig, UberRides};
 use pond_core::mcp::ports::notification::MemberNotifier;
 use pond_core::rides::booking::RideBooking;
+use pond_core::rides::ports::RideStore;
 use pond_core::security::ports::secret::SecretRepository;
 
 const POLL_ENV: &str = "GIAP_RIDE_POLL_SECS";
@@ -59,12 +60,14 @@ fn accounts(
 
 /// Turn ride booking on, or say why it stays off: the accounts as [`install_accounts`], the
 /// booking rules, the phone's ride routes and the tracker. Without them `book_ride` and the
-/// phone's ride routes answer that booking is not set up.
-pub fn start(
+/// phone's ride routes answer that booking is not set up. With `store`, rides kept before a
+/// restart are taken back before the phone's routes can be asked about them.
+pub async fn start(
     travel_enabled: bool,
     secrets: Option<Arc<dyn SecretRepository + Send + Sync>>,
     relay_url: Option<String>,
     notifier: Arc<dyn MemberNotifier>,
+    store: Option<Arc<dyn RideStore>>,
 ) -> Option<Arc<RideBooking>> {
     let accounts = accounts(travel_enabled, secrets, relay_url)?;
     let config = match UberConfig::from_env() {
@@ -76,12 +79,23 @@ pub fn start(
     };
     pond_mcp_server::travel::init_ride_accounts(accounts.clone());
     let uber = UberRides::new(reqwest::Client::new(), config, accounts.clone());
-    let booking = Arc::new(RideBooking::new(Arc::new(uber)));
+    let mut booking = RideBooking::new(Arc::new(uber));
+    if let Some(store) = store {
+        booking = booking.with_store(store);
+    }
+    let booking = Arc::new(booking);
+    let restored = booking.restore(chrono::Utc::now()).await;
+    if restored > 0 {
+        tracing::info!(
+            rides = restored,
+            "rides: took back the rides kept before the restart"
+        );
+    }
 
     pond_api::rides::install(booking.clone());
 
-    // Rides are kept in memory only, so the first pass takes over each connected member's trip
-    // under way: one in flight across a restart is still followed.
+    // A trip booked some other way (or lost by a pond with no store) is followed from the first
+    // pass; one already taken back above is recognised and not followed twice.
     let interval = poll_interval(std::env::var(POLL_ENV).ok().as_deref());
     let tracked = booking.clone();
     tokio::spawn(async move {
@@ -132,8 +146,10 @@ mod tests {
             true,
             None,
             Some("https://credentials.example".into()),
-            notifier.clone()
+            notifier.clone(),
+            None,
         )
+        .await
         .is_none());
     }
 
@@ -147,7 +163,11 @@ mod tests {
         let notifier: Arc<dyn MemberNotifier> =
             Arc::new(pond_core::mcp::mocks::mock_member_notifier::MockMemberNotifier::new());
         let relay = Some("https://credentials.example".to_string());
-        assert!(start(false, Some(secrets.clone()), relay.clone(), notifier).is_none());
+        assert!(
+            start(false, Some(secrets.clone()), relay.clone(), notifier, None)
+                .await
+                .is_none()
+        );
         assert!(install_accounts(false, Some(secrets), relay).is_none());
     }
 }

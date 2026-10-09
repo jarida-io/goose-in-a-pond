@@ -141,10 +141,17 @@ members' sign-ins), `pond-api/src/rides.rs` (the phone's routes), `pond-server/s
   id is a UUID that names neither the ride nor its status, because the push relay's FCM message
   carries it. After 40 reads in a row fail, the pond stops reading the ride and tells the member the
   ride app shows where it stands.
-- **Memory.** Rides are kept in memory only. At startup the pond takes over each connected member's
-  trip under way, so it is still followed; a fare quoted but not yet confirmed is lost, and the
-  phone learns a taken-over ride's id from its next update. Keeping rides in `pond_system.db` is a
-  follow-up. A ride that is over is forgotten a day after it was quoted or taken over.
+- **Memory.** Each ride is kept in the `rides` table of `pond_system.db` (migration 0060,
+  `pond-infra/src/sqlite_ride_store.rs`), written on every change: the ride, the last status its
+  member was told, and its failed reads. At startup the pond takes them all back before the phone's
+  routes can be asked, so a fare quoted before a restart can still be confirmed, an update is not
+  sent twice, and the 40-read limit keeps counting. A ride that was being requested when the pond
+  stopped is never requested again: it comes back as an outcome unknown, settled by the member's
+  trip under way like any lost answer. The pond still takes over each connected member's trip under
+  way, for one booked outside the pond. A ride that is over is forgotten, and its row deleted, a
+  day after it was quoted or taken over; a removed member's rides go with them (`ON DELETE
+  CASCADE`). A store that fails is logged and does not fail the member: the ride carries on in
+  memory.
 - **When it runs.** Only while `ext_travel_enabled` is on. Off at startup, the ride routes answer
   503 and nothing is tracked; switched off later, no new fare is quoted or confirmed, though a ride
   already quoted or booked can still be read, declined or cancelled. Booking also needs the secret

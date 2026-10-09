@@ -3503,7 +3503,11 @@ async fn run_server(
         secret_repo.clone(),
         pond_api::musickit::managed_url(),
         targeted_notification_sender.clone(),
-    );
+        Some(Arc::new(
+            pond_infra::sqlite_ride_store::SqliteRideStore::new(db.system.clone()),
+        )),
+    )
+    .await;
 
     // Converge Matter only now: a first enable installs a controller (minutes), and the notice
     // explaining the wait needs the sender. `apply` returns immediately.

@@ -11,16 +11,16 @@ use crate::mcp::ports::notification::{MemberDelivery, MemberNotifier, Notificati
 /// update that could not be sent, is tried again on the next pass; it never stops the others.
 /// Rides that are over are forgotten here too.
 pub async fn track_once(booking: &RideBooking, notifier: &dyn MemberNotifier) -> usize {
-    booking.prune(Utc::now());
+    booking.prune(Utc::now()).await;
     let mut sent = 0;
     for pending in booking.to_follow() {
         if booking.is_read(&pending.id) {
             match read(booking, &pending).await {
-                Read::Done => booking.read_succeeded(&pending.id),
+                Read::Done => booking.read_succeeded(&pending.id).await,
                 Read::Nothing => {}
                 Read::Failed(why) => {
                     tracing::warn!(ride = %pending.id, error = %why, "could not read a ride");
-                    if !booking.read_failed(&pending.id) {
+                    if !booking.read_failed(&pending.id).await {
                         continue;
                     }
                 }
@@ -31,7 +31,7 @@ pub async fn track_once(booking: &RideBooking, notifier: &dyn MemberNotifier) ->
         };
         let (message, data) = match &news {
             RideNews::Status { message: None, .. } => {
-                booking.told(&pending.id, &news);
+                booking.told(&pending.id, &news).await;
                 continue;
             }
             RideNews::Status {
@@ -73,13 +73,13 @@ pub async fn track_once(booking: &RideBooking, notifier: &dyn MemberNotifier) ->
             .await
         {
             MemberDelivery::Reached(_) => {
-                booking.told(&pending.id, &news);
+                booking.told(&pending.id, &news).await;
                 sent += 1;
             }
             // Nobody to tell: trying again would only fail the same way.
             MemberDelivery::NoPhone => {
                 tracing::info!(ride = %pending.id, "a ride update has no phone to go to");
-                booking.told(&pending.id, &news);
+                booking.told(&pending.id, &news).await;
             }
             MemberDelivery::Failed(why) => {
                 tracing::warn!(ride = %pending.id, error = %why, "a ride update was not sent; trying again next pass");

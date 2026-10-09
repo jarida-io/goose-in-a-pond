@@ -191,3 +191,64 @@ impl RideProvider for MockRideProvider {
         Ok(())
     }
 }
+
+/// Test double for [`RideStore`](super::ports::RideStore): keeps rides in a map, and can be told
+/// to fail every write, as a full disk would.
+#[derive(Default)]
+pub struct MemoryRideStore {
+    rides: Mutex<HashMap<String, super::domain::SavedRide>>,
+    failing: std::sync::atomic::AtomicBool,
+}
+
+impl MemoryRideStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn fail_writes(&self, failing: bool) {
+        self.failing
+            .store(failing, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The ride as kept, if it is.
+    pub fn kept(&self, id: &str) -> Option<super::domain::SavedRide> {
+        self.rides.lock().unwrap().get(id).cloned()
+    }
+
+    pub fn len(&self) -> usize {
+        self.rides.lock().unwrap().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn check(&self) -> Result<()> {
+        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(anyhow!("disk full"));
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl super::ports::RideStore for MemoryRideStore {
+    async fn save(&self, ride: &super::domain::SavedRide) -> Result<()> {
+        self.check()?;
+        self.rides
+            .lock()
+            .unwrap()
+            .insert(ride.ride.id.clone(), ride.clone());
+        Ok(())
+    }
+
+    async fn remove(&self, id: &str) -> Result<()> {
+        self.check()?;
+        self.rides.lock().unwrap().remove(id);
+        Ok(())
+    }
+
+    async fn load(&self) -> Result<Vec<super::domain::SavedRide>> {
+        Ok(self.rides.lock().unwrap().values().cloned().collect())
+    }
+}

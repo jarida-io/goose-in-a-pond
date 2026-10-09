@@ -224,3 +224,25 @@ mod tests {
         assert!(!RideStatus::Other("x".into()).is_terminal());
     }
 }
+
+/// Whether the tracker still reads a ride.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reading {
+    On,
+    /// Stopped after too many failed reads; the member has not been told yet.
+    GaveUp,
+    GaveUpTold,
+}
+
+/// A ride as kept across restarts: the ride, and what its member has been told about it, so a
+/// restart neither repeats an update nor forgets that reading it had failed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedRide {
+    pub ride: PendingRide,
+    /// The last status the member was told about, or that needed no telling.
+    pub announced: Option<RideStatus>,
+    /// Reads in a row that failed, or found no trip for a request without a clear answer.
+    pub failed_reads: u32,
+    pub reading: Reading,
+}

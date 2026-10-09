@@ -226,6 +226,7 @@ pub async fn decline(
     let profile_id = member(&state, principal.as_deref()).await?;
     booking()?
         .decline(&id, &profile_id)
+        .await
         .map_err(booking_refusal)?;
     Ok(StatusCode::NO_CONTENT)
 }

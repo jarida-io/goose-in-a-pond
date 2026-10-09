@@ -3,7 +3,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use super::domain::{FareQuote, Place, RequestFailure, Ride};
+use super::domain::{FareQuote, Place, RequestFailure, Ride, SavedRide};
 
 #[async_trait]
 pub trait RideProvider: Send + Sync {
@@ -36,4 +36,16 @@ pub trait RideProvider: Send + Sync {
 #[async_trait]
 pub trait RideAccounts: Send + Sync {
     async fn is_connected(&self, profile_id: &str) -> Result<bool>;
+}
+
+/// Driven port: where rides are kept, so a restart loses neither a quote nor a booked ride.
+#[async_trait]
+pub trait RideStore: Send + Sync {
+    /// Keep this ride as it now stands, replacing what was kept for it.
+    async fn save(&self, ride: &SavedRide) -> Result<()>;
+
+    async fn remove(&self, id: &str) -> Result<()>;
+
+    /// Every kept ride. One that can no longer be read is skipped, never an error for the rest.
+    async fn load(&self) -> Result<Vec<SavedRide>>;
 }
