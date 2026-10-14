@@ -620,10 +620,17 @@ jobs:
           cache: npm
           cache-dependency-path: pond-desktop/package-lock.json
 
+      - name: Disk before the build (verification only)
+        run: df -h /
+
       # A scratch POND_DATA_DIR, a mock chat model, and the loopback bypass off
       # for the auth phase are all the script's own doing -- see its header.
       - name: scripts/live-test.sh
         run: bash scripts/live-test.sh
+
+      - name: Disk after the build (verification only)
+        if: always()
+        run: df -h / && du -sh target ~/.cargo/registry ~/.cargo/git 2>/dev/null || true
 
       # rust-cache saves ~/.cargo/git after this job, and a fork's pull_request run can restore a
       # cache written on this repository's branches. Take the private fork's source out first so
