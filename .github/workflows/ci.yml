@@ -583,6 +583,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      # Same packages as the Rust job; alsa-sys in pond-server's build needs libasound2-dev.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev protobuf-compiler
+
       - name: Validate private dependency credential routing
         run: |
           bash -n scripts/ci/git-askpass.sh
