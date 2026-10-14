@@ -276,7 +276,9 @@ page_dir() {
   local dir="$RUNTIME"
   if [ -x /snap/bin/firefox ]; then
     dir="$RUNTIME/snap.firefox"
-    mkdir -p -m 700 "$dir" 2>/dev/null
+    # Not -p: with -p, -m sets only the last component. $RUNTIME already exists, and an existing
+    # $dir is fine, since the check below decides whether it is usable.
+    mkdir -m 700 "$dir" 2>/dev/null
   fi
   if [ -n "$(find "$dir" -maxdepth 0 -user "$(id -u)" -perm 700 2>/dev/null)" ]; then
     echo "$dir"
