@@ -300,8 +300,8 @@ whisper-rs-sys = { path = "vendor/whisper-rs-sys" }
 # path this used made the fork unbuildable anywhere but my Mac. Pinned by full SHA so a
 # device build and a laptop build are the same code -- move the rev deliberately, never
 # by pointing at a branch.
-llama-cpp-2 = { git = "https://github.com/jarida-io/llama-cpp-rs-giap", rev = "c1317d4fecb7055a3e243d1a9c6810cb3abe821b" }
-llama-cpp-sys-2 = { git = "https://github.com/jarida-io/llama-cpp-rs-giap", rev = "c1317d4fecb7055a3e243d1a9c6810cb3abe821b" }
+llama-cpp-2 = { git = "https://github.com/jarida-io/llama-cpp-rs-giap", rev = "8ac8291a42c9641b23aeba48d80ecffc774f304e" }
+llama-cpp-sys-2 = { git = "https://github.com/jarida-io/llama-cpp-rs-giap", rev = "8ac8291a42c9641b23aeba48d80ecffc774f304e" }
 
 [patch."https://github.com/lightsparkdev/frost"]
 frost-core = { git = "https://github.com/Exile10/frost", rev = "280c861abcc3f00edfae523b393e5dbb3a1eb249" }
