@@ -10,6 +10,9 @@
            the voice sample needs the claimant's token, takes a voice and nothing else, and refuses
            a voice that is not installed (or the whole route, on a pond with no voice engine)
            without making a sound
+  network-status
+           GET /network/status answers the claimant's token, never a caller without one, and
+           names a documented state for each setup radio
   reset-wizard
            after a host reset of the pond `card` claimed: its wizard refuses the tokenless host and
            admits the claimant's token (the model list and download progress too, #365),
@@ -157,6 +160,41 @@ def voice_sample():
           "%s %s" % (code, text[:200]))
 
 
+BLE_STATES = {"off", "serving", "advertising", "unavailable"}
+
+
+def availability_ok(part):
+    """`{available, reason}`: a reason exactly when it is not available."""
+    if not isinstance(part, dict) or not isinstance(part.get("available"), bool):
+        return False
+    reason = part.get("reason")
+    if part["available"]:
+        return reason is None
+    return isinstance(reason, str) and reason != ""
+
+
+def network_status():
+    bearer = {"Authorization": "Bearer " + json.loads(CLAIMANT.read_text())["session_token"]}
+    code, _, text, _ = request("GET", "/network/status")
+    check("GET /network/status refuses a caller with no token", code == 401, "%s %s" % (code, text[:200]))
+    code, _, text, body = request("GET", "/network/status", None, bearer)
+    check("GET /network/status answers the claimant's token", code == 200, "%s %s" % (code, text[:200]))
+    if code == 200 and isinstance(body, dict):
+        ble = body.get("ble") or {}
+        state = ble.get("state")
+        check("ble.state %r is a documented state" % state, state in BLE_STATES, text[:300])
+        reason = ble.get("reason")
+        check("ble.reason is given exactly when ble is unavailable",
+              (state == "unavailable") == (isinstance(reason, str) and reason != ""), text[:300])
+        check("ble.session_open is false with no phone connected", ble.get("session_open") is False, text[:300])
+        check("ble.enabled is the setting, or null when unreadable", ble.get("enabled") in (True, False, None),
+              text[:300])
+        wifi = body.get("wifi") or {}
+        check("wifi.scan and wifi.join each say available, or why not",
+              availability_ok(wifi.get("scan")) and availability_ok(wifi.get("join")), text[:300])
+        print("        ble %s%s" % (state, " (%s)" % reason if reason else ""))
+
+
 def reset_wizard():
     bearer = {"Authorization": "Bearer " + json.loads(CLAIMANT.read_text())["session_token"]}
 
@@ -199,5 +237,5 @@ def reset_wizard():
 if __name__ == "__main__":
     pond_cpace.check_vectors()
     {"card": card, "pairing": pairing, "restart": restart, "voice-sample": voice_sample,
-     "reset-wizard": reset_wizard}[sys.argv[1]]()
+     "network-status": network_status, "reset-wizard": reset_wizard}[sys.argv[1]]()
     sys.exit(1 if FAILURES else 0)

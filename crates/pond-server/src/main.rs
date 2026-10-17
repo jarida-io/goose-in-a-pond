@@ -12,7 +12,6 @@ mod kokoro_control;
 mod litert_runtime;
 mod llamafile_process;
 mod llm_memory_consolidator;
-mod mdns_advertiser;
 use pond_server::tls_identity;
 mod model_download;
 mod node_path;
@@ -292,6 +291,10 @@ enum Commands {
         rearm: bool,
     },
 
+    /// The BLE setup channel's radio, which the server runs as its own child (macOS).
+    #[command(hide = true)]
+    BleHelper,
+
     /// Print a sign-in link for the web dashboard in a browser.
     ///
     /// A browser needs the host credential to pair phones or manage remote access. The link
@@ -448,6 +451,11 @@ enum MemoryAction {
 }
 
 fn main() -> Result<()> {
+    let cli = Cli::parse();
+    // First, on the main thread CoreBluetooth needs, with no runtime and no shared state touched.
+    if matches!(cli.command, Some(Commands::BleHelper)) {
+        run_ble_helper();
+    }
     // Before the runtime (env mutation must be single-threaded) and any child spawn: a GUI
     // launch inherits launchd's bare PATH, which hides nvm's node, and a service can find an old
     // one first (the Jetson's apt Node 12), which the one `giap.sh node` recorded goes ahead of.
@@ -472,7 +480,7 @@ fn main() -> Result<()> {
         .worker_threads(workers)
         .enable_all()
         .build()?;
-    let result = runtime.block_on(async_main());
+    let result = runtime.block_on(async_main(cli));
     shut_down(runtime, SHUTDOWN_GRACE);
     result
 }
@@ -544,8 +552,18 @@ fn apply_device_choices() {
     pond_net::dns::decide_at_startup();
 }
 
-async fn async_main() -> Result<()> {
-    let cli = Cli::parse();
+/// Never returns: the helper exits when the server closes its stdin.
+fn run_ble_helper() -> ! {
+    #[cfg(target_os = "macos")]
+    pond_connect::ble::macos::helper::run();
+    #[cfg(not(target_os = "macos"))]
+    {
+        eprintln!("ble-helper runs only on macOS; on this OS the server drives Bluetooth itself");
+        std::process::exit(2);
+    }
+}
+
+async fn async_main(cli: Cli) -> Result<()> {
     let data_dir = default_data_dir();
     pin_goose_state_under(&data_dir);
     // Before any adapter asks whether a model fits beside picture support; only local-inference
@@ -642,6 +660,7 @@ async fn async_main() -> Result<()> {
             .await
         }
         Some(Commands::Dashboard) => run_dashboard(),
+        Some(Commands::BleHelper) => run_ble_helper(),
         None => {
             // No subcommand: interactive text chat, provider from Settings.
             let _log = tracing_setup::init_tracing(false, &data_dir);
@@ -4390,31 +4409,36 @@ async fn run_server(
         tracing::info!("OAuth auto-refresh worker started — runs every 45 minutes");
     }
 
-    // Named binding, not `_`: dropping the handle deregisters the mDNS service.
-    let setup_advert = setup_record.as_ref().map(setup_advert_for);
-    let _mdns_handle = match mdns_advertiser::advertise(
-        &pairing_hostname,
-        https_port,
-        env!("CARGO_PKG_VERSION"),
-        &pairing_pin,
-        setup_advert.as_ref(),
-    ) {
-        Ok(h) => {
-            println!("  mDNS: advertising _pond._tcp.local. over HTTPS on port {https_port}");
-            let h = Arc::new(h);
-            tokio::spawn(keep_setup_advert_current(
-                h.clone(),
-                setup_store.clone(),
-                setup_claims.clone(),
-                setup_advert,
-            ));
-            Some(h)
+    // The run loop retries a failed first publish, so a responder that starts late still lands.
+    let discovery = pond_core::network::services::discovery::DiscoveryService::new(
+        pond_connect::discovery::platform(),
+        setup_store.clone(),
+        setup_claims.clone(),
+        pond_core::network::domain::pond_advert::PondAdvert::new(
+            &pairing_hostname,
+            https_port,
+            env!("CARGO_PKG_VERSION"),
+            &pairing_pin,
+        ),
+    );
+    let advertiser = discovery.advertiser();
+    let published = match discovery.publish_current().await {
+        Ok(advert) => {
+            println!(
+                "  mDNS: advertising _pond._tcp.local. over HTTPS on port {https_port} (via {})",
+                advertiser.responder()
+            );
+            Some(advert)
         }
         Err(e) => {
-            tracing::warn!("mDNS advertisement failed (LAN discovery disabled): {e:#}");
+            tracing::warn!("mDNS advertisement failed (LAN discovery off until it lands): {e:#}");
             None
         }
     };
+    tokio::spawn(discovery.run(
+        published,
+        pond_core::network::services::discovery::ADVERT_RECHECK_INTERVAL,
+    ));
 
     if !pond_api::web_ui_embedded() && !static_dir.exists() {
         tracing::warn!(
@@ -4450,7 +4474,31 @@ async fn run_server(
         });
     }
 
-    let listeners = pond_server::listeners::compose(
+    // The BLE setup channel, over the same ports AppState holds. No setup record means no card id
+    // to advertise, so no BLE; nothing here can stop the pond.
+    let ble_radios = match setup_record.as_ref() {
+        Some(record) => Some(pond_server::ble_setup::start(
+            &state,
+            pond_connect::setup_channel::SetupChannelConfig {
+                discriminator: record.discriminator,
+                pin: pairing_pin.clone(),
+                https_port,
+                hostname: pairing_hostname.clone(),
+            },
+            setup_claims.clone(),
+            pond_connect::ble::platform(),
+            pond_connect::wifi::platform(),
+        )),
+        None => {
+            tracing::warn!(
+                kind = "ble_unavailable",
+                "no setup record, so no card id to advertise; BLE setup is off"
+            );
+            None
+        }
+    };
+
+    let mut listeners = pond_server::listeners::compose(
         state.clone(),
         static_dir,
         transport.clone(),
@@ -4459,6 +4507,11 @@ async fn run_server(
         #[cfg(unix)]
         embedded.clone(),
     );
+    if let Some(radios) = ble_radios {
+        // `GET /network/status` on both listeners a household's devices use.
+        listeners.dashboard = listeners.dashboard.layer(axum::Extension(radios.clone()));
+        listeners.companion = listeners.companion.layer(axum::Extension(radios));
+    }
     #[cfg(unix)]
     match embedded.config() {
         Ok(config) if config.enabled => {
@@ -4623,6 +4676,8 @@ async fn run_server(
         }
     };
     tls_handle.shutdown();
+    // Goodbyes now, so phones drop the pond at once rather than when its records expire.
+    advertiser.withdraw().await;
     #[cfg(unix)]
     if let Err(error) = embedded.shutdown().await {
         tracing::warn!(%error, "embedded networking shutdown failed");
@@ -4673,56 +4728,6 @@ fn print_pairing_qr(url: &str) {
             }
         }
         Err(e) => tracing::warn!("QR code generation failed: {e:#}"),
-    }
-}
-
-/// How often the advertiser re-reads the claim, to see a `setup-code --rearm` made by another
-/// process; a claim made here is seen at once.
-const SETUP_ADVERT_POLL: std::time::Duration = std::time::Duration::from_secs(60);
-
-fn setup_advert_for(
-    record: &pond_core::network::domain::setup_record::SetupRecord,
-) -> mdns_advertiser::SetupAdvert {
-    mdns_advertiser::SetupAdvert {
-        id: record.discriminator.to_string(),
-        unclaimed: !record.claim_state().is_claimed(),
-    }
-}
-
-/// Re-announces `_pond._tcp` when the claim changes, so `setup=1` goes away once a phone pairs.
-async fn keep_setup_advert_current(
-    mdns: Arc<mdns_advertiser::MdnsHandle>,
-    store: Arc<pond_infra::file_setup_code_store::FileSetupCodeStore>,
-    claims: Arc<pond_core::network::services::setup_claim::SetupClaimService>,
-    mut advertised: Option<mdns_advertiser::SetupAdvert>,
-) {
-    use pond_core::network::ports::setup_code_store::SetupCodeStore as _;
-    loop {
-        tokio::select! {
-            _ = claims.claim_latched() => {}
-            _ = tokio::time::sleep(SETUP_ADVERT_POLL) => {}
-        }
-        let current = match store.load().await {
-            Ok(record) => record.as_ref().map(setup_advert_for),
-            // Keep what is advertised: the store refuses the card anyway while it is unreadable.
-            Err(error) => {
-                tracing::debug!(%error, "setup record unreadable; mDNS setup state unchanged");
-                continue;
-            }
-        };
-        if current == advertised {
-            continue;
-        }
-        match mdns.set_setup(current.as_ref()) {
-            Ok(()) => {
-                tracing::info!(
-                    setup_open = current.as_ref().is_some_and(|a| a.unclaimed),
-                    "mDNS: re-announced _pond._tcp with the new claim state"
-                );
-                advertised = current;
-            }
-            Err(error) => tracing::warn!(%error, "mDNS: could not re-announce the claim state"),
-        }
     }
 }
 

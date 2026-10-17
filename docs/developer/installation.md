@@ -79,9 +79,11 @@ There is no `--fast` flag; it was documented here but never parsed.
 | C compiler | `xcode-select --install` | `apt install build-essential` |
 | cmake | `brew install cmake` | `apt install cmake` |
 | pkg-config | `brew install pkg-config` | `apt install pkg-config` |
+| libdbus (BlueZ for the BLE setup channel) | not needed | `apt install libdbus-1-dev` |
 | Node.js (desktop and tests; the UI build needs less) | `bash scripts/giap.sh node` | `bash scripts/giap.sh node` |
 
-The install script auto-installs cmake and pkg-config via Homebrew (macOS) or apt (Linux).
+The install script auto-installs cmake and pkg-config via Homebrew (macOS) or apt (Linux), and
+libdbus-1-dev on Linux.
 
 ### Node
 
@@ -254,6 +256,43 @@ dev installer.
 
 Service control afterwards is `bash scripts/giap.sh` menu 20-25 (install, start,
 stop, restart, status, logs, uninstall).
+
+### Wi-Fi from the BLE setup channel (the polkit grant)
+
+A headless pond gets its Wi-Fi from a phone over Bluetooth
+([the setup channel](../architecture/pond-setup-channel.md)), and joins it through NetworkManager
+as its own user. NetworkManager's default policy refuses that user with no desktop session, so on
+a production or Jetson install `giap.sh install` writes a polkit grant for the pond's user (the
+system unit's `User=`, else whoever runs the installer). It allows exactly four actions and
+nothing broader: `settings.modify.system`, `network-control`, `wifi.scan` and
+`enable-disable-wifi`, all under `org.freedesktop.NetworkManager.`. No hotspot, hostname or sleep
+action is granted.
+
+| polkit | File |
+|---|---|
+| 0.105 (Ubuntu 22.04, JetPack 6) | `/etc/polkit-1/localauthority/50-local.d/50-giap-network.pkla` |
+| 0.106 and later | `/etc/polkit-1/rules.d/50-giap-network.rules` |
+
+```bash
+bash scripts/giap.sh wifi-grant            # write it (sudo); again is a no-op
+bash scripts/giap.sh wifi-grant status     # the doctor lines below
+bash scripts/giap.sh wifi-grant remove     # take it out again, either flavour
+bash scripts/giap.sh --dry-run wifi-grant  # print the file, write nothing
+```
+
+A dev machine keeps its own policy: the installer only prints the command there. polkit reads
+the file at once, with no restart. `giap.sh doctor` checks, on Linux:
+
+- rfkill for Bluetooth and Wi-Fi (`rfkill unblock bluetooth` lifts a soft block);
+- `bluetooth.service` is running;
+- the adapter offers LE advertising (`LEAdvertisingManager1.SupportedInstances`, else
+  `btmgmt info`);
+- the grant, as NetworkManager actually answers it for this user (`nmcli general permissions`),
+  so a file polkit ignores reads differently from a missing one.
+
+The pond's Bluetooth needs no grant: the default D-Bus policy already lets its user serve GATT and
+advertise. It never pairs, registers no agent and leaves the adapter's discoverable and pairable
+switches alone.
 
 ## Jetson Orin Nano
 

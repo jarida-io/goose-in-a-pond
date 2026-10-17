@@ -16,6 +16,7 @@ Status: **DESIGNED 2026-10-16.** Phase status is in [Phases](#phases).
 | 2026-10-16 | **SoftAP is a Linux-only fallback.** | It lets any browser set a pond up without the app. macOS cannot script an access point and Windows Mobile Hotspot needs an upstream connection to share. |
 | 2026-10-16 | **BT Classic is not a setup transport.** | iOS does not let an app open RFCOMM to a non-MFi device. Its job on a headless pond is accessory pairing (speakers, headsets), driven from the phone. *Default, awaiting confirmation.* |
 | 2026-10-16 | **Windows gets ports that leave room for it, not adapters yet.** | `pond-server` does not run on Windows today (six `cfg(windows)` blocks, no CI runner). *Default, awaiting confirmation.* |
+| 2026-10-17 | **On macOS the pond registers `_pond._tcp` with the system's mDNSResponder; elsewhere it runs mdns-sd.** | mDNSResponder already owns UDP 5353 and the Mac's host name. Beside it, mdns-sd renamed the Mac on start and, after a day and a half, read queries without answering them ([Discovery](#discovery-p2)). One responder per host. |
 
 ## What exists (verified 2026-10-16)
 
@@ -57,7 +58,7 @@ Status: **DESIGNED 2026-10-16.** Phase status is in [Phases](#phases).
 | BLE GATT server | BlueZ D-Bus (`bluer`) | CoreBluetooth `CBPeripheralManager`; app bundle with `NSBluetoothAlwaysUsageDescription` and a Bluetooth grant | WinRT `GattServiceProvider` + advertisement publisher |
 | Join Wi-Fi | NetworkManager D-Bus (`zbus`), with the polkit grant | CoreWLAN | WinRT `WiFiAdapter` |
 | SoftAP | NetworkManager hotspot (`802-11-wireless.mode=ap`, `ipv4.method=shared`) | Not scriptable | Mobile Hotspot needs an upstream connection (reported, unverified) |
-| mDNS | `mdns-sd` (in use) | same | same |
+| mDNS | `mdns-sd`, beside avahi | mDNSResponder through dns_sd (`DNSServiceRegister`) | `mdns-sd` |
 | BT Classic | BlueZ | IOBluetooth | WinRT RFCOMM |
 
 ## Architecture
@@ -90,7 +91,54 @@ The existing modules move behind these ports in phase 2: the pure parts of
 `pond-api/src/network.rs` (what counts as LAN, tailnet, tunnel) become domain rules, getifaddrs
 becomes the `InterfaceInventory` adapter, and `mdns_advertiser.rs` becomes the mdns-sd
 `ServiceAdvertiser`. `pond-net` stays the egress leaf it is; `embedded_network.rs` stays where it is
-until remote access needs something from this context.
+until remote access needs something from this context. The adapters landed in one crate,
+`crates/pond-connect`, rather than one per OS ([setup channel](pond-setup-channel.md#crate-layout)).
+
+### Discovery (P2)
+
+Landed 2026-10-17 on `feat/ble-setup`. `_pond._tcp` goes out through the `ServiceAdvertiser` port
+(`pond-core/src/network/ports/service_advertiser.rs`). The TXT contract is the domain's
+`PondAdvert`: `v`, `scheme`, `pin`, then `id=<discriminator>` and, while unclaimed, `setup=1`.
+`DiscoveryService` publishes it at startup and again when a claim this process latches lands, or,
+on its 60-second check, when the setup record reads differently (a `setup-code --rearm` from
+another process) or the last publish failed. `mdns_advertiser.rs` is gone; its tunnel exclusion
+moved with mdns-sd. The adapters are in `pond-connect/src/discovery/`:
+
+| Host | Responder | When the claim changes | Goodbyes |
+|---|---|---|---|
+| macOS | mDNSResponder, through `DNSServiceRegister` on one registrar thread | `DNSServiceUpdateRecord` on the same registration | sent by mDNSResponder when the connection closes, even for a killed pond (gone within 2 s of `kill -9`, measured) |
+| Linux and elsewhere | mdns-sd 0.11, in-process, tunnel interfaces excluded | the instance re-registered in place | on `withdraw` at shutdown |
+
+On macOS the SRV target is the Mac's own host name, which mDNSResponder keeps current, and a name
+conflict renames the instance rather than failing. If mDNSResponder drops the registration (it
+restarted), the adapter registers again on its next 5-second check.
+
+**Why macOS changed (measured 2026-10-17 with mdns-sd 0.11.5 and its debug log).**
+
+- **It went deaf with age.** A fresh mdns-sd pond did receive and answer queries: an SRV query
+  from mDNSResponder 2.5 minutes after start was answered in 1 ms, and all 39 one-minute
+  multicast probes, from 8 to 48 minutes after start, were answered. The mock pond on :4100, up
+  36 hours, had read 10.8 MB on its IPv4 5353 socket (`netstat -anv`, `Recv-Q` 0) and sent
+  4.9 KB from it in all, and it answered none of a PTR, an SRV and TXT, or an A query, logging
+  nothing. Neither `dns-sd -L` on the Mac nor the Jetson's `avahi-browse -r` could resolve it.
+  What turns a fresh daemon into this one was not reproduced.
+- **It fought mDNSResponder for the host name.** mdns-sd announces `<host>.local` with every
+  interface's addresses, and mDNSResponder owns that name: `LocalHostName` went from
+  `J3RRA4-35544` to `J3RRA4-35606` within a second of one start. The SRV then named a host
+  mDNSResponder had given up, and each later start published under a new instance name.
+- **Killed ponds sent no goodbyes**, so their PTRs (75-minute TTL) are the "Mac-hosted ponds" a
+  browse lists and cannot resolve.
+- **No legacy unicast in 0.11.5**: a one-shot query from a port other than 5353 got a multicast
+  answer, never its own reply.
+
+mdns-sd 0.21.5 answers legacy unicast and, in a 40-second run beside mDNSResponder, left the host
+name alone. Whether it also cures the deafness was not tested, and it would still be a second
+responder on 5353. Linux stays on 0.11.5, which works beside avahi.
+
+**After**, with the dns_sd adapter: a scratch pond resolved through `dns-sd -L` ten minutes after
+start, and from the Jetson through `avahi-browse -rpt`, with `id` and `setup=1` while unclaimed;
+the host name did not change. A pairing dropped `setup=1` from the TXT at once, and a
+`setup-code --rearm` from another process brought it back at the next 60-second check.
 
 ## Claiming a pond
 
@@ -223,6 +271,11 @@ role writes `chat_model`. This closes the onboarding half of #365.
 
 ## The setup channel
 
+**Superseded for BLE by [the setup channel contract](pond-setup-channel.md) (2026-10-17),** which
+is binding where the two differ: JSON rather than CBOR, no service data in the advertisement, the
+`goose-setup-channel-v1` key labels, and `spoken_code` rather than `speak_code`. The sketch below
+is kept for the SoftAP and LAN transports it also names.
+
 One message protocol, carried by any transport: BLE GATT, the SoftAP's HTTP listener, or the LAN
 HTTPS listener. The pond is the server.
 
@@ -271,10 +324,10 @@ log or return it, and zeroizes its copy.
 |---|---|---|
 | P0 | This design | DESIGNED 2026-10-16 |
 | P1 | `pond-core/src/network/`: setup code, card, discriminator, claim policy, guess and spoken-code limits, `SetupCodeStore` and `CodeAnnouncer` ports; `FileSetupCodeStore`. Wi-Fi, transport and capability ports wait for the phases that use them | LANDED 2026-10-16 |
-| P2 | Move interface classification and mDNS behind the context's ports; `GET /api/v1/network/status` with capabilities | not started |
+| P2 | Move interface classification and mDNS behind the context's ports; `GET /api/v1/network/status` with capabilities | Discovery LANDED 2026-10-17 ([Discovery](#discovery-p2)): the `ServiceAdvertiser` port, mDNSResponder on macOS, mdns-sd elsewhere; Mac unit, live and dns-sd tests, and the Jetson resolving a Mac-hosted pond. The classification rules moved to `pond-core` and the status route landed with P5b; the getifaddrs `InterfaceInventory` port has not |
 | P3 | `pond-server setup-code`, card at install and provision; CPace against the setup code with the claim latch; spoken fallback with bundled clips; goose-on-the-go reads `pond://setup` | LANDED 2026-10-17, server side (the wire contract above; Mac unit, route and live tests; no phone or Orin run yet). goose-on-the-go's half lands in its own repo |
 | P4 | Claim before onboarding, owner attribution and the voice sample (server); owner setup in goose-on-the-go | LANDED 2026-10-17, server side: the claim-aware wizard exposure, `claimed_by` and owner attribution at completion, `POST /voice/sample`, and the five model routes a phone needs before onboarding (#365). Mac unit, route and live tests, and the Kokoro sample seam against a real model; no phone or Orin run yet. Owner setup in goose-on-the-go is handed off (`.ai/handoffs/gotg-onboarding-and-setup.md`) |
-| P5 | Setup channel and BLE: macOS adapter first (the Mac development loop), then Linux, verified on the Jetson last; Wi-Fi join | not started |
+| P5 | Setup channel and BLE: macOS adapter first (the Mac development loop), then Linux, verified on the Jetson last; Wi-Fi join | P5a LANDED 2026-10-17: the OS-independent core in `crates/pond-connect` ([setup channel](pond-setup-channel.md#phases)); no radio adapter yet |
 | P6 | Connectivity watchdog; SoftAP and captive page on Linux | not started |
 | P7 | Matter BLE and Wi-Fi handoff through this layer; BT Classic accessories; Windows adapters | not started |
 

@@ -718,6 +718,11 @@ pub struct Settings {
     /// it is how a phone pairs a pond with no screen, and only someone in earshot can use it.
     #[serde(default = "Settings::default_spoken_pairing_codes")]
     pub spoken_pairing_codes: bool,
+
+    /// May the pond advertise over Bluetooth LE and take a phone's setup connection? On by
+    /// default: it is how a pond with no network or screen is reached at all.
+    #[serde(default = "Settings::default_ble_setup_enabled")]
+    pub ble_setup_enabled: bool,
 }
 
 impl Default for Settings {
@@ -863,6 +868,7 @@ impl Default for Settings {
             context_ingest_enabled: false,
             ext_context_enabled: false,
             spoken_pairing_codes: Self::default_spoken_pairing_codes(),
+            ble_setup_enabled: Self::default_ble_setup_enabled(),
         }
     }
 }
@@ -1267,6 +1273,10 @@ impl Settings {
     }
 
     fn default_spoken_pairing_codes() -> bool {
+        true
+    }
+
+    fn default_ble_setup_enabled() -> bool {
         true
     }
 
@@ -1955,8 +1965,9 @@ mod tests {
             "ext_travel_enabled",
             "ext_weather_enabled",
             "home_name",
-            // Privacy hub view and the catalogue's Privacy & Security section.
+            // Privacy hub view and the catalogue's Privacy & Security section, both of them.
             "spoken_pairing_codes",
+            "ble_setup_enabled",
             "llm_max_tokens",
             "llm_provider",
             "llm_temperature",

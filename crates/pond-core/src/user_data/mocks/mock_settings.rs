@@ -141,6 +141,18 @@ fn build_settings(store: &HashMap<String, String>) -> Settings {
             s.ext_travel_enabled = b;
         }
     }
+    // The spoken pairing code's switch: a "turned off" test must not pass on the default.
+    if let Some(v) = store.get("spoken_pairing_codes") {
+        if let Ok(b) = v.parse() {
+            s.spoken_pairing_codes = b;
+        }
+    }
+    // The setup channel's switch, for the same reason.
+    if let Some(v) = store.get("ble_setup_enabled") {
+        if let Ok(b) = v.parse() {
+            s.ble_setup_enabled = b;
+        }
+    }
     s
 }
 

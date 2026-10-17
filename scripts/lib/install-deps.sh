@@ -45,7 +45,7 @@ _install_deps_linux() {
     log "Installing build dependencies via apt..."
     sudo apt-get update -qq 2>/dev/null || true
     if sudo apt-get install -y -qq \
-        build-essential pkg-config libssl-dev libasound2-dev cmake 2>/dev/null; then
+        build-essential pkg-config libssl-dev libasound2-dev libdbus-1-dev cmake 2>/dev/null; then
       success "Linux dependencies installed (apt)"
       S_DEPS="ok"
     else
@@ -54,7 +54,7 @@ _install_deps_linux() {
     fi
   elif command -v dnf &>/dev/null; then
     log "Installing build dependencies via dnf..."
-    if sudo dnf install -y gcc gcc-c++ openssl-devel alsa-lib-devel cmake pkg-config 2>/dev/null; then
+    if sudo dnf install -y gcc gcc-c++ openssl-devel alsa-lib-devel dbus-devel cmake pkg-config 2>/dev/null; then
       success "Linux dependencies installed (dnf)"
       S_DEPS="ok"
     else
@@ -63,7 +63,7 @@ _install_deps_linux() {
     fi
   elif command -v pacman &>/dev/null; then
     log "Installing build dependencies via pacman..."
-    if sudo pacman -S --noconfirm --needed base-devel cmake openssl alsa-lib pkg-config 2>/dev/null; then
+    if sudo pacman -S --noconfirm --needed base-devel cmake openssl alsa-lib dbus pkg-config 2>/dev/null; then
       success "Linux dependencies installed (pacman)"
       S_DEPS="ok"
     else

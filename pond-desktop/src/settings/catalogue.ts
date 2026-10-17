@@ -351,6 +351,7 @@ export const CATALOGUE: CatalogueCategory[] = [
           },
           { key: "mesh_enabled", label: "Talk to your other ponds", description: "Let this pond talk to your other ponds.", control: { kind: "toggle" }, consumer: "live", proposed: true },
           { key: "spoken_pairing_codes", label: "Say pairing codes aloud", description: "Let a phone on your home network ask the pond to read out a code for pairing. Only someone in the room can hear it.", control: { kind: "toggle" }, consumer: "live" },
+          { key: "ble_setup_enabled", label: "Set up over Bluetooth", description: "Let a phone nearby find the pond over Bluetooth to claim it or give it Wi-Fi. It only shows itself while unclaimed or offline.", control: { kind: "toggle" }, consumer: "live" },
         ],
       },
       {

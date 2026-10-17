@@ -57,7 +57,8 @@ source "${SCRIPT_DIR}/lib/install-models.sh"
 source "${SCRIPT_DIR}/lib/install-systemd.sh"
 source "${SCRIPT_DIR}/lib/install-desktop.sh"
 source "${SCRIPT_DIR}/lib/setup-code.sh"
-# setup-code.sh talks through giap.sh's names for these.
+source "${SCRIPT_DIR}/lib/connect-setup.sh"
+# setup-code.sh and connect-setup.sh talk through giap.sh's names for these.
 ok()   { success "$@"; }
 note() { log "$@"; }
 info() { log "$@"; }
@@ -137,6 +138,21 @@ fi
 if [ "$MODE" = "production" ] || [ "$MODE" = "jetson" ]; then
   setup_systemd
   setup_mdns
+fi
+
+# A phone gives a headless pond its Wi-Fi over the BLE setup channel, which NetworkManager refuses
+# the pond's user without this grant. A dev machine keeps its own policy unless asked.
+if [ "$OS" = "linux" ]; then
+  if [ "$MODE" = "production" ] || [ "$MODE" = "jetson" ]; then
+    POND_USER="$(connect_pond_user)" || POND_USER=""
+    if [ -n "$POND_USER" ]; then
+      connect_grant_install "$POND_USER" || true
+    else
+      warn "no Wi-Fi grant: could not tell which user runs the pond; run bash scripts/giap.sh wifi-grant as that user"
+    fi
+  else
+    log "to let this pond join Wi-Fi from the BLE setup channel: bash scripts/giap.sh wifi-grant"
+  fi
 fi
 
 # ── Step 9: Desktop (optional) ──────────────────────────────────────────────

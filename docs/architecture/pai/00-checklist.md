@@ -3427,3 +3427,177 @@ voice sample (touches PAI-1 and PAI-2; not a PAI milestone).**
   `pond-ear`'s `loading_costs_what_the_ear_says_it_holds` fails when its test binary runs its six
   tests in parallel and passes alone; `pond-ear` has no dependencies, so this change cannot reach
   it.
+
+**2026-10-17 — Pond networking P5a: the BLE setup channel's core (touches PAI-2; not a PAI
+milestone).**
+
+- **What landed.** [`pond-setup-channel.md`](../pond-setup-channel.md) P5a, on `feat/ble-setup`:
+  `crates/pond-connect` (framing, sealing, messages and the per-connection session, GATT and
+  advertising constants, capabilities); the `WifiStation` port, `should_advertise` and the shared
+  `SpokenCodeService` in `pond-core/src/network/`; `init_channel_pake`/`verify_channel_pake` on the
+  handshake port; `crates/pond-connect/tests/fixtures/setup-channel-vectors.json`. No radio code.
+  Five spec corrections agreed with goose-on-the-go are in the doc's decisions table (`pond_id`,
+  advertising is OR, every refusal is `ok: false`, the session outlives advertising, one message
+  per chunk).
+- **PAI-2: new secrets in flight.** CPace's ISK never leaves `pond-infra`: an accepted run hands
+  out only `k_p2c`/`k_c2p`, derived with HKDF-SHA-512, and only through the two channel methods,
+  which no route calls (`setup_channel_keys_stay_in_process.rs` scans `pond-api/src`). A run is
+  finished only on the transport that started it, so a BLE challenge id overheard in the clear
+  cannot be burned over HTTPS. `ChannelKeys` and `WifiPassphrase` are pond-core types; pond-core
+  has no zeroize, so both wipe themselves with a safe `fill(0)` behind `black_box`, and neither has
+  `Display`, `Serialize` or `Clone`. Opened plaintexts are `Zeroizing`, the session wipes its token
+  copies after sealing them, and `ChaCha20Poly1305` zeroizes its own key. A test captures every
+  log level and the audit trail through a whole claim, a Wi-Fi join, a wrong passphrase and a
+  spoken-code pairing, and finds no passphrase, code, token or key.
+- **Not wiped, written down so it is not rediscovered:** the HMAC states inside `hkdf` and `hmac`
+  (as with the existing CPace tags), and serde_json's scratch buffer when a passphrase arrives
+  with escapes.
+- **Open.** A central can hold the single session by sending a request every 119 s; the spec has
+  no session lifetime cap.
+- **Invariants.** No egress, no prompt or KV change, no `Settings` field, no migration, no route.
+  The spoken-code route keeps its answers byte for byte; its decision logic moved into
+  `SpokenCodeService` so the route and the channel share one limiter.
+- **Verified on the Mac.** Unit tests, and end-to-end tests where pond-infra's CPace responder
+  drives a session over an in-memory transport at ATT_MTU 23 and 185 against the real SQLite
+  handshake and setup record; the key schedule re-derived with Python's standard library.
+  `cpace-vectors.json` is unchanged. **Not run:** `scripts/live-test.sh`, since P5a adds no route
+  or wiring and a rebuild would replace the binary under the mock pond running on :4100.
+  **Not verified:** any radio, a real phone, anything on the Orin.
+
+**2026-10-17 — Pond networking P5b: the macOS BLE helper, CoreWLAN and the server wiring
+(touches PAI-2; not a PAI milestone).**
+
+- **What landed.** [`pond-setup-channel.md`](../pond-setup-channel.md) P5b, on `feat/ble-setup`:
+  `pond-server ble-helper` (CoreBluetooth, NDJSON on stdin and stdout) and its supervisor
+  `HelperPeripheral`; the CoreWLAN `WifiStation`; the advertising controller; a 10-minute cap on
+  a session; the `ble_setup_enabled` setting (on by default, in both desktop settings views);
+  `GET /api/v1/network/status`; the wiring in `run_server` from `AppState`'s own handshake,
+  limiter, settings, profiles, claims, onboarding and event log. The pure LAN classifier moved to
+  `pond_core::network::domain::interface`, and `pond-api`'s pairing boundary calls it unchanged.
+- **PAI-2: secrets in flight.** The Wi-Fi passphrase reaches CoreWLAN as a no-copy `NSString` over
+  the pond's own buffer, which its deallocator zeroes when macOS releases the string. The helper
+  only ever carries framed bytes, sealed once the exchange is done, and logs nothing but link
+  numbers, MTUs and state names; an unreadable command is reported by column, never by content.
+  `/network/status` is `Authenticated` in every state and is pinned in
+  `the_public_route_classification_is_pinned`.
+- **Not wiped, written down so it is not rediscovered:** CoreWLAN's own copies, and the UTF-16
+  copy `NSString` may make of a non-ASCII passphrase instead of using the buffer.
+- **Found while measuring.** `dispatch_main` `pthread_exit`s the main thread, which runs its
+  thread-local destructors: the helper's `CBPeripheralManager` was dropped the moment the queue
+  started (bluetoothd logged a check-in and an immediate `CBMsgIdCheckOut`). The helper now runs
+  the main run loop.
+- **Invariants.** No egress, no prompt or KV change, no migration. One new `Settings` field
+  (`ble_setup_enabled`: `upsert!`, `apply_key`, UI_WIRED; no install has a stored row, so no
+  `DEFAULT_ADOPTIONS` entry). One new route. A BLE failure never stops the pond: no setup record,
+  no adapter, or a dead helper each only switch BLE off, with the reason on the status route.
+- **Verified on the Mac.** Unit tests (the supervisor against in-memory pipes and real `/bin/sh`
+  children; the controller; the cap; CoreWLAN error and signal mapping); the route test; the
+  settings guards; `scripts/live-test.sh` (168 checks, 0 failed); desktop tests and typecheck; both
+  toggles rendered against a live pond, and the Hub's toggle writing `ble_setup_enabled`. A scratch
+  pond started its helper, which read `authorization: not_determined` and was then aborted by TCC
+  (SIGABRT, namespace TCC: no `NSBluetoothAlwaysUsageDescription` in the responsible app, Claude
+  Code); the supervisor retried at 2, 8 and 30 s and reported the reason. CoreWLAN without Location
+  permission: every SSID withheld (`scan` `not_permitted`), `join` available, status connected with
+  no name. **Not verified:** advertising, any phone, a real `wifi_join`, anything on the Orin.
+- **Open.** pond-server now links pond-connect, so on Linux it needs `libdbus-1-dev` wherever it
+  is built (CI's `rust` and `live-test` jobs). `/network/status` has no UI yet, and
+  `scripts/live-test.sh` does not check it.
+
+**2026-10-17 — Pond networking P5c: the Linux BLE peripheral, the NetworkManager station and the
+polkit grant (touches PAI-2; not a PAI milestone).**
+
+- **What landed.** [`pond-setup-channel.md`](../pond-setup-channel.md) P5c, on `feat/ble-setup`:
+  `BluezPeripheral` over bluer and the central router behind it, the NetworkManager `WifiStation`
+  over zbus, `scripts/lib/connect-setup.sh` (`giap.sh wifi-grant [remove|status]`, written by
+  `giap.sh install` on production and Jetson installs, and four doctor lines), libdbus-1-dev in
+  `install-deps.sh` and in CI's `rust` and `live-test` jobs, a `connect-setup` bash-tests job, a
+  `GET /network/status` check in `scripts/live-test.sh`, `examples/ble_peripheral` and
+  `examples/wifi_station` for the device run, and `jetson-emu.sh box` seeding its git
+  dependencies from the Mac so the private llama-cpp fork resolves in the container.
+- **PAI-2: secrets in flight and privilege.** The passphrase is borrowed from the sealed message
+  straight into the D-Bus message to NetworkManager; no `String` copy of it exists in the pond, and
+  zbus frees its serialised buffer without wiping it (written down so it is not rediscovered). A
+  join's connection is added `persist=memory`, saved only once it has an IPv4 address and deleted
+  otherwise. Nothing logs it: `JoinRequest`'s `Debug` redacts it, and NetworkManager's error
+  messages are dropped, only their D-Bus names kept. The grant gives the pond's own user exactly
+  `settings.modify.system`, `network-control`, `wifi.scan` and `enable-disable-wifi`, refuses a user
+  name that could escape the file, and is removable. The pond never pairs over Bluetooth.
+- **Invariants.** No egress, no prompt or KV change, no migration, no new setting, no new route.
+  A BLE or Wi-Fi failure never stops the pond: `start` succeeds and keeps healing, and `status`
+  and `capabilities` carry the reason.
+- **Verified.** In `jetson-emu.sh box` (linux/arm64, real bluer and zbus, no radio): `cargo test
+  -p pond-connect` 106 + 8 + 1 + 3 passed, 46 of them the Linux adapters'; clippy with no warning
+  of the adapters' own beyond the toolchain-wide `double_must_use` on `#[async_trait]`. The bash
+  tests (19) under bash 5.2 and /bin/bash 3.2, and `giap.sh doctor` on Linux in a container. On the
+  Mac: `cargo check --locked -p pond-connect` and `scripts/live-test.sh --no-build` PASSED with the
+  new status-route checks. **Not verified:** any radio, a phone, a real join, anything on the Orin.
+- **Open.** `docs/api.md` says the host credential answers `GET /network/status`; it does not
+  (401, the route is `Exposure::Authenticated`, token only), so the live check asks with a token.
+
+**2026-10-17 — Pond networking P5e: resuming the setup channel as a paired device (touches
+PAI-2: a new credential; not a PAI milestone).**
+
+- **What landed.** [`pond-setup-channel.md`](../pond-setup-channel.md) P5e, on `feat/ble-setup`.
+  A paired phone opens a sealed channel with no code: `pake_init` with `credential: "device"`,
+  and the CPace password is the lowercase hex SHA-256 of its current refresh token, which is what
+  `session_tokens.refresh_hash` already holds. The label is `goose-device-cpace-v1`. A confirmed
+  run rotates that session in one transaction, the one `/handshake/refresh` now shares, and
+  `sealed` carries the new tokens.
+- **PAI-2, the new credential.** It is the setup channel's only. HTTPS answers
+  `400 invalid_credential` before anything is charged, because it already has
+  `/handshake/refresh`. An id with no active session runs against 64 random hex characters, so
+  it fails at confirmation by the same path, answer, log lines and audit event as a wrong token;
+  only a debug line says which it was. Five runs per `client_id` per rolling ten minutes, charged
+  at `init` like the setup code's throttle, then `device_cooling` with `retry_after`; a success
+  clears the count. The password has 256 bits, so this bounds load, not guessing. No claim latch,
+  no pairing code, no `devices` write: a resume never changes who the device belongs to (PAI-1).
+  A resume is audited as `auth.device_resumed` with `method: "cpace-device"`, never as a pairing.
+  Who can read `pond_system.db` can resume as any device, and already holds the household.
+- **Not wiped, written down so it is not rediscovered:** the committed hash lives in the waiting
+  run as a `Zeroizing<String>`, but sqlx's row buffer that read it from SQLite is not wiped.
+- **Invariants.** No egress, no prompt or KV change, no `Settings` field, no migration, no new
+  route; `pake/init`'s handler only maps the two new refusals (400 and 429). The
+  `cpace-vectors.json` values are byte-identical; only the `device` entry was added.
+- **Verified on the Mac.** pond-core, pond-infra, pond-api and pond-connect tests: a paired phone
+  resumes over an in-memory transport at ATT_MTU 23 and 185, gets new tokens, and its old refresh
+  token stops refreshing; a rotated token fails; an unknown id fails exactly as a wrong token does
+  (answer, audit attributes, and INFO-and-above log lines compared); cooling after five; HTTPS
+  refuses `device`; a capture of every log level finds no token, hash or key. The `device` vector
+  is reproduced by `scripts/pond_cpace.py`. **Not run:** `scripts/live-test.sh`: P5e adds no
+  route, migration or wiring, the one handler change is covered by the route test, and a rebuild
+  would replace the binary under the mock pond on :4100.
+  **Not verified:** a real phone, any radio, anything on the Orin.
+
+**2026-10-17 — Pond networking P2, discovery: `_pond._tcp` behind a `ServiceAdvertiser` port, and
+mDNSResponder on macOS (touches PAI-2's LAN surface; not a PAI milestone).**
+
+- **What landed.** [`pond-networking.md`](../pond-networking.md#discovery-p2), on `feat/ble-setup`.
+  `PondAdvert` holds the TXT contract in pond-core, `ServiceAdvertiser` is the port, and
+  `DiscoveryService` publishes at startup, on a latched claim, and on a 60-second check that sees
+  a re-arm from another process and retries a failed publish. The adapters are in
+  `pond-connect/src/discovery/`: dns_sd through mDNSResponder on macOS, mdns-sd 0.11.5 everywhere
+  else. `pond-server/src/mdns_advertiser.rs` is gone, and the pond withdraws its advert on
+  shutdown.
+- **Why, measured on the Mac with mdns-sd's debug log.** A fresh mdns-sd pond answered queries;
+  the 36-hour-old mock on :4100 had read 10.8 MB on its 5353 socket and sent 4.9 KB, answering
+  nothing and logging nothing. mdns-sd also announced the Mac's own `<host>.local`, and
+  mDNSResponder renamed the Mac (`J3RRA4-35544` to `J3RRA4-35606`) within a second of a start.
+  Killed ponds left their PTRs for 75 minutes. What makes a fresh daemon go deaf was not found.
+- **PAI-2.** The TXT is unchanged and public: the pin, and the card's discriminator, which the BLE
+  local name already carries. mDNS stays spoofable, so clients still confirm the pin.
+- **Invariants.** No egress, no prompt or KV change, no setting, no migration, no route. A
+  responder that is down or refuses never stops the pond; the advert is retried.
+- **Verified on the Mac.** pond-core (14) and pond-connect (6) unit tests, and an ignored live test
+  that registers with mDNSResponder, resolves through `dns-sd`, updates the TXT and withdraws. A
+  scratch pond resolved through `dns-sd -L` ten minutes after start and from the Jetson's
+  `avahi-browse -rpt`, with `id` and `setup=1`, and the host name did not change; a pairing
+  dropped `setup=1` at once and a `setup-code --rearm` restored it at the next check; `kill -9`
+  withdrew it within 2 s. `scripts/live-test.sh` PASSED. In `jetson-emu.sh box` (linux/arm64): `cargo check -p
+  pond-connect --tests` clean, and the discovery tests pass (5), the selection test picking
+  mdns-sd.
+- **Not verified.** The packaged app: its bundle declares no `NSLocalNetworkUsageDescription`, and
+  if macOS denies it the adapter retries with a "local network access" reason. A re-registration
+  after mDNSResponder restarts (needs root). The mdns-sd path on the Orin (moved, not changed).
+- **Open.** mdns-sd 0.21.5 answers legacy unicast and left the host name alone in a 40-second run
+  beside mDNSResponder. Whether Linux should move to it, with its name probing beside avahi, is
+  a separate decision for a Jetson run.

@@ -143,6 +143,8 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/voice/calibrate", post(calibrate_wake_word))
         .route("/voice/calibrate", delete(reset_wake_word_calibration))
         .route("/system/info", get(system_info))
+        // The setup channel's radios: a token in every state, so the wizard can show them.
+        .route("/network/status", get(crate::network::network_status))
         // Local diagnostics; network peers must authenticate, and speaking needs the credential.
         .route("/test", get(test_services))
         .route("/test/speak", post(test_speak))
@@ -654,7 +656,8 @@ pub(crate) fn too_many_requests(code: &str, retry_after_secs: u64) -> axum::resp
 fn cpace_method(credential: Option<Credential>) -> &'static str {
     match credential {
         Some(Credential::Setup) => "cpace-setup",
-        _ => "cpace",
+        Some(Credential::Device) => "cpace-device",
+        Some(Credential::Pairing) | None => "cpace",
     }
 }
 
@@ -911,8 +914,8 @@ async fn handshake_verify(
 }
 
 /// CPace phase 1 (public, direct LAN peers): commit to the current pairing code, or to the
-/// printed setup code when `credential` is `"setup"`, and answer with the Pond's share. See
-/// `pond_core::security::ports::handshake`.
+/// printed setup code when `credential` is `"setup"`, and answer with the Pond's share; the
+/// adapter refuses `"device"` here. See `pond_core::security::ports::handshake`.
 async fn handshake_pake_init(
     State(state): State<Arc<AppState>>,
     peer: Result<
@@ -949,9 +952,10 @@ async fn handshake_pake_init(
         PakeRefusal::NoActivePairingCode | PakeRefusal::SetupCodeUnavailable => {
             StatusCode::CONFLICT
         }
-        PakeRefusal::InvalidClientNonce => StatusCode::BAD_REQUEST,
+        PakeRefusal::InvalidClientNonce | PakeRefusal::InvalidCredential => StatusCode::BAD_REQUEST,
         PakeRefusal::Busy => StatusCode::SERVICE_UNAVAILABLE,
-        PakeRefusal::SetupCodeCooling { retry_after } => {
+        PakeRefusal::SetupCodeCooling { retry_after }
+        | PakeRefusal::DeviceCooling { retry_after } => {
             return Err(too_many_requests(
                 refusal.code(),
                 retry_after.as_secs_ceil(),

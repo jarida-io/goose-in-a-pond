@@ -243,7 +243,22 @@ fn every_principal_starts_with_no_device() {
 #[test]
 fn every_handshake_adapter_answers_who_a_token_belongs_to() {
     // (type name, why it legitimately cannot answer)
-    const ALLOWED_SILENT: [(&str, &str); 3] = [
+    const ALLOWED_SILENT: [(&str, &str); 6] = [
+        (
+            "FakeHandshake",
+            "pond-connect's setup session test double: its tokens are fixed strings no route \
+             ever authenticates, so it has no device to name",
+        ),
+        (
+            "NoHandshake",
+            "pond-connect's transport test double: it refuses every exchange and validates no \
+             token, so it has no device to name",
+        ),
+        (
+            "CountingHandshake",
+            "pond-core's spoken-code test double: it only issues pairing codes and validates \
+             no token",
+        ),
         (
             "RejectingHandshake",
             "a pond-api test fixture that refuses every verify, so it issues no token and has \

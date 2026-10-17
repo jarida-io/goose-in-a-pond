@@ -256,6 +256,18 @@ export function PrivacyDetail({ go }: PrivacyDetailProps) {
             }
           />
           <Row
+            label="Set up over Bluetooth"
+            sub="A phone nearby can find the pond while it is unclaimed or offline"
+            control={
+              <Toggle
+                key={`ble-setup-${settings.ble_setup_enabled ?? true}`}
+                on={settings.ble_setup_enabled ?? true}
+                onChange={(v) => handleToggle("ble_setup_enabled", v)}
+                label="Set up over Bluetooth"
+              />
+            }
+          />
+          <Row
             label="Anonymous diagnostics"
             sub="Share crash logs to improve Goose"
             control={

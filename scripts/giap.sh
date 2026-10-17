@@ -16,6 +16,7 @@
 #   bash scripts/giap.sh litert import DIR  # take in a package built on another host (the Jetson)
 #   bash scripts/giap.sh models pairings         # regenerate the vision pairing table from Hugging Face
 #   bash scripts/giap.sh models pairings --check # only compare it (exit 1 if the committed table is stale)
+#   bash scripts/giap.sh wifi-grant [remove|status]  # Linux: let the pond's user join Wi-Fi from the BLE setup channel (sudo)
 #   bash scripts/giap.sh provision --host HOST --key FILE  # save a Pond's setup card, give it a device certificate (operator; must come first)
 #   bash scripts/giap.sh --dry-run …  # print every command instead of running it
 #
@@ -56,6 +57,8 @@ source "$HERE/lib/litert-setup.sh"
 source "$HERE/lib/model-pairings.sh"
 # shellcheck source=lib/setup-code.sh
 source "$HERE/lib/setup-code.sh"
+# shellcheck source=lib/connect-setup.sh
+source "$HERE/lib/connect-setup.sh"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 # Which Node the repo runs on, finding one, and downloading one. REPO_ROOT has to be set first: the
@@ -729,6 +732,13 @@ doctor() {
   setup_code_doctor "$(setup_code_bin "$REPO_ROOT")" "$D_DATA_DIR"
   [ "$SETUP_CODE_LEVEL" = warn ] && DOC_WARN=$((DOC_WARN+1))
 
+  # The BLE setup channel's radios and the Wi-Fi grant. A pond without them still runs, so these
+  # warn rather than fail. macOS asks for its own permissions.
+  if [ "$D_OS" = "linux" ]; then
+    connect_doctor "$(connect_pond_user 2>/dev/null)"
+    DOC_WARN=$((DOC_WARN + CONNECT_DOCTOR_WARN)); DOC_UNK=$((DOC_UNK + CONNECT_DOCTOR_UNK))
+  fi
+
   # Remote reach. A Pond with no tailnet is not broken — remote access is simply
   # a capability it does not have — so absent is a note, not a failure. What is
   # worth flagging is a daemon that is installed and NOT up, because the operator
@@ -921,6 +931,27 @@ action_install() {
     bad "install exited $rc"
   fi
   return $rc
+}
+
+# `giap.sh wifi-grant [remove|status]`, and menu item 16: the polkit grant a Linux pond needs to
+# join Wi-Fi from the setup channel. Asking for it is the consent; sudo asks for the password.
+action_wifi_grant() { # $1 = "" | remove | status
+  head1 "Wi-Fi grant for the BLE setup channel"
+  if [ "$D_OS" != "linux" ]; then
+    info "only a Linux pond needs it: macOS asks the household for its own permissions"
+    return 0
+  fi
+  local user
+  if ! user="$(connect_pond_user)"; then
+    bad "could not tell which user runs the pond (root never does)"
+    return 1
+  fi
+  case "${1:-}" in
+    ""|grant) connect_grant_install "$user" ;;
+    remove)   connect_grant_remove ;;
+    status)   connect_doctor "$user" ;;
+    *)        bad "unknown wifi-grant action: $1 (grant, remove or status)"; return 2 ;;
+  esac
 }
 
 # Get a Node that can build the UI: one already installed somewhere, else (after asking) a verified
@@ -1306,6 +1337,7 @@ show_menu() {
   say "  13) Build both (UI then server)"
   [ "$D_IS_JETSON" = false ] && say "  14) Deploy to the Jetson (from this dev machine)"
   say "  15) LiteRT-LM library — status, and building it (for .litertlm models)"
+  [ "$D_OS" = "linux" ] && say "  16) Let the pond join Wi-Fi from the BLE setup channel (polkit grant, sudo)"
   say ""
   say "  ${C_B}Service${C_RST}"
   say "  20) Install the service"
@@ -1343,6 +1375,7 @@ menu_loop() {
       13) action_build_ui && action_build_server; pause ;;
       14) action_deploy; pause ;;
       15) action_litert_menu; pause ;;
+      16) action_wifi_grant; pause ;;
       20) action_service_install; pause ;;
       21) svc_ctl start;   detect_service; detect_runtime; pause ;;
       22) svc_ctl stop;    detect_service; detect_runtime; pause ;;
@@ -1369,8 +1402,8 @@ usage() {
 }
 
 # ── entry ────────────────────────────────────────────────────────────────────
-# The first word is the command; only `litert` (a subcommand and a platform) and `models` (a
-# subcommand) take more.
+# The first word is the command; only `litert` (a subcommand and a platform), `models` and
+# `wifi-grant` (a subcommand) take more.
 CMD=""; CMD_SUB=""; CMD_ARG=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -1393,7 +1426,7 @@ while [ $# -gt 0 ]; do
 done
 case "$CMD" in
   litert) ;;
-  models) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
+  models|wifi-grant) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
   *)      if [ -n "$CMD_SUB" ]; then bad "'$CMD' takes no arguments (got: $CMD_SUB)"; exit 2; fi ;;
 esac
 
@@ -1419,5 +1452,6 @@ case "$CMD" in
   gui)       action_launch_gui ;;
   litert)    action_litert "$CMD_SUB" "$CMD_ARG" ;;
   models)    action_models "$CMD_SUB" ;;
+  wifi-grant) action_wifi_grant "$CMD_SUB" ;;
   *)         bad "unknown command: $CMD"; usage; exit 1 ;;
 esac

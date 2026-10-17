@@ -263,6 +263,8 @@ export interface Settings {
   ext_context_enabled?: boolean;
   /** Let a phone on the home network ask the pond to read a pairing code aloud. Ships ON. */
   spoken_pairing_codes?: boolean;
+  /** Advertise over Bluetooth LE so a phone can set the pond up without a network. Ships ON. */
+  ble_setup_enabled?: boolean;
 
   // Compaction — GIAP-owned history pruning
   hybrid_compaction_enabled?: boolean;

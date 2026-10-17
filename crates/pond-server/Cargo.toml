@@ -155,6 +155,8 @@ pond-adapters-lightning       = { workspace = true, optional = true }
 # fallback and the `cfg(not(feature = "goose-agent"))` voice-mode wiring).
 pond-core              = { workspace = true, features = ["test-mocks"] }
 pond-api               = { workspace = true }
+# The BLE setup channel and the Wi-Fi station; on macOS this binary is also its BLE helper.
+pond-connect           = { workspace = true }
 pond-hf-cache          = { workspace = true }
 pond-infra             = { workspace = true }
 pond-infra-scheduler   = { workspace = true }
@@ -207,7 +209,6 @@ flate2 = "1"
 tar = "0.4"
 url = { workspace = true }
 sha2 = "0.10"
-mdns-sd = "0.11"
 qrcode  = "0.14"
 
 [dev-dependencies]

@@ -367,6 +367,10 @@ if [ "$AUTH_OK" -eq 1 ]; then
   if ! POND_DATA_DIR="$AUTH_DIR" POND_SERVER_BIN="$BIN" python3 scripts/setup_code_checks.py voice-sample; then
     RC=1
   fi
+  # The setup radios' status: token-only, in a documented state on any host, radio or none.
+  if ! POND_DATA_DIR="$AUTH_DIR" POND_SERVER_BIN="$BIN" python3 scripts/setup_code_checks.py network-status; then
+    RC=1
+  fi
 
   if ! POND_DATA_DIR="$AUTH_DIR" python3 scripts/remote_auth_checks.py; then
     RC=1

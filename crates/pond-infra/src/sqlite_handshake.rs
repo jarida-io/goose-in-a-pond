@@ -14,6 +14,12 @@
 //! label. That code is guarded by [`SetupClaimService`] (a guess throttle, and a claim latch read
 //! live) rather than by the pairing-code budget, and it never touches `pairing_codes`. Every
 //! completed pairing, by either secret, latches the claim.
+//!
+//! The BLE setup channel runs the same exchange in process (`init_channel_pake`), and only its
+//! accepted runs yield channel keys. A run is finished only on the transport that started it.
+//!
+//! There, and only there, a paired phone may resume with `credential: "device"`: the password is
+//! its newest refresh hash, and a confirmed run rotates that session as `refresh` does.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -31,16 +37,17 @@ use tokio::sync::RwLock;
 
 use pond_core::network::domain::claim::ClaimRefusal;
 use pond_core::network::domain::credential::Credential;
+use pond_core::network::services::device_resume_throttle::DeviceResumeThrottle;
 use pond_core::network::services::setup_claim::SetupClaimService;
 use pond_core::security::ports::handshake::{
-    ChallengeResponse, Handshake, HandshakeRequest, HandshakeResponse, InitRequest, PairingCode,
-    PakeChallenge, PakeInitRequest, PakeRefusal, PakeVerifyRequest, RefreshRequest, TokenCaller,
-    VerifyRequest,
+    ChallengeResponse, ChannelKeys, ChannelVerify, Handshake, HandshakeRequest, HandshakeResponse,
+    InitRequest, PairingCode, PakeChallenge, PakeInitRequest, PakeRefusal, PakeVerifyRequest,
+    RefreshRequest, TokenCaller, VerifyRequest,
 };
 use pond_core::user_data::ports::device_attribution::checked_profile_id;
 use pond_core::user_data::services::member_attribution::sole_member;
 
-use crate::pairing_cpace::{self, CpaceError, Initiator};
+use crate::pairing_cpace::{self, Confirmed, CpaceError, Initiator};
 
 const PAIRING_CODE_TTL_MIN: i64 = 10;
 const CHALLENGE_TTL_SEC: i64 = 60;
@@ -79,16 +86,31 @@ struct PakeState {
     pending: HashMap<String, PendingPake>,
     /// Confirmation attempts spent per code, by code hash.
     attempts: HashMap<String, u32>,
+    /// Device runs started per `client_id`, paired or not.
+    device_resumes: DeviceResumeThrottle,
 }
 
 /// One CPace run the Pond has started.
 struct PendingPake {
     initiator: Initiator,
     secret: RunSecret,
+    transport: RunTransport,
     client_id: String,
     client_type: String,
     expires_at: DateTime<Utc>,
 }
+
+/// Which surface started a run. A verify from the other one never burns it, or anyone who
+/// overheard a BLE challenge id could spend the phone's run over HTTPS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunTransport {
+    Https,
+    /// The in-process BLE setup channel: the only transport that receives channel keys.
+    SetupChannel,
+}
+
+/// The answer to a verify, and the channel keys when a setup-channel run was accepted.
+type RunOutcome = (HandshakeResponse, Option<ChannelKeys>);
 
 /// The password a run committed to, which decides the limits it is held to.
 enum RunSecret {
@@ -96,6 +118,11 @@ enum RunSecret {
     Pairing { code_hash: String },
     /// The printed setup code: its guess throttle was charged when the run started.
     Setup,
+    /// The device's newest refresh hash, or a random stand-in when it has none; the row a
+    /// confirmed run rotates. Its throttle was charged when the run started.
+    Device {
+        refresh_hash: zeroize::Zeroizing<String>,
+    },
 }
 
 impl RunSecret {
@@ -103,6 +130,7 @@ impl RunSecret {
         match self {
             Self::Pairing { .. } => Credential::Pairing,
             Self::Setup => Credential::Setup,
+            Self::Device { .. } => Credential::Device,
         }
     }
 }
@@ -428,11 +456,12 @@ impl SqliteHandshakeAdapter {
         request: PakeVerifyRequest,
         client_id: String,
         client_type: String,
-    ) -> Result<HandshakeResponse> {
+        transport: RunTransport,
+    ) -> Result<RunOutcome> {
         let share = B64.decode(request.share.as_bytes()).unwrap_or_default();
         let confirm = hex_decode(&request.confirm).unwrap_or_default();
-        let server_tag = match initiator.finish(&share, &confirm) {
-            Ok(tag) => tag,
+        let confirmed = match initiator.finish(&share, &confirm) {
+            Ok(confirmed) => confirmed,
             Err(error) => {
                 let reason = match error {
                     CpaceError::InvalidShare => "invalid_share",
@@ -440,11 +469,11 @@ impl SqliteHandshakeAdapter {
                 };
                 // The throttle was charged when the run started; nothing else is spent here.
                 tracing::warn!(reason, "setup code CPace attempt failed");
-                return Ok(self.reject(reason));
+                return Ok((self.reject(reason), None));
             }
         };
         let Some(claims) = self.setup_claims.as_ref() else {
-            return Ok(self.reject(PakeRefusal::SetupCodeUnavailable.code()));
+            return Ok((self.reject(PakeRefusal::SetupCodeUnavailable.code()), None));
         };
         // Latched before any token exists, so a crash leaves a claimed pond, never a paired phone
         // beside a live card. `complete_setup_claim` issues the tokens to `client_id`.
@@ -460,13 +489,120 @@ impl SqliteHandshakeAdapter {
                     "setup pairing refused: the claim could not be recorded"
                 );
             }
-            return Ok(self.reject(PakeRefusal::SetupCodeUnavailable.code()));
+            return Ok((self.reject(PakeRefusal::SetupCodeUnavailable.code()), None));
         }
         let (session, refresh, expires) = self
             .complete_setup_claim(&client_id, &client_type, request.device_name)
             .await?;
-        Ok(HandshakeResponse {
-            server_proof: Some(hex_lower(&server_tag)),
+        Ok(self.accepted(&confirmed, session, refresh, expires, transport))
+    }
+
+    /// The newest active refresh hash for `device_id`, or a random one of the same shape when
+    /// there is none, so an unpaired id fails at confirmation exactly as a wrong token does.
+    async fn device_run_password(&self, device_id: &str) -> Result<zeroize::Zeroizing<String>> {
+        let newest: Option<String> = sqlx::query_scalar(
+            "SELECT refresh_hash FROM session_tokens
+             WHERE device_id = ? AND revoked_at IS NULL AND refresh_expires_at > ?
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(device_id)
+        .bind(Self::now().to_rfc3339())
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(hash) = newest {
+            return Ok(zeroize::Zeroizing::new(hash));
+        }
+        tracing::debug!(
+            kind = "device_run_unpaired",
+            "no active session for this id; the device run commits to a random password"
+        );
+        let stand_in = zeroize::Zeroizing::new(Self::random_bytes(32));
+        Ok(zeroize::Zeroizing::new(hex_lower(&stand_in)))
+    }
+
+    /// The rest of a device run once its run is burned and live: confirm, then rotate. No claim
+    /// latch, no code and no `devices` write, so the device keeps its attribution.
+    async fn verify_device_run(
+        &self,
+        initiator: Initiator,
+        request: PakeVerifyRequest,
+        client_id: String,
+        refresh_hash: zeroize::Zeroizing<String>,
+        transport: RunTransport,
+    ) -> Result<RunOutcome> {
+        let share = B64.decode(request.share.as_bytes()).unwrap_or_default();
+        let confirm = hex_decode(&request.confirm).unwrap_or_default();
+        let confirmed = match initiator.finish(&share, &confirm) {
+            Ok(confirmed) => confirmed,
+            Err(error) => {
+                let reason = match error {
+                    CpaceError::InvalidShare => "invalid_share",
+                    CpaceError::InvalidConfirmation => "invalid_confirmation",
+                };
+                // One line for a paired id and an unknown one: which it was is not for the log.
+                tracing::warn!(reason, "device run CPace attempt failed");
+                return Ok((self.reject(reason), None));
+            }
+        };
+        let Some((session, refresh, expires)) = self.rotate_refresh(&refresh_hash).await? else {
+            tracing::warn!(
+                "device run refused: the session it proved was rotated or revoked since it started"
+            );
+            return Ok((self.reject("invalid_or_expired_refresh"), None));
+        };
+        self.pake_state().device_resumes.record_success(&client_id);
+        tracing::info!(
+            client_id = %client_id,
+            method = "cpace-device",
+            expires_at = %expires.to_rfc3339(),
+            "device resumed its session"
+        );
+        Ok(self.accepted(&confirmed, session, refresh, expires, transport))
+    }
+
+    /// Revoke this refresh row and mint the next pair for the same device and client, in one
+    /// transaction. `None` when the row is revoked, expired or unknown.
+    async fn rotate_refresh(
+        &self,
+        refresh_hash: &str,
+    ) -> Result<Option<(String, String, DateTime<Utc>)>> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let now = Utc::now().to_rfc3339();
+        let row: Option<(String, String, String)> = sqlx::query_as(
+            "SELECT client_id, client_type, device_id FROM session_tokens
+             WHERE refresh_hash = ? AND revoked_at IS NULL AND refresh_expires_at > ?",
+        )
+        .bind(refresh_hash)
+        .bind(&now)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((client_id, client_type, device_id)) = row else {
+            return Ok(None);
+        };
+        sqlx::query("UPDATE session_tokens SET revoked_at = ? WHERE refresh_hash = ?")
+            .bind(&now)
+            .bind(refresh_hash)
+            .execute(&mut *tx)
+            .await?;
+        let pair = self
+            .issue_session_pair_in(&mut tx, &client_id, &client_type, &device_id)
+            .await?;
+        tx.commit().await?;
+        Ok(Some(pair))
+    }
+
+    /// An accepted CPace answer. Channel keys exist only for a setup-channel run, and only now,
+    /// after the tokens they will carry were minted.
+    fn accepted(
+        &self,
+        confirmed: &Confirmed,
+        session: String,
+        refresh: String,
+        expires: DateTime<Utc>,
+        transport: RunTransport,
+    ) -> RunOutcome {
+        let response = HandshakeResponse {
+            server_proof: Some(hex_lower(&confirmed.server_tag)),
             ..self.response(
                 true,
                 Some(session),
@@ -474,7 +610,9 @@ impl SqliteHandshakeAdapter {
                 Some(expires.to_rfc3339()),
                 None,
             )
-        })
+        };
+        let keys = (transport == RunTransport::SetupChannel).then(|| confirmed.channel_keys());
+        (response, keys)
     }
 
     /// Consume the code, register the device and mint tokens, once a proof has verified.
@@ -539,6 +677,274 @@ impl SqliteHandshakeAdapter {
             "device paired"
         );
         Ok(Some((session, refresh, expires)))
+    }
+
+    /// CPace phase 1 for either transport; the run remembers which one started it.
+    async fn start_pake_run(
+        &self,
+        request: PakeInitRequest,
+        transport: RunTransport,
+    ) -> Result<std::result::Result<PakeChallenge, PakeRefusal>> {
+        // Before any refusal can return: otherwise runs committed to a code that has gone stay
+        // in memory until the next run starts.
+        let started = Self::now();
+        self.pake_state()
+            .pending
+            .retain(|_, run| run.expires_at > started);
+        // HTTPS has `/handshake/refresh`; a device run there would be a second way in for nothing.
+        if request.credential == Credential::Device && transport != RunTransport::SetupChannel {
+            tracing::warn!(
+                kind = "device_credential_refused",
+                "pake_init named the device credential outside the setup channel"
+            );
+            return Ok(Err(PakeRefusal::InvalidCredential));
+        }
+        // The run is under this Pond's own pin whatever the phone claims; the claim only lets a
+        // phone at the wrong Pond fail here, clearly, instead of at confirmation.
+        let Some(pin) = self.spki_pin.as_deref() else {
+            tracing::warn!("CPace pairing refused: this Pond has no TLS identity to bind");
+            return Ok(Err(PakeRefusal::ChannelBindingMismatch));
+        };
+        if request.channel_binding != pin {
+            tracing::warn!(
+                claimed = %request.channel_binding,
+                ours = pin,
+                "pairing refused: the phone pinned a key that is not this Pond's"
+            );
+            return Ok(Err(PakeRefusal::ChannelBindingMismatch));
+        }
+        let nonce = match B64.decode(request.client_nonce.as_bytes()) {
+            Ok(nonce) if nonce.len() == pairing_cpace::SID_PART_LEN => nonce,
+            _ => return Ok(Err(PakeRefusal::InvalidClientNonce)),
+        };
+
+        let (secret, password, ci) = match request.credential {
+            Credential::Pairing => {
+                // Commit to the newest active code: the one the dashboard and CLI show.
+                let newest: Option<(String,)> = sqlx::query_as(
+                    "SELECT code_hash FROM pairing_codes
+                     WHERE consumed_at IS NULL AND expires_at > ?
+                     ORDER BY created_at DESC LIMIT 1",
+                )
+                .bind(Self::now().to_rfc3339())
+                .fetch_optional(&self.pool)
+                .await?;
+                let Some((code_hash,)) = newest else {
+                    return Ok(Err(PakeRefusal::NoActivePairingCode));
+                };
+                let Some(code) = ISSUED_CODE_CACHE.read().await.get(&code_hash).cloned() else {
+                    // Issued by an earlier process: its plaintext is gone, so nobody can pair with it.
+                    return Ok(Err(PakeRefusal::NoActivePairingCode));
+                };
+                (
+                    RunSecret::Pairing { code_hash },
+                    zeroize::Zeroizing::new(code),
+                    pairing_cpace::channel_identifier(pin, &request.client_id),
+                )
+            }
+            Credential::Setup => {
+                let Some(claims) = self.setup_claims.as_ref() else {
+                    return Ok(Err(PakeRefusal::SetupCodeUnavailable));
+                };
+                let code = match claims.admit_setup_attempt(std::time::Instant::now()).await {
+                    Ok(code) => code,
+                    Err(ClaimRefusal::SetupCodeUnavailable) => {
+                        return Ok(Err(PakeRefusal::SetupCodeUnavailable))
+                    }
+                    Err(ClaimRefusal::SetupCodeCooling { retry_after }) => {
+                        tracing::warn!(
+                            retry_after_secs = retry_after.as_secs_ceil(),
+                            "setup code refused: too many wrong attempts, cooling down"
+                        );
+                        return Ok(Err(PakeRefusal::SetupCodeCooling { retry_after }));
+                    }
+                };
+                (
+                    RunSecret::Setup,
+                    zeroize::Zeroizing::new(code.digits().to_string()),
+                    pairing_cpace::setup_channel_identifier(pin, &request.client_id),
+                )
+            }
+            Credential::Device => {
+                // Charged before the lookup, so a paired id and an unknown one are limited alike.
+                let admitted = self
+                    .pake_state()
+                    .device_resumes
+                    .admit(&request.client_id, std::time::Instant::now());
+                if let Err(retry_after) = admitted {
+                    tracing::warn!(
+                        retry_after_secs = retry_after.as_secs_ceil(),
+                        "device run refused: too many failed attempts, cooling down"
+                    );
+                    return Ok(Err(PakeRefusal::DeviceCooling { retry_after }));
+                }
+                let refresh_hash = self.device_run_password(&request.client_id).await?;
+                (
+                    RunSecret::Device {
+                        refresh_hash: refresh_hash.clone(),
+                    },
+                    refresh_hash,
+                    pairing_cpace::device_channel_identifier(pin, &request.client_id),
+                )
+            }
+        };
+
+        let challenge = Self::random_bytes(pairing_cpace::SID_PART_LEN);
+        let initiator = Initiator::start(
+            password.as_bytes(),
+            &ci,
+            pairing_cpace::session_id(&challenge, &nonce),
+        );
+        let share = initiator.share();
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Self::now();
+        let expires = now + Duration::seconds(CHALLENGE_TTL_SEC);
+        {
+            let mut state = self.pake_state();
+            state.pending.retain(|_, run| run.expires_at > now);
+            if state.pending.len() >= MAX_PENDING_PAKE {
+                tracing::warn!(
+                    pending = state.pending.len(),
+                    "CPace pairing refused: too many runs are waiting for their verify"
+                );
+                return Ok(Err(PakeRefusal::Busy));
+            }
+            state.pending.insert(
+                id.clone(),
+                PendingPake {
+                    initiator,
+                    secret,
+                    transport,
+                    client_id: request.client_id,
+                    client_type: request.client_type,
+                    expires_at: expires,
+                },
+            );
+        }
+        Ok(Ok(PakeChallenge {
+            challenge_id: id,
+            challenge: B64.encode(&challenge),
+            expires_at: expires.to_rfc3339(),
+            suite: pairing_cpace::SUITE.to_string(),
+            share: B64.encode(share),
+        }))
+    }
+
+    /// CPace phase 2 for either transport. A run is finished only on the transport that started it.
+    async fn finish_pake_run(
+        &self,
+        request: PakeVerifyRequest,
+        transport: RunTransport,
+    ) -> Result<RunOutcome> {
+        // 1. Burn the run before anything is checked: one attempt per challenge.
+        let run = {
+            let mut state = self.pake_state();
+            match state.pending.get(&request.challenge_id) {
+                Some(run) if run.transport == transport => {
+                    state.pending.remove(&request.challenge_id)
+                }
+                Some(_) => {
+                    tracing::warn!(
+                        kind = "pake_transport_mismatch",
+                        ?transport,
+                        "a verify named a run another transport started; the run is left alone"
+                    );
+                    None
+                }
+                None => None,
+            }
+        };
+        let Some(run) = run else {
+            return Ok((self.reject("unknown_challenge"), None));
+        };
+        if run.expires_at < Self::now() {
+            return Ok((self.reject("challenge_expired"), None));
+        }
+        let PendingPake {
+            initiator,
+            secret,
+            client_id,
+            client_type,
+            ..
+        } = run;
+        let code_hash = match secret {
+            RunSecret::Pairing { code_hash } => code_hash,
+            RunSecret::Setup => {
+                return self
+                    .verify_setup_run(initiator, request, client_id, client_type, transport)
+                    .await
+            }
+            RunSecret::Device { refresh_hash } => {
+                return self
+                    .verify_device_run(initiator, request, client_id, refresh_hash, transport)
+                    .await
+            }
+        };
+
+        // 2. The code the run committed to must still be live: not consumed by another device,
+        //    replaced by a newer code, expired, or retired by its failure budget.
+        if self.active_code_profile(&code_hash).await?.is_none() {
+            return Ok((self.reject("code_retired"), None));
+        }
+
+        // 3. Spend one attempt from the code's budget before the tag is checked, so concurrent
+        //    verifies cannot check more tags than the budget allows.
+        let attempt = {
+            let mut state = self.pake_state();
+            let spent = state.attempts.entry(code_hash.clone()).or_insert(0);
+            if *spent >= PAKE_FAILURE_BUDGET {
+                None
+            } else {
+                *spent += 1;
+                Some(*spent)
+            }
+        };
+        let Some(attempt) = attempt else {
+            return Ok((self.reject("code_retired"), None));
+        };
+
+        // 4. Check `Yb` and `T_client`. Undecodable input fails the same checks as a bad value.
+        let share = B64.decode(request.share.as_bytes()).unwrap_or_default();
+        let confirm = hex_decode(&request.confirm).unwrap_or_default();
+        let confirmed = match initiator.finish(&share, &confirm) {
+            Ok(confirmed) => confirmed,
+            Err(error) => {
+                let reason = match error {
+                    CpaceError::InvalidShare => "invalid_share",
+                    CpaceError::InvalidConfirmation => "invalid_confirmation",
+                };
+                if attempt >= PAKE_FAILURE_BUDGET {
+                    self.retire_codes(std::slice::from_ref(&code_hash)).await?;
+                    tracing::warn!(
+                        attempts = attempt,
+                        "pairing code retired: its CPace failure budget is spent; issue a new code"
+                    );
+                    return Ok((self.reject("code_retired"), None));
+                }
+                tracing::warn!(
+                    reason,
+                    attempt,
+                    budget = PAKE_FAILURE_BUDGET,
+                    "CPace pairing attempt failed"
+                );
+                return Ok((self.reject(reason), None));
+            }
+        };
+
+        // 5. Consume the code, register the device, mint tokens, and only then prove ourselves.
+        let Some((session, refresh, expires)) = self
+            .complete_pairing(
+                &code_hash,
+                &client_id,
+                &client_type,
+                request.device_name,
+                "cpace",
+            )
+            .await?
+        else {
+            return Ok((self.reject("code_retired"), None));
+        };
+        Ok(self.accepted(&confirmed, session, refresh, expires, transport))
     }
 }
 
@@ -767,217 +1173,27 @@ impl Handshake for SqliteHandshakeAdapter {
         &self,
         request: PakeInitRequest,
     ) -> Result<std::result::Result<PakeChallenge, PakeRefusal>> {
-        // Before any refusal can return: otherwise runs committed to a code that has gone stay
-        // in memory until the next run starts.
-        let started = Self::now();
-        self.pake_state()
-            .pending
-            .retain(|_, run| run.expires_at > started);
-        // The run is under this Pond's own pin whatever the phone claims; the claim only lets a
-        // phone at the wrong Pond fail here, clearly, instead of at confirmation.
-        let Some(pin) = self.spki_pin.as_deref() else {
-            tracing::warn!("CPace pairing refused: this Pond has no TLS identity to bind");
-            return Ok(Err(PakeRefusal::ChannelBindingMismatch));
-        };
-        if request.channel_binding != pin {
-            tracing::warn!(
-                claimed = %request.channel_binding,
-                ours = pin,
-                "pairing refused: the phone pinned a key that is not this Pond's"
-            );
-            return Ok(Err(PakeRefusal::ChannelBindingMismatch));
-        }
-        let nonce = match B64.decode(request.client_nonce.as_bytes()) {
-            Ok(nonce) if nonce.len() == pairing_cpace::SID_PART_LEN => nonce,
-            _ => return Ok(Err(PakeRefusal::InvalidClientNonce)),
-        };
-
-        let (secret, password, ci) = match request.credential {
-            Credential::Pairing => {
-                // Commit to the newest active code: the one the dashboard and CLI show.
-                let newest: Option<(String,)> = sqlx::query_as(
-                    "SELECT code_hash FROM pairing_codes
-                     WHERE consumed_at IS NULL AND expires_at > ?
-                     ORDER BY created_at DESC LIMIT 1",
-                )
-                .bind(Self::now().to_rfc3339())
-                .fetch_optional(&self.pool)
-                .await?;
-                let Some((code_hash,)) = newest else {
-                    return Ok(Err(PakeRefusal::NoActivePairingCode));
-                };
-                let Some(code) = ISSUED_CODE_CACHE.read().await.get(&code_hash).cloned() else {
-                    // Issued by an earlier process: its plaintext is gone, so nobody can pair with it.
-                    return Ok(Err(PakeRefusal::NoActivePairingCode));
-                };
-                (
-                    RunSecret::Pairing { code_hash },
-                    zeroize::Zeroizing::new(code),
-                    pairing_cpace::channel_identifier(pin, &request.client_id),
-                )
-            }
-            Credential::Setup => {
-                let Some(claims) = self.setup_claims.as_ref() else {
-                    return Ok(Err(PakeRefusal::SetupCodeUnavailable));
-                };
-                let code = match claims.admit_setup_attempt(std::time::Instant::now()).await {
-                    Ok(code) => code,
-                    Err(ClaimRefusal::SetupCodeUnavailable) => {
-                        return Ok(Err(PakeRefusal::SetupCodeUnavailable))
-                    }
-                    Err(ClaimRefusal::SetupCodeCooling { retry_after }) => {
-                        tracing::warn!(
-                            retry_after_secs = retry_after.as_secs_ceil(),
-                            "setup code refused: too many wrong attempts, cooling down"
-                        );
-                        return Ok(Err(PakeRefusal::SetupCodeCooling { retry_after }));
-                    }
-                };
-                (
-                    RunSecret::Setup,
-                    zeroize::Zeroizing::new(code.digits().to_string()),
-                    pairing_cpace::setup_channel_identifier(pin, &request.client_id),
-                )
-            }
-        };
-
-        let challenge = Self::random_bytes(pairing_cpace::SID_PART_LEN);
-        let initiator = Initiator::start(
-            password.as_bytes(),
-            &ci,
-            pairing_cpace::session_id(&challenge, &nonce),
-        );
-        let share = initiator.share();
-        let id = uuid::Uuid::new_v4().to_string();
-        let now = Self::now();
-        let expires = now + Duration::seconds(CHALLENGE_TTL_SEC);
-        {
-            let mut state = self.pake_state();
-            state.pending.retain(|_, run| run.expires_at > now);
-            if state.pending.len() >= MAX_PENDING_PAKE {
-                tracing::warn!(
-                    pending = state.pending.len(),
-                    "CPace pairing refused: too many runs are waiting for their verify"
-                );
-                return Ok(Err(PakeRefusal::Busy));
-            }
-            state.pending.insert(
-                id.clone(),
-                PendingPake {
-                    initiator,
-                    secret,
-                    client_id: request.client_id,
-                    client_type: request.client_type,
-                    expires_at: expires,
-                },
-            );
-        }
-        Ok(Ok(PakeChallenge {
-            challenge_id: id,
-            challenge: B64.encode(&challenge),
-            expires_at: expires.to_rfc3339(),
-            suite: pairing_cpace::SUITE.to_string(),
-            share: B64.encode(share),
-        }))
+        self.start_pake_run(request, RunTransport::Https).await
     }
 
     async fn verify_pake(&self, request: PakeVerifyRequest) -> Result<HandshakeResponse> {
-        // 1. Burn the run before anything is checked: one attempt per challenge.
-        let Some(run) = self.pake_state().pending.remove(&request.challenge_id) else {
-            return Ok(self.reject("unknown_challenge"));
-        };
-        if run.expires_at < Self::now() {
-            return Ok(self.reject("challenge_expired"));
-        }
-        let PendingPake {
-            initiator,
-            secret,
-            client_id,
-            client_type,
-            ..
-        } = run;
-        let code_hash = match secret {
-            RunSecret::Pairing { code_hash } => code_hash,
-            RunSecret::Setup => {
-                return self
-                    .verify_setup_run(initiator, request, client_id, client_type)
-                    .await
-            }
-        };
+        let (response, _no_keys) = self.finish_pake_run(request, RunTransport::Https).await?;
+        Ok(response)
+    }
 
-        // 2. The code the run committed to must still be live: not consumed by another device,
-        //    replaced by a newer code, expired, or retired by its failure budget.
-        if self.active_code_profile(&code_hash).await?.is_none() {
-            return Ok(self.reject("code_retired"));
-        }
+    async fn init_channel_pake(
+        &self,
+        request: PakeInitRequest,
+    ) -> Result<std::result::Result<PakeChallenge, PakeRefusal>> {
+        self.start_pake_run(request, RunTransport::SetupChannel)
+            .await
+    }
 
-        // 3. Spend one attempt from the code's budget before the tag is checked, so concurrent
-        //    verifies cannot check more tags than the budget allows.
-        let attempt = {
-            let mut state = self.pake_state();
-            let spent = state.attempts.entry(code_hash.clone()).or_insert(0);
-            if *spent >= PAKE_FAILURE_BUDGET {
-                None
-            } else {
-                *spent += 1;
-                Some(*spent)
-            }
-        };
-        let Some(attempt) = attempt else {
-            return Ok(self.reject("code_retired"));
-        };
-
-        // 4. Check `Yb` and `T_client`. Undecodable input fails the same checks as a bad value.
-        let share = B64.decode(request.share.as_bytes()).unwrap_or_default();
-        let confirm = hex_decode(&request.confirm).unwrap_or_default();
-        let server_tag = match initiator.finish(&share, &confirm) {
-            Ok(tag) => tag,
-            Err(error) => {
-                let reason = match error {
-                    CpaceError::InvalidShare => "invalid_share",
-                    CpaceError::InvalidConfirmation => "invalid_confirmation",
-                };
-                if attempt >= PAKE_FAILURE_BUDGET {
-                    self.retire_codes(std::slice::from_ref(&code_hash)).await?;
-                    tracing::warn!(
-                        attempts = attempt,
-                        "pairing code retired: its CPace failure budget is spent; issue a new code"
-                    );
-                    return Ok(self.reject("code_retired"));
-                }
-                tracing::warn!(
-                    reason,
-                    attempt,
-                    budget = PAKE_FAILURE_BUDGET,
-                    "CPace pairing attempt failed"
-                );
-                return Ok(self.reject(reason));
-            }
-        };
-
-        // 5. Consume the code, register the device, mint tokens, and only then prove ourselves.
-        let Some((session, refresh, expires)) = self
-            .complete_pairing(
-                &code_hash,
-                &client_id,
-                &client_type,
-                request.device_name,
-                "cpace",
-            )
-            .await?
-        else {
-            return Ok(self.reject("code_retired"));
-        };
-        Ok(HandshakeResponse {
-            server_proof: Some(hex_lower(&server_tag)),
-            ..self.response(
-                true,
-                Some(session),
-                Some(refresh),
-                Some(expires.to_rfc3339()),
-                None,
-            )
-        })
+    async fn verify_channel_pake(&self, request: PakeVerifyRequest) -> Result<ChannelVerify> {
+        let (response, keys) = self
+            .finish_pake_run(request, RunTransport::SetupChannel)
+            .await?;
+        Ok(ChannelVerify { response, keys })
     }
 
     async fn pake_credential(&self, challenge_id: &str) -> Option<Credential> {
@@ -988,32 +1204,10 @@ impl Handshake for SqliteHandshakeAdapter {
     }
 
     async fn refresh(&self, request: RefreshRequest) -> Result<HandshakeResponse> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let refresh_hash = Self::sha256_hex(request.refresh_token.as_bytes());
-        let now = Utc::now().to_rfc3339();
-        let row: Option<(String, String, String)> = sqlx::query_as(
-            "SELECT client_id, client_type, device_id FROM session_tokens
-             WHERE refresh_hash = ? AND revoked_at IS NULL AND refresh_expires_at > ?",
-        )
-        .bind(&refresh_hash)
-        .bind(&now)
-        .fetch_optional(&mut *tx)
-        .await?;
-
-        let Some((client_id, client_type, device_id)) = row else {
+        let Some((session, refresh, expires)) = self.rotate_refresh(&refresh_hash).await? else {
             return Ok(self.reject("invalid_or_expired_refresh"));
         };
-
-        // Rotate: revoke the old row, mint a fresh pair.
-        sqlx::query("UPDATE session_tokens SET revoked_at = ? WHERE refresh_hash = ?")
-            .bind(&now)
-            .bind(&refresh_hash)
-            .execute(&mut *tx)
-            .await?;
-        let (session, refresh, expires) = self
-            .issue_session_pair_in(&mut tx, &client_id, &client_type, &device_id)
-            .await?;
-        tx.commit().await?;
         Ok(self.response(
             true,
             Some(session),
@@ -2641,5 +2835,556 @@ mod tests {
             PakeRefusal::SetupCodeUnavailable,
             "and the card fails closed"
         );
+    }
+
+    // ---- The setup channel: the same exchange in process, with keys ---------------------
+
+    async fn channel_setup_run(
+        pond: &SetupPond,
+        password: &str,
+        client_id: &str,
+    ) -> (ChannelVerify, pairing_cpace::Responder) {
+        let nonce = [4u8; 32];
+        let challenge = pond
+            .hs
+            .init_channel_pake(setup_init_request(client_id, &nonce))
+            .await
+            .unwrap()
+            .expect("an unclaimed pond starts a setup run on the channel");
+        let ci = pairing_cpace::setup_channel_identifier(OURS, client_id);
+        let (phone, request) = answer_under(&challenge, password, &ci, client_id, &nonce);
+        (pond.hs.verify_channel_pake(request).await.unwrap(), phone)
+    }
+
+    #[tokio::test]
+    async fn an_accepted_channel_run_hands_over_the_keys_the_phone_derives() {
+        let pond = setup_pond(&[]).await;
+        let (verified, phone) = channel_setup_run(&pond, &pond.code, "ble-phone").await;
+        assert!(
+            verified.response.accepted,
+            "{:?}",
+            verified.response.rejection_reason
+        );
+        let proof = hex_decode(verified.response.server_proof.as_deref().unwrap()).unwrap();
+        assert!(phone.verify_server(&proof));
+
+        let keys = verified
+            .keys
+            .expect("an accepted channel run carries its keys");
+        let expected = phone.channel_keys();
+        assert_eq!(keys.pond_to_phone(), expected.pond_to_phone());
+        assert_eq!(keys.phone_to_pond(), expected.phone_to_pond());
+
+        assert!(pond
+            .store
+            .load()
+            .await
+            .unwrap()
+            .unwrap()
+            .claim_state()
+            .is_claimed());
+        let token = verified.response.session_token.unwrap();
+        assert!(pond.hs.validate_token(&token).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_refused_channel_run_has_no_keys_and_spends_what_https_would() {
+        let pond = setup_pond(&[]).await;
+        let (verified, _) = channel_setup_run(&pond, "34970112330", "ble-phone").await;
+        assert!(!verified.response.accepted);
+        assert_eq!(
+            verified.response.rejection_reason.as_deref(),
+            Some("invalid_confirmation")
+        );
+        assert!(verified.keys.is_none());
+        assert!(!pond
+            .store
+            .load()
+            .await
+            .unwrap()
+            .unwrap()
+            .claim_state()
+            .is_claimed());
+    }
+
+    #[tokio::test]
+    async fn a_channel_pairing_run_consumes_the_code_and_claims_like_https() {
+        let pond = setup_pond(&[]).await;
+        let pc = pond.hs.issue_pairing_code().await.unwrap();
+        let nonce = [6u8; 32];
+        let challenge = pond
+            .hs
+            .init_channel_pake(pake_init_request("ble-phone", OURS, &nonce))
+            .await
+            .unwrap()
+            .unwrap();
+        let (phone, request) = pake_answer(&challenge, &pc.code, "ble-phone", OURS, &nonce);
+        let verified = pond.hs.verify_channel_pake(request).await.unwrap();
+        assert!(verified.response.accepted);
+        assert_eq!(
+            verified.keys.unwrap().phone_to_pond(),
+            phone.channel_keys().phone_to_pond()
+        );
+        assert!(pond
+            .store
+            .load()
+            .await
+            .unwrap()
+            .unwrap()
+            .claim_state()
+            .is_claimed());
+        assert!(
+            pond.hs.current_pairing_code().await.unwrap().is_none(),
+            "the code is spent"
+        );
+    }
+
+    /// A BLE challenge id travels in the clear, so a verify over HTTPS that names it must not
+    /// burn the phone's run; and an HTTPS run never yields keys on the channel.
+    #[tokio::test]
+    async fn a_run_is_finished_only_on_the_transport_that_started_it() {
+        let pond = setup_pond(&[]).await;
+        let nonce = [4u8; 32];
+        let challenge = pond
+            .hs
+            .init_channel_pake(setup_init_request("ble-phone", &nonce))
+            .await
+            .unwrap()
+            .unwrap();
+        let ci = pairing_cpace::setup_channel_identifier(OURS, "ble-phone");
+        let (_, request) = answer_under(&challenge, &pond.code, &ci, "ble-phone", &nonce);
+        let over_https = pond.hs.verify_pake(request.clone()).await.unwrap();
+        assert!(!over_https.accepted);
+        assert_eq!(
+            over_https.rejection_reason.as_deref(),
+            Some("unknown_challenge")
+        );
+        assert!(
+            pond.hs
+                .verify_channel_pake(request)
+                .await
+                .unwrap()
+                .response
+                .accepted,
+            "the channel run was left alone"
+        );
+
+        let pc = pond.hs.issue_pairing_code().await.unwrap();
+        let challenge = pake_init(&pond.hs, "lan-phone", &nonce).await;
+        let (_, request) = pake_answer(&challenge, &pc.code, "lan-phone", OURS, &nonce);
+        let on_channel = pond.hs.verify_channel_pake(request.clone()).await.unwrap();
+        assert!(!on_channel.response.accepted);
+        assert!(on_channel.keys.is_none());
+        assert!(
+            pond.hs.verify_pake(request).await.unwrap().accepted,
+            "the HTTPS run was left alone"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_claimed_pond_refuses_the_card_on_the_channel_too() {
+        let pond = setup_pond(&[]).await;
+        let (first, _) = channel_setup_run(&pond, &pond.code, "ble-phone").await;
+        assert!(first.response.accepted);
+        assert_eq!(
+            pond.hs
+                .init_channel_pake(setup_init_request("ble-phone-2", &[1u8; 32]))
+                .await
+                .unwrap()
+                .unwrap_err(),
+            PakeRefusal::SetupCodeUnavailable
+        );
+    }
+
+    // ---- A paired device resuming on the setup channel ----------------------------------
+
+    use pond_core::network::services::device_resume_throttle::{
+        DEVICE_RESUME_ATTEMPTS, DEVICE_RESUME_WINDOW,
+    };
+    use std::time::Instant;
+
+    fn device_init_request(client_id: &str, nonce: &[u8]) -> PakeInitRequest {
+        PakeInitRequest {
+            credential: Credential::Device,
+            ..pake_init_request(client_id, OURS, nonce)
+        }
+    }
+
+    async fn start_device_run(
+        hs: &SqliteHandshakeAdapter,
+        client_id: &str,
+        nonce: &[u8],
+    ) -> std::result::Result<PakeChallenge, PakeRefusal> {
+        hs.init_channel_pake(device_init_request(client_id, nonce))
+            .await
+            .unwrap()
+    }
+
+    /// The phone's answer to a device run, proving it holds `refresh_token`.
+    fn device_answer(
+        challenge: &PakeChallenge,
+        refresh_token: &str,
+        client_id: &str,
+        nonce: &[u8],
+    ) -> (pairing_cpace::Responder, PakeVerifyRequest) {
+        let password = pairing_cpace::device_password(refresh_token);
+        let ci = pairing_cpace::device_channel_identifier(OURS, client_id);
+        answer_under(challenge, &password, &ci, client_id, nonce)
+    }
+
+    /// A whole device run, the way goose-on-the-go resumes over BLE.
+    async fn resume(
+        hs: &SqliteHandshakeAdapter,
+        refresh_token: &str,
+        client_id: &str,
+    ) -> (ChannelVerify, pairing_cpace::Responder) {
+        let nonce = [0x21u8; 32];
+        let challenge = start_device_run(hs, client_id, &nonce)
+            .await
+            .expect("the pond starts a device run");
+        let (phone, request) = device_answer(&challenge, refresh_token, client_id, &nonce);
+        (hs.verify_channel_pake(request).await.unwrap(), phone)
+    }
+
+    /// The password a waiting device run committed to.
+    fn committed_password(hs: &SqliteHandshakeAdapter, challenge_id: &str) -> String {
+        match &hs
+            .pake_state()
+            .pending
+            .get(challenge_id)
+            .expect("a waiting run")
+            .secret
+        {
+            RunSecret::Device { refresh_hash } => refresh_hash.to_string(),
+            _ => panic!("a device run holds a device secret"),
+        }
+    }
+
+    async fn active_sessions(pool: &Pool<Sqlite>, device: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM session_tokens WHERE device_id = ? AND revoked_at IS NULL",
+        )
+        .bind(device)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_paired_device_resumes_with_a_rotated_session_and_keeps_its_owner() {
+        let (hs, pool) = fresh_with_household().await;
+        let pc = hs.issue_pairing_code_for(Some("liz")).await.unwrap();
+        let paired = pair(&hs, &pc.code, "liz-phone").await;
+        assert!(paired.accepted);
+        let old_session = paired.session_token.unwrap();
+        let old_refresh = paired.refresh_token.unwrap();
+
+        let nonce = [0x31u8; 32];
+        let challenge = start_device_run(&hs, "liz-phone", &nonce).await.unwrap();
+        assert_eq!(
+            hs.pake_credential(&challenge.challenge_id).await,
+            Some(Credential::Device)
+        );
+        let (phone, mut request) = device_answer(&challenge, &old_refresh, "liz-phone", &nonce);
+        request.device_name = Some("Somebody else's phone".into());
+        let verified = hs.verify_channel_pake(request).await.unwrap();
+
+        let response = &verified.response;
+        assert!(response.accepted, "{:?}", response.rejection_reason);
+        let proof = hex_decode(response.server_proof.as_deref().unwrap()).unwrap();
+        assert!(phone.verify_server(&proof), "the phone can check the pond");
+        let keys = verified
+            .keys
+            .as_ref()
+            .expect("a device run seals the channel");
+        assert_eq!(keys.pond_to_phone(), phone.channel_keys().pond_to_phone());
+        assert_eq!(keys.phone_to_pond(), phone.channel_keys().phone_to_pond());
+
+        let new_session = response.session_token.clone().unwrap();
+        let new_refresh = response.refresh_token.clone().unwrap();
+        assert_ne!(new_refresh, old_refresh);
+        assert!(hs.validate_token(&new_session).await.unwrap());
+        assert!(
+            !hs.validate_token(&old_session).await.unwrap(),
+            "the old session went with its refresh row"
+        );
+        let replay = hs
+            .refresh(RefreshRequest {
+                refresh_token: old_refresh,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            replay.rejection_reason.as_deref(),
+            Some("invalid_or_expired_refresh")
+        );
+        assert_eq!(active_sessions(&pool, "liz-phone").await, 1);
+        assert_eq!(
+            hs.caller_for_token(&new_session).await.unwrap(),
+            Some(TokenCaller {
+                client_id: "liz-phone".into(),
+                device_id: "liz-phone".into(),
+            })
+        );
+
+        let attribution = SqliteDeviceAttribution::new(pool.clone());
+        assert_eq!(
+            attribution.device_profile("liz-phone").await.unwrap(),
+            Some("liz".to_string()),
+            "a resume keeps the device's member"
+        );
+        let (name,): (String,) = sqlx::query_as("SELECT name FROM devices WHERE id = 'liz-phone'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            name, "liz-phone phone",
+            "the run's device_name renames nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_device_run_neither_latches_the_claim_nor_needs_a_code() {
+        let pond = setup_pond(&[]).await;
+        let (_, refresh, _) = pond
+            .hs
+            .issue_session_pair("phone", "gotg", "phone")
+            .await
+            .unwrap();
+        assert!(pond.hs.current_pairing_code().await.unwrap().is_none());
+
+        let (verified, _) = resume(&pond.hs, &refresh, "phone").await;
+        assert!(
+            verified.response.accepted,
+            "{:?}",
+            verified.response.rejection_reason
+        );
+        assert!(
+            !pond
+                .store
+                .load()
+                .await
+                .unwrap()
+                .unwrap()
+                .claim_state()
+                .is_claimed(),
+            "a resume is not a first pairing"
+        );
+        assert_eq!(count(&pond.pool, "pairing_codes").await, 0);
+        assert_eq!(
+            count(&pond.pool, "devices").await,
+            0,
+            "no devices row is written"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rotated_refresh_token_fails_and_the_current_one_resumes() {
+        let hs = fresh().await;
+        let paired = pair(&hs, &hs.issue_pairing_code().await.unwrap().code, "phone").await;
+        let stale = paired.refresh_token.unwrap();
+        let current = hs
+            .refresh(RefreshRequest {
+                refresh_token: stale.clone(),
+            })
+            .await
+            .unwrap()
+            .refresh_token
+            .unwrap();
+
+        let (verified, _) = resume(&hs, &stale, "phone").await;
+        assert_eq!(
+            verified.response.rejection_reason.as_deref(),
+            Some("invalid_confirmation")
+        );
+        assert!(verified.keys.is_none());
+        assert!(verified.response.session_token.is_none());
+        assert!(verified.response.server_proof.is_none());
+
+        let (verified, _) = resume(&hs, &current, "phone").await;
+        assert!(verified.response.accepted);
+    }
+
+    /// From outside, an id with no session and a paired id with the wrong token are one case:
+    /// both runs commit to 64 hex characters, both charge the throttle, and both are refused at
+    /// confirmation with the same answer.
+    #[tokio::test]
+    async fn an_unknown_id_takes_the_same_path_to_invalid_confirmation_as_a_wrong_token() {
+        let hs = fresh().await;
+        let paired = pair(&hs, &hs.issue_pairing_code().await.unwrap().code, "phone").await;
+        let stored =
+            SqliteHandshakeAdapter::sha256_hex(paired.refresh_token.as_deref().unwrap().as_bytes());
+
+        let nonce = [0x42u8; 32];
+        let known = start_device_run(&hs, "phone", &nonce).await.unwrap();
+        let unknown = start_device_run(&hs, "stranger", &nonce).await.unwrap();
+        let unknown_again = start_device_run(&hs, "stranger", &nonce).await.unwrap();
+        assert_eq!(committed_password(&hs, &known.challenge_id), stored);
+        let stand_in = committed_password(&hs, &unknown.challenge_id);
+        for password in [&stored, &stand_in] {
+            assert_eq!(password.len(), 64);
+            assert!(password
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        }
+        assert_ne!(
+            stand_in,
+            committed_password(&hs, &unknown_again.challenge_id),
+            "each run gets a fresh stand-in"
+        );
+        let (matching,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM session_tokens WHERE refresh_hash = ?")
+                .bind(&stand_in)
+                .fetch_one(&hs.pool)
+                .await
+                .unwrap();
+        assert_eq!(matching, 0, "the stand-in names no session");
+        for challenge in [&known, &unknown] {
+            assert_eq!(challenge.suite, pairing_cpace::SUITE);
+            assert_eq!(B64.decode(&challenge.share).unwrap().len(), 32);
+        }
+
+        let (_, wrong) = device_answer(&known, "not-the-token", "phone", &nonce);
+        let (_, guess) = device_answer(&unknown, "not-the-token", "stranger", &nonce);
+        let wrong = hs.verify_channel_pake(wrong).await.unwrap();
+        let guess = hs.verify_channel_pake(guess).await.unwrap();
+        assert_eq!(
+            wrong.response.rejection_reason.as_deref(),
+            Some("invalid_confirmation")
+        );
+        assert_eq!(
+            serde_json::to_value(&wrong.response).unwrap(),
+            serde_json::to_value(&guess.response).unwrap()
+        );
+        assert!(wrong.keys.is_none() && guess.keys.is_none());
+        let now = Instant::now();
+        assert_eq!(hs.pake_state().device_resumes.charged("phone", now), 1);
+        assert_eq!(hs.pake_state().device_resumes.charged("stranger", now), 2);
+    }
+
+    #[tokio::test]
+    async fn five_failed_device_runs_cool_that_device_and_a_success_resets_its_count() {
+        let hs = fresh().await;
+        let paired = pair(&hs, &hs.issue_pairing_code().await.unwrap().code, "phone").await;
+        let token = paired.refresh_token.unwrap();
+
+        for _ in 0..DEVICE_RESUME_ATTEMPTS - 1 {
+            let (failed, _) = resume(&hs, "not-the-token", "phone").await;
+            assert_eq!(
+                failed.response.rejection_reason.as_deref(),
+                Some("invalid_confirmation")
+            );
+        }
+        let (resumed, _) = resume(&hs, &token, "phone").await;
+        assert!(resumed.response.accepted, "the fifth run is still allowed");
+        let session = resumed.response.session_token.clone().unwrap();
+        assert_eq!(
+            hs.pake_state()
+                .device_resumes
+                .charged("phone", Instant::now()),
+            0,
+            "a success resets the count"
+        );
+
+        for id in ["phone", "stranger"] {
+            for _ in 0..DEVICE_RESUME_ATTEMPTS {
+                let (failed, _) = resume(&hs, "not-the-token", id).await;
+                assert_eq!(
+                    failed.response.rejection_reason.as_deref(),
+                    Some("invalid_confirmation"),
+                    "{id}"
+                );
+            }
+            let refusal = start_device_run(&hs, id, &[1u8; 32]).await.unwrap_err();
+            assert_eq!(refusal.code(), "device_cooling", "{id}");
+            let wait = refusal
+                .retry_after()
+                .expect("cooling says how long")
+                .as_secs_ceil();
+            assert!(
+                (1..=DEVICE_RESUME_WINDOW.as_secs()).contains(&wait),
+                "{id} waits {wait} s"
+            );
+        }
+        assert!(
+            start_device_run(&hs, "tablet", &[1u8; 32]).await.is_ok(),
+            "each device cools alone"
+        );
+        assert!(
+            hs.validate_token(&session).await.unwrap(),
+            "failed runs leave the device's session alone"
+        );
+    }
+
+    /// A device removed from the household has no active row, so it meets the stand-in.
+    #[tokio::test]
+    async fn a_revoked_device_cannot_resume() {
+        let hs = fresh().await;
+        let paired = pair(&hs, &hs.issue_pairing_code().await.unwrap().code, "phone").await;
+        assert_eq!(hs.revoke_device("phone").await.unwrap(), 1);
+        let (verified, _) = resume(&hs, paired.refresh_token.as_deref().unwrap(), "phone").await;
+        assert_eq!(
+            verified.response.rejection_reason.as_deref(),
+            Some("invalid_confirmation")
+        );
+        assert_eq!(active_sessions(&hs.pool, "phone").await, 0);
+    }
+
+    #[tokio::test]
+    async fn https_refuses_the_device_credential_before_anything_is_spent() {
+        let hs = fresh().await;
+        let paired = pair(&hs, &hs.issue_pairing_code().await.unwrap().code, "phone").await;
+        let refusal = hs
+            .init_pake(device_init_request("phone", &[1u8; 32]))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(refusal, PakeRefusal::InvalidCredential);
+        assert_eq!(refusal.code(), "invalid_credential");
+        assert_eq!(
+            hs.pake_state()
+                .device_resumes
+                .charged("phone", Instant::now()),
+            0
+        );
+        assert!(hs.pake_state().pending.is_empty(), "no run was started");
+        let refreshed = hs
+            .refresh(RefreshRequest {
+                refresh_token: paired.refresh_token.unwrap(),
+            })
+            .await
+            .unwrap();
+        assert!(refreshed.accepted, "HTTPS has refresh for this");
+    }
+
+    #[tokio::test]
+    async fn a_device_run_whose_session_rotated_meanwhile_mints_nothing() {
+        let hs = fresh().await;
+        let paired = pair(&hs, &hs.issue_pairing_code().await.unwrap().code, "phone").await;
+        let token = paired.refresh_token.unwrap();
+        let nonce = [0x17u8; 32];
+        let challenge = start_device_run(&hs, "phone", &nonce).await.unwrap();
+        let rotated = hs
+            .refresh(RefreshRequest {
+                refresh_token: token.clone(),
+            })
+            .await
+            .unwrap();
+
+        let (_, request) = device_answer(&challenge, &token, "phone", &nonce);
+        let verified = hs.verify_channel_pake(request).await.unwrap();
+        assert_eq!(
+            verified.response.rejection_reason.as_deref(),
+            Some("invalid_or_expired_refresh")
+        );
+        assert!(verified.keys.is_none());
+        assert!(verified.response.server_proof.is_none());
+        assert!(
+            hs.validate_token(rotated.session_token.as_deref().unwrap())
+                .await
+                .unwrap(),
+            "the rotation that won stands"
+        );
+        assert_eq!(active_sessions(&hs.pool, "phone").await, 1);
     }
 }

@@ -1,5 +1,84 @@
 {
   "description": "One fixed CPace pairing run between a Pond (initiator A) and a phone (responder B). Byte strings are lowercase hex; `wire` shows them as the routes carry them. K_mac is the draft's mac_key (section 10.4). Regenerate with CPACE_VECTORS_WRITE=1 cargo test -p pond-infra exchange_vectors.",
+  "device": {
+    "credential": "device",
+    "description": "A paired phone resuming over the setup channel: the same exchange as the pairing run above, with the lowercase hex SHA-256 of the phone's current refresh token as the password and the device channel label in CI. PRS is the 64 ASCII characters of refresh_hash, written in hex like every PRS here; the digest's 32 raw bytes are not the password (negative raw_digest). pake_init carries \"credential\": \"device\"; everything else on the wire is the pairing exchange unchanged. The setup channel only: HTTPS answers invalid_credential.",
+    "inputs": {
+      "ADa": "",
+      "ADb": "",
+      "PRS": "31663234366234666337316331636139396636346563306431363836326431633264376463626232383330396464336561343365313132656434303635666264",
+      "challenge": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "client_id": "install-abcdef",
+      "client_nonce": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "refresh_hash": "1f246b4fc71c1ca99f64ec0d16862d1c2d7dcbb28309dd3ea43e112ed4065fbd",
+      "refresh_token": "vector-refresh-0001",
+      "spki_pin": "sha256/TnkUsN+AaLec3BDTh/KUwSokXTmCq2+4rlfBnmJxPkE=",
+      "ya": "da3d23700a9e5699258aef94dc060dfda5ebb61f02a5ea77fad53f4ff0976d08",
+      "yb": "d2316b454718c35362d83d69df6320f38578ed5984651435e2949762d900b80d"
+    },
+    "labels": {
+      "channel": "goose-device-cpace-v1"
+    },
+    "negative": [
+      {
+        "T_client": "7e56b77b541cf30eb8e004bd8d6c5a1eb1a9475cbb26575077b39c0eeecf0238b42af310df79208c9f8433ea51d1a1d3ca7ee8b55311b0506577600eea67c741",
+        "Yb": "42402a3aa48a16c74a94a866d425ee0b3d6d3c7f3565da559417324c274eec3f",
+        "name": "raw_digest",
+        "phone_PRS": "1f246b4fc71c1ca99f64ec0d16862d1c2d7dcbb28309dd3ea43e112ed4065fbd",
+        "pond_result": "invalid_confirmation"
+      },
+      {
+        "T_client": "be283eb7ffaff048e1e2ed16f567c2094932ab8e367d0667915fa5a842953ab7e082d049cfb284fd9a2d762c44f2e06ec7aae61038b4bf39dd4c0192911500b4",
+        "Yb": "ae731c72330c03fceaed1c7b9e97ba7b692eaf832b70ba70428b3753956ed712",
+        "name": "uppercase_hash",
+        "phone_PRS": "31463234364234464337314331434139394636344543304431363836324431433244374443424232383330394444334541343345313132454434303635464244",
+        "pond_result": "invalid_confirmation"
+      },
+      {
+        "CI": "14676f6f73652d73657475702d63706163652d7631337368613235362f546e6b55734e2b41614c656333424454682f4b5577536f6b58546d4371322b34726c66426e6d4a78506b453d0e696e7374616c6c2d616263646566",
+        "T_client": "c25eaad4ae596f2cb2c1d09f00afb2776b41ce72895af9de490f0438cf52d5d46195a87b06eb7cd49fe449ecc159f7232c71ff6dd0244e637084441982a2aed6",
+        "Yb": "044aedebd10e5e24d328512745d8c123805750493bdaada30c825f3f7562684e",
+        "name": "setup_label",
+        "pond_result": "invalid_confirmation"
+      }
+    ],
+    "outputs": {
+      "CI": "15676f6f73652d6465766963652d63706163652d7631337368613235362f546e6b55734e2b41614c656333424454682f4b5577536f6b58546d4371322b34726c66426e6d4a78506b453d0e696e7374616c6c2d616263646566",
+      "ISK": "7ee3acd23ab6cff5477cbba23231f736721395c35548a57139c32e00892cad7227b4a51cf2f63c7afdd1ccb090fff6fd0bac4cde966fc50e797ed64c02c404cb",
+      "K": "72cacf841abd88cb3d86755d374726e3e40e85a68a4477336a330c7b1dde9e2a",
+      "K_mac": "8abb4e9c490dc4ef5d8314c2d47f053dfb51721f20251c1acd39068061e4907be0f9542a8282d46a3fa565f520af758ec8b0bd423b93936f2b662f405906ce7e",
+      "T_client": "7ccd232fa24e0d2cd6f05679af20b72391ef918bb4b7aa349fa392ab610be95fdb6760ad12fba7fc95e485088a85c701d0e13cb93b6c2846b1ea5c862c3594f4",
+      "T_server": "ff2463cebecee2f053ac5bfceb7cf0a2b298a04a7e656d98c2400cd45201d0e8051a952e39611af4e3dbccfc7d76de0df2a0f7d152de70f4b167538fefaf7d56",
+      "Ya": "ba3440b7425843ca7b442c032ec16d46a6bdcda0e19f6d5341908f05e8c9fe3d",
+      "Yb": "3c3b9b2648b5001a69a76ea9b79672749e993d76d2793e28a9c4f14c0f79456a",
+      "g": "7a722d42642bf87e2982bc411defe52deb7fbc7f44bd84733749253bba58a52a",
+      "generator_string": "11435061636552697374726574746f32353540316632343662346663373163316361393966363465633064313638363264316332643764636262323833303964643365613433653131326564343036356662642c00000000000000000000000000000000000000000000000000000000000000000000000000000000000000005915676f6f73652d6465766963652d63706163652d7631337368613235362f546e6b55734e2b41614c656333424454682f4b5577536f6b58546d4371322b34726c66426e6d4a78506b453d0e696e7374616c6c2d61626364656640000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "sid": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
+    },
+    "wire": {
+      "init_request": {
+        "channel_binding": "sha256/TnkUsN+AaLec3BDTh/KUwSokXTmCq2+4rlfBnmJxPkE=",
+        "client_id": "install-abcdef",
+        "client_nonce": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+        "client_type": "gotg",
+        "client_version": "1.0.0",
+        "credential": "device"
+      },
+      "init_response": {
+        "challenge": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        "share": "ujRAt0JYQ8p7RCwDLsFtRqa9zaDhn21TQZCPBejJ/j0=",
+        "suite": "CPACE-RISTR255-SHA512"
+      },
+      "verify_request": {
+        "confirm": "7ccd232fa24e0d2cd6f05679af20b72391ef918bb4b7aa349fa392ab610be95fdb6760ad12fba7fc95e485088a85c701d0e13cb93b6c2846b1ea5c862c3594f4",
+        "share": "PDubJki1ABppp26pt5ZydJ6ZPXbSeT4oqcTxTA95RWo="
+      },
+      "verify_response": {
+        "accepted": true,
+        "server_proof": "ff2463cebecee2f053ac5bfceb7cf0a2b298a04a7e656d98c2400cd45201d0e8051a952e39611af4e3dbccfc7d76de0df2a0f7d152de70f4b167538fefaf7d56"
+      }
+    }
+  },
   "inputs": {
     "ADa": "",
     "ADb": "",

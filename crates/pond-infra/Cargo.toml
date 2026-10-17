@@ -27,6 +27,8 @@ jsonwebtoken = { workspace = true }
 fastembed = { workspace = true }
 # Handshake / pairing (#93): HMAC pairing proof + hashed tokens.
 sha2 = "0.10"
+# The setup channel's HKDF-SHA-512 over CPace's ISK: 0.12 shares hmac 0.12 and sha2 0.10.
+hkdf = "0.12"
 hmac = { workspace = true }
 rand = "0.8"
 base64 = { workspace = true }

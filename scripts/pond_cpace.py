@@ -23,7 +23,9 @@ DSI = b"CPaceRistretto255"
 CHANNEL_LABEL = b"goose-pair-cpace-v1"
 # The printed setup code runs under its own label, so the two secrets never share a generator.
 SETUP_CHANNEL_LABEL = b"goose-setup-cpace-v1"
-CHANNEL_LABELS = {"pairing": CHANNEL_LABEL, "setup": SETUP_CHANNEL_LABEL}
+# A paired phone resuming over the setup channel proves its refresh token's hash under this one.
+DEVICE_CHANNEL_LABEL = b"goose-device-cpace-v1"
+CHANNEL_LABELS = {"pairing": CHANNEL_LABEL, "setup": SETUP_CHANNEL_LABEL, "device": DEVICE_CHANNEL_LABEL}
 CLIENT_TAG_LABEL = b"goose-pair-cpace-client-v1"
 SERVER_TAG_LABEL = b"goose-pair-cpace-server-v1"
 
@@ -268,6 +270,21 @@ def check_vectors():
                             h(o["Ya"]), scalar=int.from_bytes(h(i["yb"]), "little"))
     assert mislabelled.ci.hex() == setup["negative"][0]["CI"], "the pairing label's CI"
     assert mislabelled.confirmation().hex() == setup["negative"][0]["T_client"], "the pairing label's tag"
+
+    device = run["device"]
+    assert device["credential"] == "device" and device["labels"]["channel"] == DEVICE_CHANNEL_LABEL.decode()
+    i, o = device["inputs"], device["outputs"]
+    password = hashlib.sha256(i["refresh_token"].encode()).hexdigest()
+    assert password == i["refresh_hash"] and password.encode().hex() == i["PRS"], "device password"
+    resumed = Responder(password, i["spki_pin"], i["client_id"], h(i["challenge"]), h(i["client_nonce"]),
+                        h(o["Ya"]), scalar=int.from_bytes(h(i["yb"]), "little"), credential="device")
+    assert resumed.ci.hex() == o["CI"], "device CI"
+    assert encode(generator(password.encode(), resumed.ci, resumed.sid)).hex() == o["g"], "device generator"
+    assert resumed.share.hex() == o["Yb"] and resumed.isk.hex() == o["ISK"], "device Yb, ISK"
+    assert resumed.confirmation().hex() == o["T_client"] and resumed.verify_server(o["T_server"]), "device tags"
+    upper = Responder(password.upper(), i["spki_pin"], i["client_id"], h(i["challenge"]), h(i["client_nonce"]),
+                      h(o["Ya"]), scalar=int.from_bytes(h(i["yb"]), "little"), credential="device")
+    assert upper.confirmation().hex() == device["negative"][1]["T_client"], "upper-case hash tag"
 
 
 def pair(call, code, pin, client_id, device_name=None, client_type="gotg", credential="pairing"):

@@ -127,8 +127,16 @@ mac:
     # under Electron than it was under Tauri, so re-verify it on a real BLE
     # pairing rather than assuming it carried over.
     NSBluetoothAlwaysUsageDescription: >-
-      Goose In A Pond uses Bluetooth to set up new smart-home devices, which
-      announce themselves over Bluetooth before they are on your network.
+      Goose In A Pond uses Bluetooth so a phone nearby can find and set up this
+      pond, and to set up new smart-home devices, which announce themselves over
+      Bluetooth before they are on your network.
+    # The pond registers _pond._tcp with mDNSResponder; without these, recent
+    # macOS can refuse a bundled app's Bonjour registration as local-network use.
+    NSLocalNetworkUsageDescription: >-
+      Goose In A Pond announces itself on your home network so your phone can
+      find it and connect.
+    NSBonjourServices:
+      - _pond._tcp
     # Keep the app on screen and in the Dock -- explicitly not an agent. This
     # must stay false even if the window hides to the tray, or the app never
     # appears in the Dock at all.

@@ -659,6 +659,14 @@ impl SettingsRepository for SqliteSettingsRepository {
             }
         );
         upsert!(
+            "ble_setup_enabled",
+            if settings.ble_setup_enabled {
+                "true"
+            } else {
+                "false"
+            }
+        );
+        upsert!(
             "context_ingest_enabled",
             if settings.context_ingest_enabled {
                 "true"
@@ -1120,6 +1128,8 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
         "context_ingest_enabled" => s.context_ingest_enabled = value == "true",
         // A corrupt row is not "true", so the pond keeps the codes to itself.
         "spoken_pairing_codes" => s.spoken_pairing_codes = value == "true",
+        // A corrupt row is not "true", so the radio stays quiet.
+        "ble_setup_enabled" => s.ble_setup_enabled = value == "true",
         "ext_context_enabled" => s.ext_context_enabled = value == "true",
         _ => {}
     }

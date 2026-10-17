@@ -209,10 +209,19 @@ cmd_box() {
     box_cmd=(cargo test -p pond-core -p pond-adapters-local-inference)
   fi
 
+  # The box keeps its own cargo caches between runs, and copies in this Mac's git checkouts so the
+  # private llama-cpp-rs-giap resolves with no credentials in the container.
+  local host_git="${CARGO_HOME:-$HOME/.cargo}/git"
+  local -a seed=()
+  [ -d "$host_git/db" ] && seed=(-v "$host_git":/host-cargo-git:ro)
+
   say "Running in container: ${box_cmd[*]}"
   docker run --rm --platform linux/arm64 \
     --memory "${mem}m" --memory-swap "${mem}m" \
     -v "$REPO_ROOT":/src -w /src \
+    -v giap-jetson-emu-registry:/usr/local/cargo/registry \
+    -v giap-jetson-emu-git:/usr/local/cargo/git \
+    ${seed[@]+"${seed[@]}"} \
     -e CARGO_TARGET_DIR=/src/target-jetson \
     -e RUSTFLAGS="-C target-cpu=cortex-a78" \
     -e CFLAGS="-march=armv8.2-a+fp16+dotprod" \
@@ -227,7 +236,13 @@ cmd_box() {
       apt-get update -qq
       apt-get install -y -qq cmake pkg-config libssl-dev libasound2-dev \
         libdbus-1-dev libsqlite3-dev clang git >/dev/null 2>&1
-      rustup component add rustfmt >/dev/null 2>&1
+      rustup component add rustfmt clippy >/dev/null 2>&1
+      if [ -d /host-cargo-git/db ]; then
+        mkdir -p /usr/local/cargo/git/db
+        for db in /host-cargo-git/db/*; do
+          [ -e "/usr/local/cargo/git/db/${db##*/}" ] || cp -a "$db" /usr/local/cargo/git/db/
+        done
+      fi
       # Make the JetPack marker real, so the acceleration probe reaches the
       # container branch through the filesystem and not through the profile.
       echo "# R36 (release), REVISION: 4.3, GCID: 00000000, BOARD: generic" \

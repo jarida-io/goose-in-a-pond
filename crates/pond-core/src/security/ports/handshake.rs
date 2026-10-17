@@ -101,7 +101,8 @@ pub struct PakeInitRequest {
     pub channel_binding: String,
     /// 32 random bytes from the phone, standard base64: the second half of the session id.
     pub client_nonce: String,
-    /// The secret the phone holds: the card's setup code, or a pairing code.
+    /// The secret the phone holds: the card's setup code, a pairing code, or (on the setup
+    /// channel only) its own refresh token.
     #[serde(default)]
     pub credential: Credential,
 }
@@ -135,6 +136,10 @@ pub enum PakeRefusal {
     SetupCodeUnavailable,
     /// Too many wrong setup codes; nothing is checked until `retry_after` has passed.
     SetupCodeCooling { retry_after: RetryAfter },
+    /// `credential: "device"` over HTTPS, which has `/handshake/refresh` for that.
+    InvalidCredential,
+    /// Too many failed device runs for this `client_id`; none starts until `retry_after`.
+    DeviceCooling { retry_after: RetryAfter },
 }
 
 impl PakeRefusal {
@@ -147,12 +152,16 @@ impl PakeRefusal {
             Self::Busy => "pairing_busy",
             Self::SetupCodeUnavailable => "setup_code_unavailable",
             Self::SetupCodeCooling { .. } => "setup_code_cooling",
+            Self::InvalidCredential => "invalid_credential",
+            Self::DeviceCooling { .. } => "device_cooling",
         }
     }
 
     pub fn retry_after(self) -> Option<RetryAfter> {
         match self {
-            Self::SetupCodeCooling { retry_after } => Some(retry_after),
+            Self::SetupCodeCooling { retry_after } | Self::DeviceCooling { retry_after } => {
+                Some(retry_after)
+            }
             _ => None,
         }
     }
@@ -169,6 +178,59 @@ pub struct PakeVerifyRequest {
     /// Optional friendly device name to record in the devices table.
     #[serde(default)]
     pub device_name: Option<String>,
+}
+
+/// Length of each setup-channel key (ChaCha20-Poly1305).
+pub const CHANNEL_KEY_LEN: usize = 32;
+
+/// The setup channel's per-direction keys from one accepted CPace run: its ISK stays in the
+/// adapter and only these leave, for one session. Wiped on drop; `Debug` redacts.
+pub struct ChannelKeys {
+    pond_to_phone: [u8; CHANNEL_KEY_LEN],
+    phone_to_pond: [u8; CHANNEL_KEY_LEN],
+}
+
+impl ChannelKeys {
+    pub fn new(
+        pond_to_phone: &[u8; CHANNEL_KEY_LEN],
+        phone_to_pond: &[u8; CHANNEL_KEY_LEN],
+    ) -> Self {
+        Self {
+            pond_to_phone: *pond_to_phone,
+            phone_to_pond: *phone_to_pond,
+        }
+    }
+
+    /// `k_p2c`: seals what the pond sends.
+    pub fn pond_to_phone(&self) -> &[u8; CHANNEL_KEY_LEN] {
+        &self.pond_to_phone
+    }
+
+    /// `k_c2p`: seals what the phone sends.
+    pub fn phone_to_pond(&self) -> &[u8; CHANNEL_KEY_LEN] {
+        &self.phone_to_pond
+    }
+}
+
+impl Drop for ChannelKeys {
+    fn drop(&mut self) {
+        crate::shared::domain::wipe::wipe(&mut self.pond_to_phone);
+        crate::shared::domain::wipe::wipe(&mut self.phone_to_pond);
+    }
+}
+
+impl std::fmt::Debug for ChannelKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ChannelKeys(redacted)")
+    }
+}
+
+/// What a setup-channel `verify` produced: the answer HTTPS would give, and, only for an accepted
+/// run, the keys that seal the rest of the session.
+#[derive(Debug)]
+pub struct ChannelVerify {
+    pub response: HandshakeResponse,
+    pub keys: Option<ChannelKeys>,
 }
 
 /// Exchange a refresh token for a fresh session+refresh pair.
@@ -261,6 +323,26 @@ pub trait Handshake: Send + Sync {
         ))
     }
 
+    /// As [`Self::init_pake`], for the in-process setup channel. The run is the same exchange
+    /// under the same limits, and only [`Self::verify_channel_pake`] can finish it. Only here
+    /// may a phone name [`Credential::Device`].
+    async fn init_channel_pake(
+        &self,
+        _request: PakeInitRequest,
+    ) -> Result<std::result::Result<PakeChallenge, PakeRefusal>> {
+        Err(anyhow::anyhow!(
+            "the setup channel is not supported by this adapter"
+        ))
+    }
+
+    /// As [`Self::verify_pake`], plus the keys for an accepted run. No HTTP route calls this, so
+    /// only an in-process transport can hold them; an HTTPS run is unknown here, and the reverse.
+    async fn verify_channel_pake(&self, _request: PakeVerifyRequest) -> Result<ChannelVerify> {
+        Err(anyhow::anyhow!(
+            "the setup channel is not supported by this adapter"
+        ))
+    }
+
     /// Which secret a waiting run was started with, so a verify can be audited under the right
     /// method without the phone saying it again. `None` once the run is spent or unknown.
     async fn pake_credential(&self, _challenge_id: &str) -> Option<Credential> {
@@ -289,5 +371,26 @@ pub trait Handshake: Send + Sync {
     /// The latest unexpired, unconsumed pairing code, if any, for the dashboard to re-display.
     async fn current_pairing_code(&self) -> Result<Option<PairingCode>> {
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn the_device_refusals_carry_their_wire_codes() {
+        assert_eq!(PakeRefusal::InvalidCredential.code(), "invalid_credential");
+        assert_eq!(PakeRefusal::InvalidCredential.retry_after(), None);
+        let cooling = PakeRefusal::DeviceCooling {
+            retry_after: RetryAfter(Duration::from_secs(90)),
+        };
+        assert_eq!(cooling.code(), "device_cooling");
+        assert_eq!(
+            cooling.retry_after(),
+            Some(RetryAfter(Duration::from_secs(90)))
+        );
     }
 }

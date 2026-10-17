@@ -2,6 +2,8 @@
 
 use axum::{extract::ConnectInfo, http::StatusCode, Extension, Json};
 use if_addrs::{IfAddr, Interface};
+use pond_core::network::domain::capability::Availability;
+use pond_core::network::ports::setup_radios::SetupRadios;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::net::{IpAddr, SocketAddr};
@@ -19,45 +21,12 @@ pub struct CompanionTransport {
 #[derive(Clone, Default)]
 pub struct EmbeddedAddress(pub std::sync::Arc<std::sync::RwLock<Option<String>>>);
 
-/// Whether an address belongs to Tailscale's IPv4 or IPv6 allocations.
-pub fn is_tailnet(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v) => u32::from(v) & 0xffc0_0000 == 0x6440_0000,
-        IpAddr::V6(v) => v.to_ipv4_mapped().map_or_else(
-            || v.octets()[..6] == [0xfd, 0x7a, 0x11, 0x5c, 0xa1, 0xe0],
-            |v| is_tailnet(v.into()),
-        ),
-    }
-}
+pub use pond_core::network::domain::interface::is_tailnet;
 
-/// Exclude tunnels and container-only networks from the home LAN boundary. Overlay VPNs
-/// that present as Ethernet (ZeroTier, NetBird, Hamachi, Nebula) are not point-to-point, so
-/// only their names give them away; a peer reached through one is not in the house.
+/// Exclude tunnels and container-only networks from the home LAN boundary; the classification is
+/// pond-core's, shared with the setup channel's advertising decision.
 pub fn is_lan_interface(interface: &Interface) -> bool {
-    !interface.is_loopback()
-        && !interface.is_link_local()
-        && !is_tailnet(interface.ip())
-        && ![
-            "tailscale",
-            "utun",
-            "tun",
-            "tap",
-            "wg",
-            "wt",
-            "zt",
-            "feth",
-            "ham",
-            "nebula",
-            "ipsec",
-            "gif",
-            "stf",
-            "ppp",
-            "docker",
-            "veth",
-            "virbr",
-        ]
-        .iter()
-        .any(|prefix| interface.name.starts_with(prefix))
+    pond_core::network::domain::interface::is_lan_address(&interface.name, interface.ip())
 }
 
 /// Read current interface addresses; callers must fail closed on an error.
@@ -163,6 +132,43 @@ pub fn require_lan(peer: Option<ConnectInfo<SocketAddr>>) -> Result<(), (StatusC
         StatusCode::FORBIDDEN,
         Json(json!({"error": "pairing_requires_lan"})),
     ))
+}
+
+/// What the household's status view says when no setup channel was wired into this server.
+const NO_SETUP_CHANNEL: &str = "this pond is not running the setup channel";
+
+/// `GET /api/v1/network/status`: the setup channel's radios and why each part is unavailable.
+/// A paired device's or the host's read, in every state, so the wizard can show it too.
+pub(crate) async fn network_status(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<crate::AppState>>,
+    radios: Option<Extension<std::sync::Arc<dyn SetupRadios>>>,
+) -> Json<Value> {
+    let enabled = match state.settings_repo.get().await {
+        Ok(settings) => Some(settings.ble_setup_enabled),
+        Err(error) => {
+            tracing::warn!(%error, "network status: settings unreadable");
+            None
+        }
+    };
+    let Some(Extension(radios)) = radios else {
+        let none = availability(&Availability::unavailable(NO_SETUP_CHANNEL));
+        return Json(json!({
+            "ble": {"enabled": enabled, "state": "unavailable", "reason": NO_SETUP_CHANNEL,
+                    "session_open": false},
+            "wifi": {"scan": none, "join": none},
+        }));
+    };
+    let ble = radios.ble();
+    let wifi = radios.wifi().await;
+    Json(json!({
+        "ble": {"enabled": enabled, "state": ble.as_str(), "reason": ble.reason(),
+                "session_open": radios.session_open()},
+        "wifi": {"scan": availability(&wifi.scan), "join": availability(&wifi.join)},
+    }))
+}
+
+fn availability(availability: &Availability) -> Value {
+    json!({"available": availability.is_available(), "reason": availability.reason()})
 }
 
 /// Additive transport fields for old clients of `/system/info`.

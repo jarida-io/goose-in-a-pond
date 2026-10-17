@@ -52,3 +52,30 @@ describe("Hub privacy settings: spoken pairing codes", () => {
     );
   });
 });
+
+function bleSetupSwitch(): HTMLButtonElement {
+  return screen.getByRole("button", { name: "Set up over Bluetooth" }) as HTMLButtonElement;
+}
+
+describe("Hub privacy settings: setup over Bluetooth", () => {
+  it("draws ON when the key is absent, as the server ships it", async () => {
+    vi.mocked(api.getSettings).mockResolvedValue({} as never);
+    await renderPrivacy();
+    expect(bleSetupSwitch().getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("draws OFF when the household turned it off", async () => {
+    vi.mocked(api.getSettings).mockResolvedValue({ ble_setup_enabled: false } as never);
+    await renderPrivacy();
+    await waitFor(() => expect(bleSetupSwitch().getAttribute("aria-pressed")).toBe("false"));
+  });
+
+  it("saves the switch as ble_setup_enabled", async () => {
+    vi.mocked(api.getSettings).mockResolvedValue({ ble_setup_enabled: true } as never);
+    await renderPrivacy();
+    fireEvent.click(bleSetupSwitch());
+    await waitFor(() =>
+      expect(api.updateSettings).toHaveBeenCalledWith({ ble_setup_enabled: false }),
+    );
+  });
+});

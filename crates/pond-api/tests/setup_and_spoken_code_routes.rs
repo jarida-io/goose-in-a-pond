@@ -240,6 +240,37 @@ async fn an_unknown_credential_is_refused_by_name_not_as_a_bad_body() {
     assert_eq!(answer.json, json!({"error": "invalid request body"}));
 }
 
+/// `"device"` is the setup channel's own; HTTPS has `/handshake/refresh` for a paired phone.
+#[tokio::test]
+async fn the_device_credential_is_refused_over_https_even_for_a_paired_phone() {
+    let h = harness().await;
+    let claimed = claim_over_http(&h, &h.code, "card-phone").await;
+    assert_eq!(claimed.json["accepted"], true, "{}", claimed.text);
+    let refresh_token = claimed.json["refresh_token"].as_str().unwrap().to_string();
+
+    for router in [&h.loopback, &h.lan] {
+        let answer = post(
+            router,
+            "/api/v1/handshake/pake/init",
+            Some(init_body("card-phone", &[1u8; 32], Some(json!("device")))),
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{}", answer.text);
+        assert_eq!(answer.json, json!({"error": "invalid_credential"}));
+    }
+    let refreshed = post(
+        &h.loopback,
+        "/api/v1/handshake/refresh",
+        Some(json!({"refresh_token": refresh_token})),
+    )
+    .await;
+    assert_eq!(refreshed.status, StatusCode::OK, "{}", refreshed.text);
+    assert_eq!(
+        refreshed.json["accepted"], true,
+        "the session it named still refreshes"
+    );
+}
+
 #[tokio::test]
 async fn a_phone_claims_the_pond_with_its_card_and_the_audit_names_the_setup_method() {
     let h = harness().await;

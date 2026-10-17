@@ -72,6 +72,7 @@ All errors return JSON:
 | POST | /onboard/complete | Wizard (see Onboarding Gate) | Mark onboarding finished; makes the claiming device the owner's |
 | GET | /onboard/status | Public | Onboarding progress |
 | GET | /system/info | Public | Connection bootstrap; full record only with a valid bearer |
+| GET | /network/status | Token, every state | The BLE setup channel and Wi-Fi station, and why each part is off |
 | GET | /test | Public | Probe all backend services |
 | POST | /test/speak | Loopback + host credential | Play text on server speakers |
 | GET | /dev/goose | Public | Goose agent + MCP tool status |
@@ -219,6 +220,37 @@ listener runs (`POND_DEV_INSECURE_LAN=1`); the key is absent otherwise. See
 
 ---
 
+### GET /network/status (2026-10-17)
+
+The BLE setup channel's radios, for the household's status view (`docs/architecture/pond-setup-channel.md`).
+A paired device's token in every state, before onboarding included, so the wizard can show it. A
+caller without a token gets `401`, the host credential alone included: the route is
+`Exposure::Authenticated`, which the auth middleware enforces before any handler runs.
+
+**Response 200**
+```json
+{
+  "ble": {
+    "enabled": true,
+    "state": "unavailable",
+    "reason": "macOS stopped the Bluetooth helper (signal 6) before the radio answered, which it does when the app the pond runs under has no Bluetooth permission or declares no Bluetooth use; ...",
+    "session_open": false
+  },
+  "wifi": {
+    "scan": { "available": false, "reason": "macOS shows Wi-Fi network names only to apps with Location permission; ..." },
+    "join": { "available": true, "reason": null }
+  }
+}
+```
+
+`ble.enabled` is the `ble_setup_enabled` setting (`null` if it could not be read). `ble.state` is
+`off` (not started, or still starting), `serving` (the GATT service is up, nothing advertised),
+`advertising`, or `unavailable` with `reason`. `session_open` is true while a phone holds the one
+setup session. A server built without the setup channel answers `unavailable` with
+`"this pond is not running the setup channel"` for every part.
+
+---
+
 ### GET /test
 
 Probes all backend services in parallel and reports latency. Intended for the diagnostic page and healthcheck scripts.
@@ -363,7 +395,9 @@ early: the run itself always uses the Pond's own pin.
 `credential` (2026-10-17) names the secret the phone holds: `"pairing"`, a six-digit pairing
 code, or `"setup"`, the eleven-digit code on the pond's printed setup card. Absent means
 `"pairing"`, so a phone that predates it pairs unchanged; goose-on-the-go omits it for a pairing
-code. Any other value, `null` included, is `400 {"error": "invalid_credential"}`. For `"setup"`
+code. Any other value, `null` included, is `400 {"error": "invalid_credential"}`; so is
+`"device"`, which only the BLE setup channel takes (a paired phone uses `/handshake/refresh`
+here). For `"setup"`
 the PRS is the eleven ASCII digits and CI is `lv_cat("goose-setup-cpace-v1", spki_pin, client_id)`,
 so the two secrets never share a generator; everything else, `verify` included, is the exchange
 above. The vector file's `setup` entry is one such run.
@@ -404,7 +438,7 @@ whatever the status:
 | init | 409 | `no_active_pairing_code` | No live code; show a new one |
 | init | 400 | `invalid_client_nonce` | `client_nonce` is not 32 bytes of base64 |
 | init | 503 | `pairing_busy` | Too many runs are waiting for their verify; retry shortly |
-| init | 400 | `invalid_credential` | `credential` is not `"setup"` or `"pairing"` |
+| init | 400 | `invalid_credential` | `credential` is not `"setup"` or `"pairing"` (`"device"` is the setup channel's only) |
 | init | 409 | `setup_code_unavailable` | `"setup"` on a pond that is claimed or has no setup code |
 | init | 429 | `setup_code_cooling` | Too many wrong setup codes; `retry_after` (whole seconds) and a `Retry-After` header say when |
 | verify | 429 | `pairing_busy` | The per-IP verify limit (10 a minute); `retry_after_secs` says when |

@@ -225,6 +225,8 @@ const PUBLIC_ROUTES: &[(Method, &str, Exposure)] = &[
     (Method::POST, "/voice/sample", Exposure::Authenticated),
     // Discovery needs system info before pairing; transcription and diagnostics stay protected.
     (Method::GET, "/system/info", Exposure::Always),
+    // Names the radios and why they are off; nothing a stranger in range should read.
+    (Method::GET, "/network/status", Exposure::Authenticated),
     (Method::GET, "/test", Exposure::HostOnly),
     // Speaks on the host's speaker; the handler also asks for the host credential.
     (Method::POST, "/test/speak", Exposure::HostOnly),
@@ -996,6 +998,8 @@ mod tests {
             // Choosing the chat model completion requires, before onboarding (#365); token only.
             "GET /models = Authenticated".to_string(),
             "GET /models/download/progress = Authenticated".to_string(),
+            // The setup radios and why each is off; a token in every state, never tokenless.
+            "GET /network/status = Authenticated".to_string(),
             "GET /player/status = HostOnly".to_string(),
             // The wizard resumes from what it saved; the PUT's answer already shows its caller this.
             "GET /settings = Authenticated".to_string(),

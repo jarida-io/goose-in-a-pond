@@ -1,0 +1,70 @@
+[package]
+name = "pond-connect"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "How a pond is found and reached: the BLE setup channel and its Wi-Fi station"
+
+[features]
+# Re-exports pond-core's mock station for the radio adapters' own tests.
+test-mocks = ["pond-core/test-mocks"]
+
+[dependencies]
+# Policy and ports only. No pond-api, no pond-server: they wire this crate, never the reverse.
+pond-core = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+# getifaddrs: the advertising decision and a Wi-Fi join's wait read the host's addresses live.
+libc = { workspace = true }
+# The `_pond._tcp` responder off macOS; macOS registers with mDNSResponder through libSystem.
+mdns-sd = "0.11"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+zeroize = "1"
+
+# The radio stacks, one table per OS, so neither adapter's dependencies reach the other's build.
+[target.'cfg(target_os = "linux")'.dependencies]
+# BlueZ's GATT server and advertising over D-Bus; links libdbus, so builds need libdbus-1-dev.
+bluer = { version = "0.17.4", features = ["bluetoothd"] }
+futures = { workspace = true }
+# NetworkManager over D-Bus. async-io, not tokio: notify-rust shares this zbus and calls its
+# blocking API from inside tokio, which zbus's tokio mode would turn into a nested-runtime panic.
+zbus = { version = "5.15", default-features = false, features = ["async-io"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# CoreBluetooth runs only inside `pond-server ble-helper`; CoreWLAN runs in the server behind the
+# WifiStation port. Only the framework classes used are enabled, to keep the build small.
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2 = "0.6"
+objc2-core-bluetooth = { version = "0.3", default-features = false, features = [
+    "std", "bitflags", "dispatch2", "CBATTRequest", "CBAdvertisementData", "CBAttribute",
+    "CBCentral", "CBCharacteristic", "CBError", "CBManager", "CBPeer", "CBPeripheralManager",
+    "CBPeripheralManagerConstants", "CBService", "CBUUID",
+] }
+objc2-core-wlan = { version = "0.3", default-features = false, features = [
+    "std", "bitflags", "CWConfiguration", "CWInterface", "CWNetwork", "CWNetworkProfile",
+    "CWWiFiClient", "CoreWLANTypes",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std", "block2", "NSArray", "NSData", "NSDictionary", "NSError", "NSObject", "NSOrderedSet",
+    "NSRunLoop", "NSSet", "NSString", "NSUUID", "NSValue",
+] }
+
+[dev-dependencies]
+pond-core = { workspace = true, features = ["test-mocks"] }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+# The real handshake and the phone's half of CPace, so the end-to-end test pairs like a phone.
+pond-infra = { workspace = true, features = ["cpace-client"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

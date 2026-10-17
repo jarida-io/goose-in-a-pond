@@ -1,0 +1,134 @@
+{
+  "aead": {
+    "associated_data": "",
+    "cipher": "ChaCha20-Poly1305",
+    "nonce": "4 zero bytes || 8-byte big-endian counter, one counter per direction from 0",
+    "tag_bytes": 16
+  },
+  "description": "The BLE setup channel's keys, sealing and framing (docs/architecture/pond-setup-channel.md). ISK and sid are the setup run's in cpace-vectors.json. Byte strings are lowercase hex; `plaintext` is the exact bytes sealed. The four sealed messages are one session's first four, in order. Regenerate with SETUP_CHANNEL_VECTORS_WRITE=1 cargo test -p pond-connect --test setup_channel_vectors.",
+  "framed": {
+    "att_mtu": 23,
+    "chunk_bytes": 20,
+    "messages": [
+      {
+        "chunks": [
+          "000000c47b226964223a3130302c227479706522",
+          "3a2268656c6c6f222c226f6b223a747275652c22",
+          "70726f746f636f6c223a312c22706f6e645f6964",
+          "223a2237663361222c22636c61696d6564223a66",
+          "616c73652c2270696e223a227368613235362f54",
+          "6e6b55734e2b41614c656333424454682f4b5577",
+          "536f6b58546d4371322b34726c66426e6d4a7850",
+          "6b453d222c226361706162696c6974696573223a",
+          "5b22776966695f7363616e222c22776966695f6a",
+          "6f696e222c2273706f6b656e5f636f6465225d7d"
+        ],
+        "frame": "000000c47b226964223a3130302c2274797065223a2268656c6c6f222c226f6b223a747275652c2270726f746f636f6c223a312c22706f6e645f6964223a2237663361222c22636c61696d6564223a66616c73652c2270696e223a227368613235362f546e6b55734e2b41614c656333424454682f4b5577536f6b58546d4371322b34726c66426e6d4a78506b453d222c226361706162696c6974696573223a5b22776966695f7363616e222c22776966695f6a6f696e222c2273706f6b656e5f636f6465225d7d",
+        "message": "{\"id\":100,\"type\":\"hello\",\"ok\":true,\"protocol\":1,\"pond_id\":\"7f3a\",\"claimed\":false,\"pin\":\"sha256/TnkUsN+AaLec3BDTh/KUwSokXTmCq2+4rlfBnmJxPkE=\",\"capabilities\":[\"wifi_scan\",\"wifi_join\",\"spoken_code\"]}"
+      },
+      {
+        "chunks": [
+          "0000005b7b226964223a3130312c227479706522",
+          "3a2273706f6b656e5f636f6465222c226f6b223a",
+          "747275652c2273706f6b656e223a747275652c22",
+          "657870697265735f6174223a22323032362d3130",
+          "2d31375431303a31303a30305a227d"
+        ],
+        "frame": "0000005b7b226964223a3130312c2274797065223a2273706f6b656e5f636f6465222c226f6b223a747275652c2273706f6b656e223a747275652c22657870697265735f6174223a22323032362d31302d31375431303a31303a30305a227d",
+        "message": "{\"id\":101,\"type\":\"spoken_code\",\"ok\":true,\"spoken\":true,\"expires_at\":\"2026-10-17T10:10:00Z\"}"
+      }
+    ],
+    "notifications": [
+      "000000c47b226964223a3130302c227479706522",
+      "3a2268656c6c6f222c226f6b223a747275652c22",
+      "70726f746f636f6c223a312c22706f6e645f6964",
+      "223a2237663361222c22636c61696d6564223a66",
+      "616c73652c2270696e223a227368613235362f54",
+      "6e6b55734e2b41614c656333424454682f4b5577",
+      "536f6b58546d4371322b34726c66426e6d4a7850",
+      "6b453d222c226361706162696c6974696573223a",
+      "5b22776966695f7363616e222c22776966695f6a",
+      "6f696e222c2273706f6b656e5f636f6465225d7d",
+      "0000005b7b226964223a3130312c227479706522",
+      "3a2273706f6b656e5f636f6465222c226f6b223a",
+      "747275652c2273706f6b656e223a747275652c22",
+      "657870697265735f6174223a22323032362d3130",
+      "2d31375431303a31303a30305a227d"
+    ],
+    "rule": "each message starts its own chunk; a chunk never carries bytes of two messages"
+  },
+  "inputs": {
+    "ISK": "33dcca7959f49aa7f2d50ac781aa7ac9f0dfbbe08ca97d86dbc0aec45bb0ee8ee3e76a1737de90c35200ddd843cf045f4ec7f845c178122127a888a4b5894590",
+    "sid": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "source": "cpace-vectors.json setup.outputs"
+  },
+  "kdf": {
+    "extract": "HKDF-Extract(salt = sid, ikm = ISK)",
+    "hash": "SHA-512",
+    "info_c2p": "goose-setup-channel-v1 phone to pond",
+    "info_p2c": "goose-setup-channel-v1 pond to phone",
+    "length": 32
+  },
+  "outputs": {
+    "k_c2p": "ffb2ca6f3be4d2e4146600407397c37bf73ac856c270b8df4fa1bcb3bd8221ce",
+    "k_p2c": "b5765f8839095cd277925f46ded24b13d3932e4c56e8a960dd11624b889fda93",
+    "prk": "bd1277009437027f1bdcbec1e7e0323f4050860749017493d8f50ada12e90edc5a040a6727167d310c69840c2e312afd11fb36dfeed035a27327a3f24071984d"
+  },
+  "protocol": 1,
+  "sealed": [
+    {
+      "carried_as": "pake_verify.sealed",
+      "ciphertext": "a686f8438b483e6f126bad128ed2a9e544cec73f58cb8117006faab80df4f7ffa20df8e0432225cafd89368ea7e96ef88484df3164d5eb6091113eece773da500a328c92ebe41638c049d51d5ac1437eb0fb574e7930d2c64c0c21663278d26cdc5b0c5c05397a77c70db01cdafa51df2e8fe121a7b85b2b10c5606a207aca1434d7f5fdfd4889f340e7847e6d40fc568707ce4f355b6b5421640addca70b5397ea178a7af705656c161699e436da87be37df674b5aecea5fca3080611f1f36ac1fa662c4334084581f32080ffc699810c302a07554b4904c81779c3a463a3cc178181b6516c149956d185f6339b1bce496408eae73102b3c84ef00ff878cd03cd0519bef3823937b89c8b574510540a9446dbf969877e67de2dc3210fce7ab47e0cb1888357b883b12b2de28cf3a350a3305716dd73f05ea262ea1e9e6e17810d0e8788b5f956fc3f6f1b42522d1720855683e89dc737604f6bcc31f21342ec03733da91eff967af10d012c1495d718c74df83f7b3c4be93e311e1d629812e4e2719fd2bd4b8c2a861f5d468ec5763302fef9b35e272765a19b91bbab",
+      "counter": 0,
+      "direction": "pond_to_phone",
+      "key": "k_p2c",
+      "nonce": "000000000000000000000000",
+      "plaintext": "{\"accepted\":true,\"session_token\":\"vector-session-0001\",\"refresh_token\":\"vector-refresh-0001\",\"expires_at\":\"2026-10-18T09:00:00+00:00\",\"hostname\":\"pond-7f3a\",\"server_version\":\"0.1.0\",\"capabilities\":[\"chat\",\"devices\",\"settings\"],\"rejection_reason\":null,\"server_proof\":\"8260dd442d6e934d5da589493d0ff360d0e355ec0aa3e0ce1f432b4929b82a7418cfd5829f9b0f96e7432b6519cd61e82f0b6564219adfabe7857845706b74c5\"}",
+      "sealed": "pob4Q4tIPm8Sa60SjtKp5UTOxz9Yy4EXAG+quA309/+iDfjgQyIlyv2JNo6n6W74hITfMWTV62CRET7s53PaUAoyjJLr5BY4wEnVHVrBQ36w+1dOeTDSxkwMIWYyeNJs3FsMXAU5enfHDbAc2vpR3y6P4SGnuFsrEMVgaiB6yhQ01/X9/UiJ80DnhH5tQPxWhwfOTzVba1QhZArdynC1OX6heKevcFZWwWFpnkNtqHvjffZ0ta7OpfyjCAYR8fNqwfpmLEM0CEWB8yCA/8aZgQwwKgdVS0kEyBd5w6Rjo8wXgYG2UWwUmVbRhfYzmxvOSWQI6ucxArPITvAP+HjNA80FGb7zgjk3uJyLV0UQVAqURtv5aYd+Z94twyEPznq0fgyxiINXuIOxKy3ijPOjUKMwVxbdc/BeomLqHp5uF4ENDoeItflW/D9vG0JSLRcghVaD6J3HN2BPa8wx8hNC7ANzPake/5Z68Q0BLBSV1xjHTfg/ezxL6T4xHh1imBLk4nGf0r1LjCqGH11GjsV2MwL++bNeJydloZuRu6s="
+    },
+    {
+      "carried_as": "envelope",
+      "ciphertext": "fa0dc822ffb6d5380ab7402163fabf9eecac398a47b212e95cf8491c087d4c905eb6c70ce5bff4681aac68",
+      "counter": 0,
+      "direction": "phone_to_pond",
+      "envelope": "{\"sealed\":\"+g3IIv+21TgKt0AhY/q/nuysOYpHshLpXPhJHAh9TJBetscM5b/0aBqsaA==\"}",
+      "key": "k_c2p",
+      "nonce": "000000000000000000000000",
+      "plaintext": "{\"id\":3,\"type\":\"wifi_scan\"}",
+      "sealed": "+g3IIv+21TgKt0AhY/q/nuysOYpHshLpXPhJHAh9TJBetscM5b/0aBqsaA=="
+    },
+    {
+      "carried_as": "envelope",
+      "ciphertext": "b2cecc330e90c88b3a82312eb65ca9c65a57135b9046635be07c1a38ff1049259fe3baf46e68193465f66e6ddc483c591e7a3dc5e2f5db0986b0a6c166c5b401ca2f6d6b549079961555c87209cefd24c4e9f9028b5d0739b146619ab9b5f3919b8f639b67ed1c70be03141c03c4ed064da5254a0627e543b1fa8f533dfc",
+      "counter": 1,
+      "direction": "pond_to_phone",
+      "envelope": "{\"sealed\":\"ss7MMw6QyIs6gjEutlypxlpXE1uQRmNb4HwaOP8QSSWf47r0bmgZNGX2bm3cSDxZHno9xeL12wmGsKbBZsW0AcovbWtUkHmWFVXIcgnO/STE6fkCi10HObFGYZq5tfORm49jm2ftHHC+AxQcA8TtBk2lJUoGJ+VDsfqPUz38\"}",
+      "key": "k_p2c",
+      "nonce": "000000000000000000000001",
+      "plaintext": "{\"id\":3,\"type\":\"wifi_scan\",\"ok\":true,\"networks\":[{\"ssid\":\"Home\",\"security\":\"wpa2\",\"signal\":70,\"known\":false}]}",
+      "sealed": "ss7MMw6QyIs6gjEutlypxlpXE1uQRmNb4HwaOP8QSSWf47r0bmgZNGX2bm3cSDxZHno9xeL12wmGsKbBZsW0AcovbWtUkHmWFVXIcgnO/STE6fkCi10HObFGYZq5tfORm49jm2ftHHC+AxQcA8TtBk2lJUoGJ+VDsfqPUz38"
+    },
+    {
+      "carried_as": "envelope",
+      "ciphertext": "54ab84cd242698f274dc9799c7f41ac054cc0a0819719f283e4eef4f91632d7818b9862ca59ebff87a8d643971b48180041dea932e0bfe6ae2adb930a6ff3f10782f0ba10de83f07329ee93eec7ada9c77c1963b3da67118c6ca157c67d03177bcb9a99694",
+      "counter": 1,
+      "direction": "phone_to_pond",
+      "envelope": "{\"sealed\":\"VKuEzSQmmPJ03JeZx/QawFTMCggZcZ8oPk7vT5FjLXgYuYYspZ6/+HqNZDlxtIGABB3qky4L/mrirbkwpv8/EHgvC6EN6D8HMp7pPux62px3wZY7PaZxGMbKFXxn0DF3vLmplpQ=\"}",
+      "key": "k_c2p",
+      "nonce": "000000000000000000000001",
+      "plaintext": "{\"id\":4,\"type\":\"wifi_join\",\"ssid\":\"Home\",\"passphrase\":\"correct horse battery staple\"}",
+      "sealed": "VKuEzSQmmPJ03JeZx/QawFTMCggZcZ8oPk7vT5FjLXgYuYYspZ6/+HqNZDlxtIGABB3qky4L/mrirbkwpv8/EHgvC6EN6D8HMp7pPux62px3wZY7PaZxGMbKFXxn0DF3vLmplpQ="
+    }
+  ],
+  "spec": "docs/architecture/pond-setup-channel.md",
+  "wire": {
+    "pake_verify_answer": {
+      "accepted": true,
+      "id": 2,
+      "ok": true,
+      "sealed": "pob4Q4tIPm8Sa60SjtKp5UTOxz9Yy4EXAG+quA309/+iDfjgQyIlyv2JNo6n6W74hITfMWTV62CRET7s53PaUAoyjJLr5BY4wEnVHVrBQ36w+1dOeTDSxkwMIWYyeNJs3FsMXAU5enfHDbAc2vpR3y6P4SGnuFsrEMVgaiB6yhQ01/X9/UiJ80DnhH5tQPxWhwfOTzVba1QhZArdynC1OX6heKevcFZWwWFpnkNtqHvjffZ0ta7OpfyjCAYR8fNqwfpmLEM0CEWB8yCA/8aZgQwwKgdVS0kEyBd5w6Rjo8wXgYG2UWwUmVbRhfYzmxvOSWQI6ucxArPITvAP+HjNA80FGb7zgjk3uJyLV0UQVAqURtv5aYd+Z94twyEPznq0fgyxiINXuIOxKy3ijPOjUKMwVxbdc/BeomLqHp5uF4ENDoeItflW/D9vG0JSLRcghVaD6J3HN2BPa8wx8hNC7ANzPake/5Z68Q0BLBSV1xjHTfg/ezxL6T4xHh1imBLk4nGf0r1LjCqGH11GjsV2MwL++bNeJydloZuRu6s=",
+      "server_proof": "8260dd442d6e934d5da589493d0ff360d0e355ec0aa3e0ce1f432b4929b82a7418cfd5829f9b0f96e7432b6519cd61e82f0b6564219adfabe7857845706b74c5",
+      "type": "pake_verify"
+    }
+  }
+}

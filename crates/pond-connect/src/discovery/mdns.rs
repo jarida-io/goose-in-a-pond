@@ -1,7 +1,15 @@
-//! Advertises `_pond._tcp.local.` so phones on the LAN find this hub without an IP.
+//! The pond's `_pond._tcp` instance through mdns-sd, a responder inside the pond's own process.
+//! It is the advertiser off macOS: on Linux it answers beside avahi (the Jetson resolves its own
+//! pond). It builds on every OS so its tests run on the Mac.
 
-use anyhow::Result;
+use std::sync::Mutex;
+
+use async_trait::async_trait;
 use mdns_sd::{IfKind, ServiceDaemon, ServiceInfo};
+use pond_core::network::domain::pond_advert::{AdvertiseError, PondAdvert, POND_SERVICE_TYPE};
+use pond_core::network::ports::service_advertiser::ServiceAdvertiser;
+
+pub const RESPONDER: &str = "mdns-sd";
 
 /// Interface-name prefixes that cannot carry LAN service discovery.
 ///
@@ -55,98 +63,28 @@ fn tunnel_interface_names() -> Vec<String> {
         .collect()
 }
 
-/// What the TXT record says about setup: the pond's id, and whether its card is still accepted.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SetupAdvert {
-    /// The discriminator printed on the card, so a phone connects to the pond it scanned.
-    pub id: String,
-    pub unclaimed: bool,
+fn service_type() -> String {
+    format!("{POND_SERVICE_TYPE}.local.")
 }
 
-/// Holds the running mDNS daemon. Drop to deregister.
-pub struct MdnsHandle {
-    daemon: ServiceDaemon,
-    full_name: String,
-    instance_name: String,
-    host_fqdn: String,
-    port: u16,
-    version: String,
-    pin: String,
-}
-
-impl MdnsHandle {
-    /// Re-announces the same instance with a new setup state; mdns-sd replaces the record in place.
-    pub fn set_setup(&self, setup: Option<&SetupAdvert>) -> Result<()> {
-        let service = service_info(
-            &self.instance_name,
-            &self.host_fqdn,
-            self.port,
-            txt_properties(&self.version, &self.pin, setup),
-        )?;
-        self.daemon.register(service)?;
-        Ok(())
-    }
-}
-
-impl Drop for MdnsHandle {
-    fn drop(&mut self) {
-        if let Err(e) = self.daemon.unregister(&self.full_name) {
-            tracing::warn!("mDNS deregister failed: {e}");
-        }
-    }
-}
-
-const SERVICE_TYPE: &str = "_pond._tcp.local.";
-
-/// The TXT record. `setup=1` only while the card is accepted, so a phone holding one looks only
-/// at ponds that will take it.
-fn txt_properties(
-    version: &str,
-    pin: &str,
-    setup: Option<&SetupAdvert>,
-) -> std::collections::HashMap<String, String> {
-    let mut properties = std::collections::HashMap::new();
-    properties.insert("v".to_string(), version.to_string());
-    properties.insert("scheme".to_string(), "https".to_string());
-    // Public, and only a convenience: mDNS is spoofable, so clients must confirm the pin.
-    properties.insert("pin".to_string(), pin.to_string());
-    if let Some(setup) = setup {
-        properties.insert("id".to_string(), setup.id.clone());
-        if setup.unclaimed {
-            properties.insert("setup".to_string(), "1".to_string());
-        }
-    }
-    properties
-}
-
-fn service_info(
-    instance_name: &str,
-    host_fqdn: &str,
-    port: u16,
-    properties: std::collections::HashMap<String, String>,
-) -> Result<ServiceInfo> {
-    Ok(ServiceInfo::new(
-        SERVICE_TYPE,
-        instance_name,
-        host_fqdn,
+fn service_info(advert: &PondAdvert) -> Result<ServiceInfo, AdvertiseError> {
+    let txt = advert.txt();
+    let properties: Vec<(&str, &str)> = txt.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let info = ServiceInfo::new(
+        &service_type(),
+        &advert.instance(),
+        &format!("{}.local.", advert.host),
         "", // addresses filled in by enable_addr_auto() below
-        port,
-        Some(properties),
-    )?
+        advert.port,
+        properties.as_slice(),
+    )
+    .map_err(|e| AdvertiseError::Refused(e.to_string()))?;
     // mdns-sd won't fill addresses for an empty host; without this phones get no resolvable IP.
-    .enable_addr_auto())
+    Ok(info.enable_addr_auto())
 }
 
-/// Advertise `_pond._tcp.local.` on `port` using `hostname` as the instance label.
-pub fn advertise(
-    hostname: &str,
-    port: u16,
-    version: &str,
-    pin: &str,
-    setup: Option<&SetupAdvert>,
-) -> Result<MdnsHandle> {
-    let daemon = ServiceDaemon::new()?;
-
+fn start_daemon() -> Result<ServiceDaemon, AdvertiseError> {
+    let daemon = ServiceDaemon::new().map_err(|e| AdvertiseError::Unavailable(e.to_string()))?;
     let tunnels = tunnel_interface_names();
     let kinds: Vec<IfKind> = tunnels.iter().cloned().map(IfKind::Name).collect();
     match daemon.disable_interface(kinds) {
@@ -159,40 +97,103 @@ pub fn advertise(
             "mDNS: could not exclude tunnel interfaces ({e}); expect send errors in the log"
         ),
     }
+    Ok(daemon)
+}
 
-    let instance_name = format!("Pond Hub @ {hostname}");
-    let host_fqdn = format!("{hostname}.local.");
-    let service = service_info(
-        &instance_name,
-        &host_fqdn,
-        port,
-        txt_properties(version, pin, setup),
-    )?;
+struct Registered {
+    full_name: String,
+    instance: String,
+    port: u16,
+}
 
-    let full_name = service.get_fullname().to_string();
-    daemon.register(service)?;
+#[derive(Default)]
+struct State {
+    daemon: Option<ServiceDaemon>,
+    registered: Option<Registered>,
+}
 
-    tracing::info!(
-        hostname,
-        port,
-        setup_open = setup.is_some_and(|s| s.unclaimed),
-        "_pond._tcp.local. registered — phones on the same LAN can now discover this hub"
-    );
+impl State {
+    fn unregister(&mut self) {
+        if let (Some(daemon), Some(registered)) = (&self.daemon, self.registered.take()) {
+            if let Err(e) = daemon.unregister(&registered.full_name) {
+                tracing::warn!("mDNS deregister failed: {e}");
+            }
+        }
+    }
+}
 
-    Ok(MdnsHandle {
-        daemon,
-        full_name,
-        instance_name,
-        host_fqdn,
-        port,
-        version: version.to_string(),
-        pin: pin.to_string(),
-    })
+#[derive(Default)]
+pub struct MdnsSdAdvertiser {
+    state: Mutex<State>,
+}
+
+impl MdnsSdAdvertiser {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+#[async_trait]
+impl ServiceAdvertiser for MdnsSdAdvertiser {
+    async fn publish(&self, advert: &PondAdvert) -> Result<(), AdvertiseError> {
+        let info = service_info(advert)?;
+        let instance = advert.instance();
+        let mut state = self.state();
+        // A new name or port retires the old instance; the same one is replaced in place.
+        if state
+            .registered
+            .as_ref()
+            .is_some_and(|r| r.instance != instance || r.port != advert.port)
+        {
+            state.unregister();
+        }
+        let daemon = match state.daemon.take() {
+            Some(daemon) => daemon,
+            None => start_daemon()?,
+        };
+        let full_name = info.get_fullname().to_string();
+        let registered = daemon.register(info);
+        state.daemon = Some(daemon);
+        registered.map_err(|e| AdvertiseError::Unavailable(e.to_string()))?;
+        state.registered = Some(Registered {
+            full_name,
+            instance,
+            port: advert.port,
+        });
+        Ok(())
+    }
+
+    async fn withdraw(&self) {
+        let mut state = self.state();
+        state.unregister();
+        if let Some(daemon) = state.daemon.take() {
+            if let Err(e) = daemon.shutdown() {
+                tracing::debug!("mDNS daemon shutdown: {e}");
+            }
+        }
+    }
+
+    fn responder(&self) -> &'static str {
+        RESPONDER
+    }
+}
+
+impl Drop for MdnsSdAdvertiser {
+    fn drop(&mut self) {
+        self.state().unregister();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pond_core::network::domain::pond_advert::SetupAdvert;
 
     #[test]
     fn covers_the_interface_that_reported_the_bug() {
@@ -220,34 +221,6 @@ mod tests {
     }
 
     #[test]
-    fn the_txt_record_names_the_pond_and_opens_setup_only_while_unclaimed() {
-        let base = txt_properties("1.0", "sha256/x", None);
-        assert_eq!(base.get("id"), None);
-        assert_eq!(base.get("setup"), None);
-        assert_eq!(base.get("pin").map(String::as_str), Some("sha256/x"));
-
-        let open = SetupAdvert {
-            id: "7f3a".into(),
-            unclaimed: true,
-        };
-        let txt = txt_properties("1.0", "sha256/x", Some(&open));
-        assert_eq!(txt.get("id").map(String::as_str), Some("7f3a"));
-        assert_eq!(txt.get("setup").map(String::as_str), Some("1"));
-
-        let claimed = SetupAdvert {
-            unclaimed: false,
-            ..open
-        };
-        let txt = txt_properties("1.0", "sha256/x", Some(&claimed));
-        assert_eq!(txt.get("id").map(String::as_str), Some("7f3a"));
-        assert_eq!(
-            txt.get("setup"),
-            None,
-            "a claimed pond must not invite a card"
-        );
-    }
-
-    #[test]
     fn builds_one_name_per_prefix_and_index() {
         assert_eq!(
             tunnel_interface_names().len(),
@@ -255,7 +228,29 @@ mod tests {
         );
     }
 
-    /// Run with a VPN up: `cargo test -p pond-server --bin pond-server -- --ignored`.
+    #[test]
+    fn the_service_carries_the_txt_contract_under_the_pond_type() {
+        let advert =
+            PondAdvert::new("nano", 4443, "0.1.0", "sha256/x").with_setup(Some(SetupAdvert {
+                id: "7f3a".into(),
+                unclaimed: true,
+            }));
+        let info = service_info(&advert).unwrap();
+        assert_eq!(info.get_type(), "_pond._tcp.local.");
+        assert_eq!(info.get_fullname(), "Pond Hub @ nano._pond._tcp.local.");
+        assert_eq!(info.get_hostname(), "nano.local.");
+        assert_eq!(info.get_port(), 4443);
+        for (key, value) in advert.txt() {
+            assert_eq!(
+                info.get_property_val_str(key),
+                Some(value.as_str()),
+                "{key}"
+            );
+        }
+        assert_eq!(info.get_properties().len(), 5);
+    }
+
+    /// Run with a VPN up: `cargo test -p pond-connect -- --ignored tunnels_this_host`.
     #[test]
     #[ignore = "asserts about the host's live interfaces; needs a tunnel up"]
     fn the_exclusion_list_covers_the_tunnels_this_host_actually_has() {
