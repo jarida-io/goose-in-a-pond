@@ -178,6 +178,8 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
         mesh_provider: Arc::new(tokio::sync::RwLock::new(None)),
         peer_capability_query: Arc::new(tokio::sync::RwLock::new(None)),
         mesh_rebuild: None,
+        setup_claims: None,
+        spoken_codes: Default::default(),
     });
     (
         build_router(state, std::path::PathBuf::from("pond-desktop/dist")),
@@ -592,6 +594,8 @@ async fn make_app_with_agent(
         mesh_provider: Arc::new(tokio::sync::RwLock::new(None)),
         peer_capability_query: Arc::new(tokio::sync::RwLock::new(None)),
         mesh_rebuild: None,
+        setup_claims: None,
+        spoken_codes: Default::default(),
     });
     (
         build_router(state, std::path::PathBuf::from("pond-desktop/dist")),

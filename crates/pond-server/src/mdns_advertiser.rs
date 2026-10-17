@@ -55,10 +55,37 @@ fn tunnel_interface_names() -> Vec<String> {
         .collect()
 }
 
+/// What the TXT record says about setup: the pond's id, and whether its card is still accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupAdvert {
+    /// The discriminator printed on the card, so a phone connects to the pond it scanned.
+    pub id: String,
+    pub unclaimed: bool,
+}
+
 /// Holds the running mDNS daemon. Drop to deregister.
 pub struct MdnsHandle {
     daemon: ServiceDaemon,
     full_name: String,
+    instance_name: String,
+    host_fqdn: String,
+    port: u16,
+    version: String,
+    pin: String,
+}
+
+impl MdnsHandle {
+    /// Re-announces the same instance with a new setup state; mdns-sd replaces the record in place.
+    pub fn set_setup(&self, setup: Option<&SetupAdvert>) -> Result<()> {
+        let service = service_info(
+            &self.instance_name,
+            &self.host_fqdn,
+            self.port,
+            txt_properties(&self.version, &self.pin, setup),
+        )?;
+        self.daemon.register(service)?;
+        Ok(())
+    }
 }
 
 impl Drop for MdnsHandle {
@@ -69,8 +96,55 @@ impl Drop for MdnsHandle {
     }
 }
 
+const SERVICE_TYPE: &str = "_pond._tcp.local.";
+
+/// The TXT record. `setup=1` only while the card is accepted, so a phone holding one looks only
+/// at ponds that will take it.
+fn txt_properties(
+    version: &str,
+    pin: &str,
+    setup: Option<&SetupAdvert>,
+) -> std::collections::HashMap<String, String> {
+    let mut properties = std::collections::HashMap::new();
+    properties.insert("v".to_string(), version.to_string());
+    properties.insert("scheme".to_string(), "https".to_string());
+    // Public, and only a convenience: mDNS is spoofable, so clients must confirm the pin.
+    properties.insert("pin".to_string(), pin.to_string());
+    if let Some(setup) = setup {
+        properties.insert("id".to_string(), setup.id.clone());
+        if setup.unclaimed {
+            properties.insert("setup".to_string(), "1".to_string());
+        }
+    }
+    properties
+}
+
+fn service_info(
+    instance_name: &str,
+    host_fqdn: &str,
+    port: u16,
+    properties: std::collections::HashMap<String, String>,
+) -> Result<ServiceInfo> {
+    Ok(ServiceInfo::new(
+        SERVICE_TYPE,
+        instance_name,
+        host_fqdn,
+        "", // addresses filled in by enable_addr_auto() below
+        port,
+        Some(properties),
+    )?
+    // mdns-sd won't fill addresses for an empty host; without this phones get no resolvable IP.
+    .enable_addr_auto())
+}
+
 /// Advertise `_pond._tcp.local.` on `port` using `hostname` as the instance label.
-pub fn advertise(hostname: &str, port: u16, version: &str, pin: &str) -> Result<MdnsHandle> {
+pub fn advertise(
+    hostname: &str,
+    port: u16,
+    version: &str,
+    pin: &str,
+    setup: Option<&SetupAdvert>,
+) -> Result<MdnsHandle> {
     let daemon = ServiceDaemon::new()?;
 
     let tunnels = tunnel_interface_names();
@@ -86,26 +160,14 @@ pub fn advertise(hostname: &str, port: u16, version: &str, pin: &str) -> Result<
         ),
     }
 
-    let service_type = "_pond._tcp.local.";
     let instance_name = format!("Pond Hub @ {hostname}");
     let host_fqdn = format!("{hostname}.local.");
-
-    let mut properties = std::collections::HashMap::new();
-    properties.insert("v".to_string(), version.to_string());
-    properties.insert("scheme".to_string(), "https".to_string());
-    // Public, and only a convenience: mDNS is spoofable, so clients must confirm the pin.
-    properties.insert("pin".to_string(), pin.to_string());
-
-    let service = ServiceInfo::new(
-        service_type,
+    let service = service_info(
         &instance_name,
         &host_fqdn,
-        "", // addresses filled in by enable_addr_auto() below
         port,
-        Some(properties),
-    )?
-    // mdns-sd won't fill addresses for an empty host; without this phones get no resolvable IP.
-    .enable_addr_auto();
+        txt_properties(version, pin, setup),
+    )?;
 
     let full_name = service.get_fullname().to_string();
     daemon.register(service)?;
@@ -113,10 +175,19 @@ pub fn advertise(hostname: &str, port: u16, version: &str, pin: &str) -> Result<
     tracing::info!(
         hostname,
         port,
+        setup_open = setup.is_some_and(|s| s.unclaimed),
         "_pond._tcp.local. registered — phones on the same LAN can now discover this hub"
     );
 
-    Ok(MdnsHandle { daemon, full_name })
+    Ok(MdnsHandle {
+        daemon,
+        full_name,
+        instance_name,
+        host_fqdn,
+        port,
+        version: version.to_string(),
+        pin: pin.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -146,6 +217,34 @@ mod tests {
                 "{real} would be excluded from mDNS, and it can carry LAN discovery"
             );
         }
+    }
+
+    #[test]
+    fn the_txt_record_names_the_pond_and_opens_setup_only_while_unclaimed() {
+        let base = txt_properties("1.0", "sha256/x", None);
+        assert_eq!(base.get("id"), None);
+        assert_eq!(base.get("setup"), None);
+        assert_eq!(base.get("pin").map(String::as_str), Some("sha256/x"));
+
+        let open = SetupAdvert {
+            id: "7f3a".into(),
+            unclaimed: true,
+        };
+        let txt = txt_properties("1.0", "sha256/x", Some(&open));
+        assert_eq!(txt.get("id").map(String::as_str), Some("7f3a"));
+        assert_eq!(txt.get("setup").map(String::as_str), Some("1"));
+
+        let claimed = SetupAdvert {
+            unclaimed: false,
+            ..open
+        };
+        let txt = txt_properties("1.0", "sha256/x", Some(&claimed));
+        assert_eq!(txt.get("id").map(String::as_str), Some("7f3a"));
+        assert_eq!(
+            txt.get("setup"),
+            None,
+            "a claimed pond must not invite a card"
+        );
     }
 
     #[test]

@@ -47,6 +47,8 @@ const S_IN_BYTES: usize = 128;
 const MAC_KEY_PREFIX: &[u8] = b"CPaceMac";
 /// First field of the channel identifier; a breaking draft revision means a new label.
 const CHANNEL_LABEL: &[u8] = b"goose-pair-cpace-v1";
+/// The setup code's own label, so a setup run and a pairing run never share a generator.
+const SETUP_CHANNEL_LABEL: &[u8] = b"goose-setup-cpace-v1";
 /// Label of the phone's confirmation tag.
 const CLIENT_TAG_LABEL: &[u8] = b"goose-pair-cpace-client-v1";
 /// Label of the Pond's confirmation tag.
@@ -99,6 +101,15 @@ fn lv_cat(parts: &[&[u8]]) -> Vec<u8> {
 /// The channel identifier: this protocol's label, the TLS key pin, and the phone's id.
 pub fn channel_identifier(spki_pin: &str, client_id: &str) -> Vec<u8> {
     lv_cat(&[CHANNEL_LABEL, spki_pin.as_bytes(), client_id.as_bytes()])
+}
+
+/// As [`channel_identifier`], for a run whose password is the printed setup code.
+pub fn setup_channel_identifier(spki_pin: &str, client_id: &str) -> Vec<u8> {
+    lv_cat(&[
+        SETUP_CHANNEL_LABEL,
+        spki_pin.as_bytes(),
+        client_id.as_bytes(),
+    ])
 }
 
 /// The session identifier: the Pond's challenge, then the phone's nonce.
@@ -545,6 +556,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_setup_channel_identifier_has_its_own_label() {
+        assert_eq!(
+            setup_channel_identifier("pin", "id"),
+            [
+                &[20u8][..],
+                b"goose-setup-cpace-v1",
+                &[3],
+                b"pin",
+                &[2],
+                b"id"
+            ]
+            .concat()
+        );
+        assert_ne!(
+            setup_channel_identifier(PIN, "phone-1"),
+            channel_identifier(PIN, "phone-1")
+        );
+    }
+
+    #[test]
+    fn a_setup_run_and_a_pairing_run_with_the_same_digits_do_not_agree() {
+        let code = b"79927398713";
+        let pond = Initiator::start(code, &setup_channel_identifier(PIN, "phone-1"), sid());
+        let phone = Responder::respond(
+            code,
+            &channel_identifier(PIN, "phone-1"),
+            &sid(),
+            &pond.share(),
+        )
+        .unwrap();
+        assert_eq!(
+            pond.finish(&phone.share(), &phone.confirmation()),
+            Err(CpaceError::InvalidConfirmation)
+        );
+    }
+
     // ---- Cross-language exchange vectors --------------------------------------------------
 
     /// Every value of one fixed run, as `tests/fixtures/cpace-vectors.json` records it.
@@ -602,6 +650,7 @@ mod tests {
                 (responder B). Byte strings are lowercase hex; `wire` shows them as the routes \
                 carry them. K_mac is the draft's mac_key (section 10.4). Regenerate with CPACE_VECTORS_WRITE=1 cargo test -p pond-infra \
                 exchange_vectors.",
+            "setup": setup_run(),
             "spec": "draft-irtf-cfrg-cpace-21",
             "suite": SUITE,
             "labels": {
@@ -693,6 +742,155 @@ mod tests {
                 },
             ],
         })
+    }
+
+    /// The same exchange with the setup credential: the card's eleven digits as the password and
+    /// the setup channel label, under the pairing run's pin, ids and scalars.
+    fn setup_run() -> Value {
+        let code = "34970112339";
+        let pin = PIN;
+        let client_id = "install-abcdef";
+        let challenge: Vec<u8> = (0u8..32).collect();
+        let client_nonce: Vec<u8> = (32u8..64).collect();
+        let ya_bytes = unhex("da3d23700a9e5699258aef94dc060dfda5ebb61f02a5ea77fad53f4ff0976d08");
+        let yb_bytes = unhex("d2316b454718c35362d83d69df6320f38578ed5984651435e2949762d900b80d");
+
+        let ci = setup_channel_identifier(pin, client_id);
+        let sid = session_id(&challenge, &client_nonce);
+        let gen_str = generator_string(code.as_bytes(), &ci, &sid);
+        let g = generator(code.as_bytes(), &ci, &sid);
+        let pond = Initiator::with_scalar(scalar(&ya_bytes), code.as_bytes(), &ci, sid.clone());
+        let ya = pond.share();
+        let phone =
+            Responder::with_scalar(scalar(&yb_bytes), code.as_bytes(), &ci, &sid, &ya).unwrap();
+        let yb = phone.share();
+        let k = scalar_mult_vfy(&scalar(&yb_bytes), &ya).unwrap();
+        let isk = intermediate_session_key(&sid, k.as_slice(), &ya, &yb);
+        let t_client = phone.confirmation();
+        let t_server = pond.finish(&yb, &t_client).unwrap();
+        assert!(phone.verify_server(&t_server));
+
+        let b64 = |b: &[u8]| {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(b)
+        };
+        let rejected = |share: &[u8], tag: &[u8]| {
+            let pond = Initiator::with_scalar(scalar(&ya_bytes), code.as_bytes(), &ci, sid.clone());
+            match pond.finish(share, tag) {
+                Ok(_) => "accepted",
+                Err(CpaceError::InvalidShare) => "invalid_share",
+                Err(CpaceError::InvalidConfirmation) => "invalid_confirmation",
+            }
+        };
+        // A phone that ran the setup code under the pairing label, with the same scalar.
+        let pairing_ci = channel_identifier(pin, client_id);
+        let pairing_label =
+            Responder::with_scalar(scalar(&yb_bytes), code.as_bytes(), &pairing_ci, &sid, &ya)
+                .unwrap();
+        // A phone that mistyped one digit of the card, with the same scalar.
+        let wrong_code =
+            Responder::with_scalar(scalar(&yb_bytes), b"34970112330", &ci, &sid, &ya).unwrap();
+
+        json!({
+            "description": "The setup credential: the same exchange as the pairing run above, with \
+                the printed card's eleven ASCII digits as PRS and the setup channel label in CI. \
+                pake/init carries \"credential\": \"setup\"; everything else on the wire is the \
+                pairing exchange unchanged.",
+            "credential": "setup",
+            "labels": {
+                "channel": std::str::from_utf8(SETUP_CHANNEL_LABEL).unwrap(),
+            },
+            "inputs": {
+                "code": code,
+                "PRS": hex(code.as_bytes()),
+                "spki_pin": pin,
+                "client_id": client_id,
+                "challenge": hex(&challenge),
+                "client_nonce": hex(&client_nonce),
+                "ya": hex(&ya_bytes),
+                "yb": hex(&yb_bytes),
+                "ADa": "",
+                "ADb": "",
+            },
+            "outputs": {
+                "CI": hex(&ci),
+                "sid": hex(&sid),
+                "generator_string": hex(&gen_str),
+                "g": hex(&g.compress().to_bytes()),
+                "Ya": hex(&ya),
+                "Yb": hex(&yb),
+                "K": hex(k.as_slice()),
+                "ISK": hex(isk.as_slice()),
+                "K_mac": hex(Confirmation::derive(&sid, k.as_slice(), ya, yb).mac_key.as_slice()),
+                "T_client": hex(&t_client),
+                "T_server": hex(&t_server),
+            },
+            "wire": {
+                "init_request": {
+                    "client_id": client_id,
+                    "client_type": "gotg",
+                    "client_version": "1.0.0",
+                    "channel_binding": pin,
+                    "client_nonce": b64(&client_nonce),
+                    "credential": "setup",
+                },
+                "init_response": {
+                    "challenge": b64(&challenge),
+                    "suite": SUITE,
+                    "share": b64(&ya),
+                },
+                "verify_request": {
+                    "share": b64(&yb),
+                    "confirm": hex(&t_client),
+                },
+                "verify_response": {
+                    "accepted": true,
+                    "server_proof": hex(&t_server),
+                },
+            },
+            "negative": [
+                {
+                    "name": "pairing_label",
+                    "CI": hex(&pairing_ci),
+                    "Yb": hex(&pairing_label.share()),
+                    "T_client": hex(&pairing_label.confirmation()),
+                    "pond_result": rejected(&pairing_label.share(), &pairing_label.confirmation()),
+                },
+                {
+                    "name": "wrong_code",
+                    "phone_code": "34970112330",
+                    "Yb": hex(&wrong_code.share()),
+                    "T_client": hex(&wrong_code.confirmation()),
+                    "pond_result": rejected(&wrong_code.share(), &wrong_code.confirmation()),
+                },
+            ],
+        })
+    }
+
+    #[test]
+    fn the_setup_vector_is_marked_and_differs_from_the_pairing_run() {
+        let run = exchange_run();
+        let setup = &run["setup"];
+        assert_eq!(setup["credential"], "setup");
+        assert_eq!(setup["labels"]["channel"], "goose-setup-cpace-v1");
+        assert_eq!(setup["wire"]["init_request"]["credential"], "setup");
+        assert_eq!(setup["inputs"]["code"], "34970112339");
+        assert!(
+            pond_core::network::domain::setup_code::SetupCode::parse("34970112339").is_ok(),
+            "the vector's code passes the card's own check digit"
+        );
+        assert_ne!(setup["outputs"]["CI"], run["outputs"]["CI"]);
+        assert_ne!(setup["outputs"]["g"], run["outputs"]["g"]);
+        for negative in setup["negative"].as_array().unwrap() {
+            assert_eq!(
+                negative["pond_result"], "invalid_confirmation",
+                "{negative}"
+            );
+        }
+        assert!(
+            run["wire"]["init_request"].get("credential").is_none(),
+            "an ordinary pairing omits the credential"
+        );
     }
 
     #[test]

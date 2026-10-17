@@ -17,6 +17,7 @@ pub mod quiet_pass;
 pub mod rides;
 pub mod routes;
 pub mod runs;
+pub mod spoken_code;
 pub mod spotify_focus;
 #[cfg(feature = "test-support")]
 pub mod test_support;
@@ -291,6 +292,10 @@ pub struct AppState {
     /// Always safe to call: no-op if already built or disabled; never tears a built stack down.
     pub mesh_rebuild:
         Option<Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>>,
+    /// The printed setup code's claim latch; `None` where no setup record is wired (tests, CLI).
+    pub setup_claims: Option<Arc<pond_core::network::services::setup_claim::SetupClaimService>>,
+    /// The spoken-code route's limiter and speaker; the default has no speaker and answers 503.
+    pub spoken_codes: Arc<crate::spoken_code::SpokenCodes>,
 }
 
 impl AppState {
@@ -773,6 +778,7 @@ mod rate_limit_tests {
             "/api/v1/handshake/refresh",
             "/api/v1/handshake/revoke",
             "/api/v1/handshake/pairing-code",
+            "/api/v1/handshake/spoken-code",
         ] {
             assert!(is_handshake_path(path), "{path} should use it");
         }

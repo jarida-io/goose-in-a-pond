@@ -21,6 +21,9 @@ SQRT_M1 = pow(2, (P - 1) // 4, P)
 SUITE = "CPACE-RISTR255-SHA512"
 DSI = b"CPaceRistretto255"
 CHANNEL_LABEL = b"goose-pair-cpace-v1"
+# The printed setup code runs under its own label, so the two secrets never share a generator.
+SETUP_CHANNEL_LABEL = b"goose-setup-cpace-v1"
+CHANNEL_LABELS = {"pairing": CHANNEL_LABEL, "setup": SETUP_CHANNEL_LABEL}
 CLIENT_TAG_LABEL = b"goose-pair-cpace-client-v1"
 SERVER_TAG_LABEL = b"goose-pair-cpace-server-v1"
 
@@ -177,8 +180,8 @@ def scalar_mult_vfy(scalar, share):
     return None if k == bytes(32) else k
 
 
-def channel_identifier(pin, client_id):
-    return lv_cat(CHANNEL_LABEL, pin.encode(), client_id.encode())
+def channel_identifier(pin, client_id, credential="pairing"):
+    return lv_cat(CHANNEL_LABELS[credential], pin.encode(), client_id.encode())
 
 
 def sample_scalar():
@@ -193,9 +196,10 @@ def sample_scalar():
 class Responder:
     """One phone-side run: answer the Pond's `Ya` and derive both confirmation tags."""
 
-    def __init__(self, code, pin, client_id, challenge, client_nonce, ya, scalar=None):
+    def __init__(self, code, pin, client_id, challenge, client_nonce, ya, scalar=None,
+                 credential="pairing"):
         scalar = scalar if scalar is not None else sample_scalar()
-        self.ci = channel_identifier(pin, client_id)
+        self.ci = channel_identifier(pin, client_id, credential)
         self.sid = challenge + client_nonce
         self.share = encode(_mul(scalar, generator(code.encode(), self.ci, self.sid)))
         k = scalar_mult_vfy(scalar, ya)
@@ -251,18 +255,36 @@ def check_vectors():
                       ya_share, scalar=int.from_bytes(h(i["yb"]), "little"))
     assert wrong.share.hex() == run["negative"][0]["Yb"] and wrong.confirmation().hex() == run["negative"][0]["T_client"]
 
+    setup = run["setup"]
+    assert setup["credential"] == "setup" and setup["labels"]["channel"] == SETUP_CHANNEL_LABEL.decode()
+    i, o = setup["inputs"], setup["outputs"]
+    card = Responder(i["code"], i["spki_pin"], i["client_id"], h(i["challenge"]), h(i["client_nonce"]),
+                     h(o["Ya"]), scalar=int.from_bytes(h(i["yb"]), "little"), credential="setup")
+    assert card.ci.hex() == o["CI"], "setup CI"
+    assert encode(generator(i["code"].encode(), card.ci, card.sid)).hex() == o["g"], "setup generator"
+    assert card.share.hex() == o["Yb"] and card.isk.hex() == o["ISK"], "setup Yb, ISK"
+    assert card.confirmation().hex() == o["T_client"] and card.verify_server(o["T_server"]), "setup tags"
+    mislabelled = Responder(i["code"], i["spki_pin"], i["client_id"], h(i["challenge"]), h(i["client_nonce"]),
+                            h(o["Ya"]), scalar=int.from_bytes(h(i["yb"]), "little"))
+    assert mislabelled.ci.hex() == setup["negative"][0]["CI"], "the pairing label's CI"
+    assert mislabelled.confirmation().hex() == setup["negative"][0]["T_client"], "the pairing label's tag"
 
-def pair(call, code, pin, client_id, device_name=None, client_type="gotg"):
+
+def pair(call, code, pin, client_id, device_name=None, client_type="gotg", credential="pairing"):
     """Pair through `call(method, path, body, expected=...)` as a phone does; returns the
-    verify response after checking the Pond's proof, or raises."""
+    verify response after checking the Pond's proof, or raises. `credential="setup"` runs the
+    printed card's code; a phone omits the field for an ordinary pairing code, and so does this."""
     nonce = os.urandom(32)
-    challenge = call("POST", "/handshake/pake/init", {
+    init = {
         "client_id": client_id, "client_type": client_type, "client_version": "live-check",
         "channel_binding": pin, "client_nonce": base64.b64encode(nonce).decode(),
-    })
+    }
+    if credential != "pairing":
+        init["credential"] = credential
+    challenge = call("POST", "/handshake/pake/init", init)
     assert challenge["suite"] == SUITE, challenge
     phone = Responder(code, pin, client_id, base64.b64decode(challenge["challenge"]), nonce,
-                      base64.b64decode(challenge["share"]))
+                      base64.b64decode(challenge["share"]), credential=credential)
     result = call("POST", "/handshake/pake/verify", {
         "challenge_id": challenge["challenge_id"], "device_name": device_name or client_id,
         "share": base64.b64encode(phone.share).decode(), "confirm": phone.confirmation().hex(),

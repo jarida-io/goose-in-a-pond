@@ -588,3 +588,51 @@ fn recipes_remove_nonexistent_name_exits_nonzero() {
         .failure()
         .stderr(predicate::str::contains("not found"));
 }
+
+// ── setup-code ────────────────────────────────────────────────────────────────
+
+#[test]
+fn setup_code_status_never_makes_a_code() {
+    let tmp = TempDir::new().unwrap();
+    pond(&tmp)
+        .args(["setup-code", "--status"])
+        .assert()
+        .success()
+        .stdout("missing\n");
+    assert!(
+        !tmp.path().join("setup").exists(),
+        "--status is read-only: it made the setup directory"
+    );
+}
+
+#[test]
+fn setup_code_makes_the_card_once_and_status_then_reads_unclaimed() {
+    let tmp = TempDir::new().unwrap();
+    let first = pond(&tmp).args(["setup-code", "--json"]).output().unwrap();
+    assert!(first.status.success());
+    let card: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(card["code"].as_str().unwrap().len(), 11);
+    assert_eq!(card["claimed_at"], serde_json::Value::Null);
+
+    let again = pond(&tmp).args(["setup-code", "--json"]).output().unwrap();
+    let again: serde_json::Value = serde_json::from_slice(&again.stdout).unwrap();
+    assert_eq!(
+        again["code"], card["code"],
+        "a second run must not void the card"
+    );
+
+    pond(&tmp)
+        .args(["setup-code", "--status"])
+        .assert()
+        .success()
+        .stdout("unclaimed\n");
+}
+
+#[test]
+fn setup_code_status_takes_no_other_option() {
+    let tmp = TempDir::new().unwrap();
+    pond(&tmp)
+        .args(["setup-code", "--status", "--json"])
+        .assert()
+        .failure();
+}

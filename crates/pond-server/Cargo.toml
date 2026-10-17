@@ -171,6 +171,8 @@ pond-adapters-whisper = { path = "../../crates/pond-adapters-whisper" }
 # The SpeechDetector trait the composition root hands to the whisper adapter.
 pond-voice            = { path = "../../crates/pond-voice" }
 pond-adapters-kokoro = { path = "../../crates/pond-adapters-kokoro" }
+# The spoken pairing code's bundled clips play through it when no voice is installed.
+pond-audio-out = { path = "../pond-audio-out" }
 pond-audio = { path = "../pond-audio" }
 cpal = "0.15"
 pond-mcp-server    = { path = "../pond-mcp-server" }

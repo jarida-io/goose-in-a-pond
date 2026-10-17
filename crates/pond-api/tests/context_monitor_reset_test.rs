@@ -178,6 +178,8 @@ async fn make_app() -> (axum::Router, Arc<AppState>, tempfile::TempDir) {
         mesh_provider: Arc::new(tokio::sync::RwLock::new(None)),
         peer_capability_query: Arc::new(tokio::sync::RwLock::new(None)),
         mesh_rebuild: None,
+        setup_claims: None,
+        spoken_codes: Default::default(),
     });
     (
         build_router(state.clone(), std::path::PathBuf::from("pond-desktop/dist")),

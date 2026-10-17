@@ -216,6 +216,8 @@ async fn make_app_inner(with_secrets: bool) -> Harness {
         mesh_provider: Arc::new(tokio::sync::RwLock::new(None)),
         peer_capability_query: Arc::new(tokio::sync::RwLock::new(None)),
         mesh_rebuild: None,
+        setup_claims: None,
+        spoken_codes: Default::default(),
     });
 
     Harness {

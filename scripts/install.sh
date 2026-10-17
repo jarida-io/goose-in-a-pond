@@ -56,6 +56,11 @@ source "${SCRIPT_DIR}/lib/install-build.sh"
 source "${SCRIPT_DIR}/lib/install-models.sh"
 source "${SCRIPT_DIR}/lib/install-systemd.sh"
 source "${SCRIPT_DIR}/lib/install-desktop.sh"
+source "${SCRIPT_DIR}/lib/setup-code.sh"
+# setup-code.sh talks through giap.sh's names for these.
+ok()   { success "$@"; }
+note() { log "$@"; }
+info() { log "$@"; }
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
 MODE=""
@@ -106,6 +111,15 @@ build_server
 
 # ── Step 5: Server setup (DB + Whisper + Piper + ONNX) ──────────────────────
 run_pond_setup
+
+# The printed setup card a phone scans to set this pond up; made once, never replaced.
+SETUP_BIN="${REPO_DIR}/target/release/pond-server"
+[ "$MODE" = "dev" ] && SETUP_BIN="${REPO_DIR}/target/debug/pond-server"
+if [ -x "$SETUP_BIN" ]; then
+  setup_code_install_card "$SETUP_BIN" "$DATA_DIR" || true
+else
+  warn "no pond-server binary yet, so no setup card: run pond-server setup-code --card \"$DATA_DIR/setup/card.svg\" once it is built"
+fi
 
 # ── Step 6: LLM model ───────────────────────────────────────────────────────
 if [ "$MODE" != "minimal" ]; then

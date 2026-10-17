@@ -9,6 +9,11 @@
 //! it. Each code allows [`PAKE_FAILURE_BUDGET`] confirmation attempts; the attempt that spends
 //! the budget retires the code, so an attacker gets at most that many online guesses per code
 //! whatever addresses it holds.
+//!
+//! A phone holding the pond's printed setup code runs the same exchange under its own channel
+//! label. That code is guarded by [`SetupClaimService`] (a guess throttle, and a claim latch read
+//! live) rather than by the pairing-code budget, and it never touches `pairing_codes`. Every
+//! completed pairing, by either secret, latches the claim.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -24,12 +29,16 @@ use std::sync::{Arc, Mutex};
 use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
 
+use pond_core::network::domain::claim::ClaimRefusal;
+use pond_core::network::domain::credential::Credential;
+use pond_core::network::services::setup_claim::SetupClaimService;
 use pond_core::security::ports::handshake::{
     ChallengeResponse, Handshake, HandshakeRequest, HandshakeResponse, InitRequest, PairingCode,
     PakeChallenge, PakeInitRequest, PakeRefusal, PakeVerifyRequest, RefreshRequest, TokenCaller,
     VerifyRequest,
 };
 use pond_core::user_data::ports::device_attribution::checked_profile_id;
+use pond_core::user_data::services::member_attribution::sole_member;
 
 use crate::pairing_cpace::{self, CpaceError, Initiator};
 
@@ -58,6 +67,8 @@ pub struct SqliteHandshakeAdapter {
     capabilities: Vec<String>,
     spki_pin: Option<String>,
     pake: Mutex<PakeState>,
+    /// `None` refuses every setup-code run as `setup_code_unavailable`, and latches nothing.
+    setup_claims: Option<Arc<SetupClaimService>>,
 }
 
 /// CPace state between `init_pake` and `verify_pake`. In memory only: a restart forgets every
@@ -73,10 +84,27 @@ struct PakeState {
 /// One CPace run the Pond has started.
 struct PendingPake {
     initiator: Initiator,
-    code_hash: String,
+    secret: RunSecret,
     client_id: String,
     client_type: String,
     expires_at: DateTime<Utc>,
+}
+
+/// The password a run committed to, which decides the limits it is held to.
+enum RunSecret {
+    /// A pairing code, by hash: its failure budget and its consumption apply.
+    Pairing { code_hash: String },
+    /// The printed setup code: its guess throttle was charged when the run started.
+    Setup,
+}
+
+impl RunSecret {
+    fn credential(&self) -> Credential {
+        match self {
+            Self::Pairing { .. } => Credential::Pairing,
+            Self::Setup => Credential::Setup,
+        }
+    }
 }
 
 impl SqliteHandshakeAdapter {
@@ -92,6 +120,7 @@ impl SqliteHandshakeAdapter {
             hostname,
             spki_pin,
             pake: Mutex::new(PakeState::default()),
+            setup_claims: None,
             server_version: env!("CARGO_PKG_VERSION").to_string(),
             capabilities: vec![
                 "chat".to_string(),
@@ -99,6 +128,13 @@ impl SqliteHandshakeAdapter {
                 "settings".to_string(),
             ],
         }
+    }
+
+    /// Accept the printed setup code while the pond is unclaimed, and latch the claim on every
+    /// completed pairing.
+    pub fn with_setup_claims(mut self, claims: Arc<SetupClaimService>) -> Self {
+        self.setup_claims = Some(claims);
+        self
     }
 
     pub fn into_dyn(self) -> Arc<dyn Handshake> {
@@ -280,6 +316,166 @@ impl SqliteHandshakeAdapter {
         Ok(row.map(|(profile,)| profile))
     }
 
+    /// Any first pairing claims the pond. Best effort: a broken setup directory must not take
+    /// pairing down with it, and a pond with no setup record has nothing to latch.
+    async fn latch_setup_claim(&self, method: &'static str) {
+        let Some(claims) = self.setup_claims.as_ref() else {
+            return;
+        };
+        if let Err(error) = claims.latch_claim(Self::now()).await {
+            tracing::warn!(
+                kind = "setup_claim_latch_failed",
+                %error,
+                method,
+                "a device paired, but the setup code's claim could not be recorded; \
+                 the printed card may still be accepted"
+            );
+        }
+    }
+
+    /// Write or refresh the device row a pairing registers. Logged, not fatal: the proof was
+    /// valid, but the attribution rides on this statement.
+    async fn register_device(
+        &self,
+        device_id: &str,
+        device_name: &str,
+        client_type: &str,
+        profile_id: Option<&str>,
+        at: &str,
+    ) {
+        // On conflict the new attribution wins, so an ordinary code releases an old one:
+        // `device_id` is self-reported, and inheriting the owner would allow impersonation.
+        let registered = sqlx::query(
+            "INSERT INTO devices (id, name, hostname, device_type, ip_address,
+                capabilities, last_seen, is_online, created_at, updated_at, profile_id)
+             VALUES (?, ?, '', ?, '', '[]', ?, 1, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+               name = excluded.name, device_type = excluded.device_type,
+               last_seen = excluded.last_seen,
+               is_online = 1, updated_at = excluded.updated_at,
+               profile_id = excluded.profile_id",
+        )
+        .bind(device_id)
+        .bind(device_name)
+        .bind(client_type)
+        .bind(at)
+        .bind(at)
+        .bind(at)
+        .bind(profile_id)
+        .execute(&self.pool)
+        .await;
+        if let Err(e) = &registered {
+            tracing::warn!(
+                error = %e,
+                device = %device_id,
+                "device row not written during pairing; the device is unattributed"
+            );
+        }
+    }
+
+    fn device_name_for(client_id: &str, device_name: Option<String>) -> String {
+        device_name
+            .unwrap_or_else(|| format!("gotg-{}", client_id.chars().take(8).collect::<String>()))
+    }
+
+    /// The household's only member, if it has exactly one. A failed read narrows to nobody: a
+    /// wrong owner would ride on every turn.
+    async fn sole_household_member(&self) -> Option<String> {
+        match sqlx::query_scalar::<_, String>("SELECT id FROM profiles")
+            .fetch_all(&self.pool)
+            .await
+        {
+            Ok(ids) => sole_member(&ids),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not list household members; the claiming device is unattributed");
+                None
+            }
+        }
+    }
+
+    /// Register the claiming device and mint its tokens. Called only after the claim latched,
+    /// and it never touches `pairing_codes`: the setup code is not one.
+    async fn complete_setup_claim(
+        &self,
+        client_id: &str,
+        client_type: &str,
+        device_name: Option<String>,
+    ) -> Result<(String, String, DateTime<Utc>)> {
+        let at = Self::now().to_rfc3339();
+        let owner = self.sole_household_member().await;
+        let device_name = Self::device_name_for(client_id, device_name);
+        self.register_device(client_id, &device_name, client_type, owner.as_deref(), &at)
+            .await;
+        let (session, refresh, expires) = self
+            .issue_session_pair(client_id, client_type, client_id)
+            .await?;
+        tracing::info!(
+            client_id = %client_id,
+            device = %device_name,
+            method = "cpace-setup",
+            attributed = owner.is_some(),
+            expires_at = %expires.to_rfc3339(),
+            "device paired"
+        );
+        Ok((session, refresh, expires))
+    }
+
+    /// The rest of a setup run once its run is burned and live: confirm, latch, then mint.
+    async fn verify_setup_run(
+        &self,
+        initiator: Initiator,
+        request: PakeVerifyRequest,
+        client_id: String,
+        client_type: String,
+    ) -> Result<HandshakeResponse> {
+        let share = B64.decode(request.share.as_bytes()).unwrap_or_default();
+        let confirm = hex_decode(&request.confirm).unwrap_or_default();
+        let server_tag = match initiator.finish(&share, &confirm) {
+            Ok(tag) => tag,
+            Err(error) => {
+                let reason = match error {
+                    CpaceError::InvalidShare => "invalid_share",
+                    CpaceError::InvalidConfirmation => "invalid_confirmation",
+                };
+                // The throttle was charged when the run started; nothing else is spent here.
+                tracing::warn!(reason, "setup code CPace attempt failed");
+                return Ok(self.reject(reason));
+            }
+        };
+        let Some(claims) = self.setup_claims.as_ref() else {
+            return Ok(self.reject(PakeRefusal::SetupCodeUnavailable.code()));
+        };
+        // Latched before any token exists, so a crash leaves a claimed pond, never a paired phone
+        // beside a live card.
+        if let Err(error) = claims.record_claim(Self::now()).await {
+            if error.downcast_ref::<ClaimRefusal>().is_some() {
+                tracing::warn!(
+                    client_id = %client_id,
+                    "setup pairing refused: another device claimed this pond first"
+                );
+            } else {
+                tracing::warn!(
+                    %error,
+                    "setup pairing refused: the claim could not be recorded"
+                );
+            }
+            return Ok(self.reject(PakeRefusal::SetupCodeUnavailable.code()));
+        }
+        let (session, refresh, expires) = self
+            .complete_setup_claim(&client_id, &client_type, request.device_name)
+            .await?;
+        Ok(HandshakeResponse {
+            server_proof: Some(hex_lower(&server_tag)),
+            ..self.response(
+                true,
+                Some(session),
+                Some(refresh),
+                Some(expires.to_rfc3339()),
+                None,
+            )
+        })
+    }
+
     /// Consume the code, register the device and mint tokens, once a proof has verified.
     /// `None` when the code was consumed by another pairing, retired or expired first. Only the code attributes the
     /// device; nothing the client sent is consulted (see `issue_pairing_code_for`).
@@ -318,39 +514,18 @@ impl SqliteHandshakeAdapter {
             );
             return Ok(None);
         }
+        self.latch_setup_claim(method).await;
 
         let device_id = client_id.to_string();
-        let device_name = device_name
-            .unwrap_or_else(|| format!("gotg-{}", client_id.chars().take(8).collect::<String>()));
-        // On conflict the code's profile wins, so an ordinary code releases an old attribution:
-        // `device_id` is self-reported, and inheriting the owner would allow impersonation.
-        let registered = sqlx::query(
-            "INSERT INTO devices (id, name, hostname, device_type, ip_address,
-                capabilities, last_seen, is_online, created_at, updated_at, profile_id)
-             VALUES (?, ?, '', ?, '', '[]', ?, 1, ?, ?, ?)
-             ON CONFLICT(id) DO UPDATE SET
-               name = excluded.name, device_type = excluded.device_type,
-               last_seen = excluded.last_seen,
-               is_online = 1, updated_at = excluded.updated_at,
-               profile_id = excluded.profile_id",
+        let device_name = Self::device_name_for(client_id, device_name);
+        self.register_device(
+            &device_id,
+            &device_name,
+            client_type,
+            code_profile.as_deref(),
+            &at,
         )
-        .bind(&device_id)
-        .bind(&device_name)
-        .bind(client_type)
-        .bind(&at)
-        .bind(&at)
-        .bind(&at)
-        .bind(&code_profile)
-        .execute(&self.pool)
         .await;
-        // Logged, not fatal: the proof was valid, but the attribution rides on this statement.
-        if let Err(e) = &registered {
-            tracing::warn!(
-                error = %e,
-                device = %device_id,
-                "device row not written during pairing; the device is unattributed"
-            );
-        }
 
         let (session, refresh, expires) = self
             .issue_session_pair(client_id, client_type, &device_id)
@@ -383,6 +558,7 @@ impl Handshake for SqliteHandshakeAdapter {
             .execute(&self.pool)
             .await?;
         ISSUED_CODE_CACHE.write().await.remove(&matched);
+        self.latch_setup_claim("legacy").await;
 
         // Writes no `devices` row, so a legacy pair is always unattributed; a member-bound code
         // consumed here is burned with its attribution discarded (the operator re-issues).
@@ -615,28 +791,58 @@ impl Handshake for SqliteHandshakeAdapter {
             _ => return Ok(Err(PakeRefusal::InvalidClientNonce)),
         };
 
-        // Commit to the newest active code: the one the dashboard and CLI show.
-        let newest: Option<(String,)> = sqlx::query_as(
-            "SELECT code_hash FROM pairing_codes
-             WHERE consumed_at IS NULL AND expires_at > ?
-             ORDER BY created_at DESC LIMIT 1",
-        )
-        .bind(Self::now().to_rfc3339())
-        .fetch_optional(&self.pool)
-        .await?;
-        let Some((code_hash,)) = newest else {
-            return Ok(Err(PakeRefusal::NoActivePairingCode));
+        let (secret, password, ci) = match request.credential {
+            Credential::Pairing => {
+                // Commit to the newest active code: the one the dashboard and CLI show.
+                let newest: Option<(String,)> = sqlx::query_as(
+                    "SELECT code_hash FROM pairing_codes
+                     WHERE consumed_at IS NULL AND expires_at > ?
+                     ORDER BY created_at DESC LIMIT 1",
+                )
+                .bind(Self::now().to_rfc3339())
+                .fetch_optional(&self.pool)
+                .await?;
+                let Some((code_hash,)) = newest else {
+                    return Ok(Err(PakeRefusal::NoActivePairingCode));
+                };
+                let Some(code) = ISSUED_CODE_CACHE.read().await.get(&code_hash).cloned() else {
+                    // Issued by an earlier process: its plaintext is gone, so nobody can pair with it.
+                    return Ok(Err(PakeRefusal::NoActivePairingCode));
+                };
+                (
+                    RunSecret::Pairing { code_hash },
+                    zeroize::Zeroizing::new(code),
+                    pairing_cpace::channel_identifier(pin, &request.client_id),
+                )
+            }
+            Credential::Setup => {
+                let Some(claims) = self.setup_claims.as_ref() else {
+                    return Ok(Err(PakeRefusal::SetupCodeUnavailable));
+                };
+                let code = match claims.admit_setup_attempt(std::time::Instant::now()).await {
+                    Ok(code) => code,
+                    Err(ClaimRefusal::SetupCodeUnavailable) => {
+                        return Ok(Err(PakeRefusal::SetupCodeUnavailable))
+                    }
+                    Err(ClaimRefusal::SetupCodeCooling { retry_after }) => {
+                        tracing::warn!(
+                            retry_after_secs = retry_after.as_secs_ceil(),
+                            "setup code refused: too many wrong attempts, cooling down"
+                        );
+                        return Ok(Err(PakeRefusal::SetupCodeCooling { retry_after }));
+                    }
+                };
+                (
+                    RunSecret::Setup,
+                    zeroize::Zeroizing::new(code.digits().to_string()),
+                    pairing_cpace::setup_channel_identifier(pin, &request.client_id),
+                )
+            }
         };
-        let Some(code) = ISSUED_CODE_CACHE.read().await.get(&code_hash).cloned() else {
-            // Issued by an earlier process: its plaintext is gone, so nobody can pair with it.
-            return Ok(Err(PakeRefusal::NoActivePairingCode));
-        };
-        let code = zeroize::Zeroizing::new(code);
 
         let challenge = Self::random_bytes(pairing_cpace::SID_PART_LEN);
-        let ci = pairing_cpace::channel_identifier(pin, &request.client_id);
         let initiator = Initiator::start(
-            code.as_bytes(),
+            password.as_bytes(),
             &ci,
             pairing_cpace::session_id(&challenge, &nonce),
         );
@@ -658,7 +864,7 @@ impl Handshake for SqliteHandshakeAdapter {
                 id.clone(),
                 PendingPake {
                     initiator,
-                    code_hash,
+                    secret,
                     client_id: request.client_id,
                     client_type: request.client_type,
                     expires_at: expires,
@@ -682,10 +888,25 @@ impl Handshake for SqliteHandshakeAdapter {
         if run.expires_at < Self::now() {
             return Ok(self.reject("challenge_expired"));
         }
+        let PendingPake {
+            initiator,
+            secret,
+            client_id,
+            client_type,
+            ..
+        } = run;
+        let code_hash = match secret {
+            RunSecret::Pairing { code_hash } => code_hash,
+            RunSecret::Setup => {
+                return self
+                    .verify_setup_run(initiator, request, client_id, client_type)
+                    .await
+            }
+        };
 
         // 2. The code the run committed to must still be live: not consumed by another device,
         //    replaced by a newer code, expired, or retired by its failure budget.
-        if self.active_code_profile(&run.code_hash).await?.is_none() {
+        if self.active_code_profile(&code_hash).await?.is_none() {
             return Ok(self.reject("code_retired"));
         }
 
@@ -693,7 +914,7 @@ impl Handshake for SqliteHandshakeAdapter {
         //    verifies cannot check more tags than the budget allows.
         let attempt = {
             let mut state = self.pake_state();
-            let spent = state.attempts.entry(run.code_hash.clone()).or_insert(0);
+            let spent = state.attempts.entry(code_hash.clone()).or_insert(0);
             if *spent >= PAKE_FAILURE_BUDGET {
                 None
             } else {
@@ -708,13 +929,6 @@ impl Handshake for SqliteHandshakeAdapter {
         // 4. Check `Yb` and `T_client`. Undecodable input fails the same checks as a bad value.
         let share = B64.decode(request.share.as_bytes()).unwrap_or_default();
         let confirm = hex_decode(&request.confirm).unwrap_or_default();
-        let PendingPake {
-            initiator,
-            code_hash,
-            client_id,
-            client_type,
-            ..
-        } = run;
         let server_tag = match initiator.finish(&share, &confirm) {
             Ok(tag) => tag,
             Err(error) => {
@@ -763,6 +977,13 @@ impl Handshake for SqliteHandshakeAdapter {
                 None,
             )
         })
+    }
+
+    async fn pake_credential(&self, challenge_id: &str) -> Option<Credential> {
+        self.pake_state()
+            .pending
+            .get(challenge_id)
+            .map(|run| run.secret.credential())
     }
 
     async fn refresh(&self, request: RefreshRequest) -> Result<HandshakeResponse> {
@@ -995,6 +1216,7 @@ mod tests {
             client_version: "1.0".into(),
             channel_binding: pin.into(),
             client_nonce: B64.encode(nonce),
+            credential: Credential::Pairing,
         }
     }
 
@@ -1960,5 +2182,431 @@ mod tests {
             .unwrap();
         assert!(resp.accepted, "{:?}", resp.rejection_reason);
         assert_eq!(resp.server_proof, None);
+    }
+
+    // ---- The printed setup code ------------------------------------------------------------
+
+    use crate::file_setup_code_store::FileSetupCodeStore;
+    use pond_core::network::ports::setup_code_store::SetupCodeStore;
+
+    /// A pond with a setup record on disk and the claim service wired, as startup builds it.
+    struct SetupPond {
+        hs: SqliteHandshakeAdapter,
+        store: Arc<FileSetupCodeStore>,
+        code: String,
+        pool: Pool<Sqlite>,
+        dir: tempfile::TempDir,
+    }
+
+    async fn setup_pond(members: &[(&str, &str)]) -> SetupPond {
+        let dir = tempdir().unwrap();
+        let db = Database::init(dir.path()).await.unwrap();
+        for (id, name) in members {
+            sqlx::query("INSERT INTO profiles (id, display_name) VALUES (?, ?)")
+                .bind(id)
+                .bind(name)
+                .execute(&db.system)
+                .await
+                .unwrap();
+        }
+        let store = Arc::new(FileSetupCodeStore::new(dir.path()));
+        let record = store.create_if_missing().await.unwrap();
+        let hs = SqliteHandshakeAdapter::new(db.system.clone(), Some(OURS.to_string()))
+            .with_setup_claims(Arc::new(SetupClaimService::new(store.clone())));
+        SetupPond {
+            hs,
+            store,
+            code: record.code.digits().to_string(),
+            pool: db.system.clone(),
+            dir,
+        }
+    }
+
+    fn setup_init_request(client_id: &str, nonce: &[u8]) -> PakeInitRequest {
+        PakeInitRequest {
+            credential: Credential::Setup,
+            ..pake_init_request(client_id, OURS, nonce)
+        }
+    }
+
+    /// The phone's answer under an explicit channel identifier, so a test can pick the label.
+    fn answer_under(
+        challenge: &PakeChallenge,
+        password: &str,
+        ci: &[u8],
+        client_id: &str,
+        nonce: &[u8],
+    ) -> (pairing_cpace::Responder, PakeVerifyRequest) {
+        let phone = pairing_cpace::Responder::respond(
+            password.as_bytes(),
+            ci,
+            &pairing_cpace::session_id(&B64.decode(&challenge.challenge).unwrap(), nonce),
+            &B64.decode(&challenge.share).unwrap(),
+        )
+        .unwrap();
+        let request = PakeVerifyRequest {
+            challenge_id: challenge.challenge_id.clone(),
+            share: B64.encode(phone.share()),
+            confirm: hex_lower(&phone.confirmation()),
+            device_name: Some(format!("{client_id} phone")),
+        };
+        (phone, request)
+    }
+
+    /// A whole setup run with `password`, the way goose-on-the-go runs one.
+    async fn claim_with(
+        hs: &SqliteHandshakeAdapter,
+        password: &str,
+        client_id: &str,
+    ) -> (HandshakeResponse, pairing_cpace::Responder) {
+        let nonce = [9u8; 32];
+        let challenge = hs
+            .init_pake(setup_init_request(client_id, &nonce))
+            .await
+            .unwrap()
+            .expect("an unclaimed pond starts a setup run");
+        let ci = pairing_cpace::setup_channel_identifier(OURS, client_id);
+        let (phone, request) = answer_under(&challenge, password, &ci, client_id, &nonce);
+        (hs.verify_pake(request).await.unwrap(), phone)
+    }
+
+    async fn count(pool: &Pool<Sqlite>, table: &str) -> i64 {
+        sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_phone_claims_an_unclaimed_pond_with_its_setup_code() {
+        let pond = setup_pond(&[]).await;
+        let (resp, phone) = claim_with(&pond.hs, &pond.code, "phone-1").await;
+
+        assert!(resp.accepted, "{:?}", resp.rejection_reason);
+        let proof = hex_decode(resp.server_proof.as_deref().unwrap()).unwrap();
+        assert!(
+            phone.verify_server(&proof),
+            "the phone must be able to check the pond"
+        );
+        assert!(pond
+            .hs
+            .validate_token(resp.session_token.as_deref().unwrap())
+            .await
+            .unwrap());
+        assert!(
+            pond.store
+                .load()
+                .await
+                .unwrap()
+                .unwrap()
+                .claimed_at
+                .is_some(),
+            "the claim is latched by the time the tokens exist"
+        );
+        let (name,): (String,) = sqlx::query_as("SELECT name FROM devices WHERE id = 'phone-1'")
+            .fetch_one(&pond.pool)
+            .await
+            .unwrap();
+        assert_eq!(name, "phone-1 phone");
+        assert_eq!(
+            count(&pond.pool, "pairing_codes").await,
+            0,
+            "the setup code is not a pairing code"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_household_of_one_owns_the_claiming_phone_and_a_larger_one_does_not() {
+        let solo = setup_pond(&[("liz", "Liz")]).await;
+        assert!(claim_with(&solo.hs, &solo.code, "phone-1").await.0.accepted);
+        let attribution = SqliteDeviceAttribution::new(solo.pool.clone());
+        assert_eq!(
+            attribution.device_profile("phone-1").await.unwrap(),
+            Some("liz".to_string())
+        );
+
+        let pair_of = setup_pond(&[("liz", "Liz"), ("jerry", "Jerry")]).await;
+        assert!(
+            claim_with(&pair_of.hs, &pair_of.code, "phone-2")
+                .await
+                .0
+                .accepted
+        );
+        let attribution = SqliteDeviceAttribution::new(pair_of.pool.clone());
+        assert_eq!(attribution.device_profile("phone-2").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_claimed_pond_refuses_its_setup_code_at_init() {
+        let pond = setup_pond(&[]).await;
+        pond.store.mark_claimed(Utc::now()).await.unwrap();
+        let refusal = pond
+            .hs
+            .init_pake(setup_init_request("phone-1", &[1u8; 32]))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(refusal, PakeRefusal::SetupCodeUnavailable);
+        assert_eq!(refusal.code(), "setup_code_unavailable");
+    }
+
+    #[tokio::test]
+    async fn a_pond_with_no_record_or_no_claim_service_refuses_the_setup_code() {
+        let unwired = fresh().await;
+        assert_eq!(
+            unwired
+                .init_pake(setup_init_request("phone-1", &[1u8; 32]))
+                .await
+                .unwrap()
+                .unwrap_err(),
+            PakeRefusal::SetupCodeUnavailable
+        );
+
+        let dir = tempdir().unwrap();
+        let db = Database::init(dir.path()).await.unwrap();
+        let empty = Arc::new(FileSetupCodeStore::new(dir.path()));
+        let hs = SqliteHandshakeAdapter::new(db.system.clone(), Some(OURS.to_string()))
+            .with_setup_claims(Arc::new(SetupClaimService::new(empty)));
+        assert_eq!(
+            hs.init_pake(setup_init_request("phone-1", &[1u8; 32]))
+                .await
+                .unwrap()
+                .unwrap_err(),
+            PakeRefusal::SetupCodeUnavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn the_sixth_setup_attempt_cools_and_says_how_long_to_wait() {
+        let pond = setup_pond(&[]).await;
+        for attempt in 0..pond_core::network::services::setup_guess_throttle::FREE_SETUP_FAILURES {
+            assert!(
+                pond.hs
+                    .init_pake(setup_init_request("phone-1", &[attempt as u8; 32]))
+                    .await
+                    .unwrap()
+                    .is_ok(),
+                "attempt {attempt} is free"
+            );
+        }
+        let refusal = pond
+            .hs
+            .init_pake(setup_init_request("phone-1", &[7u8; 32]))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(refusal.code(), "setup_code_cooling");
+        let wait = refusal
+            .retry_after()
+            .expect("cooling says how long")
+            .as_secs_ceil();
+        assert!((1..=30).contains(&wait), "waited {wait} s");
+    }
+
+    #[tokio::test]
+    async fn a_pond_claimed_between_init_and_verify_mints_nothing() {
+        let pond = setup_pond(&[]).await;
+        let nonce = [3u8; 32];
+        let challenge = pond
+            .hs
+            .init_pake(setup_init_request("late-phone", &nonce))
+            .await
+            .unwrap()
+            .unwrap();
+        // Another device claims while this phone is still answering.
+        pond.store.mark_claimed(Utc::now()).await.unwrap();
+
+        let ci = pairing_cpace::setup_channel_identifier(OURS, "late-phone");
+        let (_, request) = answer_under(&challenge, &pond.code, &ci, "late-phone", &nonce);
+        let resp = pond.hs.verify_pake(request).await.unwrap();
+        assert!(!resp.accepted);
+        assert_eq!(
+            resp.rejection_reason.as_deref(),
+            Some("setup_code_unavailable")
+        );
+        assert!(resp.session_token.is_none() && resp.refresh_token.is_none());
+        assert!(resp.server_proof.is_none(), "no proof without a claim");
+        assert_eq!(count(&pond.pool, "session_tokens").await, 0);
+        assert_eq!(count(&pond.pool, "devices").await, 0);
+    }
+
+    #[tokio::test]
+    async fn two_phones_racing_the_card_leave_exactly_one_paired() {
+        let pond = setup_pond(&[]).await;
+        let mut runs = Vec::new();
+        for (client, nonce) in [("phone-a", [1u8; 32]), ("phone-b", [2u8; 32])] {
+            let challenge = pond
+                .hs
+                .init_pake(setup_init_request(client, &nonce))
+                .await
+                .unwrap()
+                .unwrap();
+            let ci = pairing_cpace::setup_channel_identifier(OURS, client);
+            runs.push(answer_under(&challenge, &pond.code, &ci, client, &nonce).1);
+        }
+        let second = runs.pop().unwrap();
+        let first = runs.pop().unwrap();
+        let (a, b) = tokio::join!(pond.hs.verify_pake(first), pond.hs.verify_pake(second));
+        let outcomes = [a.unwrap(), b.unwrap()];
+        assert_eq!(outcomes.iter().filter(|r| r.accepted).count(), 1);
+        let loser = outcomes.iter().find(|r| !r.accepted).unwrap();
+        assert_eq!(
+            loser.rejection_reason.as_deref(),
+            Some("setup_code_unavailable")
+        );
+        assert_eq!(count(&pond.pool, "devices").await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_phone_answering_under_the_pairing_label_fails_a_setup_run() {
+        let pond = setup_pond(&[]).await;
+        let nonce = [4u8; 32];
+        let challenge = pond
+            .hs
+            .init_pake(setup_init_request("phone-1", &nonce))
+            .await
+            .unwrap()
+            .unwrap();
+        let pairing_ci = pairing_cpace::channel_identifier(OURS, "phone-1");
+        let (_, request) = answer_under(&challenge, &pond.code, &pairing_ci, "phone-1", &nonce);
+        let resp = pond.hs.verify_pake(request).await.unwrap();
+        assert!(!resp.accepted);
+        assert_eq!(
+            resp.rejection_reason.as_deref(),
+            Some("invalid_confirmation")
+        );
+        assert_eq!(
+            pond.store.load().await.unwrap().unwrap().claimed_at,
+            None,
+            "a failed run must not claim"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_setup_run_leaves_pairing_codes_and_their_budgets_untouched() {
+        let pond = setup_pond(&[]).await;
+        let pc = pond.hs.issue_pairing_code().await.unwrap();
+        let code_hash = SqliteHandshakeAdapter::sha256_hex(pc.code.as_bytes());
+
+        for attempt in 0..pond_core::network::services::setup_guess_throttle::FREE_SETUP_FAILURES {
+            let (resp, _) = claim_with(&pond.hs, "00000000000", "guesser").await;
+            assert!(!resp.accepted);
+            assert_eq!(
+                resp.rejection_reason.as_deref(),
+                Some("invalid_confirmation"),
+                "attempt {attempt}: a setup run never answers code_retired"
+            );
+        }
+        assert_eq!(pond.hs.pake_state().attempts.get(&code_hash), None);
+        assert!(pond
+            .hs
+            .active_code_profile(&code_hash)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(pair(&pond.hs, &pc.code, "phone-1").await.accepted);
+    }
+
+    #[tokio::test]
+    async fn the_pond_remembers_which_secret_each_waiting_run_holds() {
+        let pond = setup_pond(&[]).await;
+        pond.hs.issue_pairing_code().await.unwrap();
+        let setup = pond
+            .hs
+            .init_pake(setup_init_request("phone-1", &[1u8; 32]))
+            .await
+            .unwrap()
+            .unwrap();
+        let pairing = pake_init(&pond.hs, "phone-2", &[2u8; 32]).await;
+        assert_eq!(
+            pond.hs.pake_credential(&setup.challenge_id).await,
+            Some(Credential::Setup)
+        );
+        assert_eq!(
+            pond.hs.pake_credential(&pairing.challenge_id).await,
+            Some(Credential::Pairing)
+        );
+        assert_eq!(pond.hs.pake_credential("no-such-run").await, None);
+    }
+
+    #[tokio::test]
+    async fn every_pairing_code_path_latches_the_claim() {
+        let claimed = |pond: &SetupPond| {
+            let store = pond.store.clone();
+            async move { store.load().await.unwrap().unwrap().claimed_at.is_some() }
+        };
+
+        let cpace = setup_pond(&[]).await;
+        let pc = cpace.hs.issue_pairing_code().await.unwrap();
+        assert!(!claimed(&cpace).await);
+        assert!(pair(&cpace.hs, &pc.code, "phone").await.accepted);
+        assert!(claimed(&cpace).await, "CPace with a pairing code");
+        assert_eq!(
+            cpace
+                .hs
+                .init_pake(setup_init_request("phone-2", &[1u8; 32]))
+                .await
+                .unwrap()
+                .unwrap_err(),
+            PakeRefusal::SetupCodeUnavailable,
+            "once claimed, the card is refused"
+        );
+
+        let hmac = setup_pond(&[]).await;
+        let pc = hmac.hs.issue_pairing_code().await.unwrap();
+        let init = challenge_for(&hmac.hs, "dashboard").await;
+        let resp = hmac
+            .hs
+            .verify_handshake(VerifyRequest {
+                challenge_id: init.challenge_id,
+                mac: client_mac(&pc.code, &init.challenge, "dashboard"),
+                device_name: None,
+            })
+            .await
+            .unwrap();
+        assert!(resp.accepted);
+        assert!(claimed(&hmac).await, "loopback HMAC");
+
+        let legacy = setup_pond(&[]).await;
+        let pc = legacy.hs.issue_pairing_code().await.unwrap();
+        let resp = legacy
+            .hs
+            .handshake(HandshakeRequest {
+                client_id: "cli".into(),
+                client_type: "cli".into(),
+                client_version: "1.0".into(),
+                pairing_code: Some(pc.code),
+            })
+            .await
+            .unwrap();
+        assert!(resp.accepted);
+        assert!(claimed(&legacy).await, "legacy single step");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_broken_setup_directory_does_not_stop_a_pairing() {
+        use std::os::unix::fs::PermissionsExt;
+        let pond = setup_pond(&[]).await;
+        let setup_dir = pond
+            .dir
+            .path()
+            .join(crate::file_setup_code_store::SETUP_DIR);
+        std::fs::set_permissions(&setup_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let pc = pond.hs.issue_pairing_code().await.unwrap();
+        assert!(
+            pair(&pond.hs, &pc.code, "phone").await.accepted,
+            "a setup store that cannot be read must not take pairing down"
+        );
+        assert_eq!(
+            pond.hs
+                .init_pake(setup_init_request("phone-2", &[1u8; 32]))
+                .await
+                .unwrap()
+                .unwrap_err(),
+            PakeRefusal::SetupCodeUnavailable,
+            "and the card fails closed"
+        );
     }
 }

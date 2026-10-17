@@ -178,6 +178,8 @@ const PUBLIC_ROUTES: &[(Method, &str, Exposure)] = &[
     (Method::POST, "/handshake/revoke", Exposure::Authenticated),
     (Method::GET, "/handshake/pairing-code", Exposure::Always),
     (Method::POST, "/handshake/pairing-code", Exposure::Always),
+    // A headless pond's way to pair a phone: LAN-gated in the handler, never returns the code.
+    (Method::POST, "/handshake/spoken-code", Exposure::Always),
     // Onboarding: runs before any device pairs, and must not afterwards.
     (Method::POST, "/onboard", Exposure::UntilOnboarded),
     (Method::POST, "/onboard/complete", Exposure::UntilOnboarded),
@@ -588,6 +590,7 @@ mod tests {
             (Method::POST, "/api/v1/handshake/verify"),
             (Method::POST, "/api/v1/handshake/refresh"),
             (Method::GET, "/api/v1/handshake/pairing-code"),
+            (Method::POST, "/api/v1/handshake/spoken-code"),
             (Method::GET, "/api/v1/onboard/status"),
             (Method::GET, "/api/v1/oauth/callback"),
             (Method::POST, "/api/v1/oauth/refresh"),

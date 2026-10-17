@@ -171,8 +171,30 @@ $DATA_DIR/
 │   │   └── en_US-lessac-medium.onnx.json  TTS config
 │   ├── gguf/                   GGUF models (local inference)
 │   └── face/                   Face recognition ONNX models
-└── prompts/                    User prompt overrides
+├── prompts/                    User prompt overrides
+└── setup/                      0700: the printed setup card's code and claim
+    ├── setup.json              0600; never regenerated, keep a backup
+    └── card.svg                0600; the card install wrote, to print
 ```
+
+### The setup card
+
+Install makes the pond's setup code (`pond-server setup-code`) and writes a printable card to
+`$DATA_DIR/setup/card.svg`. **Print it and keep it with the pond.** A pond with no screen is set
+up by scanning the card with Goose On The Go, which claims the pond; the card is accepted only
+until the first device pairs. To print it again, or to see the code:
+
+```bash
+pond-server setup-code                      # the code, the pond id, a terminal QR
+pond-server setup-code --card card.svg      # the printable card again
+pond-server setup-code --status             # unclaimed, claimed or missing (doctor uses this)
+pond-server setup-code --rearm              # accept the same card again after a factory reset
+```
+
+For a pond imaged elsewhere, `bash scripts/giap.sh provision --host <pond> --key <file>` fetches
+its card over SSH and saves it on your machine as `./pond-<id>-setup-card.svg` (`--card` to choose
+the path). `giap.sh doctor` reports the claim state. A pond that already had paired phones when it
+got its first setup code is created claimed, so upgrading a pond in use opens nothing.
 
 ## LLM Provider Options
 

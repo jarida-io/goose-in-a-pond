@@ -42,6 +42,7 @@ All errors return JSON:
 | POST | /handshake | Loopback only (legacy) | GIAP ↔ GOTG authentication handshake |
 | POST | /handshake/pake/init | Public, direct LAN peers | Phone pairing (CPace), phase 1 |
 | POST | /handshake/pake/verify | Public, direct LAN peers | Phone pairing (CPace), phase 2 |
+| POST | /handshake/spoken-code | Public, direct LAN peers | Read a fresh pairing code aloud; never returns it |
 | POST | /handshake/init | Loopback only | Dashboard pairing (HMAC), phase 1 |
 | POST | /handshake/verify | Loopback only | Dashboard pairing (HMAC), phase 2 |
 | POST | /onboard | Public | Start first-run onboarding flow |
@@ -334,6 +335,14 @@ encodings in standard base64; tags are 64 bytes in lowercase hex.
 pin that listener's `/system/info` reports. It is checked only so a phone at the wrong Pond fails
 early: the run itself always uses the Pond's own pin.
 
+`credential` (2026-10-17) names the secret the phone holds: `"pairing"`, a six-digit pairing
+code, or `"setup"`, the eleven-digit code on the pond's printed setup card. Absent means
+`"pairing"`, so a phone that predates it pairs unchanged; goose-on-the-go omits it for a pairing
+code. Any other value, `null` included, is `400 {"error": "invalid_credential"}`. For `"setup"`
+the PRS is the eleven ASCII digits and CI is `lv_cat("goose-setup-cpace-v1", spki_pin, client_id)`,
+so the two secrets never share a generator; everything else, `verify` included, is the exchange
+above. The vector file's `setup` entry is one such run.
+
 **Response 200**: the Pond has committed to the newest active pairing code.
 ```json
 {
@@ -370,12 +379,16 @@ whatever the status:
 | init | 409 | `no_active_pairing_code` | No live code; show a new one |
 | init | 400 | `invalid_client_nonce` | `client_nonce` is not 32 bytes of base64 |
 | init | 503 | `pairing_busy` | Too many runs are waiting for their verify; retry shortly |
+| init | 400 | `invalid_credential` | `credential` is not `"setup"` or `"pairing"` |
+| init | 409 | `setup_code_unavailable` | `"setup"` on a pond that is claimed or has no setup code |
+| init | 429 | `setup_code_cooling` | Too many wrong setup codes; `retry_after` (whole seconds) and a `Retry-After` header say when |
 | verify | 429 | `pairing_busy` | The per-IP verify limit (10 a minute); `retry_after_secs` says when |
 | verify | 200 | `invalid_confirmation` | `T_client` is wrong, which means a wrong code (or a wrong pin) |
 | verify | 200 | `invalid_share` | `Yb` did not decode, or the shared point was the identity |
 | verify | 200 | `code_retired` | The code this run used was consumed, replaced, expired, or spent its 10 failed attempts; show a new code |
 | verify | 200 | `unknown_challenge` | No such run, or it was already used (each run gets one attempt) |
 | verify | 200 | `challenge_expired` | The run is older than 60 s |
+| verify | 200 | `setup_code_unavailable` | A setup run confirmed, but another device claimed the pond first; nothing was minted |
 
 The pairing rate bucket (30 a minute per IP, loopback exempt) answers `429` with
 `{"error": "Rate limit exceeded"}` and a `Retry-After` header before either handler runs, so a
@@ -383,6 +396,32 @@ client should treat any 429 as `pairing_busy`.
 
 Each code allows 10 confirmation attempts in all; the one that spends the budget answers
 `code_retired`, and the code stops working. Issuing a new code retires every older one.
+
+The setup code is never retired, since anyone in range could then destroy the card: wrong
+guesses slow it instead. Five attempts are free, then one per 30 s, doubling to one per 10 min,
+across every client, charged when `init` admits the run. A setup run never answers
+`code_retired` and does not touch any pairing code's budget. A confirmed setup run latches the
+claim before any token exists, then registers the device (bound to the household's only member
+if it has exactly one, otherwise to nobody). Every pairing with a pairing code, by CPace, the
+dashboard's HMAC exchange or the legacy single step, latches the claim too.
+
+### Spoken pairing code: POST /handshake/spoken-code (2026-10-17)
+
+No body, no token; direct LAN peers and loopback only (`403 pairing_requires_lan`), in the
+pairing rate bucket. The pond issues an ordinary pairing code, with the same default attribution
+as one issued on the host, and reads it aloud twice; the phone then pairs with it as above,
+omitting `credential`. **No answer ever carries the code.**
+
+| Status | Body | Meaning |
+|--------|------|---------|
+| 202 | `{"spoken": true, "expires_at": "<RFC3339>"}` | The pond has started reading the code; it lives 10 minutes |
+| 403 | `{"error": "spoken_codes_disabled"}` | The household turned `spoken_pairing_codes` off |
+| 429 | `{"error": "spoken_code_limited", "retry_after": <seconds>}` and `Retry-After` | At most one code per 30 s and ten an hour, whatever asks |
+| 503 | `{"error": "announcer_unavailable"}` | The pond has no speaker; no code was issued |
+
+The 202 comes as soon as reading starts, because a first utterance loads the voice. With no
+voice installed the pond plays clips compiled into the server. A failure while speaking is
+logged (`kind="spoken_code_failed"`); the phone can ask again after 30 s.
 
 ### Dashboard pairing: POST /handshake/init and /handshake/verify
 

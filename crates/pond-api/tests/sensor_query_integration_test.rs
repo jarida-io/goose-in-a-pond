@@ -81,6 +81,8 @@ async fn make_harness() -> Harness {
         mesh_provider: Arc::new(tokio::sync::RwLock::new(None)),
         peer_capability_query: Arc::new(tokio::sync::RwLock::new(None)),
         mesh_rebuild: None,
+        setup_claims: None,
+        spoken_codes: Default::default(),
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedding_provider: None,
         vector_index: None,

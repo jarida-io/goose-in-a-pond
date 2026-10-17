@@ -93,7 +93,8 @@ coordinator policy permits an approved phone to reach only its own Pond HTTPS po
   `/api/v1/system/info` publishes `https_port` and `tailnet_address` to anyone; the
   pin comes with the pairing code from `/handshake/pairing-code` (host only) and
   from mDNS.
-- mDNS `_pond._tcp.local.` publishes the HTTPS port and `scheme=https`.
+- mDNS `_pond._tcp.local.` publishes the HTTPS port and `scheme=https`, the pond's
+  setup `id`, and `setup=1` while it is unclaimed.
   Discovery supplies candidates; it never supplies trusted keys.
 
 To view the dashboard from another computer, use an authenticated SSH tunnel to
@@ -110,8 +111,13 @@ shared. The desktop app needs no link. See
 ## Pairing and identity
 
 Open the local dashboard or run `pond-server pairing`, which prints the QR in the
-terminal and works over SSH on a headless Pond. The dashboard, CLI,
-and startup output use the same payload contract:
+terminal. A headless Pond no longer needs SSH to pair a phone: the phone scans the
+Pond's printed setup card to claim it (`pond://setup?v=1&code=<11 digits>&id=<4 hex>`,
+from `pond-server setup-code`), or, once the Pond is claimed, asks it to read a
+pairing code aloud (`POST /handshake/spoken-code`) and types what it hears. Both run
+the same CPace exchange on the LAN; see
+[A pond with no screen](auth-network-posture.md#a-pond-with-no-screen-the-setup-code-and-the-spoken-code-2026-10-17).
+The dashboard, CLI, and startup output use the same payload contract for a pairing code:
 
 ```text
 pond://pair?v=2&scheme=https&host=<hostname>.local&port=<https-port>&code=<6-digits>&pin=<url-encoded-sha256/base64-SPKI>&ip=<LAN-address>&ts=<tailnet-address>
@@ -129,7 +135,8 @@ for tailnet or unclassifiable peers. A verify that omits `channel_binding` is
 refused from any peer but loopback with 403 `channel_binding_required`, without
 consuming the challenge; the legacy single-step `/handshake` answers 403
 `legacy_pairing_host_only` off the host. Knowing a code or starting a challenge at
-home does not permit completing it remotely. Code issuance remains loopback-only.
+home does not permit completing it remotely. Code issuance remains loopback-only, except
+that a direct LAN peer may have the Pond read a fresh code aloud.
 Existing sessions and refresh tokens continue to work remotely.
 
 Credentials and the pin are stored together in native SecureStore. Non-secret

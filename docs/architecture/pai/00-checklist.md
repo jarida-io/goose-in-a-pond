@@ -3328,3 +3328,56 @@ only; touches PAI-2 and PAI-3).**
   from every turn without its key. See `small-model-tools.md` §8.9.
 - **Not verified on the Orin.** Any pond that installed github, brave-search or slack before
   this keeps a plaintext copy of that key until its first start on the new build.
+
+**2026-10-16 — Headless setup and claiming (pond networking; touches PAI-2, not a PAI milestone).**
+
+- **Design.** [`pond-networking.md`](../pond-networking.md). A screenless pond is claimed with a
+  printed eleven-digit setup code (Luhn check digit) made at install or provision time, valid only
+  until the first device pairs, with the pond reading a short-lived pairing code aloud as the
+  fallback. Both feed the existing CPace exchange. BLE is the primary setup transport.
+- **What it does to PAI-2.** The setup code is a secret kept out of `Settings` and out of the
+  database (`<data>/setup/setup.json`, `0600`), and its `Debug` redacts. Its claim latch is read
+  live, like the onboarding state in §3.7, and factory reset re-arms it, so it is not a one-way
+  door. A later phase narrows the wizard's `UntilOnboarded` writes to loopback while unclaimed and
+  to a paired token once claimed, which closes the window where any LAN peer drives a fresh pond's
+  wizard. The spoken code is a new issuance route that never returns the code; whether presence in
+  earshot should count on a claimed pond is a setting.
+- **Invariants.** No egress, no prompt or KV change, no `Settings` field, no migration in P1.
+
+**2026-10-17 — Pond networking P3, server side: setup code, spoken code, claim latch (touches
+PAI-2; not a PAI milestone).**
+
+- **What landed.** [`pond-networking.md`](../pond-networking.md) P3, server half. `pake/init`
+  takes `"credential": "setup"`, and the run uses the printed card's eleven digits under the
+  `goose-setup-cpace-v1` channel label. A confirmed setup run latches the claim before any token
+  exists. Every pairing-code pairing latches it too. `pond-server setup-code` prints and writes
+  the card. `POST /handshake/spoken-code` reads a fresh pairing code aloud, with the voice or with
+  clips compiled into the binary. The `_pond._tcp` record carries `id` and, while unclaimed,
+  `setup=1`. install makes the card, provision fetches it and doctor reports it.
+- **PAI-2, the three things it adds.** A new public route, `POST /handshake/spoken-code`:
+  `Exposure::Always`, LAN-gated in its handler, in the pairing rate bucket, and no answer ever
+  carries the code (the route tests scan every body for a six-digit run). A new secret file,
+  `<data>/setup/setup.json` (`0600` in `0700`; P1), and `setup/card.svg`, written `0600`. Neither
+  code is in `Settings`, a log line, an event attribute or a REST response; only `setup-code`'s
+  own output and the card show the setup code. A new setting, `spoken_pairing_codes`, ships ON
+  (its own `default_*` fn). That is deliberate: it is how a phone pairs a screenless pond, and
+  only presence in earshot can use the code. A corrupt row reads off, and a failed settings read
+  answers 500, not a spoken code.
+- **The latch is read live,** like the onboarding state in section 3.7. `setup-code --rearm`
+  re-arms it, so it is not a one-way door. A pond that already had paired devices when its record
+  was made is created claimed, so the household Jetson does not start accepting a card on upgrade.
+- **Invariants.** No egress, no prompt or KV change, no migration. One new settings row. The
+  spoken code adds an issuance path that retires the code on any screen, which is why the route
+  checks for a speaker first, and why issuance is limited to one code per 30 s and ten an hour.
+- **Verified on the Mac.** Unit and route tests, the CPace setup vector reproduced by
+  `scripts/pond_cpace.py`, and `scripts/live-test.sh`. The live test claims a fresh pond with
+  its card over loopback, reads `claimed`, and gets 409 on a second attempt. A pairing-code
+  pairing claims another pond, and the claim survives a restart. On a probe pond, `dns-sd -L`
+  showed `setup=1 id=aa48` before a pairing and `id=aa48` alone after it, and the setup code was
+  in no log file, stdout line or database row. **Not verified:** a real phone, the clips heard by
+  a person, and anything on the Orin.
+- **Log lines left as they were.** The live test's log dig shows `mdns_sd` ERRORs for the macOS
+  `nan0` interface ("Network is down"), which the tunnel exclusion list does not cover, and a
+  30 s embedding-provider init timeout in the scratch pond. Neither comes from this change (the
+  first is the advertisement on an interface the list misses), though neither was re-checked
+  against an older build.

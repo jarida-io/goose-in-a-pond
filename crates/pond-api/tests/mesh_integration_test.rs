@@ -145,6 +145,8 @@ async fn make_app_with_mesh_provider_and_capabilities(
         mesh_provider: Arc::new(tokio::sync::RwLock::new(mesh_provider)),
         peer_capability_query: Arc::new(tokio::sync::RwLock::new(peer_capability_query)),
         mesh_rebuild: None,
+        setup_claims: None,
+        spoken_codes: Default::default(),
     });
 
     (
@@ -264,6 +266,8 @@ async fn make_app_with_settlement_deps() -> (
         mesh_provider: Arc::new(tokio::sync::RwLock::new(None)),
         peer_capability_query: Arc::new(tokio::sync::RwLock::new(None)),
         mesh_rebuild: None,
+        setup_claims: None,
+        spoken_codes: Default::default(),
     });
 
     (

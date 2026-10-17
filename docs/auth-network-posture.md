@@ -371,7 +371,8 @@ the code is `pond-infra/src/pairing_cpace.rs` (the math) and `sqlite_handshake.r
 
 1. Operator reads the pairing code printed on server startup, or from
    `pond-server pairing` (`GET /api/v1/handshake/pairing-code`, loopback and the
-   host credential), and shows it to the phone, usually with the QR.
+   host credential), and shows it to the phone, usually with the QR. A pond with no
+   screen reads one aloud instead, or is claimed with its printed setup card (below).
 2. Phone `POST /handshake/pake/init {client_id, …, channel_binding, client_nonce}`. The Pond
    commits to the newest active code and answers with its public share `Ya`.
 3. Phone `POST /handshake/pake/verify {challenge_id, share: Yb, confirm: T_client}`. The Pond
@@ -428,10 +429,46 @@ the body, are this host's alone: any other peer, and any peer on the plaintext d
 listener, gets `403 pairing_requires_cpace` (`legacy_pairing_host_only` for the single step).
 They have no failure budget; the verify limiter below applies to loopback too.
 
+### A pond with no screen: the setup code and the spoken code (2026-10-17)
+
+Design: [`architecture/pond-networking.md`](architecture/pond-networking.md#claiming-a-pond).
+
+**The setup code** is eleven digits (ten random, a Luhn check digit) printed on a card at install
+or provision time (`pond-server setup-code --card`). It lives in `<data>/setup/setup.json`, `0600`
+in a `0700` directory, never in `Settings` or the database, and its `Debug` redacts. A phone names
+it in `pake/init` with `"credential": "setup"`; the run uses the eleven digits as PRS under its own
+channel label (`goose-setup-cpace-v1`), so a setup run and a pairing run never share a generator,
+and the pin binding is the pairing exchange's. It is never retired, since anyone in range could
+then destroy the card: five wrong attempts are free, then one per 30 s doubling to one per 10 min,
+across every client, held in memory and charged when `init` admits the run (refused with
+`429 setup_code_cooling` and `retry_after`).
+
+**The claim latch.** A pond is unclaimed until its first device pairs, by any route, and accepts
+the setup code only while unclaimed (`409 setup_code_unavailable` after). A confirmed setup run
+writes `claimed_at` before any token exists; if another device won the claim in between, it mints
+nothing. Every pairing-code pairing latches it too, best effort: a setup directory that cannot be
+written logs `kind="setup_claim_latch_failed"` and pairing goes on, while the card fails closed.
+The latch is read live on every attempt, never cached; `pond-server setup-code --rearm` (on the
+host, from the data directory) clears it and re-arms the same card, and devices already paired
+keep working. A pond that already had paired devices when its record was made, such as the
+household's Jetson, is created claimed.
+
+**The spoken code.** `POST /handshake/spoken-code` issues an ordinary pairing code (six digits, ten
+minutes, ten failures) with the host's default attribution and reads it aloud twice; no answer
+carries it, so only someone in earshot can use it. That is the proof of presence the setup channel
+lacks once a pond is claimed. At most one code per 30 s and ten an hour, whatever asks; it refuses
+with `503` before issuing a code when the pond has no speaker, since issuing retires the code on
+any screen. A household that does not want presence in the room to count as presence at home turns
+`spoken_pairing_codes` off (`403 spoken_codes_disabled`). It ships on.
+
+Neither code appears in a log line, an event attribute or a REST response; only
+`pond-server setup-code`'s own output and the card file show the setup code. Setup runs are
+audited as `method="cpace-setup"`, a spoken code as `auth.spoken_code_issued`.
+
 ### Who may pair
 
-Every pairing route requires loopback or a peer within an active directly attached LAN
-interface's netmask. Tunnel interfaces, point-to-point links, and tailnet allocations are
+Every pairing route, the setup code's `pake/init` and `POST /handshake/spoken-code` included,
+requires loopback or a peer within an active directly attached LAN interface's netmask. Tunnel interfaces, point-to-point links, and tailnet allocations are
 excluded. Missing connection metadata or failed interface classification is denied. Forwarding
 headers are ignored. The rejection is HTTP 403 with `pairing_requires_lan`, including remote
 completion of a run started locally. Refresh is still remotely usable. See
@@ -552,7 +589,7 @@ is selected into its own bucket and never touches the general allowance
 | Bucket | Limit | Covers | Loopback |
 |---|---|---|---|
 | General | 600 / 60 s per IP | everything except `/api/v1/handshake*` (`lib.rs:536-539`) | exempt |
-| Pairing | 30 / 60 s per IP | every `/api/v1/handshake*` route (`lib.rs:544-547`) | exempt |
+| Pairing | 30 / 60 s per IP | every `/api/v1/handshake*` route, `spoken-code` included (`lib.rs:544-547`) | exempt |
 | Verify | 10 / 60 s per IP | `/handshake/pake/verify` and `/handshake/verify` (`verify_limiter`) | **not exempt** |
 
 Pairing was split out in `a2c86a93` because a chatty client spending the shared

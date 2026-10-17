@@ -24,6 +24,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::network::domain::claim::RetryAfter;
+use crate::network::domain::credential::Credential;
+
 /// Request from a client wanting to connect to GIAP (legacy single-shot).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandshakeRequest {
@@ -98,6 +101,9 @@ pub struct PakeInitRequest {
     pub channel_binding: String,
     /// 32 random bytes from the phone, standard base64: the second half of the session id.
     pub client_nonce: String,
+    /// The secret the phone holds: the card's setup code, or a pairing code.
+    #[serde(default)]
+    pub credential: Credential,
 }
 
 /// CPace phase 1 response: the Pond's half of the session id and its public share.
@@ -125,6 +131,10 @@ pub enum PakeRefusal {
     InvalidClientNonce,
     /// Too many runs are waiting for their `verify`; try again shortly.
     Busy,
+    /// The pond is claimed or has no setup code; both read the same to a phone on purpose.
+    SetupCodeUnavailable,
+    /// Too many wrong setup codes; nothing is checked until `retry_after` has passed.
+    SetupCodeCooling { retry_after: RetryAfter },
 }
 
 impl PakeRefusal {
@@ -135,6 +145,15 @@ impl PakeRefusal {
             Self::NoActivePairingCode => "no_active_pairing_code",
             Self::InvalidClientNonce => "invalid_client_nonce",
             Self::Busy => "pairing_busy",
+            Self::SetupCodeUnavailable => "setup_code_unavailable",
+            Self::SetupCodeCooling { .. } => "setup_code_cooling",
+        }
+    }
+
+    pub fn retry_after(self) -> Option<RetryAfter> {
+        match self {
+            Self::SetupCodeCooling { retry_after } => Some(retry_after),
+            _ => None,
         }
     }
 }
@@ -240,6 +259,12 @@ pub trait Handshake: Send + Sync {
         Err(anyhow::anyhow!(
             "CPace pairing not supported by this adapter"
         ))
+    }
+
+    /// Which secret a waiting run was started with, so a verify can be audited under the right
+    /// method without the phone saying it again. `None` once the run is spent or unknown.
+    async fn pake_credential(&self, _challenge_id: &str) -> Option<Credential> {
+        None
     }
 
     /// Exchange a refresh token for a fresh session+refresh pair.

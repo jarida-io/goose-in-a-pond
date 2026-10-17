@@ -350,6 +350,7 @@ export const CATALOGUE: CatalogueCategory[] = [
             note: "Nothing reads this. There is no cloud fallback to switch on yet — the pond stays local either way.",
           },
           { key: "mesh_enabled", label: "Talk to your other ponds", description: "Let this pond talk to your other ponds.", control: { kind: "toggle" }, consumer: "live", proposed: true },
+          { key: "spoken_pairing_codes", label: "Say pairing codes aloud", description: "Let a phone on your home network ask the pond to read out a code for pairing. Only someone in the room can hear it.", control: { kind: "toggle" }, consumer: "live" },
         ],
       },
       {

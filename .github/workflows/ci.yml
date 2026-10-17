@@ -422,6 +422,17 @@ jobs:
       - name: Bash tests
         run: bash scripts/lib/model-pairings.test.sh
 
+  # The printed setup card's tooling (scripts/lib/setup-code.sh): the doctor line, the card made at
+  # install, and provision fetching it over ssh, against a fake pond-server and a fake ssh.
+  setup-code:
+    name: Setup card scripts - bash tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tests
+        run: bash scripts/lib/setup-code.test.sh
+
   # Every shell script outside the goose/ submodule. Most of them run on the Jetson or a server and
   # no test can exercise them here, so this is the only check they get. A warning fails the job; a
   # note is printed and does not. The root .shellcheckrc makes it follow sourced files.

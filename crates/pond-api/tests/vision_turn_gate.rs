@@ -294,6 +294,8 @@ async fn pond(agent: Arc<VisionAgent>, provider: &str, model: &str) -> Pond {
         mesh_provider: Arc::new(tokio::sync::RwLock::new(None)),
         peer_capability_query: Arc::new(tokio::sync::RwLock::new(None)),
         mesh_rebuild: None,
+        setup_claims: None,
+        spoken_codes: Default::default(),
     });
     Pond {
         app: build_router(state, std::path::PathBuf::from("pond-desktop/dist")),

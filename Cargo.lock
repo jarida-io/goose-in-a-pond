@@ -11973,6 +11973,7 @@ dependencies = [
  "pond-agent",
  "pond-api",
  "pond-audio",
+ "pond-audio-out",
  "pond-core",
  "pond-hf-cache",
  "pond-inference",

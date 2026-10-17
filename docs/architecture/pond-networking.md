@@ -1,0 +1,254 @@
+# Pond networking: one layer for discovery, setup and claiming
+
+A pond with no screen has to be set up from scratch: put on the household's network, found, and
+claimed by its first phone. This document is the design for doing that over Bluetooth LE, Wi-Fi
+and wired links, on any host the pond runs on (Jetson, a Linux single-board computer, a Mac, later
+Windows), through one networking context instead of the five places networking lives today.
+
+Status: **DESIGNED 2026-10-16.** Phase status is in [Phases](#phases).
+
+## Decisions
+
+| Date | Decision | Why |
+|---|---|---|
+| 2026-10-16 | **A pond is claimed with a printed setup code, and falls back to reading a code aloud.** | A screenless pond has no other channel the household trusts. The card proves possession of the device; the spoken code proves presence in the room. |
+| 2026-10-16 | **BLE is the primary setup transport.** | It is the only transport every host OS (Linux, macOS, Windows) can serve and both phone OSes can use from an app, and it leaves the pond's Wi-Fi free to scan and join while the phone talks to it. |
+| 2026-10-16 | **SoftAP is a Linux-only fallback.** | It lets any browser set a pond up without the app. macOS cannot script an access point and Windows Mobile Hotspot needs an upstream connection to share. |
+| 2026-10-16 | **BT Classic is not a setup transport.** | iOS does not let an app open RFCOMM to a non-MFi device. Its job on a headless pond is accessory pairing (speakers, headsets), driven from the phone. *Default, awaiting confirmation.* |
+| 2026-10-16 | **Windows gets ports that leave room for it, not adapters yet.** | `pond-server` does not run on Windows today (six `cfg(windows)` blocks, no CI runner). *Default, awaiting confirmation.* |
+
+## What exists (verified 2026-10-16)
+
+- **No setup radio code anywhere.** Neither this repo nor goose-on-the-go has BLE, SoftAP, Wi-Fi
+  join or captive-portal code. Bluetooth appears only in Matter accessory commissioning
+  (`matter-server/src/ble.ts`, noble over raw HCI, `cap_net_raw` set by hand, off by default).
+- **Pairing assumes a console.** `/handshake/pairing-code` answers loopback peers holding the host
+  credential only (`handshake_issue_pairing_code`, `crates/pond-api/src/routes.rs`). A headless
+  pond's code is in its startup output or behind `ssh … pond-server pairing`.
+- **The wizard is open to the LAN until onboarding completes.** `PUT /settings`, `/onboard/*` and
+  `POST /profiles` are `Exposure::UntilOnboarded` (`PUBLIC_ROUTES`,
+  `crates/pond-api/src/middleware/mod.rs`), so on a fresh pond any LAN peer can drive it.
+- **goose-on-the-go has no owner-setup wizard.** It finds ponds by mDNS, QR or address, and refuses
+  to pair unless NetInfo reports Wi-Fi or Ethernet and the address is local
+  (`providers/server-provider.tsx`, `models/connection.ts::isLocalPairingUrl`).
+- **Networking is spread across five places:** `pond-net` (outbound clients and DNS),
+  `pond-api/src/network.rs` (getifaddrs LAN/tailnet classification, Unix only),
+  `pond-server/src/mdns_advertiser.rs`, `pond-server/src/tls_identity.rs` (pin and pairing URL),
+  and `pond-server/src/embedded_network.rs` with `native/pondnet` (remote access).
+- **Matter commissioning hands over no Wi-Fi credentials** (`commission` in
+  `matter-server/src/controller.ts`), so BLE-commissioning a fresh Wi-Fi accessory cannot succeed.
+
+### The Jetson's radios (read over SSH, 2026-10-16)
+
+| Fact | Consequence |
+|---|---|
+| RTL8822CE: AP and P2P-GO modes, but "interface combinations are not supported" | No access point and station at once. Scan before switching to AP; leave AP to join. |
+| Regulatory domain unset (`country 00`) | An AP is limited to world-safe 2.4 GHz channels until a country is set. |
+| BlueZ 5.64, peripheral role, 4 advertising instances | A GATT server and advertisement are available. |
+| `/etc/dbus-1/system.d/bluetooth.conf` default context allows `org.bluez` | The pond's own user can serve GATT over D-Bus with no root and no `cap_net_raw`. |
+| NetworkManager 1.36, dnsmasq-base, avahi present; `nano` gets `no` for `settings.modify.system` and `wifi.share.*` | Joining Wi-Fi or starting a hotspot needs a polkit grant the installer writes. Polkit is 0.105 (`.pkla`, no `rules.d`). |
+| USB-C device mode on (`l4tbr0`, 192.168.55.1 when cabled) | A laptop cable is a no-radio path on the Jetson. |
+
+### What each host OS allows
+
+| Capability | Linux | macOS | Windows |
+|---|---|---|---|
+| BLE GATT server | BlueZ D-Bus (`bluer`) | CoreBluetooth `CBPeripheralManager`; app bundle with `NSBluetoothAlwaysUsageDescription` and a Bluetooth grant | WinRT `GattServiceProvider` + advertisement publisher |
+| Join Wi-Fi | NetworkManager D-Bus (`zbus`), with the polkit grant | CoreWLAN | WinRT `WiFiAdapter` |
+| SoftAP | NetworkManager hotspot (`802-11-wireless.mode=ap`, `ipv4.method=shared`) | Not scriptable | Mobile Hotspot needs an upstream connection (reported, unverified) |
+| mDNS | `mdns-sd` (in use) | same | same |
+| BT Classic | BlueZ | IOBluetooth | WinRT RFCOMM |
+
+## Architecture
+
+A new bounded context, `pond-core/src/network/`, owns the policy. Adapters own the radios.
+
+```
+pond-core/src/network/
+  domain/    SetupCode, SetupCard, Discriminator, ClaimState, Capabilities, WifiNetwork
+  ports/     SetupCodeStore, CodeAnnouncer, WifiStation, SetupTransport, ServiceAdvertiser,
+             InterfaceInventory, RadioCapabilities
+  services/  ClaimPolicy (which secret is valid when, and how fast it may be guessed),
+             SetupService (state machine), ConnectivityWatchdog
+pond-infra             FileSetupCodeStore (the code is generated here: pond-core has no RNG)
+pond-adapters-net-linux    NetworkManager (zbus), BlueZ (bluer), mdns-sd
+pond-adapters-net-macos    CoreWLAN, CoreBluetooth (objc2), mdns-sd
+pond-adapters-net-windows  WinRT (windows crate), mdns-sd            -- later
+```
+
+Each adapter reports its capabilities at runtime (`RadioCapabilities`), so the dashboard and the
+phone only offer what this host can do, and say why when they cannot ("this Mac cannot run a setup
+hotspot"). Adapters are picked at compile time by target OS, with a mock for tests.
+
+**One owner per radio.** Matter's BLE (noble over raw HCI) contends with BlueZ for the same
+adapter. Once the Linux adapter exists, Matter commissioning should reach BLE through it rather
+than through its own stack, and take the household Wi-Fi credential from `WifiStation` for the
+devices it commissions.
+
+The existing modules move behind these ports in phase 2: the pure parts of
+`pond-api/src/network.rs` (what counts as LAN, tailnet, tunnel) become domain rules, getifaddrs
+becomes the `InterfaceInventory` adapter, and `mdns_advertiser.rs` becomes the mdns-sd
+`ServiceAdvertiser`. `pond-net` stays the egress leaf it is; `embedded_network.rs` stays where it is
+until remote access needs something from this context.
+
+## Claiming a pond
+
+A pond is **unclaimed** until its first device pairs, by any route. While unclaimed it accepts its
+setup code. Once claimed it never accepts the setup code again until it is reset to factory state.
+
+### The setup code
+
+- **Format.** Eleven digits: ten random, then a Luhn check digit, so the app can tell a typo from a
+  wrong code before spending a guess. Shown as `4-3-4`, `3497-011-2339`. About 33 bits.
+- **Made** by `pond-server setup-code` at install time (`giap.sh install`) and by `giap.sh
+  provision` for an imaged pond. Install prints it with a QR and writes a printable card; provision
+  prints the card on the operator's machine.
+- **Stored** at `<data>/setup/setup.json`, mode `0600` in a `0700` directory, written atomically:
+  `{version, code, discriminator, created_at, claimed_at}`. Not in `Settings` (PAI-2: `GET /settings`
+  serialises the whole struct) and not in the database. `scripts/pond-snapshot.py` leaves it out,
+  as it leaves out `embedded-network/device`: the card belongs to the hardware.
+- **QR.** `pond://setup?v=1&code=34970112339&id=7f3a`. `id` is the discriminator: four hex digits,
+  random, so a phone near several unclaimed ponds connects to the one on its card. The card carries
+  no TLS pin; the pin arrives authenticated by the exchange below.
+- **Guessing.** A static code cannot be retired after ten wrong guesses the way a pairing code is,
+  or anyone in range could destroy the card. Instead failures slow it: five free attempts, then one
+  per 30 s doubling to one per 10 min, across all clients, held in memory. At that rate ten digits
+  outlast the hardware.
+- **Lifecycle.** `claimed_at` is written before the first device's tokens are returned, and read
+  live on every attempt. Factory reset (host-only, like `POST /onboard/reset` once onboarded)
+  clears it, which re-arms the same printed code. It is a latch with a door, not a one-way door.
+
+### The spoken fallback
+
+When there is no card, the phone asks the pond to say a code. The pond issues an ordinary pairing
+code (six digits, ten minutes, retired after ten failures; the existing `issue_pairing_code_for`)
+and reads it aloud twice. **The code is never in any response**: whoever asks learns only that it
+was spoken, and only someone in earshot can use it.
+
+- Triggered by the setup channel (BLE or LAN) or by voice ("pair a new phone") once the pond has its
+  wake word and speech models.
+- At most one code per 30 s and ten per hour, whatever asks.
+- A fresh pond may have no voice downloaded yet, so a short set of English digit clips is compiled
+  into the binary. The configured TTS voice is used when one is installed.
+- On a claimed pond this replaces `ssh … pond-server pairing` for adding a phone. A setting turns it
+  off for households that do not want presence in earshot to count as presence at home.
+
+### The exchange
+
+Both secrets feed the CPace exchange phones already use (`pairing_cpace.rs`, `services/cpace.ts`,
+suite `CPACE-RISTR255-SHA512`). The phone names which secret it holds in `init` (`credential:
+"setup"` or `"pairing"`); the pond refuses `setup` once claimed (`setup_code_unavailable`) and while
+the guess delay runs (`setup_code_cooling`, with `retry_after`).
+
+Over pinned HTTPS nothing else changes: the channel identifier already carries the TLS pin, so a
+phone that pinned an interceptor's key fails confirmation. Over BLE there is no TLS, so the pond
+sends its pin in `hello` and the phone puts that pin into the channel identifier exactly as it would
+over HTTPS. A substituted pin fails confirmation the same way. **A completed exchange therefore
+proves the pin**, which is what lets a pond with no screen hand a phone its TLS identity.
+
+### Wire contract over the LAN (P3)
+
+The setup code and the spoken code reach a pond over the companion HTTPS listener first; the setup
+channel carries the same exchange later.
+
+- **Setup exchange.** `POST /api/v1/handshake/pake/init` takes an optional `"credential"`,
+  `"setup"` or `"pairing"` (absent means `"pairing"`; anything else is `400 invalid_credential`).
+  For `"setup"` the password is the eleven ASCII digits, and the channel identifier is
+  `lv_cat("goose-setup-cpace-v1", pin, client_id)`, so the two secrets never share a generator.
+  Everything else (session id, shares, tags, `verify`) is the pairing exchange unchanged.
+- **Setup refusals at `init`:** `409 {"error":"setup_code_unavailable"}` (claimed, or no code), and
+  `429 {"error":"setup_code_cooling","retry_after":<seconds>}` with a `Retry-After` header. The LAN
+  rule (`403 pairing_requires_lan`) and the existing refusals apply as before.
+- **Setup `verify`:** a run that confirms latches the claim, then registers the device (bound to the
+  household's only member if it has exactly one, otherwise to nobody) and mints its tokens. If
+  another device claimed in between, it answers `accepted: false` with
+  `setup_code_unavailable` and mints nothing. A setup run never answers `code_retired`.
+- **Every other pairing claims too.** A device that pairs with a pairing code, over loopback or by
+  CPace, latches the claim. A pond that already had paired devices when its setup record was made
+  is created claimed.
+- **Spoken code.** `POST /api/v1/handshake/spoken-code`, no body, no token, loopback or direct LAN
+  peers only. It issues an ordinary pairing code and reads it aloud; the phone then pairs with
+  `"credential": "pairing"`. Answers `202 {"spoken":true,"expires_at":"<RFC3339>"}`,
+  `429 {"error":"spoken_code_limited","retry_after":<seconds>}` with `Retry-After`,
+  `403 {"error":"spoken_codes_disabled"}` when the household turned it off (`spoken_pairing_codes`,
+  default on), and `503 {"error":"announcer_unavailable"}` when the pond cannot make a sound. **No
+  answer ever carries the code.**
+- **Discovery.** The `_pond._tcp` TXT record gains `id=<discriminator>` and, while unclaimed,
+  `setup=1`, so a phone that scanned a card connects to the pond with that `id`.
+
+### Claim before onboarding
+
+Today a fresh pond's wizard is open to every LAN peer. With claiming in place, the wizard's writes
+become: open to loopback while unclaimed (the desktop app), and open to a paired device's token once
+claimed. A phone therefore claims first and then runs owner setup as itself. The `Exposure` classes
+grow one state; the guards in `middleware/mod.rs` that pin each route's class move with them.
+goose-on-the-go gains the owner-setup steps the desktop wizard has (about you, locale, personality,
+wake word).
+
+## The setup channel
+
+One message protocol, carried by any transport: BLE GATT, the SoftAP's HTTP listener, or the LAN
+HTTPS listener. The pond is the server.
+
+| Message | Direction | Sealed | Purpose |
+|---|---|---|---|
+| `hello` | pond → phone | no | protocol version, discriminator, claim state, capabilities, TLS pin |
+| `speak_code` | phone → pond | no | ask for the spoken fallback |
+| `pake_init`, `pake_verify` | both | no | the CPace exchange above, unchanged in content |
+| `wifi_scan` | phone → pond | yes | networks the pond can see (SSID, security, signal) |
+| `wifi_join` | phone → pond | yes | SSID and passphrase; answers with address, port, host name, or a reason (`wrong_password`, `not_found`, `no_address`, `timeout`) |
+| `status` | phone → pond | yes | claim state, network state, model download progress |
+
+After `pake_verify` both sides derive a channel key from CPace's `ISK` (HKDF-SHA-512, label
+`goose-setup-aead-v1`, one key per direction) and seal every later message with ChaCha20-Poly1305
+and a per-direction counter nonce. The tokens `pake_verify` mints are sealed too.
+
+**BLE framing.** One primary service `185b51bd-e038-4b6c-99b0-4e2379dd362c`; the phone writes to
+`72172de5-d65e-47ad-857d-1b9dd7623d33` (write with response) and subscribes to
+`1065b140-d075-431c-b981-7e1a735960cb` (notify). Messages are CBOR, length-prefixed and chunked to
+the negotiated MTU. No OS-level bonding: the app layer authenticates, so neither side shows a
+system pairing dialog.
+
+**What is advertised.** The service UUID and four bytes of service data: protocol version, a flags
+byte (unclaimed, setup window open), and the discriminator. No host name, no household, no
+addresses. The pond advertises only while unclaimed or while a setup window is open.
+
+**The Wi-Fi passphrase** is handed straight to the OS network manager, which keeps it in its own
+store (NetworkManager's root-only connection files, the macOS keychain). The pond does not persist,
+log or return it, and zeroizes its copy.
+
+## Self-healing
+
+- **Lost network.** When the pond has had no usable network for five minutes it opens a setup
+  window: BLE advertising starts, and the phone app offers to move the pond to a new network. A
+  claimed pond needs a spoken code to accept new credentials.
+- **SoftAP** (Linux) starts only when no known network is in range after a scan, because the radio
+  cannot be an access point and a station at once. It alternates with rescans, and its SSID is
+  `Pond-Setup-<discriminator>` with the setup code as its WPA2 passphrase, so the card covers it.
+- **Privileges** come from `giap.sh install`: the polkit grant (`.pkla` on polkit 0.105, a
+  `rules.d` file on newer ones) for the pond's user, scoped to NetworkManager's Wi-Fi actions.
+  `giap.sh doctor` checks rfkill, `bluetooth.service`, the grant, and the adapter's AP support.
+
+## Phases
+
+| Phase | Scope | Status |
+|---|---|---|
+| P0 | This design | DESIGNED 2026-10-16 |
+| P1 | `pond-core/src/network/`: setup code, card, discriminator, claim policy, guess and spoken-code limits, `SetupCodeStore` and `CodeAnnouncer` ports; `FileSetupCodeStore`. Wi-Fi, transport and capability ports wait for the phases that use them | LANDED 2026-10-16 |
+| P2 | Move interface classification and mDNS behind the context's ports; `GET /api/v1/network/status` with capabilities | not started |
+| P3 | `pond-server setup-code`, card at install and provision; CPace against the setup code with the claim latch; spoken fallback with bundled clips; goose-on-the-go reads `pond://setup` | LANDED 2026-10-17, server side (the wire contract above; Mac unit, route and live tests; no phone or Orin run yet). goose-on-the-go's half lands in its own repo |
+| P4 | Claim before onboarding; owner setup in goose-on-the-go | not started |
+| P5 | Setup channel and BLE: macOS adapter first (the Mac development loop), then Linux, verified on the Jetson last; Wi-Fi join | not started |
+| P6 | Connectivity watchdog; SoftAP and captive page on Linux | not started |
+| P7 | Matter BLE and Wi-Fi handoff through this layer; BT Classic accessories; Windows adapters | not started |
+
+## Open questions
+
+- What should reset to factory state mean beyond re-arming the code: forget Wi-Fi, devices,
+  household authority? Today only `POST /onboard/reset` exists.
+- Re-provisioning a claimed pond without anyone in earshot (a phone holding a valid refresh token,
+  over BLE) needs a proof that does not send the token in the clear. The token is stored hashed.
+- Setting the Wi-Fi regulatory domain needs `CAP_NET_ADMIN`; whether the polkit grant or a oneshot
+  unit sets it from the phone's country.
+- Whether goose-on-the-go should listen for the spoken code itself (microphone) rather than ask the
+  household to type it.

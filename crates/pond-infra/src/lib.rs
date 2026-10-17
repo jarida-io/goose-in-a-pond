@@ -3,6 +3,7 @@ pub mod db;
 pub mod fastembed_embedding;
 pub mod fcm_push_relay;
 pub mod file_secret_repository;
+pub mod file_setup_code_store;
 pub mod logging_device_control;
 pub mod mock_handshake;
 pub mod onboarding;

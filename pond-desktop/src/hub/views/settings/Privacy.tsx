@@ -244,6 +244,18 @@ export function PrivacyDetail({ go }: PrivacyDetailProps) {
             }
           />
           <Row
+            label="Say pairing codes aloud"
+            sub="A phone at home can ask; only someone in the room hears it"
+            control={
+              <Toggle
+                key={`spoken-codes-${settings.spoken_pairing_codes ?? true}`}
+                on={settings.spoken_pairing_codes ?? true}
+                onChange={(v) => handleToggle("spoken_pairing_codes", v)}
+                label="Say pairing codes aloud"
+              />
+            }
+          />
+          <Row
             label="Anonymous diagnostics"
             sub="Share crash logs to improve Goose"
             control={

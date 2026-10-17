@@ -184,6 +184,8 @@ async fn make_app_with_real_memory(
         mesh_provider: Arc::new(tokio::sync::RwLock::new(None)),
         peer_capability_query: Arc::new(tokio::sync::RwLock::new(None)),
         mesh_rebuild: None,
+        setup_claims: None,
+        spoken_codes: Default::default(),
     });
 
     let router = build_router(state, std::path::PathBuf::from("pond-desktop/dist"));

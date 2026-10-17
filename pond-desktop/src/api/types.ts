@@ -261,6 +261,8 @@ export interface Settings {
   context_ingest_enabled?: boolean;
   /** Let the model read the personal-context corpus (adds two tool schemas). */
   ext_context_enabled?: boolean;
+  /** Let a phone on the home network ask the pond to read a pairing code aloud. Ships ON. */
+  spoken_pairing_codes?: boolean;
 
   // Compaction — GIAP-owned history pruning
   hybrid_compaction_enabled?: boolean;

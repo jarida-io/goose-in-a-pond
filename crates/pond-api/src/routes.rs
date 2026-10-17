@@ -23,6 +23,7 @@ use pond_core::models::services::context::context_governor::{
     ContextGovernor, ContextInputs, EngineWindow,
 };
 use pond_core::models::services::context::context_monitor::ContextHealth;
+use pond_core::network::domain::credential::Credential;
 use pond_core::prompts::{builtin_template_content, ProfileContext};
 use pond_core::security::domain::event::{EventCategory, EventQuery, PrivacySensitivity};
 use pond_core::security::domain::proven_device::{DeviceRung, ProvenDevice};
@@ -106,6 +107,11 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route(
             "/handshake/pairing-code",
             get(handshake_pairing_code).post(handshake_issue_pairing_code),
+        )
+        // Loopback or direct LAN: the pond reads a pairing code aloud and never returns it.
+        .route(
+            "/handshake/spoken-code",
+            post(crate::spoken_code::handshake_spoken_code),
         )
         .route("/onboard", post(start_onboarding))
         .route("/onboard/complete", post(complete_onboarding))
@@ -609,12 +615,52 @@ async fn handshake_handler(
 }
 
 /// Logs the error and returns a generic 500, so internal error text never reaches callers.
-fn handshake_error(action: &str, e: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
+pub(crate) fn handshake_error(
+    action: &str,
+    e: impl std::fmt::Display,
+) -> (StatusCode, Json<Value>) {
     tracing::warn!(action, error = %e, "handshake request failed");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(json!({ "error": "handshake request failed" })),
     )
+}
+
+/// A 429 that says when to come back twice over: the `Retry-After` header, for HTTP stacks, and
+/// `retry_after` in the body, for a client that reads only JSON.
+pub(crate) fn too_many_requests(code: &str, retry_after_secs: u64) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(
+            axum::http::header::RETRY_AFTER,
+            retry_after_secs.to_string(),
+        )],
+        Json(json!({ "error": code, "retry_after": retry_after_secs })),
+    )
+        .into_response()
+}
+
+/// The pairing-outcome method a run is audited under.
+fn cpace_method(credential: Option<Credential>) -> &'static str {
+    match credential {
+        Some(Credential::Setup) => "cpace-setup",
+        _ => "cpace",
+    }
+}
+
+/// `credential` is read before the rest of the body, so a phone naming a secret this pond does
+/// not know is told so, not handed the generic bad-body answer.
+fn parse_pake_init(body: Value) -> Result<PakeInitRequest, (StatusCode, Json<Value>)> {
+    if let Some(credential) = body.get("credential") {
+        if Credential::deserialize(credential).is_err() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "invalid_credential"})),
+            ));
+        }
+    }
+    serde_json::from_value(body).map_err(|_| bad_body())
 }
 
 /// Generic 400 for a malformed request body (carries no internal detail).
@@ -682,7 +728,8 @@ fn verify_limiter() -> &'static crate::middleware::RateLimiter {
 /// `reason` is a closed set of rejection codes, safe to log: none carries the code or MAC.
 /// `insecure_dev` marks an attempt that arrived on the plaintext development listener, so the
 /// audit trail says which devices were paired where anyone on the network could watch.
-/// `method` is `cpace` (phones) or `loopback_hmac` (the dashboard).
+/// `method` is `cpace` (phones), `cpace-setup` (a phone with the setup card) or `loopback_hmac`
+/// (the dashboard).
 async fn emit_pairing_outcome(
     state: &AppState,
     paired: bool,
@@ -854,8 +901,9 @@ async fn handshake_verify(
     Ok(Json(resp))
 }
 
-/// CPace phase 1 (public, direct LAN peers): commit to the current pairing code and answer
-/// with the Pond's share. See `pond_core::security::ports::handshake`.
+/// CPace phase 1 (public, direct LAN peers): commit to the current pairing code, or to the
+/// printed setup code when `credential` is `"setup"`, and answer with the Pond's share. See
+/// `pond_core::security::ports::handshake`.
 async fn handshake_pake_init(
     State(state): State<Arc<AppState>>,
     peer: Result<
@@ -863,14 +911,17 @@ async fn handshake_pake_init(
         axum::extract::rejection::ExtensionRejection,
     >,
     insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
-    body: Result<Json<PakeInitRequest>, JsonRejection>,
-) -> Result<Json<PakeChallenge>, (StatusCode, Json<Value>)> {
-    crate::network::require_lan(peer.ok())?;
-    let Json(request) = body.map_err(|_| bad_body())?;
+    body: Result<Json<Value>, JsonRejection>,
+) -> Result<Json<PakeChallenge>, axum::response::Response> {
+    use axum::response::IntoResponse;
+    crate::network::require_lan(peer.ok()).map_err(IntoResponse::into_response)?;
+    let Json(body) = body.map_err(|_| bad_body().into_response())?;
+    let request = parse_pake_init(body).map_err(IntoResponse::into_response)?;
+    let method = cpace_method(Some(request.credential));
     let refusal = match state.handshake.init_pake(request).await {
         Ok(Ok(challenge)) => return Ok(Json(challenge)),
         Ok(Err(refusal)) => refusal,
-        Err(e) => return Err(handshake_error("pake_init", e)),
+        Err(e) => return Err(handshake_error("pake_init", e).into_response()),
     };
     let status = match refusal {
         PakeRefusal::ChannelBindingMismatch => {
@@ -881,16 +932,24 @@ async fn handshake_pake_init(
                 None,
                 Some(refusal.code()),
                 insecure.is_some(),
-                "cpace",
+                method,
             )
             .await;
             StatusCode::FORBIDDEN
         }
-        PakeRefusal::NoActivePairingCode => StatusCode::CONFLICT,
+        PakeRefusal::NoActivePairingCode | PakeRefusal::SetupCodeUnavailable => {
+            StatusCode::CONFLICT
+        }
         PakeRefusal::InvalidClientNonce => StatusCode::BAD_REQUEST,
         PakeRefusal::Busy => StatusCode::SERVICE_UNAVAILABLE,
+        PakeRefusal::SetupCodeCooling { retry_after } => {
+            return Err(too_many_requests(
+                refusal.code(),
+                retry_after.as_secs_ceil(),
+            ))
+        }
     };
-    Err((status, Json(json!({"error": refusal.code()}))))
+    Err((status, Json(json!({"error": refusal.code()}))).into_response())
 }
 
 /// CPace phase 2 (public, direct LAN peers): check the phone's share and confirmation, then
@@ -913,6 +972,8 @@ async fn handshake_pake_verify(
     check_verify_limit(peer).await?;
     let Json(request) = body.map_err(|_| bad_body())?;
     let device_name = request.device_name.clone();
+    // Asked before the verify burns the run: afterwards the pond no longer knows it.
+    let method = cpace_method(state.handshake.pake_credential(&request.challenge_id).await);
     // CPace keeps the code from being recovered offline even here, but over plaintext anyone
     // on the network can take the tokens once they are issued. Say so every time.
     if insecure_dev {
@@ -931,7 +992,7 @@ async fn handshake_pake_verify(
                 device_name.as_deref(),
                 Some("internal_error"),
                 insecure_dev,
-                "cpace",
+                method,
             )
             .await;
             return Err(handshake_error("pake_verify", e));
@@ -943,7 +1004,7 @@ async fn handshake_pake_verify(
         device_name.as_deref(),
         resp.rejection_reason.as_deref(),
         insecure_dev,
-        "cpace",
+        method,
     )
     .await;
     let mut body = serde_json::to_value(&resp).map_err(|e| handshake_error("pake_verify", e))?;

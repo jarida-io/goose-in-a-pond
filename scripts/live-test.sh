@@ -223,6 +223,10 @@ else
   echo "scripts/live_checks.py not present; skipping the assertion suite"
 fi
 
+# The printed setup card: this fresh pond starts unclaimed, and a pairing-code pairing claims it.
+say "setup code: a pairing claims the pond"
+POND_DATA_DIR="$DATA_DIR" POND_SERVER_BIN="$BIN" python3 scripts/setup_code_checks.py pairing || RC=1
+
 # ── Migration idempotence ────────────────────────────────────────────────────
 #
 # A migration that only works on an empty database works exactly once, and
@@ -275,6 +279,7 @@ PY
   # second server can tell you.
   if [ -f scripts/live_checks.py ]; then
     POND_DATA_DIR="$DATA_DIR" python3 scripts/live_checks.py restart || RC=$?
+    POND_DATA_DIR="$DATA_DIR" POND_SERVER_BIN="$BIN" python3 scripts/setup_code_checks.py restart || RC=1
   fi
 else
   echo "RESTART FAILED -- a migration that only works on an empty database" >&2
@@ -351,6 +356,11 @@ if [ "$AUTH_OK" -eq 1 ]; then
            RC=1 ;;
     esac
   done
+
+  # A second fresh pond, claimed with its card over loopback, with no bypass to hide behind.
+  if ! POND_DATA_DIR="$AUTH_DIR" POND_SERVER_BIN="$BIN" python3 scripts/setup_code_checks.py card; then
+    RC=1
+  fi
 
   if ! POND_DATA_DIR="$AUTH_DIR" python3 scripts/remote_auth_checks.py; then
     RC=1

@@ -247,6 +247,7 @@ voice path (`useVoicePipeline`); the desktop app and the pond's own voice loop e
 | `cloud_fallback_enabled` | `false` | **NONE** | H:Privacy |
 | `mesh_enabled` | `false` | LIVE | **API** (Mesh.tsx displays, cannot set) |
 | `context_ingest_enabled` | `false` | LIVE | **API** |
+| `spoken_pairing_codes` | **`true`** | LIVE | H:Privacy, catalogue |
 
 ### 7. Extensions & Tools
 

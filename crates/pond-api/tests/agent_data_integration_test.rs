@@ -230,6 +230,8 @@ async fn make_app_full(
         mesh_provider: Arc::new(tokio::sync::RwLock::new(None)),
         peer_capability_query: Arc::new(tokio::sync::RwLock::new(None)),
         mesh_rebuild: None,
+        setup_claims: None,
+        spoken_codes: Default::default(),
     });
 
     (
@@ -522,6 +524,8 @@ async fn prompt_template_delete_system_returns_403() {
         mesh_provider: Arc::new(tokio::sync::RwLock::new(None)),
         peer_capability_query: Arc::new(tokio::sync::RwLock::new(None)),
         mesh_rebuild: None,
+        setup_claims: None,
+        spoken_codes: Default::default(),
     });
 
     let app = build_router(state, std::path::PathBuf::from("pond-desktop/dist"));
@@ -1041,6 +1045,8 @@ async fn returns_501_when_repos_not_configured() {
         mesh_provider: Arc::new(tokio::sync::RwLock::new(None)),
         peer_capability_query: Arc::new(tokio::sync::RwLock::new(None)),
         mesh_rebuild: None,
+        setup_claims: None,
+        spoken_codes: Default::default(),
     });
     let app = build_router(state, std::path::PathBuf::from("pond-desktop/dist"));
 

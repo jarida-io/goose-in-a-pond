@@ -18,6 +18,7 @@ mod model_download;
 mod node_path;
 mod ports;
 mod schedule_executors;
+mod spoken_code;
 mod system_deps;
 mod three_stage_consolidator;
 mod tracing_setup;
@@ -266,6 +267,29 @@ enum Commands {
         /// Force a fresh code even if one is still active
         #[arg(long)]
         refresh: bool,
+    },
+
+    /// Show this pond's printed setup code, its claim state, and a QR to put on its card.
+    ///
+    /// A pond with no screen is set up by scanning this card with Goose On The Go. The code is
+    /// made once, the first time this runs or the server starts, and never changes; it is
+    /// accepted only until the first device pairs. Works with or without the server running.
+    SetupCode {
+        /// Print {"code","display","id","claimed_at","url"} instead of the card text
+        #[arg(long)]
+        json: bool,
+
+        /// Also write a printable SVG card to PATH (0600), or to stdout with `-`
+        #[arg(long, value_name = "PATH|-")]
+        card: Option<String>,
+
+        /// Print only unclaimed, claimed or missing; never makes a code
+        #[arg(long, conflicts_with_all = ["json", "card", "rearm"])]
+        status: bool,
+
+        /// Accept the same printed card again; devices already paired keep working
+        #[arg(long)]
+        rearm: bool,
     },
 
     /// Print a sign-in link for the web dashboard in a browser.
@@ -603,6 +627,20 @@ async fn async_main() -> Result<()> {
             reset,
         }) => run_calibrate(phrase.as_deref(), samples, whisper_url.as_deref(), reset).await,
         Some(Commands::Pairing { refresh }) => run_pairing(refresh).await,
+        Some(Commands::SetupCode {
+            json,
+            card,
+            status,
+            rearm,
+        }) => {
+            run_setup_code(pond_server::setup_code::SetupCodeRequest {
+                json,
+                card,
+                status,
+                rearm,
+            })
+            .await
+        }
         Some(Commands::Dashboard) => run_dashboard(),
         None => {
             // No subcommand: interactive text chat, provider from Settings.
@@ -4060,9 +4098,45 @@ async fn run_server(
         }
     }
 
+    // The printed card's code and its claim latch live beside the TLS identity, not in the
+    // database: the card belongs to the hardware.
+    let setup_store = Arc::new(pond_infra::file_setup_code_store::FileSetupCodeStore::new(
+        &data_dir,
+    ));
+    let setup_record = {
+        let paired = device_registry
+            .list_devices()
+            .await
+            .map(|devices| !devices.is_empty());
+        match pond_server::setup_code::ensure_record_at_startup(setup_store.as_ref(), paired).await
+        {
+            Ok(record) => Some(record),
+            Err(error) => {
+                tracing::warn!(
+                    error = %format!("{error:#}"),
+                    "setup code unavailable; phones can still pair with a pairing code"
+                );
+                None
+            }
+        }
+    };
+    if setup_record
+        .as_ref()
+        .is_some_and(|r| !r.claim_state().is_claimed())
+    {
+        println!(
+            "This pond is unclaimed: the first phone to scan its setup card sets it up. \
+             `pond-server setup-code` prints the card."
+        );
+    }
+    let setup_claims = Arc::new(
+        pond_core::network::services::setup_claim::SetupClaimService::new(setup_store.clone()),
+    );
+
     // Before `db` moves into AppState.
     let handshake: Arc<dyn pond_core::security::ports::handshake::Handshake> = Arc::new(
-        SqliteHandshakeAdapter::new(db.system.clone(), Some(pairing_pin.clone())),
+        SqliteHandshakeAdapter::new(db.system.clone(), Some(pairing_pin.clone()))
+            .with_setup_claims(setup_claims.clone()),
     );
     let pairing_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
@@ -4097,6 +4171,11 @@ async fn run_server(
         }
         Err(e) => tracing::warn!("failed to issue pairing code at startup: {e:#}"),
     }
+
+    // The voice when one is installed, else the bundled clips; built before `tts` moves below.
+    let announcer: Arc<dyn pond_core::network::ports::code_announcer::CodeAnnouncer> =
+        Arc::new(spoken_code::SpeakerCodeAnnouncer::new(tts.clone()));
+    let spoken_codes = Arc::new(pond_api::spoken_code::SpokenCodes::new(Some(announcer)));
 
     let state = Arc::new(AppState {
         tts_control: tts_control.clone(),
@@ -4202,6 +4281,8 @@ async fn run_server(
         mesh_provider: mesh_provider.clone(),
         peer_capability_query,
         mesh_rebuild: Some(mesh_rebuild),
+        setup_claims: Some(setup_claims.clone()),
+        spoken_codes,
     });
 
     // OAuth refresh updates secrets only; restarting extensions would break in-flight tool calls.
@@ -4309,14 +4390,23 @@ async fn run_server(
     }
 
     // Named binding, not `_`: dropping the handle deregisters the mDNS service.
+    let setup_advert = setup_record.as_ref().map(setup_advert_for);
     let _mdns_handle = match mdns_advertiser::advertise(
         &pairing_hostname,
         https_port,
         env!("CARGO_PKG_VERSION"),
         &pairing_pin,
+        setup_advert.as_ref(),
     ) {
         Ok(h) => {
             println!("  mDNS: advertising _pond._tcp.local. over HTTPS on port {https_port}");
+            let h = Arc::new(h);
+            tokio::spawn(keep_setup_advert_current(
+                h.clone(),
+                setup_store.clone(),
+                setup_claims.clone(),
+                setup_advert,
+            ));
             Some(h)
         }
         Err(e) => {
@@ -4575,22 +4665,63 @@ async fn shutdown_signal() {
 
 /// Print a Unicode QR code for `url` to stdout, indented to match the startup banner.
 fn print_pairing_qr(url: &str) {
-    use qrcode::render::unicode;
-    use qrcode::QrCode;
-
-    match QrCode::new(url.as_bytes()) {
-        Ok(code) => {
-            let image = code
-                .render::<unicode::Dense1x2>()
-                .dark_color(unicode::Dense1x2::Light)
-                .light_color(unicode::Dense1x2::Dark)
-                .quiet_zone(true)
-                .build();
-            for line in image.lines() {
+    match pond_server::setup_code::qr_terminal_lines(url) {
+        Ok(lines) => {
+            for line in lines {
                 println!("  {line}");
             }
         }
-        Err(e) => tracing::warn!("QR code generation failed: {e}"),
+        Err(e) => tracing::warn!("QR code generation failed: {e:#}"),
+    }
+}
+
+/// How often the advertiser re-reads the claim, to see a `setup-code --rearm` made by another
+/// process; a claim made here is seen at once.
+const SETUP_ADVERT_POLL: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn setup_advert_for(
+    record: &pond_core::network::domain::setup_record::SetupRecord,
+) -> mdns_advertiser::SetupAdvert {
+    mdns_advertiser::SetupAdvert {
+        id: record.discriminator.to_string(),
+        unclaimed: !record.claim_state().is_claimed(),
+    }
+}
+
+/// Re-announces `_pond._tcp` when the claim changes, so `setup=1` goes away once a phone pairs.
+async fn keep_setup_advert_current(
+    mdns: Arc<mdns_advertiser::MdnsHandle>,
+    store: Arc<pond_infra::file_setup_code_store::FileSetupCodeStore>,
+    claims: Arc<pond_core::network::services::setup_claim::SetupClaimService>,
+    mut advertised: Option<mdns_advertiser::SetupAdvert>,
+) {
+    use pond_core::network::ports::setup_code_store::SetupCodeStore as _;
+    loop {
+        tokio::select! {
+            _ = claims.claim_latched() => {}
+            _ = tokio::time::sleep(SETUP_ADVERT_POLL) => {}
+        }
+        let current = match store.load().await {
+            Ok(record) => record.as_ref().map(setup_advert_for),
+            // Keep what is advertised: the store refuses the card anyway while it is unreadable.
+            Err(error) => {
+                tracing::debug!(%error, "setup record unreadable; mDNS setup state unchanged");
+                continue;
+            }
+        };
+        if current == advertised {
+            continue;
+        }
+        match mdns.set_setup(current.as_ref()) {
+            Ok(()) => {
+                tracing::info!(
+                    setup_open = current.as_ref().is_some_and(|a| a.unclaimed),
+                    "mDNS: re-announced _pond._tcp with the new claim state"
+                );
+                advertised = current;
+            }
+            Err(error) => tracing::warn!(%error, "mDNS: could not re-announce the claim state"),
+        }
     }
 }
 
@@ -9448,6 +9579,13 @@ fn run_dashboard() -> Result<()> {
          Anyone with this link can pair devices until the server restarts; do not share it."
     );
     Ok(())
+}
+
+/// Works on the data directory directly, so it answers whether or not the server is running.
+async fn run_setup_code(request: pond_server::setup_code::SetupCodeRequest) -> Result<()> {
+    let store = pond_infra::file_setup_code_store::FileSetupCodeStore::new(default_data_dir());
+    let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
+    pond_server::setup_code::run(&store, &request, &mut out, &mut err).await
 }
 
 async fn run_pairing(refresh: bool) -> Result<()> {

@@ -16,7 +16,7 @@
 #   bash scripts/giap.sh litert import DIR  # take in a package built on another host (the Jetson)
 #   bash scripts/giap.sh models pairings         # regenerate the vision pairing table from Hugging Face
 #   bash scripts/giap.sh models pairings --check # only compare it (exit 1 if the committed table is stale)
-#   bash scripts/giap.sh provision --host HOST --key FILE  # give a Pond a device certificate (operator; must come first)
+#   bash scripts/giap.sh provision --host HOST --key FILE  # save a Pond's setup card, give it a device certificate (operator; must come first)
 #   bash scripts/giap.sh --dry-run …  # print every command instead of running it
 #
 # It auto-detects the host (Jetson / Linux / macOS), whether CUDA is usable, and
@@ -54,6 +54,8 @@ source "$HERE/lib/macos-sdk.sh"
 source "$HERE/lib/litert-setup.sh"
 # shellcheck source=lib/model-pairings.sh
 source "$HERE/lib/model-pairings.sh"
+# shellcheck source=lib/setup-code.sh
+source "$HERE/lib/setup-code.sh"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 # Which Node the repo runs on, finding one, and downloading one. REPO_ROOT has to be set first: the
@@ -722,6 +724,10 @@ doctor() {
         note "set POND_SECRET_KEY_FILE to a separate mount if device theft is the threat you care about" ;;
     esac
   fi
+
+  # The printed setup card: claimed is a pond in use, unclaimed one waiting for its first phone.
+  setup_code_doctor "$(setup_code_bin "$REPO_ROOT")" "$D_DATA_DIR"
+  [ "$SETUP_CODE_LEVEL" = warn ] && DOC_WARN=$((DOC_WARN+1))
 
   # Remote reach. A Pond with no tailnet is not broken — remote access is simply
   # a capability it does not have — so absent is a note, not a failure. What is
