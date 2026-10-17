@@ -310,3 +310,39 @@ fn write_wav(path: &str, samples: &[f32]) {
     wav.extend(bytes);
     std::fs::write(path, wav).expect("write wav");
 }
+
+/// The voice preview's seam: another voice's audio, with the selection left as it was.
+#[tokio::test]
+#[ignore = "needs Kokoro weights and an audio device; set KOKORO_DIR"]
+async fn a_sample_in_another_voice_leaves_the_selected_voice_alone() {
+    let Some(dir) = model_dir() else {
+        panic!("set KOKORO_DIR to a directory holding tokenizer.json + model + voices/");
+    };
+    let Some(other) = second_voice(&dir.join("voices")) else {
+        panic!("install a second voice beside af_heart to run this test");
+    };
+    let output = pond_adapters_kokoro::KokoroOutput::new(pond_adapters_kokoro::KokoroConfig {
+        model_path: dir.join(model_file()),
+        voices_dir: dir.join("voices"),
+        tokenizer_path: dir.join("tokenizer.json"),
+        intra_threads: intra_threads(),
+        espeak_data: None,
+    })
+    .expect("Kokoro output");
+    output
+        .set_voice(pond_adapters_kokoro::DEFAULT_VOICE)
+        .await
+        .unwrap();
+
+    let text = "Hello, I'm Goose. This is how I sound.";
+    let sample = output.synth_wav_in_voice(&other, text).await.unwrap();
+    let selected = output.synth_wav(text).await.unwrap();
+    assert!(sample.len() > 44, "the sample has no audio");
+    assert_ne!(
+        sample, selected,
+        "{other} sounded exactly like the selected voice"
+    );
+    assert_eq!(output.voice().await, pond_adapters_kokoro::DEFAULT_VOICE);
+    assert!(output.synth_wav_in_voice("../escape", text).await.is_err());
+    assert_eq!(output.voice().await, pond_adapters_kokoro::DEFAULT_VOICE);
+}

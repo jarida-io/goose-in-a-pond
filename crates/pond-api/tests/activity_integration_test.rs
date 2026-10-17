@@ -152,6 +152,7 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
         mesh_rebuild: None,
         setup_claims: None,
         spoken_codes: Default::default(),
+        voice_samples: Default::default(),
     });
 
     (

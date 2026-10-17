@@ -27,7 +27,8 @@ Status: **DESIGNED 2026-10-16.** Phase status is in [Phases](#phases).
   pond's code is in its startup output or behind `ssh … pond-server pairing`.
 - **The wizard is open to the LAN until onboarding completes.** `PUT /settings`, `/onboard/*` and
   `POST /profiles` are `Exposure::UntilOnboarded` (`PUBLIC_ROUTES`,
-  `crates/pond-api/src/middleware/mod.rs`), so on a fresh pond any LAN peer can drive it.
+  `crates/pond-api/src/middleware/mod.rs`), so on a fresh pond any LAN peer can drive it. (Closed
+  by P4 on 2026-10-17: see [Claim before onboarding](#claim-before-onboarding).)
 - **goose-on-the-go has no owner-setup wizard.** It finds ponds by mDNS, QR or address, and refuses
   to pair unless NetInfo reports Wi-Fi or Ethernet and the address is local
   (`providers/server-provider.tsx`, `models/connection.ts::isLocalPairingUrl`).
@@ -104,7 +105,8 @@ setup code. Once claimed it never accepts the setup code again until it is reset
   provision` for an imaged pond. Install prints it with a QR and writes a printable card; provision
   prints the card on the operator's machine.
 - **Stored** at `<data>/setup/setup.json`, mode `0600` in a `0700` directory, written atomically:
-  `{version, code, discriminator, created_at, claimed_at}`. Not in `Settings` (PAI-2: `GET /settings`
+  `{version, code, discriminator, created_at, claimed_at, claimed_by}` (`claimed_by` since P4;
+  still version 1, and a record without it reads with nobody as the claimant). Not in `Settings` (PAI-2: `GET /settings`
   serialises the whole struct) and not in the database. `scripts/pond-snapshot.py` leaves it out,
   as it leaves out `embedded-network/device`: the card belongs to the hardware.
 - **QR.** `pond://setup?v=1&code=34970112339&id=7f3a`. `id` is the discriminator: four hex digits,
@@ -178,12 +180,46 @@ channel carries the same exchange later.
 
 ### Claim before onboarding
 
-Today a fresh pond's wizard is open to every LAN peer. With claiming in place, the wizard's writes
-become: open to loopback while unclaimed (the desktop app), and open to a paired device's token once
-claimed. A phone therefore claims first and then runs owner setup as itself. The `Exposure` classes
-grow one state; the guards in `middleware/mod.rs` that pin each route's class move with them.
-goose-on-the-go gains the owner-setup steps the desktop wizard has (about you, locale, personality,
-wake word).
+Until P4 a fresh pond's wizard was open to every LAN peer. With claiming in place, the wizard's
+routes answer a caller **without a token** only from loopback, and only while the pond is unclaimed
+(the desktop app, before it pairs). Once the pond is claimed, they need a paired device's token
+until onboarding completes. After that they close to tokenless callers as before. A phone therefore
+claims first and then runs owner setup as itself. goose-on-the-go gains the owner-setup steps the
+desktop wizard has (about you, locale, personality, wake word).
+
+| Tokenless caller | Unclaimed, not onboarded | Claimed, not onboarded | Onboarded |
+|---|---|---|---|
+| Wizard writes (`UntilOnboarded`) | loopback only | nobody | nobody |
+| `POST /onboard/reset` (`UntilOnboardedThenHostOnly`) | loopback only | nobody | loopback + host credential |
+
+A caller with a valid token is admitted in every column before onboarding completes, as before.
+The claim state is read live on each such request, like the onboarding state. A read failure counts
+as claimed, which narrows access. A pond with no setup record reads as unclaimed.
+
+**The claiming device becomes the owner's.** A pond is claimed before it has any members, so its
+first device starts out attributed to nobody, and attribution otherwise comes only from a pairing
+code. The setup record therefore notes which device latched the claim (`claimed_by`, the token's
+device, never request input). When `POST /onboard/complete` succeeds, if that device is still
+unattributed and `primary_profile_id` names an existing member, the device is attributed to that
+member. `GET /devices/self` then reports the owner. A device that was already attributed is left
+alone, and a record written before `claimed_by` existed binds nobody.
+
+**Hearing a voice before choosing it.** `POST /api/v1/voice/sample {"voice": "<installed voice
+id>"}` reads one fixed sentence on the pond's own speaker in that voice, without changing any
+setting. It needs a paired device's token (`Exposure::Authenticated`, so it works during onboarding
+too), refuses a voice that is not installed (`404 unknown_voice`), takes no text from the caller, and
+allows one sample per 3 s (`429 voice_sample_limited` with `Retry-After`). It answers
+`202 {"speaking": true}` and plays detached, and `503 voice_unavailable` when the pond has no speech
+engine. The sentence is synthesised with that voice's style for that one utterance, so the voice a
+running turn reads between sentences never changes; it plays without beginning a turn, so it never
+cuts one off, and a turn that starts cuts it off instead.
+
+**Choosing the chat model during setup.** `POST /onboard/complete` needs a chat model, so the five
+routes that list, fetch and pick one (`GET /models`, `GET /models/download/progress`,
+`POST /models/download/control`, `POST /models/{category}/{name}/download`,
+`POST /models/{category}/{name}/activate`) take a paired device's token before onboarding too
+(`Exposure::Authenticated`), and never answer a tokenless caller. Activating a model for the chat
+role writes `chat_model`. This closes the onboarding half of #365.
 
 ## The setup channel
 
@@ -237,7 +273,7 @@ log or return it, and zeroizes its copy.
 | P1 | `pond-core/src/network/`: setup code, card, discriminator, claim policy, guess and spoken-code limits, `SetupCodeStore` and `CodeAnnouncer` ports; `FileSetupCodeStore`. Wi-Fi, transport and capability ports wait for the phases that use them | LANDED 2026-10-16 |
 | P2 | Move interface classification and mDNS behind the context's ports; `GET /api/v1/network/status` with capabilities | not started |
 | P3 | `pond-server setup-code`, card at install and provision; CPace against the setup code with the claim latch; spoken fallback with bundled clips; goose-on-the-go reads `pond://setup` | LANDED 2026-10-17, server side (the wire contract above; Mac unit, route and live tests; no phone or Orin run yet). goose-on-the-go's half lands in its own repo |
-| P4 | Claim before onboarding; owner setup in goose-on-the-go | not started |
+| P4 | Claim before onboarding, owner attribution and the voice sample (server); owner setup in goose-on-the-go | LANDED 2026-10-17, server side: the claim-aware wizard exposure, `claimed_by` and owner attribution at completion, `POST /voice/sample`, and the five model routes a phone needs before onboarding (#365). Mac unit, route and live tests, and the Kokoro sample seam against a real model; no phone or Orin run yet. Owner setup in goose-on-the-go is handed off (`.ai/handoffs/gotg-onboarding-and-setup.md`) |
 | P5 | Setup channel and BLE: macOS adapter first (the Mac development loop), then Linux, verified on the Jetson last; Wi-Fi join | not started |
 | P6 | Connectivity watchdog; SoftAP and captive page on Linux | not started |
 | P7 | Matter BLE and Wi-Fi handoff through this layer; BT Classic accessories; Windows adapters | not started |

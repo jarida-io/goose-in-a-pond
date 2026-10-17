@@ -265,6 +265,7 @@ async fn pond_with_parts(
         mesh_rebuild: None,
         setup_claims: None,
         spoken_codes: Default::default(),
+        voice_samples: Default::default(),
     });
 
     Fixture {

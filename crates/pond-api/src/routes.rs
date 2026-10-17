@@ -84,8 +84,8 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     // ───────────── Public routes (accessible before onboarding) ─────────────
     // "Public" = not behind `require_onboarding_complete`. Anonymous access is separate
     // (`middleware::PUBLIC_ROUTES`): the wizard's writes (`PUT /settings`,
-    // `POST /profiles`, `PATCH /profiles/{id}`, `POST /onboard/*`,
-    // `/voice/calibrate`) close to anonymous callers after onboarding. Classify new routes there.
+    // `POST /profiles`, `PATCH /profiles/{id}`, `POST /onboard/*`, `/voice/calibrate`) answer an
+    // anonymous caller only on an unclaimed pond's host, until onboarding. Classify new routes there.
     let public_routes = Router::new()
         .route("/health", get(health))
         .route("/handshake", post(handshake_handler))
@@ -120,8 +120,9 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/onboard/step/{name}", post(onboarding_step))
         // Reset onboarding back to the first step ("Start over" in Settings).
         .route("/onboard/reset", post(reset_onboarding))
-        // Settings write is public so onboarding steps can save before completion
-        .route("/settings", put(update_settings))
+        // The write is the wizard's; the read needs a token in every state, so the wizard can
+        // resume from what it saved without a PUT that answers with the whole record.
+        .route("/settings", get(get_settings).put(update_settings))
         // Warm-up readiness; anonymous during onboarding, like the /settings write (PUBLIC_ROUTES).
         .route("/warmup", get(get_warmup))
         // ── Time and place ────────────────────────────────────────────────
@@ -131,6 +132,13 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // Voice preview before pairing; a loopback peer without a token needs the host credential.
         .route("/tts", post(tts_synthesise))
         .route("/voice/tts/apply", post(apply_tts_settings))
+        // Hearing a voice before choosing it; a paired token in every state (PUBLIC_ROUTES).
+        .route(
+            "/voice/sample",
+            post(crate::voice_sample::voice_sample).layer(axum::extract::DefaultBodyLimit::max(
+                crate::voice_sample::VOICE_SAMPLE_BODY_LIMIT,
+            )),
+        )
         // Wake-word phrase calibration (public — used during onboarding WakeWord step)
         .route("/voice/calibrate", post(calibrate_wake_word))
         .route("/voice/calibrate", delete(reset_wake_word_calibration))
@@ -140,7 +148,14 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/test/speak", post(test_speak))
         // Profile create/patch are public so onboarding steps can write before completion
         .route("/profiles", post(create_profile))
-        .route("/profiles/{id}", patch(update_profile_prefs));
+        .route("/profiles/{id}", patch(update_profile_prefs))
+        // The chat model `/onboard/complete` requires: a paired device lists, fetches and picks
+        // it before onboarding (#365). A token in every state (PUBLIC_ROUTES).
+        .route("/models", get(list_models))
+        .route("/models/download/progress", get(get_download_progress))
+        .route("/models/download/control", post(download_control))
+        .route("/models/{category}/{name}/download", post(download_model))
+        .route("/models/{category}/{name}/activate", post(activate_model));
 
     // ───────────── Protected routes (require onboarding) ─────────────
     let protected_routes = Router::new()
@@ -213,9 +228,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/mesh/self", get(get_mesh_self))
         .route("/mesh/settlement", get(get_mesh_settlement_status))
-        .route("/settings", get(get_settings))
         .route("/weather", get(get_weather))
-        .route("/models", get(list_models))
         .route("/models/capabilities", get(get_model_capabilities))
         .route("/models/vision-status", get(get_vision_status))
         .route("/models/memory-status", get(get_memory_status))
@@ -227,13 +240,9 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/models/search/gguf/files", get(list_hf_model_files))
         .route("/models/search/llamafile", get(search_llamafile_models))
         .route("/models/download/url", post(download_model_from_url))
-        .route("/models/download/progress", get(get_download_progress))
-        .route("/models/download/control", post(download_control))
         .route("/models/scan", post(scan_models))
         .route("/models/cleanup", post(cleanup_models))
         .route("/models/disk-usage", get(disk_usage))
-        .route("/models/{category}/{name}/download", post(download_model))
-        .route("/models/{category}/{name}/activate", post(activate_model))
         .route(
             "/models/{category}/{name}/companions/pictures",
             post(crate::model_acquisition::add_pictures),
@@ -1317,7 +1326,58 @@ async fn complete_onboarding(
                 Json(json!({"error": format!("Failed to complete onboarding: {}", e)})),
             )
         })?;
+    attribute_claimant_to_owner(&state, settings.primary_profile_id.as_deref()).await;
     Ok(Json(json!({"status": "completed"})))
+}
+
+/// The device that claimed the pond paired before it had members, so it belonged to nobody; it
+/// becomes the primary member's now. After completion is saved, so a failure here only logs.
+async fn attribute_claimant_to_owner(state: &Arc<AppState>, primary_profile_id: Option<&str>) {
+    let Some(claims) = state.setup_claims.as_ref() else {
+        return;
+    };
+    let failed = |device: Option<&str>, why: String| {
+        tracing::warn!(
+            kind = "owner_attribution_failed",
+            device = device.unwrap_or("unknown"),
+            error = %why,
+            "onboarding completed, but the device that claimed this pond was not attributed \
+             to its owner; it stays unattributed until a pairing code or Devices binds it"
+        );
+    };
+    let claimant = match claims.claimed_by().await {
+        Ok(Some(device)) => device,
+        Ok(None) => return,
+        Err(e) => return failed(None, format!("{e:#}")),
+    };
+    let attribution = device_attribution(state);
+    let current = match attribution.device_profile(&claimant).await {
+        Ok(current) => current,
+        Err(e) => return failed(Some(&claimant), format!("{e:#}")),
+    };
+    let members: Vec<String> = match state.profile_repo.list().await {
+        Ok(profiles) => profiles.into_iter().map(|p| p.id).collect(),
+        Err(e) => return failed(Some(&claimant), format!("{e:#}")),
+    };
+    let Some(owner) = pond_core::user_data::services::member_attribution::owner_for_claimant(
+        current.as_deref(),
+        primary_profile_id,
+        &members,
+    ) else {
+        return;
+    };
+    match attribution
+        .set_device_profile(&claimant, Some(&owner))
+        .await
+    {
+        Ok(()) => tracing::info!(
+            kind = "owner_attributed",
+            device = %claimant,
+            profile_id = %owner,
+            "the device that claimed this pond now belongs to its owner"
+        ),
+        Err(e) => failed(Some(&claimant), format!("{e:#}")),
+    }
 }
 
 /// Onboarding-status JSON shared by the status, step and reset routes so their shapes match.
@@ -1421,7 +1481,7 @@ async fn bearer_or_host_credential(
 /// Resets onboarding to `Welcome` and re-arms the onboarding guard. Open while the wizard runs;
 /// once the Pond is set up, a caller the middleware admitted only for being on the host must
 /// hold a token or the host credential, because a reset reopens the wizard's writes
-/// (`PUT /settings`, `POST /profiles`, `/onboard/*`) to every LAN and tailnet peer.
+/// (`PUT /settings`, `POST /profiles`, `/onboard/*`) to any tokenless process on an unclaimed host.
 async fn reset_onboarding(
     State(state): State<Arc<AppState>>,
     principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,

@@ -54,14 +54,19 @@ impl SetupClaimService {
     }
 
     /// Call BEFORE the first device's tokens are returned, so a crash leaves a claimed pond, never
-    /// a paired phone beside a live card. `SetupCodeUnavailable`: another device won the claim.
-    pub async fn record_claim(&self, at: DateTime<Utc>) -> anyhow::Result<SetupRecord> {
+    /// a paired phone beside a live card. `device` is the one those tokens will be issued to.
+    /// `SetupCodeUnavailable`: another device won the claim.
+    pub async fn record_claim(
+        &self,
+        at: DateTime<Utc>,
+        device: &str,
+    ) -> anyhow::Result<SetupRecord> {
         let mut throttle = self.throttle.lock().await;
         match self.store.load().await? {
             Some(record) if !record.claim_state().is_claimed() => {}
             _ => return Err(ClaimRefusal::SetupCodeUnavailable.into()),
         }
-        let record = self.store.mark_claimed(at).await?;
+        let record = self.store.mark_claimed(at, Some(device)).await?;
         throttle.record_success();
         self.claimed.notify_one();
         tracing::info!(claimed_at = %at, "pond claimed with its setup code");
@@ -69,14 +74,15 @@ impl SetupClaimService {
     }
 
     /// Any first pairing claims the pond, so a phone paired with a pairing code closes the card
-    /// too. `Ok(false)` when there was nothing to latch: no record, or already claimed.
-    pub async fn latch_claim(&self, at: DateTime<Utc>) -> anyhow::Result<bool> {
+    /// too. `device` is the one the pairing issues its tokens to. `Ok(false)` when there was
+    /// nothing to latch: no record, or already claimed.
+    pub async fn latch_claim(&self, at: DateTime<Utc>, device: &str) -> anyhow::Result<bool> {
         let _throttle = self.throttle.lock().await;
         match self.store.load().await? {
             Some(record) if !record.claim_state().is_claimed() => {}
             _ => return Ok(false),
         }
-        self.store.mark_claimed(at).await?;
+        self.store.mark_claimed(at, Some(device)).await?;
         self.claimed.notify_one();
         tracing::info!(claimed_at = %at, "pond claimed by a pairing");
         Ok(true)
@@ -95,6 +101,17 @@ impl SetupClaimService {
             .load()
             .await?
             .map_or(ClaimState::Unclaimed, |record| record.claim_state()))
+    }
+
+    /// The device whose pairing latched the claim; `None` when nothing latched or nobody was
+    /// recorded (a record written before `claimed_by`, a pond created claimed).
+    pub async fn claimed_by(&self) -> anyhow::Result<Option<String>> {
+        Ok(self
+            .store
+            .load()
+            .await?
+            .filter(|record| record.claim_state().is_claimed())
+            .and_then(|record| record.claimed_by))
     }
 }
 
@@ -159,7 +176,8 @@ mod tests {
             Err(ClaimRefusal::SetupCodeUnavailable)
         );
         assert!(service.claim_state().await.is_err());
-        assert!(service.record_claim(at(10)).await.is_err());
+        assert!(service.record_claim(at(10), "phone").await.is_err());
+        assert!(service.claimed_by().await.is_err());
     }
 
     #[tokio::test]
@@ -193,8 +211,12 @@ mod tests {
         let now = Instant::now();
         let code = service.admit_setup_attempt(now).await.unwrap();
 
-        let claimed = service.record_claim(at(10)).await.unwrap();
+        let claimed = service.record_claim(at(10), "card-phone").await.unwrap();
         assert_eq!(claimed.claimed_at, Some(at(10)));
+        assert_eq!(
+            service.claimed_by().await.unwrap().as_deref(),
+            Some("card-phone")
+        );
         assert_eq!(
             service.admit_setup_attempt(now).await,
             Err(ClaimRefusal::SetupCodeUnavailable)
@@ -202,6 +224,7 @@ mod tests {
 
         store.rearm().await.unwrap();
         assert_eq!(service.admit_setup_attempt(now).await.unwrap(), code);
+        assert_eq!(service.claimed_by().await.unwrap(), None);
     }
 
     #[tokio::test]
@@ -212,19 +235,27 @@ mod tests {
         service.admit_setup_attempt(now).await.unwrap();
         service.admit_setup_attempt(now).await.unwrap();
 
-        service.record_claim(at(10)).await.unwrap();
-        let err = service.record_claim(at(11)).await.unwrap_err();
+        service.record_claim(at(10), "first-phone").await.unwrap();
+        let err = service
+            .record_claim(at(11), "second-phone")
+            .await
+            .unwrap_err();
         assert_eq!(
             err.downcast_ref::<ClaimRefusal>(),
             Some(&ClaimRefusal::SetupCodeUnavailable)
         );
-        assert_eq!(store.record().unwrap().claimed_at, Some(at(10)));
+        let record = store.record().unwrap();
+        assert_eq!(record.claimed_at, Some(at(10)));
+        assert_eq!(record.claimed_by.as_deref(), Some("first-phone"));
     }
 
     #[tokio::test]
     async fn a_claim_on_a_pond_with_no_code_is_refused() {
         let store = Arc::new(MockSetupCodeStore::new());
-        let err = service(&store).record_claim(at(10)).await.unwrap_err();
+        let err = service(&store)
+            .record_claim(at(10), "phone")
+            .await
+            .unwrap_err();
         assert_eq!(
             err.downcast_ref::<ClaimRefusal>(),
             Some(&ClaimRefusal::SetupCodeUnavailable)
@@ -295,9 +326,11 @@ mod tests {
     async fn a_pairing_latches_the_claim_once_and_keeps_the_first_timestamp() {
         let store = Arc::new(MockSetupCodeStore::unclaimed());
         let service = service(&store);
-        assert!(service.latch_claim(at(10)).await.unwrap());
-        assert!(!service.latch_claim(at(11)).await.unwrap());
-        assert_eq!(store.record().unwrap().claimed_at, Some(at(10)));
+        assert!(service.latch_claim(at(10), "desktop").await.unwrap());
+        assert!(!service.latch_claim(at(11), "late-phone").await.unwrap());
+        let record = store.record().unwrap();
+        assert_eq!(record.claimed_at, Some(at(10)));
+        assert_eq!(record.claimed_by.as_deref(), Some("desktop"));
         assert_eq!(
             service.admit_setup_attempt(Instant::now()).await,
             Err(ClaimRefusal::SetupCodeUnavailable)
@@ -305,9 +338,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nobody_is_the_claimant_until_a_claim_latches_or_when_none_was_recorded() {
+        let store = Arc::new(MockSetupCodeStore::unclaimed());
+        let service = service(&store);
+        assert_eq!(service.claimed_by().await.unwrap(), None);
+
+        // Created claimed, or written before `claimed_by` existed.
+        store.set_claimed_at(Some(at(10)));
+        assert_eq!(service.claimed_by().await.unwrap(), None);
+
+        // A stale name on an unclaimed record names nobody.
+        let mut record = MockSetupCodeStore::fixed_record();
+        record.claimed_by = Some("ghost".into());
+        store.set_record(Some(record));
+        assert_eq!(service.claimed_by().await.unwrap(), None);
+
+        let recordless = SetupClaimService::new(Arc::new(MockSetupCodeStore::new()));
+        assert_eq!(recordless.claimed_by().await.unwrap(), None);
+    }
+
+    #[tokio::test]
     async fn a_pairing_on_a_pond_with_no_record_has_nothing_to_latch() {
         let store = Arc::new(MockSetupCodeStore::new());
-        assert!(!service(&store).latch_claim(at(10)).await.unwrap());
+        assert!(!service(&store).latch_claim(at(10), "phone").await.unwrap());
         assert_eq!(store.record(), None);
     }
 
@@ -315,14 +368,14 @@ mod tests {
     async fn a_latch_against_an_unreadable_store_is_an_error_not_a_silent_skip() {
         let store = Arc::new(MockSetupCodeStore::unclaimed());
         store.set_failing(true);
-        assert!(service(&store).latch_claim(at(10)).await.is_err());
+        assert!(service(&store).latch_claim(at(10), "phone").await.is_err());
     }
 
     #[tokio::test]
     async fn a_claim_is_signalled_even_when_nobody_was_waiting_yet() {
         let store = Arc::new(MockSetupCodeStore::unclaimed());
         let service = service(&store);
-        service.latch_claim(at(10)).await.unwrap();
+        service.latch_claim(at(10), "phone").await.unwrap();
         tokio::time::timeout(Duration::from_secs(1), service.claim_latched())
             .await
             .expect("the latch must leave a permit for a later waiter");
@@ -338,7 +391,7 @@ mod tests {
         }
         assert!(service.admit_setup_attempt(now).await.is_err());
 
-        service.record_claim(at(10)).await.unwrap();
+        service.record_claim(at(10), "phone").await.unwrap();
         store.rearm().await.unwrap();
         assert!(
             service.admit_setup_attempt(now).await.is_ok(),

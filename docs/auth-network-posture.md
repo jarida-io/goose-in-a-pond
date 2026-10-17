@@ -44,9 +44,10 @@ dashboard router in `pond-server/src/listeners.rs::compose`):
   from a loopback peer without a token (2026-10-12): `POST /onboard/reset` once the
   Pond is set up, `POST /tts`, and `POST /test/speak` (the last one even with a
   token). A reset re-arms the wizard, which reopens `PUT /settings`,
-  `POST /profiles` and `/onboard/*` to every LAN and tailnet peer, so another
-  account, or a page on another local port, could otherwise take a set-up Pond
-  back to the wizard. A valid bearer token still admits a reset or `/tts`: the
+  `POST /profiles` and `/onboard/*` to every paired device, and to tokenless
+  processes on the host while the Pond is unclaimed (below), so another account,
+  or a page on another local port, could otherwise take a set-up Pond back to the
+  wizard. A valid bearer token still admits a reset or `/tts`: the
   handler checks it itself, because the middleware skips the token on a route a
   loopback peer may call without one. The wizard's own reset, before the Pond is
   set up, stays open. On the companion listener, which holds no credential, these
@@ -195,7 +196,8 @@ recovery override. This transport does not complete broader authorization work.
 - All `/api/v1/*` routes require `Authorization: Bearer <session_token>` and are
   rejected with **401** otherwise, **except** the public allowlist: `/health`,
   `/handshake`, `/handshake/{init,verify,refresh,pairing-code}`,
-  onboarding routes, and a few local dev/test pages
+  onboarding routes (on the host, while unclaimed; see "Who may drive the
+  wizard"), and a few local dev/test pages
   (`crates/pond-api/src/middleware/mod.rs::route_exposure`). The allowlist is
   state-scoped rather than flat: each entry in `PUBLIC_ROUTES` carries an
   `Exposure` of `Always`, `HostOnly`, `Authenticated`, `UntilOnboarded`, or
@@ -464,6 +466,41 @@ any screen. A household that does not want presence in the room to count as pres
 Neither code appears in a log line, an event attribute or a REST response; only
 `pond-server setup-code`'s own output and the card file show the setup code. Setup runs are
 audited as `method="cpace-setup"`, a spoken code as `auth.spoken_code_issued`.
+
+### Who may drive the wizard (2026-10-17)
+
+Until pond networking P4 the wizard's routes (`PUT /settings`, `POST /profiles`,
+`PATCH /profiles/{id}`, `/onboard/*`, `/location/detect`, `/warmup`, `/voice/tts/apply`,
+`/voice/calibrate`) answered every LAN and tailnet peer with no token until onboarding finished, so
+whoever reached a fresh pond first could set it up. Now a tokenless caller is answered only from
+loopback, and only while the pond is neither claimed nor onboarded: the desktop app before it pairs.
+Once any device has paired the pond is claimed, and the wizard needs a paired device's token until
+onboarding completes; a phone claims with the card or a spoken code, then runs owner setup as
+itself. After onboarding the wizard closes to tokenless callers as before, and `POST /onboard/reset`
+keeps its loopback-plus-host-credential rule. A valid token is admitted before onboarding in every
+state.
+
+| Tokenless caller | Unclaimed, not onboarded | Claimed, not onboarded | Onboarded |
+|---|---|---|---|
+| Wizard routes (`Exposure::UntilOnboarded`) | loopback only | nobody | nobody |
+| `POST /onboard/reset` (`UntilOnboardedThenHostOnly`) | loopback only | nobody | loopback + host credential |
+
+The claim is read live from the setup record on each of these requests, like the onboarding state
+(PAI-2 §3.7); a read failure counts as claimed, and a pond with no setup record reads as unclaimed.
+A claimed pond that is reset and has lost every token is not stuck: the host can still issue a
+pairing code and pair (pairing answers in every state), and `setup-code --rearm` makes it unclaimed.
+The desktop pairs on start and sends its token, so it works in either order; a browser tab on the
+host pairs with the host credential from the `pond-server dashboard` link when a claimed pond
+refuses it. A browser elsewhere on the LAN can no longer set a pond up without pairing.
+
+**The claiming device becomes the owner's.** The setup record notes which device latched the claim
+(`claimed_by`: the device the claiming pairing issued its tokens to, never request input). When
+`POST /onboard/complete` succeeds, that device, if still unattributed, is attributed to
+`primary_profile_id` when that names a member. A device attributed since is left alone.
+
+**Also open to a paired token before onboarding**, and never tokenless: `POST /voice/sample`
+(one fixed sentence in an installed voice, no settings changed, one per 3 s) and the five model
+routes a phone needs to list, fetch and choose the chat model completion requires (#365).
 
 ### Who may pair
 

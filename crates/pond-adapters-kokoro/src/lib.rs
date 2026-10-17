@@ -173,6 +173,26 @@ impl KokoroOutput {
 
     /// Mono f32 at [`SAMPLE_RATE`]; empty for text that phonemizes to nothing.
     pub async fn synth_samples(&self, text: &str) -> Result<Vec<f32>> {
+        self.synth_samples_with(text, None).await
+    }
+
+    /// `text` in `voice` as a WAV, leaving the selected voice untouched: a turn reads the
+    /// selection between sentences, so swapping it for a preview would race that turn.
+    pub async fn synth_wav_in_voice(&self, voice: &str, text: &str) -> Result<Vec<u8>> {
+        let style = Arc::new(StyleTable::load(&self.config.voices_dir, voice)?);
+        let samples = self.synth_samples_with(text, Some(style)).await?;
+        if samples.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(encode_wav_pcm16(&f32_to_pcm16(&samples), SAMPLE_RATE))
+    }
+
+    /// `style` is the voice to use; `None` is the selected one.
+    async fn synth_samples_with(
+        &self,
+        text: &str,
+        style: Option<Arc<StyleTable>>,
+    ) -> Result<Vec<f32>> {
         let (chunks, dropped) = tokenizer::chunk(text, &self.vocab)?;
         if dropped > 0 {
             // Not fatal, but the word will sound wrong: the model never learned that phoneme.
@@ -186,7 +206,10 @@ impl KokoroOutput {
             return Ok(Vec::new());
         }
 
-        let style = self.ensure_style().await?;
+        let style = match style {
+            Some(style) => style,
+            None => self.ensure_style().await?,
+        };
         let speed = self.speed();
 
         let mut engine_guard = self.engine.write().await;

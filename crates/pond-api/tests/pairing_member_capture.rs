@@ -140,6 +140,7 @@ async fn make_app() -> Harness {
         mesh_rebuild: None,
         setup_claims: None,
         spoken_codes: Default::default(),
+        voice_samples: Default::default(),
     });
 
     let dist = std::path::PathBuf::from("pond-desktop/dist");

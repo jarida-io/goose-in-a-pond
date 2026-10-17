@@ -6,9 +6,19 @@
   pairing  a fresh pond reports `unclaimed`, and a pairing-code pairing (the dashboard's loopback
            HMAC) claims it too
   restart  the claim survived a restart
+  voice-sample
+           the voice sample needs the claimant's token, takes a voice and nothing else, and refuses
+           a voice that is not installed (or the whole route, on a pond with no voice engine)
+           without making a sound
+  reset-wizard
+           after a host reset of the pond `card` claimed: its wizard refuses the tokenless host and
+           admits the claimant's token (the model list and download progress too, #365),
+           completing it makes the claiming phone the primary member's, and after
+           `setup-code --rearm` the wizard reopens to the host
 
 The launcher proves process and port ownership first. The setup code is read from
-`pond-server setup-code --json` and never printed.
+`pond-server setup-code --json` and never printed, and neither is the claimant's token, which
+`card` keeps in the scratch data directory (`0600`) for `reset-wizard`.
 """
 import base64
 import hashlib
@@ -27,6 +37,8 @@ DATA = Path(os.environ["POND_DATA_DIR"])
 BIN = os.environ["POND_SERVER_BIN"]
 PORT = int((DATA / ".runtime_api_port").read_text())
 HOST_ONLY = {"X-Pond-Host-Credential": (DATA / ".runtime_host_credential").read_text().strip()}
+CLAIMANT = DATA / "live-claimant.json"
+FULL_SETUP = {"user_name": "AuthProbe", "assistant_name": "Goose", "timezone": "UTC", "chat_model": "mock"}
 FAILURES = []
 
 
@@ -105,6 +117,9 @@ def card():
     check("the setup code claims the pond over loopback CPace", result.get("accepted") is True,
           str({k: v for k, v in result.items() if "token" not in k}))
     check("the pond then reports claimed", status() == "claimed", status())
+    if result.get("accepted") is True:
+        CLAIMANT.touch(mode=0o600)
+        CLAIMANT.write_text(json.dumps({"session_token": result["session_token"]}))
 
     code, _, text, _ = request("POST", "/handshake/pake/init", init_body("live-second-phone", "setup"))
     check("a second setup attempt is 409 setup_code_unavailable",
@@ -129,7 +144,60 @@ def restart():
     check("the claim survives a restart", status() == "claimed", status())
 
 
+def voice_sample():
+    bearer = {"Authorization": "Bearer " + json.loads(CLAIMANT.read_text())["session_token"]}
+    code, _, text, _ = request("POST", "/voice/sample", {"voice": "af_heart"})
+    check("the voice sample refuses a caller with no token", code == 401, "%s %s" % (code, text[:200]))
+    code, _, text, body = request("POST", "/voice/sample", {"voice": "af_heart", "text": "hi"}, bearer)
+    check("the voice sample takes no text from the caller",
+          code == 400 and body == {"error": "invalid request body"}, "%s %s" % (code, text[:200]))
+    code, _, text, body = request("POST", "/voice/sample", {"voice": "zz_not_installed"}, bearer)
+    check("an uninstalled voice is 404 unknown_voice, or 503 voice_unavailable with no engine",
+          (code, body) in ((404, {"error": "unknown_voice"}), (503, {"error": "voice_unavailable"})),
+          "%s %s" % (code, text[:200]))
+
+
+def reset_wizard():
+    bearer = {"Authorization": "Bearer " + json.loads(CLAIMANT.read_text())["session_token"]}
+
+    code, _, text, _ = request("PUT", "/settings", FULL_SETUP)
+    check("a claimed, reset pond's wizard refuses the tokenless host", code == 401, "%s %s" % (code, text[:200]))
+    code, _, text, _ = request("POST", "/onboard/reset")
+    check("and so does its reset, until it is set up again", code == 401, "%s %s" % (code, text[:200]))
+    for path in ("/models", "/models/download/progress"):
+        code, _, text, _ = request("GET", path, None, bearer)
+        check("GET %s answers the claimant before onboarding (#365)" % path, code == 200,
+              "%s %s" % (code, text[:200]))
+        code, _, text, _ = request("GET", path)
+        check("and never a caller with no token", code == 401, "%s %s" % (code, text[:200]))
+    code, _, text, owner = request("POST", "/profiles", {"display_name": "Live Owner"}, bearer)
+    check("the claimant's token reopens the wizard", code == 201, "%s %s" % (code, text[:200]))
+    owner_id = (owner or {}).get("id")
+    code, _, text, _ = request("PUT", "/settings", {**FULL_SETUP, "primary_profile_id": owner_id}, bearer)
+    check("the claimant names the owner as the primary member", code == 200, "%s %s" % (code, text[:200]))
+    code, _, text, _ = request("POST", "/onboard/complete", None, bearer)
+    check("the claimant finishes setup as itself", code == 200, "%s %s" % (code, text[:200]))
+    code, _, text, me = request("GET", "/devices/self", None, bearer)
+    check("and the claiming phone now belongs to the owner",
+          code == 200 and ((me or {}).get("profile") or {}).get("id") == owner_id,
+          "%s %s" % (code, text[:200]))
+    code, _, text, _ = request("PUT", "/settings", FULL_SETUP)
+    check("the wizard closes again once set up", code == 401, "%s %s" % (code, text[:200]))
+
+    setup_code("--rearm")
+    check("a re-armed pond reports unclaimed", status() == "unclaimed", status())
+    code, _, text, _ = request("POST", "/onboard/reset", None, HOST_ONLY)
+    check("the host resets the re-armed pond", code == 200, "%s %s" % (code, text[:200]))
+    code, _, text, _ = request("PUT", "/settings", FULL_SETUP)
+    check("a re-armed, reset pond's wizard reopens to the host", code == 200, "%s %s" % (code, text[:200]))
+    code, _, text, _ = request("POST", "/onboard/complete")
+    check("the host finishes setup", code == 200, "%s %s" % (code, text[:200]))
+    code, _, text, _ = request("PUT", "/settings", FULL_SETUP)
+    check("and the wizard closes again", code == 401, "%s %s" % (code, text[:200]))
+
+
 if __name__ == "__main__":
     pond_cpace.check_vectors()
-    {"card": card, "pairing": pairing, "restart": restart}[sys.argv[1]]()
+    {"card": card, "pairing": pairing, "restart": restart, "voice-sample": voice_sample,
+     "reset-wizard": reset_wizard}[sys.argv[1]]()
     sys.exit(1 if FAILURES else 0)

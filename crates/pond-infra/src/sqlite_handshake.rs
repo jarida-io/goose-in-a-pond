@@ -316,13 +316,14 @@ impl SqliteHandshakeAdapter {
         Ok(row.map(|(profile,)| profile))
     }
 
-    /// Any first pairing claims the pond. Best effort: a broken setup directory must not take
-    /// pairing down with it, and a pond with no setup record has nothing to latch.
-    async fn latch_setup_claim(&self, method: &'static str) {
+    /// Any first pairing claims the pond, naming `device_id`, the device the pairing issues its
+    /// tokens to. Best effort: a broken setup directory must not take pairing down with it, and
+    /// a pond with no setup record has nothing to latch.
+    async fn latch_setup_claim(&self, method: &'static str, device_id: &str) {
         let Some(claims) = self.setup_claims.as_ref() else {
             return;
         };
-        if let Err(error) = claims.latch_claim(Self::now()).await {
+        if let Err(error) = claims.latch_claim(Self::now(), device_id).await {
             tracing::warn!(
                 kind = "setup_claim_latch_failed",
                 %error,
@@ -446,8 +447,8 @@ impl SqliteHandshakeAdapter {
             return Ok(self.reject(PakeRefusal::SetupCodeUnavailable.code()));
         };
         // Latched before any token exists, so a crash leaves a claimed pond, never a paired phone
-        // beside a live card.
-        if let Err(error) = claims.record_claim(Self::now()).await {
+        // beside a live card. `complete_setup_claim` issues the tokens to `client_id`.
+        if let Err(error) = claims.record_claim(Self::now(), &client_id).await {
             if error.downcast_ref::<ClaimRefusal>().is_some() {
                 tracing::warn!(
                     client_id = %client_id,
@@ -514,9 +515,9 @@ impl SqliteHandshakeAdapter {
             );
             return Ok(None);
         }
-        self.latch_setup_claim(method).await;
-
         let device_id = client_id.to_string();
+        self.latch_setup_claim(method, &device_id).await;
+
         let device_name = Self::device_name_for(client_id, device_name);
         self.register_device(
             &device_id,
@@ -558,11 +559,11 @@ impl Handshake for SqliteHandshakeAdapter {
             .execute(&self.pool)
             .await?;
         ISSUED_CODE_CACHE.write().await.remove(&matched);
-        self.latch_setup_claim("legacy").await;
 
         // Writes no `devices` row, so a legacy pair is always unattributed; a member-bound code
         // consumed here is burned with its attribution discarded (the operator re-issues).
         let device_id = request.client_id.clone();
+        self.latch_setup_claim("legacy", &device_id).await;
         let (session, refresh, expires) = self
             .issue_session_pair(&request.client_id, &request.client_type, &device_id)
             .await?;
@@ -2293,15 +2294,21 @@ mod tests {
             .validate_token(resp.session_token.as_deref().unwrap())
             .await
             .unwrap());
+        let record = pond.store.load().await.unwrap().unwrap();
         assert!(
-            pond.store
-                .load()
-                .await
-                .unwrap()
-                .unwrap()
-                .claimed_at
-                .is_some(),
+            record.claimed_at.is_some(),
             "the claim is latched by the time the tokens exist"
+        );
+        let caller = pond
+            .hs
+            .caller_for_token(resp.session_token.as_deref().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            record.claimed_by.as_deref(),
+            Some(caller.device_id.as_str()),
+            "the claimant is the device the tokens were issued to"
         );
         let (name,): (String,) = sqlx::query_as("SELECT name FROM devices WHERE id = 'phone-1'")
             .fetch_one(&pond.pool)
@@ -2339,7 +2346,7 @@ mod tests {
     #[tokio::test]
     async fn a_claimed_pond_refuses_its_setup_code_at_init() {
         let pond = setup_pond(&[]).await;
-        pond.store.mark_claimed(Utc::now()).await.unwrap();
+        pond.store.mark_claimed(Utc::now(), None).await.unwrap();
         let refusal = pond
             .hs
             .init_pake(setup_init_request("phone-1", &[1u8; 32]))
@@ -2414,7 +2421,7 @@ mod tests {
             .unwrap()
             .unwrap();
         // Another device claims while this phone is still answering.
-        pond.store.mark_claimed(Utc::now()).await.unwrap();
+        pond.store.mark_claimed(Utc::now(), None).await.unwrap();
 
         let ci = pairing_cpace::setup_channel_identifier(OURS, "late-phone");
         let (_, request) = answer_under(&challenge, &pond.code, &ci, "late-phone", &nonce);
@@ -2455,6 +2462,18 @@ mod tests {
             Some("setup_code_unavailable")
         );
         assert_eq!(count(&pond.pool, "devices").await, 1);
+        let winner = outcomes.iter().find(|r| r.accepted).unwrap();
+        let caller = pond
+            .hs
+            .caller_for_token(winner.session_token.as_deref().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            pond.store.load().await.unwrap().unwrap().claimed_by,
+            Some(caller.device_id),
+            "the record names the phone that won, not the one that lost"
+        );
     }
 
     #[tokio::test]
@@ -2535,12 +2554,24 @@ mod tests {
             let store = pond.store.clone();
             async move { store.load().await.unwrap().unwrap().claimed_at.is_some() }
         };
+        let claimant = |pond: &SetupPond| {
+            let store = pond.store.clone();
+            async move { store.load().await.unwrap().unwrap().claimed_by }
+        };
 
         let cpace = setup_pond(&[]).await;
         let pc = cpace.hs.issue_pairing_code().await.unwrap();
         assert!(!claimed(&cpace).await);
         assert!(pair(&cpace.hs, &pc.code, "phone").await.accepted);
         assert!(claimed(&cpace).await, "CPace with a pairing code");
+        assert_eq!(claimant(&cpace).await.as_deref(), Some("phone"));
+        let later = cpace.hs.issue_pairing_code().await.unwrap();
+        assert!(pair(&cpace.hs, &later.code, "second-phone").await.accepted);
+        assert_eq!(
+            claimant(&cpace).await.as_deref(),
+            Some("phone"),
+            "a later pairing never takes the claim over"
+        );
         assert_eq!(
             cpace
                 .hs
@@ -2566,6 +2597,7 @@ mod tests {
             .unwrap();
         assert!(resp.accepted);
         assert!(claimed(&hmac).await, "loopback HMAC");
+        assert_eq!(claimant(&hmac).await.as_deref(), Some("dashboard"));
 
         let legacy = setup_pond(&[]).await;
         let pc = legacy.hs.issue_pairing_code().await.unwrap();
@@ -2581,6 +2613,7 @@ mod tests {
             .unwrap();
         assert!(resp.accepted);
         assert!(claimed(&legacy).await, "legacy single step");
+        assert_eq!(claimant(&legacy).await.as_deref(), Some("cli"));
     }
 
     #[cfg(unix)]

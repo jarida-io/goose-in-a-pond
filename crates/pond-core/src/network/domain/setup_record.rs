@@ -32,6 +32,10 @@ pub struct SetupRecord {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub claimed_at: Option<DateTime<Utc>>,
+    /// The device the claiming pairing issued its tokens to, so onboarding can make it the owner's.
+    /// Absent from records written before it existed, and from a pond created claimed.
+    #[serde(default)]
+    pub claimed_by: Option<String>,
 }
 
 impl SetupRecord {
@@ -42,6 +46,7 @@ impl SetupRecord {
             discriminator,
             created_at,
             claimed_at: None,
+            claimed_by: None,
         }
     }
 
@@ -98,12 +103,23 @@ mod tests {
                 "discriminator": "7f3a",
                 "created_at": "2026-10-16T09:00:00Z",
                 "claimed_at": null,
+                "claimed_by": null,
             })
         );
         assert_eq!(
             serde_json::from_value::<SetupRecord>(value).unwrap(),
             record
         );
+    }
+
+    #[test]
+    fn a_record_written_before_claimed_by_reads_with_nobody_as_the_claimant() {
+        let json = r#"{"version":1,"code":"79927398713","discriminator":"7f3a",
+                       "created_at":"2026-10-16T09:00:00Z","claimed_at":"2026-10-16T10:00:00Z"}"#;
+        let record: SetupRecord = serde_json::from_str(json).unwrap();
+        assert!(record.claim_state().is_claimed());
+        assert_eq!(record.claimed_by, None);
+        assert_eq!(record.version, SETUP_RECORD_VERSION);
     }
 
     #[test]

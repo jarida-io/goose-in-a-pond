@@ -218,6 +218,7 @@ async fn make_app_inner(with_secrets: bool) -> Harness {
         mesh_rebuild: None,
         setup_claims: None,
         spoken_codes: Default::default(),
+        voice_samples: Default::default(),
     });
 
     Harness {

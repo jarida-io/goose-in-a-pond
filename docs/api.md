@@ -21,6 +21,29 @@ Obtain a token via `POST /api/v1/handshake`. The token format is validated by mi
 
 Protected routes return `403 Forbidden` until `OnboardingStep::Completed` is recorded. Public routes are always accessible. Settings write (`PUT /settings`) and profile create/patch are public specifically so onboarding steps can persist data before completion.
 
+**Who may drive the wizard (2026-10-17, pond networking P4).** The wizard's routes (`PUT /settings`,
+`POST /profiles`, `PATCH /profiles/{id}`, `POST /onboard`, `/onboard/complete`, `/onboard/step/{name}`,
+`POST /location/detect`, `GET /warmup`, `POST /voice/tts/apply`, `/voice/calibrate`) answer a caller
+with no token only from loopback, and only while the pond is neither claimed nor onboarded (the
+desktop before it pairs). Once any device has paired, the pond is claimed and they need a paired
+device's token until onboarding completes; a phone claims a pond first and runs owner setup as
+itself. After onboarding they close to tokenless callers, as before. `POST /onboard/reset` follows
+the same rule before onboarding and keeps its loopback-plus-host-credential rule after it. A valid
+token is admitted before onboarding in every state. The claim is read live on each of these
+requests; a read failure counts as claimed, and a pond with no setup record reads as unclaimed.
+
+| Tokenless caller | Unclaimed, not onboarded | Claimed, not onboarded | Onboarded |
+|---|---|---|---|
+| Wizard routes | loopback only | nobody | nobody |
+| `POST /onboard/reset` | loopback only | nobody | loopback + host credential |
+
+Six more routes a phone needs during setup take a paired device's token and skip the onboarding
+guard, without ever answering a tokenless caller: `POST /voice/sample`, and the five model routes
+that list, fetch and choose the chat model `POST /onboard/complete` requires (`GET /models`,
+`GET /models/download/progress`, `POST /models/download/control`,
+`POST /models/{category}/{name}/download`, `POST /models/{category}/{name}/activate`). That closes
+the onboarding half of #365. The rest of `/models` still waits for onboarding.
+
 ### Rate Limiting
 
 Remote clients (non-loopback): **600 req / 60 s** (≈10 req/s burst). Loopback clients (local dashboard, CLI) are never rate-limited.
@@ -45,8 +68,8 @@ All errors return JSON:
 | POST | /handshake/spoken-code | Public, direct LAN peers | Read a fresh pairing code aloud; never returns it |
 | POST | /handshake/init | Loopback only | Dashboard pairing (HMAC), phase 1 |
 | POST | /handshake/verify | Loopback only | Dashboard pairing (HMAC), phase 2 |
-| POST | /onboard | Public | Start first-run onboarding flow |
-| POST | /onboard/complete | Public | Mark onboarding finished |
+| POST | /onboard | Wizard (see Onboarding Gate) | Start first-run onboarding flow |
+| POST | /onboard/complete | Wizard (see Onboarding Gate) | Mark onboarding finished; makes the claiming device the owner's |
 | GET | /onboard/status | Public | Onboarding progress |
 | GET | /system/info | Public | Connection bootstrap; full record only with a valid bearer |
 | GET | /test | Public | Probe all backend services |
@@ -54,32 +77,34 @@ All errors return JSON:
 | GET | /dev/goose | Public | Goose agent + MCP tool status |
 | POST | /transcribe | Public | Proxy audio to Whisper ASR |
 | GET | /settings | Protected | Get all settings |
-| PUT | /settings | Public | Update settings (partial) |
+| PUT | /settings | Wizard (see Onboarding Gate) | Update settings (partial) |
 | POST | /chat | Protected | Single-turn agent conversation |
 | POST | /chat/stream | Protected | Streaming agent conversation (SSE) |
 | POST | /tts | Token, or loopback + host credential | Synthesise speech (returns WAV) |
+| POST | /voice/sample | Token, before onboarding too | Hear an installed voice on the pond's speaker before choosing it |
 | GET | /sessions | Protected | List conversation sessions |
 | PATCH | /sessions/{id} | Protected | Rename session |
 | GET | /sessions/{id}/messages | Protected | Get session messages |
 | GET | /sessions/{id}/attachments/{attachment_id} | Protected | Raw bytes of one chat-image attachment |
-| GET | /models | Protected | List model catalog |
+| GET | /models | Token, before onboarding too | List model catalog |
 | GET | /models/capabilities | Protected | Active model's runtime capabilities |
 | GET | /models/active-roles | Protected | Current role assignments |
 | GET | /models/memory-status | Protected | LLM RAM budget |
 | POST | /models/registry/refresh | Protected | Refresh online model catalog |
 | POST | /models/scan | Protected | Scan filesystem for new models |
-| GET | /models/download/progress | Protected | In-progress download status |
+| GET | /models/download/progress | Token, before onboarding too | In-progress download status |
+| POST | /models/download/control | Token, before onboarding too | Pause, resume or cancel a download |
 | POST | /models/download/url | Protected | Download model from arbitrary URL |
-| POST | /models/{category}/{name}/download | Protected | Download catalogued model |
-| POST | /models/{category}/{name}/activate | Protected | Assign model to a role |
+| POST | /models/{category}/{name}/download | Token, before onboarding too | Download catalogued model |
+| POST | /models/{category}/{name}/activate | Token, before onboarding too | Assign model to a role |
 | DELETE | /models/{category}/{name} | Protected | Delete model file from disk |
 | GET | /models/ollama | Protected | List models from local Ollama |
 | POST | /models/ollama/pull | Protected | Pull Ollama model |
 | GET | /models/search/gguf | Protected | Search HuggingFace for GGUF models |
 | GET | /models/search/gguf/files | Protected | List GGUF files in a HF repo |
 | GET | /models/search/llamafile | Protected | Search GitHub for llamafile releases |
-| POST | /profiles | Public | Create household profile |
-| PATCH | /profiles/{id} | Public | Update profile preferences |
+| POST | /profiles | Wizard (see Onboarding Gate) | Create household profile |
+| PATCH | /profiles/{id} | Wizard (see Onboarding Gate) | Update profile preferences |
 | GET | /profiles | Protected | List all profiles |
 | GET | /profiles/{id} | Protected | Get a profile |
 | DELETE | /profiles/{id} | Protected | Delete a profile |
@@ -458,7 +483,17 @@ Starts the onboarding flow if not already in progress. Idempotent — safe to ca
 
 ### POST /onboard/complete
 
-Marks onboarding as complete. After this call, all protected routes become accessible.
+Marks onboarding as complete. After this call, all protected routes become accessible. It
+refuses with `400` and `missing_fields` while any of `user_name`, `assistant_name`, `timezone` or
+`chat_model` is empty; activating a model for the `chat` role sets `chat_model` (as `PUT /settings` can).
+
+**The claiming device becomes the owner's (2026-10-17).** A pond is claimed before it has members,
+so the device that claimed it starts out unattributed. After completion is saved: if the setup
+record's `claimed_by` names a device that is still unattributed, and `primary_profile_id` names an
+existing member, that device is attributed to the member, and `GET /devices/self` then reports
+them. A device attributed since (by a pairing code) is left alone; no primary member, or a record
+with no `claimed_by` (written before the field, or a pond created claimed), binds nobody. A failure
+here is logged (`kind="owner_attribution_failed"`) and does not change the answer.
 
 **Response 200**
 ```json
@@ -469,12 +504,15 @@ Marks onboarding as complete. After this call, all protected routes become acces
 
 ### POST /onboard/reset
 
-Returns onboarding to `Welcome` and reopens the wizard's routes. Open to anyone while the
-wizard runs. Once the Pond is set up it needs a valid bearer token, or a loopback peer
-presenting `X-Pond-Host-Credential` (2026-10-12): a reset reopens `PUT /settings`,
-`POST /profiles` and `/onboard/*` to every LAN and tailnet peer. A LAN caller without a
-token gets `401`; a loopback caller with neither gets `403 host_credential_required`, or
-`503 host_credential_unavailable` on the companion listener.
+Returns onboarding to `Welcome` and reopens the wizard's routes. While the wizard runs it
+answers a paired device's token, and a tokenless loopback caller only while the pond is
+unclaimed (see Onboarding Gate). Once the Pond is set up it needs a valid bearer token, or a
+loopback peer presenting `X-Pond-Host-Credential` (2026-10-12): a reset reopens `PUT /settings`,
+`POST /profiles` and `/onboard/*` to every paired device, and to tokenless processes on the host
+while the pond is unclaimed. A LAN caller without a token gets `401`; a loopback caller with
+neither gets `403 host_credential_required`, or `503 host_credential_unavailable` on the
+companion listener. A claimed pond that has lost every token is not stuck: the host can still
+issue a pairing code and pair, and `pond-server setup-code --rearm` makes it unclaimed again.
 
 **Response 200** — the status body below, at `Welcome`.
 
@@ -502,7 +540,10 @@ Steps: `Welcome` → `Basics` → `Location` → `Accessibility` → `Personalit
 
 ### GET /settings
 
-Returns the full settings object.
+Returns the full settings object. It needs a paired device's token in every state, and since
+2026-10-17 that includes before onboarding completes, so a wizard resumes from what it saved
+(the desktop's `ensurePrimaryProfile`, the phone's owner setup) instead of reading the answer of an
+empty `PUT`. Without a token it is `401` whatever the state.
 
 **Response 200**
 ```json
@@ -678,6 +719,33 @@ Body: raw WAV audio bytes
 
 ---
 
+### POST /voice/sample (2026-10-17)
+
+Reads one fixed sentence, "Hello, I'm Goose. This is how I sound.", on the pond's own speaker in
+an installed voice, so a household can hear it before choosing it. It changes no setting and not
+the selected voice, and takes no text from the caller. A paired device's token is required in
+every state, before onboarding too; it never answers a tokenless caller.
+
+**Request** (any other field is refused)
+```json
+{ "voice": "bm_george" }
+```
+
+| Status | Body | Meaning |
+|--------|------|---------|
+| 202 | `{"speaking": true}` | The pond has started; the sample plays detached, since a first utterance loads the voice engine |
+| 400 | `{"error": "invalid request body"}` | Not exactly `{"voice": "<id>"}` |
+| 401 | | No valid token |
+| 404 | `{"error": "unknown_voice"}` | The speech engine has not installed that voice (this route never downloads one) |
+| 429 | `{"error": "voice_sample_limited", "retry_after": <seconds>}` and `Retry-After` | One sample per 3 s, whoever asks |
+| 503 | `{"error": "voice_unavailable"}` | No speech engine is running |
+
+A refused voice does not use up the next sample. The sample pauses music like any speech, and a
+turn that starts speaking cuts it off; the sample never cuts off a turn. A failure while speaking
+is logged (`kind="voice_sample_failed"`).
+
+---
+
 ### POST /transcribe
 
 Proxies audio to the local whisper.cpp server and returns the transcription. Primarily a testing tool — voice input in the chat loop uses a different internal path.
@@ -793,6 +861,12 @@ and shows them through an object URL (`PondApiClient.getSessionAttachment`); Rea
 ---
 
 ## Models
+
+`GET /models`, `GET /models/download/progress`, `POST /models/download/control`,
+`POST /models/{category}/{name}/download` and `POST /models/{category}/{name}/activate` answer a
+paired device's token before onboarding as well as after (2026-10-17, #365), because
+`POST /onboard/complete` needs a chat model. They never answer a tokenless caller. Every other
+model route waits for onboarding (`403 onboarding_required`).
 
 ### GET /models
 
@@ -976,7 +1050,7 @@ Downloads a model from an arbitrary HTTPS URL. Useful for custom GGUF files not 
 
 ### POST /models/{category}/{name}/activate
 
-Assigns a model to a role. Validates that the category is compatible with the role (e.g., only `whisper` models can be assigned to `asr`; only `gguf`/`llamafile`/`ollama` models can be assigned to `chat`/`think`/`task`). For LLM roles, hot-reloads the ModelRouter.
+Assigns a model to a role. Validates that the category is compatible with the role (e.g., only `whisper` models can be assigned to `asr`; only `gguf`/`llamafile`/`ollama` models can be assigned to `chat`/`think`/`task`). For LLM roles, hot-reloads the ModelRouter. The `chat` role also writes `settings.chat_model` and `chat_provider`, which is what `POST /onboard/complete` checks.
 
 **Request**
 ```json
@@ -1279,7 +1353,7 @@ Devices are GOTG mobile clients, IoT sensors, cameras, or other Pond instances.
 
 The calling device, and the household member it is attributed to, if anyone. **For display only:** a greeting, the name on a profile screen. It proves nothing and grants nothing. `Principal::profile_id` is not populated from it, and it never feeds `ProfileScope`.
 
-The device comes from `proven_device()`, the token this Pond issued at pairing, never from anything the client sends about itself. The attribution comes from the pairing code (migration 0043). The route is scoped to the caller on purpose. Adding `profile_id` to every row of `GET /devices` would hand every paired client the whole device-to-member map.
+The device comes from `proven_device()`, the token this Pond issued at pairing, never from anything the client sends about itself. The attribution comes from the pairing code (migration 0043), or, for the device that claimed the pond, from `POST /onboard/complete` naming a primary member (2026-10-17). The route is scoped to the caller on purpose. Adding `profile_id` to every row of `GET /devices` would hand every paired client the whole device-to-member map.
 
 **Response 200**, attributed:
 ```json

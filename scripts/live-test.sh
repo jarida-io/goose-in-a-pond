@@ -327,8 +327,10 @@ if [ "$AUTH_OK" -eq 1 ]; then
   # Both writes below are themselves on the public allowlist, which is why they
   # work without a token. Since PAI-2 P7 that is no longer a hole: they are
   # classified Exposure::UntilOnboarded, so they answer only while this pond is
-  # still being set up -- which it is, on a fresh $AUTH_DIR. The P7 block after
-  # the route loop asserts they stop answering once this lift has landed.
+  # still being set up, and since P4 only to the host and only while nothing has
+  # claimed it -- both true of a fresh $AUTH_DIR, which curl reaches over loopback.
+  # The P7 block after the route loop asserts they stop answering once this lift
+  # has landed.
   # The BEFORE half of P7's pair, and it is not decoration. Asserting only the
   # 401 after onboarding passes on a server that never started, on a route that
   # does not exist, and on an allowlist that closed PUT /settings
@@ -359,6 +361,10 @@ if [ "$AUTH_OK" -eq 1 ]; then
 
   # A second fresh pond, claimed with its card over loopback, with no bypass to hide behind.
   if ! POND_DATA_DIR="$AUTH_DIR" POND_SERVER_BIN="$BIN" python3 scripts/setup_code_checks.py card; then
+    RC=1
+  fi
+  # Its claimant can ask for a voice sample; nothing here asks for one that would make a sound.
+  if ! POND_DATA_DIR="$AUTH_DIR" POND_SERVER_BIN="$BIN" python3 scripts/setup_code_checks.py voice-sample; then
     RC=1
   fi
 
@@ -417,28 +423,10 @@ if [ "$AUTH_OK" -eq 1 ]; then
   if [ "$code" = "200" ]; then
     printf '  PASS  POST   /onboard/reset         still reachable from the host\n'
 
-    code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://127.0.0.1:$AUTH_PORT/api/v1/settings" \
-      -H 'Content-Type: application/json' \
-      -d '{"user_name":"AuthProbe","assistant_name":"Goose","timezone":"UTC","chat_model":"mock"}')
-    if [ "$code" = "200" ]; then
-      printf '  PASS  PUT    /settings             reopened after the reset\n'
-    else
-      printf '  FAIL  PUT    /settings returned %s after a reset -- this pond is UNRECOVERABLE\n' "$code"
-      RC=1
-    fi
-
-    code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$AUTH_PORT/api/v1/onboard/complete")
-    if [ "$code" != "200" ]; then
-      printf '  FAIL  POST   /onboard/complete returned %s after a reset\n' "$code"
-      RC=1
-    fi
-
-    code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://127.0.0.1:$AUTH_PORT/api/v1/settings" \
-      -H 'Content-Type: application/json' -d '{"user_name":"AuthProbe"}')
-    if [ "$code" = "401" ]; then
-      printf '  PASS  PUT    /settings             closed again after re-onboarding\n'
-    else
-      printf '  FAIL  PUT    /settings returned %s -- the closure did not re-arm\n' "$code"
+    # The card claimed this pond above, so the reset wizard is the claimant's (P4): the host
+    # alone no longer drives it, and `setup-code --rearm` is what returns it to the host. If
+    # neither reopens it, this pond is UNRECOVERABLE.
+    if ! POND_DATA_DIR="$AUTH_DIR" POND_SERVER_BIN="$BIN" python3 scripts/setup_code_checks.py reset-wizard; then
       RC=1
     fi
   else

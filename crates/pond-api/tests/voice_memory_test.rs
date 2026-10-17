@@ -184,6 +184,7 @@ async fn make_memory_app() -> (axum::Router, Arc<MockMemoryRepository>, tempfile
         mesh_rebuild: None,
         setup_claims: None,
         spoken_codes: Default::default(),
+        voice_samples: Default::default(),
     });
     (
         build_router(state, std::path::PathBuf::from("pond-desktop/dist")),

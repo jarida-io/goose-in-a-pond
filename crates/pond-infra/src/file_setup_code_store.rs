@@ -205,13 +205,14 @@ impl SetupCodeStore for FileSetupCodeStore {
         Ok(record)
     }
 
-    async fn mark_claimed(&self, at: DateTime<Utc>) -> Result<SetupRecord> {
+    async fn mark_claimed(&self, at: DateTime<Utc>, by: Option<&str>) -> Result<SetupRecord> {
         let _guard = self.write_lock.lock().await;
         let mut record = self.require()?;
         if record.claimed_at.is_some() {
             return Ok(record);
         }
         record.claimed_at = Some(at);
+        record.claimed_by = by.map(str::to_string);
         self.replace(&record)?;
         Ok(record)
     }
@@ -219,7 +220,9 @@ impl SetupCodeStore for FileSetupCodeStore {
     async fn rearm(&self) -> Result<SetupRecord> {
         let _guard = self.write_lock.lock().await;
         let mut record = self.require()?;
-        if record.claimed_at.take().is_none() {
+        let was_claimed = record.claimed_at.take().is_some();
+        let had_claimant = record.claimed_by.take().is_some();
+        if !was_claimed && !had_claimant {
             return Ok(record);
         }
         self.replace(&record)?;
@@ -417,6 +420,7 @@ mod tests {
             keys,
             [
                 "claimed_at",
+                "claimed_by",
                 "code",
                 "created_at",
                 "discriminator",
@@ -426,6 +430,27 @@ mod tests {
         assert_eq!(value["code"], made.code.digits());
         assert_eq!(value["discriminator"], made.discriminator.to_string());
         assert!(value["claimed_at"].is_null());
+        assert!(value["claimed_by"].is_null());
+    }
+
+    #[tokio::test]
+    async fn a_file_written_before_claimed_by_still_loads_and_claims() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_raw(
+            &tmp,
+            r#"{"version":1,"code":"79927398713","discriminator":"7f3a",
+                "created_at":"2026-10-16T09:00:00Z","claimed_at":null}"#,
+        );
+        let store = store_in(&tmp);
+        let loaded = store.load().await.unwrap().unwrap();
+        assert_eq!((loaded.claimed_at, loaded.claimed_by), (None, None));
+
+        let claimed = store.mark_claimed(at(10), Some("phone-a")).await.unwrap();
+        assert_eq!(claimed.claimed_by.as_deref(), Some("phone-a"));
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(value["version"], 1, "the record stays version 1");
+        assert_eq!(value["claimed_by"], "phone-a");
     }
 
     #[tokio::test]
@@ -445,16 +470,16 @@ mod tests {
         let store = store_in(&tmp);
         let made = store.create_if_missing().await.unwrap();
 
-        let claimed = store.mark_claimed(at(10)).await.unwrap();
+        let claimed = store.mark_claimed(at(10), Some("phone-a")).await.unwrap();
         assert_eq!(claimed.claimed_at, Some(at(10)));
         assert_eq!(claimed.code, made.code);
+        let again = store.mark_claimed(at(11), Some("phone-b")).await.unwrap();
+        assert_eq!(again.claimed_at, Some(at(10)));
+        assert_eq!(again.claimed_by.as_deref(), Some("phone-a"));
+        let on_disk = store_in(&tmp).load().await.unwrap().unwrap();
         assert_eq!(
-            store.mark_claimed(at(11)).await.unwrap().claimed_at,
-            Some(at(10))
-        );
-        assert_eq!(
-            store_in(&tmp).load().await.unwrap().unwrap().claimed_at,
-            Some(at(10)),
+            (on_disk.claimed_at, on_disk.claimed_by.as_deref()),
+            (Some(at(10)), Some("phone-a")),
             "the claim did not reach the disk"
         );
     }
@@ -468,17 +493,22 @@ mod tests {
         let handles: Vec<_> = (1..=12)
             .map(|hour| {
                 let store = store.clone();
-                tokio::spawn(async move { store.mark_claimed(at(hour)).await.unwrap() })
+                tokio::spawn(async move {
+                    let device = format!("phone-{hour}");
+                    store.mark_claimed(at(hour), Some(&device)).await.unwrap()
+                })
             })
             .collect();
         let mut seen = Vec::new();
         for handle in handles {
-            seen.push(handle.await.unwrap().claimed_at.unwrap());
+            let record = handle.await.unwrap();
+            seen.push((record.claimed_at.unwrap(), record.claimed_by.unwrap()));
         }
-        let on_disk = store.load().await.unwrap().unwrap().claimed_at.unwrap();
+        let record = store.load().await.unwrap().unwrap();
+        let on_disk = (record.claimed_at.unwrap(), record.claimed_by.unwrap());
         assert!(
-            seen.iter().all(|&t| t == on_disk),
-            "claims disagreed: {seen:?} vs {on_disk}"
+            seen.iter().all(|t| *t == on_disk),
+            "claims disagreed: {seen:?} vs {on_disk:?}"
         );
     }
 
@@ -486,7 +516,7 @@ mod tests {
     async fn mark_claimed_and_rearm_need_a_record() {
         let tmp = tempfile::tempdir().unwrap();
         let store = store_in(&tmp);
-        assert!(store.mark_claimed(at(10)).await.is_err());
+        assert!(store.mark_claimed(at(10), None).await.is_err());
         assert!(store.rearm().await.is_err());
         assert!(!store.path().exists(), "a refused claim created a record");
     }
@@ -496,10 +526,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = store_in(&tmp);
         let made = store.create_if_missing().await.unwrap();
-        store.mark_claimed(at(10)).await.unwrap();
+        store.mark_claimed(at(10), Some("phone-a")).await.unwrap();
 
         let rearmed = store.rearm().await.unwrap();
-        assert_eq!(rearmed.claimed_at, None);
+        assert_eq!((rearmed.claimed_at, rearmed.claimed_by), (None, None));
         assert_eq!(rearmed.code, made.code);
         assert_eq!(rearmed.discriminator, made.discriminator);
         assert_eq!(rearmed.created_at, made.created_at);
@@ -513,7 +543,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = store_in(&tmp);
         store.create_if_missing().await.unwrap();
-        store.mark_claimed(at(10)).await.unwrap();
+        store.mark_claimed(at(10), None).await.unwrap();
 
         let file_mode = fs::metadata(store.path()).unwrap().permissions().mode() & 0o777;
         let dir_mode = fs::metadata(tmp.path().join(SETUP_DIR))
@@ -537,7 +567,7 @@ mod tests {
             store.create_if_missing().await.is_err(),
             "a corrupt card was regenerated"
         );
-        assert!(store.mark_claimed(at(10)).await.is_err());
+        assert!(store.mark_claimed(at(10), None).await.is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), "{ not json");
     }
 
@@ -628,7 +658,7 @@ mod tests {
         fs::set_permissions(store.path(), fs::Permissions::from_mode(0o644)).unwrap();
         let err = format!("{:#}", store.load().await.unwrap_err());
         assert!(err.contains("0600"), "{err}");
-        assert!(store.mark_claimed(at(10)).await.is_err());
+        assert!(store.mark_claimed(at(10), None).await.is_err());
         let mode = fs::metadata(store.path()).unwrap().permissions().mode() & 0o777;
         assert_eq!(
             mode, 0o644,

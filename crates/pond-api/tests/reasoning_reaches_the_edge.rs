@@ -229,6 +229,7 @@ async fn make_app(agent: Arc<dyn Agent>) -> Harness {
         mesh_rebuild: None,
         setup_claims: None,
         spoken_codes: Default::default(),
+        voice_samples: Default::default(),
     });
 
     Harness {

@@ -9,6 +9,8 @@ use std::sync::Arc;
 use tower::ServiceExt;
 
 use pond_api::{build_router, AppState};
+use pond_core::network::mocks::mock_setup_code_store::MockSetupCodeStore;
+use pond_core::network::services::setup_claim::SetupClaimService;
 use pond_core::shared::mocks::mock_agent::MockAgent;
 use pond_core::user_data::domain::onboarding::OnboardingStep;
 use pond_core::user_data::mocks::mock_memory::MockMemoryRepository;
@@ -118,6 +120,23 @@ async fn app_with_step(step: Option<OnboardingStep>) -> (axum::Router, tempfile:
 async fn app_with_repo(
     onboarding_repo: Arc<dyn OnboardingRepository + Send + Sync>,
 ) -> (axum::Router, tempfile::TempDir) {
+    app_with(onboarding_repo, None, false).await
+}
+
+/// A pond mid-wizard whose setup record lives in `store`, as the server wires its claim latch.
+async fn claimable_app(
+    step: Option<OnboardingStep>,
+    store: &Arc<MockSetupCodeStore>,
+) -> (axum::Router, tempfile::TempDir) {
+    let claims = Arc::new(SetupClaimService::new(store.clone()));
+    app_with(Arc::new(MockRepo::new(step)), Some(claims), false).await
+}
+
+async fn app_with(
+    onboarding_repo: Arc<dyn OnboardingRepository + Send + Sync>,
+    setup_claims: Option<Arc<SetupClaimService>>,
+    skip_onboarding: bool,
+) -> (axum::Router, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let db = pond_infra::db::Database::init(tmp.path()).await.unwrap();
 
@@ -164,7 +183,7 @@ async fn app_with_repo(
         prompt_template_dir: None,
         model_repo: None,
         data_dir: None,
-        skip_onboarding: false,
+        skip_onboarding,
         engine_availability: pond_core::models::domain::engine::EngineAvailability {
             litert_library: true,
         },
@@ -225,8 +244,9 @@ async fn app_with_repo(
         mesh_provider: Arc::new(tokio::sync::RwLock::new(None)),
         peer_capability_query: Arc::new(tokio::sync::RwLock::new(None)),
         mesh_rebuild: None,
-        setup_claims: None,
+        setup_claims,
         spoken_codes: Default::default(),
+        voice_samples: Default::default(),
     });
     (
         // As the dashboard listener wires it, so host recovery can present the credential.
@@ -326,24 +346,24 @@ async fn devices_is_blocked_before_onboarding() {
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
 }
 
+/// The wizard resumes from what it saved, so a paired device reads settings before onboarding.
 #[tokio::test]
-async fn settings_is_blocked_before_onboarding() {
+async fn a_paired_device_reads_settings_before_onboarding() {
     let (app, _tmp) = app_with_step(None).await;
     let res: Response = app
         .oneshot(
             Request::builder()
                 .uri("/api/v1/settings")
-                // Auth runs first: without a token this would measure auth, not onboarding.
                 .header("Authorization", "Bearer test-token")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    assert_eq!(res.status(), StatusCode::OK);
 }
 
-/// `GET /settings` serialises every setting, API keys included; checked through the real stack.
+/// `GET /settings` serialises every setting; checked through the real stack.
 #[tokio::test]
 async fn get_settings_without_a_token_is_unauthorized() {
     let (app, _tmp) = app_with_step(Some(OnboardingStep::Completed)).await;
@@ -364,16 +384,33 @@ async fn get_settings_without_a_token_is_unauthorized() {
 const FULL_SETUP: &str =
     r#"{"user_name":"Jerry","assistant_name":"Goose","timezone":"UTC","chat_model":"mock"}"#;
 
-async fn put_settings_no_token(app: &axum::Router, body: &'static str) -> StatusCode {
+async fn put_settings_no_token(
+    app: &axum::Router,
+    peer: SocketAddr,
+    body: &'static str,
+) -> StatusCode {
+    wizard_write(app, "PUT", "/api/v1/settings", peer, None, body).await
+}
+
+/// One wizard request from `peer`, with a bearer when given.
+async fn wizard_write(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    peer: SocketAddr,
+    bearer: Option<&str>,
+    body: &'static str,
+) -> StatusCode {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("Content-Type", "application/json")
+        .extension(ConnectInfo(peer));
+    if let Some(bearer) = bearer {
+        request = request.header("Authorization", format!("Bearer {bearer}"));
+    }
     app.clone()
-        .oneshot(
-            Request::builder()
-                .method("PUT")
-                .uri("/api/v1/settings")
-                .header("Content-Type", "application/json")
-                .body(Body::from(body))
-                .unwrap(),
-        )
+        .oneshot(request.body(Body::from(body)).unwrap())
         .await
         .unwrap()
         .status()
@@ -425,25 +462,173 @@ const ON_THE_LAN: SocketAddr = SocketAddr::new(
     44321,
 );
 
-/// The wizard saves before any device has paired; a 401 here would deadlock onboarding.
+/// The desktop's wizard can save before it pairs; a 401 here would deadlock onboarding.
 #[tokio::test]
-async fn put_settings_without_a_token_is_allowed_while_the_wizard_is_running() {
+async fn put_settings_without_a_token_is_allowed_from_the_host_while_the_wizard_is_running() {
     let (app, _tmp) = app_with_step(Some(OnboardingStep::Basics)).await;
     assert_ne!(
-        put_settings_no_token(&app, FULL_SETUP).await,
+        put_settings_no_token(&app, AT_THE_POND, FULL_SETUP).await,
         StatusCode::UNAUTHORIZED,
-        "PUT /settings must stay reachable without a token mid-onboarding, or the \
-         wizard cannot save"
+        "PUT /settings must stay reachable without a token from the host mid-onboarding, or \
+         the wizard cannot save"
+    );
+}
+
+/// Until P4 any LAN peer could drive a fresh pond's wizard; a phone now claims it first.
+#[tokio::test]
+async fn a_tokenless_lan_peer_cannot_drive_a_fresh_ponds_wizard() {
+    let (app, _tmp) = app_with_step(Some(OnboardingStep::Basics)).await;
+    assert_eq!(
+        put_settings_no_token(&app, ON_THE_LAN, FULL_SETUP).await,
+        StatusCode::UNAUTHORIZED
+    );
+    // A paired phone's token is what admits it.
+    assert_eq!(
+        wizard_write(
+            &app,
+            "PUT",
+            "/api/v1/settings",
+            ON_THE_LAN,
+            Some("test-token"),
+            FULL_SETUP
+        )
+        .await,
+        StatusCode::OK
     );
 }
 
 #[tokio::test]
 async fn put_settings_without_a_token_is_refused_once_onboarded() {
     let (app, _tmp) = app_with_step(Some(OnboardingStep::Completed)).await;
+    for peer in [AT_THE_POND, ON_THE_LAN] {
+        assert_eq!(
+            put_settings_no_token(&app, peer, FULL_SETUP).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+}
+
+/// Every wizard route, on a pond a device has claimed: the claimant's token, never the host alone.
+#[tokio::test]
+async fn a_claimed_ponds_wizard_needs_a_paired_devices_token() {
+    let store = Arc::new(MockSetupCodeStore::unclaimed());
+    store.set_claimed_at(Some(chrono::Utc::now()));
+    let (app, _tmp) = claimable_app(Some(OnboardingStep::Basics), &store).await;
+    for (method, uri, body) in [
+        ("PUT", "/api/v1/settings", FULL_SETUP),
+        ("POST", "/api/v1/profiles", r#"{"display_name":"Jerry"}"#),
+        ("POST", "/api/v1/onboard/step/Basics", ""),
+        ("POST", "/api/v1/onboard/reset", ""),
+    ] {
+        assert_eq!(
+            wizard_write(&app, method, uri, AT_THE_POND, None, body).await,
+            StatusCode::UNAUTHORIZED,
+            "{method} {uri} answered a tokenless host caller on a claimed pond"
+        );
+        for peer in [AT_THE_POND, ON_THE_LAN] {
+            let status = wizard_write(&app, method, uri, peer, Some("test-token"), body).await;
+            assert!(
+                status.is_success(),
+                "{method} {uri} refused the claimant's token from {peer}: {status}"
+            );
+        }
+    }
+    let status = wizard_write(
+        &app,
+        "POST",
+        "/api/v1/onboard/complete",
+        AT_THE_POND,
+        Some("test-token"),
+        "",
+    )
+    .await;
     assert_eq!(
-        put_settings_no_token(&app, FULL_SETUP).await,
+        status,
+        StatusCode::OK,
+        "the claimant finishes setup as itself"
+    );
+    assert_eq!(
+        put_settings_no_token(&app, AT_THE_POND, FULL_SETUP).await,
         StatusCode::UNAUTHORIZED
     );
+}
+
+/// No cache: `setup-code --rearm` reopens the host's tokenless wizard on the very next request.
+#[tokio::test]
+async fn the_claim_is_read_live_so_a_rearm_reopens_the_hosts_wizard() {
+    let store = Arc::new(MockSetupCodeStore::unclaimed());
+    let (app, _tmp) = claimable_app(Some(OnboardingStep::Basics), &store).await;
+    assert_eq!(
+        put_settings_no_token(&app, AT_THE_POND, FULL_SETUP).await,
+        StatusCode::OK
+    );
+    store.set_claimed_at(Some(chrono::Utc::now()));
+    assert_eq!(
+        put_settings_no_token(&app, AT_THE_POND, FULL_SETUP).await,
+        StatusCode::UNAUTHORIZED,
+        "a claim latched by another process must close the host's wizard at once"
+    );
+    store.set_claimed_at(None);
+    assert_eq!(
+        put_settings_no_token(&app, AT_THE_POND, FULL_SETUP).await,
+        StatusCode::OK,
+        "a re-armed pond must reopen without a restart, or the claim is a one-way door"
+    );
+}
+
+/// A failed read narrows: the wizard asks for a token rather than answering the host.
+#[tokio::test]
+async fn an_unreadable_claim_reads_as_claimed() {
+    let store = Arc::new(MockSetupCodeStore::unclaimed());
+    store.set_failing(true);
+    let (app, _tmp) = claimable_app(Some(OnboardingStep::Basics), &store).await;
+    assert_eq!(
+        put_settings_no_token(&app, AT_THE_POND, FULL_SETUP).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        wizard_write(
+            &app,
+            "PUT",
+            "/api/v1/settings",
+            AT_THE_POND,
+            Some("test-token"),
+            FULL_SETUP
+        )
+        .await,
+        StatusCode::OK
+    );
+}
+
+/// Nothing has latched on a pond whose card was never made, so the host's wizard stays open.
+#[tokio::test]
+async fn a_pond_with_no_setup_record_reads_as_unclaimed() {
+    let store = Arc::new(MockSetupCodeStore::new());
+    let (app, _tmp) = claimable_app(Some(OnboardingStep::Basics), &store).await;
+    assert_eq!(
+        put_settings_no_token(&app, AT_THE_POND, FULL_SETUP).await,
+        StatusCode::OK
+    );
+}
+
+/// `--skip-onboarding` still means "no wizard": its writes are closed to the tokenless host.
+#[tokio::test]
+async fn skip_onboarding_still_reads_as_set_up() {
+    let store = Arc::new(MockSetupCodeStore::unclaimed());
+    let claims = Arc::new(SetupClaimService::new(store.clone()));
+    let (app, _tmp) = app_with(
+        Arc::new(MockRepo::new(Some(OnboardingStep::Basics))),
+        Some(claims),
+        true,
+    )
+    .await;
+    assert_eq!(
+        put_settings_no_token(&app, AT_THE_POND, FULL_SETUP).await,
+        StatusCode::UNAUTHORIZED
+    );
+    let (status, body) = reset(&app, AT_THE_POND, None, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "host_credential_required");
 }
 
 /// One router, no restart: the gate must read onboarding state live, not latch.
@@ -453,7 +638,7 @@ async fn reset_then_recover_is_not_a_one_way_door() {
 
     // 1. Set up: the wizard's writes do not answer an anonymous caller.
     assert_eq!(
-        put_settings_no_token(&app, FULL_SETUP).await,
+        put_settings_no_token(&app, AT_THE_POND, FULL_SETUP).await,
         StatusCode::UNAUTHORIZED
     );
 
@@ -467,51 +652,112 @@ async fn reset_then_recover_is_not_a_one_way_door() {
          enough to lose every token can only be fixed by reflashing it"
     );
 
-    // 3. The door reopened, same router, no restart. A latch fails here.
+    // 3. The door reopened to the host, same router, no restart. A latch fails here.
     assert_eq!(
-        put_settings_no_token(&app, FULL_SETUP).await,
+        put_settings_no_token(&app, AT_THE_POND, FULL_SETUP).await,
         StatusCode::OK,
         "after a reset the wizard must be able to save again"
     );
 
-    let res: Response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/profiles")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"display_name":"Jerry"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
     assert_eq!(
-        res.status(),
+        wizard_write(
+            &app,
+            "POST",
+            "/api/v1/profiles",
+            AT_THE_POND,
+            None,
+            r#"{"display_name":"Jerry"}"#
+        )
+        .await,
         StatusCode::CREATED,
         "POST /profiles must reopen after a reset -- the wizard creates the first \
          household member before anything can pair"
     );
 
     // 4. ...and finish, which is what re-arms the closure.
-    let res: Response = app
+    assert_eq!(
+        wizard_write(
+            &app,
+            "POST",
+            "/api/v1/onboard/complete",
+            AT_THE_POND,
+            None,
+            ""
+        )
+        .await,
+        StatusCode::OK
+    );
+
+    // 5. Closed again.
+    assert_eq!(
+        put_settings_no_token(&app, AT_THE_POND, FULL_SETUP).await,
+        StatusCode::UNAUTHORIZED,
+        "the closure must re-arm when onboarding completes again"
+    );
+}
+
+/// The same cycle on a claimed pond: the reset reopens the wizard to the claimant's token, and
+/// a host that has lost every token pairs again (pairing answers in every state) or re-arms.
+#[tokio::test]
+async fn reset_on_a_claimed_pond_is_not_a_one_way_door_either() {
+    let store = Arc::new(MockSetupCodeStore::unclaimed());
+    store.set_claimed_at(Some(chrono::Utc::now()));
+    let repo = Arc::new(MockRepo::new(Some(OnboardingStep::Completed)));
+    let claims = Arc::new(SetupClaimService::new(store.clone()));
+    let (app, _tmp) = app_with(repo, Some(claims), false).await;
+
+    let (status, _) = reset(&app, AT_THE_POND, None, Some(CREDENTIAL.as_str())).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the host can still reset a claimed pond"
+    );
+
+    assert_eq!(
+        put_settings_no_token(&app, AT_THE_POND, FULL_SETUP).await,
+        StatusCode::UNAUTHORIZED,
+        "a claimed pond's wizard is its claimant's, reset or not"
+    );
+    for peer in [AT_THE_POND, ON_THE_LAN] {
+        assert_eq!(
+            wizard_write(
+                &app,
+                "PUT",
+                "/api/v1/settings",
+                peer,
+                Some("test-token"),
+                FULL_SETUP
+            )
+            .await,
+            StatusCode::OK,
+            "the claimant's token must reopen the wizard after a reset, from {peer}"
+        );
+    }
+
+    let pairing = app
         .clone()
         .oneshot(
             Request::builder()
-                .method("POST")
-                .uri("/api/v1/onboard/complete")
+                .uri("/api/v1/handshake/pairing-code")
+                .header(pond_api::host_guard::CREDENTIAL_HEADER, CREDENTIAL.as_str())
+                .extension(ConnectInfo(AT_THE_POND))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-
-    // 5. Closed again.
     assert_eq!(
-        put_settings_no_token(&app, FULL_SETUP).await,
-        StatusCode::UNAUTHORIZED,
-        "the closure must re-arm when onboarding completes again"
+        pairing.status(),
+        StatusCode::OK,
+        "pairing must answer a claimed, reset pond's host, or a pond that lost every token \
+         could only be repaired by reflashing it"
+    );
+
+    store.set_claimed_at(None);
+    assert_eq!(
+        put_settings_no_token(&app, AT_THE_POND, FULL_SETUP).await,
+        StatusCode::OK,
+        "a re-armed reset pond is a fresh install again"
     );
 }
 
@@ -520,7 +766,7 @@ async fn reset_then_recover_is_not_a_one_way_door() {
 async fn an_unreadable_onboarding_table_closes_the_write_holes_rather_than_opening_them() {
     let (app, _tmp) = app_with_repo(Arc::new(UnreadableRepo)).await;
     assert_eq!(
-        put_settings_no_token(&app, FULL_SETUP).await,
+        put_settings_no_token(&app, AT_THE_POND, FULL_SETUP).await,
         StatusCode::UNAUTHORIZED,
         "a pond whose onboarding state cannot be read must refuse the wizard's \
          writes, not offer them to anyone who asks"
@@ -540,7 +786,7 @@ async fn reset_from_the_lan_without_a_token_is_refused_once_onboarded() {
 
 /// Another OS account, or a page on another local port, reaches loopback too. Without the
 /// credential only the Pond's own account can read, it could re-arm the wizard and open its
-/// writes to every LAN and tailnet peer.
+/// writes to itself.
 #[tokio::test]
 async fn reset_from_the_host_needs_the_host_credential_once_onboarded() {
     let (app, _tmp) = app_with_step(Some(OnboardingStep::Completed)).await;
@@ -554,18 +800,23 @@ async fn reset_from_the_host_needs_the_host_credential_once_onboarded() {
     let (status, _) = reset(&app, AT_THE_POND, Some("not-a-token"), None).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(
-        put_settings_no_token(&app, FULL_SETUP).await,
+        put_settings_no_token(&app, AT_THE_POND, FULL_SETUP).await,
         StatusCode::UNAUTHORIZED,
         "a refused reset reopened the wizard"
     );
 }
 
-/// The wizard's own "Start over" runs before any token or credential exists.
+/// The desktop wizard's own "Start over" can run before it pairs; a phone's runs with its token.
 #[tokio::test]
-async fn reset_stays_open_while_the_wizard_runs() {
+async fn reset_stays_open_to_the_host_while_an_unclaimed_wizard_runs() {
     let (app, _tmp) = app_with_step(Some(OnboardingStep::Basics)).await;
-    assert_eq!(reset_no_token(&app, ON_THE_LAN).await, StatusCode::OK);
     assert_eq!(reset_no_token(&app, AT_THE_POND).await, StatusCode::OK);
+    assert_eq!(
+        reset_no_token(&app, ON_THE_LAN).await,
+        StatusCode::UNAUTHORIZED
+    );
+    let (status, _) = reset(&app, ON_THE_LAN, Some("test-token"), None).await;
+    assert_eq!(status, StatusCode::OK);
 }
 
 /// The shipped "Start over" (`handleRestartOnboarding`) resets while its token is still set.

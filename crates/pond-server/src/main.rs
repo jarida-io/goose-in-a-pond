@@ -4283,6 +4283,7 @@ async fn run_server(
         mesh_rebuild: Some(mesh_rebuild),
         setup_claims: Some(setup_claims.clone()),
         spoken_codes,
+        voice_samples: Default::default(),
     });
 
     // OAuth refresh updates secrets only; restarting extensions would break in-flight tool calls.

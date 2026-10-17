@@ -367,8 +367,8 @@ async fn post_from_the_host(
     .await
 }
 
-/// Resetting onboarding reopens the wizard's writes to every LAN and tailnet peer, and speaking
-/// uses the host's speaker. Being a loopback peer proves neither is the Pond's own account.
+/// Resetting onboarding reopens the wizard's writes to any tokenless process on an unclaimed host,
+/// and speaking uses the host's speaker. Being a loopback peer proves neither is the Pond's own.
 #[tokio::test]
 async fn onboarding_reset_and_test_speech_need_the_host_credential_on_loopback() {
     let h = harness().await;

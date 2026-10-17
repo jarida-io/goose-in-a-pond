@@ -21,6 +21,23 @@ pub fn owner_for_new_code(
     sole_member(member_ids)
 }
 
+/// The member the device that claimed the pond becomes once onboarding completes: the primary
+/// member, and only while the device belongs to nobody, so an attribution made since is kept.
+pub fn owner_for_claimant(
+    claimant_owner: Option<&str>,
+    primary_profile_id: Option<&str>,
+    member_ids: &[String],
+) -> Option<String> {
+    if claimant_owner.is_some() {
+        return None;
+    }
+    let primary = primary_profile_id.filter(|id| !id.trim().is_empty())?;
+    member_ids
+        .iter()
+        .any(|member| member == primary)
+        .then(|| primary.to_string())
+}
+
 /// The one member, when there is exactly one.
 pub fn sole_member(member_ids: &[String]) -> Option<String> {
     match member_ids {
@@ -77,5 +94,41 @@ mod tests {
     #[test]
     fn an_empty_household_pairs_unattributed() {
         assert_eq!(owner_for_new_code(None, false, &[]), None);
+    }
+
+    #[test]
+    fn an_unattributed_claimant_becomes_the_primary_members() {
+        assert_eq!(
+            owner_for_claimant(None, Some("jerry"), &ids(&["jerry", "liz"])),
+            Some("jerry".into())
+        );
+    }
+
+    #[test]
+    fn a_claimant_attributed_since_is_never_rebound() {
+        assert_eq!(
+            owner_for_claimant(Some("liz"), Some("jerry"), &ids(&["jerry", "liz"])),
+            None
+        );
+    }
+
+    #[test]
+    fn no_primary_member_binds_nobody() {
+        for primary in [None, Some(""), Some("  ")] {
+            assert_eq!(
+                owner_for_claimant(None, primary, &ids(&["jerry"])),
+                None,
+                "{primary:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_primary_id_that_names_no_member_binds_nobody() {
+        assert_eq!(
+            owner_for_claimant(None, Some("deleted"), &ids(&["jerry"])),
+            None
+        );
+        assert_eq!(owner_for_claimant(None, Some("jerry"), &[]), None);
     }
 }

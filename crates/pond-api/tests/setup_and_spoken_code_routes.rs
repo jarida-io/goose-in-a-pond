@@ -1,5 +1,6 @@
 //! The P3 wire contract over HTTP (`docs/architecture/pond-networking.md`, "Wire contract over
-//! the LAN"): the setup credential on `pake/init`, its refusals, and the spoken pairing code.
+//! the LAN"): the setup credential on `pake/init`, its refusals, and the spoken pairing code; and
+//! P4's "Claim before onboarding": the claiming device runs owner setup and becomes the owner's.
 //! Every peer is a `MockConnectInfo`, so nothing here depends on the host's real interfaces.
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -27,11 +28,13 @@ use tower::ServiceExt;
 struct Harness {
     loopback: axum::Router,
     tailnet: axum::Router,
+    lan: axum::Router,
     store: Arc<FileSetupCodeStore>,
     code: String,
     announcer: Arc<MockCodeAnnouncer>,
     settings: Arc<dyn SettingsRepository + Send + Sync>,
     event_log: Arc<SqliteEventLog>,
+    db: Arc<pond_infra::db::Database>,
     _dir: tempfile::TempDir,
 }
 
@@ -67,30 +70,49 @@ async fn harness_with(adjust: impl FnOnce(&mut AppState)) -> Harness {
     state.event_log = Some(event_log.clone());
     adjust(&mut state);
     let settings = state.settings_repo.clone();
+    let db = state.db.clone();
     let state = Arc::new(state);
 
     let dist = std::path::PathBuf::from("pond-desktop/dist");
     let loopback = build_router(state.clone(), dist.clone())
         .layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40_000))));
-    let tailnet = build_router(state, dist).layer(MockConnectInfo(SocketAddr::from((
-        [100, 64, 0, 44],
+    let tailnet = build_router(state.clone(), dist.clone()).layer(MockConnectInfo(
+        SocketAddr::from(([100, 64, 0, 44], 40_000)),
+    ));
+    let lan = build_router(state, dist).layer(MockConnectInfo(SocketAddr::from((
+        [192, 168, 1, 50],
         40_000,
     ))));
     Harness {
         loopback,
         tailnet,
+        lan,
         store,
         code,
         announcer,
         settings,
         event_log,
+        db,
         _dir: dir,
     }
 }
 
 /// Status, `Retry-After`, the raw body text (for scanning) and the body as JSON.
 async fn post(router: &axum::Router, path: &str, body: Option<Value>) -> Answer {
-    let request = Request::builder().method(Method::POST).uri(path);
+    send(router, Method::POST, path, body, None).await
+}
+
+async fn send(
+    router: &axum::Router,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+    bearer: Option<&str>,
+) -> Answer {
+    let mut request = Request::builder().method(method).uri(path);
+    if let Some(bearer) = bearer {
+        request = request.header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+    }
     let request = match body {
         Some(body) => request
             .header("Content-Type", "application/json")
@@ -239,7 +261,10 @@ async fn a_phone_claims_the_pond_with_its_card_and_the_audit_names_the_setup_met
 #[tokio::test]
 async fn a_claimed_pond_answers_409_setup_code_unavailable() {
     let h = harness().await;
-    h.store.mark_claimed(chrono::Utc::now()).await.unwrap();
+    h.store
+        .mark_claimed(chrono::Utc::now(), None)
+        .await
+        .unwrap();
     let answer = post(
         &h.loopback,
         "/api/v1/handshake/pake/init",
@@ -423,4 +448,167 @@ async fn the_setup_and_spoken_routes_are_refused_off_the_direct_lan() {
     assert_eq!(setup.json, json!({"error": "pairing_requires_lan"}));
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(h.announcer.announced().is_empty());
+}
+
+/// A pond wired as the server runs it: real settings, and the onboarding guard live.
+async fn fresh_pond() -> Harness {
+    harness_with(|state| {
+        state.skip_onboarding = false;
+        state.settings_repo = Arc::new(pond_infra::sqlite_settings::SqliteSettingsRepository::new(
+            state.db.system.clone(),
+        ));
+    })
+    .await
+}
+
+/// The phone's session token from a setup claim.
+async fn claim_as(h: &Harness, device: &str) -> String {
+    let claimed = claim_over_http(h, &h.code, device).await;
+    assert_eq!(claimed.json["accepted"], true, "{}", claimed.text);
+    claimed.json["session_token"].as_str().unwrap().to_string()
+}
+
+/// Owner setup the way goose-on-the-go runs it: every write as the paired phone, over the LAN.
+async fn owner_setup(h: &Harness, token: &str, owner: &str, make_primary: bool) -> String {
+    let created = send(
+        &h.lan,
+        Method::POST,
+        "/api/v1/profiles",
+        Some(json!({"display_name": owner})),
+        Some(token),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.text);
+    let id = created.json["id"].as_str().unwrap().to_string();
+    let mut settings = json!({
+        "user_name": owner, "assistant_name": "Goose", "timezone": "UTC", "chat_model": "mock",
+    });
+    if make_primary {
+        settings["primary_profile_id"] = json!(id);
+    }
+    let saved = send(
+        &h.lan,
+        Method::PUT,
+        "/api/v1/settings",
+        Some(settings),
+        Some(token),
+    )
+    .await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.text);
+    id
+}
+
+async fn complete(h: &Harness, token: &str) {
+    let done = send(
+        &h.lan,
+        Method::POST,
+        "/api/v1/onboard/complete",
+        None,
+        Some(token),
+    )
+    .await;
+    assert_eq!(done.status, StatusCode::OK, "{}", done.text);
+}
+
+async fn device_self(h: &Harness, token: &str) -> Value {
+    let answer = send(
+        &h.lan,
+        Method::GET,
+        "/api/v1/devices/self",
+        None,
+        Some(token),
+    )
+    .await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.text);
+    answer.json
+}
+
+#[tokio::test]
+async fn the_phone_that_claims_a_fresh_pond_sets_it_up_as_itself_and_becomes_the_owners() {
+    let h = fresh_pond().await;
+    let token = claim_as(&h, "owner-phone").await;
+
+    // Claimed, so the wizard is the phone's: nobody drives it without a token, not even the host.
+    for router in [&h.lan, &h.loopback] {
+        let anonymous = send(
+            router,
+            Method::PUT,
+            "/api/v1/settings",
+            Some(json!({"user_name": "Mallory"})),
+            None,
+        )
+        .await;
+        assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+    }
+
+    let owner = owner_setup(&h, &token, "Jerry", true).await;
+    complete(&h, &token).await;
+    assert_eq!(
+        device_self(&h, &token).await,
+        json!({"device_id": "owner-phone", "profile": {"id": owner, "display_name": "Jerry"}}),
+        "the claiming phone belongs to the owner once setup completes"
+    );
+}
+
+#[tokio::test]
+async fn a_claimant_attributed_before_completion_is_left_alone() {
+    let h = fresh_pond().await;
+    let token = claim_as(&h, "liz-phone").await;
+    let jerry = owner_setup(&h, &token, "Jerry", true).await;
+    let liz = send(
+        &h.lan,
+        Method::POST,
+        "/api/v1/profiles",
+        Some(json!({"display_name": "Liz"})),
+        Some(&token),
+    )
+    .await
+    .json["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    {
+        use pond_core::user_data::ports::device_attribution::DeviceAttribution;
+        pond_infra::sqlite_device_attribution::SqliteDeviceAttribution::new(h.db.system.clone())
+            .set_device_profile("liz-phone", Some(&liz))
+            .await
+            .unwrap();
+    }
+    complete(&h, &token).await;
+    let me = device_self(&h, &token).await;
+    assert_eq!(
+        me["profile"]["id"],
+        json!(liz),
+        "attributed to {jerry} instead"
+    );
+}
+
+#[tokio::test]
+async fn no_primary_member_and_no_recorded_claimant_bind_nobody() {
+    let h = fresh_pond().await;
+    let token = claim_as(&h, "phone").await;
+    owner_setup(&h, &token, "Jerry", false).await;
+    complete(&h, &token).await;
+    assert_eq!(device_self(&h, &token).await["profile"], Value::Null);
+
+    // A pond created claimed (it had devices before setup records) recorded no claimant.
+    let h = fresh_pond().await;
+    h.store
+        .mark_claimed(chrono::Utc::now(), None)
+        .await
+        .unwrap();
+    let issued = post(&h.loopback, "/api/v1/handshake/spoken-code", None).await;
+    assert_eq!(issued.status, StatusCode::ACCEPTED, "{}", issued.text);
+    let code = wait_for_announcement(&h).await;
+    let (status, paired) = pair_phone(&h.loopback, &code, "later-phone", TEST_SPKI_PIN).await;
+    assert_eq!(status, StatusCode::OK);
+    let token = paired["session_token"].as_str().unwrap().to_string();
+    assert_eq!(h.store.load().await.unwrap().unwrap().claimed_by, None);
+    owner_setup(&h, &token, "Jerry", true).await;
+    complete(&h, &token).await;
+    assert_eq!(
+        device_self(&h, &token).await["profile"],
+        Value::Null,
+        "a pairing on an already-claimed pond is not the claimant"
+    );
 }

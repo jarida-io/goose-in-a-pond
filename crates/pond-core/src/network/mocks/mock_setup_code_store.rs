@@ -94,13 +94,16 @@ impl SetupCodeStore for MockSetupCodeStore {
         Ok(record.get_or_insert_with(Self::fixed_record).clone())
     }
 
-    async fn mark_claimed(&self, at: DateTime<Utc>) -> Result<SetupRecord> {
+    async fn mark_claimed(&self, at: DateTime<Utc>, by: Option<&str>) -> Result<SetupRecord> {
         self.check()?;
         let mut guard = self.record.lock().unwrap();
         let record = guard
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("no setup code to mark claimed"))?;
-        record.claimed_at.get_or_insert(at);
+        if record.claimed_at.is_none() {
+            record.claimed_at = Some(at);
+            record.claimed_by = by.map(str::to_string);
+        }
         Ok(record.clone())
     }
 
@@ -111,6 +114,7 @@ impl SetupCodeStore for MockSetupCodeStore {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("no setup code to re-arm"))?;
         record.claimed_at = None;
+        record.claimed_by = None;
         Ok(record.clone())
     }
 }
@@ -123,7 +127,7 @@ mod tests {
     async fn it_keeps_the_store_contract() {
         let store = MockSetupCodeStore::new();
         assert_eq!(store.load().await.unwrap(), None);
-        assert!(store.mark_claimed(Utc::now()).await.is_err());
+        assert!(store.mark_claimed(Utc::now(), None).await.is_err());
         assert!(store.rearm().await.is_err());
 
         let made = store.create_if_missing().await.unwrap();
@@ -132,17 +136,19 @@ mod tests {
 
         let first = Utc.with_ymd_and_hms(2026, 10, 16, 10, 0, 0).unwrap();
         let later = Utc.with_ymd_and_hms(2026, 10, 16, 11, 0, 0).unwrap();
+        let claimed = store.mark_claimed(first, Some("phone-a")).await.unwrap();
         assert_eq!(
-            store.mark_claimed(first).await.unwrap().claimed_at,
-            Some(first)
+            (claimed.claimed_at, claimed.claimed_by.as_deref()),
+            (Some(first), Some("phone-a"))
         );
+        let again = store.mark_claimed(later, Some("phone-b")).await.unwrap();
         assert_eq!(
-            store.mark_claimed(later).await.unwrap().claimed_at,
-            Some(first)
+            (again.claimed_at, again.claimed_by.as_deref()),
+            (Some(first), Some("phone-a"))
         );
 
         let rearmed = store.rearm().await.unwrap();
-        assert_eq!(rearmed.claimed_at, None);
+        assert_eq!((rearmed.claimed_at, rearmed.claimed_by), (None, None));
         assert_eq!(rearmed.code, made.code);
 
         store.set_failing(true);

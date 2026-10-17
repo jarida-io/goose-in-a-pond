@@ -206,6 +206,7 @@ async fn make_app(wire_index: bool, wire_embedder: bool) -> Harness {
         mesh_rebuild: None,
         setup_claims: None,
         spoken_codes: Default::default(),
+        voice_samples: Default::default(),
     });
 
     Harness {

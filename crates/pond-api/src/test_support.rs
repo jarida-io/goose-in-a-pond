@@ -141,6 +141,7 @@ pub async fn app_state() -> TestState {
         mesh_rebuild: None,
         setup_claims: None,
         spoken_codes: Default::default(),
+        voice_samples: Default::default(),
     };
     TestState {
         state,

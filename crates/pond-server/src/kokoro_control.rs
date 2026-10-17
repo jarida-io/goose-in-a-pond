@@ -179,6 +179,14 @@ impl TtsControl for KokoroTtsControl {
     async fn installed_voices(&self) -> Vec<String> {
         self.engine.installed_voices()
     }
+
+    async fn synthesize_in_voice(&self, voice: &str, text: &str) -> Result<Vec<u8>> {
+        let wav = self.engine.synth_wav_in_voice(voice, text).await?;
+        if wav.is_empty() {
+            anyhow::bail!("Kokoro produced no audio for the sample in {voice:?}");
+        }
+        Ok(wav)
+    }
 }
 
 #[cfg(test)]

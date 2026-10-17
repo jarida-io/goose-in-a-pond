@@ -3381,3 +3381,49 @@ PAI-2; not a PAI milestone).**
   30 s embedding-provider init timeout in the scratch pond. Neither comes from this change (the
   first is the advertisement on an interface the list misses), though neither was re-checked
   against an older build.
+
+**2026-10-17 — Pond networking P4, server side: claim before onboarding, the owner's phone, the
+voice sample (touches PAI-1 and PAI-2; not a PAI milestone).**
+
+- **What landed.** [`pond-networking.md`](../pond-networking.md) P4, server half, on
+  `feat/claim-before-onboarding`. The wizard's `UntilOnboarded` routes answer a tokenless caller
+  only from loopback while the pond is neither claimed nor onboarded (the desktop before it
+  pairs); a claimed pond's wizard needs a paired device's token. `POST /onboard/reset` follows
+  the same table before onboarding and keeps loopback plus the host credential after. The setup
+  record gains `claimed_by`, and `POST /onboard/complete` attributes that device to
+  `primary_profile_id`. `POST /voice/sample` reads a fixed sentence in an installed voice. The
+  five model routes that list, fetch and choose the chat model take a token before onboarding,
+  which closes the onboarding half of #365.
+- **PAI-2.** This narrows access: until now any LAN or tailnet peer could drive a fresh pond's
+  wizard. The claim is read live on each state-dependent request, like the onboarding state in
+  §3.7; a read failure counts as claimed, a pond with no setup record as unclaimed. A claimed,
+  reset pond is not a one-way door: the claimant's token reopens its wizard, the host can still
+  pair (pairing answers in every state), and `setup-code --rearm` returns it to the host. The
+  middleware's pure tests pin every cell of the table, and `reset_never_becomes_a_one_way_door`
+  now covers the claimed column. Six routes join `PUBLIC_ROUTES` as `Authenticated`, so they skip
+  the onboarding guard and never answer a tokenless caller; the classification guard names each.
+  No secret in any log, event or response: the voice sample logs the voice id, attribution logs
+  the device and profile ids.
+- **PAI-1.** The owner's own phone was attributed to nobody, because a pond is claimed before it
+  has members, so its turns were never personal. `claimed_by` is the device the claiming pairing
+  issued its tokens to (`client_id`), never request input, and only the first one is kept.
+  Attribution happens once, after completion is saved, and only while the device is
+  unattributed; a device bound since by a pairing code is left alone. On a desktop-run pond the
+  desktop pairs first and is the claimant, but its wizard (`ensurePrimaryProfile` in
+  `useOnboardingPersist.ts`) reads `GET /settings` before naming a primary member, and that
+  route waits for onboarding, so today it names nobody and the desktop stays unattributed. Open:
+  the wizard should `PUT` `primary_profile_id` right after `POST /profiles`, as a phone must.
+- **Invariants.** No egress, no prompt or KV change, no `Settings` field, no migration. The
+  sample synthesises with the voice's style table for one utterance, so the selection a running
+  turn reads never moves, and it plays without `begin_utterance`, so it never cuts a turn off.
+- **Verified on the Mac.** Unit and route tests; the Kokoro seam synthesised a second voice with
+  a real model and left the selected voice in place; `scripts/live-test.sh` claimed a fresh pond
+  with its card, refused its reset wizard to the tokenless host, read the model list and progress
+  with the claimant's token before onboarding, completed setup as the claimant, read the owner
+  back from `GET /devices/self`, re-armed, and drove the host's wizard again. **Not verified:** a
+  real phone, a sample heard by a person through the route, and anything on the Orin.
+- **Left as it was.** `activate` ignores a failed `chat_model` write (`let _ = set_key(...)`), so
+  a storage error there surfaces later as `missing_fields: ["chat_model"]` at completion.
+  `pond-ear`'s `loading_costs_what_the_ear_says_it_holds` fails when its test binary runs its six
+  tests in parallel and passes alone; `pond-ear` has no dependencies, so this change cannot reach
+  it.

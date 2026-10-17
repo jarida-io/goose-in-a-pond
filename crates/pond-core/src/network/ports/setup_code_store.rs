@@ -15,9 +15,11 @@ pub trait SetupCodeStore: Send + Sync {
     /// Idempotent: an existing record comes back unchanged, so a re-run never voids a card.
     async fn create_if_missing(&self) -> Result<SetupRecord>;
 
-    /// Idempotent and keeps the first `claimed_at`. An error when there is no record.
-    async fn mark_claimed(&self, at: DateTime<Utc>) -> Result<SetupRecord>;
+    /// Idempotent and keeps the first `claimed_at` and `claimed_by`: `by` is written only by the
+    /// claim that latches. An error when there is no record.
+    async fn mark_claimed(&self, at: DateTime<Utc>, by: Option<&str>) -> Result<SetupRecord>;
 
-    /// Clears `claimed_at` and keeps the code: factory reset re-arms the same printed card.
+    /// Clears `claimed_at` and `claimed_by` and keeps the code: factory reset re-arms the same
+    /// printed card.
     async fn rearm(&self) -> Result<SetupRecord>;
 }

@@ -214,6 +214,7 @@ async fn build_app(
         mesh_rebuild: None,
         setup_claims: None,
         spoken_codes: Default::default(),
+        voice_samples: Default::default(),
     });
 
     let router = build_router(state, std::path::PathBuf::from("pond-desktop/dist"));

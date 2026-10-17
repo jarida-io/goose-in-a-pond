@@ -24,6 +24,7 @@ pub mod test_support;
 pub mod thought_filter;
 pub mod tool_context;
 pub mod uber_accounts;
+pub mod voice_sample;
 pub mod web_search;
 
 /// Local llamafile server lifecycle, injected by `pond-server` (`None` in tests).
@@ -296,6 +297,8 @@ pub struct AppState {
     pub setup_claims: Option<Arc<pond_core::network::services::setup_claim::SetupClaimService>>,
     /// The spoken-code route's limiter and speaker; the default has no speaker and answers 503.
     pub spoken_codes: Arc<crate::spoken_code::SpokenCodes>,
+    /// The voice-sample route's limiter, shared by every caller; it speaks through `tts`.
+    pub voice_samples: Arc<crate::voice_sample::VoiceSamples>,
 }
 
 impl AppState {

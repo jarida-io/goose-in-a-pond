@@ -47,7 +47,7 @@ pub async fn ensure_record_at_startup(
         .context("could not tell whether devices are already paired, so no setup code was made")?;
     let created = store.create_if_missing().await?;
     if paired && created.claimed_at.is_none() {
-        return store.mark_claimed(Utc::now()).await;
+        return store.mark_claimed(Utc::now(), None).await;
     }
     Ok(created)
 }
@@ -262,7 +262,7 @@ mod tests {
         store.create_if_missing().await.unwrap();
         let (_, out, _) = run_to_strings(&store, request.clone()).await;
         assert_eq!(out, "unclaimed\n");
-        store.mark_claimed(Utc::now()).await.unwrap();
+        store.mark_claimed(Utc::now(), None).await.unwrap();
         let (_, out, _) = run_to_strings(&store, request).await;
         assert_eq!(out, "claimed\n");
     }

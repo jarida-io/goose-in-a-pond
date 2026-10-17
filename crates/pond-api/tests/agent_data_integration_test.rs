@@ -232,6 +232,7 @@ async fn make_app_full(
         mesh_rebuild: None,
         setup_claims: None,
         spoken_codes: Default::default(),
+        voice_samples: Default::default(),
     });
 
     (
@@ -526,6 +527,7 @@ async fn prompt_template_delete_system_returns_403() {
         mesh_rebuild: None,
         setup_claims: None,
         spoken_codes: Default::default(),
+        voice_samples: Default::default(),
     });
 
     let app = build_router(state, std::path::PathBuf::from("pond-desktop/dist"));
@@ -1047,6 +1049,7 @@ async fn returns_501_when_repos_not_configured() {
         mesh_rebuild: None,
         setup_claims: None,
         spoken_codes: Default::default(),
+        voice_samples: Default::default(),
     });
     let app = build_router(state, std::path::PathBuf::from("pond-desktop/dist"));
 
