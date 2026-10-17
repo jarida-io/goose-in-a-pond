@@ -25,6 +25,7 @@ struct Harness {
     loopback: axum::Router,
     remote: axum::Router,
     handshake: Arc<SqliteHandshakeAdapter>,
+    registry: Arc<SqliteDeviceRegistry>,
     _tmp: tempfile::TempDir,
 }
 
@@ -37,6 +38,7 @@ async fn make_app() -> Harness {
     let profiles = Arc::new(SqliteProfileRepository::new(pool.clone()));
 
     let handshake = Arc::new(SqliteHandshakeAdapter::new(pool.clone(), None));
+    let registry = Arc::new(SqliteDeviceRegistry::new(pool.clone()));
     let state = Arc::new(AppState {
         warmup: Default::default(),
         db,
@@ -57,7 +59,7 @@ async fn make_app() -> Harness {
         tts_control: None,
         settings_repo: Arc::new(MockSettingsRepository::new()),
         profile_repo: profiles.clone(),
-        device_registry: Arc::new(SqliteDeviceRegistry::new(pool.clone())),
+        device_registry: registry.clone(),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedding_provider: None,
@@ -154,6 +156,7 @@ async fn make_app() -> Harness {
         loopback,
         remote,
         handshake,
+        registry,
         _tmp: tmp,
     }
 }
@@ -521,4 +524,204 @@ async fn removing_a_device_queues_its_remote_revocation_first() {
     assert!(remove().await.status().is_success());
     assert!(!h.handshake.validate_token(phone).await.unwrap());
     assert_eq!(*queue.devices.lock().unwrap(), ["phone000000000001"]);
+}
+
+async fn device_row(h: &Harness, id: &str) -> pond_core::user_data::ports::device_registry::Device {
+    use pond_core::user_data::ports::device_registry::DeviceRegistry;
+    h.registry
+        .get_device(id)
+        .await
+        .unwrap()
+        .expect("device row")
+}
+
+async fn edit_device(
+    router: &axum::Router,
+    id: &str,
+    token: &str,
+    credential: Option<&str>,
+    body: Value,
+) -> axum::response::Response {
+    let mut request = Request::builder()
+        .method(Method::PUT)
+        .uri(format!("/api/v1/devices/{id}"))
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {token}"));
+    if let Some(credential) = credential {
+        request = request.header(pond_api::host_guard::CREDENTIAL_HEADER, credential);
+    }
+    router
+        .clone()
+        .oneshot(request.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_phone_renames_its_own_row_and_keeps_what_it_left_out() {
+    let h = make_app().await;
+    let a = pair(&h, "phone-a").await;
+    let token = a.session_token.as_deref().unwrap();
+    let set = edit_device(
+        &h.remote,
+        "phone-a",
+        token,
+        None,
+        json!({"name": "Kitchen phone", "hostname": "a-host", "room": "Kitchen"}),
+    )
+    .await;
+    assert_eq!(set.status(), StatusCode::OK);
+
+    let renamed = edit_device(
+        &h.remote,
+        "phone-a",
+        token,
+        None,
+        json!({"name": "Amina's iPhone"}),
+    )
+    .await;
+    assert_eq!(renamed.status(), StatusCode::OK);
+    let row = device_row(&h, "phone-a").await;
+    assert_eq!(row.name, "Amina's iPhone");
+    assert_eq!(
+        row.hostname.as_deref(),
+        Some("a-host"),
+        "an omitted hostname is kept"
+    );
+    assert_eq!(
+        row.room.as_deref(),
+        Some("Kitchen"),
+        "an omitted room is kept"
+    );
+
+    let cleared = edit_device(&h.remote, "phone-a", token, None, json!({"room": null})).await;
+    assert_eq!(cleared.status(), StatusCode::OK);
+    let row = device_row(&h, "phone-a").await;
+    assert_eq!(row.name, "Amina's iPhone", "an omitted name is kept");
+    assert_eq!(row.room, None, "an explicit null clears the room");
+    assert_eq!(row.hostname.as_deref(), Some("a-host"));
+}
+
+#[tokio::test]
+async fn a_phone_cannot_rename_another_phone() {
+    let h = make_app().await;
+    let a = pair(&h, "phone-a").await;
+    pair(&h, "phone-b").await;
+    let before = device_row(&h, "phone-b").await.name;
+
+    for router in [&h.remote, &h.loopback] {
+        let refused = edit_device(
+            router,
+            "phone-b",
+            a.session_token.as_deref().unwrap(),
+            None,
+            json!({"name": "not yours"}),
+        )
+        .await;
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(refused.into_body(), 4096)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["error"], "device_not_yours");
+    }
+    assert_eq!(device_row(&h, "phone-b").await.name, before);
+}
+
+#[tokio::test]
+async fn the_host_renames_any_row_and_a_stale_credential_does_not() {
+    let h = make_app().await;
+    let a = pair(&h, "phone-a").await;
+    pair(&h, "phone-b").await;
+    let credential = pond_api::host_guard::HostCredential::generate();
+    let loopback = h
+        .loopback
+        .clone()
+        .layer(axum::Extension(credential.clone()));
+    let token = a.session_token.as_deref().unwrap();
+
+    let stale = pond_api::host_guard::HostCredential::generate();
+    let refused = edit_device(
+        &loopback,
+        "phone-b",
+        token,
+        Some(stale.as_str()),
+        json!({"name": "x"}),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+
+    let host = edit_device(
+        &loopback,
+        "phone-b",
+        token,
+        Some(credential.as_str()),
+        json!({"name": "Liz's phone"}),
+    )
+    .await;
+    assert_eq!(host.status(), StatusCode::OK);
+    assert_eq!(device_row(&h, "phone-b").await.name, "Liz's phone");
+
+    // The companion listener holds no credential, so presenting one there proves nothing.
+    let remote = edit_device(
+        &h.remote,
+        "phone-b",
+        token,
+        Some(credential.as_str()),
+        json!({"name": "y"}),
+    )
+    .await;
+    assert_eq!(remote.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn any_paired_device_renames_a_shared_row() {
+    use pond_core::user_data::ports::device_registry::{DeviceRegistry, RegisterDeviceRequest};
+    let h = make_app().await;
+    let a = pair(&h, "phone-a").await;
+    h.registry
+        .register(RegisterDeviceRequest {
+            id: Some("matter-7".into()),
+            name: "Lamp".into(),
+            device_type: "matter_light".into(),
+            hostname: None,
+            capabilities: vec![],
+            room: Some("Living room".into()),
+        })
+        .await
+        .unwrap();
+
+    let renamed = edit_device(
+        &h.remote,
+        "matter-7",
+        a.session_token.as_deref().unwrap(),
+        None,
+        json!({"name": "Reading lamp"}),
+    )
+    .await;
+    assert_eq!(renamed.status(), StatusCode::OK);
+    let row = device_row(&h, "matter-7").await;
+    assert_eq!(row.name, "Reading lamp");
+    assert_eq!(row.room.as_deref(), Some("Living room"));
+}
+
+#[tokio::test]
+async fn editing_an_unknown_device_or_blanking_a_name_is_refused() {
+    let h = make_app().await;
+    let a = pair(&h, "phone-a").await;
+    let token = a.session_token.as_deref().unwrap();
+    assert_eq!(
+        edit_device(&h.remote, "nobody", token, None, json!({"name": "x"}))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        edit_device(&h.remote, "phone-a", token, None, json!({"name": "   "}))
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
 }

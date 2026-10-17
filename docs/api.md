@@ -85,6 +85,7 @@ All errors return JSON:
 | GET | /devices | Protected | List registered devices |
 | GET | /devices/self | Protected | The calling device, and the household member it belongs to |
 | POST | /devices | Protected | Register a device |
+| PUT | /devices/{id} | Protected | Rename a device, or set its hostname and room |
 | DELETE | /devices/{id} | Protected | Unregister a device |
 | POST | /devices/{id}/heartbeat | Protected | Update device last-seen |
 | POST | /sensors | Protected | Record a sensor reading |
@@ -1275,6 +1276,35 @@ A Pond from before this route answers a GET here with **405**, because the reque
 ```
 
 **Response 201** — device object
+
+---
+
+### PUT /devices/{id}
+
+The Devices panel's "Configure" save, and a phone renaming itself after setup.
+
+**Body** — every field optional: `{"name"?: string, "hostname"?: string | null, "room"?: string | null}`.
+A field left out keeps its stored value (2026-10-17). An explicit `null`, or a blank string, clears a
+hostname or room. A blank name is refused.
+
+**Who may change which row** (2026-10-17, `pond_core::user_data::services::device_edit`):
+
+| Row | May change it |
+|---|---|
+| A paired client's own (`device_type` `gotg`, `desktop` or `cli`) | that device (its own token) or the host (the loopback listener with `X-Pond-Host-Credential`) |
+| A shared row (a Matter device, a sensor, another pond) | any authenticated caller, because the household's devices are managed from any of its phones |
+
+Until then any paired token could rename any row, the owner's phone included. The desktop's
+Devices panel sends the host credential, since it is the one place another phone's name is edited.
+
+**Response 200** — the updated device.
+
+**Response 400** `{"error":"name_required"}` — a blank name.
+
+**Response 403** `{"error":"device_not_yours"}` — another paired client's row, without the host
+credential. Logged as `kind="device_edit_denied"` with the row, its type and the caller.
+
+**Response 404** `{"error":"device_not_found"}`.
 
 ---
 

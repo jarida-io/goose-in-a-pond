@@ -528,12 +528,15 @@ export class PondApiClient {
     return this.post(`/api/v1/devices/${encodeURIComponent(id)}/offline`, {});
   }
 
-  /** Save edits from the Devices "Configure" panel (name, hostname, room). */
+  /**
+   * Save edits from the Devices "Configure" panel (name, hostname, room). With the host
+   * credential, because another phone's row is only the host's or that phone's to change.
+   */
   updateDevice(
     id: string,
     req: { name: string; hostname?: string; room?: string },
   ): Promise<Device> {
-    return this.put<Device>(`/api/v1/devices/${encodeURIComponent(id)}`, req);
+    return this.hostRequest<Device>("PUT", `/api/v1/devices/${encodeURIComponent(id)}`, req);
   }
 
   // ── Mesh ──────────────────────────────────────────────────

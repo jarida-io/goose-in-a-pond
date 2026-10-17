@@ -71,17 +71,15 @@ pub fn require_credential(
             Json(json!({"error": "host_credential_unavailable"})),
         ));
     };
-    let presented = headers
-        .get(CREDENTIAL_HEADER)
-        .map(|value| value.as_bytes())
-        .unwrap_or_default();
-    let matches: bool = presented.ct_eq(expected.as_str().as_bytes()).into();
-    if matches || (presented.is_empty() && crate::middleware::dev_allow_loopback()) {
+    if presents_credential(Some(expected), headers) {
         return Ok(());
     }
+    let presented = headers
+        .get(CREDENTIAL_HEADER)
+        .is_some_and(|value| !value.is_empty());
     tracing::warn!(
         operation,
-        presented = !presented.is_empty(),
+        presented,
         kind = "host_credential_rejected",
         "refused a host-only request without the current host credential"
     );
@@ -89,6 +87,20 @@ pub fn require_credential(
         StatusCode::FORBIDDEN,
         Json(json!({"error": "host_credential_required"})),
     ))
+}
+
+/// Whether the request holds the current credential, without logging a refusal: for routes where
+/// the host is one of several callers allowed, and the others are judged next.
+pub fn presents_credential(expected: Option<&HostCredential>, headers: &HeaderMap) -> bool {
+    let Some(expected) = expected else {
+        return false;
+    };
+    let presented = headers
+        .get(CREDENTIAL_HEADER)
+        .map(|value| value.as_bytes())
+        .unwrap_or_default();
+    let matches: bool = presented.ct_eq(expected.as_str().as_bytes()).into();
+    matches || (presented.is_empty() && crate::middleware::dev_allow_loopback())
 }
 
 /// Names that only ever resolve to this machine. The port is not checked, so an SSH tunnel

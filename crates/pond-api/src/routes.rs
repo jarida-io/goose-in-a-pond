@@ -4485,40 +4485,90 @@ async fn device_offline(
 
 #[derive(serde::Deserialize)]
 struct UpdateDeviceBody {
-    name: String,
-    hostname: Option<String>,
-    room: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    // Two levels of `Option`: an omitted field keeps its value, an explicit `null` clears it.
+    #[serde(default, deserialize_with = "present_field")]
+    hostname: Option<Option<String>>,
+    #[serde(default, deserialize_with = "present_field")]
+    room: Option<Option<String>>,
 }
 
-/// `PUT /api/v1/devices/{id}` — the Devices UI's "Configure" save action.
+fn present_field<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+/// `PUT /api/v1/devices/{id}`, the Devices UI's "Configure" save. A phone's own row is that
+/// phone's or the host's to change; omitted fields keep their values (`device_edit`).
 async fn update_device(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    credential: Option<axum::Extension<crate::host_guard::HostCredential>>,
+    headers: axum::http::HeaderMap,
     body: Result<Json<UpdateDeviceBody>, JsonRejection>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use pond_core::user_data::services::device_edit::{self, DeviceEdit};
+
     let Json(req) = body.map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": format!("Invalid request: {}", e)})),
         )
     })?;
-    let name = req.name.trim().to_string();
-    if name.is_empty() {
+    let current = state
+        .device_registry
+        .get_device(&id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "device_not_found"})),
+            )
+        })?;
+
+    let caller = proven_device(principal.as_ref());
+    let host = crate::host_guard::presents_credential(
+        credential.as_ref().map(|axum::Extension(c)| c),
+        &headers,
+    );
+    if !device_edit::may_edit(&current, caller.id(), host) {
+        tracing::warn!(
+            kind = "device_edit_denied",
+            device = %id,
+            device_type = %current.device_type,
+            caller = caller.id().unwrap_or("none"),
+            "refused to change another paired device's row; only that device or the host may"
+        );
         return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "name is required"})),
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "device_not_yours"})),
         ));
     }
+
+    let edit = DeviceEdit {
+        name: req.name,
+        hostname: req.hostname,
+        room: req.room,
+    };
+    let update = device_edit::merge(&current, edit).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "name_required", "message": e.to_string()})),
+        )
+    })?;
     let device = state
         .device_registry
-        .update(
-            &id,
-            pond_core::user_data::ports::device_registry::UpdateDeviceRequest {
-                name,
-                hostname: req.hostname.filter(|s| !s.trim().is_empty()),
-                room: req.room.filter(|s| !s.trim().is_empty()),
-            },
-        )
+        .update(&id, update)
         .await
         .map_err(|e| {
             (
