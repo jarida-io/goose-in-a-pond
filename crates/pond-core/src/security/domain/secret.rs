@@ -41,6 +41,12 @@ impl SecretRequirement {
         self.kind != SecretKind::Choice || self.options.iter().any(|o| o.value == value)
     }
 
+    /// Whether an extension may not be installed or started while this secret is missing: a
+    /// required one the user pastes. A sign-in flow is completed after install, so it never blocks.
+    pub fn blocks_install(&self) -> bool {
+        self.required && self.kind != SecretKind::OAuthFlow
+    }
+
     /// The value that applies to a choice until one is saved: its first answer.
     pub fn default_value(&self) -> Option<&str> {
         match self.kind {
@@ -87,6 +93,26 @@ mod tests {
         assert!(!c.accepts("tidal") && !c.accepts(""));
         assert_eq!(c.default_value(), Some("apple"));
         assert_eq!(c.options[1].description, "By hand");
+    }
+
+    fn requirement(required: bool, kind: &str) -> SecretRequirement {
+        serde_json::from_str(&format!(
+            r#"{{"key":"K","display_name":"K","description":"","required":{required},"kind":"{kind}"}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn only_a_required_secret_the_user_pastes_blocks_install() {
+        assert!(requirement(true, "api_key").blocks_install());
+        assert!(requirement(true, "generic").blocks_install());
+        assert!(
+            !requirement(true, "oauth_flow").blocks_install(),
+            "a sign-in happens after install"
+        );
+        for kind in ["api_key", "generic", "oauth_flow", "choice"] {
+            assert!(!requirement(false, kind).blocks_install(), "{kind}");
+        }
     }
 
     #[test]

@@ -1,0 +1,19 @@
+{
+  "answer": "7,550",
+  "blocks": [
+    "Types and Fees: Type of Passport/Application Number of pages Amount (KES)",
+    "Types and Fees: 1 Ordinary passports A Series (34 Pages) 7,550.00",
+    "Types and Fees: B Series (50 pages) 9,550.00",
+    "Types and Fees: C Series (66 pages) 12,050.00",
+    "Types and Fees: 2 Diplomatic passports 15,050.00",
+    "Types and Fees: 3 Mutilated passport 20,050.00",
+    "Types and Fees: 4 Lost passports 20,050.00",
+    "Types and Fees: 5 Certificate of Identity (for Foreigners) 3,050.00",
+    "Types and Fees: 6 Temporary permit 1,050.00",
+    "Types and Fees: 7 Interstate Pass (EAC) Gratis"
+  ],
+  "fetched": "2026-10-15",
+  "question": "How much does a 34-page Kenyan passport cost?",
+  "title": "Passport types and fees",
+  "url": "https://immigration.go.ke/type-and-fees/"
+}

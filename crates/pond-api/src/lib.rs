@@ -23,6 +23,7 @@ pub mod test_support;
 pub mod thought_filter;
 pub mod tool_context;
 pub mod uber_accounts;
+pub mod web_search;
 
 /// Local llamafile server lifecycle, injected by `pond-server` (`None` in tests).
 #[async_trait::async_trait]

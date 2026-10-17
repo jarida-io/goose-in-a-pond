@@ -45,6 +45,11 @@ sysinfo      = "0.38"
 # which the protocol carries base64-encoded.
 base64       = { workspace = true }
 notify-rust  = "4"
+# search_web: fetch pages concurrently in one task, and read them.
+futures      = { workspace = true }
+# search_web: Readability's class and id patterns. Already in the graph through pond-core.
+regex        = { workspace = true }
+scraper      = { workspace = true }
 
 [dev-dependencies]
 pond-core = { path = "../pond-core", features = ["test-mocks"] }

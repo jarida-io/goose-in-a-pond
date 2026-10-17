@@ -81,6 +81,8 @@ const NAME_MAP: Record<string, string> = {
   get_wikipedia_article: "Wikipedia",
   // computation
   compute_answer: "Computed",
+  // web
+  search_web: "Web search",
   // schedule
   list_schedules: "Schedules",
   create_schedule: "Create Schedule",

@@ -23,6 +23,13 @@ The design it informs is
    prompt rule that names the operations, get the call that `calculate` alone does not?
 5. **E5, thinking on.** E1's `V1` arm with reasoning enabled, for the two Gemma models: is
    thinking the lever that the tool surface is not?
+6. **E6, web search beside knowledge.** 12 questions only the live web answers
+   (`cases-web.json`), asked beside the earlier cases. Is `search_web` called when it is
+   needed, and does it take questions `look_up` or `calculate` should answer?
+7. **E7, web read-back.** On SYNTHETIC fixtures (`fixtures/web/synthetic.json`; Brave's terms
+   forbid benchmarking on its results): snippets only, against passages extracted from the
+   pages, against pages that could not be read. `kt/rankers.py` compares the passage rankers
+   on retrieval alone, the production MiniLM included (run it with the pond's venv Python).
 
 ## Arms
 

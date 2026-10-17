@@ -636,6 +636,10 @@ mod tests {
             (Method::GET, "/api/v1/musickit/developer-token"),
             (Method::GET, "/api/v1/player/user-token"),
             (Method::GET, "/api/v1/secrets"),
+            // Web search settings: the same door as `/secrets`, whose key they store.
+            (Method::GET, "/api/v1/web-search"),
+            (Method::PUT, "/api/v1/web-search/key"),
+            (Method::DELETE, "/api/v1/web-search/key"),
         ] {
             assert!(
                 !answers_without_token(&method, path, SETTING_UP, FROM_THE_HOST),

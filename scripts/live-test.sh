@@ -143,6 +143,9 @@ export RUSTFLAGS=""
 # credentials service for a token unless told `off`. The check below that expects "not set up" is
 # about the route reaching the secret store, and needs the service out of the picture.
 export POND_CREDENTIALS_URL=off
+# The secret store reads the environment first: a developer's exported Brave key would make the
+# web search checks below report a key the scratch pond never stored.
+unset BRAVE_SEARCH_API_KEY
 
 if [ "$DO_BUILD" -eq 1 ]; then
   say "building pond-server (RUSTFLAGS empty, per ci.yml)"
@@ -166,16 +169,24 @@ fi
 
 # ── Start ────────────────────────────────────────────────────────────────────
 #
-# If startup dies at "never wrote .runtime_api_port after 180s", check this
-# before reading any diff: `ensure_onnx_runtime` resolves ORT into $DATA_DIR/lib,
-# and $DATA_DIR is a fresh scratch directory on every run -- so it downloads
-# ~30 MB from GitHub Releases each time, and on a slow link that alone exceeds
-# the timeout. It is not a hang in your feature. Export ORT_DYLIB_PATH (its
-# resolution step 1) at an existing copy, e.g. the one in the real data dir:
-#
-#   export ORT_DYLIB_PATH="$HOME/Library/Application Support/goose-in-a-pond/lib/libonnxruntime.<ver>.dylib"
-#
+# A fresh $DATA_DIR downloads ONNX Runtime and installs espeak-ng-data before it
+# binds, which on a slow link outlasts the 180 s start window. Reuse the real
+# pond's copies when this machine has them: ORT at the version the pond pins
+# (ORT_VERSION in main.rs), espeak copied in, never linked.
+REAL_DATA_DIR="$HOME/Library/Application Support/goose-in-a-pond"
+ORT_PINNED="$(sed -n 's/^const ORT_VERSION: &str = "\(.*\)";/\1/p' crates/pond-server/src/main.rs)"
+if [ -z "${ORT_DYLIB_PATH:-}" ] && [ -n "$ORT_PINNED" ] \
+  && [ -f "$REAL_DATA_DIR/lib/libonnxruntime.$ORT_PINNED.dylib" ]; then
+  export ORT_DYLIB_PATH="$REAL_DATA_DIR/lib/libonnxruntime.$ORT_PINNED.dylib"
+  say "reusing ONNX Runtime $ORT_PINNED from the real data dir"
+fi
+seed_espeak() { # seed_espeak <data-dir>
+  [ -d "$REAL_DATA_DIR/bin/espeak-ng-data" ] && [ ! -d "$1/bin/espeak-ng-data" ] || return 0
+  mkdir -p "$1/bin" && cp -R "$REAL_DATA_DIR/bin/espeak-ng-data" "$1/bin/"
+}
+
 mkdir -p "$DATA_DIR"
+seed_espeak "$DATA_DIR"
 say "starting pond-server against $DATA_DIR"
 
 # `serve` shuts down on stdin EOF when detached, so stdin is held open.
@@ -279,6 +290,7 @@ fi
 say "auth allowlist (no token, no loopback bypass)"
 AUTH_DIR="$DATA_DIR-auth"
 mkdir -p "$AUTH_DIR"
+seed_espeak "$AUTH_DIR"
 POND_DATA_DIR="$AUTH_DIR" RUST_LOG=warn \
   "$BIN" serve --port "$((PORT + 20))" > "$AUTH_DIR/server.out" 2>&1 < /dev/zero &
 AUTH_PID=$!
@@ -328,7 +340,7 @@ if [ "$AUTH_OK" -eq 1 ]; then
   fi
   curl -s -o /dev/null -X POST "http://127.0.0.1:$AUTH_PORT/api/v1/onboard/complete"
 
-  for route in /settings /profiles /sessions /devices /memory; do
+  for route in /settings /profiles /sessions /devices /memory /web-search; do
     code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$AUTH_PORT/api/v1$route")
     case "$code" in
       401) printf '  PASS  GET %-10s requires a token\n' "$route" ;;

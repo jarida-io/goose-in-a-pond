@@ -1,0 +1,1714 @@
+{
+ "model": "gemma-4-E4B-it-qat-UD-Q4_K_XL",
+ "exp": "e8",
+ "rows": [
+  {
+   "arm": "M0",
+   "id": "w01",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1059,
+   "prompt_ms": 4832.816,
+   "wall": 5.87,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "w02",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1059,
+   "prompt_ms": 547.265,
+   "wall": 1.575,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "w03",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1063,
+   "prompt_ms": 962.345,
+   "wall": 1.998,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "w04",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1062,
+   "prompt_ms": 727.121,
+   "wall": 1.776,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "w05",
+   "expect": "web",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [],
+   "content": "I do not have a tool that can check the real-time operational status of M-Pesa.",
+   "finish": "stop",
+   "prompt_tokens": 1057,
+   "prompt_ms": 622.407,
+   "wall": 1.52,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "w06",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1059,
+   "prompt_ms": 715.093,
+   "wall": 1.651,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "w07",
+   "expect": "web",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [],
+   "content": "I do not have access to real-time cinema showtimes.",
+   "finish": "stop",
+   "prompt_tokens": 1060,
+   "prompt_ms": 829.024,
+   "wall": 1.346,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "w08",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1063,
+   "prompt_ms": 786.893,
+   "wall": 1.76,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "w09",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1060,
+   "prompt_ms": 818.119,
+   "wall": 1.818,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "w10",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1060,
+   "prompt_ms": 878.335,
+   "wall": 1.862,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "w11",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1059,
+   "prompt_ms": 714.367,
+   "wall": 1.7,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "w12",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1063,
+   "prompt_ms": 981.049,
+   "wall": 1.957,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "r01",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "Wangari Maathai was a Kenyan environmental activist and political leader who was awarded the Nobel Peace Prize in 2004 for her work in environmentalism and democracy. She founded the Green Belt Movement, which aimed to combat deforestation and promote sustainable development in Kenya.",
+   "finish": "stop",
+   "prompt_tokens": 1056,
+   "prompt_ms": 743.712,
+   "wall": 2.777,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "r02",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "Kisumu is known for being a major city in Kenya, situated on the shores of Lake Victoria. It is a significant center for trade, commerce, and culture in the region.",
+   "finish": "stop",
+   "prompt_tokens": 1055,
+   "prompt_ms": 920.37,
+   "wall": 2.164,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "r03",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "Ngũgĩ wa Thiong'o is a Kenyan author, essayist, and academic who is known for his works that explore themes of decolonization, African identity, and the struggle against oppression. He is a prominent figure in African literature and has written extensively in both English and Gikuyu.",
+   "finish": "stop",
+   "prompt_tokens": 1060,
+   "prompt_ms": 1037.04,
+   "wall": 3.418,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "r04",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1055,
+   "prompt_ms": 1092.309,
+   "wall": 2.007,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "r05",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "The Battle of Adwa was a major victory for the Ethiopian army against the invading Italian forces on March 1, 1896. It is considered a significant moment in African history because it was one of the first times an African nation successfully defeated a major European colonial power in a large-scale ",
+   "finish": "stop",
+   "prompt_tokens": 1057,
+   "prompt_ms": 735.542,
+   "wall": 4.649,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "r06",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "M-Pesa is a mobile phone-based money transfer and mobile banking service that was launched in Kenya. It allows users to send and receive money using their mobile phones, and it has become a very popular and widely used financial service in East Africa.",
+   "finish": "stop",
+   "prompt_tokens": 1055,
+   "prompt_ms": 968.734,
+   "wall": 2.909,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "r07",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "Dedan Kimathi was a Kenyan revolutionary and a key figure in the Mau Mau uprising against British colonial rule in Kenya. He was a prominent leader among the Mau Mau fighters.",
+   "finish": "stop",
+   "prompt_tokens": 1055,
+   "prompt_ms": 1057.986,
+   "wall": 2.306,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "r08",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1065,
+   "prompt_ms": 1189.851,
+   "wall": 2.058,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "r09",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1064,
+   "prompt_ms": 1039.692,
+   "wall": 1.931,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "r10",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "Barack Obama's father was born in Kenya.",
+   "finish": "stop",
+   "prompt_tokens": 1057,
+   "prompt_ms": 893.003,
+   "wall": 1.309,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "r11",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "The main languages spoken in Lamu are Swahili and various local dialects.",
+   "finish": "stop",
+   "prompt_tokens": 1057,
+   "prompt_ms": 797.29,
+   "wall": 1.327,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "r12",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1062,
+   "prompt_ms": 1000.927,
+   "wall": 1.884,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "r13",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1058,
+   "prompt_ms": 921.374,
+   "wall": 1.85,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "r14",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1059,
+   "prompt_ms": 926.894,
+   "wall": 1.825,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "r15",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1058,
+   "prompt_ms": 921.62,
+   "wall": 1.838,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "n01",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [],
+   "content": "I am functioning well, thank you for asking. How can I assist you today?",
+   "finish": "stop",
+   "prompt_tokens": 1055,
+   "prompt_ms": 933.699,
+   "wall": 1.571,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "n02",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [],
+   "content": "You are welcome.",
+   "finish": "stop",
+   "prompt_tokens": 1057,
+   "prompt_ms": 849.119,
+   "wall": 1.012,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "n03",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [],
+   "content": "Grey clouds weep on Nairobi's green,\nWashing the dust, a vibrant scene.",
+   "finish": "stop",
+   "prompt_tokens": 1059,
+   "prompt_ms": 746.603,
+   "wall": 1.419,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "n04",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [],
+   "content": "Could you please send me the report when you have a moment?",
+   "finish": "stop",
+   "prompt_tokens": 1059,
+   "prompt_ms": 817.078,
+   "wall": 1.302,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "n05",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "4",
+   "finish": "stop",
+   "prompt_tokens": 1056,
+   "prompt_ms": 841.365,
+   "wall": 0.895,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "n06",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "It is Wednesday.",
+   "finish": "stop",
+   "prompt_tokens": 1057,
+   "prompt_ms": 730.915,
+   "wall": 0.904,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "o01",
+   "expect": "other:giap-weather",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-weather"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1058,
+   "prompt_ms": 693.273,
+   "wall": 1.505,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "o02",
+   "expect": "other:giap-memory",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-memory"
+     }
+    }
+   ],
+   "content": "I need to check your memories to see what you told me about your sister.",
+   "finish": "tool_calls",
+   "prompt_tokens": 1057,
+   "prompt_ms": 863.473,
+   "wall": 2.511,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "o03",
+   "expect": "other:giap-schedule",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-schedule"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1059,
+   "prompt_ms": 1041.048,
+   "wall": 1.905,
+   "error": null
+  },
+  {
+   "arm": "M0",
+   "id": "o04",
+   "expect": "other:giap-device-control",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-device-control"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1054,
+   "prompt_ms": 868.411,
+   "wall": 2.01,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "w01",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1064,
+   "prompt_ms": 2457.967,
+   "wall": 3.292,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "w02",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1064,
+   "prompt_ms": 790.407,
+   "wall": 1.686,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "w03",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1068,
+   "prompt_ms": 1102.114,
+   "wall": 1.934,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "w04",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1067,
+   "prompt_ms": 1026.002,
+   "wall": 2.141,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "w05",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1062,
+   "prompt_ms": 763.751,
+   "wall": 1.75,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "w06",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1064,
+   "prompt_ms": 897.63,
+   "wall": 1.737,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "w07",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1065,
+   "prompt_ms": 1021.874,
+   "wall": 1.899,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "w08",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1068,
+   "prompt_ms": 981.566,
+   "wall": 1.808,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "w09",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1065,
+   "prompt_ms": 994.657,
+   "wall": 1.864,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "w10",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1065,
+   "prompt_ms": 956.293,
+   "wall": 1.809,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "w11",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1064,
+   "prompt_ms": 774.034,
+   "wall": 1.647,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "w12",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1068,
+   "prompt_ms": 996.212,
+   "wall": 1.824,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "r01",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1061,
+   "prompt_ms": 756.049,
+   "wall": 1.616,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "r02",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1060,
+   "prompt_ms": 785.768,
+   "wall": 1.653,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "r03",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "Ngũgĩ wa Thiong'o is a Kenyan author, essayist, and academic who is known for his works that explore themes of decolonization, African identity, and the struggle against oppression. He is a prominent figure in African literature and has written extensively in both English and Gikuyu.",
+   "finish": "stop",
+   "prompt_tokens": 1065,
+   "prompt_ms": 942.884,
+   "wall": 3.257,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "r04",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1060,
+   "prompt_ms": 970.866,
+   "wall": 1.832,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "r05",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1062,
+   "prompt_ms": 696.003,
+   "wall": 1.543,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "r06",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "M-Pesa is a mobile phone-based money transfer and mobile banking service that was launched in Kenya. It allows users to send and receive money using their mobile phones, and it has become a very popular and widely used service in East Africa.",
+   "finish": "stop",
+   "prompt_tokens": 1060,
+   "prompt_ms": 726.516,
+   "wall": 2.509,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "r07",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1060,
+   "prompt_ms": 924.816,
+   "wall": 1.773,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "r08",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1070,
+   "prompt_ms": 864.634,
+   "wall": 1.707,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "r09",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1069,
+   "prompt_ms": 865.696,
+   "wall": 1.72,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "r10",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "I need to use the giap-knowledge tool to find out where Barack Obama's father was born.",
+   "finish": "tool_calls",
+   "prompt_tokens": 1062,
+   "prompt_ms": 694.619,
+   "wall": 2.336,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "r11",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "I will use the giap-knowledge tool to find out what language is mostly spoken in Lamu.\n",
+   "finish": "tool_calls",
+   "prompt_tokens": 1062,
+   "prompt_ms": 877.062,
+   "wall": 2.574,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "r12",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1067,
+   "prompt_ms": 1026.871,
+   "wall": 1.87,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "r13",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1063,
+   "prompt_ms": 641.612,
+   "wall": 1.48,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "r14",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1064,
+   "prompt_ms": 685.141,
+   "wall": 1.532,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "r15",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-knowledge"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1063,
+   "prompt_ms": 697.822,
+   "wall": 1.547,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "n01",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [],
+   "content": "I am functioning well, thank you for asking. How can I assist you today?",
+   "finish": "stop",
+   "prompt_tokens": 1060,
+   "prompt_ms": 667.521,
+   "wall": 1.247,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "n02",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [],
+   "content": "You are welcome.",
+   "finish": "stop",
+   "prompt_tokens": 1062,
+   "prompt_ms": 668.143,
+   "wall": 0.819,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "n03",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [],
+   "content": "Grey clouds weep on Nairobi's green hills,\nWashing the dust with a gentle, cool spill.",
+   "finish": "stop",
+   "prompt_tokens": 1064,
+   "prompt_ms": 618.277,
+   "wall": 1.344,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "n04",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [],
+   "content": "Could you please send me the report when you have a moment?",
+   "finish": "stop",
+   "prompt_tokens": 1064,
+   "prompt_ms": 610.69,
+   "wall": 1.055,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "n05",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "4",
+   "finish": "stop",
+   "prompt_tokens": 1061,
+   "prompt_ms": 647.563,
+   "wall": 0.698,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "n06",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "It is Wednesday.",
+   "finish": "stop",
+   "prompt_tokens": 1062,
+   "prompt_ms": 622.447,
+   "wall": 0.769,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "o01",
+   "expect": "other:giap-weather",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-weather"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1063,
+   "prompt_ms": 577.241,
+   "wall": 1.362,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "o02",
+   "expect": "other:giap-memory",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-memory"
+     }
+    }
+   ],
+   "content": "I need to check your memories to see what you told me about your sister.",
+   "finish": "tool_calls",
+   "prompt_tokens": 1062,
+   "prompt_ms": 603.185,
+   "wall": 2.02,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "o03",
+   "expect": "other:giap-schedule",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-schedule"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1064,
+   "prompt_ms": 810.334,
+   "wall": 1.626,
+   "error": null
+  },
+  {
+   "arm": "MW",
+   "id": "o04",
+   "expect": "other:giap-device-control",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-toolkit"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-toolkit__enable_tool_group",
+     "args": {
+      "group": "giap-device-control"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 1059,
+   "prompt_ms": 672.879,
+   "wall": 1.583,
+   "error": null
+  }
+ ]
+}

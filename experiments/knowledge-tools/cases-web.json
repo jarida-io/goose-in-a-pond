@@ -1,0 +1,17 @@
+{
+  "_doc": "E6 cases, labelled BEFORE any run. expect 'web': only a live web search can answer (current, local, prices, schedules, recent events). accept: families that also count as right. E6 runs these beside the read, compute, none and other cases of cases.json, to see both whether search_web is called when needed and whether it takes questions look_up or calculate should answer.",
+  "cases": [
+    {"id": "w01", "q": "What time does the Junction Mall in Nairobi close today?", "expect": "web", "arg": ["junction"]},
+    {"id": "w02", "q": "What's the latest news on the Nairobi Expressway?", "expect": "web", "arg": ["expressway"]},
+    {"id": "w03", "q": "How much does a Samsung Galaxy A15 cost in Kenya right now?", "expect": "web", "arg": ["a15"]},
+    {"id": "w04", "q": "What is today's exchange rate from US dollars to Kenyan shillings?", "expect": "web", "accept": ["compute"], "arg": ["dollar|usd"]},
+    {"id": "w05", "q": "Is M-Pesa down right now?", "expect": "web", "arg": ["m-?pesa"]},
+    {"id": "w06", "q": "What are the opening hours of the Kenya National Archives?", "expect": "web", "arg": ["archives"]},
+    {"id": "w07", "q": "Which films are showing at Century Cinemax Junction this weekend?", "expect": "web", "arg": ["cinemax|century"]},
+    {"id": "w08", "q": "What did the Central Bank of Kenya decide at its last interest rate meeting?", "expect": "web", "arg": ["central bank|cbk"]},
+    {"id": "w09", "q": "Find me a well-reviewed Ethiopian restaurant in Kilimani.", "expect": "web", "arg": ["ethiopian"]},
+    {"id": "w10", "q": "When does the next SGR train leave Nairobi for Mombasa?", "expect": "web", "arg": ["sgr|train|madaraka"]},
+    {"id": "w11", "q": "Who is leading the Kenyan Premier League table this season?", "expect": "web", "arg": ["premier league|kpl"]},
+    {"id": "w12", "q": "What's the price of a litre of petrol in Nairobi this month?", "expect": "web", "arg": ["petrol|fuel"]}
+  ]
+}

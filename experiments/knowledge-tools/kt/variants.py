@@ -90,7 +90,21 @@ V3_TOOLS = [
     V1_TOOLS[1],
 ]
 
-SCHEMAS = {"V0": V0_TOOLS, "V1": V1_TOOLS, "V2": V2_TOOLS, "V3": V3_TOOLS}
+# search_web exactly as docs/architecture/small-model-tools.md section 8.2 specifies it.
+SEARCH_WEB = _fn(
+    "giap-knowledge__search_web",
+    "Search the web for anything current, local or specific that the encyclopedia will not "
+    "have: news, opening hours, prices, products, businesses, recent results.",
+    {"question": {"description": "The user's question, in their own words.", "type": "string"}},
+    ["question"],
+)
+
+SCHEMAS = {
+    "V0": V0_TOOLS, "V1": V1_TOOLS, "V2": V2_TOOLS, "V3": V3_TOOLS,
+    # E6: web search beside the shipped knowledge tools, and beside the redesigned ones.
+    "S0": V0_TOOLS + [SEARCH_WEB],
+    "S1": V1_TOOLS + [SEARCH_WEB],
+}
 
 # Tool name -> knowledge family. look_up in V2 serves both, so it maps to a set.
 FAMILY = {
@@ -98,6 +112,10 @@ FAMILY = {
     "V1": {"giap-knowledge__look_up": {"read"}, "giap-knowledge__calculate": {"compute"}},
     "V2": {"giap-knowledge__look_up": {"read", "compute"}},
     "V3": {"giap-knowledge__look_up": {"read"}, "giap-knowledge__calculator": {"compute"}},
+    "S0": {"giap-knowledge__get_wikipedia_article": {"read"}, "giap-knowledge__compute_answer": {"compute"},
+           "giap-knowledge__search_web": {"web"}},
+    "S1": {"giap-knowledge__look_up": {"read"}, "giap-knowledge__calculate": {"compute"},
+           "giap-knowledge__search_web": {"web"}},
 }
 
 # The tool a forced call uses, per schema and family, and how its argument is filled.
@@ -291,3 +309,49 @@ RENDERERS = {
     # Oracle: needs the case's answer patterns, so the runner calls r1o_read itself.
     "R1o": {"read": None, "compute": r1_compute},
 }
+
+
+# ── E7: web read-back formats (SYNTHETIC fixtures, fixtures/web/synthetic.json) ─────────────
+
+
+def w0_snippets(case):
+    """The old SearXNG formatter: bold titles, snippets, domains, nothing from the pages."""
+    lines = ["Web search: \"%s\"" % case["q"], ""]
+    for r in case["results"]:
+        lines.append("- **%s** -- %s (%s)" % (r["title"], r["snippet"], r["domain"]))
+    return "\n".join(lines)
+
+
+def _web_passages(case, use_pages, budget=1800, per_source=2, ranker=None):
+    q = {_stem(t) for t in _terms(case["q"])}
+    cands = []  # (source index, text)
+    for i, r in enumerate(case["results"]):
+        if use_pages and r.get("page"):
+            cands += [(i, p) for p in r["page"]]
+        else:
+            cands.append((i, r["snippet"]))
+    if ranker is not None:
+        scores = ranker(case["q"], [t for _, t in cands])
+    else:
+        scores = _bm25([[_stem(t) for t in _terms(t)] for _, t in cands], q) if q else [0] * len(cands)
+    order = sorted(range(len(cands)), key=lambda k: -scores[k])
+    picked, used, per = [], 0, {}
+    for k in order:
+        i, text = cands[k]
+        if per.get(i, 0) >= per_source or used + len(text) > budget:
+            continue
+        if scores[k] <= 0 and picked:
+            continue
+        picked.append((i, text)); used += len(text); per[i] = per.get(i, 0) + 1
+    return picked
+
+
+def w1_passages(case, use_pages=True, ranker=None):
+    """The section-8 formatter: plain text, title (domain), passages chosen by the question."""
+    picked = _web_passages(case, use_pages, ranker=ranker)
+    lines = ["Web results for: %s" % case["q"]]
+    for i in sorted({i for i, _ in picked}, key=lambda i: [j for j, _ in picked].index(i)):
+        r = case["results"][i]
+        lines.append("%s (%s)" % (r["title"], r["domain"]))
+        lines += [t for j, t in picked if j == i]
+    return "\n".join(lines)

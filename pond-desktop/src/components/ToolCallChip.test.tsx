@@ -90,3 +90,53 @@ describe("ToolCallChip — MCP-UI cards in the conversation", () => {
     expect(sent).not.toContain("w2");
   });
 });
+
+describe("ToolCallChip: web search", () => {
+  const searched = card({
+    tool: "giap-knowledge__search_web",
+    renderHint: "search",
+    data: {
+      query: "library hours",
+      results: [
+        {
+          title: "Opening hours",
+          url: "https://library.example.org/hours",
+          domain: "library.example.org",
+          snippet: "Saturday 9:00 to 13:00.",
+        },
+      ],
+    },
+  });
+
+  it("is labelled Web search, not the tool's snake_case name", () => {
+    render(<ToolCallChip card={searched} />);
+    expect(screen.getByRole("button", { name: /^Web search/ })).toBeTruthy();
+    expect(screen.queryByText(/search web/i)).toBeNull();
+  });
+
+  it("opens to the result card, each result a link", () => {
+    render(<ToolCallChip card={searched} />);
+    expand();
+    const link = screen.getByRole("link", { name: /Opening hours/ }) as HTMLAnchorElement;
+    expect(link.href).toBe("https://library.example.org/hours");
+    expect(screen.getByText("Saturday 9:00 to 13:00.")).toBeTruthy();
+  });
+
+  it("clicking a result does not collapse the chip", () => {
+    render(<ToolCallChip card={searched} />);
+    expand();
+    fireEvent.click(screen.getByRole("link", { name: /Opening hours/ }));
+    expect(screen.getByText("Saturday 9:00 to 13:00.")).toBeTruthy();
+  });
+
+  it("shows the plain text when the search found nothing and sent no card", () => {
+    const c = card({
+      tool: "giap-knowledge__search_web",
+      renderHint: undefined,
+      data: { result: "No web results for that." },
+    });
+    render(<ToolCallChip card={c} />);
+    expand();
+    expect(screen.getByText("No web results for that.")).toBeTruthy();
+  });
+});

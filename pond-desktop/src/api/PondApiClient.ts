@@ -64,6 +64,8 @@ import {
   type TranscribeResponse,
   type UserSkill,
   type WeatherApiResponse,
+  type WebSearchKeyStored,
+  type WebSearchState,
   type ZoneChoice,
   type DetectedPlace,
 } from "./types";
@@ -2008,6 +2010,22 @@ export class PondApiClient {
       `/api/v1/extensions/${encodeURIComponent(name)}/secrets`,
       secrets,
     );
+  }
+
+  // ── Web search ───────────────────────────────────────────
+
+  /** An older pond answers with its web page, which `request` returns as undefined: callers guard. */
+  getWebSearch(): Promise<WebSearchState> {
+    return this.get("/api/v1/web-search");
+  }
+
+  /** Brave is asked once before anything is stored. A refused key is an ApiError with status 422. */
+  setWebSearchKey(key: string): Promise<WebSearchKeyStored> {
+    return this.put("/api/v1/web-search/key", { key });
+  }
+
+  deleteWebSearchKey(): Promise<void> {
+    return this.del("/api/v1/web-search/key");
   }
 
   // ── Secrets ──────────────────────────────────────────────

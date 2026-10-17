@@ -97,6 +97,52 @@ def by_case(exp, arm):
         print("| %s | %s |" % (cid, " | ".join(cells)))
 
 
+def web_table():
+    data = load("e6")
+    if not data:
+        return
+    print("\n### E6 — web search beside the knowledge tools (all mode)\n")
+    print("| model | arm | web questions to search_web | web questions to look_up instead | web, no call | "
+          "encyclopedia taken by search_web | sums taken by search_web | none: false call | other: stolen |")
+    print("|---|---|---:|---:|---:|---:|---:|---:|---:|")
+    for model, rows in data.items():
+        for arm in ("S0", "S1"):
+            rs = [r for r in rows if r["arm"] == arm]
+            if not rs:
+                continue
+            web = [r for r in rs if r["expect"] == "web"]
+            reads = [r for r in rs if r["expect"] == "read"]
+            sums = [r for r in rs if r["expect"] == "compute"]
+            none = [r for r in rs if r["expect"] == "none"]
+            oth = [r for r in rs if r["expect"].startswith("other:")]
+            print("| %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+                model, arm,
+                pct(sum("web" in r["families"] for r in web), len(web)),
+                pct(sum("web" not in r["families"] and "read" in r["families"] for r in web), len(web)),
+                pct(sum(not r["calls"] for r in web), len(web)),
+                pct(sum("web" in r["families"] for r in reads), len(reads)),
+                pct(sum("web" in r["families"] for r in sums), len(sums)),
+                pct(sum(r["verdict"] == "false_call" for r in none), len(none)),
+                pct(sum(r["verdict"] in ("steal", "ok_but_steal") for r in oth), len(oth))))
+
+
+def web_readback_table():
+    data = load("e7")
+    if not data:
+        return
+    print("\n### E7 — web read-back on SYNTHETIC fixtures (the search_web call forced)\n")
+    print("| model | arm | correct | honest decline | invented | result bytes |")
+    print("|---|---|---:|---:|---:|---:|")
+    for model, rows in data.items():
+        for arm in ("W0_snippets", "W1_passages", "W1s_no_pages", "W1b_boosted"):
+            rs = [r for r in rows if r["arm"] == arm]
+            if not rs:
+                continue
+            print("| %s | %s | %s | %d | %d | %d |" % (
+                model, arm, pct(sum(r["correct"] for r in rs), len(rs)), sum(r["declined"] for r in rs),
+                sum(r["invented"] for r in rs), int(statistics.median([r["result_bytes"] for r in rs]))))
+
+
 def readback_table():
     data = load("e2")
     if not data:
@@ -128,6 +174,8 @@ def main():
     calls_table("e4", ["V1P2", "V3", "V3P2"], "E4 — compute affordance (compute, none, other cases only)")
     calls_table("e5", ["V1T"], "E5 — V1 with thinking on (read, compute, none cases)")
     readback_table()
+    web_table()
+    web_readback_table()
     for arm in ("V0", "V1P"):
         by_case("e1", arm)
 

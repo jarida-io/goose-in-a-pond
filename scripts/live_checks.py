@@ -38,6 +38,9 @@ results = []
 RESTART_CANARY_KEY = "LIVE_TEST_SECRET_ACROSS_RESTART"
 RESTART_CANARY_VALUE = "live-test-restart-canary"
 
+# A web search key no Brave account has; it must never come back in a response body.
+WEB_SEARCH_CANARY = "live-test-web-search-key"
+
 
 def check(label, ok, detail=""):
     results.append((label, bool(ok), detail))
@@ -587,6 +590,98 @@ def section_network_mode():
         200,
         body,
         ("enabled", isinstance(body, dict) and body.get("weather_enabled") is True),
+    )
+
+
+def section_web_search():
+    """search_web's settings routes on a real server: registered, reaching the secret store,
+    and never answering with the key.
+
+    The key check must not leave the machine, so the network mode is `offline` for it: Brave
+    then counts as unreachable, and the key is stored `unverified`. The key is left stored for
+    the restart pass, which checks it survived and its in-memory status did not.
+    """
+    print("\n=== web search settings ===")
+
+    code, body = call("GET", "/api/v1/web-search")
+    if not expect(
+        "GET /web-search reports no key",
+        code,
+        200,
+        body,
+        (
+            "off",
+            body == {"provider": "brave", "configured": False, "status": "not_configured"},
+        ),
+    ):
+        return
+
+    code, body = call("PUT", "/api/v1/web-search/key", {})
+    expect("PUT /web-search/key without a key is refused", code, 400, body)
+
+    code, body = call("PUT", "/api/v1/settings", {"network_mode": "offline"})
+    if not expect("network_mode=offline for the key check", code, 200, body):
+        return
+    try:
+        code, body = call("PUT", "/api/v1/web-search/key", {"key": WEB_SEARCH_CANARY})
+        expect(
+            "a key saved while Brave is unreachable is stored unverified",
+            code,
+            200,
+            body,
+            ("body", body == {"configured": True, "status": "unverified"}),
+        )
+    finally:
+        code, body = call("PUT", "/api/v1/settings", {"network_mode": "open"})
+        expect("network_mode=open is restored", code, 200, body)
+
+    code, body = call("GET", "/api/v1/web-search")
+    expect(
+        "the stored key is reported, never returned",
+        code,
+        200,
+        body,
+        ("configured", isinstance(body, dict) and body.get("configured") is True),
+        ("unverified", isinstance(body, dict) and body.get("status") == "unverified"),
+        ("no key in the body", WEB_SEARCH_CANARY not in json.dumps(body)),
+    )
+
+
+def section_web_search_after_restart():
+    """The key is in the secret store, so it survives; its status was in memory, so it does not."""
+    print("\n=== web search settings after restart ===")
+
+    store = os.path.join(DATA_DIR, "secrets.json")
+    if os.path.exists(store):
+        check(
+            "the web search key is not in the store's file bytes",
+            WEB_SEARCH_CANARY.encode() not in open(store, "rb").read(),
+            "the plaintext key is on disk",
+        )
+
+    code, body = call("GET", "/api/v1/web-search")
+    expect(
+        "the key survived the restart and its status did not",
+        code,
+        200,
+        body,
+        ("configured", isinstance(body, dict) and body.get("configured") is True),
+        ("ok", isinstance(body, dict) and body.get("status") == "ok"),
+    )
+
+    code, body = call("DELETE", "/api/v1/web-search/key")
+    expect("DELETE /web-search/key", code, 204, body)
+
+    code, body = call("GET", "/api/v1/web-search")
+    expect(
+        "removing the key turns web search off",
+        code,
+        200,
+        body,
+        (
+            "off",
+            body == {"provider": "brave", "configured": False, "status": "not_configured"},
+        ),
     )
 
 
@@ -1526,6 +1621,7 @@ def main():
     """
     if len(sys.argv) > 1 and sys.argv[1] == "restart":
         section_secret_store_after_restart()
+        section_web_search_after_restart()
         section_network_mode_after_restart()
         section_lane_clock_after_restart()
         section_picture_support_after_restart()
@@ -1538,6 +1634,7 @@ def main():
         section_redaction()
         section_network_mode()
         section_music_player()
+        section_web_search()
         # First pass only. It creates a profile by name, which would collide
         # with the row it left behind, and the process counters it reads are
         # zero on a fresh process by design -- so on the restart pass it would

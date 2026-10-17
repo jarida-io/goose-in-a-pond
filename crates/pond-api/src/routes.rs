@@ -309,6 +309,12 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/extensions/{name}/secrets",
             get(get_extension_secrets_handler).post(set_extension_secrets_handler),
         )
+        // ── Web search: keep out of PUBLIC_ROUTES, like `/secrets` ───────────
+        .route("/web-search", get(crate::web_search::status))
+        .route(
+            "/web-search/key",
+            put(crate::web_search::set_key).delete(crate::web_search::delete_key),
+        )
         // ── OAuth PKCE ─────────────────────────────────────────────────────────
         .route("/oauth/authorize", post(oauth_authorize_handler))
         .route("/oauth/callback", get(oauth_callback_handler))
@@ -11080,11 +11086,7 @@ async fn install_marketplace_handler(
 
     if !ext.required_secrets.is_empty() {
         let mut missing = Vec::new();
-        for sr in &ext.required_secrets {
-            if !sr.required || sr.kind == pond_core::security::domain::secret::SecretKind::OAuthFlow
-            {
-                continue;
-            }
+        for sr in ext.blocking_secrets() {
             if secrets.contains_key(&sr.key) {
                 continue;
             }
@@ -11160,8 +11162,12 @@ async fn install_marketplace_handler(
 
     match manager.add_extension(req.clone()).await {
         Ok(info) => {
-            // Persist so the extension reconnects on restart
+            // Persist so the extension reconnects on restart. Key values stay in the secret store
+            // only, and the per-run token is minted again at every start.
             if let Some(repo) = &state.mcp_server_repo {
+                let mut row_env =
+                    pond_core::mcp::services::extension_env::without_declared_secrets(&env, &ext);
+                row_env.remove(crate::oauth_callback::INTERNAL_TOKEN_ENV_KEY);
                 let cfg = pond_core::mcp::ports::mcp_server::McpServerConfig {
                     id: uuid::Uuid::new_v4().to_string(),
                     name: ext.id.clone(),
@@ -11169,7 +11175,7 @@ async fn install_marketplace_handler(
                     description: ext.description,
                     command: ext.command,
                     args: ext.args,
-                    env,
+                    env: row_env,
                     uri: ext.uri,
                     enabled: true,
                     created_at: chrono::Utc::now().to_rfc3339(),
@@ -11308,12 +11314,62 @@ async fn delete_secret_handler(
             .into_response();
     };
     match repo.delete(&key).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            stop_extensions_needing(&state, &key).await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
         )
             .into_response(),
+    }
+}
+
+/// Stop every installed catalogue extension that cannot run without `key`, now that it is gone.
+/// Its row stays enabled, so saving the key again starts it (`restart_extension_with_secrets`).
+async fn stop_extensions_needing(state: &AppState, key: &str) {
+    let (Some(mgr), Some(mp), Some(servers), Some(secrets)) = (
+        &state.extension_manager,
+        &state.marketplace,
+        &state.mcp_server_repo,
+        &state.secret_repo,
+    ) else {
+        return;
+    };
+    // The store reads the process environment first, so the key may still be there.
+    if secrets.get(key).await.ok().flatten().is_some() {
+        return;
+    }
+    let installed = match servers.list().await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read installed extensions to stop those needing {key}");
+            return;
+        }
+    };
+    for row in installed.iter().filter(|r| r.enabled) {
+        let Ok(Some(ext)) = mp.get_by_id(&row.name).await else {
+            continue;
+        };
+        if !ext.blocking_secrets().any(|sr| sr.key == key) {
+            continue;
+        }
+        match mgr.remove_extension(&row.name).await {
+            Ok(()) => tracing::info!(
+                extension = %row.name,
+                key,
+                "stopped the extension: a key it cannot run without was removed"
+            ),
+            Err(e) => tracing::debug!(
+                extension = %row.name,
+                error = %e,
+                "the extension was not running when its key was removed"
+            ),
+        }
+        if let Some(registry) = &state.tool_registry {
+            registry.deregister_extension(&row.name).await;
+        }
     }
 }
 
@@ -11410,12 +11466,27 @@ async fn restart_extension_with_secrets(state: &AppState, ext_id: &str) -> Resul
         Err(e) => return Err(format!("Could not look up '{ext_id}': {e}")),
     };
 
-    let mut env = std::collections::HashMap::new();
-    for sr in ext.env_secrets() {
+    let mut stored = std::collections::HashMap::new();
+    for sr in &ext.required_secrets {
         if let Ok(Some(val)) = secret_repo.get(&sr.key).await {
-            env.insert(sr.key.clone(), val);
+            stored.insert(sr.key.clone(), val);
         }
     }
+    let prepared = pond_core::mcp::services::extension_env::prepare_extension_env(
+        &std::collections::HashMap::new(),
+        &ext,
+        &stored,
+    );
+    let mut env = match prepared.start {
+        Ok(env) => env,
+        Err(missing) => {
+            return Err(format!(
+                "{} cannot start without {}.",
+                ext.name,
+                missing.join(", ")
+            ))
+        }
+    };
     env.insert(
         crate::oauth_callback::INTERNAL_TOKEN_ENV_KEY.to_string(),
         crate::oauth_callback::internal_extension_token().to_string(),
@@ -14714,6 +14785,9 @@ fn env_or(name: &str, default: f32) -> f32 {
         .unwrap_or(default)
 }
 
+/// Opens an MCP-UI card hint inside a tool result.
+const UI_HINT_MARKER: &str = "[[[mcp-ui:";
+
 /// Extract optional MCP-UI hint from tool result content.
 ///
 /// MCP servers can optionally prepend a structured JSON marker to their
@@ -14724,6 +14798,10 @@ fn env_or(name: &str, default: f32) -> f32 {
 /// Clean text for the LLM continues here
 /// ```
 ///
+/// The marker may also open a later content block of its own, annotated for
+/// the user only so the model never reads it. The adapter joins a result's
+/// text blocks with `\n`, so such a block starts a line.
+///
 /// The SSE layer calls this before forwarding tool results. The LLM only
 /// sees the clean text; the frontend gets a structured `"ui"` field in the
 /// SSE event for rich rendering.
@@ -14731,29 +14809,47 @@ fn env_or(name: &str, default: f32) -> f32 {
 /// Returns `(clean_content_for_llm, optional_ui_hint_json)`.
 fn extract_ui_hint(content: &str) -> (String, Option<serde_json::Value>) {
     let trimmed = content.trim_start();
-    if let Some(rest) = trimmed.strip_prefix("[[[mcp-ui:") {
-        if let Some(end_idx) = rest.find("]]]") {
-            let hint_payload = &rest[..end_idx];
-            let clean_text = rest[end_idx + 3..].trim_start().to_string();
-            // hint_payload = "weather:{...}" -- split on first ':'
-            if let Some(colon_idx) = hint_payload.find(':') {
-                let card_type = &hint_payload[..colon_idx];
-                let json_str = &hint_payload[colon_idx + 1..];
-                if let Ok(data) = serde_json::from_str::<serde_json::Value>(json_str) {
-                    return (
-                        clean_text,
-                        Some(serde_json::json!({
-                            "card_type": card_type,
-                            "data": data
-                        })),
-                    );
-                }
-            }
-            // Marker found but malformed JSON -- still strip it, no UI hint
-            return (clean_text, None);
+    if let Some(found) = trimmed.strip_prefix(UI_HINT_MARKER).and_then(parse_ui_hint) {
+        return found;
+    }
+    if let Some(at) = content.find(&format!("\n{UI_HINT_MARKER}")) {
+        let before = content[..at].trim_end();
+        let after = content[at + 1..]
+            .strip_prefix(UI_HINT_MARKER)
+            .and_then(parse_ui_hint);
+        if let Some((after, hint)) = after {
+            let clean = match (before.is_empty(), after.is_empty()) {
+                (_, true) => before.to_string(),
+                (true, false) => after,
+                (false, false) => format!("{before}\n{after}"),
+            };
+            return (clean, hint);
         }
     }
     (content.to_string(), None)
+}
+
+/// `rest` is what follows the marker's opening. `None` when the marker never closes.
+fn parse_ui_hint(rest: &str) -> Option<(String, Option<serde_json::Value>)> {
+    let end_idx = rest.find("]]]")?;
+    let hint_payload = &rest[..end_idx];
+    let clean_text = rest[end_idx + 3..].trim_start().to_string();
+    // hint_payload = "weather:{...}" -- split on first ':'
+    if let Some(colon_idx) = hint_payload.find(':') {
+        let card_type = &hint_payload[..colon_idx];
+        let json_str = &hint_payload[colon_idx + 1..];
+        if let Ok(data) = serde_json::from_str::<serde_json::Value>(json_str) {
+            return Some((
+                clean_text,
+                Some(serde_json::json!({
+                    "card_type": card_type,
+                    "data": data
+                })),
+            ));
+        }
+    }
+    // Marker found but malformed JSON -- still strip it, no UI hint
+    Some((clean_text, None))
 }
 
 /// POST /api/v1/faces/identify-burst — multi-frame consensus, so one lucky frame can't match.
@@ -17590,6 +17686,37 @@ mod tests {
         assert_eq!(ui["data"]["temp"], 72);
     }
 
+    /// The result `search_web` returns: the model's copy, then its card in a user-only block,
+    /// joined the way the goose adapter joins a result's text blocks.
+    #[test]
+    fn extract_ui_hint_finds_a_card_in_a_later_block() {
+        let input = "Web results for: what time\nJunction Mall (junction.co.ke)\nOpen 9am to 9pm.\n\
+                     [[[mcp-ui:search:{\"query\":\"what time\",\"results\":[{\"url\":\"https://x.test\"}]}]]]";
+        let (clean, hint) = extract_ui_hint(input);
+        assert_eq!(
+            clean,
+            "Web results for: what time\nJunction Mall (junction.co.ke)\nOpen 9am to 9pm."
+        );
+        let ui = hint.expect("the card in the second block is found");
+        assert_eq!(ui["card_type"], "search");
+        assert_eq!(ui["data"]["results"][0]["url"], "https://x.test");
+    }
+
+    #[test]
+    fn extract_ui_hint_keeps_the_blocks_around_a_card_in_the_middle() {
+        let (clean, hint) = extract_ui_hint("first\n[[[mcp-ui:x:{\"a\":1}]]]\nlast");
+        assert_eq!(clean, "first\nlast");
+        assert_eq!(hint.unwrap()["data"]["a"], 1);
+    }
+
+    #[test]
+    fn extract_ui_hint_leaves_marker_text_inside_a_line_alone() {
+        let input = "a result quoting [[[mcp-ui:x:{}]]] mid-line";
+        let (clean, hint) = extract_ui_hint(input);
+        assert_eq!(clean, input);
+        assert!(hint.is_none());
+    }
+
     #[test]
     fn extract_ui_hint_marker_without_colon_in_payload() {
         let input = "[[[mcp-ui:weather]]]\nSome text";
@@ -17787,6 +17914,24 @@ mod tests {
             "the marker must not be persisted -- it would be replayed into the \
              next prompt as literal text"
         );
+    }
+
+    #[test]
+    fn a_card_in_its_own_block_rides_the_frame_and_stays_out_of_the_transcript() {
+        let mut turn = accumulator();
+        let frame = frame_of(turn.absorb(AgentStreamEvent::ToolResult {
+            tool: "giap-knowledge__search_web".to_string(),
+            id: "call-2".to_string(),
+            content: "Web results for: q\nPassage.\n[[[mcp-ui:search:{\"query\":\"q\",\"results\":[]}]]]"
+                .to_string(),
+        }));
+        assert_eq!(frame["content"], "Web results for: q\nPassage.");
+        assert_eq!(
+            frame["ui"],
+            json!({"card_type": "search", "data": {"query": "q", "results": []}})
+        );
+        let persisted: Value = serde_json::from_str(&turn.tool_results[0]).unwrap();
+        assert_eq!(persisted["content"], "Web results for: q\nPassage.");
     }
 
     /// The handler's `ChatService` owns the `persist_thinking` gate; the translator never records.

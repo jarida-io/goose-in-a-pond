@@ -30,7 +30,7 @@ doc should not have implied a mechanism the authors consciously rejected.
 
 **Egress visibility.** `shared/services/egress.rs` is the best privacy primitive in the codebase: a
 process-global request context attributes every outbound call to a session and tool (`:25-53`), and
-host classification (`classify_host`) uses a curated 17-entry `KNOWN_PUBLIC_SUFFIXES` allowlist where
+host classification (`classify_host`) uses a curated 18-entry `KNOWN_PUBLIC_SUFFIXES` allowlist where
 loopback is `Internal`, allowlisted hosts are `Public`, and **everything else defaults to
 `Sensitive`**. Suffix matching is exact-or-dotted, with a test proving
 `notwikipedia.org.evil.com` does not match (`classifies_unknown_hosts_as_sensitive`).

@@ -484,3 +484,322 @@ choosing. Thinking-off E2B should not be presented as a model that looks things 
 **D7. Rename without aliases.** Nothing outside the pond calls the knowledge tools by name:
 the desktop matches them for labels and cards, and the dispatcher only describes their
 arguments. *Recommendation:* rename in one step, with both UIs updated in the same commit.
+
+---
+
+## 8. Web search (`search_web`), the first tool built on these rules
+
+**Status:** built 2026-10-15 on `feat/web-search`, not merged, not run on the Orin, not run
+against Brave with a real key. Jerry chose the backend: **Brave Search API, with the
+household's own key**, settable from the desktop and from Goose on the Go (its PR:
+jarida-io/goose-on-the-go#130). §8.8 records what was built where the contract below was
+amended, and what is still open. `search_web`
+searches, then fetches the top result pages, extracts their readable text, and feeds the
+model the passages that answer the question.
+
+### 8.1 Why Brave, and why not DuckDuckGo
+
+Primary sources, read 2026-10-15:
+
+| backend | why not, or why |
+|---|---|
+| **DuckDuckGo** | No web search API exists. The Instant Answer API returns abstracts and definitions: asked "what time does junction mall close" it returned nothing at all. Its own API page (an archived copy, found through search) says it "is not a full search results API" because DuckDuckGo "does not have the rights to fully syndicate" its results. The only route to real results is scraping its HTML pages, outside its authorised use and brittle against its rate limiting. Possible later as an opt-in backend, by Jerry's decision only. |
+| Google Custom Search JSON API | Closed to new customers; shuts down 2027-01-01. |
+| Tavily | §9.2 takes a "perpetual, and irrevocable license" to store and use every query. |
+| Mojeek | AI use explicitly allowed, £2 per 1,000, no free tier; a later backend behind the same port. |
+| SearXNG run by the pond | No key, but scrapes Google/Bing/DuckDuckGo against their terms, and costs RAM the Orin does not have. |
+| **Brave** | $5 per 1,000 searches, with $5 of free credit a month (about 1,000 searches). A card confirms identity. The household is the customer, which is what Brave's terms permit (§4(a): a key is not shared outside the customer's own contractors; §3(b)(iii): the API is not made available to third parties). |
+
+**Brave terms that bind the implementation:**
+
+- §3(b)(i): no storing or caching Search Results beyond transient use. Nothing is cached to
+  disk.
+- §3(b)(xiii): Search Results may not be used to evaluate or benchmark models. The bench uses
+  hand-written fixtures for web cases, never Brave output.
+- §3(b)(xii): no redistribution of results.
+- §4(d): attribution is optional, and if shown it must read "POWERED BY BRAVE" with the logo.
+
+**One conflict is Jerry's to settle.** Chat history persists tool results. Where pages were
+fetched, the model's copy carries the pages' own text (third-party content, not Brave's), plus
+titles and domains. Brave descriptions appear only when a page could not be read.
+
+### 8.2 The tool
+
+```text
+name:        giap-knowledge__search_web
+description: Search the web for anything current, local or specific that the encyclopedia
+             will not have: news, opening hours, prices, products, businesses, recent results.
+question:    string, REQUIRED. "The user's question, in their own words."
+```
+
+The `extra` catch-all absorbs `query`/`q`/`topic`. The tool is **offered only while a key is
+stored**. `giap-knowledge` always lists it, so no Goose or GIAP tool cache ever goes stale.
+The per-turn allow-set drops `giap-knowledge__search_web` when `BRAVE_SEARCH_API_KEY` is
+absent. The requirement table is policy in `pond-core` (`tool_group.rs`); the secret check is
+mechanism in `pond-mcp-server`. A key pasted on the phone puts the tool in the next turn's
+prompt with no restart. The handler re-checks the key at call time, which covers the race.
+
+### 8.3 Pipeline
+
+1. **Search.** `GET https://api.search.brave.com/res/v1/web/search`:
+   - parameters `q=<question>`, `count=8`, `extra_snippets=true`, `safesearch=moderate`,
+     `text_decorations=false`;
+   - headers `X-Subscription-Token: <key>`, `Accept: application/json`;
+   - 6 s timeout;
+   - `country` is not sent: Kenya is not a documented value.
+2. **Fetch.** The top 3 `http(s)` results are fetched concurrently:
+   - 5 s per page and a 7 s deadline overall;
+   - 1.5 MB cap, `text/html` only, at most 3 redirects;
+   - every URL and redirect hop goes through `check_egress`, so `allowlist` and `offline` modes
+     are honoured, and a refused page falls back to its snippets silently.
+3. **Guard.** Page fetches use a client whose DNS resolver refuses every non-public address:
+   - loopback, private, link-local, CGNAT, unique-local, multicast, unspecified;
+   - IPv4-mapped IPv6 forms of all of those;
+   - IP-literal URLs in those ranges as well.
+
+   A search result must never be able to make the pond read its own API, the Matter server or
+   the household's router. Brave's own host uses the ordinary client.
+4. **Extract.** HTML is parsed with `scraper`, a new workspace dependency:
+   - drop `script`, `style`, `noscript`, `template`, `svg`, `iframe`, `nav`, `header`,
+     `footer`, `aside`, `form` and `[aria-hidden=true]`;
+   - keep text blocks from `p`, `li`, `h1`–`h4`, `td`, `th`, `blockquote`, `pre`, `dd`;
+   - collapse whitespace, and drop non-heading blocks under 40 chars.
+5. **Rank** (amended 2026-10-15, after E7). The candidates are page blocks plus Brave's
+   `description` and `extra_snippets`. They are scored with BM25 against the full question,
+   with two changes the bench showed are needed:
+   - **Suffix stemming before the five-character cut.** Strip one of `ations ation ings ing
+     edly ers ies ied ed es ly er s`, then cut to five, so "opening" meets "open".
+   - **An answer-type boost.** When the question asks a time, price, date or count ("what
+     time", "close", "how much", "cost", "when", "how many"…), passages carrying that shape (a
+     clock time, a currency amount, a year or date, a number) get the top score added.
+
+   This is retrieval inside a tool the model already chose to call, not routing. Plain BM25 put
+   the answer in the top two passages for 4 of 6 web cases; the amended ranker did for 6, with
+   Wikipedia unchanged at 11 of 17. The production MiniLM embedder managed 5, so the tool needs
+   no model (`kt/rankers.py`).
+   - Take the best passages up to about 1,800 bytes, at most 2 per source.
+   - A source whose page was read contributes page text, not Brave's description.
+   - The ranker is pure, so it lives in `pond-core`, where `look_up` will reuse it.
+6. **Model's copy, plain text, no URLs, no Markdown:**
+
+   ```text
+   Web results for: <question>
+   <Title> (<domain>[, <age>])
+   <passage>
+   <passage>
+   <Title> (<domain>)
+   <passage>
+   ```
+
+7. **Card.** The card goes in a separate content block annotated `audience: ["user"]` (Goose
+   drops those before the provider). It carries the `[[[mcp-ui:search:{...}]]]` marker with
+   `{query, results: [{title, url, domain, snippet}]}`. The SSE layer finds the marker in any
+   block, not only the first.
+8. **Misses** go through `format.rs`, naming real tools only:
+
+   | condition | what the model is told |
+   |---|---|
+   | no results | `format_no_results`, offering `look_up` |
+   | 401/403 | "the web search key was rejected", and the settings status is set to `rejected` |
+   | 402/429 | "this month's web search allowance is used up" (`quota`) |
+   | network failure | `format_api_error` |
+   | key removed mid-turn | `format_dead_end` |
+
+9. **Egress.** `api.search.brave.com` joins `KNOWN_PUBLIC_SUFFIXES`. Page hosts classify as
+   they do today. Each request is recorded through `traced_get_with`, attributed to
+   `search_web`.
+
+### 8.4 HTTP contract (both apps use only this)
+
+All three routes require a token, like `/secrets`, and none returns the key.
+
+| route | does | answers |
+|---|---|---|
+| `GET /api/v1/web-search` | report state | `{"provider": "brave", "configured": bool, "status": "ok" \| "not_configured" \| "rejected" \| "quota" \| "unverified"}` |
+| `PUT /api/v1/web-search/key` `{"key": "..."}` | validate with ONE Brave request (`q=test`, `count=1`), then store as `BRAVE_SEARCH_API_KEY` | 200 `{"configured": true, "status": "ok"}`; 422 `{"error": "Brave did not accept this key."}` on 401/403, nothing stored; 200 `"quota"` when the key is valid but spent; 200 `"unverified"` when Brave could not be reached (stored, checked on first use) |
+| `DELETE /api/v1/web-search/key` | remove the key | 204 |
+
+### 8.5 What each app shows
+
+The same content in every surface. On the desktop it is one shared `connections/WebSearchPanel`,
+mounted wherever `ConnectionsPanel` already is: classic `sections/Context.tsx` and hub
+`hub/views/settings/Connections.tsx`, so there is one form. On Goose on the Go it is a new
+screen under Profile → Integrations.
+
+- **A status line:**
+
+  | status | shows |
+  |---|---|
+  | `ok` | "On, searching with Brave" |
+  | `not_configured` | "Off" |
+  | `rejected` | "Brave did not accept the key" |
+  | `quota` | "This month's free searches are used up" |
+  | `unverified` | "Saved, not yet checked" |
+
+- **A masked, write-only key field** with Save, and Remove when a key is stored. The key is
+  never read back.
+- **Help text:** "Get a free key at api-dashboard.search.brave.com. The free monthly credit
+  covers about 1,000 searches. Brave asks for a card to confirm who you are." The URL is a
+  link.
+- **The privacy line, always visible:** "When the pond searches the web, your question is
+  sent to Brave, and the top pages are read from their sites."
+
+### 8.6 Tests and gates
+
+- Unit tests:
+  - the resolver guard (every refused range, mapped forms, an IP literal, a redirect to
+    loopback);
+  - the extractor, on hand-written HTML: boilerplate dropped, blocks kept;
+  - the ranker;
+  - the result formatter (no URL, no Markdown, budget held);
+  - each Brave status mapping, against a stub server;
+  - the per-turn gate: no key, no tool; a key, the tool; removing it drops it again;
+  - the agent-visible projection of a result: no `mcp-ui`.
+- The three routes against a stub Brave.
+- `scripts/live-test.sh`, since the change adds routes.
+- An `#[ignore]` live test against Brave, run by hand with a real key.
+- Bench E6 and E7 (§8.7) are re-run against the live tool before it ships.
+
+### 8.7 What the bench measured for web search
+
+Both experiments ran on current main's captured prompt (`68eef8cb`), thinking off.
+
+**E6, calling.** 12 questions only the live web can answer (opening hours, prices, news, train
+times), asked beside the 40 earlier cases. The arm is `S1`: `look_up`, `calculate` and
+`search_web`.
+
+| `S1` | web questions to `search_web` | encyclopedia it took | sums it took | false calls |
+|---|---:|---:|---:|---:|
+| E2B | **12/12** | 4/17 | 0/11 | 0/8 |
+| E4B | **12/12** | 3/17 | 0/11 | 0/8 |
+| Llama 3.2 3B | 7/12 | 0/17 | 0/11 | 4/8 |
+| Granite 4.1 3B | 2/12 | 0/17 | 0/11 | 0/8 |
+
+E2B is the model that almost never looks anything up, and it calls `search_web` every time
+the question is plainly current ("today", "right now", "this month"): those read as live, and
+live is what the system prompt says to call tools for. The other families are weaker. Granite
+sent seven web questions to `get_current_weather`; Llama sent two there and three to `look_up`.
+
+**E7, reading back.** Six SYNTHETIC cases (`fixtures/web/synthetic.json`, hand-written,
+because Brave's §3(b)(xiii) forbids benchmarking on its results), with the `search_web` call
+forced. Each snippet looks like a real hit but lacks the answer; the page text has it.
+
+| correct / honest "the result does not say" (of 6) | snippets only (the old SearXNG format) | pages, plain BM25 | pages unreadable | pages, amended ranker |
+|---|---:|---:|---:|---:|
+| E2B | 0 / 6 | 4 / 2 | 0 / 6 | **6 / 0** |
+| E4B | 0 / 6 | 4 / 2 | 0 / 6 | **6 / 0** |
+
+**E8, finding it under `minimal`.** The household's own mode lists dormant groups by the text
+before the first colon of each description. For giap-knowledge that is "General reference
+knowledge and factual lookup", which says nothing about the web. The description now begins
+"Looking things up, working things out and searching the web".
+
+| `minimal`, knowledge loaded | web, old line | web, new line | encyclopedia, old | encyclopedia, new | false calls / stolen |
+|---|---:|---:|---:|---:|---:|
+| E2B | 7/12 | **12/12** | 0/17 | 0/17 | 0 / 0 |
+| E4B | 10/12 | **12/12** | 7/17 | **13/17** | 0 / 0 |
+
+**The same description under `relevant`** (`kt/selection.py`). This replicates
+`select_groups` with the production MiniLM: core groups, any group scoring at least 0.28, and
+the top non-core scorer as a rescue. It reproduces the live capture's choice of `giap-schedule`
+for "Who was Wangari Maathai?". The reason shows in the scores: every group scores between
+−0.1 and 0.15 against these questions, so the rescue decides. The new description takes
+encyclopedia questions from 5/17 to 10/17 and web questions from 2/12 to 5/12. Better, still
+unreliable, and more evidence for decision D1.
+
+Reading the pages is the whole difference between a web search that answers and one that does
+not. Neither model invented an answer in any arm: given results without the answer, both said
+so. The caveat is the size of the evidence. Six synthetic cases, written by the same hand
+that wrote the boost patterns, make 6/6 an upper bound. The live-tool re-run in §8.6 is the
+real test.
+
+### 8.8 As built, and what is still open
+
+**Where the build differs from §8.3:**
+
+- **Ranking.** The ranker fuses plain and boosted BM25 by reciprocal rank (k = 60). When two or
+  fewer pages were read, it quotes up to four passages a page within 2,400 bytes; otherwise
+  two a page within 1,800.
+- **Extraction.** It ports Mozilla Readability's unlikely-candidate rule, with its retry
+  without the class test when a page yields under 500 characters, and adds:
+  - a "most popular / trending" rail pattern;
+  - drops for `cite`, `sup`, reference lists and navboxes, and the
+    navigation/contentinfo/complementary/endnote roles;
+  - table rows kept whole, so infobox rows survive;
+  - headings prefixed onto the blocks under them;
+  - long blocks split into runs of whole sentences.
+- **Stemmer.** It also drops a trailing `e` ("close" and "closing" meet), and "how long",
+  "distance" and "length" count as number questions.
+
+**Measured on ten real pages** (frozen in `fixtures/web/real/`, chosen before tuning; the answer
+is in every page's extracted text):
+
+- The answer reaches the model's copy on **6 of 10**, against 5 before the last iteration.
+- No citation, menu, rail or footer text reaches the copy.
+- The misses:
+  - two infobox rows ("Line length 472.3 km", an elevation) that share no word with the
+    question;
+  - two answer sentences, on GOV.UK and the BBC, that share almost none.
+- More misses sat in the extractor, on pages dropped while choosing the set: a 26-character
+  opening-hours paragraph under the 40-character rule, text in plain `div`s, and a Bootstrap
+  `media-block` that Readability's "media" pattern drops.
+- The synthetic six stay at 6 of 6, and the Wikipedia seventeen go from 10 to 13.
+
+**Found on the way, now fixed:**
+
+- The voice child (`chat --voice --json-events`) never installed a secret store, so every
+  keyed tool was keyless in voice. `run_chat` now installs a read-only one, which also turns
+  Wolfram on in voice for a pond with an AppID.
+- `enable_tool_group` could have widened a withheld tool back in. It cannot now.
+
+**Open, each recorded rather than engineered around:**
+
+| item | what | whose |
+|---|---|---|
+| History keeps results | Brave §3(b)(i) allows only transient storage of Search Results; chat history persists the tool message. Where pages were read, that message carries the pages' own text, not Brave's. | Jerry |
+| Guests can spend the allowance | `giap-knowledge` is not on the guest denylist, so a guest's question can spend the household's Brave credit. | Jerry |
+| 429 means two things | Brave answers 429 for a per-second burst as well as a spent quota; both show "used up". | follow-up |
+| The environment wins | The secret store reads the environment first, so an exported `BRAVE_SEARCH_API_KEY` turns the tool on, and `DELETE` cannot turn it off. | follow-up |
+| The direct dispatcher | On the mistral.rs backend (off by default) and the quarantined pond-agent, `convert_rmcp_result` joins every text block, so the card reaches the model and there is no per-turn key gate. | follow-up |
+| Status is per process | `rejected`/`quota` learned by the voice child never reach the serve process's `GET`; a restart reports a stored key `ok`. | follow-up |
+| Live Brave | The `#[ignore]` test `live_brave_search_answers_a_local_question` needs a household key; no run has spent a real search. | Jerry, with a key |
+
+### 8.9 Every tool that needs a key is off while its key is missing
+
+Jerry, 2026-10-15: "disable tools that need API keys and the API keys are not available".
+
+| tool | key | how it is turned off |
+|---|---|---|
+| `giap-knowledge__search_web` | `BRAVE_SEARCH_API_KEY` | per turn: withheld from the allow-set (§8.2) |
+| `giap-knowledge__compute_answer` | `WOLFRAM_APP_ID` | the same per-turn gate. Keyless, it only returned a setup message, and with it on offer both Gemma models got fewer sums right than with no tool at all (E2, arm K: 2 and 1 of 13) |
+| catalogue extensions: github, brave-search, slack | the key their catalogue entry marks `required` | at start and stop: never started without the key, and stopped when it is deleted |
+
+**Why extensions are gated differently.** An extension the pond never starts offers no tools, so
+no per-turn bookkeeping is needed for it. The rule for "cannot run without" is
+`SecretRequirement::blocks_install`, which install and the lifecycle share, so the two can never
+disagree. A sign-in (`oauth_flow`) never blocks; music declares nothing required.
+
+**What was wrong underneath, now fixed.** Installing a catalogue extension saved its server row
+with the key values in `env`: a plaintext copy in `pond_system.db`, beside the encrypted store.
+Start-up began from that copy, so deleting a key never turned the extension off.
+
+- Rows are now saved without key values.
+- Start-up scrubs existing rows once, injects keys from the store only, and skips an extension
+  whose key is missing, logging its name and the key's name.
+- `DELETE /api/v1/secrets/{key}` stops every running extension that needs that key, and keeps
+  it installed; saving the key again restarts it.
+
+**Not gated.** `book_ride` needs a linked Uber account, not a key. No UI can enter a Wolfram
+AppID today: the desktop's API-keys screen went with the settings catalogue on 2026-08-17. So
+`compute_answer` stays off on every pond until a key arrives by `PUT /api/v1/secrets/WOLFRAM_APP_ID`.
+
+**Verified.** Tests for the table, the rule, the gate and the start-up env preparation. In
+`pond-api/tests/keyed_extensions.rs`:
+
+- install refuses without the key and starts nothing;
+- install with the key saves no key value;
+- deleting the key stops the extension and keeps it installed;
+- deleting an unrelated key stops nothing;
+- a restart without the key is refused by name, and saving the key restarts it.
+
+`scripts/live-test.sh` passed: 145 checks, then 23 after a restart, then the auth phase.

@@ -183,6 +183,10 @@ test-case = "3.3.1"
 assert_cmd = "2"
 predicates = "3"
 url = "2.5.8"
+# pond-mcp-server only: search_web reads fetched pages. html5ever's spec-compliant tree builder,
+# so malformed markup parses the way a browser parses it; pure Rust, so it cross-compiles to
+# the Orin unchanged. `main` (a CLI binary) and `errors` (parse-error records) are off.
+scraper = { version = "0.27", default-features = false }
 opentelemetry = { version = "0.32", default-features = false }
 opentelemetry_sdk = { version = "0.32", default-features = false, features = ["metrics"] }
 opentelemetry-http = { version = "0.32", default-features = false, features = ["internal-logs", "reqwest"] }

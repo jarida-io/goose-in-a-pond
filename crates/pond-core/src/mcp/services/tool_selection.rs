@@ -752,6 +752,27 @@ mod tests {
         assert!(note.contains("enable_tool_group"));
     }
 
+    /// The minimal prompt lists a dormant group by the head of its description, before the
+    /// first colon; this head was measured on the bench against the line it replaced.
+    #[test]
+    fn the_knowledge_group_is_listed_by_its_measured_head() {
+        let knowledge = crate::mcp::domain::tool_group::find_group("giap-knowledge").unwrap();
+        assert_eq!(
+            knowledge.description,
+            "Looking things up, working things out and searching the web: encyclopedia articles \
+             about people, places and events, exact arithmetic, unit conversions and dates, and \
+             the web for anything current, local or specific, such as news, opening hours, \
+             prices and products."
+        );
+        let note = dormant_groups_note(&available(), &[]);
+        assert!(
+            note.contains(
+                "\n- giap-knowledge: Looking things up, working things out and searching the web\n"
+            ),
+            "{note}"
+        );
+    }
+
     /// In the default "all" mode the note must cost zero tokens.
     #[test]
     fn dormant_note_is_empty_when_nothing_is_dormant() {

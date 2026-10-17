@@ -1386,6 +1386,35 @@ export interface FaceModelsResponse {
   models: FaceModelEntry[];
 }
 
+// ── Web search ────────────────────────────────────────────────
+export type WebSearchStatus = "ok" | "not_configured" | "rejected" | "quota" | "unverified";
+
+/** `GET /api/v1/web-search`. The key itself is never returned. */
+export interface WebSearchState {
+  provider: "brave";
+  configured: boolean;
+  status: WebSearchStatus;
+}
+
+/** `PUT /api/v1/web-search/key` when the key was stored. A key Brave refused is a 422 instead. */
+export interface WebSearchKeyStored {
+  configured: true;
+  status: "ok" | "quota" | "unverified";
+}
+
+/** The 422 body of `PUT /api/v1/web-search/key`; nothing was stored. */
+export interface WebSearchKeyRejected {
+  error: string;
+}
+
+/** One result of a `search` card. */
+export interface WebSearchHit {
+  title: string;
+  url: string;
+  domain: string;
+  snippet: string;
+}
+
 // ── API Error ─────────────────────────────────────────────────
 export class ApiError extends Error {
   constructor(

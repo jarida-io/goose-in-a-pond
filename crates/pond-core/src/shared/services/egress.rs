@@ -409,6 +409,7 @@ const KNOWN_PUBLIC_SUFFIXES: &[&str] = &[
     "theguardian.com",
     "gnews.io",
     "open-meteo.com",
+    "api.search.brave.com",
 ];
 
 /// Privacy class of a host: loopback `Internal`, known public API `Public`, else `Sensitive`.
@@ -648,6 +649,7 @@ mod tests {
             "hacker-news.firebaseio.com",
             "api.open-meteo.com",
             "geocoding-api.open-meteo.com",
+            "api.search.brave.com",
         ] {
             assert_eq!(
                 classify_host(host),
@@ -670,6 +672,11 @@ mod tests {
         // A look-alike suffix must not match (no substring/false-positive).
         assert_eq!(
             classify_host("notwikipedia.org.evil.com"),
+            PrivacySensitivity::Sensitive
+        );
+        // Only Brave's API host is curated; the pages its results point at classify as before.
+        assert_eq!(
+            classify_host("search.brave.com"),
             PrivacySensitivity::Sensitive
         );
     }

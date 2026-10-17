@@ -17,8 +17,9 @@ use crate::knowledge::{clean_query_for_search, KnowledgeMcpServer};
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-/// Secret-store key holding the Wolfram|Alpha AppID.
-pub const WOLFRAM_APP_ID_KEY: &str = "WOLFRAM_APP_ID";
+/// Secret-store key holding the Wolfram|Alpha AppID; the per-turn gate withholds the tool
+/// without it.
+pub const WOLFRAM_APP_ID_KEY: &str = pond_core::mcp::domain::tool_group::WOLFRAM_APP_ID;
 
 const WOLFRAM_QUERY_BASE: &str = "https://api.wolframalpha.com/v2/query";
 const WOLFRAM_SIGNUP_URL: &str = "https://developer.wolframalpha.com/access";
@@ -267,7 +268,7 @@ pub fn redact_appid(s: &str) -> String {
     out
 }
 
-async fn app_id() -> Option<String> {
+pub(crate) async fn app_id() -> Option<String> {
     crate::secrets::secret(WOLFRAM_APP_ID_KEY)
         .await
         .map(|k| k.trim().to_string())
@@ -969,7 +970,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn both_tools_are_actually_exposed_by_the_server() {
+    async fn every_composed_tool_is_actually_exposed_by_the_server() {
         use rmcp::handler::server::ServerHandler;
         let server = KnowledgeMcpServer::new(crate::build_http_client());
         let listed = server
@@ -980,9 +981,14 @@ mod tests {
 
         // Wolfram's #[tool_router] is composed in `new()`; losing that would still compile.
         assert!(names.contains(&"compute_answer"), "got: {names:?}");
-        // And the ones this file's sibling owns are still there.
+        // And the ones this file's siblings own are still there.
         assert!(names.contains(&"get_wikipedia_article"), "got: {names:?}");
-        assert_eq!(names.len(), 2, "giap-knowledge serves two tools: {names:?}");
+        assert!(names.contains(&"search_web"), "got: {names:?}");
+        assert_eq!(
+            names.len(),
+            3,
+            "giap-knowledge serves three tools: {names:?}"
+        );
     }
 
     #[tokio::test]

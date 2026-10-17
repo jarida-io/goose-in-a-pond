@@ -3008,6 +3008,35 @@ impl GooseAdapter {
             allowed_tools
         };
 
+        // ── 6e. Tools whose secret is not stored, in every mode ──────────────
+        // Their servers list them always, so no tool cache goes stale; the store is read per turn,
+        // so a key saved from any app reaches the next turn. The withheld tools sort after the core
+        // block (`prefix_sort_key`), so the prefix moves only from them on, and only when a key
+        // comes or goes. Before the allow-set and the entitlement, which the delegation authority
+        // is built from.
+        let withheld = pond_mcp_server::tools_withheld_for_missing_secrets(
+            allowed_tools
+                .iter()
+                .chain(entitled_tools.iter().flatten())
+                .map(String::as_str),
+        )
+        .await;
+        let (allowed_tools, entitled_tools) = if withheld.is_empty() {
+            (allowed_tools, entitled_tools)
+        } else {
+            tracing::info!(
+                target: "giap::trace",
+                kind = "tools_withheld_for_missing_secret",
+                session_id = %session_id,
+                tools = ?withheld,
+                "tools whose key is not stored were withheld from the turn"
+            );
+            (
+                without(allowed_tools, &withheld),
+                entitled_tools.map(|tools| without(tools, &withheld)),
+            )
+        };
+
         tracing::debug!(target: "pond_adapters_goose::goose_agent", "Allowed tools for turn: {:?}", allowed_tools);
 
         // Vetoes anything Goose adds (platform tools, final_output). The tool-call guard reads
@@ -4864,13 +4893,26 @@ impl pond_core::mcp::ports::tools::tool_selection_control::ToolSelectionControl 
                 );
                 return Err(ToolSelectionError::NotReady(group.to_string()));
             }
+            // Widening a group must not hand back a tool the turn withheld for its missing key.
+            let withheld = pond_mcp_server::tools_withheld_for_missing_secrets(
+                newly_allowed.iter().map(String::as_str),
+            )
+            .await;
             self.shim_controls
                 .session(&goose_sid)
-                .extend_allowed_tools(newly_allowed);
+                .extend_allowed_tools(newly_allowed.into_iter().filter(|t| !withheld.contains(t)));
         }
 
         Ok(groups)
     }
+}
+
+/// `tools` less `withheld`.
+fn without(tools: HashSet<String>, withheld: &HashSet<String>) -> HashSet<String> {
+    tools
+        .into_iter()
+        .filter(|t| !withheld.contains(t))
+        .collect()
 }
 
 #[cfg(test)]
@@ -5229,6 +5271,72 @@ mod tests {
             coalescer.flush(),
             None,
             "redacted or blank reasoning produced a frame"
+        );
+    }
+
+    /// Goose's own projection, the one its reply loop sends the provider, keeps the model's copy
+    /// of a `search_web` result and drops the card.
+    #[test]
+    fn a_search_web_card_never_reaches_the_provider() {
+        use pond_mcp_server::web_search::{result_from, WebHit};
+        let hits = vec![WebHit {
+            title: "Junction Mall".to_string(),
+            url: "https://www.junction.co.ke/hours".to_string(),
+            description: "Junction Mall opens at 9am.".to_string(),
+            age: None,
+            extra_snippets: Vec::new(),
+        }];
+        let pages = vec![Some(vec![
+            "Junction Mall is open every day from 9:00 am to 9:00 pm.".to_string(),
+        ])];
+        let result = result_from("What time does Junction Mall close?", &hits, &pages);
+        let message = Message::user().with_tool_response("call-1", Ok(result));
+
+        let whole = serde_json::to_string(&message).unwrap();
+        assert!(
+            whole.contains("[[[mcp-ui:search:"),
+            "the stored message must carry the card, or this test proves nothing: {whole}"
+        );
+        let projected = serde_json::to_string(&message.agent_visible_content()).unwrap();
+        assert!(!projected.contains("mcp-ui"), "{projected}");
+        assert!(projected.contains("9:00 am to 9:00 pm"), "{projected}");
+    }
+
+    /// The test binary installs no secret store, which is a pond with no key stored.
+    #[tokio::test]
+    async fn with_no_key_stored_search_web_is_withheld_and_nothing_else_is() {
+        let withheld = pond_mcp_server::tools_withheld_for_missing_secrets([
+            "giap-knowledge__search_web",
+            "giap-knowledge__get_wikipedia_article",
+            "giap-memory__recall_memories",
+        ])
+        .await;
+        assert_eq!(
+            withheld,
+            HashSet::from(["giap-knowledge__search_web".to_string()])
+        );
+    }
+
+    /// After the recipe narrowing and before both readers: the shim's allow-set, and the
+    /// delegation authority a subagent's tools are derived from.
+    #[test]
+    fn keyless_tools_are_withheld_before_the_allow_set_and_the_authority() {
+        let lines = stream_body_code();
+        let at = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("`{needle}` is gone from the turn; re-anchor this test"))
+        };
+        let recipe = at("request.tool_group_allowlist");
+        let gate = at("tools_withheld_for_missing_secrets(");
+        let allow_set = at("session_controls.set_allowed_tools(allowed_tools.clone())");
+        let authority = at("self.turn_authorities.publish(");
+        assert!(recipe < gate, "the gate must see the recipe-narrowed set");
+        assert!(gate < allow_set, "the shim must get the gated set");
+        assert!(
+            gate < authority,
+            "delegation must not regain a withheld tool"
         );
     }
 

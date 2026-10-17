@@ -98,7 +98,7 @@ export const SETTINGS: SettingsGroup[] = [
         color: "#1F6F63",
         bg: "#D7EDE8",
         label: "Accounts",
-        sub: "Calendar and mail the pond can read",
+        sub: "Calendar and mail the pond can read, and web search",
         value: "",
       },
       {

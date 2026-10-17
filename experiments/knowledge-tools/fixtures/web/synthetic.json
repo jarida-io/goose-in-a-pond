@@ -1,0 +1,61 @@
+{
+  "_doc": "SYNTHETIC fixtures for E7, hand-written on 2026-10-15. Every title, snippet, page and number here is invented to test result FORMAT, not facts: do not read any of them as true. Brave's terms (3(b)(xiii)) forbid using its search results to evaluate or benchmark models, so no real search output is used. Each snippet reads like a real search hit but does NOT contain the answer; the page text does, among unrelated paragraphs.",
+  "cases": [
+    {
+      "id": "ws1", "q": "What time does the Junction Mall in Nairobi close today?",
+      "answer": ["9(:00)? ?pm|21:00|8(:00)? ?pm|20:00"],
+      "results": [
+        {"title": "The Junction Mall - Shopping in Nairobi", "domain": "junction.example.co.ke", "snippet": "The Junction Mall on Ngong Road brings together over 100 stores, restaurants, a cinema and a supermarket under one roof.",
+         "page": ["Welcome to The Junction, Nairobi's favourite family shopping destination on Ngong Road.", "Parking is available for over 1,000 cars, with the first hour free for all shoppers who validate their ticket at any store.", "Opening hours: Monday to Saturday from 8:00 am to 9:00 pm. Sundays and public holidays from 9:00 am to 8:00 pm.", "Our tenants include fashion, electronics, banks, a food court and a children's play area on the upper level."]},
+        {"title": "Junction Mall reviews and photos", "domain": "reviews.example.com", "snippet": "Read 1,204 reviews of The Junction Mall, Nairobi, rated 4.3 out of 5 by shoppers.",
+         "page": ["Shoppers praise the cinema and the food court but note the traffic on Ngong Road at weekends.", "The mall was renovated and expanded with a new wing of restaurants."]}
+      ]
+    },
+    {
+      "id": "ws2", "q": "How much does a Samsung Galaxy A15 cost in Kenya right now?",
+      "answer": ["17,?999"],
+      "results": [
+        {"title": "Samsung Galaxy A15 price in Kenya", "domain": "phoneshop.example.co.ke", "snippet": "Shop the Samsung Galaxy A15 at the best price in Kenya. Free delivery in Nairobi and fast countrywide shipping.",
+         "page": ["Buy genuine Samsung smartphones with a one-year warranty.", "Samsung Galaxy A15 (6GB RAM, 128GB) is now KSh 17,999, down from KSh 21,500, while stocks last.", "Pay with M-Pesa on delivery. Delivery within Nairobi takes one working day."]},
+        {"title": "Galaxy A15 review: battery and camera", "domain": "techblog.example.com", "snippet": "We spent two weeks with the Galaxy A15. Here is how its 5000 mAh battery and 50 MP camera held up.",
+         "page": ["The Galaxy A15 has a 6.5-inch Super AMOLED display and a 5000 mAh battery.", "Camera performance in daylight is good for the price; low-light shots are soft."]}
+      ]
+    },
+    {
+      "id": "ws3", "q": "What are the opening hours of the Kenya National Archives?",
+      "answer": ["5(\\.00|:00)? ?pm|17:00"],
+      "results": [
+        {"title": "Kenya National Archives and Documentation Service", "domain": "archives.example.go.ke", "snippet": "The Kenya National Archives preserves the nation's documentary heritage and makes it available for research.",
+         "page": ["The Archives building on Moi Avenue houses records dating back to the colonial era.", "The search room is open Monday to Friday, 8.00 am to 5.00 pm. It is closed on weekends and public holidays.", "Researchers must register at the front desk and present an identity card."]}
+      ]
+    },
+    {
+      "id": "ws4", "q": "What did the Central Bank of Kenya decide at its last interest rate meeting?",
+      "answer": ["9\\.25"],
+      "results": [
+        {"title": "Monetary Policy Committee statement", "domain": "centralbank.example.go.ke", "snippet": "The Monetary Policy Committee met to review the outcome of its previous policy decisions and recent economic developments.",
+         "page": ["The Committee noted that overall inflation remained within the target range.", "The Committee decided to lower the Central Bank Rate by 25 basis points, from 9.50 percent to 9.25 percent.", "The Committee will meet again in two months, but stands ready to act earlier if necessary."]},
+        {"title": "CBK holds talks with lenders", "domain": "news.example.co.ke", "snippet": "Bankers met the regulator this week to discuss credit to small businesses.",
+         "page": ["Lenders asked for clearer guidance on risk-based pricing of loans."]}
+      ]
+    },
+    {
+      "id": "ws5", "q": "When does the next SGR train leave Nairobi for Mombasa?",
+      "answer": ["8(:00)? ?am|3(:00)? ?pm|08:00|15:00"],
+      "results": [
+        {"title": "Madaraka Express timetable", "domain": "railway.example.co.ke", "snippet": "Plan your journey on the Madaraka Express between Nairobi and Mombasa. Book tickets online or by M-Pesa.",
+         "page": ["Passengers should arrive at the terminus at least one hour before departure for security checks.", "The Inter-County train departs Nairobi Terminus at 8:00 am daily. The Express train departs Nairobi at 3:00 pm daily.", "Children under three travel free."]}
+      ]
+    },
+    {
+      "id": "ws6", "q": "What's the price of a litre of petrol in Nairobi this month?",
+      "answer": ["180\\.66"],
+      "results": [
+        {"title": "Monthly fuel price review", "domain": "energy.example.go.ke", "snippet": "The regulator has released the maximum retail prices for petroleum products for the next pricing cycle.",
+         "page": ["Prices are reviewed on the 14th of every month.", "In Nairobi, Super Petrol will retail at a maximum of KSh 180.66 per litre, Diesel at KSh 168.06 and Kerosene at KSh 151.39.", "Prices in other towns vary with transport costs."]},
+        {"title": "Motorists react to fuel prices", "domain": "news.example.co.ke", "snippet": "Matatu operators say fares may rise if pump prices do not come down.",
+         "page": ["Operators met to discuss fares on major routes."]}
+      ]
+    }
+  ]
+}

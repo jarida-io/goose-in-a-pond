@@ -1,8 +1,9 @@
 //! The pond's HTTP clients. Every outbound client is built here, so each one looks names up the
-//! way [`dns`] decides. `crates/pond-core/tests/egress_guard.rs` fails the build when a crate
+//! way [`dns`] decides; [`public_only`] builds the one for pages a third party chose. `crates/pond-core/tests/egress_guard.rs` fails the build when a crate
 //! builds a `reqwest` client any other way.
 
 pub mod dns;
+pub mod public_only;
 
 use std::sync::OnceLock;
 
@@ -146,5 +147,27 @@ mod tests {
             seen.iter().all(|line| !line.contains("/refused")),
             "{seen:?}"
         );
+    }
+
+    /// The public-only client asks the same gate about every hop, on top of its own checks.
+    #[tokio::test]
+    async fn the_public_only_client_asks_the_gate_too() {
+        set_redirect_gate(gate);
+        let (port, server) = serve(vec![redirect_to("/refused/x")]);
+        let error = public_only::client_builder(3)
+            .resolve(
+                "page.test",
+                std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            )
+            .build()
+            .unwrap()
+            .get(format!("http://page.test:{port}/start"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.is_redirect(), "{error:?}");
+        let source = std::error::Error::source(&error).map(ToString::to_string);
+        assert_eq!(source.as_deref(), Some("refused by the test gate"));
+        assert_eq!(server.join().unwrap().len(), 1);
     }
 }

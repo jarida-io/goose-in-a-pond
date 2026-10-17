@@ -50,3 +50,9 @@ c7a4bab7fdb12f50501556e67e3696393d495ea9:services/pondcredentials/server/tests/s
 # Flagged in the commit that added it and the one that regenerated it.
 a43817eb504b4956487130d613451a08a6c23c8d:fixtures/personal-context/household.jsonl:generic-api-key:314
 57012952ed704e093f36e1a7065cdc6956246295:fixtures/personal-context/household.jsonl:generic-api-key:314
+
+# Invented Brave-shaped search keys in the desktop's web search UI tests
+# ("BSA-test-key-0123456789"), typed into the key field to check it is sent and
+# never shown again. No real web search key exists anywhere in this repo.
+b0260aef5c1ed3a61710925cbec98118cdb8e2bb:pond-desktop/src/api/PondApiClient.test.ts:generic-api-key:1445
+0989195af73528e8689ac8bdd92f6b9c1ce6f29a:pond-desktop/src/connections/WebSearchPanel.test.tsx:generic-api-key:17

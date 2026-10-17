@@ -1,0 +1,2206 @@
+{
+ "model": "gemma-4-E2B-it-qat-UD-Q4_K_XL",
+ "exp": "e6",
+ "rows": [
+  {
+   "arm": "S0",
+   "id": "r01",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "Wangari Maathai was a Kenyan environmental activist who founded the Green Belt Movement. She is best known for her work in environmental conservation and women's empowerment.",
+   "finish": "stop",
+   "prompt_tokens": 3917,
+   "prompt_ms": 6643.518,
+   "wall": 7.526,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r02",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "Kisumu is known for being a major city in Western Kenya and a significant port city on Lake Victoria. It is also known for its vibrant culture, its role as a commercial hub, and its proximity to the Great Lakes region.",
+   "finish": "stop",
+   "prompt_tokens": 3916,
+   "prompt_ms": 242.622,
+   "wall": 1.472,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r03",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "Ngũgĩ wa Thiong'o is a Kenyan author, playwright, and academic. He is widely known for his novels, plays, and essays that explore themes of colonialism, post-colonialism, and African identity. He is a significant figure in African literature and has been a prominent voice in political discourse.",
+   "finish": "stop",
+   "prompt_tokens": 3921,
+   "prompt_ms": 288.213,
+   "wall": 2.012,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r04",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__get_wikipedia_article",
+     "args": {
+      "topic": "Uganda Railway"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3916,
+   "prompt_ms": 249.826,
+   "wall": 0.901,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r05",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "The Battle of Adwa was a decisive victory for the Ethiopian army over the Italian colonial forces in 1896. It is considered a major turning point in African history and a significant moment in the anti-colonial struggle. The Ethiopian forces, led by Emperor Menelik II, defeated the Italian army, dem",
+   "finish": "stop",
+   "prompt_tokens": 3918,
+   "prompt_ms": 257.445,
+   "wall": 2.315,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r06",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "M-Pesa is a mobile money transfer service that allows users to send and receive money through their mobile phones. It is widely used in Kenya and other parts of Africa.",
+   "finish": "stop",
+   "prompt_tokens": 3916,
+   "prompt_ms": 235.11,
+   "wall": 1.211,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r07",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "Dedan Kimathi was a prominent Kenyan politician and revolutionary who played a significant role in the Mau Mau uprising against British colonial rule in Kenya. He was a key figure in the nationalist movement and later became a Member of Parliament.",
+   "finish": "stop",
+   "prompt_tokens": 3916,
+   "prompt_ms": 239.404,
+   "wall": 1.491,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r08",
+   "expect": "read",
+   "verdict": "wrong_family",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "when did Lake Turkana get its current name and what was it called before"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3926,
+   "prompt_ms": 303.274,
+   "wall": 1.36,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r09",
+   "expect": "read",
+   "verdict": "wrong_family",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "who won the men's marathon at the 2024 Olympics"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3925,
+   "prompt_ms": 306.625,
+   "wall": 1.284,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r10",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": false,
+   "calls": [],
+   "content": "Barack Obama's father, Barack Obama Sr., was born in Honolulu, Hawaii.",
+   "finish": "stop",
+   "prompt_tokens": 3918,
+   "prompt_ms": 231.084,
+   "wall": 0.646,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r11",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "The primary language spoken in Lamu is Swahili.",
+   "finish": "stop",
+   "prompt_tokens": 3918,
+   "prompt_ms": 232.911,
+   "wall": 0.504,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r12",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": false,
+   "calls": [],
+   "content": "Wangari Maathai campaigned against the deforestation and environmental degradation in the area around Uhuru Park.",
+   "finish": "stop",
+   "prompt_tokens": 3923,
+   "prompt_ms": 278.346,
+   "wall": 0.716,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r13",
+   "expect": "read",
+   "verdict": "wrong_family",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "where is the new Lamu port being built"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3919,
+   "prompt_ms": 235.59,
+   "wall": 0.888,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r14",
+   "expect": "read",
+   "verdict": "wrong_family",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "mobile operator that ran M-Pesa in Afghanistan"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3920,
+   "prompt_ms": 232.018,
+   "wall": 0.886,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r15",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": false,
+   "calls": [],
+   "content": "The Uganda Railway construction workers were attacked by wild animals, including elephants and buffalo.",
+   "finish": "stop",
+   "prompt_tokens": 3919,
+   "prompt_ms": 236.604,
+   "wall": 0.629,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "c01",
+   "expect": "compute",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": false,
+   "calls": [],
+   "content": "20972",
+   "finish": "stop",
+   "prompt_tokens": 3921,
+   "prompt_ms": 282.635,
+   "wall": 0.428,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "c02",
+   "expect": "compute",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": false,
+   "calls": [],
+   "content": "70",
+   "finish": "stop",
+   "prompt_tokens": 3928,
+   "prompt_ms": 284.184,
+   "wall": 0.368,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "c03",
+   "expect": "compute",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": false,
+   "calls": [],
+   "content": "22 degrees Celsius",
+   "finish": "stop",
+   "prompt_tokens": 3918,
+   "prompt_ms": 241.956,
+   "wall": 0.368,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "c04",
+   "expect": "compute",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": false,
+   "calls": [],
+   "content": "The number of days between 12 December 1963 and 14 October 2026 is 10761 days.",
+   "finish": "stop",
+   "prompt_tokens": 3935,
+   "prompt_ms": 289.913,
+   "wall": 1.055,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "c05",
+   "expect": "compute",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "15 percent of 2,350 shillings is 352.5 shillings.",
+   "finish": "stop",
+   "prompt_tokens": 3924,
+   "prompt_ms": 283.771,
+   "wall": 0.735,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "c06",
+   "expect": "compute",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "2.64575",
+   "finish": "stop",
+   "prompt_tokens": 3923,
+   "prompt_ms": 284.058,
+   "wall": 0.468,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "c07",
+   "expect": "compute",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "3.5 hours is 12600 seconds.",
+   "finish": "stop",
+   "prompt_tokens": 3920,
+   "prompt_ms": 229.261,
+   "wall": 0.542,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "c08",
+   "expect": "compute",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": false,
+   "calls": [],
+   "content": "9600",
+   "finish": "stop",
+   "prompt_tokens": 3924,
+   "prompt_ms": 279.277,
+   "wall": 0.414,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "c09",
+   "expect": "compute",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": false,
+   "calls": [],
+   "content": "You will have 13000 shillings after 52 weeks.",
+   "finish": "stop",
+   "prompt_tokens": 3933,
+   "prompt_ms": 281.95,
+   "wall": 0.667,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "c10",
+   "expect": "compute",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "3 to the power of 13 is 1594323.",
+   "finish": "stop",
+   "prompt_tokens": 3921,
+   "prompt_ms": 279.486,
+   "wall": 0.718,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "c11",
+   "expect": "compute",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "26.2 miles is approximately 42.16 kilometres.",
+   "finish": "stop",
+   "prompt_tokens": 3920,
+   "prompt_ms": 227.05,
+   "wall": 0.597,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "d01",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "Ephemeral means lasting for a very short time.",
+   "finish": "stop",
+   "prompt_tokens": 3919,
+   "prompt_ms": 233.015,
+   "wall": 0.481,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "d02",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "harambee means to pull together or to come together. It is often used in a context of community effort or collective action.",
+   "finish": "stop",
+   "prompt_tokens": 3922,
+   "prompt_ms": 234.447,
+   "wall": 0.845,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "n01",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [],
+   "content": "I am doing well, thank you for asking.",
+   "finish": "stop",
+   "prompt_tokens": 3916,
+   "prompt_ms": 234.313,
+   "wall": 0.489,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "n02",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [],
+   "content": "You're welcome. Let me know if you need anything else.",
+   "finish": "stop",
+   "prompt_tokens": 3918,
+   "prompt_ms": 230.688,
+   "wall": 0.555,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "n03",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [],
+   "content": "The Nairobi sky turns grey and deep,\nWhere thirsty earth drinks secrets while it sleeps.",
+   "finish": "stop",
+   "prompt_tokens": 3920,
+   "prompt_ms": 224.039,
+   "wall": 0.634,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "n04",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [],
+   "content": "Please send me the report when you are able.",
+   "finish": "stop",
+   "prompt_tokens": 3920,
+   "prompt_ms": 227.281,
+   "wall": 0.491,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "n05",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "4",
+   "finish": "stop",
+   "prompt_tokens": 3917,
+   "prompt_ms": 233.217,
+   "wall": 0.306,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "n06",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "Today is Wednesday.",
+   "finish": "stop",
+   "prompt_tokens": 3918,
+   "prompt_ms": 232.319,
+   "wall": 0.356,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "o01",
+   "expect": "other:giap-weather",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-weather"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-weather__get_current_weather",
+     "args": {
+      "location": "Nairobi"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3919,
+   "prompt_ms": 229.097,
+   "wall": 0.733,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "o02",
+   "expect": "other:giap-memory",
+   "verdict": "miss",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [],
+   "content": "I do not have any information about your sister.",
+   "finish": "stop",
+   "prompt_tokens": 3918,
+   "prompt_ms": 233.731,
+   "wall": 0.482,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "o03",
+   "expect": "other:giap-schedule",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-schedule"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-schedule__create_schedule",
+     "args": {
+      "cron": "0 18 * * *",
+      "name": "Call mum",
+      "prompt": "Call mum"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3920,
+   "prompt_ms": 227.291,
+   "wall": 1.093,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "o04",
+   "expect": "other:giap-device-control",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-device"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-device__get_user_profile",
+     "args": {}
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3915,
+   "prompt_ms": 232.446,
+   "wall": 0.66,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "x01",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "Wangari Maathai was a Kenyan environmental activist who founded the Green Belt Movement. She won the Nobel Peace Prize in 2004. She won the prize 22 years ago.",
+   "finish": "stop",
+   "prompt_tokens": 3930,
+   "prompt_ms": 278.07,
+   "wall": 1.18,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "x02",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "The capital of Ethiopia is Addis Ababa. 2,355 metres is approximately 7,721 feet.",
+   "finish": "stop",
+   "prompt_tokens": 3929,
+   "prompt_ms": 279.082,
+   "wall": 0.878,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w01",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "Junction Mall Nairobi closing time today October 14 2026"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3920,
+   "prompt_ms": 230.414,
+   "wall": 1.009,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w02",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "latest news on the Nairobi Expressway"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3920,
+   "prompt_ms": 233.244,
+   "wall": 0.798,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w03",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "Samsung Galaxy A15 price in Kenya"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3924,
+   "prompt_ms": 276.338,
+   "wall": 0.843,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w04",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__compute_answer",
+     "args": {
+      "query": "USD to KES exchange rate today"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3923,
+   "prompt_ms": 278.426,
+   "wall": 0.832,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w05",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "Is M-Pesa down right now?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3918,
+   "prompt_ms": 232.955,
+   "wall": 0.855,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w06",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "opening hours of the Kenya National Archives"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3920,
+   "prompt_ms": 228.766,
+   "wall": 0.806,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w07",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "films showing at Century Cinemax Junction this weekend"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3921,
+   "prompt_ms": 274.272,
+   "wall": 0.909,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w08",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "Central Bank of Kenya last interest rate meeting decision"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3924,
+   "prompt_ms": 277.041,
+   "wall": 0.903,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w09",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "well-reviewed Ethiopian restaurant in Kilimani"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3921,
+   "prompt_ms": 275.287,
+   "wall": 0.869,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w10",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "next SGR train Nairobi to Mombasa departure time"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3921,
+   "prompt_ms": 275.75,
+   "wall": 0.89,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w11",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "who is leading the Kenyan Premier League table this season"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3920,
+   "prompt_ms": 228.734,
+   "wall": 0.887,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w12",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "price of a litre of petrol in Nairobi this month"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3924,
+   "prompt_ms": 276.964,
+   "wall": 0.91,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r01",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "Wangari Maathai was a Kenyan environmental activist who founded the Green Belt Movement. She is best known for her work in environmental conservation and women's empowerment.",
+   "finish": "stop",
+   "prompt_tokens": 3891,
+   "prompt_ms": 2717.157,
+   "wall": 3.462,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r02",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "What is Kisumu known for?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3890,
+   "prompt_ms": 234.408,
+   "wall": 0.757,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r03",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "Who is Ngũgĩ wa Thiong'o?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3895,
+   "prompt_ms": 278.616,
+   "wall": 0.934,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r04",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "Tell me about the Uganda Railway."
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3890,
+   "prompt_ms": 233.745,
+   "wall": 0.825,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r05",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "The Battle of Adwa was a decisive victory for the Ethiopian army over the Italian colonial forces in 1896. It is considered a major turning point in African history and a significant event in the anti-colonial struggle. The Ethiopian forces, led by Emperor Menelik II, defeated the Italian army, demo",
+   "finish": "stop",
+   "prompt_tokens": 3892,
+   "prompt_ms": 234.013,
+   "wall": 1.97,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r06",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "M-Pesa is a mobile money transfer service that allows users to send and receive money through their mobile phones. It is widely used in Kenya and other parts of Africa.",
+   "finish": "stop",
+   "prompt_tokens": 3890,
+   "prompt_ms": 231.284,
+   "wall": 1.037,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r07",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "Who was Dedan Kimathi?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3890,
+   "prompt_ms": 232.912,
+   "wall": 0.824,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r08",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "When did Lake Turkana get its current name, and what was it called before?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3900,
+   "prompt_ms": 278.008,
+   "wall": 1.07,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r09",
+   "expect": "read",
+   "verdict": "wrong_family",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "who won the men's marathon at the 2024 Olympics"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3899,
+   "prompt_ms": 277.004,
+   "wall": 1.036,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r10",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": false,
+   "calls": [],
+   "content": "Barack Obama's father, Barack Obama Sr., was born in Honolulu, Hawaii.",
+   "finish": "stop",
+   "prompt_tokens": 3892,
+   "prompt_ms": 231.658,
+   "wall": 0.641,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r11",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "The primary language spoken in Lamu is Swahili.",
+   "finish": "stop",
+   "prompt_tokens": 3892,
+   "prompt_ms": 233.617,
+   "wall": 0.503,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r12",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "What building did Wangari Maathai campaign against in Uhuru Park?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3897,
+   "prompt_ms": 278.275,
+   "wall": 1.008,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r13",
+   "expect": "read",
+   "verdict": "wrong_family",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "where is the new Lamu port being built"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3893,
+   "prompt_ms": 233.985,
+   "wall": 0.833,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r14",
+   "expect": "read",
+   "verdict": "wrong_family",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "mobile operator that ran M-Pesa in Afghanistan"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3894,
+   "prompt_ms": 226.266,
+   "wall": 0.831,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r15",
+   "expect": "read",
+   "verdict": "wrong_family",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "animals that attacked workers building the Uganda Railway"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3893,
+   "prompt_ms": 236.449,
+   "wall": 0.811,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "c01",
+   "expect": "compute",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": false,
+   "calls": [],
+   "content": "20972",
+   "finish": "stop",
+   "prompt_tokens": 3895,
+   "prompt_ms": 278.739,
+   "wall": 0.423,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "c02",
+   "expect": "compute",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": false,
+   "calls": [],
+   "content": "42",
+   "finish": "stop",
+   "prompt_tokens": 3902,
+   "prompt_ms": 281.83,
+   "wall": 0.364,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "c03",
+   "expect": "compute",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": false,
+   "calls": [],
+   "content": "22 degrees Celsius",
+   "finish": "stop",
+   "prompt_tokens": 3892,
+   "prompt_ms": 235.369,
+   "wall": 0.364,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "c04",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__calculate",
+     "args": {
+      "question": "How many days are there between 12 December 1963 and 14 October 2026?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3909,
+   "prompt_ms": 289.138,
+   "wall": 1.213,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "c05",
+   "expect": "compute",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "15 percent of 2,350 shillings is 352.5 shillings.",
+   "finish": "stop",
+   "prompt_tokens": 3898,
+   "prompt_ms": 282.938,
+   "wall": 0.754,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "c06",
+   "expect": "compute",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "2.64575",
+   "finish": "stop",
+   "prompt_tokens": 3897,
+   "prompt_ms": 282.302,
+   "wall": 0.463,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "c07",
+   "expect": "compute",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "3.5 hours is 12600 seconds.",
+   "finish": "stop",
+   "prompt_tokens": 3894,
+   "prompt_ms": 232.551,
+   "wall": 0.515,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "c08",
+   "expect": "compute",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "The result is 7680.",
+   "finish": "stop",
+   "prompt_tokens": 3898,
+   "prompt_ms": 288.34,
+   "wall": 0.521,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "c09",
+   "expect": "compute",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": false,
+   "calls": [],
+   "content": "25500 shillings",
+   "finish": "stop",
+   "prompt_tokens": 3907,
+   "prompt_ms": 287.093,
+   "wall": 0.466,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "c10",
+   "expect": "compute",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "The result of 3 to the power of 13 is 1594323.",
+   "finish": "stop",
+   "prompt_tokens": 3895,
+   "prompt_ms": 283.265,
+   "wall": 0.796,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "c11",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__calculate",
+     "args": {
+      "question": "How many kilometres is 26.2 miles?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3894,
+   "prompt_ms": 231.271,
+   "wall": 0.853,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "d01",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "Ephemeral means lasting for a very short time.",
+   "finish": "stop",
+   "prompt_tokens": 3893,
+   "prompt_ms": 235.426,
+   "wall": 0.476,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "d02",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "harambee means to pull together or to come together. It is often used in a context of community effort or collective action.",
+   "finish": "stop",
+   "prompt_tokens": 3896,
+   "prompt_ms": 234.708,
+   "wall": 0.816,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "n01",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [],
+   "content": "I am doing well, thank you for asking.",
+   "finish": "stop",
+   "prompt_tokens": 3890,
+   "prompt_ms": 232.818,
+   "wall": 0.484,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "n02",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [],
+   "content": "You're welcome. Let me know if you need anything else.",
+   "finish": "stop",
+   "prompt_tokens": 3892,
+   "prompt_ms": 237.919,
+   "wall": 0.59,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "n03",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [],
+   "content": "The Nairobi sky turns grey and deep,\nWhere thirsty earth drinks secrets while it sleeps.",
+   "finish": "stop",
+   "prompt_tokens": 3894,
+   "prompt_ms": 233.112,
+   "wall": 0.651,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "n04",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [],
+   "content": "Please send me the report when you are able.",
+   "finish": "stop",
+   "prompt_tokens": 3894,
+   "prompt_ms": 229.638,
+   "wall": 0.482,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "n05",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "4",
+   "finish": "stop",
+   "prompt_tokens": 3891,
+   "prompt_ms": 239.23,
+   "wall": 0.294,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "n06",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "Today is Wednesday.",
+   "finish": "stop",
+   "prompt_tokens": 3892,
+   "prompt_ms": 240.95,
+   "wall": 0.37,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "o01",
+   "expect": "other:giap-weather",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-weather"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-weather__get_current_weather",
+     "args": {
+      "location": "Nairobi"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3893,
+   "prompt_ms": 236.948,
+   "wall": 0.736,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "o02",
+   "expect": "other:giap-memory",
+   "verdict": "miss",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [],
+   "content": "I do not have any information about your sister.",
+   "finish": "stop",
+   "prompt_tokens": 3892,
+   "prompt_ms": 235.777,
+   "wall": 0.503,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "o03",
+   "expect": "other:giap-schedule",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-schedule"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-schedule__create_schedule",
+     "args": {
+      "cron": "0 18 * * *",
+      "name": "Call mum",
+      "prompt": "Call mum"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3894,
+   "prompt_ms": 233.382,
+   "wall": 1.109,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "o04",
+   "expect": "other:giap-device-control",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-device"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-device__get_user_profile",
+     "args": {}
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3889,
+   "prompt_ms": 237.539,
+   "wall": 0.635,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "x01",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "Who was Wangari Maathai?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3904,
+   "prompt_ms": 283.516,
+   "wall": 0.842,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "x02",
+   "expect": "read",
+   "verdict": "no_call",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": true,
+   "calls": [],
+   "content": "The capital of Ethiopia is Addis Ababa. 2,355 metres is approximately 7,721 feet.",
+   "finish": "stop",
+   "prompt_tokens": 3903,
+   "prompt_ms": 294.617,
+   "wall": 0.844,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "w01",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "What time does the Junction Mall in Nairobi close today October 14 2026"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3894,
+   "prompt_ms": 237.996,
+   "wall": 1.083,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "w02",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "latest news on the Nairobi Expressway"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3894,
+   "prompt_ms": 236.81,
+   "wall": 0.791,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "w03",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "Samsung Galaxy A15 price in Kenya"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3898,
+   "prompt_ms": 285.913,
+   "wall": 0.861,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "w04",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "USD to KES exchange rate today"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3897,
+   "prompt_ms": 289.213,
+   "wall": 0.862,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "w05",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "Is M-Pesa down right now?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3892,
+   "prompt_ms": 238.53,
+   "wall": 0.86,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "w06",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "opening hours of the Kenya National Archives"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3894,
+   "prompt_ms": 233.903,
+   "wall": 0.798,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "w07",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "films showing at Century Cinemax Junction this weekend"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3895,
+   "prompt_ms": 287.792,
+   "wall": 0.907,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "w08",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "Central Bank of Kenya last interest rate meeting decision"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3898,
+   "prompt_ms": 288.018,
+   "wall": 0.926,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "w09",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "well-reviewed Ethiopian restaurant in Kilimani"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3895,
+   "prompt_ms": 286.42,
+   "wall": 0.894,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "w10",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "next SGR train Nairobi to Mombasa departure time"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3895,
+   "prompt_ms": 284.478,
+   "wall": 0.912,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "w11",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "who is leading the Kenyan Premier League table this season"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3894,
+   "prompt_ms": 233.081,
+   "wall": 0.87,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "w12",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "price of a litre of petrol in Nairobi this month"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 3898,
+   "prompt_ms": 293.101,
+   "wall": 0.937,
+   "error": null
+  }
+ ]
+}

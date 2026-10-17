@@ -35,6 +35,8 @@ const EGRESS_TRACKED: &[&str] = &[
     "crates/pond-api/src/musickit.rs",
     // Pauses Spotify while the pond speaks, and resumes it (Developer Policy III.7).
     "crates/pond-api/src/spotify_focus.rs",
+    // Checks a web search key with one Brave request before storing it.
+    "crates/pond-api/src/web_search.rs",
     "crates/pond-adapters-caldav/src/lib.rs",
     // Uber's Riders API, on the member's own account; Uber's hosts stay Sensitive.
     "crates/pond-adapters-uber/src/lib.rs",

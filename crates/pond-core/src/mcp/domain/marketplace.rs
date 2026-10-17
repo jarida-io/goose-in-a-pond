@@ -38,4 +38,9 @@ impl MarketplaceExtension {
     pub fn env_secrets(&self) -> impl Iterator<Item = &SecretRequirement> {
         self.required_secrets.iter().filter(|s| !s.host_only)
     }
+
+    /// The secrets this extension may not be installed or started without.
+    pub fn blocking_secrets(&self) -> impl Iterator<Item = &SecretRequirement> {
+        self.required_secrets.iter().filter(|s| s.blocks_install())
+    }
 }

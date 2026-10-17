@@ -2,6 +2,7 @@ pub mod chat;
 pub mod delegation;
 pub mod egress;
 pub mod in_process_event_bus;
+pub mod passages;
 pub mod print_output;
 pub mod sensor_persisting_event_bus;
 pub mod session_summary;

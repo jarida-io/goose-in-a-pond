@@ -14,6 +14,7 @@ pub mod system;
 pub mod toolkit;
 pub mod travel;
 pub mod weather;
+pub mod web_search;
 pub mod wolfram;
 
 // ── Shared utilities for Knowledge-family servers ───────────────────────────
@@ -177,7 +178,7 @@ pub use orchestrator::{
     OrchestratorDeps,
 };
 pub use schedule::{init_schedule_deps, spawn_schedule_server};
-pub use secrets::{init_secret_deps, secret};
+pub use secrets::{init_secret_deps, secret, tools_withheld_for_missing_secrets};
 pub use sensors::{init_sensor_deps, spawn_sensor_server};
 pub use session_meta::{session_from_meta, SESSION_ID_META_KEY};
 pub use system::spawn_system_server;

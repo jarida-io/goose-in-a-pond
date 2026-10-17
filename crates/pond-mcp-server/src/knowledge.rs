@@ -1,4 +1,5 @@
-//! Knowledge MCP server: Wikipedia lookup, plus the Wolfram tools from [`crate::wolfram`].
+//! Knowledge MCP server: Wikipedia lookup, plus the Wolfram tool from [`crate::wolfram`] and web
+//! search from [`crate::web_search`].
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -67,18 +68,21 @@ pub struct KnowledgeMcpServer {
 
 #[tool_router]
 impl KnowledgeMcpServer {
-    /// Every tool from BOTH routers, without constructing the server or its deps.
+    /// Every tool from all three routers, without constructing the server or its deps.
     pub(crate) fn tool_defs() -> Vec<rmcp::model::Tool> {
         let mut tools = Self::tool_router().list_all();
         tools.extend(Self::wolfram_tool_router().list_all());
+        tools.extend(Self::web_search_tool_router().list_all());
         tools
     }
 
     pub fn new(http_client: reqwest::Client) -> Self {
         Self {
             http_client,
-            // One extension, two routers: the Wolfram tools live in `wolfram.rs`.
-            tool_router: Self::tool_router() + Self::wolfram_tool_router(),
+            // One extension, three routers: `wolfram.rs` and `web_search.rs` hold the others.
+            tool_router: Self::tool_router()
+                + Self::wolfram_tool_router()
+                + Self::web_search_tool_router(),
         }
     }
 
@@ -140,7 +144,7 @@ verbatim.")]
 }
 
 // `router = self.tool_router` is load-bearing: the default is this impl block's router
-// alone, which would drop the composed Wolfram tools from `list_tools`.
+// alone, which would drop the composed Wolfram and web search tools from `list_tools`.
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for KnowledgeMcpServer {
     fn get_info(&self) -> ServerInfo {
@@ -150,26 +154,25 @@ impl ServerHandler for KnowledgeMcpServer {
                 "giap-knowledge",
                 env!("CARGO_PKG_VERSION"),
             ))
-            .with_instructions(
-                "GIAP Knowledge server — reference lookups, definitions, and computation.\n\n\
-                 Tools: get_wikipedia_article (deep articles), \
-                 search_wikipedia (find articles), define_word (dictionary), search_books (book search), \
-                 compute_answer (Wolfram|Alpha), explore_computation (open a Wolfram suggestion).\n\n\
-                 Reading vs computing is the split. If the answer has to be worked out — \
-                 arithmetic, a unit or currency conversion, a date difference, a statistic — \
-                 use compute_answer. If it has to be read — who someone was, what happened, \
-                 what a place is like — use get_wikipedia_article; it auto-searches when the \
-                 title is not exact. Use search_wikipedia only to disambiguate between several \
-                 possible articles. For word definitions, use define_word. For book queries, \
-                 use search_books.\n\
-                 A compute_answer result may end with suggestions, each with an id like 'w3'. \
-                 When one of them is what the user actually meant, call explore_computation \
-                 with that id rather than guessing or re-asking.\n\
-                 After receiving results: synthesize in your own words. Do not parrot verbatim.\n\
-                 In voice mode: 1-3 sentences. Offer to elaborate if the user wants more.",
-            )
+            .with_instructions(KNOWLEDGE_INSTRUCTIONS)
     }
 }
+
+/// Every tool these instructions name must be one this server lists.
+const KNOWLEDGE_INSTRUCTIONS: &str = "\
+GIAP Knowledge server: encyclopedia articles, computation and web search.
+
+Tools: get_wikipedia_article (encyclopedia articles), compute_answer (computation; offered \
+while a computation key is stored), search_web (the web; offered while a web search key is \
+stored).
+
+If the answer has to be worked out (arithmetic, a unit or currency conversion, a date \
+difference, a statistic), use compute_answer. If it has to be read (who someone was, what \
+happened, what a place is like), use get_wikipedia_article; it auto-searches when the title is \
+not exact. If it is current, local or specific (news, opening hours, prices, products, \
+businesses, recent results), use search_web.
+After receiving results: synthesize in your own words. Do not parrot verbatim.
+In voice mode: 1-3 sentences. Offer to elaborate if the user wants more.";
 
 // ── MCP-UI hint helpers ───────────────────────────────────────────────────
 
@@ -473,10 +476,13 @@ impl KnowledgeMcpServer {
                     "[wikipedia] fallback search returned no results for '{}'",
                     query
                 );
-                Ok(crate::format::format_no_results(
-                    &format!("Wikipedia articles for '{}'", query),
-                    &["giap-knowledge__compute_answer"],
-                ))
+                // Name compute_answer only while the turn can be offering it.
+                let what = format!("Wikipedia articles for '{}'", query);
+                Ok(if crate::wolfram::app_id().await.is_some() {
+                    crate::format::format_no_results(&what, &["giap-knowledge__compute_answer"])
+                } else {
+                    crate::format::format_no_results(&what, &[])
+                })
             }
         }
     }
@@ -577,6 +583,36 @@ mod tests {
     #[test]
     fn server_constructs() {
         let _server = test_server();
+    }
+
+    #[test]
+    fn the_instructions_name_only_tools_that_exist_and_every_one_that_does() {
+        use rmcp::handler::server::ServerHandler;
+        let instructions = test_server()
+            .get_info()
+            .instructions
+            .expect("giap-knowledge sends instructions");
+        let tools: Vec<String> = KnowledgeMcpServer::tool_defs()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        let named: Vec<&str> = instructions
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|word| word.contains('_'))
+            .collect();
+        assert!(named.len() >= tools.len(), "the scan found {named:?}");
+        for name in &named {
+            assert!(
+                tools.iter().any(|t| t == name),
+                "{name} is not a tool: {tools:?}"
+            );
+        }
+        for tool in &tools {
+            assert!(
+                instructions.contains(tool.as_str()),
+                "{tool} is not described"
+            );
+        }
     }
 
     #[test]

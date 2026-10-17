@@ -2,7 +2,7 @@
 //! prefix, so any move costs a full re-prefill. Sizes are the RAW pre-minify router form,
 //! since this crate must not depend on `pond-adapters-goose`; don't quote them as prompt cost.
 
-use pond_core::mcp::domain::tool_group::prefix_sort_key;
+use pond_core::mcp::domain::tool_group::{prefix_sort_key, required_secret};
 use rmcp::model::Tool;
 
 /// Every tool GIAP can offer, from the real routers, unordered (see [`ordered_tools`]).
@@ -85,6 +85,20 @@ pub fn ordered_tools(groups: &[&str]) -> Vec<PrefixEntry> {
         .collect()
 }
 
+/// [`ordered_tools`] as a turn offers them with the secrets `is_stored` names: a tool whose
+/// secret is absent is withheld from the allow-set, so it is not in the prefix.
+pub fn ordered_tools_with(groups: &[&str], is_stored: impl Fn(&str) -> bool) -> Vec<PrefixEntry> {
+    ordered_tools(groups)
+        .into_iter()
+        .filter(|e| required_secret(&e.name).is_none_or(&is_stored))
+        .collect()
+}
+
+/// [`ordered_tools`] as a default install offers them: no secret stored.
+pub fn ordered_keyless_tools(groups: &[&str]) -> Vec<PrefixEntry> {
+    ordered_tools_with(groups, |_| false)
+}
+
 pub fn total_bytes(entries: &[PrefixEntry]) -> usize {
     entries.iter().map(|e| e.bytes).sum()
 }
@@ -106,10 +120,11 @@ mod tests {
         "giap-toolkit",
     ];
 
-    /// The fixture. Regenerate deliberately: a change means the next cold turn re-prefills.
+    /// The fixture: a default install, which stores no key, so neither keyed tool is offered.
+    /// Regenerate deliberately: a change means the next cold turn re-prefills.
     #[test]
     fn the_default_tool_prefix_is_unchanged() {
-        let entries = ordered_tools(DEFAULT_GROUPS);
+        let entries = ordered_keyless_tools(DEFAULT_GROUPS);
         let rendered: Vec<String> = entries
             .iter()
             .map(|e| format!("{} {}", e.bytes, e.name))
@@ -144,14 +159,53 @@ mod tests {
         let total = total_bytes(&entries);
         assert_eq!(
             total,
-            13_548,
-            "the default tool block is now {total} raw bytes, was 13,548. That is \
+            13_156,
+            "the default tool block is now {total} raw bytes, was 13,156. That is \
              the PRE-minification form (see the module docs); the provider shim minifies it further. If the change is deliberate, update this number and \
              say why in the commit.\nfull order:\n{}",
             rendered.join("\n")
         );
 
-        assert_eq!(entries.len(), 27, "tool count moved");
+        assert_eq!(entries.len(), 26, "tool count moved");
+    }
+
+    /// Storing one key adds its one schema inside `giap-knowledge`: the prefix moves from there
+    /// on, once, and the core block and everything sorting before it stay byte-identical.
+    #[test]
+    fn storing_a_key_moves_the_prefix_only_from_its_tool_on() {
+        let keyless = ordered_keyless_tools(DEFAULT_GROUPS);
+        for requirement in pond_core::mcp::domain::tool_group::TOOL_REQUIREMENTS {
+            let keyed = ordered_tools_with(DEFAULT_GROUPS, |s| s == requirement.secret);
+            assert_eq!(keyed.len(), keyless.len() + 1, "{}", requirement.secret);
+            let at = keyed
+                .iter()
+                .position(|e| e.name == requirement.tool)
+                .expect("the keyed tool is in the keyed block");
+            let shared = keyed
+                .iter()
+                .zip(&keyless)
+                .take_while(|(a, b)| a == b)
+                .count();
+            assert_eq!(
+                shared, at,
+                "the prefix must hold up to {}",
+                requirement.tool
+            );
+            assert!(
+                keyed
+                    .iter()
+                    .take_while(|e| prefix_sort_key(&e.name).0 == 0)
+                    .count()
+                    <= at,
+                "{} must sort after the core block",
+                requirement.tool
+            );
+        }
+        let total = total_bytes(&ordered_tools(DEFAULT_GROUPS));
+        assert_eq!(
+            total, 13_958,
+            "the block with every key stored is now {total} raw bytes, was 13,958"
+        );
     }
 
     #[test]

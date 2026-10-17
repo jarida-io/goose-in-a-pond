@@ -3316,3 +3316,15 @@ only; touches PAI-2 and PAI-3).**
   preamble. A lookup's result shrinks by ~900 prompt tokens per turn, which is working set.
 - **Not verified on the Orin.** The ~1 s per lookup is August's recorded 862 tok/s prefill
   (an older engine build) applied to the measured token saving, not a device measurement.
+
+**2026-10-15 — Keyed tools are off without their keys; extension keys left the database (PAI-2).**
+
+- **What was wrong.** A catalogue extension's install saved its server row with the API key
+  values in `env`, a plaintext copy in `pond_system.db` beside the encrypted secret store.
+  Start-up began from that copy, so deleting a key never turned the extension off.
+- **What landed** (#570). Rows are saved without key values. Start-up scrubs existing rows once,
+  injects keys from the store only, and does not start an extension whose required key is
+  missing. Deleting a key stops what needs it. `compute_answer`, like `search_web`, is withheld
+  from every turn without its key. See `small-model-tools.md` §8.9.
+- **Not verified on the Orin.** Any pond that installed github, brave-search or slack before
+  this keeps a plaintext copy of that key until its first start on the new build.

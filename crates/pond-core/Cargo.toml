@@ -26,6 +26,8 @@ serde_json = { workspace = true }
 # of an existing `agent_recipes` row, and the parse belongs in the domain: a
 # malformed narrowing block has to REFUSE, and that refusal is policy.
 serde_yaml = { workspace = true }
+# Already in this crate's graph through tera; used for the passage ranker's answer types.
+regex = { workspace = true }
 tera = { workspace = true }
 thiserror = "1.0"
 tokio = { workspace = true }

@@ -68,6 +68,7 @@ function friendlyToolStatus(rawName: string): string {
     list_schedules: "Looking up your schedules…",
     get_user_profile: "Looking up your profile…",
     list_skills: "Checking my skills…",
+    search_web: "Searching the web…",
   };
   if (map[bare]) return map[bare];
   return `Working on: ${bare.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}…`;

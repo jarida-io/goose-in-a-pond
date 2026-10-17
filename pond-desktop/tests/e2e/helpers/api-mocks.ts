@@ -494,6 +494,11 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     route.fulfill({ json: { keys: [] } }),
   );
 
+  // Web search starts Off; a spec that exercises it registers its own, later, routes.
+  await page.route("**/api/v1/web-search", (route) =>
+    route.fulfill({ json: { provider: "brave", configured: false, status: "not_configured" } }),
+  );
+
   await page.route("**/api/v1/extensions/*/secrets", (route) => {
     if (route.request().method() === "POST") {
       // The documented response shape; a 204 would test the undefined-body path users never hit.

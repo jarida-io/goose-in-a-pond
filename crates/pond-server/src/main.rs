@@ -3320,16 +3320,30 @@ async fn run_server(
                     {
                         use pond_core::mcp::ports::extension_manager::AddExtensionRequest;
 
-                        // Secrets overwrite the persisted env: the row's copy is an
-                        // install-time snapshot, and tokens rotate.
+                        // A catalogue extension's keys come from the store alone: the row's
+                        // copies are dropped, and the row is saved once without them.
                         let mut env = srv.env.clone();
-                        if let Some(sr) = &secret_repo {
-                            if let Ok(Some(ext)) = marketplace.get_by_id(&srv.name).await {
-                                for secret_req in ext.env_secrets() {
+                        let mut scrubbed_row = None;
+                        let mut missing_keys = None;
+                        if let Ok(Some(ext)) = marketplace.get_by_id(&srv.name).await {
+                            let mut stored = std::collections::HashMap::new();
+                            if let Some(sr) = &secret_repo {
+                                for secret_req in &ext.required_secrets {
                                     if let Ok(Some(val)) = sr.get(&secret_req.key).await {
-                                        env.insert(secret_req.key.clone(), val);
+                                        stored.insert(secret_req.key.clone(), val);
                                     }
                                 }
+                            }
+                            let prepared =
+                                pond_core::mcp::services::extension_env::prepare_extension_env(
+                                    &srv.env, &ext, &stored,
+                                );
+                            if prepared.row_changed {
+                                scrubbed_row = Some(prepared.row_env);
+                            }
+                            match prepared.start {
+                                Ok(start_env) => env = start_env,
+                                Err(missing) => missing_keys = Some(missing),
                             }
                         }
 
@@ -3342,22 +3356,45 @@ async fn run_server(
 
                         // Old configs may carry cwd-relative args; re-anchor and persist them.
                         let mut args = srv.args.clone();
-                        if pond_core::mcp::services::marketplace::anchor_asset_args(
+                        let anchored = pond_core::mcp::services::marketplace::anchor_asset_args(
                             &mut args,
                             &asset_root,
-                        ) {
+                        );
+                        if anchored {
                             tracing::info!(
                                 extension = %srv.name,
                                 "re-anchored persisted extension args to the asset root"
                             );
+                        }
+                        if scrubbed_row.is_some() {
+                            tracing::info!(
+                                extension = %srv.name,
+                                "removed key values from the saved extension row; they live in \
+                                 the secret store"
+                            );
+                        }
+                        if anchored || scrubbed_row.is_some() {
                             let mut migrated = srv.clone();
                             migrated.args = args.clone();
+                            if let Some(row_env) = scrubbed_row {
+                                migrated.env = row_env;
+                            }
                             if let Err(e) = repo.save(&migrated).await {
                                 tracing::warn!(
-                                    "failed to persist re-anchored args for '{}': {e}",
+                                    "failed to persist the migrated row for '{}': {e}",
                                     srv.name
                                 );
                             }
+                        }
+
+                        if let Some(missing) = missing_keys {
+                            tracing::warn!(
+                                extension = %srv.name,
+                                missing = %missing.join(", "),
+                                "not starting the extension: a key it cannot run without is not \
+                                 stored; saving it starts it"
+                            );
+                            continue;
                         }
 
                         let req = AddExtensionRequest {
@@ -4860,6 +4897,11 @@ async fn run_chat(
         )),
         pond_api::musickit::managed_url(),
     );
+    // The keys the builtin tools need (web search, Wolfram): read per call from the file the serve
+    // process writes, so a key saved from either app reaches this process's next turn.
+    pond_mcp_server::init_secret_deps(Arc::new(
+        pond_infra::file_secret_repository::ReadOnlySecretStore::new(&data_dir),
+    ));
 
     // Before any ONNX init (else ORT_DYLIB_PATH is unset and Piper::new() hangs), and after the
     // egress mode install, since it may download ~100 MB.

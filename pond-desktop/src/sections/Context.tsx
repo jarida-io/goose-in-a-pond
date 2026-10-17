@@ -8,6 +8,7 @@ import { api } from "../api/PondApiClient";
 import type { ContextIndexHealth, MemoryFragment } from "../api/types";
 import { ConnectionsPanel } from "../connections/ConnectionsPanel";
 import { UberAccountsPanel } from "../connections/UberAccountsPanel";
+import { WebSearchPanel } from "../connections/WebSearchPanel";
 import { useAppState } from "../state/useAppContext";
 import { Collected } from "./context/Collected";
 import { Lineage } from "./context/Lineage";
@@ -18,7 +19,7 @@ type View = "remembered" | "collected" | "sources" | "lineage";
 const VIEWS: Array<{ id: View; label: string; blurb: string }> = [
   { id: "remembered", label: "Remembered", blurb: "What you told it" },
   { id: "collected", label: "Collected", blurb: "What it read from your accounts" },
-  { id: "sources", label: "Sources", blurb: "Accounts it may read or use" },
+  { id: "sources", label: "Sources", blurb: "Accounts it may read or use, and web search" },
   { id: "lineage", label: "Lineage", blurb: "How it all connects" },
 ];
 
@@ -294,6 +295,7 @@ export function Context() {
         <>
           <ConnectionsPanel sessionId={sessionId} />
           <UberAccountsPanel />
+          <WebSearchPanel />
         </>
       )}
 

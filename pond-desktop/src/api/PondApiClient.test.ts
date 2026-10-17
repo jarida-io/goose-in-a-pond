@@ -1438,3 +1438,57 @@ describe("the host credential", () => {
     expect(sent("/handshake/pairing-code")).toEqual([undefined]);
   });
 });
+
+// ── web search ────────────────────────────────────────────────────────────────
+
+describe("web search", () => {
+  const KEY = "BSA-test-key-0123456789";
+
+  it("getWebSearch() GETs the state and returns it as the pond sent it", async () => {
+    fetchMock.mockResolvedValueOnce(okJson({ provider: "brave", configured: true, status: "quota" }));
+    const res = await client().getWebSearch();
+    expect(res).toEqual({ provider: "brave", configured: true, status: "quota" });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:4000/api/v1/web-search",
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+
+  it("getWebSearch() hands back undefined, for the caller to guard, when an older pond sends a page", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response("<!doctype html>", { status: 200, headers: { "Content-Type": "text/html" } }),
+    );
+    expect(await client().getWebSearch()).toBeUndefined();
+  });
+
+  it("setWebSearchKey() PUTs the key in the body, never in the address", async () => {
+    fetchMock.mockResolvedValueOnce(okJson({ configured: true, status: "unverified" }));
+    const res = await client().setWebSearchKey(KEY);
+    expect(res).toEqual({ configured: true, status: "unverified" });
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://localhost:4000/api/v1/web-search/key");
+    expect(url).not.toContain(KEY);
+    expect(init.method).toBe("PUT");
+    expect(JSON.parse(init.body as string)).toEqual({ key: KEY });
+  });
+
+  it("setWebSearchKey() rejects with the 422 and Brave's sentence, the key never echoed", async () => {
+    fetchMock.mockResolvedValueOnce(errJson(422, "Brave did not accept this key."));
+    const err = await client().setWebSearchKey(KEY).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(422);
+    expect((err as ApiError).message).toBe("Brave did not accept this key.");
+    expect((err as ApiError).body).toEqual({ error: "Brave did not accept this key." });
+    expect(JSON.stringify(err)).not.toContain(KEY);
+  });
+
+  it("deleteWebSearchKey() DELETEs and takes the 204", async () => {
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+    await expect(client().deleteWebSearchKey()).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:4000/api/v1/web-search/key",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+});

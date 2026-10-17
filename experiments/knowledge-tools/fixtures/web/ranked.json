@@ -1,0 +1,106 @@
+{
+ "bm25_shipped": {
+  "ws1": [
+   "Read 1,204 reviews of The Junction Mall, Nairobi, rated 4.3 out of 5 by shoppers.",
+   "Welcome to The Junction, Nairobi's favourite family shopping destination on Ngong Road."
+  ],
+  "ws2": [
+   "Shop the Samsung Galaxy A15 at the best price in Kenya. Free delivery in Nairobi and fast countrywide shipping.",
+   "Samsung Galaxy A15 (6GB RAM, 128GB) is now KSh 17,999, down from KSh 21,500, while stocks last."
+  ],
+  "ws3": [
+   "The Kenya National Archives preserves the nation's documentary heritage and makes it available for research.",
+   "The Archives building on Moi Avenue houses records dating back to the colonial era."
+  ],
+  "ws4": [
+   "The Committee decided to lower the Central Bank Rate by 25 basis points, from 9.50 percent to 9.25 percent.",
+   "The Committee noted that overall inflation remained within the target range."
+  ],
+  "ws5": [
+   "The Inter-County train departs Nairobi Terminus at 8:00 am daily. The Express train departs Nairobi at 3:00 pm daily.",
+   "Plan your journey on the Madaraka Express between Nairobi and Mombasa. Book tickets online or by M-Pesa."
+  ],
+  "ws6": [
+   "In Nairobi, Super Petrol will retail at a maximum of KSh 180.66 per litre, Diesel at KSh 168.06 and Kerosene at KSh 151.39.",
+   "Prices are reviewed on the 14th of every month."
+  ]
+ },
+ "bm25_boosted": {
+  "ws1": [
+   "Opening hours: Monday to Saturday from 8:00 am to 9:00 pm. Sundays and public holidays from 9:00 am to 8:00 pm.",
+   "Read 1,204 reviews of The Junction Mall, Nairobi, rated 4.3 out of 5 by shoppers."
+  ],
+  "ws2": [
+   "Samsung Galaxy A15 (6GB RAM, 128GB) is now KSh 17,999, down from KSh 21,500, while stocks last.",
+   "Shop the Samsung Galaxy A15 at the best price in Kenya. Free delivery in Nairobi and fast countrywide shipping."
+  ],
+  "ws3": [
+   "The search room is open Monday to Friday, 8.00 am to 5.00 pm. It is closed on weekends and public holidays.",
+   "The Kenya National Archives preserves the nation's documentary heritage and makes it available for research."
+  ],
+  "ws4": [
+   "The Committee decided to lower the Central Bank Rate by 25 basis points, from 9.50 percent to 9.25 percent.",
+   "The Committee will meet again in two months, but stands ready to act earlier if necessary."
+  ],
+  "ws5": [
+   "The Inter-County train departs Nairobi Terminus at 8:00 am daily. The Express train departs Nairobi at 3:00 pm daily.",
+   "Plan your journey on the Madaraka Express between Nairobi and Mombasa. Book tickets online or by M-Pesa."
+  ],
+  "ws6": [
+   "In Nairobi, Super Petrol will retail at a maximum of KSh 180.66 per litre, Diesel at KSh 168.06 and Kerosene at KSh 151.39.",
+   "Prices are reviewed on the 14th of every month."
+  ]
+ },
+ "minilm": {
+  "ws1": [
+   "Read 1,204 reviews of The Junction Mall, Nairobi, rated 4.3 out of 5 by shoppers.",
+   "Welcome to The Junction, Nairobi's favourite family shopping destination on Ngong Road."
+  ],
+  "ws2": [
+   "Shop the Samsung Galaxy A15 at the best price in Kenya. Free delivery in Nairobi and fast countrywide shipping.",
+   "Samsung Galaxy A15 (6GB RAM, 128GB) is now KSh 17,999, down from KSh 21,500, while stocks last."
+  ],
+  "ws3": [
+   "The Kenya National Archives preserves the nation's documentary heritage and makes it available for research.",
+   "The search room is open Monday to Friday, 8.00 am to 5.00 pm. It is closed on weekends and public holidays."
+  ],
+  "ws4": [
+   "The Monetary Policy Committee met to review the outcome of its previous policy decisions and recent economic developments.",
+   "The Committee decided to lower the Central Bank Rate by 25 basis points, from 9.50 percent to 9.25 percent."
+  ],
+  "ws5": [
+   "Plan your journey on the Madaraka Express between Nairobi and Mombasa. Book tickets online or by M-Pesa.",
+   "The Inter-County train departs Nairobi Terminus at 8:00 am daily. The Express train departs Nairobi at 3:00 pm daily."
+  ],
+  "ws6": [
+   "In Nairobi, Super Petrol will retail at a maximum of KSh 180.66 per litre, Diesel at KSh 168.06 and Kerosene at KSh 151.39.",
+   "Prices in other towns vary with transport costs."
+  ]
+ },
+ "hybrid": {
+  "ws1": [
+   "Read 1,204 reviews of The Junction Mall, Nairobi, rated 4.3 out of 5 by shoppers.",
+   "Opening hours: Monday to Saturday from 8:00 am to 9:00 pm. Sundays and public holidays from 9:00 am to 8:00 pm."
+  ],
+  "ws2": [
+   "Samsung Galaxy A15 (6GB RAM, 128GB) is now KSh 17,999, down from KSh 21,500, while stocks last.",
+   "Shop the Samsung Galaxy A15 at the best price in Kenya. Free delivery in Nairobi and fast countrywide shipping."
+  ],
+  "ws3": [
+   "The search room is open Monday to Friday, 8.00 am to 5.00 pm. It is closed on weekends and public holidays.",
+   "The Kenya National Archives preserves the nation's documentary heritage and makes it available for research."
+  ],
+  "ws4": [
+   "The Committee decided to lower the Central Bank Rate by 25 basis points, from 9.50 percent to 9.25 percent.",
+   "The Monetary Policy Committee met to review the outcome of its previous policy decisions and recent economic developments."
+  ],
+  "ws5": [
+   "The Inter-County train departs Nairobi Terminus at 8:00 am daily. The Express train departs Nairobi at 3:00 pm daily.",
+   "Plan your journey on the Madaraka Express between Nairobi and Mombasa. Book tickets online or by M-Pesa."
+  ],
+  "ws6": [
+   "In Nairobi, Super Petrol will retail at a maximum of KSh 180.66 per litre, Diesel at KSh 168.06 and Kerosene at KSh 151.39.",
+   "Prices in other towns vary with transport costs."
+  ]
+ }
+}

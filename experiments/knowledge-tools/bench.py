@@ -25,6 +25,7 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+from kt import rankers as R  # noqa: E402
 from kt import variants as V  # noqa: E402
 
 CORE = ("giap-memory__", "giap-system__", "giap-toolkit__")
@@ -148,7 +149,7 @@ def classify(case, out, family_map):
     accept = {expect, *case.get("accept", [])}
     if out.get("finish") == "error":
         return "error", fams, other
-    if expect in ("read", "compute"):
+    if expect in ("read", "compute", "web"):
         if fams & accept:
             return "ok", fams, other
         if fams:
@@ -260,6 +261,86 @@ def e5(server, cases, log):
     return run_calls(server, base, arms, keep, log)
 
 
+def e6(server, cases, log):
+    """Web search beside the knowledge tools: called when the live web is needed? And does it
+    take questions that look_up or calculate should answer (counted as wrong_family)?"""
+    base = load_payload("all")
+    web = json.load(open(os.path.join(HERE, "cases-web.json")))["cases"]
+    keep = [c for c in cases if c["id"][0] in "rcndox"] + web
+    arms = [(name, with_tools(base["tools"], V.SCHEMAS[name]), V.FAMILY[name], None) for name in ("S0", "S1")]
+    wanted = os.environ.get("E6_ARMS")
+    if wanted:
+        arms = [a for a in arms if a[0] in wanted.split(",")]
+    return run_calls(server, base, arms, keep, log)
+
+
+# An honest "the result does not say" (re-scored after "do not have" slipped past the first
+# version and was counted as invention).
+DECLINE = re.compile(r"\b(do|does|did) not (have|say|mention|state|list|include|give|show|provide|contain)\b|"
+                     r"(doesn't|don't|didn't) (have|say|mention|provide|contain)|not (mentioned|provided|available|given|listed)|"
+                     r"no (information|details|specific)|(couldn't|could not|can't|cannot|unable to) (find|give|provide|compute|perform|convert)", re.I)
+
+
+def e7(server, cases, log):
+    """Web read-back on SYNTHETIC fixtures: snippet list vs extracted passages vs snippets in
+    the new format (pages unreadable). The search_web call is forced."""
+    base = load_payload("all")
+    system, template = base["messages"][0], base["messages"][1]["content"]
+    tools = with_tools(base["tools"], V.SCHEMAS["S1"])
+    fx = json.load(open(os.path.join(HERE, "fixtures", "web", "synthetic.json")))["cases"]
+    arms = [("W0_snippets", V.w0_snippets), ("W1_passages", lambda c: V.w1_passages(c, True)),
+            ("W1s_no_pages", lambda c: V.w1_passages(c, False)),
+            # The amended ranker (suffix stemming + answer-type boost), as section 8.3 now specifies.
+            ("W1b_boosted", lambda c: V.w1_passages(c, True, ranker=R.boosted))]
+    wanted = os.environ.get("E7_ARMS")
+    if wanted:
+        arms = [a for a in arms if a[0] in wanted.split(",")]
+    rows = []
+    for arm, render_fn in arms:
+        for case in fx:
+            result = render_fn(case)
+            tcs = [{"id": "call_0", "type": "function", "function": {
+                "name": "giap-knowledge__search_web", "arguments": json.dumps({"question": case["q"]})}}]
+            msgs = [system, {"role": "user", "content": user_turn(template, case["q"])},
+                    {"role": "assistant", "content": "", "tool_calls": tcs},
+                    {"role": "tool", "tool_call_id": "call_0", "content": result}]
+            out = parse(server.chat(msgs, tools))
+            content = out["content"]
+            correct = bool(content) and all(re.search(p, fold(content)) for p in case["answer"])
+            declined = bool(DECLINE.search(content))
+            rows.append({"arm": arm, "id": case["id"], "correct": correct, "declined": declined and not correct,
+                         "invented": not correct and not declined and not out["calls"],
+                         "extra_calls": [c["name"] for c in out["calls"]], "result_bytes": len(result.encode()),
+                         "prompt_tokens": out.get("prompt_tokens"), "content": content[:400], "finish": out["finish"]})
+            log("%-13s %s %s %s" % (arm, case["id"], "OK" if correct else ("declined" if declined else "--"), content[:90].replace("\n", " ")))
+    return rows
+
+
+# The giap-knowledge group line a minimal-mode prompt shows, once its blurb names the web.
+BW_KNOWLEDGE_LINE = "- giap-knowledge: Looking things up, working things out and searching the web"
+
+
+def e8(server, cases, log):
+    """Minimal mode with web questions: does the group line have to mention the web for the
+    model to load giap-knowledge through the hatch? M0 is today's line, MW names the web."""
+    base = load_payload("minimal")
+    system = base["messages"][0]["content"]
+    assert "- giap-knowledge: " in system
+    web = json.load(open(os.path.join(HERE, "cases-web.json")))["cases"]
+    keep = web + [c for c in cases if c["id"][0] in "rno"]
+    family = {"giap-toolkit__enable_tool_group": set()}
+    mw = re.sub(r"- giap-knowledge: [^\n]*", BW_KNOWLEDGE_LINE, system)
+    arms = [("M0", base["tools"], family, None), ("MW", base["tools"], family, mw)]
+    rows = run_calls(server, base, arms, keep, log)
+    for r in rows:
+        r["arm_label"] = r["arm"]
+        r["arm"] = {"M0": "M0", "MW": "M1"}[r["arm"]]  # M1 so regrade_minimal grades the hatch
+    rows = regrade_minimal(rows)
+    for r in rows:
+        r["arm"] = r.pop("arm_label")
+    return rows
+
+
 def e4(server, cases, log):
     """Compute affordance only: compute, none, other cases; does a name or a rule get the call?"""
     base = load_payload("all")
@@ -311,7 +392,7 @@ def regrade_minimal(rows):
             continue
         r["arg_ok"] = None
         loaded_k = any("knowledge" in g for g in groups)
-        if r["expect"] in ("read", "compute"):
+        if r["expect"] in ("read", "compute", "web"):
             r["verdict"] = "ok" if loaded_k else ("listed" if listed else ("other_tool" if r["calls"] else "no_call"))
         elif r["expect"] == "none":
             r["verdict"] = "ok" if not r["calls"] else "false_call"
@@ -420,7 +501,7 @@ def readback(server, system, template, tools, arm, schema, renderer, case):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--exp", choices=["e1", "e2", "e3", "e4", "e5"], required=True)
+    ap.add_argument("--exp", choices=["e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8"], required=True)
     ap.add_argument("--model", required=True)
     ap.add_argument("--url", default="http://127.0.0.1:8095")
     ap.add_argument("--out", default=os.path.join(HERE, "results"))
@@ -433,7 +514,7 @@ def main():
     os.makedirs(a.out, exist_ok=True)
     server = Server(a.url)
     log = lambda s: print(s, flush=True)  # noqa: E731
-    rows = {"e1": e1, "e2": e2, "e3": e3, "e4": e4, "e5": e5}[a.exp](server, cases, log)
+    rows = {"e1": e1, "e2": e2, "e3": e3, "e4": e4, "e5": e5, "e6": e6, "e7": e7, "e8": e8}[a.exp](server, cases, log)
     path = os.path.join(a.out, "%s-%s.json" % (a.exp, a.model))
     json.dump({"model": a.model, "exp": a.exp, "rows": rows}, open(path, "w"), ensure_ascii=False, indent=1)
     print("wrote", path)

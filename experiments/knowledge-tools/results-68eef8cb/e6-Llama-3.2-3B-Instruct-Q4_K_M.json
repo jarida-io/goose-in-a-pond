@@ -1,0 +1,2705 @@
+{
+ "model": "Llama-3.2-3B-Instruct-Q4_K_M",
+ "exp": "e6",
+ "rows": [
+  {
+   "arm": "S0",
+   "id": "r01",
+   "expect": "read",
+   "verdict": "wrong_family",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__compute_answer",
+     "args": {
+      "query": "Wangari Maathai"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5311,
+   "prompt_ms": 17609.051,
+   "wall": 18.463,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r02",
+   "expect": "read",
+   "verdict": "wrong_family",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "What is Kisumu known for?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5310,
+   "prompt_ms": 334.808,
+   "wall": 1.212,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r03",
+   "expect": "read",
+   "verdict": "wrong_family",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__compute_answer",
+     "args": {
+      "query": "Ngõgô wa Thiong"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5315,
+   "prompt_ms": 380.034,
+   "wall": 1.512,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r04",
+   "expect": "read",
+   "verdict": "wrong_family",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "Uganda Railway"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5310,
+   "prompt_ms": 386.971,
+   "wall": 1.214,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r05",
+   "expect": "read",
+   "verdict": "wrong_family",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "What happened at the Battle of Adwa?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5312,
+   "prompt_ms": 399.152,
+   "wall": 1.372,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r06",
+   "expect": "read",
+   "verdict": "wrong_family",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "What is M-Pesa?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5309,
+   "prompt_ms": 420.863,
+   "wall": 1.442,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r07",
+   "expect": "read",
+   "verdict": "wrong_family",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__compute_answer",
+     "args": {
+      "query": "Dedan Kimathi"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5310,
+   "prompt_ms": 564.674,
+   "wall": 1.538,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r08",
+   "expect": "read",
+   "verdict": "wrong_family",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "When did Lake Turkana get its current name, and what was it called before?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5320,
+   "prompt_ms": 435.608,
+   "wall": 1.737,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r09",
+   "expect": "read",
+   "verdict": "wrong_family",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "men"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5316,
+   "prompt_ms": 521.212,
+   "wall": 1.297,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r10",
+   "expect": "read",
+   "verdict": "wrong_family",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "Barack Obama"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5311,
+   "prompt_ms": 430.507,
+   "wall": 1.228,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r11",
+   "expect": "read",
+   "verdict": "wrong_family",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "What language is mostly spoken in Lamu?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5312,
+   "prompt_ms": 401.077,
+   "wall": 1.404,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r12",
+   "expect": "read",
+   "verdict": "wrong_family",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "Wangari Maathai campaign against building in Uhuru Park"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5318,
+   "prompt_ms": 412.325,
+   "wall": 1.578,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r13",
+   "expect": "read",
+   "verdict": "wrong_family",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "new Lamu port construction location"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5313,
+   "prompt_ms": 463.067,
+   "wall": 1.592,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r14",
+   "expect": "read",
+   "verdict": "wrong_family",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "mobile operator ran M-Pesa in Afghanistan"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5313,
+   "prompt_ms": 771.691,
+   "wall": 1.941,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "r15",
+   "expect": "read",
+   "verdict": "wrong_family",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "Which animals attacked the workers building the Uganda Railway?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5313,
+   "prompt_ms": 449.547,
+   "wall": 1.539,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "c01",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__compute_answer",
+     "args": {
+      "query": "1234 times 17"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5312,
+   "prompt_ms": 457.387,
+   "wall": 1.378,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "c02",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__compute_answer",
+     "args": {
+      "query": "11 + 31 + 24 divided by 3"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5319,
+   "prompt_ms": 469.576,
+   "wall": 1.607,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "c03",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__compute_answer",
+     "args": {
+      "query": "72 degrees Fahrenheit to Celsius"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5311,
+   "prompt_ms": 465.831,
+   "wall": 1.374,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "c04",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__compute_answer",
+     "args": {
+      "query": "12 December 1963 to 14 October 2026 in days"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5323,
+   "prompt_ms": 458.576,
+   "wall": 1.63,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "c05",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__compute_answer",
+     "args": {
+      "query": "15 percent of 2,350 shillings"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5317,
+   "prompt_ms": 424.13,
+   "wall": 1.477,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "c06",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__compute_answer",
+     "args": {
+      "query": "sqrt(7) to five decimal places",
+      "format": "float"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5317,
+   "prompt_ms": 528.723,
+   "wall": 1.86,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "c07",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__compute_answer",
+     "args": {
+      "query": "3.5 hours in seconds"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5314,
+   "prompt_ms": 506.999,
+   "wall": 1.469,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "c08",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__compute_answer",
+     "args": {
+      "query": "16 percent of 48,000"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5314,
+   "prompt_ms": 460.226,
+   "wall": 1.445,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "c09",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__compute_answer",
+     "args": {
+      "query": "If you save 2,500 shillings every week, how much will you have after 52 weeks?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5326,
+   "prompt_ms": 481.85,
+   "wall": 2.062,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "c10",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__compute_answer",
+     "args": {
+      "query": "3 to the power of 13"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5314,
+   "prompt_ms": 504.441,
+   "wall": 1.53,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "c11",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__compute_answer",
+     "args": {
+      "query": "26.2 miles in kilometres"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5313,
+   "prompt_ms": 477.241,
+   "wall": 1.442,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "d01",
+   "expect": "none",
+   "verdict": "error",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": false,
+   "calls": [],
+   "content": "",
+   "finish": "error",
+   "prompt_tokens": null,
+   "prompt_ms": null,
+   "wall": null,
+   "error": "HTTP 500: {\"error\":{\"code\":500,\"message\":\"Failed to parse input at pos 47: {\\\"name\\\": \\\"giap-knowledge__compute_answer\\\", \\\"parameters\\\": {\\\"query\\\": \\\"What does the word \\\"ephemeral\\\" mean?\\\"}}\",\"type\":\"server_error\"}}"
+  },
+  {
+   "arm": "S0",
+   "id": "d02",
+   "expect": "none",
+   "verdict": "false_call",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "What does the Swahili word "
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5317,
+   "prompt_ms": 460.005,
+   "wall": 1.471,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "n01",
+   "expect": "none",
+   "verdict": "false_call",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__compute_answer",
+     "args": {
+      "query": "How are you today?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5310,
+   "prompt_ms": 408.698,
+   "wall": 1.287,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "n02",
+   "expect": "none",
+   "verdict": "false_call",
+   "families": [],
+   "other": [
+    "other:giap-memory"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-memory__forget_memory",
+     "args": {
+      "id": "None",
+      "content": "Thanks, that"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5311,
+   "prompt_ms": 445.93,
+   "wall": 1.605,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "n03",
+   "expect": "none",
+   "verdict": "false_call",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "a two-line poem about rain in Nairobi"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5313,
+   "prompt_ms": 643.228,
+   "wall": 1.775,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "n04",
+   "expect": "none",
+   "verdict": "false_call",
+   "families": [],
+   "other": [
+    "other:giap-memory"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-memory__recall_memories",
+     "args": {
+      "query": "report",
+      "limit": "10"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5315,
+   "prompt_ms": 489.37,
+   "wall": 1.585,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "n05",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__compute_answer",
+     "args": {
+      "query": "2 plus 2"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5311,
+   "prompt_ms": 454.628,
+   "wall": 1.371,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "n06",
+   "expect": "none",
+   "verdict": "false_call",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__compute_answer",
+     "args": {
+      "query": "What day of the week is it today?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5312,
+   "prompt_ms": 481.314,
+   "wall": 1.575,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "o01",
+   "expect": "other:giap-weather",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-weather"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-weather__get_current_weather",
+     "args": {
+      "location": "Nairobi"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5312,
+   "prompt_ms": 490.253,
+   "wall": 1.404,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "o02",
+   "expect": "other:giap-memory",
+   "verdict": "steal",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "What did I tell you about my sister?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5312,
+   "prompt_ms": 476.662,
+   "wall": 1.604,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "o03",
+   "expect": "other:giap-schedule",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-schedule"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-schedule__schedule_action",
+     "args": {
+      "id": "",
+      "action": "run_now"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5314,
+   "prompt_ms": 484.713,
+   "wall": 1.532,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "o04",
+   "expect": "other:giap-device-control",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-device-control"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-device-control__set_device_state",
+     "args": {
+      "device_id": "kitchen lights",
+      "power": "false"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5309,
+   "prompt_ms": 457.845,
+   "wall": 1.712,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "x01",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__compute_answer",
+     "args": {
+      "query": "Wangari Maathai Nobel Peace Prize years since award"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5324,
+   "prompt_ms": 514.528,
+   "wall": 1.736,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "x02",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__compute_answer",
+     "args": {
+      "query": "What is the capital of Ethiopia, and what is 2,355 metres in feet?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5321,
+   "prompt_ms": 508.995,
+   "wall": 1.965,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w01",
+   "expect": "web",
+   "verdict": "other_tool",
+   "families": [],
+   "other": [
+    "other:giap-weather"
+   ],
+   "arg_ok": false,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-weather__get_weather_forecast",
+     "args": {
+      "location": "Nairobi",
+      "days": "1"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5314,
+   "prompt_ms": 511.249,
+   "wall": 1.712,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w02",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "latest news on the Nairobi Expressway"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5314,
+   "prompt_ms": 492.347,
+   "wall": 1.561,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w03",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "Samsung Galaxy A15 price in Kenya"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5317,
+   "prompt_ms": 489.263,
+   "wall": 1.529,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w04",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "US dollar to Kenyan shilling exchange rate today"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5319,
+   "prompt_ms": 494.578,
+   "wall": 1.662,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w05",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "Is M-Pesa down right now?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5311,
+   "prompt_ms": 507.586,
+   "wall": 1.583,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w06",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "opening hours of the Kenya National Archives"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5314,
+   "prompt_ms": 488.885,
+   "wall": 1.49,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w07",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "Century Cinemax Junction showtimes this weekend"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5315,
+   "prompt_ms": 480.908,
+   "wall": 1.509,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w08",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "Central Bank of Kenya last interest rate meeting decision"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5318,
+   "prompt_ms": 483.225,
+   "wall": 1.567,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w09",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "well-reviewed Ethiopian restaurants in Kilimani"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5315,
+   "prompt_ms": 479.406,
+   "wall": 1.628,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w10",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "When does the next SGR train leave Nairobi for Mombasa?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5317,
+   "prompt_ms": 667.416,
+   "wall": 2.168,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w11",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "Kenyan Premier League table this season"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5315,
+   "prompt_ms": 675.017,
+   "wall": 1.876,
+   "error": null
+  },
+  {
+   "arm": "S0",
+   "id": "w12",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "What"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5317,
+   "prompt_ms": 672.03,
+   "wall": 1.603,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r01",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "Who was Wangari Maathai?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5271,
+   "prompt_ms": 8375.057,
+   "wall": 9.297,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r02",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "What is Kisumu known for?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5270,
+   "prompt_ms": 336.376,
+   "wall": 1.272,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r03",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": false,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "Ngõgô wa Thiong"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5275,
+   "prompt_ms": 433.049,
+   "wall": 1.618,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r04",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "Uganda Railway"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5270,
+   "prompt_ms": 448.385,
+   "wall": 1.301,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r05",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "What happened at the Battle of Adwa?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5272,
+   "prompt_ms": 435.255,
+   "wall": 1.45,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r06",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "What is M-Pesa?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5269,
+   "prompt_ms": 412.944,
+   "wall": 1.327,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r07",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "Dedan Kimathi"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5270,
+   "prompt_ms": 460.122,
+   "wall": 1.397,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r08",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "When did Lake Turkana get its current name, and what was it called before?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5280,
+   "prompt_ms": 479.504,
+   "wall": 1.784,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r09",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "men",
+      "s": "2024 Olympics",
+      "t": "marathon",
+      "category": "sports"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5276,
+   "prompt_ms": 440.277,
+   "wall": 1.906,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r10",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "Where was Barack Obama"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5271,
+   "prompt_ms": 451.731,
+   "wall": 1.306,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r11",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "What language is mostly spoken in Lamu?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5272,
+   "prompt_ms": 525.576,
+   "wall": 1.545,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r12",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "Wangari Maathai campaign against in Uhuru Park"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5278,
+   "prompt_ms": 432.968,
+   "wall": 1.57,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r13",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "Lamu port construction site"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5273,
+   "prompt_ms": 421.41,
+   "wall": 1.313,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r14",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "Which mobile operator ran M-Pesa in Afghanistan?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5273,
+   "prompt_ms": 435.988,
+   "wall": 1.49,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "r15",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "Which animals attacked the workers building the Uganda Railway?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5273,
+   "prompt_ms": 452.061,
+   "wall": 1.521,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "c01",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__calculate",
+     "args": {
+      "question": "1234 * 17"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5272,
+   "prompt_ms": 436.601,
+   "wall": 1.296,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "c02",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__calculate",
+     "args": {
+      "question": "(11 + 31 + 24) / 3"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5279,
+   "prompt_ms": 412.168,
+   "wall": 1.447,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "c03",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__calculate",
+     "args": {
+      "question": "72 degrees Fahrenheit to Celsius"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5271,
+   "prompt_ms": 446.872,
+   "wall": 1.308,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "c04",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__calculate",
+     "args": {
+      "question": "12 December 1963 to 14 October 2026 in days"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5283,
+   "prompt_ms": 450.947,
+   "wall": 1.606,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "c05",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__calculate",
+     "args": {
+      "question": "15% of 2350 shillings"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5277,
+   "prompt_ms": 438.015,
+   "wall": 1.42,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "c06",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__calculate",
+     "args": {
+      "question": "sqrt(7) to 5 decimal places"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5277,
+   "prompt_ms": 469.329,
+   "wall": 1.46,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "c07",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__calculate",
+     "args": {
+      "question": "3.5 hours in seconds"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5274,
+   "prompt_ms": 420.685,
+   "wall": 1.3,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "c08",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__calculate",
+     "args": {
+      "question": "16 percent of 48,000"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5274,
+   "prompt_ms": 434.517,
+   "wall": 1.339,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "c09",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__calculate",
+     "args": {
+      "question": "2500 shillings/week * 52 weeks"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5286,
+   "prompt_ms": 454.08,
+   "wall": 1.542,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "c10",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__calculate",
+     "args": {
+      "question": "3 to the power of 13"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5274,
+   "prompt_ms": 480.083,
+   "wall": 1.437,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "c11",
+   "expect": "compute",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__calculate",
+     "args": {
+      "question": "26.2 miles in kilometres"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5273,
+   "prompt_ms": 452.303,
+   "wall": 1.328,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "d01",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "What does the word "
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5274,
+   "prompt_ms": 489.927,
+   "wall": 1.551,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "d02",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "What does the Swahili word "
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5277,
+   "prompt_ms": 442.927,
+   "wall": 1.441,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "n01",
+   "expect": "none",
+   "verdict": "false_call",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "How are you today?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5270,
+   "prompt_ms": 454.103,
+   "wall": 1.348,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "n02",
+   "expect": "none",
+   "verdict": "false_call",
+   "families": [],
+   "other": [
+    "other:giap-memory"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-memory__forget_memory",
+     "args": {
+      "id": "None",
+      "content": "Thanks, that"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5271,
+   "prompt_ms": 449.602,
+   "wall": 1.485,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "n03",
+   "expect": "none",
+   "verdict": "false_call",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "a two-line poem about rain in Nairobi"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5273,
+   "prompt_ms": 496.147,
+   "wall": 1.574,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "n04",
+   "expect": "none",
+   "verdict": "false_call",
+   "families": [],
+   "other": [
+    "other:giap-memory"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-memory__recall_memories",
+     "args": {
+      "query": "report",
+      "limit": "10"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5275,
+   "prompt_ms": 877.875,
+   "wall": 2.008,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "n05",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [
+    "compute"
+   ],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__calculate",
+     "args": {
+      "question": "2 + 2"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5271,
+   "prompt_ms": 463.87,
+   "wall": 1.295,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "n06",
+   "expect": "none",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-system"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-system__get_current_time",
+     "args": {}
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5272,
+   "prompt_ms": 487.744,
+   "wall": 1.187,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "o01",
+   "expect": "other:giap-weather",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-weather"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-weather__get_current_weather",
+     "args": {
+      "location": "Nairobi"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5272,
+   "prompt_ms": 527.296,
+   "wall": 1.579,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "o02",
+   "expect": "other:giap-memory",
+   "verdict": "steal",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "my sister"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5272,
+   "prompt_ms": 453.925,
+   "wall": 1.346,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "o03",
+   "expect": "other:giap-schedule",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-schedule"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-schedule__schedule_action",
+     "args": {
+      "id": "",
+      "action": "run_now"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5274,
+   "prompt_ms": 511.327,
+   "wall": 1.512,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "o04",
+   "expect": "other:giap-device-control",
+   "verdict": "ok",
+   "families": [],
+   "other": [
+    "other:giap-device-control"
+   ],
+   "arg_ok": null,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-device-control__set_device_state",
+     "args": {
+      "device_id": "kitchen lights",
+      "power": "false"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5269,
+   "prompt_ms": 471.156,
+   "wall": 1.628,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "x01",
+   "expect": "read",
+   "verdict": "ok",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "Wangari Maathai, how many years ago did she win the Nobel Peace Prize?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5284,
+   "prompt_ms": 525.103,
+   "wall": 2.015,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "x02",
+   "expect": "read",
+   "verdict": "error",
+   "families": [],
+   "other": [],
+   "arg_ok": null,
+   "head_answer_ok": false,
+   "calls": [],
+   "content": "",
+   "finish": "error",
+   "prompt_tokens": null,
+   "prompt_ms": null,
+   "wall": null,
+   "error": "HTTP 500: {\"error\":{\"code\":500,\"message\":\"Failed to parse input at pos 146: ; {\\\"name\\\": \\\"giap-knowledge__calculate\\\", \\\"parameters\\\": {\\\"question\\\": \\\"2355 metres in feet\\\"}}; {\\\"name\\\": \\\"giap-knowledge__look_up\\\", \\\"parameters\\\": {\\\"question\\\": \\\"What is the capital of Ethiopia?\\\"}}; {\\\"name\\\": \\\"giap-knowledge__look_up\\\", \\\"parameters\\\": {\\\"question\\\": \\\"2355 metres in feet\\\"}}; {\\\"name\\\": \\\"giap-knowl"
+  },
+  {
+   "arm": "S1",
+   "id": "w01",
+   "expect": "web",
+   "verdict": "other_tool",
+   "families": [],
+   "other": [
+    "other:giap-weather"
+   ],
+   "arg_ok": false,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-weather__get_weather_forecast",
+     "args": {
+      "location": "Nairobi",
+      "days": "1"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5274,
+   "prompt_ms": 527.306,
+   "wall": 1.685,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "w02",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "latest news on the Nairobi Expressway"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5274,
+   "prompt_ms": 565.025,
+   "wall": 1.626,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "w03",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "Samsung Galaxy A15 price in Kenya"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5277,
+   "prompt_ms": 517.705,
+   "wall": 1.502,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "w04",
+   "expect": "web",
+   "verdict": "wrong_family",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "US dollar to Kenyan shilling exchange rate today"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5279,
+   "prompt_ms": 452.807,
+   "wall": 1.471,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "w05",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "Is M-Pesa down right now?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5271,
+   "prompt_ms": 443.508,
+   "wall": 1.431,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "w06",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "opening hours of the Kenya National Archives"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5274,
+   "prompt_ms": 420.367,
+   "wall": 1.372,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "w07",
+   "expect": "web",
+   "verdict": "other_tool",
+   "families": [],
+   "other": [
+    "other:giap-weather"
+   ],
+   "arg_ok": false,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-weather__get_weather_forecast",
+     "args": {
+      "location": "Century Cinemax Junction",
+      "days": "3"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5275,
+   "prompt_ms": 458.559,
+   "wall": 1.581,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "w08",
+   "expect": "web",
+   "verdict": "wrong_family",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "Central Bank of Kenya interest rate decision"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5278,
+   "prompt_ms": 437.782,
+   "wall": 1.403,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "w09",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "well-reviewed Ethiopian restaurants in Kilimani"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5275,
+   "prompt_ms": 463.128,
+   "wall": 1.465,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "w10",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "When does the next SGR train leave Nairobi for Mombasa?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5277,
+   "prompt_ms": 447.565,
+   "wall": 1.61,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "w11",
+   "expect": "web",
+   "verdict": "wrong_family",
+   "families": [
+    "read"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__look_up",
+     "args": {
+      "question": "Kenyan Premier League table this season"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5275,
+   "prompt_ms": 447.803,
+   "wall": 1.432,
+   "error": null
+  },
+  {
+   "arm": "S1",
+   "id": "w12",
+   "expect": "web",
+   "verdict": "ok",
+   "families": [
+    "web"
+   ],
+   "other": [],
+   "arg_ok": true,
+   "head_answer_ok": null,
+   "calls": [
+    {
+     "name": "giap-knowledge__search_web",
+     "args": {
+      "question": "What is the current price of a litre of petrol in Nairobi this month?"
+     }
+    }
+   ],
+   "content": "",
+   "finish": "tool_calls",
+   "prompt_tokens": 5277,
+   "prompt_ms": 481.824,
+   "wall": 1.735,
+   "error": null
+  }
+ ]
+}

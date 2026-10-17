@@ -300,6 +300,7 @@ mod tests {
         &[
             ("knowledge.rs", include_str!("knowledge.rs")),
             ("wolfram.rs", include_str!("wolfram.rs")),
+            ("web_search.rs", include_str!("web_search.rs")),
             ("memory.rs", include_str!("memory.rs")),
             ("sensors.rs", include_str!("sensors.rs")),
         ]
@@ -320,13 +321,15 @@ mod tests {
     }
 
     /// Every MCP server source, keyed by extension; one list shared by the tool inventory and
-    /// the supervision guard. `wolfram.rs` is a second router composed onto `giap-knowledge`.
+    /// the supervision guard. `wolfram.rs` and `web_search.rs` are routers composed onto
+    /// `giap-knowledge`.
     const TOOL_SOURCES: &[(&str, &str)] = &[
         ("giap-context", include_str!("context.rs")),
         ("giap-device", include_str!("device.rs")),
         ("giap-device-control", include_str!("device_control.rs")),
         ("giap-knowledge", include_str!("knowledge.rs")),
         ("giap-knowledge", include_str!("wolfram.rs")),
+        ("giap-knowledge", include_str!("web_search.rs")),
         ("giap-memory", include_str!("memory.rs")),
         ("giap-orchestrator", include_str!("orchestrator.rs")),
         ("giap-schedule", include_str!("schedule.rs")),
@@ -399,7 +402,7 @@ mod tests {
         );
         assert_eq!(
             tools.len(),
-            32,
+            33,
             "the tool inventory changed. Update this count in the same commit as \
              the tool — the number is the record, and a stale one is how a count \
              read 64 for months while the real number was 65. This assertion has \

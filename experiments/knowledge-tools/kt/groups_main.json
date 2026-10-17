@@ -1,0 +1,62 @@
+[
+ {
+  "extension": "giap-memory",
+  "description": "The user's long-term memories: remember a fact or preference about them, recall what they have told you before, or forget something they no longer want kept.",
+  "core": true
+ },
+ {
+  "extension": "giap-system",
+  "description": "This machine and the current moment: the date, time and timezone, operating system and hostname, memory and disk usage, and desktop notifications.",
+  "core": true
+ },
+ {
+  "extension": "giap-toolkit",
+  "description": "Which groups of tools are loaded for this conversation, and loading another group when a capability you need is not currently available.",
+  "core": true
+ },
+ {
+  "extension": "giap-schedule",
+  "description": "Reminders, alarms, timers, recurring routines and scheduled tasks: set a one-shot timer for a few minutes or hours from now, create a repeating schedule, list or inspect what is scheduled, change or pause or delete one, run one now, and review past runs. Anything about doing something later or every day at a certain time.",
+  "core": false
+ },
+ {
+  "extension": "giap-weather",
+  "description": "The weather: current conditions and the forecast for the days ahead, temperature, rain, whether to take an umbrella, for here or another place.",
+  "core": false
+ },
+ {
+  "extension": "giap-knowledge",
+  "description": "General reference knowledge and factual lookup: encyclopedia and Wikipedia articles, definitions of words, books and authors, short factual answers about history, science, geography, people and places, and computed answers such as arithmetic, unit and currency conversion, dates and statistics.",
+  "core": false
+ },
+ {
+  "extension": "giap-device",
+  "description": "The smart-home devices in this house: which lights, plugs, sensors, thermostats and appliances are registered, which rooms they are in, whether they are online, and what state they report.",
+  "core": false
+ },
+ {
+  "extension": "giap-device-control",
+  "description": "Actually operating the smart-home devices: turning a light or plug or appliance on and off, changing brightness or colour or temperature, opening or closing something, setting a device to a new state.",
+  "core": false
+ },
+ {
+  "extension": "giap-sensors",
+  "description": "Sensor readings over time: temperature, humidity, air quality, power use and other measurements from sensors in the house, their latest values and their history.",
+  "core": false
+ },
+ {
+  "extension": "giap-context",
+  "description": "The speaker's own personal context, from sources they connected: what a camera or sensor of theirs has recorded, searched by meaning or listed by recency. Read-only, and scoped to whoever is speaking.",
+  "core": false
+ },
+ {
+  "extension": "giap-travel",
+  "description": "Getting somewhere: directions and a map link to a place, or a taxi or ride with Uber or Bolt to the airport, a mall, an office or home.",
+  "core": false
+ },
+ {
+  "extension": "giap-orchestrator",
+  "description": "Handing a piece of work to a named specialist agent that runs on its own and reports back: research a question in depth, work through a longer task under a saved role, or have a second agent do something while this conversation carries on.",
+  "core": false
+ }
+]
