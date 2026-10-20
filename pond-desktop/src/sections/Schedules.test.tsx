@@ -10,6 +10,7 @@ vi.mock("../api/PondApiClient", () => ({
   api: {
     listSchedules: vi.fn(),
     createSchedule: vi.fn(),
+    updateSchedule: vi.fn(),
     deleteSchedule: vi.fn(),
     pauseSchedule: vi.fn(),
     resumeSchedule: vi.fn(),
@@ -243,5 +244,123 @@ describe("Schedules section", () => {
     vi.mocked(api.listSchedules).mockResolvedValue([]);
     renderSchedules();
     await waitFor(() => expect(api.listSchedules).toHaveBeenCalledTimes(1));
+  });
+});
+
+// ── Editing must not change timing it was not asked to ───────────────────────
+
+describe("Schedules edit", () => {
+  async function openEdit(schedule: Schedule) {
+    vi.mocked(api.listSchedules).mockResolvedValue([schedule]);
+    vi.mocked(api.updateSchedule).mockResolvedValue(schedule);
+    renderSchedules();
+    await waitFor(() => screen.getByText(schedule.name));
+    fireEvent.click(screen.getByRole("button", { name: "Edit schedule" }));
+  }
+
+  function save() {
+    fireEvent.click(screen.getByRole("button", { name: "Update Schedule" }));
+  }
+
+  it("a rename sends the name and no timing fields", async () => {
+    await openEdit({ ...activeSchedule, cron: "0 0 7 * * 1-5", timezone: "UTC" });
+    fireEvent.change(screen.getByLabelText("Schedule name"), { target: { value: "Weekday briefing" } });
+    save();
+    await waitFor(() => expect(api.updateSchedule).toHaveBeenCalled());
+    expect(api.updateSchedule).toHaveBeenCalledWith("sched-morning", { name: "Weekday briefing" });
+  });
+
+  it.each([
+    ["0 0 7 * * 1-5", "Weekly"],
+    ["0 0 7 1,15 * *", "Custom"],
+    ["0 */15 * * * *", "Custom"],
+  ])("%s opens as %s and is left unchanged on save", async (cron, preset) => {
+    await openEdit({ ...activeSchedule, cron, timezone: "UTC" });
+    expect(screen.getByRole("button", { name: preset }).getAttribute("aria-pressed")).toBe("true");
+    fireEvent.change(screen.getByLabelText("Schedule prompt"), { target: { value: "New prompt" } });
+    save();
+    await waitFor(() => expect(api.updateSchedule).toHaveBeenCalled());
+    expect(api.updateSchedule).toHaveBeenCalledWith("sched-morning", { prompt: "New prompt" });
+  });
+
+  it("a weekday range opens with every one of its days selected", async () => {
+    await openEdit({ ...activeSchedule, cron: "0 0 7 * * 1-5", timezone: "UTC" });
+    const days = screen.getByRole("group", { name: "Days of week" });
+    const pressed = Array.from(days.querySelectorAll("button"))
+      .filter((b) => b.getAttribute("aria-pressed") === "true")
+      .map((b) => b.textContent);
+    expect(pressed).toEqual(["Mon", "Tue", "Wed", "Thu", "Fri"]);
+  });
+
+  const oneOff: Schedule = {
+    ...activeSchedule,
+    cron: "@once",
+    fire_at: "2099-03-14T06:30:00Z",
+    timezone: "Africa/Nairobi",
+  };
+
+  it("a one-off opens with its date and keeps it on a rename", async () => {
+    await openEdit(oneOff);
+    expect(screen.getByRole("button", { name: "Once" }).getAttribute("aria-pressed")).toBe("true");
+    expect((screen.getByLabelText("Run date") as HTMLInputElement).value).toBe("2099-03-14");
+    expect((screen.getByLabelText("Hour") as HTMLSelectElement).value).toBe("9");
+    fireEvent.change(screen.getByLabelText("Schedule name"), { target: { value: "Pi day" } });
+    save();
+    await waitFor(() => expect(api.updateSchedule).toHaveBeenCalled());
+    expect(api.updateSchedule).toHaveBeenCalledWith("sched-morning", { name: "Pi day" });
+  });
+
+  it("a one-off's new time is sent as fire_at on its own date, not a cron", async () => {
+    await openEdit(oneOff);
+    fireEvent.change(screen.getByLabelText("Hour"), { target: { value: "10" } });
+    save();
+    await waitFor(() => expect(api.updateSchedule).toHaveBeenCalled());
+    expect(api.updateSchedule).toHaveBeenCalledWith("sched-morning", {
+      fire_at: "2099-03-14T07:30:00.000Z",
+    });
+  });
+
+  it("a one-off moved to another date sends that date", async () => {
+    await openEdit(oneOff);
+    fireEvent.change(screen.getByLabelText("Run date"), { target: { value: "2099-12-01" } });
+    save();
+    await waitFor(() => expect(api.updateSchedule).toHaveBeenCalled());
+    expect(api.updateSchedule).toHaveBeenCalledWith("sched-morning", {
+      fire_at: "2099-12-01T06:30:00.000Z",
+    });
+  });
+
+  it("a one-off in the past is refused, not sent", async () => {
+    await openEdit({ ...oneOff, fire_at: "2099-03-14T06:30:00Z" });
+    fireEvent.change(screen.getByLabelText("Run date"), { target: { value: "2000-01-01" } });
+    save();
+    await waitFor(() => expect(screen.getByText(/already passed/)).toBeTruthy());
+    expect(api.updateSchedule).not.toHaveBeenCalled();
+  });
+
+  it("saving with nothing changed sends nothing", async () => {
+    await openEdit({ ...activeSchedule, timezone: "UTC" });
+    save();
+    await waitFor(() => expect(screen.getByText(/Nothing changed/)).toBeTruthy());
+    expect(api.updateSchedule).not.toHaveBeenCalled();
+  });
+});
+
+describe("Schedules create", () => {
+  it("a dated one-off is created pinned to its date and year", async () => {
+    vi.mocked(api.listSchedules).mockResolvedValue([]);
+    vi.mocked(api.createSchedule).mockResolvedValue(activeSchedule);
+    renderSchedules();
+    await waitFor(() => expect(api.listSchedules).toHaveBeenCalled());
+    fireEvent.click(screen.getAllByRole("button", { name: /New Schedule/ })[0]);
+    fireEvent.change(screen.getByLabelText("Schedule name"), { target: { value: "Pi day" } });
+    fireEvent.change(screen.getByLabelText("Schedule prompt"), { target: { value: "Bake" } });
+    fireEvent.click(screen.getByRole("button", { name: "Once" }));
+    fireEvent.change(screen.getByLabelText("Run date"), { target: { value: "2099-03-14" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create Schedule" }));
+    await waitFor(() => expect(api.createSchedule).toHaveBeenCalled());
+    expect(api.createSchedule).toHaveBeenCalledWith(
+      expect.objectContaining({ cron: "0 0 8 14 3 * 2099", once: true }),
+    );
   });
 });

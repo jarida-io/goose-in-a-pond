@@ -57,6 +57,11 @@ void i18n.use(initReactI18next).init({
       identity: 'About you', preference: 'Preference', correction: 'Correction', relationship: 'People',
       project: 'Project', routine: 'Habit', knowledge: 'Knowledge', context: 'Right now',
     },
+  }, schedules: {
+    date: 'Date', dateLabel: 'Run date',
+    onceAt: 'Runs once on {{date}} at {{time}}',
+    oncePast: 'That date and time has already passed. Pick a moment in the future.',
+    unchanged: 'Nothing changed, so the schedule was left as it was.',
   }, pairing: {
     unavailable: 'HTTPS pairing is unavailable. Check the Pond server logs.',
     fingerprint: 'Public-key fingerprint', address: 'HTTPS address',

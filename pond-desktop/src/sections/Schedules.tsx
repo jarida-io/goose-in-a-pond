@@ -14,9 +14,19 @@ import { HP_PATHS } from "../hub/primitives/icons";
 import { type RoutineId, ROUTINES } from "../hub/data/routines";
 import "../hub/views/routines.css";
 import { ZonePicker } from "../components/ZonePicker";
+import i18n from "../i18n";
+import {
+  type RepeatPattern,
+  type ScheduleConfig,
+  DAY_VALUES,
+  HOUR_STEPS,
+  buildCron,
+  defaultConfig,
+  scheduleToConfig,
+  zonedInstant,
+} from "./scheduleTiming";
 
 /* ── Repeat patterns ──────────────────────────────────────── */
-type RepeatPattern = "once" | "hourly" | "daily" | "weekly" | "monthly" | "custom";
 
 const REPEAT_PATTERNS: { key: RepeatPattern; label: string }[] = [
   { key: "once",    label: "Once"    },
@@ -28,54 +38,11 @@ const REPEAT_PATTERNS: { key: RepeatPattern; label: string }[] = [
 ];
 
 const DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-// cron day-of-week: 1=Mon … 7=Sun (or 0=Sun in some engines; use 1-7)
-const DAY_VALUES = [1, 2, 3, 4, 5, 6, 7];
 
-interface ScheduleConfig {
-  // hourly
-  everyNHours: number;
-  startMinute: number;
-  // daily / weekly / monthly
-  hour: number;
-  minute: number;
-  // weekly
-  daysOfWeek: number[];
-  // monthly
-  dayOfMonth: number;
-  // custom
-  customCron: string;
-}
-
-function defaultConfig(): ScheduleConfig {
-  return {
-    everyNHours: 1,
-    startMinute: 0,
-    hour: 8,
-    minute: 0,
-    daysOfWeek: [1],   // Monday
-    dayOfMonth: 1,
-    customCron: "0 0 8 * * *",
-  };
-}
-
-function buildCron(repeat: RepeatPattern, cfg: ScheduleConfig): string {
-  switch (repeat) {
-    case "once":
-      // A daily cron at that time; `once: true` makes the server fire only its next occurrence.
-      return `0 ${cfg.minute} ${cfg.hour} * * *`;
-    case "hourly":
-      return `0 ${cfg.startMinute} */${cfg.everyNHours} * * *`;
-    case "daily":
-      return `0 ${cfg.minute} ${cfg.hour} * * *`;
-    case "weekly": {
-      const days = cfg.daysOfWeek.length ? cfg.daysOfWeek.join(",") : "1";
-      return `0 ${cfg.minute} ${cfg.hour} * * ${days}`;
-    }
-    case "monthly":
-      return `0 ${cfg.minute} ${cfg.hour} ${cfg.dayOfMonth} * *`;
-    default:
-      return cfg.customCron;
-  }
+/** Minutes the time picker offers, plus a stored minute off the five-minute grid so it shows. */
+function minuteOptions(current: number): number[] {
+  const grid = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55];
+  return grid.includes(current) ? grid : [...grid, current].sort((a, b) => a - b);
 }
 
 function ordinal(n: number): string {
@@ -89,7 +56,7 @@ function humanPreview(repeat: RepeatPattern, cfg: ScheduleConfig, timezone: stri
   const tz = timezone !== "UTC" ? ` (${timezone})` : "";
   switch (repeat) {
     case "once":
-      return `Runs once at ${timeStr}${tz}`;
+      return i18n.t("schedules.onceAt", { date: cfg.date, time: timeStr }) + tz;
     case "hourly":
       return `Runs every ${cfg.everyNHours === 1 ? "hour" : `${cfg.everyNHours} hours`} at :${String(cfg.startMinute).padStart(2, "0")}${tz}`;
     case "daily":
@@ -120,61 +87,6 @@ function timeAgo(dateStr: string): string {
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
-}
-
-function parseCronToConfig(cron: string): { repeat: RepeatPattern; config: ScheduleConfig } {
-  const cfg = defaultConfig();
-  const parts = cron.trim().split(/\s+/);
-  if (parts.length !== 6) return { repeat: "custom", config: { ...cfg, customCron: cron } };
-
-  const [, min, hour, dom, , dow] = parts;
-
-  // Hourly: "0 M */N * * *"
-  if (hour.startsWith("*/") && dom === "*" && dow === "*") {
-    cfg.everyNHours = parseInt(hour.slice(2)) || 1;
-    cfg.startMinute = parseInt(min) || 0;
-    return { repeat: "hourly", config: cfg };
-  }
-
-  const h = parseInt(hour);
-  const m = parseInt(min);
-  if (isNaN(h) || isNaN(m)) return { repeat: "custom", config: { ...cfg, customCron: cron } };
-  cfg.hour = h;
-  cfg.minute = m;
-
-  // Monthly: "0 M H D * *"
-  if (dom !== "*" && dow === "*") {
-    cfg.dayOfMonth = parseInt(dom) || 1;
-    return { repeat: "monthly", config: cfg };
-  }
-
-  // Weekly: "0 M H * * d,d,d"
-  if (dom === "*" && dow !== "*") {
-    cfg.daysOfWeek = dow.split(",").map((d) => parseInt(d)).filter((d) => !isNaN(d));
-    if (cfg.daysOfWeek.length === 0) cfg.daysOfWeek = [1];
-    return { repeat: "weekly", config: cfg };
-  }
-
-  // Daily: "0 M H * * *"
-  if (dom === "*" && dow === "*") {
-    return { repeat: "daily", config: cfg };
-  }
-
-  return { repeat: "custom", config: { ...cfg, customCron: cron } };
-}
-
-/** Picker state for a schedule; one-shots come from `fire_at`, as their cron is the "@once" sentinel. */
-function scheduleToConfig(s: Schedule): { repeat: RepeatPattern; config: ScheduleConfig } {
-  if (!s.fire_at) return parseCronToConfig(s.cron);
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: s.timezone || "UTC",
-    hour12: false,
-    hour: "2-digit",
-    minute: "2-digit",
-  }).formatToParts(new Date(s.fire_at));
-  const hour = parseInt(parts.find((p) => p.type === "hour")?.value ?? "0", 10) % 24;
-  const minute = parseInt(parts.find((p) => p.type === "minute")?.value ?? "0", 10);
-  return { repeat: "once", config: { ...defaultConfig(), hour, minute } };
 }
 
 /* ── Recipe / prompt presets ───────────────────────────────── */
@@ -315,6 +227,8 @@ export function Schedules() {
   // Human-friendly repeat picker state
   const [repeat, setRepeat]           = useState<RepeatPattern>("daily");
   const [schedCfg, setSchedCfg]       = useState<ScheduleConfig>(defaultConfig());
+  // What the edit form opened with, so an update sends only the fields that changed.
+  const [editBaseline, setEditBaseline] = useState<{ name: string; prompt: string; timezone: string; timing: string } | null>(null);
 
   // Run history per schedule (expanded state + cached runs)
   const [expandedRuns, setExpandedRuns] = useState<string | null>(null);
@@ -381,9 +295,20 @@ export function Schedules() {
     });
   }
 
+  /** A one-off's instant in the form's zone, or `null` (with an error shown) if it has passed. */
+  function onceInstant(): Date | null {
+    const at = zonedInstant(schedCfg.date, schedCfg.hour, schedCfg.minute, timezone);
+    if (Number.isNaN(at.getTime()) || at.getTime() <= Date.now()) {
+      flashMsg(i18n.t("schedules.oncePast"), true);
+      return null;
+    }
+    return at;
+  }
+
   async function handleCreate() {
     const finalCron = pickerCron.trim();
     if (!name.trim() || !finalCron || !prompt.trim()) return;
+    if (repeat === "once" && !onceInstant()) return;
     setSubmitting(true);
     try {
       await api.createSchedule({
@@ -414,15 +339,29 @@ export function Schedules() {
     if (!editingSchedule) return;
     setSubmitting(true);
     try {
-      const patch: { name?: string; cron?: string; prompt?: string; timezone?: string; once?: boolean } = {};
-      if (name.trim()) patch.name = name.trim();
-      if (pickerCron.trim()) patch.cron = pickerCron.trim();
-      if (prompt.trim()) patch.prompt = prompt.trim();
-      if (timezone) patch.timezone = timezone;
-      patch.once = repeat === "once";
+      const base = editBaseline ?? { name: "", prompt: "", timezone: "", timing: "" };
+      const patch: { name?: string; cron?: string; prompt?: string; timezone?: string; fire_at?: string } = {};
+      if (name.trim() && name.trim() !== base.name) patch.name = name.trim();
+      if (prompt.trim() && prompt.trim() !== base.prompt) patch.prompt = prompt.trim();
+      if (timezone && timezone !== base.timezone) patch.timezone = timezone;
+      const timingChanged = pickerCron !== base.timing;
+      if (repeat === "once") {
+        // A one-off's instant depends on its zone, so a new zone re-derives it too.
+        if (timingChanged || patch.timezone) {
+          const at = onceInstant();
+          if (!at) return;
+          patch.fire_at = at.toISOString();
+        }
+      } else if (timingChanged && pickerCron.trim()) {
+        patch.cron = pickerCron.trim();
+      }
+      if (Object.keys(patch).length === 0) {
+        closeModal();
+        flashMsg(i18n.t("schedules.unchanged"));
+        return;
+      }
       await api.updateSchedule(editingSchedule.id, patch);
-      setEditingSchedule(null);
-      setShowForm(false);
+      closeModal();
       flashMsg("Schedule updated.");
       load();
     } catch (e) {
@@ -500,6 +439,7 @@ export function Schedules() {
   function closeModal() {
     setShowForm(false);
     setEditingSchedule(null);
+    setEditBaseline(null);
   }
 
   function startEdit(s: Schedule) {
@@ -509,6 +449,12 @@ export function Schedules() {
     setTimezone(s.timezone ?? "UTC");
     setRepeat(parsed.repeat);
     setSchedCfg(parsed.config);
+    setEditBaseline({
+      name: s.name,
+      prompt: s.prompt,
+      timezone: s.timezone ?? "UTC",
+      timing: buildCron(parsed.repeat, parsed.config),
+    });
     setEditingSchedule(s);
     setShowForm(true);
   }
@@ -575,7 +521,7 @@ export function Schedules() {
                       onChange={(e) => updateCfg({ everyNHours: Number(e.target.value) })}
                       aria-label="Every N hours"
                     >
-                      {[1, 2, 3, 4, 6, 8, 12].map((n) => (
+                      {HOUR_STEPS.map((n) => (
                         <option key={n} value={n}>{n}</option>
                       ))}
                     </select>
@@ -594,6 +540,22 @@ export function Schedules() {
                     aria-label="Starting at minute"
                   />
                 </div>
+              </div>
+            )}
+
+            {repeat === "once" && (
+              <div className="sched-modal__field">
+                <label className="sched-modal__label--row">
+                  <Calendar size={12} style={{ color: "var(--grey-500)" }} />
+                  {i18n.t("schedules.date")}
+                </label>
+                <input
+                  type="date"
+                  className="sched-modal__input"
+                  value={schedCfg.date}
+                  onChange={(e) => e.target.value && updateCfg({ date: e.target.value })}
+                  aria-label={i18n.t("schedules.dateLabel")}
+                />
               </div>
             )}
 
@@ -622,7 +584,7 @@ export function Schedules() {
                       onChange={(e) => updateCfg({ minute: Number(e.target.value) })}
                       aria-label="Minute"
                     >
-                      {[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55].map((m) => (
+                      {minuteOptions(schedCfg.minute).map((m) => (
                         <option key={m} value={m}>{String(m).padStart(2, "0")}</option>
                       ))}
                     </select>
