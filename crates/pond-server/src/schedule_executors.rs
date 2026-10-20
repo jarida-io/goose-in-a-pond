@@ -94,8 +94,23 @@ impl AgentScheduleExecutor {
         };
 
         tracing::info!("[scheduler] executing prompt for task {task_id}");
-        let response = self.agent.chat(request).await?;
+        // An engine failure is an `Err` from the adapter, never reply text, so the run is failed.
+        let response = match self.agent.chat(request).await {
+            Ok(response) => response,
+            Err(e) => {
+                tracing::warn!(
+                    kind = "schedule_prompt_failed",
+                    task_id = %task_id,
+                    error = %e,
+                    "[scheduler] task {task_id} failed"
+                );
+                return Err(e);
+            }
+        };
         tracing::info!(
+            kind = "schedule_prompt_completed",
+            task_id = %task_id,
+            chars = response.text.len(),
             "[scheduler] task {task_id} completed ({} chars)",
             response.text.len()
         );
@@ -280,5 +295,55 @@ impl ScheduleExecutor for DeferredExecutor {
                  (server is still starting up)"
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream::BoxStream;
+    use pond_core::models::ports::agent::{AgentResponse, AgentStreamEvent};
+    use pond_core::user_data::mocks::mock_session::InMemorySessionStorage;
+
+    /// An engine whose model call failed: the adapter reports it as an `Err`.
+    struct FailingEngine;
+
+    #[async_trait]
+    impl Agent for FailingEngine {
+        async fn chat(&self, _request: AgentRequest) -> Result<AgentResponse> {
+            bail!("The model could not run: Execution error: null result from llama cpp")
+        }
+
+        async fn chat_stream(
+            &self,
+            _request: AgentRequest,
+        ) -> Result<BoxStream<'static, Result<AgentStreamEvent>>> {
+            unimplemented!("a schedule runs through chat")
+        }
+    }
+
+    #[tokio::test]
+    async fn an_errored_turn_is_a_failed_run_carrying_the_error() {
+        let executor = AgentScheduleExecutor::new(
+            Arc::new(FailingEngine),
+            Arc::new(InMemorySessionStorage::new()),
+            None,
+            1,
+            None,
+            None,
+        );
+        let err = executor
+            .execute(
+                "task-1",
+                &TaskKind::AgentPrompt {
+                    prompt: "Water the plants".to_string(),
+                },
+            )
+            .await
+            .expect_err("an engine failure must not be recorded as a completed run");
+        assert_eq!(
+            err.to_string(),
+            "The model could not run: Execution error: null result from llama cpp"
+        );
     }
 }

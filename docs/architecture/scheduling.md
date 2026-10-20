@@ -134,6 +134,18 @@ from goose's session history when an attempt armed the check and streamed no tex
 shows it (`kind="completeness_reply_shown"`). A turn that still has no text (tool calls only, as on
 2026-10-10) fails with an error naming the tools it called, logged as `kind="turn_without_reply"`.
 
+**A failed model call is a failed run (2026-10-20).** When the engine itself fails (llama.cpp's
+"null result", LiteRT-LM's `engine_create failed`), goose does not return an error: it writes
+"Ran into this error: ... Please retry if you think this is a transient or recoverable error." as
+the turn's reply. The executor took that as the answer, so the Jetson recorded such runs
+`completed` and notified the household with goose's prose. The provider shim now records the
+typed `ProviderError` of each session's latest provider call (`SessionControls::provider_failure`,
+cleared when a later call starts, as after a compaction and retry), and the adapter's `chat()`
+turns a reply whose turn ended on one into an `Err` ("The model could not run: <error>"), logged
+as `kind="turn_engine_failed"`. The scheduler records the run `failed` with that error, so its
+notification says it failed; the executor logs `kind="schedule_prompt_failed"`. The streaming
+chat path is unchanged: there the user still sees goose's text.
+
 ## Deferred Executor Pattern
 
 The scheduler needs `Arc<dyn Agent>` but is created before the agent (circular dependency). Solution:
