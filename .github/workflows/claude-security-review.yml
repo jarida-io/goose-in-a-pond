@@ -1,0 +1,90 @@
+name: Claude Security Review
+
+# A security pass on each PR, separate from Claude Code Review because it asks a different
+# question: not "is this change correct" but "what can an attacker do with it". cargo audit, OSV,
+# gitleaks and CodeQL cover known advisories, secrets and pattern-shaped bugs. This covers the
+# logic in between, such as an auth check that a new route skips or a path that a new handler
+# trusts.
+#
+# It comments; it does not block. The findings are a model's reading, not proof, so a person
+# decides what to do with them. Ask for another pass on a later push with `@claude` and the same
+# request (claude.yml).
+
+on:
+  pull_request:
+    # Same trigger as claude-code-review.yml, and for the same reason: a review per push mostly
+    # restates the first one.
+    types: [opened, ready_for_review, reopened]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - ".ai/**"
+      - "LICENSE"
+
+concurrency:
+  group: claude-security-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  security-review:
+    # Drafts wait until they are ready. A fork PR gets neither repository secrets nor an OIDC
+    # token, so the action could only fail there (scripts/ci/README.md).
+    if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude security review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review only the changes in this pull request for security vulnerabilities. Read
+            `gh pr diff`, then read whatever surrounding code you need to decide whether a
+            problem is real. The PR branch is checked out in the working directory.
+
+            Context: Goose In A Pond is a fully local smart-home assistant. pond-server holds
+            household memory, device control and pairing material, and runs on a home network
+            on a Jetson. docs/auth-network-posture.md describes the trust zones (loopback, LAN,
+            tailnet) and the checks on each. Look hardest at:
+            - Authentication and authorization: routes in crates/pond-api/src/routes.rs that
+              skip the auth middleware, the loopback host guard (host_guard.rs), pairing and
+              profile scoping, and names added to DIRECT_DISPATCH_ALLOWLIST, which grants a
+              tool to any paired client without a chat turn.
+            - Untrusted input reaching a shell, a filesystem path, SQL built from strings, a
+              URL the server fetches (SSRF), or an archive being extracted.
+            - Secrets: credentials logged, returned in a response, or committed.
+            - Crypto and TLS: weakened verification, nonce reuse, non-constant-time comparison
+              of secrets.
+            - MCP tools exposed to the model (crates/pond-mcp-server/src/) that act on the
+              household without the user's request.
+            - GitHub workflow changes: untrusted event fields interpolated into `run:`,
+              `pull_request_target`, or permissions widened.
+
+            Report only findings you can tie to a specific line in this diff, with a concrete
+            way to exploit it. Leave out style, hardening that is nice to have, issues that
+            exist only in unchanged code, and anything already caught by cargo audit, OSV,
+            gitleaks or CodeQL. A short list someone trusts is worth more than a long one.
+
+            Post the result with `gh pr comment` as one comment headed "Security review".
+            For each finding give severity (critical, high, medium or low), file and line,
+            how it is exploited, and the fix. Use
+            `mcp__github_inline_comment__create_inline_comment` (with `confirmed: true`) only
+            for critical and high findings. If you find nothing, say so in one line, with the
+            areas you checked.
+          claude_args: |
+            --allowedTools "Read,Grep,Glob,mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*)"

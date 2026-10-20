@@ -41,3 +41,18 @@ Security scans also run for stacked PRs and explicitly cover the Goose
 standalone lockfile and Matter lockfile, which previously fell outside the
 OSV job. The integration branch includes the separately reviewed Matter fix
 so the expanded scanner validates the complete set of remediations.
+
+## Claude reviews on pull requests
+
+Two workflows comment on each same-repository PR when it is opened, reopened or
+marked ready. Both use the `CLAUDE_CODE_OAUTH_TOKEN` secret and skip fork PRs.
+
+- `claude-code-review.yml` asks whether the change is correct.
+- `claude-security-review.yml` asks what an attacker could do with it. It covers
+  the ground between the scanners: an auth check a new route skips, a path or URL
+  a handler trusts, a tool added to `DIRECT_DISPATCH_ALLOWLIST`. It reports only
+  findings tied to a line of the diff, comments, and never fails the PR, because a
+  model's reading is not proof.
+
+Neither runs again on later pushes. Ask for a fresh pass with an `@claude` comment,
+which `claude.yml` handles.
