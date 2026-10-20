@@ -13,4 +13,15 @@ ignore = [
     # Not linked into pond-server (`cargo tree -p pond-server -i rsa --edges normal` is empty);
     # GIAP crypto is HMAC-SHA256 and sha256 hashes. Remove when rsa ships a fixed version.
     "RUSTSEC-2023-0071",
+
+    # zip 8.6.0: extract() keeps SUID/SGID bits (0367), creates symlinks pointing outside the
+    # destination (0368) and applies permissions through symlinks (0369). The fix is zip 9, but
+    # candle-core, docx-rs and umya-spreadsheet (latest releases, via goose) require zip ^8.6.0, so
+    # this lockfile cannot drop 8.x. Nothing here calls ZipArchive::extract() or
+    # ZipStreamReader::extract(): pond-server reads named entries into fixed paths, goose-cli
+    # iterates through enclosed_name(). Details and review date in osv-scanner.toml. Remove when
+    # those crates accept zip 9.
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
 ]
