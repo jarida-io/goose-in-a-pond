@@ -1,7 +1,7 @@
 # Reviewed exceptions for osv-scanner.
 #
-# Every entry here is an advisory with NO upstream fix. Anything that has a
-# fixed version is deliberately absent: an advisory you could upgrade away from
+# Every entry here is an advisory with no fix this tree can take. Anything a
+# lockfile here can upgrade away from is deliberately absent: such an advisory
 # does not belong in an ignore file, and putting it here would convert a real
 # finding into a silent one.
 #
@@ -9,8 +9,10 @@
 # reports the advisory again, which is the point -- an unmaintained crate that
 # is still unmaintained a year later is worth re-deciding, not re-ignoring.
 #
-# Reviewed 2026-09-29. Checked against the scan on jarida-io/goose-in-a-pond
-# main at that date; the fixed-version column was empty ("--") for all of them.
+# Reviewed 2026-09-29, extended 2026-10-20. Checked against the scan on
+# jarida-io/goose-in-a-pond main at those dates. The fixed-version column was
+# empty ("--") for every entry except zip, whose section says why its fix is
+# out of reach.
 
 # ── Unmaintained-crate notices ───────────────────────────────────────────────
 #
@@ -64,12 +66,52 @@ id = "RUSTSEC-2024-0449"
 ignoreUntil = 2027-03-31
 reason = "unsafe-libyaml is unmaintained (archived 2024-03-25; 0.2.11 is the last release). No fixed version exists. Arrives through serde_yaml 0.9 (itself deprecated), which pond-core, pond-api and goose use directly, so moving off it is ours to do: the advisory names saphyr / serde-saphyr as safe-Rust replacements."
 
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0370"
+ignoreUntil = 2027-03-31
+reason = "zvariant is unmaintained as a standalone crate: zbus 6 absorbed it (its wire module). No fixed version of zvariant exists. It arrives through zbus 5, which pond-connect uses for NetworkManager and deliberately shares with notify-rust (pond-mcp-server); notify-rust 4.18.2, the latest release, still requires zbus ^5. Move pond-connect and notify-rust to zbus 6 together once notify-rust allows it, and this entry goes with them."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0371"
+ignoreUntil = 2027-03-31
+reason = "zbus_names is unmaintained as a standalone crate: zbus 6 absorbed it (its names module). No fixed version of zbus_names exists. It arrives through zbus 5, which pond-connect uses for NetworkManager and deliberately shares with notify-rust (pond-mcp-server); notify-rust 4.18.2, the latest release, still requires zbus ^5. Move pond-connect and notify-rust to zbus 6 together once notify-rust allows it, and this entry goes with them."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0372"
+ignoreUntil = 2027-03-31
+reason = "zvariant_derive is unmaintained as a standalone crate: zbus 6 absorbed it (its derive macros). No fixed version of zvariant_derive exists. It arrives through zbus 5, which pond-connect uses for NetworkManager and deliberately shares with notify-rust (pond-mcp-server); notify-rust 4.18.2, the latest release, still requires zbus ^5. Move pond-connect and notify-rust to zbus 6 together once notify-rust allows it, and this entry goes with them."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0374"
+ignoreUntil = 2027-03-31
+reason = "basic-toml is unmaintained (repository archived 2025-03-02, last release the next day). No fixed version exists. It appears only in goose/Cargo.lock, through askama_derive 0.16 in the goose fork; the workspace lockfile GIAP builds from does not contain it. The fix is upstream askama moving to toml, then a goose sync."
+
 # ── A real vulnerability with no upstream fix ────────────────────────────────
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2023-0071"
 ignoreUntil = 2027-03-31
 reason = "rsa: Marvin Attack, key recovery through timing side channels (CVSS 5.9). No fixed version exists -- the fix requires a constant-time rewrite upstream. Reached transitively; GIAP does not perform RSA private-key operations on attacker-controlled timing paths. Named in security.yml's own comment. Re-check whether a fixed rsa release exists at the review date."
+
+# ── A fixed version exists, but no lockfile here can reach it ───────────────
+#
+# The rule above still holds: these are listed only because every crate that pulls zip
+# 8 has no release that allows 9, and the vulnerable function is never called.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0367"
+ignoreUntil = 2027-01-31
+reason = "zip 8.6.0: extract() keeps SUID/SGID/sticky bits from the archive. The fix is zip 9, but candle-core 0.11.0, docx-rs 0.4.22 and umya-spreadsheet 3.1.1 (the latest releases, via goose) all require zip ^8.6.0, so no lockfile here can drop 8.x until they move. The advisory is confined to ZipArchive::extract() and ZipStreamReader::extract(); nothing in this tree calls either. pond-server's model_download.rs reads two named entries by index into fixed paths; goose-cli's update.rs (Windows only) iterates entries through enclosed_name() and writes plain files without applying permissions; none of the three crates calls extract(). Re-check at the review date whether they accept zip 9, then bump and remove this entry."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0368"
+ignoreUntil = 2027-01-31
+reason = "zip 8.6.0: extract() creates symlinks whose targets point outside the destination. The fix is zip 9, but candle-core 0.11.0, docx-rs 0.4.22 and umya-spreadsheet 3.1.1 (the latest releases, via goose) all require zip ^8.6.0, so no lockfile here can drop 8.x until they move. The advisory is confined to ZipArchive::extract() and ZipStreamReader::extract(); nothing in this tree calls either. pond-server's model_download.rs reads two named entries by index into fixed paths; goose-cli's update.rs (Windows only) iterates entries through enclosed_name() and writes plain files without applying permissions; none of the three crates calls extract(). Re-check at the review date whether they accept zip 9, then bump and remove this entry."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0369"
+ignoreUntil = 2027-01-31
+reason = "zip 8.6.0: extract() applies Unix permissions through extracted symlinks. The fix is zip 9, but candle-core 0.11.0, docx-rs 0.4.22 and umya-spreadsheet 3.1.1 (the latest releases, via goose) all require zip ^8.6.0, so no lockfile here can drop 8.x until they move. The advisory is confined to ZipArchive::extract() and ZipStreamReader::extract(); nothing in this tree calls either. pond-server's model_download.rs reads two named entries by index into fixed paths; goose-cli's update.rs (Windows only) iterates entries through enclosed_name() and writes plain files without applying permissions; none of the three crates calls extract(). Re-check at the review date whether they accept zip 9, then bump and remove this entry."
 
 # ── Go: present in the module graph, not in the build ────────────────────────
 
