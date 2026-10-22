@@ -13,8 +13,6 @@ import "./suggestion-queue.css";
 export interface SuggestionQueueProps {
   /** Null before a chat session exists; proposals need one, suggestions don't. */
   sessionId: string | null;
-  /** The column's head: one sentence about this house, at most 72 chars. */
-  houseLine: string;
   /** Sends a prompt to chat. Without it the suggestions half stays folded. */
   onAsk?: (prompt: string) => void;
 }
@@ -58,7 +56,7 @@ function useShortPanel(): boolean {
   return short;
 }
 
-export function SuggestionQueue({ sessionId, houseLine, onAsk }: SuggestionQueueProps): React.ReactElement {
+export function SuggestionQueue({ sessionId, onAsk }: SuggestionQueueProps): React.ReactElement {
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   // By id, not index, so answering a row above can't swap the open card. Null means the first.
@@ -236,12 +234,14 @@ export function SuggestionQueue({ sessionId, houseLine, onAsk }: SuggestionQueue
       {/* The head. Above everything the column can be carrying, and drawn in
           every state except an open proposal -- a proposal is addressed to
           somebody and is allowed to take the column over. */}
-      {activeProposal === null && <p className="sq__head">{houseLine}</p>}
-
       {proposals.length > 0 && <p className="sq__eyebrow">Goose asks. Scroll for the next.</p>}
 
       {activeProposal === null ? (
         askable.length > 0 ? (
+          // Hidden at >=1101px (dashboard-grid.css): desktop's offers live in
+          // SuggestionChips, right under the composer, not down in this aside
+          // column. Same underlying data, a different component (SuggestionChips.tsx)
+          // -- this stays the panel's whole asking side.
           <div className="sq__offers">
             <p className="sq__eyebrow">You could ask</p>
 

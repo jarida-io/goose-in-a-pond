@@ -87,7 +87,7 @@
   --color-text-disabled:  rgba(23, 22, 22, 0.25);
 
   /* Surfaces — Jarida warm whites */
-  --color-bg:             #FFF9F9;   /* Jarida White — main window */
+  --color-bg:             #FAF3E1;   /* Jarida White — main window */
   --color-surface:        #ffffff;   /* pure white — card faces, inputs, dropdowns */
   --color-surface-warm:   #fdf8fb;   /* soft pinkish white — app-shell gradient start */
   --color-sidebar:        #F5F4F0;   /* warm stone sidebar */
@@ -295,6 +295,9 @@
 
   /* Text */
   --color-text:           #F3F1F8;
+  /* Plan §8 flagged this for a dark-mode contrast check: composited over
+     --color-surface it measures 5.45:1, over --color-bg 5.64:1, both clear
+     the 4.5:1 AA floor, so the alpha stays as shipped. */
   --color-text-secondary: rgba(243, 241, 248, 0.55);
   /* Solid, not alpha — alpha-over-panel was landing at 3.3:1, under the
      4.5:1 AA minimum for normal text. */
@@ -332,6 +335,10 @@
 
   /* Semantic fg — brightened for dark backgrounds */
   --color-success-fg:  #4ADE80;
+  /* Plan §8 flagged the warning alert for a dark-mode check: --color-text on
+     --color-warning-soft composited over --color-surface measures 10.86:1,
+     the --color-warning border/shadow on --color-surface measures 7.70:1 --
+     both clear AA with room, so no override was needed here. */
   --color-warning-fg:  #FBBF24;
   --color-info-fg:     #60A5FA;
   /* Was inheriting the light-mode #B91C1C, the only semantic fg without a dark

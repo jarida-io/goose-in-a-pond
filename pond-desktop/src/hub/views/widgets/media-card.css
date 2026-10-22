@@ -1,24 +1,96 @@
 /* ────────────────────────────────────────────────────────────
-   Now Playing card.
+   Now Playing card — neo-brutalist frame (thick accent border, hard
+   offset shadow, no blur there) around a glassmorphism interior: a
+   blurred, pulsating glow in the album art's dominant color, with the
+   actual content on a frosted glass pane on top of it.
 
-   Every colour is a token except one: the album-art gradient is the design's
-   own literal #7C3AED → #2A0C66, kept because it is a fixed piece of the
-   artwork placeholder and not a state. It is decoration only — nothing about
-   playback is ever encoded in it, so it never has to be read.
-
-   Sizes follow the design except the transport, which the touch floor wins:
-   the mockup drew 36px buttons, this ships on a 1024x600 finger-driven panel,
-   so they are 44px. The play button goes to 48px so it still reads as the
-   primary against two siblings that are now the same size it was.
+   `--mcard-glow` is set inline by MediaCard once it samples the art (see
+   dominantColor.ts); it falls back to --color-accent until that resolves
+   or when sampling fails (untagged CORS image, no art, etc). The glow
+   only breathes while a track is actually playing — paused/idle hold it
+   still, same instinct as a pausing equalizer.
    ──────────────────────────────────────────────────────────── */
 
 .mcard {
+  --mcard-glow: var(--color-accent);
+  --mcard-play-ico: var(--color-accent);
+
+  position: relative;
+  overflow: hidden;
   box-sizing: border-box;
   height: 100%;
-  border-radius: 12px;
+  border-radius: 20px;
+  box-shadow: 5px 5px 0 var(--color-accent);
   background: var(--color-surface);
-  padding: 14px;
+}
+
+/* ── Glow: blurred, pulsating, sits behind the glass pane ────*/
+
+.mcard__glow {
+  position: absolute;
+  inset: -30%;
+  background: radial-gradient(circle at 32% 28%, var(--mcard-glow) 0%, transparent 65%);
+  /* saturate() dims the glow specifically; --mcard-glow itself stays at full
+     saturation since --mcard-play-ico reads the same value for the play icon. */
+  filter: blur(48px) saturate(0.55);
+  opacity: 0.16;
+  pointer-events: none;
+  animation: mcard-pulse 6s var(--ease-in-out) infinite;
+  animation-play-state: paused;
+}
+
+.mcard[data-state="playing"] .mcard__glow {
+  animation-play-state: running;
+}
+
+@keyframes mcard-pulse {
+  0%, 100% { opacity: 0.16; transform: scale(1); }
+  50%      { opacity: 0.3; transform: scale(1.06); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mcard__glow {
+    animation: none;
+    opacity: 0.2;
+  }
+}
+
+/* ── Glass: the frosted pane everything sits on ──────────────*/
+
+.mcard__glass {
+  position: relative;
+  z-index: 1;
+  box-sizing: border-box;
+  height: 100%;
+  padding: 16px;
   display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* Playing/paused/idle states get the frosted glass + light text so the glow
+   reads through it; disconnected/error stay a plain surface.
+
+   A flat 30%-black tint read as plain grey in light theme, where the page
+   behind it is a pale beige: the tint drowned out whatever color the glow
+   and backdrop-filter were letting through. Liquid-glass instead: a lighter,
+   mostly-transparent wash so more of that color survives, and a brighter
+   saturate() so the colour that does show through reads as vivid, not washed
+   out. The inset highlights are the glass's rim catching light along its top
+   edge. */
+.mcard[data-hook="media"]:not([data-state="disconnected"]):not([data-state="error"]) .mcard__glass {
+  color: #fff;
+  background: rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(20px) saturate(190%);
+  -webkit-backdrop-filter: blur(20px) saturate(190%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.4),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+}
+
+.mcard__top {
+  display: flex;
+  align-items: flex-start;
   gap: 14px;
 }
 
@@ -26,11 +98,11 @@
 
 .mcard__art {
   flex: none;
-  width: 76px;
-  height: 76px;
-  border-radius: 10px;
+  width: 72px;
+  height: 72px;
+  border-radius: 12px;
   overflow: hidden;
-  background: linear-gradient(140deg, #7C3AED, #2A0C66);
+  background: linear-gradient(140deg, var(--color-accent), var(--color-accent-active));
   display: flex;
   align-items: flex-end;
   justify-content: flex-end;
@@ -49,24 +121,17 @@
   object-fit: cover;
 }
 
-/* ── Titles, scrubber, transport ──────────────────────────── */
-
-.mcard__col {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  gap: 8px;
-}
+/* ── Titles, like, scrubber, transport ───────────────────────*/
 
 .mcard__titles {
+  flex: 1;
   min-width: 0;
+  align-self: center;
 }
 
 .mcard__track {
   display: block;
-  font: 600 16px Quicksand, sans-serif;
+  font: 700 16px Quicksand, sans-serif;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -75,10 +140,35 @@
 .mcard__artist {
   display: block;
   font-size: 13px;
-  color: var(--color-text-secondary);
+  color: inherit;
+  opacity: 0.75;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.mcard__like {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: inherit;
+  transition: transform var(--dur-fast) var(--ink-ease);
+}
+
+.mcard__like:hover:not(:disabled) {
+  transform: scale(1.1);
+}
+
+.mcard__like:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .mcard__scrub {
@@ -90,14 +180,15 @@
 .mcard__time {
   font: 500 11px 'JetBrains Mono', monospace;
   font-variant-numeric: tabular-nums;
-  color: var(--color-text-secondary);
+  color: inherit;
+  opacity: 0.75;
 }
 
 .mcard__rail {
   flex: 1;
   height: 4px;
   border-radius: 999px;
-  background: var(--grey-200);
+  background: color-mix(in srgb, currentColor 25%, transparent);
   position: relative;
 }
 
@@ -105,7 +196,7 @@
   display: block;
   height: 4px;
   border-radius: 999px;
-  background: var(--pp);
+  background: currentColor;
 }
 
 .mcard__thumb {
@@ -115,54 +206,182 @@
   height: 10px;
   margin-left: -5px;
   border-radius: 999px;
-  background: var(--pp);
+  background: currentColor;
 }
 
 .mcard__transport {
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: center;
+  gap: 16px;
 }
 
 .mcard__btn {
-  width: 44px;
-  height: 44px;
-  border: 0;
+  width: 38px;
+  height: 38px;
+  border: 2px solid currentColor;
   border-radius: 999px;
   background: transparent;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  color: var(--color-text);
-  transition: background var(--dur-fast) var(--ink-ease);
+  color: inherit;
+  transition: background var(--dur-fast) var(--ink-ease), transform var(--dur-fast) var(--ink-ease);
 }
 
 .mcard__btn:hover:not(:disabled) {
-  background: var(--color-hover);
+  background: color-mix(in srgb, currentColor 15%, transparent);
 }
 
 .mcard__btn:active:not(:disabled) {
-  background: var(--color-pressed);
+  transform: scale(0.94);
+}
+
+.mcard__btn:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .mcard__play {
-  width: 48px;
-  height: 48px;
+  width: 52px;
+  height: 52px;
   border-radius: 999px;
-  background: var(--color-text);
+  border: 0;
+  background: #fff;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  border: 0;
   transition: transform var(--dur-fast) var(--ink-ease);
 }
 
-/* The face is already the text colour at full strength; there is no darker
-   step to press into, so the press is the only feedback it gets. */
 .mcard__play:active {
   transform: scale(0.96);
+}
+
+/* ── Small: a square album-art tile, not a shrunk player. nowPlaying's
+   default/initial size (dashboardLayout.ts) is "s", so this is the common
+   case, not an edge one. The photo fills the whole square (see the flat,
+   absolutely-positioned siblings in MediaCard.tsx); title, like and play
+   float over it on a bottom scrim instead of sitting beside a thumbnail. */
+
+.mcard--tile {
+  width: min(100%, 220px);
+  height: auto;
+  aspect-ratio: 1;
+}
+
+.mcard__tile-art {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding: 10px;
+  background: linear-gradient(140deg, var(--color-accent), var(--color-accent-active));
+}
+
+.mcard__tile-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.mcard__tile-scrim {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.75) 0%, rgba(0, 0, 0, 0.28) 42%, transparent 70%);
+  pointer-events: none;
+}
+
+.mcard__tile-like {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  cursor: pointer;
+  transition: transform var(--dur-fast) var(--ink-ease);
+}
+
+.mcard__tile-like:hover:not(:disabled) {
+  transform: scale(1.1);
+}
+
+.mcard__tile-like:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.mcard__tile-meta {
+  position: absolute;
+  left: 10px;
+  right: 48px;
+  bottom: 14px;
+  display: flex;
+  flex-direction: column;
+  color: #fff;
+  min-width: 0;
+}
+
+.mcard__tile-track {
+  font: 700 13px Quicksand, sans-serif;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mcard__tile-artist {
+  font-size: 11px;
+  opacity: 0.75;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mcard__tile-play {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: transform var(--dur-fast) var(--ink-ease);
+}
+
+.mcard__tile-play:active {
+  transform: scale(0.96);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mcard__tile-like,
+  .mcard__tile-play {
+    transition: none;
+  }
+
+  .mcard__tile-play:active {
+    transform: none;
+  }
 }
 
 /* ── The two message states: disconnected and refused ─────── */

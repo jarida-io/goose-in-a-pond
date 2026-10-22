@@ -30,6 +30,8 @@
   "dependencies": {
     "@fontsource-variable/comfortaa": "^5.3.0",
     "@fontsource-variable/quicksand": "^5.3.0",
+    "@fontsource-variable/space-grotesk": "^5.3.0",
+    "@fontsource/archivo-black": "^5.3.0",
     "@fontsource/inter": "^5.3.0",
     "@fontsource/jetbrains-mono": "^5.3.0",
     "@heroui/react": "^3.2.6",

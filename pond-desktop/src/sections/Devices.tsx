@@ -66,7 +66,7 @@ function iconClass(kind: string | undefined, isOnline: boolean): string {
   return "device-card__icon device-card__icon--edge";
 }
 
-function timeSince(iso: string | null | undefined): string {
+export function timeSince(iso: string | null | undefined): string {
   if (!iso) return "—";
   const diff = Date.now() - new Date(iso).getTime();
   const mins = Math.floor(diff / 60000);

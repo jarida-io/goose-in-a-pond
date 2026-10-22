@@ -63,6 +63,7 @@ export const HP_PATHS = {
   pulse:       "M22 12h-4l-3 9L9 3l-3 9H2",
   phone:       "M17 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2zM12 18h.01",
   chip:        "M6 4h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM9 9h6v6H9zM9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3",
+  heart:       "M12 21s-7.5-4.6-10-9.2C.6 8.6 2 5 5.5 5c2 0 3.4 1.1 4.5 2.6C11.1 6.1 12.5 5 14.5 5 18 5 19.4 8.6 22 11.8 19.5 16.4 12 21 12 21z",
 } as const;
 
 export type HpIconKey = keyof typeof HP_PATHS;

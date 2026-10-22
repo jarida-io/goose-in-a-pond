@@ -4,30 +4,92 @@
    above it; what is left is the arrange control, its caption, the
    temperature, the clock and the avatar, at 44px instead of 60.
 
-   One cluster, flush right, in the design's order. There is deliberately no
-   left-hand slot: the shell's own left cluster starts at x=20 on the row
-   above, so a child at this strip's left edge would sit directly under the
-   hamburger -- the position the design leaves empty.
+   The right cluster is flush right, in the design's order. The left slot was
+   originally left empty on purpose -- the shell's own left cluster starts at
+   x=20 on the row above, so a child at this strip's left edge sits directly
+   under the hamburger -- but now carries the greeting, stacked under it
+   rather than colliding with it.
 
    Colour discipline (DESIGN.md §2): purple appears here exactly once, as
    the 16px check on the arrange pill while arranging. Nothing here paints
-   text with it.
+   text with it. The greeting's name badge is the one exception -- it's
+   meant to track whichever accent the household has chosen, same as the
+   arrange pill's check mark, not a fixed hue.
    ──────────────────────────────────────────────────────────── */
 
 .hbar {
   flex: none;
-  height: 44px;
+  min-height: 44px;
   box-sizing: border-box;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  padding: 0 20px;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 24px 20px 8px;
+}
+
+/* Panels keep the full 24px -- ShellBar and this strip read as two rows there
+   regardless of the gap between them. At desktop width the two are close
+   enough to read as one header, so the stacked-bell-row-above-the-greeting
+   look (plan §3) is closed up instead of left as dead space. */
+@media (min-width: 1101px) {
+  .hbar {
+    padding-top: 8px;
+  }
+}
+
+/* The greeting shrinks first -- the clock, avatar and arrange control are the
+   working parts of this strip and never give up their width for it. */
+.hbar__left {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.hbar__subtitle {
+  margin: 0;
+  max-width: 60ch;
+  font: 500 14px/1.4 var(--font-body, "Quicksand", sans-serif);
+  color: var(--color-text-secondary);
+}
+
+.hbar__greeting {
+  margin: 0;
+  /* Right/bottom padding is not for the text -- it's room for the name
+     badge's offset shadow, which paints past its own box and would
+     otherwise be clipped by this element's own overflow:hidden. */
+  padding: 0 4px 4px 0;
+  /* Weight 400, not 700 -- Archivo Black only ships one weight (already "black"); asking
+     for 700 on top of it is a synthetic-bold double-up the browser would have to fake. */
+  font: 400 36px/1.1 "Archivo Black", var(--font-body, "Quicksand", sans-serif);
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Padding matches @jarida/ink's own .ink-badge horizontal spacing
+   (--ctl-px-sm), but radius stays a rounded rectangle, not the badge's pill.
+   Hairline only (plan §1: HomeStatusBar spends none of InkBudget's raised
+   signals) -- the offset shadow this used to carry put a third raised thing
+   on Home alongside the composer and the first alert. */
+.hbar__greeting-name {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px var(--ctl-px-sm);
+  border: 2px solid var(--color-text);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  color: var(--color-accent);
 }
 
 /* `min-width: 0` so the caption inside can actually shrink; without it the
    cluster's automatic minimum size is the sum of its children at full width
    and the pill would be pushed off the left of the strip instead. */
 .hbar__right {
+  flex: none;
   display: flex;
   align-items: center;
   min-width: 0;

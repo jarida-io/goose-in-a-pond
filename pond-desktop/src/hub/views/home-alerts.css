@@ -1,0 +1,96 @@
+/* Routine-due and device-offline banners. Row layout overrides InkCard's own column default.
+
+   Capped width: HomeAlerts sits directly in `.dash`, full-bleed, so on a wide
+   desktop window it was stretching a one-line message across the entire
+   screen. A short message in a long bar reads as broken, not spacious -- it
+   stays left-aligned and grows with its content instead, same as every other
+   piece of text on Home.
+
+   Border/shadow no longer the shared ink-edge: that's `--color-text` border
+   + an accent-colored shadow, which put an unrelated purple shadow under a
+   red/amber-tinted alert. Neo-brutalist here means color-coordinated instead
+   -- border and shadow both in the alert's own semantic color, the same
+   self-consistent block the music widget's shadow already does with accent. */
+
+.halerts {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 12px;
+  /* `.dash` carries no horizontal padding of its own -- every sibling (the
+     status bar, the composer) sets this same 20px left inset itself. .halerts
+     was the one that didn't, sitting flush against the window edge. */
+  padding-left: 20px;
+}
+
+/* `.halerts .halert`, not `.halert` alone: the shared ink-edge's own
+   border-radius rule is a single class too, same specificity, so this has to
+   out-specify it rather than risk losing an import-order tie.
+
+   960px is a ceiling, not a target -- it only matters below 1101px, where
+   `.halerts` stacks full-width under the composer and this stops it reading
+   as a stretched bar on a wide panel. At >=1101px `.dash__top-row` caps
+   `.halerts` itself at 420px (dashboard-grid.css), so this cap never binds
+   there; the alert just fills that narrower column instead. Padding cut from
+   ink-card's default 16px to 10px/16px so the bar itself stays slim. */
+.halerts .halert {
+  max-width: 960px;
+  padding: 10px 16px;
+  border-radius: 10px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.halert.halert--warning {
+  background: var(--color-warning-soft);
+  border: 3px solid var(--color-warning);
+  box-shadow: 4px 4px 0 var(--color-warning);
+}
+
+/* A quiet device isn't a danger -- it's information, same register as the
+   routine-due banner, not the red the destructive token would imply. */
+.halert.halert--info {
+  background: var(--color-info-soft);
+  border: 3px solid var(--color-info);
+  box-shadow: 4px 4px 0 var(--color-info);
+}
+
+/* InkBudget: only the alert that renders first keeps the raised offset (plan §1) --
+   the second one stays color-coded but flat, same border/background otherwise. */
+.halert.halert--flat {
+  box-shadow: none;
+}
+
+.halert__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* Small text label, not color alone, carries which kind of alert this is (plan §4). */
+.halert__kind {
+  font: 700 10px var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.halert__msg {
+  font: 600 14px Quicksand, sans-serif;
+  color: var(--color-text);
+}
+
+.halert__time {
+  font-family: var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
+  font-variant-numeric: tabular-nums;
+}
+
+.halert__actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

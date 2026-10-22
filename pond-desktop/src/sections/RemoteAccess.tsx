@@ -69,7 +69,7 @@ export function RemoteAccess() {
       try {
         const pending = await api.remoteRecoveryRequests();
         refusals.clear();
-        if (active) { setRequests(pending); setReviewFailed(false); setSignInNote(null); }
+        if (active) { setRequests(pending ?? []); setReviewFailed(false); setSignInNote(null); }
       } catch (error) {
         // A signed-out browser is refused by every later poll, and the Pond logs each, until a new
         // sign-in link reloads the page: say so once and stop. The shell keeps asking, ever less often.

@@ -61,7 +61,7 @@ function openPanel(): void {
 }
 
 async function readingBbbWithPanelOpen(): Promise<void> {
-  render(<SuggestionQueue sessionId="s-1" houseLine="All quiet." />);
+  render(<SuggestionQueue sessionId="s-1" />);
   await screen.findByText("AAA");
   fireEvent.click(screen.getByText("BBB"));
   expect(openCard()).toBe("BBB");
@@ -118,7 +118,7 @@ describe("SuggestionQueue cursor", () => {
   });
 
   it("advances to the successor when the open card itself is answered", async () => {
-    render(<SuggestionQueue sessionId="s-1" houseLine="All quiet." />);
+    render(<SuggestionQueue sessionId="s-1" />);
     await screen.findByText("AAA");
     expect(openCard()).toBe("AAA");
 
@@ -129,7 +129,7 @@ describe("SuggestionQueue cursor", () => {
   });
 
   it("falls back to the last suggestion when the open card was the last one", async () => {
-    render(<SuggestionQueue sessionId="s-1" houseLine="All quiet." />);
+    render(<SuggestionQueue sessionId="s-1" />);
     await screen.findByText("AAA");
     // DDD is past the two-row peek, so the panel is the only way onto it.
     openPanel();
@@ -145,7 +145,7 @@ describe("SuggestionQueue cursor", () => {
   // The error is drawn on the open card, so it must be the failed one.
   it("returns the cursor to the suggestion whose answer failed to send", async () => {
     vi.mocked(api.decideProposal).mockRejectedValue(new Error("offline"));
-    render(<SuggestionQueue sessionId="s-1" houseLine="All quiet." />);
+    render(<SuggestionQueue sessionId="s-1" />);
     await screen.findByText("AAA");
 
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
@@ -167,14 +167,13 @@ describe("SuggestionQueue cursor", () => {
 
   it("goes quiet once the last suggestion is answered", async () => {
     vi.mocked(api.listProposals).mockResolvedValue({ profile_id: null, proposals: [proposal("AAA")] });
-    render(<SuggestionQueue sessionId="s-1" houseLine="All quiet." />);
+    render(<SuggestionQueue sessionId="s-1" />);
     await screen.findByText("AAA");
 
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
     await act(async () => {});
 
     expect(openCard()).toBeNull();
-    expect(screen.getByText("All quiet.")).toBeTruthy();
   });
 });
 
@@ -208,7 +207,7 @@ describe("SuggestionQueue offers", () => {
 
   it("offers suggestions when nothing is waiting", async () => {
     vi.mocked(api.listProposals).mockResolvedValue({ profile_id: null, proposals: [] });
-    render(<SuggestionQueue sessionId="s-1" houseLine="All quiet." onAsk={() => {}} />);
+    render(<SuggestionQueue sessionId="s-1" onAsk={() => {}} />);
 
     await screen.findByText("What do you remember about me?");
     expect(offerRows()).toEqual([
@@ -230,7 +229,7 @@ describe("SuggestionQueue offers", () => {
       audience: "personal",
     });
     const asked: string[] = [];
-    render(<SuggestionQueue sessionId="s-1" houseLine="All quiet." onAsk={(p) => asked.push(p)} />);
+    render(<SuggestionQueue sessionId="s-1" onAsk={(p) => asked.push(p)} />);
 
     fireEvent.click(await screen.findByText("How did the swim go?"));
     // Sent first and unawaited.
@@ -246,7 +245,7 @@ describe("SuggestionQueue offers", () => {
       considered: [],
       audience: "personal",
     });
-    render(<SuggestionQueue sessionId="s-1" houseLine="All quiet." onAsk={() => {}} />);
+    render(<SuggestionQueue sessionId="s-1" onAsk={() => {}} />);
 
     fireEvent.click(await screen.findByText("What do you remember about me?"));
     await waitFor(() => expect(api.listSuggestions).toHaveBeenCalled());
@@ -266,7 +265,7 @@ describe("SuggestionQueue offers", () => {
       considered: [],
       audience: "personal",
     });
-    render(<SuggestionQueue sessionId="s-1" houseLine="All quiet." onAsk={() => {}} />);
+    render(<SuggestionQueue sessionId="s-1" onAsk={() => {}} />);
 
     await screen.findByText("A?");
     const line = document.querySelector(".sq__unshown");
@@ -276,14 +275,14 @@ describe("SuggestionQueue offers", () => {
 
   it("shows the measured reason under each offer", async () => {
     vi.mocked(api.listProposals).mockResolvedValue({ profile_id: null, proposals: [] });
-    render(<SuggestionQueue sessionId="s-1" houseLine="All quiet." onAsk={() => {}} />);
+    render(<SuggestionQueue sessionId="s-1" onAsk={() => {}} />);
 
     await screen.findByText("379 things remembered.");
     expect(screen.getByText("19 devices registered here.")).toBeTruthy();
   });
 
   it("keeps proposals in the column when both exist", async () => {
-    render(<SuggestionQueue sessionId="s-1" houseLine="All quiet." onAsk={() => {}} />);
+    render(<SuggestionQueue sessionId="s-1" onAsk={() => {}} />);
 
     await screen.findByText("AAA");
     expect(openCard()).toBe("AAA");
@@ -294,7 +293,7 @@ describe("SuggestionQueue offers", () => {
     vi.mocked(api.listProposals).mockResolvedValue({ profile_id: null, proposals: [] });
     const asked: string[] = [];
     render(
-      <SuggestionQueue sessionId="s-1" houseLine="All quiet." onAsk={(p) => asked.push(p)} />,
+      <SuggestionQueue sessionId="s-1" onAsk={(p) => asked.push(p)} />,
     );
 
     fireEvent.click(await screen.findByText("What do you remember about me?"));
@@ -303,29 +302,29 @@ describe("SuggestionQueue offers", () => {
 
   it("draws no offers when the surface cannot send one", async () => {
     vi.mocked(api.listProposals).mockResolvedValue({ profile_id: null, proposals: [] });
-    render(<SuggestionQueue sessionId="s-1" houseLine="All quiet." />);
+    render(<SuggestionQueue sessionId="s-1" />);
 
-    await screen.findByText("All quiet.");
+    await waitFor(() => expect(vi.mocked(api.listSuggestions)).toHaveBeenCalled());
     expect(offerRows()).toEqual([]);
   });
 
-  it("falls back to the quiet line when there is nothing to offer", async () => {
+  it("shows no offers when there is nothing to suggest", async () => {
     vi.mocked(api.listProposals).mockResolvedValue({ profile_id: null, proposals: [] });
     vi.mocked(api.listSuggestions).mockResolvedValue({
       suggestions: [],
       considered: [],
       audience: "shared",
     });
-    render(<SuggestionQueue sessionId="s-1" houseLine="Good morning, Jerry." onAsk={() => {}} />);
+    render(<SuggestionQueue sessionId="s-1" onAsk={() => {}} />);
 
-    await screen.findByText("Good morning, Jerry.");
+    await waitFor(() => expect(vi.mocked(api.listSuggestions)).toHaveBeenCalled());
     expect(offerRows()).toEqual([]);
   });
 
   // The cold launch: the Dashboard mounts with `sessionId` null.
   it("fetches with no session at all", async () => {
     vi.mocked(api.listProposals).mockResolvedValue({ profile_id: null, proposals: [] });
-    render(<SuggestionQueue sessionId={null} houseLine="All quiet." onAsk={() => {}} />);
+    render(<SuggestionQueue sessionId={null} onAsk={() => {}} />);
 
     await screen.findByText("What do you remember about me?");
     expect(vi.mocked(api.listSuggestions)).toHaveBeenCalledWith(null);
@@ -334,9 +333,9 @@ describe("SuggestionQueue offers", () => {
   it("goes quiet rather than loud when the fetch fails", async () => {
     vi.mocked(api.listProposals).mockResolvedValue({ profile_id: null, proposals: [] });
     vi.mocked(api.listSuggestions).mockRejectedValue(new Error("offline"));
-    render(<SuggestionQueue sessionId="s-1" houseLine="Good morning, Jerry." onAsk={() => {}} />);
+    render(<SuggestionQueue sessionId="s-1" onAsk={() => {}} />);
 
-    await screen.findByText("Good morning, Jerry.");
+    await waitFor(() => expect(vi.mocked(api.listSuggestions)).toHaveBeenCalled());
     expect(document.querySelector(".sq__error")).toBeNull();
   });
 });

@@ -8,6 +8,8 @@ import {
   ACCENTS,
   createTheme,
   cssVariables,
+  ratio,
+  readable,
   type AccentName,
   type InkTheme,
 } from "@jarida/ink";
@@ -96,6 +98,36 @@ function applyToDOM(theme: ThemeChoice, accent: AccentName, density: DensityChoi
   for (const [name, value] of Object.entries(cssVariables(ink))) {
     root.style.setProperty(name, value);
   }
+
+  // Ink's own --border-ink/--shadow-ink are a fixed brand purple regardless of accent
+  // (see @jarida/ink's InkPalette.ink). Every hard-shadow/ink-edge component in this app
+  // reads one of those two, so re-pointing them at the chosen accent here is what makes
+  // the whole app's shadows track Appearance → Accent instead of only the elements that
+  // read --color-accent directly.
+  //
+  // Floored at AA's nonText ratio (3:1, a border/shadow's own floor, not body text's 4.5:1):
+  // an accent picked for how it reads as a fill isn't guaranteed to read as a thin edge
+  // against --color-bg, especially in dark scheme (plan §8 flagged the old fixed #5D23C2
+  // measuring under 3:1 on #131119 -- the risk moved with the accent, it didn't go away).
+  // readable() is a no-op whenever the raw accent already clears the floor.
+  const edgeColor = readable(ink.color.accent, ink.color.bg, "nonText");
+  if (edgeColor !== ink.color.accent) {
+    // eslint-disable-next-line no-console -- a silent accent substitution is a hard debug later.
+    console.warn(
+      `[theme] ${accent} only clears ${ratio(ink.color.accent, ink.color.bg).toFixed(2)}:1 on ` +
+        `--color-bg in ${resolved} mode; lightened --border-ink/--shadow-ink to ${edgeColor} for 3:1.`,
+    );
+  }
+  root.style.setProperty("--border-ink", edgeColor);
+  root.style.setProperty("--shadow-ink", `${ink.edge.rest}px ${ink.edge.rest}px 0 ${edgeColor}`);
+
+  // The cssVariables() loop above just set --color-bg inline to the library's own
+  // "#FFF9F9"/"#131119", which (inline always beats a stylesheet rule) silently
+  // overrode whatever design-tokens.css said -- the reason editing that file's
+  // --color-bg had no visible effect. Removing the inline value lets design-tokens.css's
+  // own :root / :root[data-theme="dark"] rule win back, the same light/dark switch
+  // `root.dataset.theme` above already drives for every other per-theme override there.
+  root.style.removeProperty("--color-bg");
 
   return ink;
 }

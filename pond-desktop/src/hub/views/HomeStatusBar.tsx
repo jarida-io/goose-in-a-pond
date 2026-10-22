@@ -4,7 +4,7 @@
 import React from "react";
 import { HubIco } from "../primitives/HubIco";
 import { HP_PATHS } from "../primitives/icons";
-import { useNow } from "../state/useNow";
+import { greetingForHour, useNow } from "../state/useNow";
 import "./home-status-bar.css";
 
 export interface HomeStatusBarProps {
@@ -12,15 +12,22 @@ export interface HomeStatusBarProps {
   onToggleArrange: () => void;
   /** Outdoor temperature; null (weather off, unset or unanswered) hides the slot. */
   temp: number | null;
+  /** True when the weather widget is already placed on the page -- its own card
+      already states the temperature, so the header copy would be a duplicate. */
+  hideTemp?: boolean;
   /** The name the pond knows, for the monogram. Empty string when it has none. */
   userName: string;
+  /** The one-sentence line under the greeting -- weather and what's due, or quiet. */
+  subtitle: string;
 }
 
 export function HomeStatusBar({
   arranging,
   onToggleArrange,
   temp,
+  hideTemp = false,
   userName,
+  subtitle,
 }: HomeStatusBarProps): React.ReactElement {
   // `useNow` re-ticks: a shelf panel is never reloaded, so a mount-time clock goes stale.
   const now = useNow();
@@ -30,6 +37,14 @@ export function HomeStatusBar({
 
   return (
     <div className="hbar" data-hook="home-status">
+      <div className="hbar__left">
+        <h1 className="hbar__greeting">
+          {greetingForHour(now.getHours())}
+          {name && <>, <span className="hbar__greeting-name">{name}</span></>}
+        </h1>
+        {subtitle && <p className="hbar__subtitle">{subtitle}</p>}
+      </div>
+
       <div className="hbar__right">
         {/* The design's caption reads "drag a grip to reorder". There is no drag
             in this build and the frame's controls are arrows, so the caption
@@ -63,7 +78,7 @@ export function HomeStatusBar({
             celsius and there is no unit setting anywhere in Settings, so either
             letter would be an assertion the pond cannot make -- the design's
             64°F is a mockup literal. */}
-        {temp !== null && <span className="hbar__temp">{temp}°</span>}
+        {temp !== null && !hideTemp && <span className="hbar__temp">{temp}°</span>}
 
         <div className="hbar__stack">
           <span className="hbar__date">

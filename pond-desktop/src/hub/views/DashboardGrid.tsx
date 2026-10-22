@@ -2,14 +2,19 @@
 // Home, shared by `hub/views/Home.tsx` (panel) and `sections/Dashboard.tsx` (desktop) so the two
 // can't drift. Search reaches devices kept off Home; the layout lives in `state/dashboardLayout.ts`.
 import { Fragment, useState, type ReactElement, type ReactNode } from "react";
-import { InkButton, InkSegmented, InkSheet, InkStack, InkText } from "@jarida/ink/react";
+import { InkBudget, InkButton, InkSegmented, InkSheet, InkStack, InkText } from "@jarida/ink/react";
 import { HubIco } from "../primitives/HubIco";
 import { HP_PATHS, micEl } from "../primitives/icons";
+import { SuggestionChips } from "../primitives/SuggestionChips";
 import { SuggestionQueue } from "../primitives/SuggestionQueue";
 import { WeatherWidget } from "../primitives/WeatherWidget";
+import { HomeAlerts } from "./HomeAlerts";
+import { HomeComposer } from "./HomeComposer";
 import { HomeStatusBar } from "./HomeStatusBar";
 import { HomeControlsCard } from "./widgets/HomeControlsCard";
 import { MediaCard } from "./widgets/MediaCard";
+import { RemoteAccessCard } from "./widgets/RemoteAccessCard";
+import { TonightCard } from "./widgets/TonightCard";
 import { WidgetTrack } from "./widgets/WidgetTrack";
 import { AddWidgetButton, WidgetFrame } from "./widgets/WidgetFrame";
 import { useHomeData } from "../state/hubDataStore";
@@ -60,6 +65,8 @@ export function DashboardGrid({ onNavigate, onTalk, sessionId, onAsk }: Dashboar
   const pageCount = layout.pages.length;
   // The store won't hide the last card on Home, so the frame's x must be disabled for it too.
   const placedCount = placedCards(layout).length;
+  // The weather card already states the temperature; the header copy would duplicate it.
+  const weatherPlaced = placedCards(layout).some((c) => c.id === "weather");
   // Clamped at render, not in an effect, so the track never points past its end for a frame.
   const page = Math.min(requestedPage, Math.max(0, pageCount - 1));
 
@@ -101,7 +108,13 @@ export function DashboardGrid({ onNavigate, onTalk, sessionId, onAsk }: Dashboar
         );
 
       case "nowPlaying":
-        return <MediaCard onOpenSettings={() => onNavigate("settings")} />;
+        return <MediaCard size={card.size} onOpenSettings={() => onNavigate("settings")} />;
+
+      case "tonight":
+        return <TonightCard onNavigate={onNavigate} />;
+
+      case "remoteAccess":
+        return <RemoteAccessCard onNavigate={onNavigate} />;
     }
   }
 
@@ -136,13 +149,31 @@ export function DashboardGrid({ onNavigate, onTalk, sessionId, onAsk }: Dashboar
   ));
 
   return (
+    <InkBudget max={2} label="Home">
     <div className="dash" data-arranging={arranging || undefined}>
       <HomeStatusBar
         arranging={arranging}
         onToggleArrange={toggleArrange}
         temp={home.weatherEnabled ? home.weather.temp : null}
+        hideTemp={weatherPlaced}
         userName={home.user}
+        subtitle={quietLine}
       />
+
+      {/* A plain stacking wrapper below 1101px (matches the three standing alone before this
+          existed); at >=1101px it becomes the row that puts alerts beside the composer
+          instead of under it, in the empty top-right the composer alone left behind.
+          The composer and its chips stack as one left column against that row; the
+          chips are SuggestionQueue's own offers, repeated here (not reused) because
+          they need to sit under the composer, not in the aside column it renders in
+          below 1101px -- see SuggestionChips.tsx's own header comment. */}
+      <div className="dash__top-row">
+        <div className="dash__top-left">
+          <HomeComposer onAsk={onAsk} onTalk={onTalk} />
+          <SuggestionChips sessionId={sessionId} onAsk={onAsk} />
+        </div>
+        <HomeAlerts onNavigate={onNavigate} />
+      </div>
 
       <div className="dash__body">
         {/* The asking side: what the house said, what you could ask it, and the
@@ -158,7 +189,7 @@ export function DashboardGrid({ onNavigate, onTalk, sessionId, onAsk }: Dashboar
             In flow under the column it is none of those things, at any height,
             and the failure mode it had is not expressible any more. */}
         <div className="dash__aside">
-          <SuggestionQueue sessionId={sessionId} houseLine={quietLine} onAsk={onAsk} />
+          <SuggestionQueue sessionId={sessionId} onAsk={onAsk} />
           <div className="dash__dock">
             <button type="button" className="dash__voice" aria-label="Talk to Goose" onClick={onTalk}>
               {/* micEl, not HP_PATHS.mic: that entry is a compound sentinel
@@ -187,6 +218,7 @@ export function DashboardGrid({ onNavigate, onTalk, sessionId, onAsk }: Dashboar
         onGoToPage={setRequestedPage}
       />
     </div>
+    </InkBudget>
   );
 }
 

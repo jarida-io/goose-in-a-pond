@@ -1,0 +1,102 @@
+/* Tonight — routines left before midnight. Flat (plan §1): widget frames don't
+   spend InkBudget's raised offset, so no box-shadow here, 2px ink border like
+   every other card. Warning/amber for the "up next" row, not a new colour --
+   the routine-due alert (home-alerts.css) already uses that register for
+   exactly this kind of thing. */
+
+.tonight {
+  box-sizing: border-box;
+  height: 100%;
+  border: 2px solid var(--color-text);
+  border-radius: 12px;
+  background: var(--color-surface);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tonight__eyebrow {
+  font: 700 11px var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.tonight__count {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.tonight__number {
+  font: 800 40px/1 Quicksand, sans-serif;
+  color: var(--color-text);
+}
+
+.tonight__count-label {
+  font: 600 13px Quicksand, sans-serif;
+  color: var(--color-text-secondary);
+}
+
+.tonight__next {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--color-warning-soft);
+}
+
+.tonight__next-kind {
+  font: 700 10px var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.tonight__next-name {
+  font: 600 14px Quicksand, sans-serif;
+  color: var(--color-text);
+}
+
+.tonight__next-time {
+  font-family: var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.tonight__more {
+  margin: 0;
+  font: 500 12px Quicksand, sans-serif;
+  color: var(--color-text-secondary);
+}
+
+.tonight__quiet {
+  font: 500 13px Quicksand, sans-serif;
+  color: var(--color-text-secondary);
+}
+
+.tonight__link {
+  margin-top: auto;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 12px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: 600 13px Quicksand, sans-serif;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.tonight__link:hover {
+  background: var(--color-hover);
+}
+
+.tonight__link:active {
+  background: var(--color-pressed);
+}

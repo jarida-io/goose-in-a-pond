@@ -254,11 +254,12 @@
 }
 
 .shellbar__btn {
+  --ink-lift: var(--ink-rest);
   position: relative;
   width: 44px;
   height: 44px;
   flex: none;
-  border: 0;
+  border: 2px solid var(--color-text);
   border-radius: 999px;
   background: var(--color-surface);
   display: flex;
@@ -267,9 +268,14 @@
   justify-content: center;
   gap: 4px;
   cursor: pointer;
+  box-shadow: var(--ink-lift) var(--ink-lift) 0 var(--pp);
+  transform: translate(calc(var(--ink-rest) - var(--ink-lift)), calc(var(--ink-rest) - var(--ink-lift)));
+  transition: transform var(--dur-lift) var(--ink-ease), box-shadow var(--dur-lift) var(--ink-ease);
 }
 
-.shellbar__btn:hover { background: var(--color-hover); }
+/* Compact lift ladder (small control): a full 4px throw on a 44px button reads as falling over. */
+.shellbar__btn:hover { --ink-lift: var(--ink-raised); background: var(--color-hover); }
+.shellbar__btn:active { --ink-lift: var(--ink-press-compact); }
 
 .shellbar__bar {
   display: block;
@@ -308,4 +314,5 @@
 
 @media (prefers-reduced-motion: reduce) {
   .hdrawer__caret { transition: none; }
+  .shellbar__btn { transition: none; }
 }

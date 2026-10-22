@@ -35,8 +35,9 @@ beforeEach(() => {
 
 describe("the default", () => {
   it("is two pages and nothing more", () => {
-    expect(ids()).toEqual([["weather", "devices"], ["nowPlaying"]]);
-    expect(getDashboardLayout().hidden).toEqual([]);
+    expect(ids()).toEqual([["weather", "devices"], ["nowPlaying", "tonight"]]);
+    // remoteAccess ships available but unplaced (dashboardLayout.ts's own comment on DEFAULT_LAYOUT).
+    expect(getDashboardLayout().hidden).toEqual(["remoteAccess"]);
   });
 
   it("accounts for every card in the catalogue exactly once", () => {
@@ -56,7 +57,9 @@ describe("a layout written by an older release", () => {
         { id: "weather", size: "m" },
       ],
     ]);
-    expect(l.hidden).toEqual(["nowPlaying"]);
+    // migrateV1 recomputes hidden from the catalogue rather than trusting the v1 payload's own
+    // "hidden" field, so every other card lands here, in CARDS order.
+    expect(l.hidden).toEqual(["nowPlaying", "tonight", "remoteAccess"]);
     expect(l).not.toEqual(DEFAULT_LAYOUT);
   });
 
@@ -202,15 +205,15 @@ describe("arranging", () => {
   });
 
   it("will not let a move cross a page", () => {
-    // "nowPlaying" is alone on page 2; moving it up must not put it on page 1.
+    // "nowPlaying" is first on page 2; moving it up must not put it on page 1.
     moveCard("nowPlaying", -1);
-    expect(ids()).toEqual([["weather", "devices"], ["nowPlaying"]]);
+    expect(ids()).toEqual([["weather", "devices"], ["nowPlaying", "tonight"]]);
   });
 
   it("crosses a page only when asked to explicitly", () => {
     moveCardToPage("nowPlaying", 0);
-    // Page 2 is left empty by the move, so it goes.
-    expect(ids()).toEqual([["weather", "devices", "nowPlaying"]]);
+    // "tonight" is left behind on page 2, so it stays rather than collapsing.
+    expect(ids()).toEqual([["weather", "devices", "nowPlaying"], ["tonight"]]);
   });
 
   // Emptying the source page shifts later pages down, so a card sent to page 2 can land on page 1.
@@ -232,21 +235,21 @@ describe("arranging", () => {
   it("reports the page asked for when no page collapsed under the move", () => {
     // Devices stays behind on page 1, so nothing is dropped and the two agree.
     expect(moveCardToPage("weather", 1)).toBe(1);
-    expect(ids()).toEqual([["devices"], ["nowPlaying", "weather"]]);
+    expect(ids()).toEqual([["devices"], ["nowPlaying", "tonight", "weather"]]);
   });
 
   it("reports nothing at all when the move is refused", () => {
     // Already on page 1, so there is no move and no page to follow it to.
     expect(moveCardToPage("weather", 0)).toBeNull();
-    expect(ids()).toEqual([["weather", "devices"], ["nowPlaying"]]);
+    expect(ids()).toEqual([["weather", "devices"], ["nowPlaying", "tonight"]]);
   });
 
   it("makes one new page beyond the last, up to the limit", () => {
     moveCardToPage("weather", 2);
-    expect(ids()).toEqual([["devices"], ["nowPlaying"], ["weather"]]);
+    expect(ids()).toEqual([["devices"], ["nowPlaying", "tonight"], ["weather"]]);
     // A fourth page is past MAX_PAGES, so the move is refused.
     moveCardToPage("devices", 3);
-    expect(ids()).toEqual([["devices"], ["nowPlaying"], ["weather"]]);
+    expect(ids()).toEqual([["devices"], ["nowPlaying", "tonight"], ["weather"]]);
   });
 
   it("resizes a card and leaves its place alone", () => {

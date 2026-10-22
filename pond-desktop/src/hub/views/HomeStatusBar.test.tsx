@@ -14,6 +14,7 @@ function renderStrip(arranging: boolean) {
       onToggleArrange={() => {}}
       temp={12}
       userName="Jerry"
+      subtitle="All quiet."
     />,
   );
   const strip = container.querySelector('[data-hook="home-status"]');
@@ -29,13 +30,14 @@ function indexIn(parent: Element, el: Element | null): number {
 }
 
 describe("HomeStatusBar placement (design 2a header)", () => {
-  it("leaves the strip's left edge empty, where the shell's hamburger already is", () => {
+  it("puts the time-of-day greeting at the strip's left edge, ahead of the right cluster", () => {
     const { strip } = renderStrip(false);
 
-    // Only the right cluster: a left child would sit beneath the shell bar's own left cluster.
-    expect(strip.children).toHaveLength(1);
-    expect(strip.firstElementChild?.classList.contains("hbar__right")).toBe(true);
-    expect(strip.querySelector(".hbar__left")).toBeNull();
+    // Left greeting, then the right cluster -- the left slot now carries the
+    // greeting, stacked under the shell bar's hamburger rather than empty.
+    expect(strip.children).toHaveLength(2);
+    expect(strip.firstElementChild?.classList.contains("hbar__left")).toBe(true);
+    expect(strip.querySelector(".hbar__greeting")).not.toBeNull();
   });
 
   it("puts the arrange control in the right-hand cluster, ahead of the temperature", () => {
@@ -59,8 +61,9 @@ describe("HomeStatusBar placement (design 2a header)", () => {
     expect(caption).not.toBeNull();
     expect(caption?.textContent).toContain("use the arrows to reorder");
 
-    // Just left of the pill, not a left-edge sibling of the cluster.
-    expect(strip.children).toHaveLength(1);
+    // Just left of the pill, within the right cluster -- not the strip's own left slot,
+    // which now holds the greeting rather than the arranging caption.
+    expect(strip.children).toHaveLength(2);
     expect(indexIn(right, caption)).toBeLessThan(
       indexIn(right, right.querySelector(".hbar__arrange")),
     );

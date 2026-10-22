@@ -1,0 +1,103 @@
+/* Remote Access — away-from-home connection status. Flat, 2px ink border like every other
+   small widget card (tonight-card.css); no box-shadow since widget frames don't spend
+   InkBudget's raised offset. The dot answers on/off at a glance; the amber callout only
+   appears when a recovery request is actually waiting on a person. */
+
+.rac {
+  box-sizing: border-box;
+  height: 100%;
+  border: 2px solid var(--color-text);
+  border-radius: 12px;
+  background: var(--color-surface);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rac__eyebrow {
+  font: 700 11px var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.rac__status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rac__dot {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border-radius: 999px;
+}
+
+.rac__dot--on {
+  background: var(--color-success);
+}
+
+.rac__dot--off {
+  background: var(--color-neutral);
+}
+
+.rac__dot--unknown {
+  background: var(--color-warning);
+}
+
+.rac__status-label {
+  font: 700 18px Quicksand, sans-serif;
+  color: var(--color-text);
+}
+
+.rac__pending {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--color-warning-soft);
+}
+
+.rac__pending-kind {
+  font: 700 10px var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.rac__pending-count {
+  font: 600 13px Quicksand, sans-serif;
+  color: var(--color-text);
+}
+
+.rac__quiet {
+  font: 500 13px Quicksand, sans-serif;
+  color: var(--color-text-secondary);
+}
+
+.rac__link {
+  margin-top: auto;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 12px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: 600 13px Quicksand, sans-serif;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.rac__link:hover {
+  background: var(--color-hover);
+}
+
+.rac__link:active {
+  background: var(--color-pressed);
+}

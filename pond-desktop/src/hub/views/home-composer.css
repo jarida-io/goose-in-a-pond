@@ -1,0 +1,100 @@
+/* Desktop only. Hidden at and below 1100px -- the same SMALL_W threshold electron/main/window.ts
+   uses to switch the Jetson/kiosk panels into frameless fullscreen -- so the kiosk's existing mic
+   and chat dock (dashboard-grid.css's .dash__dock) stays exactly as it is, untouched. */
+
+/* One continuous bar, not three separate floating pills: the input and the two action cells are
+   fused flush against each other, divided by a straight black line each, and only the bar's own
+   two outer corners are rounded -- the `overflow: hidden` on this element is what clips the first
+   and last cell to that rounding without each cell needing its own radius. */
+.hcomposer {
+  display: none;
+  align-items: stretch;
+  height: 56px;
+  /* Doesn't stretch end-to-end on a wide window -- an input+two-button bar that long reads
+     as awkwardly thin and overlong rather than roomy. */
+  max-width: 900px;
+  box-sizing: border-box;
+  overflow: hidden;
+  border: 2px solid var(--color-text);
+  border-radius: 5px;
+  background: var(--color-surface);
+  box-shadow: 4px 4px 0 var(--pp);
+  /* 20px left matches HomeStatusBar's own inset -- this sits directly under the greeting
+     and would otherwise start flush at the dash's edge instead of lining up with it. */
+  margin: 0 0 16px 20px;
+}
+
+@media (min-width: 1101px) {
+  .hcomposer {
+    display: flex;
+  }
+}
+
+.hcomposer__input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 0 20px;
+  border: 0;
+  /* base.css's global `input` rule sets --radius-md on every corner; the outer bar's own
+     rounding only clips the true left edge, so the inner-right corner needs this zeroed
+     explicitly or it shows as a small rounded notch at the seam with the next cell. */
+  border-radius: 0;
+  background: transparent;
+  color: var(--color-text);
+  font: 500 14px var(--font-body, "Quicksand", sans-serif);
+}
+
+.hcomposer__input:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+
+.hcomposer__talk,
+.hcomposer__send {
+  flex: none;
+  height: 100%;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 22px;
+  border: 0;
+  border-left: 2px solid var(--color-text);
+  /* Same reason as .hcomposer__input above: base.css's global `button` rule sets
+     --radius-md on every corner by default. */
+  border-radius: 0;
+  font: 700 14px var(--font-body, "Quicksand", sans-serif);
+  cursor: pointer;
+}
+
+/* Accent fill -- the middle cell, fused between the input and Send. */
+.hcomposer__talk {
+  background: var(--color-accent);
+  color: var(--color-text-on-accent);
+}
+
+.hcomposer__talk:hover {
+  background: var(--color-accent-hover);
+}
+
+/* Solid dark -- the rightmost cell, flush against the bar's own rounded end. */
+.hcomposer__send {
+  background: var(--color-text);
+  color: var(--color-bg);
+}
+
+.hcomposer__send:hover:not(:disabled) {
+  background: var(--color-text-secondary);
+}
+
+/* Same solid fill whether or not there's anything to send -- it doesn't fade or grey out,
+   it just stops responding to clicks (the `disabled` attribute still blocks submission).
+   Overriding base.css's global `button:disabled { opacity: 0.38 }`, which is what was
+   actually greying this out -- the background colour itself was never changing. */
+.hcomposer__send:disabled {
+  opacity: 1;
+  cursor: default;
+}

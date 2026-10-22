@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { api } from "../../../api/PondApiClient";
 import { powerStateOf } from "../../../sections/devicePower";
+import { timeSince } from "../../../sections/Devices";
 import type { DeviceData } from "../../data/mockHome";
 import { HubIco } from "../../primitives/HubIco";
 import { HP_PATHS } from "../../primitives/icons";
@@ -12,11 +13,20 @@ const DEVICE_SERVER = "giap-device-control";
 /** What a device says about its switch: on, off, or (undefined) it did not say. */
 type PowerRead = boolean | undefined;
 
+/** Everything this card needs per device from `/api/v1/devices` besides the name/room/kind
+    already in `home.devices` -- capabilities for the power-tile split, plus connectivity,
+    which used to need its own fetch (HomeAlerts.tsx's) when this card only kept capabilities. */
+interface WireDevice {
+  capabilities: string[];
+  is_online: boolean;
+  last_seen?: string;
+}
+
 /** The device-list read. Loading and failed are distinct: one says wait, the other offers a retry. */
 type Wire =
   | { status: "loading" }
   | { status: "failed" }
-  | { status: "ready"; byId: Record<string, string[]> };
+  | { status: "ready"; byId: Record<string, WireDevice> };
 
 /**
  * One device's power; undefined (never `false`) on a throw or an unparseable reply. The body
@@ -69,8 +79,10 @@ export function HomeControlsCard({ limit, onManageDevices }: HomeControlsCardPro
       .listDevices()
       .then((list) => {
         if (cancelled) return;
-        const byId: Record<string, string[]> = {};
-        for (const d of list) byId[d.id] = d.capabilities ?? [];
+        const byId: Record<string, WireDevice> = {};
+        for (const d of list) {
+          byId[d.id] = { capabilities: d.capabilities ?? [], is_online: d.is_online, last_seen: d.last_seen };
+        }
         setWire({ status: "ready", byId });
       })
       .catch(() => {
@@ -97,9 +109,13 @@ export function HomeControlsCard({ limit, onManageDevices }: HomeControlsCardPro
 
   const canPower = useCallback(
     (id: string): boolean =>
-      wire.status === "ready" ? (wire.byId[id]?.includes("power") ?? false) : false,
+      wire.status === "ready" ? (wire.byId[id]?.capabilities.includes("power") ?? false) : false,
     [wire],
   );
+
+  /** Undefined only while `wire` hasn't resolved; `known` is already gated on `wire.status === "ready"`. */
+  const connectivityOf = (id: string): WireDevice | undefined =>
+    wire.status === "ready" ? wire.byId[id] : undefined;
 
   // Serialised so the read effect re-runs on changed ids, not on each new-but-equal array.
   const powerKey = useMemo(
@@ -155,19 +171,39 @@ export function HomeControlsCard({ limit, onManageDevices }: HomeControlsCardPro
     window.dispatchEvent(new CustomEvent("hub:device", { detail: device.id }));
   }
 
-  // The count stays blank until `settled`: a number there is a claim about the house.
-  const head = (label: string) => (
+  /** Dot plus text, not colour alone: offline tiles carry both (plan §6). */
+  function connectivity(id: string): ReactElement | null {
+    const info = connectivityOf(id);
+    if (!info) return null;
+    return info.is_online ? (
+      <span className="hcc__status" data-online="true">
+        <span className="hcc__dot" aria-hidden="true" />
+        Online
+      </span>
+    ) : (
+      <span className="hcc__status" data-online="false">
+        <span className="hcc__dot" aria-hidden="true" />
+        Offline · {info.last_seen ? timeSince(info.last_seen) : "unknown"}
+      </span>
+    );
+  }
+
+  const head = (showManage: boolean) => (
     <div className="hcc__head">
       <HubIco d={HP_PATHS.sliders} size={18} color="var(--color-text)" sw={1.9} />
       <span className="hcc__title">Devices</span>
-      <span className="hcc__count">{label}</span>
+      {showManage && (
+        <button type="button" className="hcc__manage" onClick={onManageDevices}>
+          Manage devices
+        </button>
+      )}
     </div>
   );
 
   if (wire.status === "failed") {
     return (
       <div className="hcc" data-hook="home-controls" data-state="failed">
-        {head("")}
+        {head(false)}
         <div className="hcc__note" role="status">
           <HubIco d={HP_PATHS.alert} size={16} color="var(--color-text-secondary)" sw={1.9} />
           <span className="hcc__note-title">Could not reach the pond</span>
@@ -195,7 +231,7 @@ export function HomeControlsCard({ limit, onManageDevices }: HomeControlsCardPro
   if (!settled) {
     return (
       <div className="hcc" data-hook="home-controls" data-state="loading">
-        {head("")}
+        {head(false)}
         <span className="hcc__quiet" role="status">
           Checking what the house holds
         </span>
@@ -214,20 +250,21 @@ export function HomeControlsCard({ limit, onManageDevices }: HomeControlsCardPro
     );
   }
 
-  const countText = known.length > room ? `${room} of ${known.length}` : String(known.length);
-
   return (
     <div className="hcc" data-hook="home-controls" data-state="ready">
-      {head(countText)}
+      {head(true)}
 
       {visible.length > 0 && (
         <div className="hcc__grid">
           {visible.map((device) => {
+            const online = connectivityOf(device.id)?.is_online ?? true;
+
             if (!canPower(device.id)) {
               return (
-                <div className="hcc__tile hcc__static" key={device.id}>
+                <div className="hcc__tile hcc__static" key={device.id} data-online={String(online)}>
                   <span className="hcc__name">{device.name}</span>
                   <span className="hcc__room">{device.room}</span>
+                  {connectivity(device.id)}
                 </div>
               );
             }
@@ -245,12 +282,14 @@ export function HomeControlsCard({ limit, onManageDevices }: HomeControlsCardPro
                   type="button"
                   data-state={busy ? "pending" : "unknown"}
                   data-last="unknown"
+                  data-online={String(online)}
                   aria-busy={busy}
                   aria-label={`${device.name}, not reporting — open controls`}
                   onClick={() => openControls(device)}
                 >
                   <span className="hcc__name">{device.name}</span>
                   <span className="hcc__value">Not reporting</span>
+                  {connectivity(device.id)}
                 </button>
               );
             }
@@ -262,6 +301,7 @@ export function HomeControlsCard({ limit, onManageDevices }: HomeControlsCardPro
                 type="button"
                 data-state={busy ? "pending" : last}
                 data-last={last}
+                data-online={String(online)}
                 aria-busy={busy}
                 aria-pressed={last === "on"}
                 aria-label={`${device.name}, ${last === "on" ? "on" : "off"}`}
@@ -272,6 +312,7 @@ export function HomeControlsCard({ limit, onManageDevices }: HomeControlsCardPro
               >
                 <span className="hcc__name">{device.name}</span>
                 <span className="hcc__value">{last === "on" ? "On" : "Off"}</span>
+                {connectivity(device.id)}
               </button>
             );
           })}

@@ -37,38 +37,6 @@
   min-height: 0;
 }
 
-/* ── the head ──
-   One sentence about this house, in the bold italic at -0.02em that DESIGN.md
-   section 2 names as the signature of this product's typography -- and which
-   appeared nowhere on Home until now.
-
-   26px, not the 30px the proposal summary uses: a proposal is a question
-   somebody has to answer and the head is the screen introducing itself, so the
-   head must not be the loudest thing on a screen that has one waiting.
-
-   Charcoal, never purple. Purple measures 4.42:1 on Jarida White, which clears
-   what a boundary needs and misses what a sentence needs (section 2). */
-.sq__head {
-  margin: 0;
-  font-family: Quicksand, Comfortaa, sans-serif;
-  font-weight: 700;
-  font-style: italic;
-  font-size: 23px;
-  line-height: 1.2;
-  letter-spacing: -0.02em;
-  color: var(--color-text);
-  text-wrap: balance;
-}
-
-/* The short panel. 480px of screen minus 60 of shell bar and 44 of status strip
-   leaves this column 376px, and it has to fit a head, an offer and the dock. 19
-   takes a line off the longest sentence homeLine can write. */
-@media (max-height: 560px) {
-  .sq__head {
-    font-size: 19px;
-  }
-}
-
 /* Quicksand, not JetBrains Mono. "You could ask" is prose; DESIGN.md section 2
    reserves the mono face for numbers, timestamps, file paths and measurements,
    and a label set in it reads as data the household cannot act on. Sentence
@@ -471,6 +439,70 @@
   gap: 8px;
 }
 
+/* Desktop's offers live in SuggestionChips (SuggestionChips.tsx), right under
+   the composer in `.dash__top-row`, not in this aside column (plan §5) --
+   this stays the panel's whole asking side below 1101px, same threshold the
+   composer itself uses. */
+@media (min-width: 1101px) {
+  .sq__offers {
+    display: none;
+  }
+}
+
+/* SuggestionChips.tsx's own root -- hidden below 1101px, same as the composer
+   it sits under (home-composer.css), since .dash__top-row stacks everything
+   in one column there and SuggestionQueue's own column already covers it. */
+.sq__offer-chips {
+  display: none;
+}
+
+@media (min-width: 1101px) {
+  .sq__offer-chips {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+}
+
+/* Shared with SuggestionChips.tsx, a different component under the composer.
+   36px visual, 44px hit area via .reach (styles/touch.css) -- dense like a
+   filter pill, not inflated to the touch floor it doesn't visually need.
+   No max-width/ellipsis: a pill that quietly cuts off its own sentence reads
+   as broken, not as something worth tapping -- the row wraps (.sq__offer-chips'
+   flex-wrap) rather than any one chip truncating. */
+.sq__chip {
+  box-sizing: border-box;
+  height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--grey-200, var(--color-border));
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: 600 13px Quicksand, sans-serif;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  transition: border-color var(--dur-fast, 120ms) var(--ink-ease, ease);
+}
+
+.sq__chip:hover {
+  border-color: var(--color-text);
+}
+
+.sq__chip:focus-visible {
+  outline: 2px solid var(--pp);
+  outline-offset: 2px;
+}
+
+.sq__chip--more {
+  cursor: default;
+  color: var(--color-text-secondary);
+  background: transparent;
+  border-style: dashed;
+}
+
 /* The rows. A hairline, no offset: these are a way in, not the thing the
    screen is for.
 
@@ -505,42 +537,27 @@
   border-color: var(--color-text);
 }
 
-/* ── the one that is loud ──
-   The ink card, taken verbatim from `styles/context.css` .ctx__card -- same
-   custom property, same 4px, same 7px on hover, same compensating translate so
-   the card's top-left corner stays put while the shadow grows underneath it.
-   Copied rather than reinterpreted: a second dialect of the house's one
-   gesture is worse than a duplicated rule.
-
-   Exactly one offer gets this. DESIGN.md section 3 budgets the offset at about
-   twice per screen; Home spends it here and on the mic, and the chat button
-   gives its own up to pay for it. */
+/* ── the featured offer, flat (plan §1) ──
+   Used to carry the house's one raised-offset gesture (DESIGN.md §3's ~2-per-screen
+   budget), back when Home spent it here and on the mic. The composer and the first
+   alert now spend that budget instead (home-composer.css, home-alerts.css), so this
+   stays flat with the 2px ink border like every other widget -- still visually
+   distinct from a plain `.sq__offer` via its own padding/radius/background, just
+   without a second raised thing competing with the composer for attention. */
 .sq__offer--lead {
-  --ink-lift: 4px;
-
   gap: 5px;
   padding: 15px 16px;
   border: 2px solid var(--color-text);
   border-radius: 12px;
   background: var(--color-surface);
-  box-shadow: var(--ink-lift) var(--ink-lift) 0 var(--border-ink);
-  transform: translate(calc(4px - var(--ink-lift)), calc(4px - var(--ink-lift)));
-  transition:
-    box-shadow var(--dur-fast, 120ms) var(--ink-ease, ease),
-    transform var(--dur-fast, 120ms) var(--ink-ease, ease),
-    border-color var(--dur-fast, 120ms) var(--ink-ease, ease);
+  transition: border-color var(--dur-fast, 120ms) var(--ink-ease, ease);
 }
 
 .sq__offer--lead:hover {
-  --ink-lift: 7px;
   border-color: var(--color-accent);
 }
 
-/* Press is physical (section 3): the shadow collapses to nothing and the card
-   travels into the space the shadow was occupying, so it reads as a key being
-   struck. */
 .sq__offer--lead:active {
-  --ink-lift: 0px;
   border-color: var(--color-text);
 }
 

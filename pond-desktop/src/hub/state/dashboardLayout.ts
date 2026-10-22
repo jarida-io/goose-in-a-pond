@@ -3,7 +3,7 @@
 
 import { useSyncExternalStore } from "react";
 
-export type CardId = "weather" | "devices" | "nowPlaying";
+export type CardId = "weather" | "devices" | "nowPlaying" | "tonight" | "remoteAccess";
 
 /** How much room a card takes. The only width input there is. */
 export type CardSize = "s" | "m" | "l";
@@ -31,6 +31,8 @@ export const CARDS: readonly CardSpec[] = [
   { id: "devices", title: "Devices", hint: "Lights, locks, plugs and thermostats", defaultSize: "l" },
   { id: "weather", title: "Weather", hint: "Now, and the days ahead", defaultSize: "m" },
   { id: "nowPlaying", title: "Music", hint: "What is playing, and the controls", defaultSize: "s" },
+  { id: "tonight", title: "Tonight", hint: "Routines left before midnight", defaultSize: "s" },
+  { id: "remoteAccess", title: "Remote Access", hint: "Away-from-home connection status", defaultSize: "s" },
 ] as const;
 
 const CARD_IDS = new Set<string>(CARDS.map((c) => c.id));
@@ -57,9 +59,14 @@ export const DEFAULT_LAYOUT: DashboardLayout = {
       { id: "weather", size: "m" },
       { id: "devices", size: "l" },
     ],
-    [{ id: "nowPlaying", size: "s" }],
+    [
+      { id: "nowPlaying", size: "s" },
+      { id: "tonight", size: "s" },
+    ],
   ],
-  hidden: [],
+  // Available from the arrange sheet rather than placed: adding a card to every existing
+  // Home is a product decision (line above this struct), and this one wasn't it.
+  hidden: ["remoteAccess"],
 };
 
 // Same key as v1, whose payload is migrated; a new key would silently reset every Home.

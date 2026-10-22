@@ -29,10 +29,14 @@ export function WeatherWidget({ variant = "card" }: WeatherWidgetProps) {
     >
       <div className="wx__main">
         <span className="wx__icon">
+          {/* currentColor, not --color-text: .wx sets color: #fff for the dark sky gradient
+              in both themes (hub.css), so --color-text (dark in light mode) made this icon
+              disappear. Every other label on the card (.wx__cond etc.) already inherits that
+              white by not setting its own color -- this was the one exception. */}
           <HubIco
             d={getForecastIcon(w.icon) || HP_PATHS.cloudSun}
             size={variant === "hero" ? 44 : 34}
-            color="var(--color-text)"
+            color="currentColor"
             sw={1.7}
           />
         </span>
@@ -46,7 +50,9 @@ export function WeatherWidget({ variant = "card" }: WeatherWidgetProps) {
         {w.forecast.map((f) => (
           <div key={f.d} className="wx__fday">
             <span>{f.d}</span>
-            <HubIco d={getForecastIcon(f.i)} size={16} color="var(--color-text-secondary)" sw={1.7} />
+            {/* currentColor, same reason as the main icon above -- --color-text-secondary
+                is a dark slate in light mode and disappeared on the dark sky gradient. */}
+            <HubIco d={getForecastIcon(f.i)} size={16} color="currentColor" sw={1.7} />
             <strong>{f.t}°</strong>
           </div>
         ))}

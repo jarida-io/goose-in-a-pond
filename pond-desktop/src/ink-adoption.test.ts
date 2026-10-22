@@ -113,13 +113,31 @@ function drift(
 describe("light", () => {
   const emitted = cssVariables(createTheme());
 
-  /** No exemptions: per DESIGN.md's precedence rule the shipped light theme wins. */
+  /** One exemption, a brand choice rather than drift: Jarida Warm White, not the library's
+      generic #FFF9F9. themeStore.ts's applyToDOM explicitly strips the library's inline
+      --color-bg (its own comment explains why) so this value wins instead. */
+  const DIVERGENCES: Record<string, string> = {
+    "--color-bg": "Jarida Warm White; see themeStore.ts's applyToDOM",
+  };
+
   it("reproduces the shipped stylesheet exactly", () => {
-    const mismatches = drift(emitted, light, resolveLight, {});
+    const mismatches = drift(emitted, light, resolveLight, DIVERGENCES);
     expect(
       mismatches,
       `The library and design-tokens.css have drifted:\n\n${mismatches.join("\n\n")}\n`,
     ).toEqual([]);
+  });
+
+  it("keeps no exemption that has stopped being one", () => {
+    // A stale exemption would hide a real drift later.
+    for (const name of Object.keys(DIVERGENCES)) {
+      const theirs = light[name];
+      if (theirs === undefined) continue;
+      expect(
+        canonical(resolveLight(theirs)),
+        `${name} now matches — remove it from DIVERGENCES`,
+      ).not.toBe(canonical(emitted[name]));
+    }
   });
 
   it("covers enough of it to be worth calling a source of truth", () => {

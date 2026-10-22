@@ -18,6 +18,25 @@
   font-style: normal;
   font-display: swap;
 }
+/* Single weight only (900/Black is baked into the typeface, not a variable axis) --
+   @fontsource/archivo-black ships woff2, not ttf, unlike the two above. */
+@font-face {
+  font-family: "Archivo Black";
+  src: url("/fonts/ArchivoBlack-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+/* Applied app-wide below (see the `body` rule's --font-* vars) -- @fontsource-variable/space-grotesk's
+   own index.css ships every language subset; this is just the latin woff2 it bundles, same
+   extract-and-copy pattern as Archivo Black above. */
+@font-face {
+  font-family: "Space Grotesk Variable";
+  src: url("/fonts/SpaceGrotesk-Variable.woff2") format("woff2-variations");
+  font-weight: 300 700;
+  font-style: normal;
+  font-display: swap;
+}
 
 /* ── Reset ──────────────────────────────────────────────────── */
 /* In the "reset" layer (registered first in design-tokens.css, before
@@ -63,7 +82,16 @@ html {
   height: 100%;
 }
 
+/* Space Grotesk app-wide: InkProvider writes --font-* inline on <html> every render (themeStore.ts
+   applyToDOM), so editing --font-display/--font-body up there has no visible effect. Redeclaring
+   them here, on a descendant of <html>, wins the cascade for this element and everything under it
+   without touching the inline value. Was scoped to .dash only (hub/views/font-trial.css, now
+   removed) as a trial; this is that same override promoted to every page. */
 body {
+  --font-display: "Space Grotesk Variable", "Quicksand", sans-serif;
+  --font-heading: "Space Grotesk Variable", "Quicksand", sans-serif;
+  --font-body:    "Space Grotesk Variable", "Quicksand", sans-serif;
+
   font-family: var(--font-body);
   font-size: var(--text-base);
   font-weight: var(--weight-regular);

@@ -380,6 +380,37 @@
 .wx--hero { background: linear-gradient(150deg, #60A5FA, #6366F1); }
 .wx--hero .wx__temp { font-size: 52px; }
 
+/* Card is the small-frame variant (DashboardGrid passes it at card.size === "s"),
+   a square glance tile rather than a shrunk hero: icon, temp and condition
+   centered and stacked, no forecast strip or H/L range -- there's no room to
+   do either justice at this size. */
+.wx--card {
+  width: min(100%, 220px);
+  height: auto;
+  aspect-ratio: 1;
+  padding: 16px;
+  gap: 0;
+  align-items: center;
+  justify-content: center;
+}
+
+.wx--card .wx__fc,
+.wx--card .wx__range {
+  display: none;
+}
+
+.wx--card .wx__main {
+  flex-direction: column;
+  gap: 6px;
+  text-align: center;
+}
+
+.wx--card .wx__meta {
+  margin-left: 0;
+  align-items: center;
+  text-align: center;
+}
+
 /* Time-of-day background, derived from real sunrise/sunset (overrides the
    default/hero gradients above regardless of variant). "day" keeps the
    existing sky-blue look, so it has no override here. */

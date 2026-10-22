@@ -15,7 +15,12 @@
    Sizes this has to hold, from DESIGN.md §4:
      1024x600  the shelf panel — one widget per page-width column
      desktop   the classic surface — the same pages, two columns wide
-   ──────────────────────────────────────────────────────────── */
+
+   One flex-wrap layout serves both: medium/large widgets always take a full
+   row (so "two columns wide" on desktop was never about them), and small
+   widgets wrap as many as fit at their own size -- one on the narrow panel,
+   two side by side once there's room, same shape the old 760px breakpoint's
+   grid was reaching for without its dead-space bug. See the rule below. */
 
 .wtrack {
   flex: 1;
@@ -49,7 +54,8 @@
   scroll-snap-align: start;
   overflow-y: auto;
   display: flex;
-  flex-direction: column;
+  flex-flow: row wrap;
+  align-content: flex-start;
   gap: 12px;
   /* No dock lane. The dock used to float over this column, so the last widget
      had to end 88px above the bottom of the track or the mic sat on top of it
@@ -60,26 +66,55 @@
   scrollbar-width: none;
 }
 
+/* Everything defaults to its own full-width row -- unchanged from the old
+   column stack. `.wframe` itself ships `flex: none` (widget-frame.css), so
+   this has to out-specify that rule by naming the child classes rather than
+   `> *` -- a universal selector carries no specificity and only won the tie
+   by import order, which broke the moment WidgetFrame's stylesheet happened
+   to load after this one. flex-shrink: 0 is load-bearing too: without it, a
+   100%-basis item that can't fit the rest of a line a small widget started
+   gets squeezed down to share that line instead of wrapping to its own,
+   which is exactly the m/l-squished-next-to-s bug this exists to avoid.
+
+   One flex-wrap system for every width, not a flex layout under 760px and a
+   separate 2-column grid above it: the grid gave each small tile a full 1fr
+   column (50% of the whole row) to sit in even though the tile itself caps
+   at ~220px, which read as a huge gap between two tiles on anything wider
+   than a phone. */
+.wtrack__page > .wframe,
+.wtrack__page > .wframe-add {
+  flex: 1 0 100%;
+  min-width: 0;
+}
+
+/* flex: 1 1 0 -- equal-width columns that split the row between however
+   many small widgets share it (e.g. weather + music), the row filled
+   edge-to-edge rather than each sized to its own content with the rest of
+   the row left as unused space. The square tile inside stays a fixed 220px
+   square either way (its own width: min(100%, 220px) caps it) and centers
+   in whatever width this column resolves to (.wframe__body's align-items:
+   center, widget-frame.css). 236px min-width: not 220px, because `.wframe`
+   adds its own padding/border on top, so the frame needs a little more room
+   to avoid clipping the tile by a few px; flex-shrink: 1 still lets it go
+   narrower than that only if the row can't otherwise fit it at all. */
+.wtrack__page > .wframe[data-size="s"] {
+  flex: 1 1 0;
+  min-width: 236px;
+}
+
+/* Medium is the one exception to "full row": a 300px basis that grows to
+   fill whatever's left on the line. Next to a small tile (236px + gap), that
+   leaves 300px+ of room, so it shares the row instead of forcing the small
+   tile onto a lonely line of its own; alone on an empty row, flex-grow fills
+   the whole width same as before. Large stays flex: 1 0 100% (shrink: 0,
+   never shares) -- only medium moved. */
+.wtrack__page > .wframe[data-size="m"] {
+  flex: 1 1 300px;
+}
+
 .wtrack__page::-webkit-scrollbar {
   width: 0;
   height: 0;
-}
-
-/* Wider track, same pages, same order — more room per widget, not different
-   widgets. A household that arranged three cards onto page one still finds
-   three cards on page one on the desktop. */
-@container wtrack (min-width: 760px) {
-  .wtrack__page {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    align-content: start;
-  }
-
-  /* A widget sized large keeps the full width it was given; the two-column
-     rule is extra room, not a re-negotiation of what fits. */
-  .wtrack__page > [data-size="l"] {
-    grid-column: 1 / -1;
-  }
 }
 
 /* ── Dots ─────────────────────────────────────────────────────
