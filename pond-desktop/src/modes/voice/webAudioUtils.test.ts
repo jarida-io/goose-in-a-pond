@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { splitSpeechUnits, splitSentences, normalizeForSpeech } from "./webAudioUtils";
+import { splitSpeechUnits, normalizeForSpeech } from "./webAudioUtils";
 
 describe("splitSpeechUnits", () => {
   it("splits opening clause after minimum words when allowClauses is true", () => {

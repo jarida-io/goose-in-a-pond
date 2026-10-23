@@ -8,7 +8,7 @@ import type {
 import {
   MIC_CONSTRAINTS,
   encodeWav, calculateRms, downsampleTo16k, getAudioContext, closeAudioContext,
-  playPingTone, playThinkingTone, splitSentences, splitSpeechUnits, stripMarkdown, normalizeForSpeech,
+  playPingTone, playThinkingTone, splitSpeechUnits, stripMarkdown, normalizeForSpeech,
   isWhisperArtifact, checkDismissal, getToolAnnouncement, getQuip,
   filterThinkingFull, createVadState, advanceVad, DEFAULT_VAD_CONFIG,
   registerTtsSource, clearTtsSource, stopTtsPlayback, isTtsInterrupted, resetTtsInterrupt,
@@ -517,10 +517,7 @@ export class WebVoiceBackend implements VoiceBackend {
       }
     } finally { reader.releaseLock(); }
 
-    if (ttsBuf.trim() && !this.cancelled) {
-      enqueue(ttsBuf.trim());
-      ttsBuf = "";
-    }
+    if (ttsBuf.trim() && !this.cancelled) enqueue(ttsBuf.trim());
 
     // Wait for TTS queue to drain (exits immediately if interrupted)
     await new Promise<void>((resolve) => {
