@@ -187,6 +187,9 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             post(register_push_token).delete(delete_push_token),
         )
         .route("/notifications/stream", get(notifications_stream))
+        // The stream's fallback for a phone a push wake brought back: the caller's own queue only.
+        .route("/notifications/pending", get(notifications_pending))
+        .route("/notifications/{id}/ack", post(acknowledge_notification))
         .route("/models/download/control", post(download_control))
         .route("/models/{category}/{name}/download", post(download_model))
         .route("/models/{category}/{name}/activate", post(activate_model));
@@ -10646,6 +10649,16 @@ struct NotificationStreamParams {
 
 /// `GET /api/v1/notifications/stream?device_id=X` — foreground push for one device.
 /// Drains its offline queue, then tails live events for it or `"broadcast"`; dedupe by `id`.
+/// A broadcast the device has its own queued copy of (a paired phone) is skipped: that copy
+/// arrives on its own, under the per-device id the push wake and `/pending` also use.
+///
+/// A phone ([`PHONE_CLIENT_TYPE`]) acknowledges each notice with `POST .../{id}/ack`, and only
+/// that marks its copy delivered: a write into a half-open connection (a phone that dropped off
+/// the network without closing it) succeeds, so a stream write is no proof the notice arrived.
+/// Every connection therefore re-sends each copy the phone has not acknowledged. Any other
+/// device has no ack path, so the stream marks what it sends delivered, as it always has.
+///
+/// [`PHONE_CLIENT_TYPE`]: pond_core::mcp::ports::notification_recipients::PHONE_CLIENT_TYPE
 async fn notifications_stream(
     State(state): State<Arc<AppState>>,
     axum::Extension(principal): axum::Extension<pond_core::security::ports::policy::Principal>,
@@ -10677,12 +10690,14 @@ async fn notifications_stream(
                 Json(json!({ "error": "device lookup failed" })),
             )
         })?;
-    if exists.is_none() {
+    let Some(device) = exists else {
         return Err((
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "unknown device" })),
         ));
-    }
+    };
+    let ack_required =
+        device.device_type == pond_core::mcp::ports::notification_recipients::PHONE_CLIENT_TYPE;
 
     // Not the chat `sse_semaphore`: phones hold these open indefinitely and would starve chat.
     let permit = state
@@ -10700,22 +10715,40 @@ async fn notifications_stream(
 
     let stream = async_stream::stream! {
         let _permit = permit;
+        // `rx` subscribed before this drain ran, so a copy queued in between arrives twice:
+        // once here and once live. Each flushed id skips its first live repeat.
+        let mut flushed = std::collections::HashSet::new();
 
         match queue.list_undelivered(&device_id).await {
             Ok(pending) => {
                 let mut ids = Vec::with_capacity(pending.len());
                 for n in &pending {
+                    flushed.insert(n.id.clone());
                     let data = serde_json::to_string(n).unwrap_or_default();
                     ids.push(n.id.clone());
                     yield Ok(Event::default().data(data));
                 }
-                if !ids.is_empty() {
+                tracing::info!(
+                    kind = "notifications_stream_flushed",
+                    count = ids.len(),
+                    ack_required,
+                    "notifications: queued notices sent on connect"
+                );
+                if !ack_required && !ids.is_empty() {
                     if let Err(e) = queue.mark_delivered(&ids).await {
-                        tracing::warn!(error = %e, "notifications: flush mark_delivered failed");
+                        tracing::warn!(
+                            kind = "notification_mark_delivered_failed",
+                            error = %e,
+                            "notifications: flush mark_delivered failed"
+                        );
                     }
                 }
             }
-            Err(e) => tracing::warn!(error = %e, "notifications: flush query failed"),
+            Err(e) => tracing::warn!(
+                kind = "notifications_stream_flush_failed",
+                error = %e,
+                "notifications: flush query failed"
+            ),
         }
 
         loop {
@@ -10723,12 +10756,22 @@ async fn notifications_stream(
                 Ok(n) => {
                     if n.target == device_id || n.target == "broadcast" {
                         let targeted = n.target == device_id;
+                        if targeted && flushed.remove(&n.id) {
+                            continue;
+                        }
+                        if !targeted && has_own_copy(queue.as_ref(), &n.id, &device_id).await {
+                            continue;
+                        }
                         let id = n.id.clone();
                         let data = serde_json::to_string(&n).unwrap_or_default();
                         yield Ok(Event::default().data(data));
-                        if targeted {
+                        if targeted && !ack_required {
                             if let Err(e) = queue.mark_delivered(&[id]).await {
-                                tracing::warn!(error = %e, "notifications: live mark_delivered failed");
+                                tracing::warn!(
+                                    kind = "notification_mark_delivered_failed",
+                                    error = %e,
+                                    "notifications: live mark_delivered failed"
+                                );
                             }
                         }
                     }
@@ -10743,6 +10786,135 @@ async fn notifications_stream(
     };
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// Whether `device_id` has its own queued copy of broadcast `notification_id`. A failed read
+/// answers `false`: a duplicate the app can dismiss beats a notice the phone never sees.
+async fn has_own_copy(
+    queue: &dyn pond_core::mcp::ports::notification_queue::NotificationQueueRepository,
+    notification_id: &str,
+    device_id: &str,
+) -> bool {
+    let own_id =
+        pond_core::mcp::ports::notification::per_device_notification_id(notification_id, device_id);
+    match queue.is_queued_for(&own_id, device_id).await {
+        Ok(found) => found,
+        Err(e) => {
+            tracing::warn!(
+                kind = "notification_copy_lookup_failed",
+                error = %e,
+                "notifications: could not tell whether this device has its own copy; streaming the broadcast"
+            );
+            false
+        }
+    }
+}
+
+/// The calling device's id and the notification queue it reads.
+type CallerQueue = (
+    String,
+    Arc<dyn pond_core::mcp::ports::notification_queue::NotificationQueueRepository>,
+);
+
+/// The calling device's id, from its pairing token only, plus the queue; or the refusal.
+fn caller_queue(
+    state: &AppState,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    operation: &'static str,
+) -> Result<CallerQueue, (StatusCode, Json<Value>)> {
+    let Some(device_id) = proven_device(principal).id().map(str::to_owned) else {
+        tracing::warn!(
+            kind = "notification_queue_refused",
+            operation,
+            reason = "no_device",
+            "notifications: request did not come from a paired device"
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "this request did not come from a paired device"})),
+        ));
+    };
+    let Some(queue) = state.notification_queue.clone() else {
+        tracing::warn!(
+            kind = "notification_queue_unavailable",
+            operation,
+            "notifications: no queue wired"
+        );
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "notifications not available"})),
+        ));
+    };
+    Ok((device_id, queue))
+}
+
+/// `GET /api/v1/notifications/pending` — the calling device's undelivered notifications, oldest
+/// first, as `{"notifications": [Notification, ...]}`. The device comes from the token, never a
+/// parameter. Read-only: the app acknowledges each one it shows with `POST .../{id}/ack`.
+async fn notifications_pending(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+) -> (StatusCode, Json<Value>) {
+    let (device_id, queue) = match caller_queue(&state, principal.as_ref(), "notifications_pending")
+    {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    match queue.list_undelivered(&device_id).await {
+        Ok(pending) => {
+            tracing::debug!(
+                kind = "notifications_pending_served",
+                count = pending.len(),
+                "notifications: pending served"
+            );
+            (StatusCode::OK, Json(json!({ "notifications": pending })))
+        }
+        Err(e) => {
+            tracing::warn!(kind = "notifications_pending_failed", error = %e, "notifications: pending query failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "could not read pending notifications"})),
+            )
+        }
+    }
+}
+
+/// `POST /api/v1/notifications/{id}/ack` — mark one of the calling device's notifications
+/// delivered. `{"id": id, "acknowledged": true}`, also when it already was; `404` when no such
+/// notification is the caller's, whether or not another device has one by that id.
+async fn acknowledge_notification(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> (StatusCode, Json<Value>) {
+    let (device_id, queue) =
+        match caller_queue(&state, principal.as_ref(), "acknowledge_notification") {
+            Ok(found) => found,
+            Err(refusal) => return refusal,
+        };
+    match queue.acknowledge(&id, &device_id).await {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(json!({"id": id, "acknowledged": true})),
+        ),
+        Ok(false) => {
+            tracing::info!(
+                kind = "notification_ack_refused",
+                "notifications: ack for a notification that is not the caller's"
+            );
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "no such notification for this device"})),
+            )
+        }
+        Err(e) => {
+            tracing::warn!(kind = "notification_ack_failed", error = %e, "notifications: ack failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "could not acknowledge the notification"})),
+            )
+        }
+    }
 }
 
 // ── Agent tools handler ───────────────────────────────────────────────────────

@@ -275,7 +275,9 @@ device's token before onboarding too (`Exposure::Authenticated`), and each handl
 caller's own device (`device_mismatch` otherwise). On an A16 against a real pond all four were
 `403 onboarding_required` for the whole of owner setup: the stream retried about once a second, and
 the phone's push token, refused once, was never registered. `POST /devices/{id}/heartbeat` stays
-behind the guard, because it names whatever device id it is given.
+behind the guard, because it names whatever device id it is given. `GET /notifications/pending`
+and `POST /notifications/{id}/ack` (2026-10-20) are classed like the stream; they take no device
+id at all and answer for the token's own device.
 
 ## The setup channel
 

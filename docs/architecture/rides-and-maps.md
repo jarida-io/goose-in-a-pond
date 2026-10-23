@@ -87,7 +87,8 @@ Links and ride offers also go to the phone of the person who asked, as a notific
    The travel server reads them each time a tool runs, so a server goose spawned before startup
    finished still uses them. From the voice child a notification is queued in `pond_system.db`, and
    `serve` hands it over when the phone opens its notification stream
-   (`/api/v1/notifications/stream`), which the push relay prompts when the pond has an FCM key.
+   (`/api/v1/notifications/stream`) or asks `/api/v1/notifications/pending`, which the push relay
+   prompts when the pond has an FCM key (`docs/api.md`, "Setting up push").
 4. **GOTG opens it.** For a link, `Notification.data` carries:
 
    ```json

@@ -294,6 +294,17 @@ const PUBLIC_ROUTES: &[(Method, &str, Exposure)] = &[
         "/notifications/stream",
         Exposure::Authenticated,
     ),
+    // The stream's fallback after a push wake; both answer from the caller's token alone.
+    (
+        Method::GET,
+        "/notifications/pending",
+        Exposure::Authenticated,
+    ),
+    (
+        Method::POST,
+        "/notifications/{id}/ack",
+        Exposure::Authenticated,
+    ),
     // Protected-router routes guarded by other means: the redirect target, by its PKCE nonce...
     (Method::GET, "/oauth/callback", Exposure::Always),
     // ...and extensions' refresh, checked against internal_extension_token in the handler.
@@ -1045,6 +1056,7 @@ mod tests {
             "GET /models/download/progress = Authenticated".to_string(),
             // The setup radios and why each is off; a token in every state, never tokenless.
             "GET /network/status = Authenticated".to_string(),
+            "GET /notifications/pending = Authenticated".to_string(),
             "GET /notifications/stream = Authenticated".to_string(),
             "GET /player/status = HostOnly".to_string(),
             // The wizard resumes from what it saved; the PUT's answer already shows its caller this.
@@ -1066,6 +1078,8 @@ mod tests {
             "POST /models/download/control = Authenticated".to_string(),
             "POST /models/{category}/{name}/activate = Authenticated".to_string(),
             "POST /models/{category}/{name}/download = Authenticated".to_string(),
+            // A woken phone fetches and acknowledges its own queued notices, as the stream would.
+            "POST /notifications/{id}/ack = Authenticated".to_string(),
             "POST /onboard = UntilOnboarded".to_string(),
             "POST /onboard/complete = UntilOnboarded".to_string(),
             // Once set up, the handler asks a caller with no token for the host credential.

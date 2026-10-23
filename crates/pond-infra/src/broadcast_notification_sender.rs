@@ -1,15 +1,21 @@
 //! `NotificationSender` over a broadcast channel (live clients), an offline queue, and an
 //! optional push [`NotificationRelay`]. [`BroadcastNotificationSender::send_to_profile`] never
 //! falls back to `broadcast()`: a member it can't address reaches nobody.
+//!
+//! `broadcast()` is durable for phones: besides the live copy every connected screen sees, each
+//! paired phone gets its own copy, id [`per_device_notification_id`], queued and relayed exactly
+//! as a targeted `send()`. The notification stream skips the live broadcast copy for a device
+//! that has its own queued copy, so a connected phone sees the notice once, under one id.
 
 use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use pond_core::mcp::ports::notification::{
-    MemberDelivery, MemberNotifier, Notification, NotificationSender,
+    per_device_notification_id, MemberDelivery, MemberNotifier, Notification, NotificationSender,
 };
 use pond_core::mcp::ports::notification_queue::NotificationQueueRepository;
+use pond_core::mcp::ports::notification_recipients::NotificationRecipients;
 use pond_core::mcp::ports::notification_relay::NotificationRelay;
 use pond_core::user_data::ports::device_attribution::{
     DeviceAttribution, TargetedDelivery, Undeliverable, RESERVED_BROADCAST_TARGET,
@@ -84,6 +90,8 @@ pub struct BroadcastNotificationSender {
     relay: Option<Arc<dyn NotificationRelay>>,
     /// Device-to-profile lookup; `None` makes [`Self::send_to_profile`] refuse, never fall back.
     attribution: Option<Arc<dyn DeviceAttribution>>,
+    /// The paired phones a broadcast is made durable for; `None` keeps broadcasts live-only.
+    recipients: Option<Arc<dyn NotificationRecipients>>,
 }
 
 impl BroadcastNotificationSender {
@@ -97,7 +105,18 @@ impl BroadcastNotificationSender {
             queue,
             relay,
             attribution: None,
+            recipients: None,
         }
+    }
+
+    /// Make every `broadcast()` durable for the phones `recipients` names: one queued, relayed
+    /// copy each, so a household notice reaches a phone that is asleep or offline.
+    pub fn with_household_recipients(
+        mut self,
+        recipients: Arc<dyn NotificationRecipients>,
+    ) -> Self {
+        self.recipients = Some(recipients);
+        self
     }
 
     /// Enable addressing a member; without it [`Self::send_to_profile`] delivers to nobody.
@@ -154,9 +173,53 @@ impl BroadcastNotificationSender {
     }
 }
 
-/// Deterministic per-device id, so a re-send replaces each device's row instead of adding one.
-fn per_device_notification_id(notification_id: &str, device_id: &str) -> String {
-    format!("{notification_id}:{device_id}")
+impl BroadcastNotificationSender {
+    /// Queue and relay one copy of a household notice per paired phone, through `send()`. Runs
+    /// before the live broadcast copy is published, so the stream finds each copy already queued
+    /// when it decides whether a phone needs the broadcast copy. A phone whose copy could not be
+    /// queued has no row, so the stream still gives it the live copy.
+    async fn fan_out_to_phones(&self, notification: &Notification) {
+        let Some(recipients) = self.recipients.as_ref() else {
+            return;
+        };
+        let phones = match recipients.paired_phones().await {
+            Ok(phones) => phones,
+            Err(e) => {
+                tracing::warn!(
+                    kind = "notification_fanout_failed",
+                    notification_id = %notification.id,
+                    error = %e,
+                    "could not read the paired phones; this notice reaches connected screens only"
+                );
+                return;
+            }
+        };
+        let mut queued = 0usize;
+        // Device ids are caller-supplied; a device named the sentinel would be every subscriber.
+        for device_id in phones.iter().filter(|d| d.as_str() != BROADCAST_TARGET) {
+            let mut copy = notification.clone();
+            copy.id = per_device_notification_id(&notification.id, device_id);
+            copy.target = device_id.clone();
+            match self.send(copy).await {
+                Ok(()) => queued += 1,
+                Err(e) => tracing::warn!(
+                    kind = "notification_fanout_device_failed",
+                    notification_id = %notification.id,
+                    device = %device_id,
+                    error = %e,
+                    "could not queue a household notice for one phone; it reaches it only live"
+                ),
+            }
+        }
+        tracing::info!(
+            kind = "notification_fanned_out",
+            notification_id = %notification.id,
+            category = %notification.category,
+            phones = phones.len(),
+            queued,
+            "household notice queued for paired phones"
+        );
+    }
 }
 
 #[async_trait]
@@ -170,7 +233,13 @@ impl NotificationSender for BroadcastNotificationSender {
             // Background push is best-effort — never fail the send on it.
             if let Some(relay) = &self.relay {
                 if let Err(e) = relay.relay(&notification).await {
-                    tracing::warn!(error = %e, "notification relay failed");
+                    tracing::warn!(
+                        kind = "push_relay_failed",
+                        notification_id = %notification.id,
+                        device = %notification.target,
+                        error = %e,
+                        "notification relay failed"
+                    );
                 }
             }
         }
@@ -180,9 +249,11 @@ impl NotificationSender for BroadcastNotificationSender {
     }
 
     async fn broadcast(&self, notification: Notification) -> Result<()> {
-        // Broadcasts are ephemeral (not per-device queued).
         let mut notification = clamp(notification);
         notification.target = BROADCAST_TARGET.to_string();
+        // Durable copies first: the stream checks for them when the live copy arrives.
+        self.fan_out_to_phones(&notification).await;
+        // No subscribers is normal (no screen connected) -- ignore the error.
         let _ = self.tx.send(notification);
         Ok(())
     }
@@ -220,6 +291,17 @@ mod tests {
         }
         async fn mark_delivered(&self, _ids: &[String]) -> Result<()> {
             Ok(())
+        }
+        async fn is_queued_for(&self, id: &str, device_id: &str) -> Result<bool> {
+            Ok(self
+                .enqueued
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|n| n.id == id && n.target == device_id))
+        }
+        async fn acknowledge(&self, id: &str, device_id: &str) -> Result<bool> {
+            self.is_queued_for(id, device_id).await
         }
     }
 
@@ -515,6 +597,12 @@ mod tests {
             async fn mark_delivered(&self, _ids: &[String]) -> Result<()> {
                 Ok(())
             }
+            async fn is_queued_for(&self, _id: &str, _device_id: &str) -> Result<bool> {
+                Ok(false)
+            }
+            async fn acknowledge(&self, _id: &str, _device_id: &str) -> Result<bool> {
+                Ok(false)
+            }
         }
         let (tx, _rx) = broadcast::channel(8);
         let sender = BroadcastNotificationSender::new(tx, Arc::new(BrokenQueue), None)
@@ -526,7 +614,95 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broadcast_does_not_enqueue() {
+    async fn a_broadcast_is_queued_and_relayed_once_per_paired_phone() {
+        use pond_core::mcp::mocks::mock_notification_recipients::MockNotificationRecipients;
+
+        let (tx, mut rx) = broadcast::channel(8);
+        let queue = Arc::new(StubQueue::default());
+        let relay = Arc::new(CountingRelay::default());
+        let sender = BroadcastNotificationSender::new(tx, queue.clone(), Some(relay.clone()))
+            .with_household_recipients(Arc::new(MockNotificationRecipients::with_phones(&[
+                "phone-a", "phone-b",
+            ])));
+
+        sender.broadcast(notif("ignored")).await.unwrap();
+
+        let enqueued = queue.enqueued.lock().unwrap().clone();
+        let rows: Vec<(&str, &str)> = enqueued
+            .iter()
+            .map(|n| (n.id.as_str(), n.target.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![("n1:phone-a", "phone-a"), ("n1:phone-b", "phone-b")],
+            "one durable row per phone, each under its own per-device id"
+        );
+        assert_eq!(
+            *relay.relayed.lock().unwrap(),
+            vec!["phone-a".to_string(), "phone-b".to_string()],
+            "each phone is woken once, for its own copy"
+        );
+
+        let published: Vec<(String, String)> = drain(&mut rx)
+            .into_iter()
+            .map(|n| (n.id, n.target))
+            .collect();
+        assert_eq!(
+            published,
+            vec![
+                ("n1:phone-a".to_string(), "phone-a".to_string()),
+                ("n1:phone-b".to_string(), "phone-b".to_string()),
+                ("n1".to_string(), BROADCAST_TARGET.to_string()),
+            ],
+            "the phones' copies are queued and published before the live copy for other screens"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_phone_list_still_reaches_connected_screens() {
+        use pond_core::mcp::mocks::mock_notification_recipients::MockNotificationRecipients;
+
+        let (tx, mut rx) = broadcast::channel(8);
+        let queue = Arc::new(StubQueue::default());
+        let relay = Arc::new(CountingRelay::default());
+        let sender = BroadcastNotificationSender::new(tx, queue.clone(), Some(relay.clone()))
+            .with_household_recipients(Arc::new(MockNotificationRecipients::failing()));
+
+        sender.broadcast(notif("ignored")).await.unwrap();
+
+        assert!(queue.enqueued.lock().unwrap().is_empty());
+        assert!(relay.relayed.lock().unwrap().is_empty());
+        let published = drain(&mut rx);
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].target, BROADCAST_TARGET);
+    }
+
+    #[tokio::test]
+    async fn a_phone_registered_as_the_sentinel_gets_no_durable_copy() {
+        use pond_core::mcp::mocks::mock_notification_recipients::MockNotificationRecipients;
+
+        let (tx, _rx) = broadcast::channel(8);
+        let queue = Arc::new(StubQueue::default());
+        let sender = BroadcastNotificationSender::new(tx, queue.clone(), None)
+            .with_household_recipients(Arc::new(MockNotificationRecipients::with_phones(&[
+                BROADCAST_TARGET,
+                "phone-a",
+            ])));
+
+        sender.broadcast(notif("ignored")).await.unwrap();
+
+        let targets: Vec<String> = queue
+            .enqueued
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|n| n.target.clone())
+            .collect();
+        assert_eq!(targets, vec!["phone-a".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_broadcast_without_recipients_is_live_only() {
         let (tx, mut rx) = broadcast::channel(8);
         let queue = Arc::new(StubQueue::default());
         let sender = BroadcastNotificationSender::new(tx, queue.clone(), None);

@@ -80,6 +80,29 @@ impl NotificationQueueRepository for SqliteNotificationQueue {
         q.execute(&self.pool).await?;
         Ok(())
     }
+
+    async fn is_queued_for(&self, id: &str, device_id: &str) -> Result<bool> {
+        let found: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM notifications WHERE id = ? AND device_id = ?")
+                .bind(id)
+                .bind(device_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(found.is_some())
+    }
+
+    async fn acknowledge(&self, id: &str, device_id: &str) -> Result<bool> {
+        // `device_id` in the WHERE is the ownership check; COALESCE keeps the first stamp.
+        let result = sqlx::query(
+            "UPDATE notifications SET delivered_at = COALESCE(delivered_at, datetime('now')) \
+             WHERE id = ? AND device_id = ?",
+        )
+        .bind(id)
+        .bind(device_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 #[cfg(test)]
@@ -132,6 +155,40 @@ mod tests {
 
         // Idempotent / empty input is a no-op.
         q.mark_delivered(&[]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn only_the_owning_device_can_acknowledge_a_row() {
+        let q = fresh().await;
+        q.enqueue(notif("n1", "dev-1")).await.unwrap();
+
+        assert!(q.is_queued_for("n1", "dev-1").await.unwrap());
+        assert!(
+            !q.is_queued_for("n1", "dev-2").await.unwrap(),
+            "another device's row is not this device's copy"
+        );
+
+        assert!(
+            !q.acknowledge("n1", "dev-2").await.unwrap(),
+            "a device that does not own the row is refused"
+        );
+        assert_eq!(
+            q.list_undelivered("dev-1").await.unwrap().len(),
+            1,
+            "and the refusal leaves the owner's row waiting"
+        );
+
+        assert!(q.acknowledge("n1", "dev-1").await.unwrap());
+        assert!(q.list_undelivered("dev-1").await.unwrap().is_empty());
+        assert!(
+            q.acknowledge("n1", "dev-1").await.unwrap(),
+            "acknowledging twice is still the owner's row"
+        );
+        assert!(
+            q.is_queued_for("n1", "dev-1").await.unwrap(),
+            "a delivered row still counts as queued for the device"
+        );
+        assert!(!q.acknowledge("missing", "dev-1").await.unwrap());
     }
 
     /// `notifications.id` is the primary key and `enqueue` is `INSERT OR REPLACE`, so a shared

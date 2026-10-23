@@ -11,6 +11,7 @@ import hmac
 import http.client
 import json
 import os
+import urllib.parse
 from pathlib import Path
 
 import pond_cpace
@@ -85,11 +86,30 @@ def run():
     call("GET", "/notifications/stream?device_id=w3-live-b", token=a["session_token"], expected=403)
     call("POST", "/devices/w3-live-b/push-token", {"platform": "fcm", "token": "scratch-placeholder"}, token=a["session_token"], expected=403)
     call("DELETE", "/devices/w3-live-b/push-token", token=a["session_token"], expected=403)
+    # Pairing is a household notice, so the phone has its own copy queued (none for the desktop,
+    # which sees notices live only). Read before the stream below, which would drain it.
+    pending = call("GET", "/notifications/pending", token=a["session_token"])["notifications"]
+    assert pending and all(n["target"] == "w3-live-a" for n in pending), pending
+    assert all(n["id"].endswith(":w3-live-a") for n in pending), pending
+    assert call("GET", "/notifications/pending", token=b["session_token"])["notifications"] == [], "desktop"
+    own = "/notifications/%s/ack" % urllib.parse.quote(pending[0]["id"], safe="")
+    call("POST", own, token=b["session_token"], expected=404)
+    assert call("POST", own, token=a["session_token"]) == {"id": pending[0]["id"], "acknowledged": True}
+    left = call("GET", "/notifications/pending", token=a["session_token"])["notifications"]
+    assert [n["id"] for n in left] == [n["id"] for n in pending[1:]], left
+    # `call` asserts the status before it reads any body.
+    for method, path in [("GET", "/notifications/pending"), ("POST", own)]:
+        assert call(method, path, expected=401).get("notifications") is None
+        assert call(method, path, token="not-a-token", expected=401).get("notifications") is None
+    print("PASS  a pairing notice is queued for the phone; pending and ack answer for the caller's own device only")
     call("GET", "/notifications/stream?device_id=w3-live-a", token=a["session_token"])
     renewed = call("POST", "/handshake/refresh", {"refresh_token": a["refresh_token"]})
     assert renewed["accepted"] is True
     call("POST", "/handshake/revoke", {"token": b["session_token"]}, token=renewed["session_token"])
     call("GET", "/settings", token=renewed["session_token"], expected=401)
+    # The revoked token is refused before either handler runs, and carries no queue back.
+    assert call("GET", "/notifications/pending", token=renewed["session_token"], expected=401).get("notifications") is None
+    assert call("POST", own, token=renewed["session_token"], expected=401).get("acknowledged") is None
     call("GET", "/settings", token=b["session_token"])
     refused = call("POST", "/handshake/refresh", {"refresh_token": renewed["refresh_token"]})
     assert refused["accepted"] is False

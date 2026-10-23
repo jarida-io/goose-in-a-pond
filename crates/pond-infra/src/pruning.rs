@@ -1,6 +1,8 @@
 //! TTL-based pruning of high-frequency tables, run as a background task in `pond-server`.
 //!
 //! Face embeddings are never auto-expired (user-managed biometrics); only orphans are swept.
+//! The notification queue's caps are constants ([`NOTIFICATIONS_DELIVERED_DAYS`],
+//! [`NOTIFICATIONS_MAX_AGE_DAYS`], [`NOTIFICATIONS_PER_DEVICE_KEEP`]), not settings.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,6 +21,15 @@ use crate::sqlite_event_log::SqliteEventLog;
 
 /// Retention ceiling (~100 years): more makes `Utc::now() - Duration` panic in chrono.
 const MAX_RETENTION_DAYS: i64 = 36_500;
+
+/// Days a delivered `notifications` row is kept (for audit) before it is deleted.
+pub const NOTIFICATIONS_DELIVERED_DAYS: u32 = 7;
+/// Days any `notifications` row is kept, delivered or not: a phone away this long gets a fresh
+/// start rather than a month of stale reminders.
+pub const NOTIFICATIONS_MAX_AGE_DAYS: u32 = 30;
+/// Newest `notifications` rows kept per device, so a rule firing every minute for a phone that
+/// never reconnects cannot grow the table without bound between passes.
+pub const NOTIFICATIONS_PER_DEVICE_KEEP: u32 = 500;
 
 fn clamp_retention_days(days: u32) -> i64 {
     (days as i64).min(MAX_RETENTION_DAYS)
@@ -112,6 +123,7 @@ pub async fn prune_once(logs: &Pool<Sqlite>, system: &Pool<Sqlite>, config: &Pru
     prune_events(logs, config).await;
     prune_session_messages(system, config.session_messages_keep).await;
     prune_orphan_face_embeddings(system).await;
+    prune_notifications(system).await;
 }
 
 /// Sweeps `>= Sensitive` past the sensitivity cap, then each category past its retention.
@@ -254,6 +266,38 @@ async fn prune_orphan_face_embeddings(pool: &Pool<Sqlite>) {
         }
         Ok(_) => {}
         Err(e) => warn!("pruning: face_embeddings failed: {}", e),
+    }
+}
+
+/// The durable notification queue: delivered rows after [`NOTIFICATIONS_DELIVERED_DAYS`], every
+/// row after [`NOTIFICATIONS_MAX_AGE_DAYS`], and anything beyond a device's newest
+/// [`NOTIFICATIONS_PER_DEVICE_KEEP`].
+async fn prune_notifications(pool: &Pool<Sqlite>) {
+    match sqlx::query(
+        "DELETE FROM notifications \
+         WHERE (delivered_at IS NOT NULL AND delivered_at < datetime('now', ?)) \
+            OR created_at < datetime('now', ?) \
+            OR rowid NOT IN ( \
+                SELECT rowid FROM notifications n2 \
+                WHERE n2.device_id = notifications.device_id \
+                ORDER BY created_at DESC, rowid DESC \
+                LIMIT ? \
+            )",
+    )
+    .bind(format!("-{NOTIFICATIONS_DELIVERED_DAYS} days"))
+    .bind(format!("-{NOTIFICATIONS_MAX_AGE_DAYS} days"))
+    .bind(NOTIFICATIONS_PER_DEVICE_KEEP)
+    .execute(pool)
+    .await
+    {
+        Ok(r) => info!(
+            kind = "notifications_pruned",
+            deleted = r.rows_affected(),
+            "pruning: notifications past retention"
+        ),
+        Err(e) => {
+            warn!(kind = "notifications_prune_failed", error = %e, "pruning: notifications failed")
+        }
     }
 }
 
@@ -418,6 +462,86 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(count, 3, "only 3 most recent messages should remain");
+    }
+
+    #[tokio::test]
+    async fn prune_notifications_keeps_what_a_phone_may_still_need() {
+        let (logs, system, _tmp) = make_pools().await;
+        sqlx::query("INSERT INTO devices (id, name) VALUES ('phone', 'Phone')")
+            .execute(&system)
+            .await
+            .unwrap();
+        for (id, created, delivered) in [
+            ("fresh-waiting", "datetime('now')", "NULL"),
+            ("old-waiting", "datetime('now', '-10 days')", "NULL"),
+            (
+                "recently-delivered",
+                "datetime('now', '-3 days')",
+                "datetime('now', '-3 days')",
+            ),
+            (
+                "long-delivered",
+                "datetime('now', '-9 days')",
+                "datetime('now', '-8 days')",
+            ),
+            ("stale-waiting", "datetime('now', '-31 days')", "NULL"),
+        ] {
+            sqlx::query(&format!(
+                "INSERT INTO notifications \
+                 (id, device_id, category, title, body, timestamp, created_at, delivered_at) \
+                 VALUES (?, 'phone', 'info', 't', 'b', '', {created}, {delivered})"
+            ))
+            .bind(id)
+            .execute(&system)
+            .await
+            .unwrap();
+        }
+
+        prune_once(&logs, &system, &PruningConfig::default()).await;
+
+        let mut left: Vec<String> = sqlx::query_scalar("SELECT id FROM notifications")
+            .fetch_all(&system)
+            .await
+            .unwrap();
+        left.sort();
+        assert_eq!(
+            left,
+            vec!["fresh-waiting", "old-waiting", "recently-delivered"],
+            "undelivered rows survive until the age cap; delivered ones only the audit window"
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_notifications_caps_rows_per_device() {
+        let (logs, system, _tmp) = make_pools().await;
+        sqlx::query("INSERT INTO devices (id, name) VALUES ('phone', 'Phone')")
+            .execute(&system)
+            .await
+            .unwrap();
+        for i in 0..(NOTIFICATIONS_PER_DEVICE_KEEP + 5) {
+            sqlx::query(
+                "INSERT INTO notifications (id, device_id, category, title, body, timestamp) \
+                 VALUES (?, 'phone', 'info', 't', 'b', '')",
+            )
+            .bind(format!("n{i}"))
+            .execute(&system)
+            .await
+            .unwrap();
+        }
+
+        prune_once(&logs, &system, &PruningConfig::default()).await;
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notifications")
+            .fetch_one(&system)
+            .await
+            .unwrap();
+        assert_eq!(count, i64::from(NOTIFICATIONS_PER_DEVICE_KEEP));
+        let oldest_kept: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM notifications WHERE id = 'n0')")
+                .fetch_one(&system)
+                .await
+                .unwrap();
+        assert!(!oldest_kept, "the oldest rows go first");
     }
 
     #[tokio::test]

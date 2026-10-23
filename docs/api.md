@@ -116,6 +116,9 @@ All errors return JSON:
 | DELETE | /profiles/{id} | Protected | Delete a profile |
 | GET | /devices | Protected | List registered devices |
 | GET | /devices/self | Protected | The calling device, and the household member it belongs to |
+| GET | /notifications/stream?device_id= | Token, every state; own device only | Live and queued notifications for the calling device (SSE) |
+| GET | /notifications/pending | Token, every state; own device only | The calling device's undelivered notifications |
+| POST | /notifications/{id}/ack | Token, every state; own device only | Mark one of the calling device's notifications delivered |
 | POST | /devices | Protected | Register a device |
 | PUT | /devices/{id} | Protected | Rename a device, or set its hostname and room |
 | DELETE | /devices/{id} | Protected | Unregister a device |
@@ -1601,6 +1604,135 @@ Updates `last_seen` and marks device online.
 ```json
 { "status": "ok" }
 ```
+
+---
+
+## Notifications
+
+A notification is `{id, target, category, title, body, timestamp, data}`. `category` is `alert`,
+`info` or `action_required`, `target` is a device id or `"broadcast"`, and `data` is an optional
+JSON object (see [rides and maps](architecture/rides-and-maps.md) for the `action` payloads).
+All three routes take a paired device's token in every onboarding state
+(`Exposure::Authenticated`, so a phone receives notices during owner setup), never answer a
+tokenless caller, and act only on the caller's own device, named by its token.
+
+### How a notice reaches a phone (2026-10-20)
+
+A **targeted** notice (one device, or a member's devices) is queued in `notifications` for each
+device, relayed through the push relay, and published live.
+
+A **household** notice (a schedule's result, a rule's `Notify` action, the `send_notification`
+tool, a pairing) goes through `NotificationSender::broadcast()`. Before 2026-10-20 that only
+published to the stream subscribers connected at that moment, so a phone that was asleep never
+saw it, and nothing was queued or relayed. Now `broadcast()` also gives every **paired phone**
+(`device_type = "gotg"` with an unrevoked session token, `NotificationRecipients`) its own copy,
+queued and relayed exactly like a targeted notice. That copy's id is
+`"{notification_id}:{device_id}"` (`per_device_notification_id`). Desktops and other clients get
+the live broadcast copy only.
+
+**One notice, one id per phone.** The stream skips a broadcast when the device it serves has its
+own queued copy (the copy arrives on its own, and stays undelivered until the phone acks it). The push
+wake's `notification_id`, the stream and `/pending` therefore all carry the same per-device id,
+and a client that dedupes by `id` shows the notice once however it arrived. A copy that fails to
+queue has no row, so the stream still sends that phone the broadcast copy.
+
+### GET /notifications/stream?device_id={id}
+
+Server-sent events, one notification per `data:` line. On connect it sends every undelivered
+notification queued for the device, oldest first; then it tails live notifications for the
+device. `device_id` must be the caller's own device (`403 device_mismatch` otherwise). Every 15 s
+of quiet it sends an SSE comment (axum's default keep-alive), which the app ignores.
+
+**Who marks a notice delivered (2026-10-20).** For a **phone** (`device_type = "gotg"`) only
+`POST /notifications/{id}/ack` does; the stream never does, on connect or live. A write into a
+connection the phone abandoned without closing (Wi-Fi and data turned off) succeeds on the Pond's
+side for as long as the kernel buffers it, so before this change such a notice was stamped
+delivered while the phone was offline, and the push wake's `/pending` then came back empty. Each
+new stream connection therefore re-sends every copy the phone has not acked; the app dedupes by
+`id` and acks each item after presenting it. The keep-alive does not close that gap: it too is a
+write that succeeds into a half-open connection, and only TCP retransmission timeouts end one.
+**Any other device** (a desktop, a speaker) has no ack path, so the stream marks what it sends
+delivered, as before. `notifications_stream_flushed` logs each connect's re-send count and
+whether the device acks.
+
+An app build from before the ack route never acks, so its queued copies stay undelivered: each
+reconnect and wake offers them again (it shows each id once per run, by its own dedupe), until the
+pruning pass below removes them at 30 days or beyond the newest 500 for that phone. The table
+stays bounded either way.
+
+### GET /notifications/pending
+
+For a phone a push wake brought back, or one reconnecting: the caller's undelivered
+notifications, oldest first: for a phone, every copy it has not acked, including those the stream
+already sent. The device comes from the token; there is no parameter. It does not mark anything
+delivered.
+
+**Response 200**
+```json
+{
+  "notifications": [
+    {
+      "id": "6f1c...:phone-a",
+      "target": "phone-a",
+      "category": "info",
+      "title": "Schedule: water the plants",
+      "body": "Done",
+      "timestamp": "2026-10-20T07:00:00Z",
+      "data": null
+    }
+  ]
+}
+```
+
+| Status | Meaning |
+|---|---|
+| 200 | The list, possibly empty. |
+| 401 | No token, or not a valid one. |
+| 403 | The request did not come from a paired device (a loopback bypass, for example). |
+| 500 | The queue could not be read; logged as `notifications_pending_failed`. |
+| 503 | No notification queue is wired. |
+
+### POST /notifications/{id}/ack
+
+Mark one of the caller's notifications delivered. Percent-encode `{id}`: a per-device id contains
+`:` and the device id. Acknowledging twice is not an error.
+
+**Response 200**
+```json
+{ "id": "6f1c...:phone-a", "acknowledged": true }
+```
+
+| Status | Meaning |
+|---|---|
+| 200 | Delivered (now or already). |
+| 401 | No token, or not a valid one. |
+| 403 | The request did not come from a paired device. |
+| 404 | No notification by that id is the caller's. Another device's notification answers the same, so the route cannot be used to learn what is queued for someone else. |
+| 500 | The write failed; logged as `notification_ack_failed`. |
+| 503 | No notification queue is wired. |
+
+### Retention
+
+The pruning pass (every 6 h) deletes delivered rows after 7 days, every row after 30 days, and
+anything beyond a device's newest 500 (`NOTIFICATIONS_*` in `pond-infra/src/pruning.rs`).
+
+### Setting up push
+
+Without a key the pond still queues every notice, and a phone receives it the next time it opens
+the app, but nothing wakes a sleeping phone. To wake Android phones through Firebase Cloud
+Messaging:
+
+1. In the Firebase console for the app's project, create a service-account key (Project settings,
+   Service accounts, Generate new private key). It downloads as a JSON file.
+2. Put it on the pond at `<data_dir>/secrets/fcm-service-account.json`, or point
+   `POND_FCM_KEY_PATH` at it, and make it readable by the pond's user only:
+   `chmod 600 <data_dir>/secrets/fcm-service-account.json`.
+3. Restart the pond. Startup logs `kind="push_relay_fcm"` when the key is in use, and a WARN
+   `kind="push_relay_stubbed"` with the `expected_path` when there is no key or it cannot be read.
+   Only the path is logged, never the key.
+
+The wake is data-only (`notification_id`, `category`, `wake: "1"`): no title or body passes
+through Google. The phone reads the content from `/pending` or the stream.
 
 ---
 

@@ -243,6 +243,8 @@ async fn stream_other_device_is_forbidden_without_disclosing_existence() {
     );
 }
 
+/// The device here is a phone (`gotg`), so the flush leaves its copy for the app's ack; a
+/// non-phone stream marking what it sends is `notification_pending_routes.rs`'s case.
 #[tokio::test]
 async fn stream_flushes_offline_queue_on_connect() {
     let h = make_app().await;
@@ -284,16 +286,13 @@ async fn stream_flushes_offline_queue_on_connect() {
     let text = String::from_utf8_lossy(&frame);
     assert!(text.contains("While you were away"), "got: {text}");
 
-    // async-stream runs the post-yield `mark_delivered` only on the next poll (which times out).
+    // Poll once more so any post-yield bookkeeping the stream does has run.
     let _ = tokio::time::timeout(std::time::Duration::from_millis(300), data.next()).await;
     drop(data);
 
-    assert!(
-        h.queue
-            .list_undelivered(&h.device_id)
-            .await
-            .unwrap()
-            .is_empty(),
-        "marked delivered after flush"
+    assert_eq!(
+        h.queue.list_undelivered(&h.device_id).await.unwrap().len(),
+        1,
+        "a phone's copy stays undelivered after the flush, until the app acks it"
     );
 }

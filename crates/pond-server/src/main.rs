@@ -3653,13 +3653,19 @@ async fn run_server(
     );
 
     // Concrete type kept: `send_to_profile` (profile-addressed, never broadcast) isn't on the port.
+    // Household recipients make every broadcast durable for paired phones: queued and woken.
     let targeted_notification_sender = Arc::new(
         pond_infra::broadcast_notification_sender::BroadcastNotificationSender::new(
             notification_tx.clone(),
             notification_queue.clone(),
             Some(push_relay),
         )
-        .with_device_attribution(device_attribution.clone()),
+        .with_device_attribution(device_attribution.clone())
+        .with_household_recipients(Arc::new(
+            pond_infra::sqlite_notification_recipients::SqliteNotificationRecipients::new(
+                db.system.clone(),
+            ),
+        )),
     );
     let notification_sender: Arc<dyn pond_core::mcp::ports::notification::NotificationSender> =
         targeted_notification_sender.clone();
@@ -4959,18 +4965,35 @@ fn push_relay(
     let fcm_key_path = std::env::var("POND_FCM_KEY_PATH")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| data_dir.join("secrets").join("fcm-service-account.json"));
+    // Only the key's path is logged, never its contents.
     if !fcm_key_path.exists() {
+        tracing::warn!(
+            kind = "push_relay_stubbed",
+            reason = "no_key",
+            expected_path = %fcm_key_path.display(),
+            "no FCM service-account key; asleep phones are not woken for notices \
+             (docs/api.md, \"Setting up push\")"
+        );
         return Arc::new(pond_infra::stub_push_relay::StubPushRelay::new(push_tokens));
     }
     match pond_infra::fcm_push_relay::FcmPushRelay::from_key_file(
         &fcm_key_path,
         push_tokens.clone(),
     ) {
-        Ok(relay) => Arc::new(relay),
+        Ok(relay) => {
+            tracing::info!(
+                kind = "push_relay_fcm",
+                path = %fcm_key_path.display(),
+                "background push active: FCM wakes paired phones"
+            );
+            Arc::new(relay)
+        }
         Err(e) => {
             tracing::warn!(
+                kind = "push_relay_stubbed",
+                reason = "key_unusable",
                 error = %e,
-                path = %fcm_key_path.display(),
+                expected_path = %fcm_key_path.display(),
                 "FCM key unusable; background push falls back to the logging stub"
             );
             Arc::new(pond_infra::stub_push_relay::StubPushRelay::new(push_tokens))

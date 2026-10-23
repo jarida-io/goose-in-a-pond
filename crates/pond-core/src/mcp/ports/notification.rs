@@ -79,7 +79,20 @@ pub trait NotificationSender: Send + Sync {
     /// Send a notification to a specific device or broadcast.
     async fn send(&self, notification: Notification) -> Result<()>;
 
+    /// A household-wide notice: every connected screen sees it live, and every paired phone
+    /// gets its own durable copy (queued, and woken through the push relay) so a phone that is
+    /// asleep or offline still receives it.
     async fn broadcast(&self, notification: Notification) -> Result<()>;
+}
+
+/// The id of one device's copy of `notification_id`: `"{notification_id}:{device_id}"`.
+///
+/// Deterministic, so a re-send replaces that device's queued row instead of adding one, and so
+/// the notification stream can tell whether a household notice already has a copy queued for
+/// the device it serves. The app dedupes by this id across the stream, a push wake and
+/// `GET /notifications/pending`.
+pub fn per_device_notification_id(notification_id: &str, device_id: &str) -> String {
+    format!("{notification_id}:{device_id}")
 }
 
 /// What became of a notification for one household member.
