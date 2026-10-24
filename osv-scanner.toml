@@ -1,9 +1,10 @@
 # Reviewed exceptions for osv-scanner.
 #
-# Every entry here is an advisory with NO upstream fix. Anything that has a
-# fixed version is deliberately absent: an advisory you could upgrade away from
-# does not belong in an ignore file, and putting it here would convert a real
-# finding into a silent one.
+# Every entry here is an advisory that cannot be fixed from this repository:
+# either no upstream fix exists, or the fix is a new major that crates we do not
+# control have not adopted yet (the zip section says which). Anything this
+# lockfile can upgrade away from is deliberately absent: putting it here would
+# convert a real finding into a silent one.
 #
 # `ignoreUntil` is a review date, not a dismissal. When it passes the scanner
 # reports the advisory again, which is the point -- an unmaintained crate that
@@ -11,6 +12,9 @@
 #
 # Reviewed 2026-09-29. Checked against the scan on jarida-io/goose-in-a-pond
 # main at that date; the fixed-version column was empty ("--") for all of them.
+# Re-reviewed 2026-10-20 against main a3230b44: negentropy (RUSTSEC-2026-0365)
+# was bumped to 0.5.2 rather than ignored; the zbus-family, basic-toml and zip
+# entries were added with the blockers stated in each reason.
 
 # ── Unmaintained-crate notices ───────────────────────────────────────────────
 #
@@ -63,6 +67,43 @@ reason = "ttf-parser is unmaintained. Transitive via font rendering, no fixed ve
 id = "RUSTSEC-2024-0449"
 ignoreUntil = 2027-03-31
 reason = "unsafe-libyaml is unmaintained (archived 2024-03-25; 0.2.11 is the last release). No fixed version exists. Arrives through serde_yaml 0.9 (itself deprecated), which pond-core, pond-api and goose use directly, so moving off it is ours to do: the advisory names saphyr / serde-saphyr as safe-Rust replacements."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0370"
+ignoreUntil = 2027-03-31
+reason = "zvariant 5 is unmaintained: merged into zbus 6 as its wire module. Arrives through zbus 5, which pond-connect uses directly and notify-rust (pond-mcp-server) requires as ^5 in its latest release, 4.18.2. Moving pond-connect alone to zbus 6 would put two zbus majors in the graph and break the shared-connection arrangement pond-connect/Cargo.toml documents. Migrate both once notify-rust ships on zbus 6."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0371"
+ignoreUntil = 2027-03-31
+reason = "zbus_names 4 is unmaintained: merged into zbus 6 as its names module. Same path and same blocker as RUSTSEC-2026-0370 (notify-rust 4.18.2 requires zbus ^5)."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0372"
+ignoreUntil = 2027-03-31
+reason = "zvariant_derive 5 is unmaintained: its macros moved into zbus 6. Same path and same blocker as RUSTSEC-2026-0370 (notify-rust 4.18.2 requires zbus ^5)."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0374"
+ignoreUntil = 2027-03-31
+reason = "basic-toml is unmaintained (archived 2025-03). Only in goose/Cargo.lock, through askama_derive in the goose submodule; not in this workspace's Cargo.lock. Clearing it is a goose-side askama upgrade, not something this repo can do without editing goose/."
+
+# ── Real vulnerabilities whose fix is a major our dependencies have not taken ─
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0367"
+ignoreUntil = 2027-01-31
+reason = "zip 8.6.0 preserves SUID/SGID bits in extract(). Patched only in zip 9.0.0; candle-core 0.11.0, docx-rs 0.4.22 and umya-spreadsheet 3.1.1 (latest releases, all via goose) require zip ^8.6.0 and zip 8 has no patched release. Not reachable: nothing in the build calls extract(). pond-server's buffalo_l download (model_download.rs) reads entries with by_index() and writes each to a fixed path chosen by file name; the three dependencies only read archives in memory. Remove when they move to zip 9."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0368"
+ignoreUntil = 2027-01-31
+reason = "zip 8.6.0 extract() creates symlinks whose targets leave the destination directory. Same blocker and same non-reachability as RUSTSEC-2026-0367: no code in the build calls extract() or creates symlinks from archive entries."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0369"
+ignoreUntil = 2027-01-31
+reason = "zip 8.6.0 extract() and ZipStreamReader::extract() apply Unix permissions through symlinks. Same blocker and same non-reachability as RUSTSEC-2026-0367: neither function is called, and pond-server never applies archive permissions."
 
 # ── A real vulnerability with no upstream fix ────────────────────────────────
 
