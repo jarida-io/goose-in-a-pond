@@ -4,6 +4,10 @@ import type { Page } from "@playwright/test";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
 import { navigateTo } from "./helpers/nav";
 
+// The API base mockAllApiRoutes pins. connectUber sends it as `origin` so the pond can send the
+// browser back to where it started after Uber sign-in.
+const API_BASE = "http://127.0.0.1:4000";
+
 async function mockUber(page: Page, connected: string[]) {
   await mockAllApiRoutes(page);
   const state = { connected: [...connected], connectBody: null as unknown, deleted: [] as string[] };
@@ -89,7 +93,7 @@ test.describe("Hub — Accounts: Uber", () => {
     expect(popup.url()).toContain("auth.uber.com");
     await expect(popup).toHaveTitle("Uber sign-in stand-in");
     await expect(panel.getByText("Connected", { exact: true })).toBeVisible({ timeout: 10_000 });
-    expect(state.connectBody).toEqual({ profile_id: "p-jerry" });
+    expect(state.connectBody).toEqual({ profile_id: "p-jerry", origin: API_BASE });
   });
 
   test("disconnecting forgets only that member", async ({ page }) => {
@@ -112,6 +116,6 @@ test.describe("Classic — Context, Sources: Uber", () => {
     await panel.getByRole("button", { name: "Connect Uber" }).click();
     await expect(await opened).toHaveTitle("Uber sign-in stand-in");
     await expect(panel.getByText("Connected", { exact: true })).toHaveCount(2, { timeout: 10_000 });
-    expect(state.connectBody).toEqual({ profile_id: "p-jerry" });
+    expect(state.connectBody).toEqual({ profile_id: "p-jerry", origin: API_BASE });
   });
 });
