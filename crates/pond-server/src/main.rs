@@ -4968,8 +4968,10 @@ fn push_relay(
     ) {
         Ok(relay) => Arc::new(relay),
         Err(e) => {
+            // The reason names a field, a scheme or a host, never key material.
             tracing::warn!(
-                error = %e,
+                kind = "push_relay_rejected_key",
+                reason = %format!("{e:#}"),
                 path = %fcm_key_path.display(),
                 "FCM key unusable; background push falls back to the logging stub"
             );

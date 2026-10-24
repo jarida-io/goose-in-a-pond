@@ -36,9 +36,46 @@ pub struct ServiceAccount {
     pub token_uri: String,
 }
 
-/// Parses structure only; the key is validated when the signing key is built.
+/// The only host a service account's `token_uri` may name.
+///
+/// The relay POSTs a signed JWT assertion to `token_uri`, and the key file is the only thing
+/// that says where that is. Every Firebase service-account key Google issues names
+/// `https://oauth2.googleapis.com/token`, so any other host means a hand-edited or substituted
+/// file, and sending the assertion there would hand a stranger a credential that mints FCM
+/// access tokens for this project until it expires.
+const GOOGLE_TOKEN_HOST: &str = "oauth2.googleapis.com";
+
+/// Parses the key file's structure and checks where its assertion would be sent.
+///
+/// `token_uri` must be an `https` URL on [`GOOGLE_TOKEN_HOST`]; an `http` URI would send the
+/// signed assertion in cleartext. The private key is validated later, when the signing key is
+/// built.
 pub fn parse_service_account(raw: &str) -> Result<ServiceAccount> {
-    serde_json::from_str(raw).context("service-account JSON missing required fields")
+    let account: ServiceAccount =
+        serde_json::from_str(raw).context("service-account JSON missing required fields")?;
+    check_token_uri(&account.token_uri)?;
+    Ok(account)
+}
+
+/// Accepts `uri` only as an `https` URL on [`GOOGLE_TOKEN_HOST`]. The error names the scheme
+/// and host, never anything else from the key file.
+fn check_token_uri(uri: &str) -> Result<()> {
+    let url = reqwest::Url::parse(uri)
+        .map_err(|e| anyhow!("service-account token_uri is not a valid URL ({e})"))?;
+    if url.scheme() != "https" {
+        return Err(anyhow!(
+            "service-account token_uri uses scheme {:?}; only https is accepted, so the signed \
+             assertion is never sent in cleartext",
+            url.scheme()
+        ));
+    }
+    match url.host_str() {
+        Some(GOOGLE_TOKEN_HOST) => Ok(()),
+        host => Err(anyhow!(
+            "service-account token_uri names host {:?}; only {GOOGLE_TOKEN_HOST} is accepted",
+            host.unwrap_or("")
+        )),
+    }
 }
 
 const FCM_BASE_URL: &str = "https://fcm.googleapis.com";
@@ -89,7 +126,8 @@ pub struct FcmPushRelay {
 }
 
 impl FcmPushRelay {
-    /// Load the key file, failing fast (bad path/JSON, non-RSA key) so the caller can use the stub.
+    /// Load the key file, failing fast (bad path/JSON, a `token_uri` that is not
+    /// `https://oauth2.googleapis.com/...`, non-RSA key) so the caller can use the stub.
     pub fn from_key_file(path: &Path, push_tokens: Arc<dyn PushTokenRepository>) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("reading FCM service-account key at {}", path.display()))?;
@@ -645,6 +683,62 @@ mod tests {
         let account = parse_service_account(ok).unwrap();
         assert_eq!(account.project_id, "goose-test");
         assert!(parse_service_account(r#"{"project_id": "x"}"#).is_err());
+    }
+
+    /// A key file whose only unusual field is `token_uri`.
+    fn key_file_with_token_uri(token_uri: &str) -> String {
+        json!({
+            "project_id": "goose-test",
+            "private_key": "not-a-real-key",
+            "client_email": "relay@goose-test.iam.gserviceaccount.com",
+            "token_uri": token_uri,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn googles_token_uri_is_accepted() {
+        let raw = key_file_with_token_uri("https://oauth2.googleapis.com/token");
+        let account = parse_service_account(&raw).unwrap();
+        assert_eq!(account.token_uri, "https://oauth2.googleapis.com/token");
+    }
+
+    #[test]
+    fn an_http_token_uri_is_refused() {
+        let raw = key_file_with_token_uri("http://oauth2.googleapis.com/token");
+        let err = parse_service_account(&raw).unwrap_err().to_string();
+        assert!(err.contains("only https is accepted"), "{err}");
+    }
+
+    #[test]
+    fn a_token_uri_on_another_host_is_refused() {
+        for uri in [
+            "https://attacker.example/token",
+            // A lookalike that merely ends in Google's host.
+            "https://evil-oauth2.googleapis.com.example/token",
+            "https://oauth2.googleapis.com.example/token",
+        ] {
+            let err = parse_service_account(&key_file_with_token_uri(uri))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("only oauth2.googleapis.com"), "{uri}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_token_uri_that_is_not_a_url_is_refused() {
+        let err = parse_service_account(&key_file_with_token_uri("oauth2.googleapis.com/token"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a valid URL"), "{err}");
+    }
+
+    #[test]
+    fn a_refused_token_uri_names_no_key_material() {
+        let raw = key_file_with_token_uri("http://attacker.example/token");
+        let err = format!("{:#}", parse_service_account(&raw).unwrap_err());
+        assert!(!err.contains("not-a-real-key"), "{err}");
+        assert!(!err.contains("relay@goose-test"), "{err}");
     }
 
     #[test]
