@@ -13576,6 +13576,19 @@ fn default_source() -> String {
     "api".to_string()
 }
 
+/// The text's document vector, or `None` to leave the row for the index sweep; never fails a save.
+async fn embed_memory_text(state: &AppState, text: &str) -> Option<Vec<f32>> {
+    let embedder = state.embedding_provider.as_ref()?;
+    match embedder.embed(text).await {
+        Ok(vector) => Some(vector),
+        Err(e) => {
+            tracing::warn!("could not embed a memory; the index sweep will embed it later: {e:#}");
+            None
+        }
+    }
+}
+
+/// Embedded at write: semantic recall skips a row with no vector until the idle sweep fills it.
 async fn save_memory(
     State(state): State<Arc<AppState>>,
     body: Result<Json<SaveMemoryRequest>, JsonRejection>,
@@ -13605,13 +13618,14 @@ async fn save_memory(
     let tier = req
         .tier
         .or_else(|| req.segment.as_ref().map(|s| s.default_tier()));
+    let embedding = embed_memory_text(&state, &req.content).await;
 
     let fragment = MemoryFragment {
         id: Uuid::new_v4().to_string(),
         profile_id: None,
         session_id: None,
         content: req.content,
-        embedding: None,
+        embedding,
         source: req.source,
         tags: req.tags,
         created_at: chrono::Utc::now(),
@@ -13643,8 +13657,8 @@ struct UpdateMemoryRequest {
     tier: Option<pond_core::user_data::domain::memory::MemoryTier>,
 }
 
-/// `PUT /api/v1/memories/{id}` -- reword and/or re-tier in place, keeping id, age and usage.
-/// A field left out is left as it is; a body with neither is refused.
+/// `PUT /api/v1/memories/{id}` -- reword and/or re-tier in place, keeping id, age and usage;
+/// new words are re-embedded. A field left out is left as it is; a body with neither is refused.
 async fn update_memory(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -13662,7 +13676,11 @@ async fn update_memory(
 
     let mut result = Ok(());
     if let Some(content) = content {
-        result = state.memory_repo.update_content(&id, content).await;
+        let embedding = embed_memory_text(&state, content).await;
+        result = state
+            .memory_repo
+            .update_content(&id, content, embedding.as_deref())
+            .await;
     }
     if let (Ok(()), Some(tier)) = (&result, body.tier) {
         result = state.memory_repo.update_tier(&id, tier).await;

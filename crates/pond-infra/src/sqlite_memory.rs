@@ -58,7 +58,8 @@ impl SqliteMemoryRepository {
                         chunk_span: None,
                         model_id: model_id.to_string(),
                         vector: vector.to_vec(),
-                        // No revision tracked: consolidation supersedes rather than edits.
+                        // No revision tracked: every text change passes through `update_content`,
+                        // which rewrites this entry.
                         source_rev: None,
                     })
                     .await
@@ -487,13 +488,25 @@ impl MemoryRepository for SqliteMemoryRepository {
         Ok(())
     }
 
-    async fn update_content(&self, id: &str, content: &str) -> Result<()> {
-        // Drop the stale vector; `search_unembedded` re-embeds the row next sweep.
-        sqlx::query("UPDATE memory_fragments SET content = ?, embedding = NULL WHERE id = ?")
-            .bind(content)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+    async fn update_content(
+        &self,
+        id: &str,
+        content: &str,
+        embedding: Option<&[f32]>,
+    ) -> Result<()> {
+        // Text and vector in one statement, so no reader sees new words scored as the old ones.
+        let updated =
+            sqlx::query("UPDATE memory_fragments SET content = ?, embedding = ? WHERE id = ?")
+                .bind(content)
+                .bind(embedding.map(vec_to_blob))
+                .bind(id)
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
+        // A missing row gets no index entry; `None` also drops the old words' entry.
+        if updated > 0 {
+            self.mirror(id, embedding).await;
+        }
         Ok(())
     }
 

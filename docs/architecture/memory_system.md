@@ -419,8 +419,8 @@ waiving its quiet period, interval floor and activity gate.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/v1/memories` | The 50 most recent active memories, household-wide |
-| POST | `/api/v1/memories` | Save `content`, optional `tags`, `source` (default `api`), `segment`, `importance`, `tier` |
-| PUT | `/api/v1/memories/{id}` | Reword, change tier, or both; absent fields are kept |
+| POST | `/api/v1/memories` | Save `content`, optional `tags`, `source` (default `api`), `segment`, `importance`, `tier`; embedded at write |
+| PUT | `/api/v1/memories/{id}` | Reword, change tier, or both; absent fields are kept, and new words' vector replaces the old |
 | DELETE | `/api/v1/memories/{id}` | Delete |
 | GET | `/api/v1/memories/extraction-status` | Batch engine status |
 | GET | `/api/v1/reminders` | Reminders captured from conversations |
@@ -429,6 +429,11 @@ waiving its quiet period, interval floor and activity gate.
 | POST | `/api/v1/memory/consolidate/stop` | Cancel a running consolidation |
 | GET | `/api/v1/lane` | Inference-lane job status |
 | POST | `/api/v1/lane/jobs/{job}/run` | Run one lane job now |
+
+`POST` and `PUT /api/v1/memories` embed with the same provider and index the extraction path
+uses. A row stored without a vector (the embedder failed, or the redactor dropped a vector of a
+credential) is embedded later by the boot backfill or by the index maintenance sweep, which runs in
+household quiet.
 
 ## Settings
 

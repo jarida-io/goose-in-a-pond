@@ -77,8 +77,14 @@ pub trait MemoryRepository: Send + Sync {
     }
 
     /// Replace a memory's text in place, keeping its identity (id, created_at, edges).
-    /// Clears the embedding, which would still score for the old words; the sweep re-embeds it.
-    async fn update_content(&self, _id: &str, _content: &str) -> Result<()> {
+    /// The old vector would still score for the old words, so `embedding` (the new text's)
+    /// replaces it; `None` clears it for the sweep to re-embed.
+    async fn update_content(
+        &self,
+        _id: &str,
+        _content: &str,
+        _embedding: Option<&[f32]>,
+    ) -> Result<()> {
         anyhow::bail!("this store cannot edit a memory's text")
     }
 

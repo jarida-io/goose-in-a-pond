@@ -3677,6 +3677,104 @@ milestone).**
   `GET /network/status` answers as it did. The setup channel's wire is unchanged but for the new
   `unsupported_security` code.
 
+**2026-10-14 — A memory saved or reworded through the API is embedded at write (PAI-8 personal
+context, PAI-2 secrets; not a PAI milestone completion).**
+
+- **The defect.** `POST /api/v1/memories` stored every memory with `embedding: None`, and
+  `PUT /api/v1/memories/{id}` cleared the vector of the memory it reworded while its
+  `pond_vectors.db` entry went on scoring the old words. `search_similar` leaves a vectorless row
+  out of the semantic candidates whenever any other row has a vector, so a memory added by hand
+  competed on importance and recency alone (`relevance_score`: 0.5 similarity, 0.3 importance,
+  0.2 recency), and `max_memory_fragments` (5 at 8k) cut it. Found on a scratch pond on the Mac
+  2026-10-13 (LiteRT gemma-4-E2B, Orin profile, 8k, MiniLM loaded): six memories saved through the
+  route, every `memory_fragments.embedding` empty, 0 rows in `pond_vectors.db`, and "What am I
+  building at the moment?" answered "I do not know", because the project memory (importance 0.6,
+  the lowest of the six) was never injected. The desktop's add and edit forms (`Context.tsx`,
+  `Memory.tsx`) use these routes, so the memory a person types in was the one least likely to be
+  recalled.
+- **The backfill already existed; it was late, not missing.** Two passes embed
+  `embedding IS NULL` rows: the one-shot boot backfill (`run_backfill`, `main.rs`), and the index
+  sweep's memory step (`run_index_maintenance` step 2c, `run_memory_embedding_sweep`). The sweep
+  first looks 16 minutes after boot (60 s delay, then a 15-minute poll) and runs only after 15
+  minutes of household quiet (`INACTIVITY_THRESHOLD_SECS`); the first-pass exemption covers the
+  activity gate, not the quiet one. A scheduled tick embeds at most 32 memory rows. So nothing
+  embeds a memory saved while somebody is using the pond, and a restart was the quickest repair.
+  **No third backfill was added.** Rows stored before this change are embedded by the boot pass on
+  the first restart after the upgrade and by the sweep in household quiet. Neither waits on a turn:
+  the sweep holds the lane slot and a new turn cancels it, and the boot pass is a spawned task
+  embedding in batches of 32 with 250 ms pauses.
+- **What landed.** `save_memory` embeds the content with `state.embedding_provider` and stores the
+  vector with the row through `state.memory_repo`, the same redacting repository over
+  `SqliteMemoryRepository::with_vector_index` that the extraction service writes through. The
+  vector reaches `memory_fragments` and `pond_vectors.db` in the one write. `update_memory` embeds
+  the new text and `MemoryRepository::update_content` now takes the vector. The SQLite adapter
+  writes text and vector in one `UPDATE` and mirrors it to the index, only when a row matched, so a
+  `PUT` to a missing id leaves no orphan. A `None` clears both, for the sweep. A failed embed never
+  fails the write; the row waits for the sweep.
+- **PAI-2 (secrets).** The route embeds the text it was sent, which is the text before redaction.
+  `RedactingMemoryRepository::add` already dropped such a vector when it replaced a secret;
+  `update_content` now applies the same rule (`vector_survives`), so a credential typed into an
+  edit never reaches `memory_fragments.embedding` or the index. Its vector is filled later from the
+  redacted text.
+- **Other invariants.** KV prefix and preamble: none; memories still ride `<system-context>`. Turn
+  blocking: the embed is on a write route, not a turn; a turn's query embed waits for at most one
+  forward pass on the embedder's lock. Egress: none (local embedder; its one-time model download
+  was already gated). Guest: none (the routes' scope is unchanged). No `Settings` field, no
+  migration.
+- **Not done.** The field report's own setup: LiteRT, the Orin profile, an 8k window. The A/B
+  below used GGUF on the Mac (the injection path is the same code), and nothing ran on the Orin.
+  Also untouched, all pre-existing: `POST /memories` accepts blank content (`PUT` refuses it),
+  `PUT` to a missing id answers 204, and consolidation's merged and split rows and
+  `pond memories add` still store no vector, so they wait for a backfill. Found on the way: the
+  startup prefix prewarm runs the injection path, whose `record_access` then counts its
+  throwaway prompt as a use, so each prewarm reinforces whichever memories rank first.
+- **Verification** (Mac). **The field report reproduced and fixed, on a real model.** Two scratch
+  ponds with gemma-4-E2B-it Q4_K_M (GGUF, hard-linked) and MiniLM; six memories through `POST`;
+  then "What am I building at the moment?". The "before" binary is this tree with the two route
+  embed calls removed:
+
+  | | before | after |
+  |---|---|---|
+  | rows with a vector after the six `POST`s | 0 of 6 | 6 of 6 |
+  | memory rows in `pond_vectors.db` | 0 | 6 |
+  | project memory injected | no (`access_count` 0) | yes |
+  | tool calls in the turn | none | none |
+  | answer | "I do not have any information about what you are building at the moment." | "I am building a solar irrigation controller for the greenhouse." |
+
+  Each run built the memory block twice, once for the startup prefix prewarm's own session and once
+  for the turn. The prewarm calls `record_access` too, so the `access_count` column holds the union
+  of the two builds; it is still exact for "before". Gates:
+  `cargo test --locked --no-fail-fast -p pond-core -p pond-infra -p pond-api`: 70 test binaries
+  and 3 doc-test runs, 3,022 passed, 0 failed, 7 ignored. A first run without `--no-fail-fast` stopped on
+  `model_integration_test::asking_twice_for_a_download_in_flight_runs_it_once`, a timing flake in
+  the download tracker that then passed 6 of 6 alone and in the full run. `cargo test --locked -p
+  pond-mcp-server`: 220 passed. Five mutants each fail a new test: `POST` without the embed, `PUT`
+  without it, the redactor keeping an edit's secret vector, an edit not mirrored to the index, and
+  an edit to a missing row mirrored anyway. `cargo clippy --locked --all-targets` on those four
+  crates reports nothing in the changed lines; it needs `-A clippy::absurd_extreme_comparisons` for
+  the existing `egress_guard.rs:407` (`MAX_UNGATED` is 0), which CI's lib-only clippy never builds.
+  `cargo check --locked -p pond-server -p pond-adapters-goose --all-targets` and `cargo fmt --check`
+  are clean. **`scripts/live-test.sh` PASSED**: 146 of 146, then 25 of 25 on the restart, and the
+  auth section clean. New in `live_checks.py`: a saved memory carries a 384-wide vector that matches
+  its index entry, an edit replaces both, the stored credential has neither, the boot backfill
+  embeds a vectorless row across the restart, and the sweep rung by hand embeds one stored after
+  boot. The first live run failed one check of its own making: ringing the sweep in the first pass
+  dated that job's lane clock, which `section_lane_clock_after_restart` requires to be empty, so
+  the sweep check moved to the end of the restart pass. The log dig showed nothing from this
+  change: four mDNS send errors on the `nan0` interface, and the expected offline refusals and
+  missing-model warning.
+- **Rebased onto main 2026-10-22 (`5a05e171`).** `PUT /memories/{id}` had meanwhile learned to
+  change a memory's tier. Only new `content` is embedded; a tier-only change leaves the vector, and
+  `re_tiering_a_memory_through_the_route_keeps_its_vector` guards that (it fails against a route
+  that clears the vector on a tier change). Re-verified on the Mac: the fast-crate
+  `cargo test --locked --no-fail-fast` passed 4,723, failed 2, ignored 37. Neither failure is this
+  change: `pond-adapters-matter`'s `an_unreachable_controller_reports_the_failure_not_off` fails the
+  same way on untouched main, and `pond-ear`'s `loading_costs_what_the_ear_says_it_holds` (a
+  footprint ratio, 124% under the parallel run) passed alone. Fast-crate clippy and both
+  `pond-server` checks (default and `mesh`) are clean. `cargo fmt --check` is red on main itself,
+  in files from the kokoro merge, none of them touched here. **`scripts/live-test.sh` PASSED**,
+  272 checks and 0 failures, every memory-vector check before and after the restart among them.
+
 **2026-10-23 — status checked against the code (documentation only; no code changed).**
 
 Section 0 is new and every count in it was read from the tree, not from the stamps. The stamps had

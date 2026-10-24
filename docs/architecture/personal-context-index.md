@@ -497,9 +497,15 @@ vector stored without a revision compares unequal to a non-NULL column and is re
 sweep **forever**, re-embedding the same summaries indefinitely on the one device where inference is
 scarce. That guard passed a mutation until a test was written specifically for it.
 
-Observed while live-testing, pre-existing and worth its own fix: `POST /api/v1/memories` constructs
-`embedding: None` and never consults the embedder, so a memory written through the API is not
-searchable until the next restart runs the backfill. The backfill is startup-only.
+Observed while live-testing, pre-existing, and **fixed 2026-10-14**: `POST /api/v1/memories`
+constructed `embedding: None` and never consulted the embedder, so a memory written through the API
+was missing from semantic recall until a backfill reached it. That meant the next restart, or the
+index sweep's memory step (added since), which runs only after fifteen minutes of household quiet.
+`POST` now embeds at write, and `PUT /api/v1/memories/{id}` hands the new words' vector to
+`update_content`, which writes it with the text and mirrors it to the index (the old version cleared
+the vector and left the index scoring the old words). Both go through the one redacting `memory_repo`,
+so a vector of a replaced credential is still dropped. The write-through chokepoint in Phase B above
+is now three methods: `add`, `update_embedding` and `update_content`.
 
 **Exercised A and B against realistic use cases 2026-08-13, and it found a real bug.** Six scenarios on
 a live pond seeded as a household (two members, shared rows, six memories, one summarised session):

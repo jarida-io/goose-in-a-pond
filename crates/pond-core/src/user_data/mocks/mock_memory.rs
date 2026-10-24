@@ -190,6 +190,20 @@ impl MemoryRepository for MockMemoryRepository {
         Ok(())
     }
 
+    async fn update_content(
+        &self,
+        id: &str,
+        content: &str,
+        embedding: Option<&[f32]>,
+    ) -> Result<()> {
+        let mut fragments = self.fragments.write().await;
+        if let Some(f) = fragments.iter_mut().find(|f| f.id == id) {
+            f.content = content.to_string();
+            f.embedding = embedding.map(<[f32]>::to_vec);
+        }
+        Ok(())
+    }
+
     // ── Consolidation-observable writes ────────────────────────────────────
 
     async fn update_lifecycle(&self, id: &str, lifecycle: MemoryLifecycle) -> Result<()> {

@@ -1048,8 +1048,8 @@ See [architecture/memory_system.md](architecture/memory_system.md).
 | Route | Request | Response |
 |---|---|---|
 | `GET /memories` | | `[MemoryFragment]`, the 50 most recent |
-| `POST /memories` | `SaveMemoryRequest {content, tags?, source? (default "api"), segment?, importance?, tier?}` | `201` with the fragment (household-scoped; its embedding is filled by the sweep) |
-| `PUT /memories/{id}` | `{content?, tier?}`; at least one | `204` |
+| `POST /memories` | `SaveMemoryRequest {content, tags?, source? (default "api"), segment?, importance?, tier?}` | `201` with the fragment (household-scoped; embedded at write, or by the sweep when the embedder fails) |
+| `PUT /memories/{id}` | `{content?, tier?}`; at least one | `204`; new `content` is re-embedded, a tier-only change keeps the vector |
 | `DELETE /memories/{id}` | | `204` |
 | `GET /memories/extraction-status` | | `{sessions_total, sessions_pending, mode, last_pass_at, last_pass_*, unattributed_sessions, blocked_on, running}` |
 | `POST /memory/consolidate` | | SSE of `ConsolidationEvent`, tagged by `type`: `started`, `proposer_done`, `adversary_done`, `judge_done`, `applied`, `completed`, `error`, `cancelled`; `501` when consolidation is not built in or not enabled |
@@ -1063,8 +1063,9 @@ See [architecture/memory_system.md](architecture/memory_system.md).
 
 `MemoryFragment` fields: `id, profile_id, session_id, content, source, tags, created_at, segment,
 importance, tier, decay_rate, access_count, last_accessed_at, lifecycle, superseded_by, corrects`.
-`tier` is `short`, `long` or `permanent`; re-tiering resets the decay rate, and rewording clears
-the embedding for the sweep to rebuild.
+`tier` is `short`, `long` or `permanent`; re-tiering resets the decay rate, and rewording replaces
+the embedding with the new text's, in the row and in the personal-context index. A save or edit
+whose text held a credential is stored redacted and without a vector, for the sweep to embed.
 
 ## Personal context
 

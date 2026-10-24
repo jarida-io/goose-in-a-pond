@@ -7,7 +7,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::security::domain::event::PrivacySensitivity;
-use crate::security::domain::redaction::RedactionLevel;
+use crate::security::domain::redaction::{Redacted, RedactionLevel};
 use crate::security::ports::redactor::Redactor;
 use crate::user_data::domain::memory::{
     MemoryEdge, MemoryEvent, MemoryEventKind, MemoryFragment, MemoryGraph, MemoryLifecycle,
@@ -34,6 +34,11 @@ impl RedactingMemoryRepository {
     }
 }
 
+/// False when a secret was replaced: the vector encodes it. The backfill embeds the stored text.
+fn vector_survives(result: &Redacted) -> bool {
+    result.highest_sensitivity() != Some(PrivacySensitivity::Secret)
+}
+
 #[async_trait]
 impl MemoryRepository for RedactingMemoryRepository {
     async fn add(&self, mut fragment: MemoryFragment) -> Result<()> {
@@ -46,8 +51,7 @@ impl MemoryRepository for RedactingMemoryRepository {
                 kinds = %kinds.join(","),
                 "[redaction] removed credential-shaped material before storing a memory"
             );
-            // The embedding encodes the unredacted secret; drop it and let backfill re-embed.
-            if result.highest_sensitivity() == Some(PrivacySensitivity::Secret) {
+            if !vector_survives(&result) {
                 fragment.embedding = None;
             }
         }
@@ -113,8 +117,13 @@ impl MemoryRepository for RedactingMemoryRepository {
         self.inner.record_access(id).await
     }
 
-    /// Redacted like `add`: an edit is new text and must not let a secret in via a correction.
-    async fn update_content(&self, id: &str, content: &str) -> Result<()> {
+    /// Redacted like `add`, vector included: an edit is new text and must not let a secret in.
+    async fn update_content(
+        &self,
+        id: &str,
+        content: &str,
+        mut embedding: Option<&[f32]>,
+    ) -> Result<()> {
         let result = self.redactor.redact(content, Self::LEVEL);
         if !result.findings.is_empty() {
             let kinds: Vec<&str> = result.findings.iter().map(|k| k.as_str()).collect();
@@ -124,9 +133,11 @@ impl MemoryRepository for RedactingMemoryRepository {
                 kinds = %kinds.join(","),
                 "[redaction] removed credential-shaped material before storing a memory edit"
             );
+            if !vector_survives(&result) {
+                embedding = None;
+            }
         }
-        // No embedding to drop: the adapter clears it on every content change.
-        self.inner.update_content(id, &result.text).await
+        self.inner.update_content(id, &result.text, embedding).await
     }
 
     async fn update_lifecycle(&self, id: &str, lifecycle: MemoryLifecycle) -> Result<()> {
@@ -280,6 +291,47 @@ mod tests {
         assert!(
             stored[0].embedding.is_some(),
             "a memory with no finding must keep its vector"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_edit_with_a_credential_drops_the_vector_it_came_with() {
+        let (inner, _r, repo) = wire();
+        inner.add(frag("m5", "the old wording")).await.unwrap();
+
+        repo.update_content("m5", &format!("the new key is {KEY}"), Some(&[0.25_f32; 4]))
+            .await
+            .unwrap();
+
+        let stored = inner
+            .search_recent(&ProfileScope::Household, 10)
+            .await
+            .unwrap();
+        assert!(!stored[0].content.contains(KEY), "{}", stored[0].content);
+        assert!(
+            stored[0].embedding.is_none(),
+            "a vector of the edited text is a durable derivative of the secret in it"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_edit_keeps_the_vector_it_came_with() {
+        let (inner, _r, repo) = wire();
+        inner.add(frag("m6", "the old wording")).await.unwrap();
+
+        repo.update_content("m6", "the new wording", Some(&[0.25_f32; 4]))
+            .await
+            .unwrap();
+
+        let stored = inner
+            .search_recent(&ProfileScope::Household, 10)
+            .await
+            .unwrap();
+        assert_eq!(stored[0].content, "the new wording");
+        assert_eq!(
+            stored[0].embedding.as_deref(),
+            Some(&[0.25_f32; 4][..]),
+            "an edit with nothing to redact must store the new text's vector"
         );
     }
 

@@ -1079,6 +1079,84 @@ mod write_through_tests {
         assert!(index.get(Corpus::Memory, "m1").await.unwrap().is_none());
     }
 
+    async fn reworded_store(
+        tmp: &TempDir,
+    ) -> (
+        crate::sqlite_memory::SqliteMemoryRepository,
+        Arc<dyn VectorIndex>,
+    ) {
+        let db = crate::db::Database::init(tmp.path()).await.unwrap();
+        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
+        let repo = crate::sqlite_memory::SqliteMemoryRepository::new(db.system.clone())
+            .with_vector_index(index.clone(), Some("m".into()));
+        let mut frag = MemoryFragment::from_chat("w1".into(), None, None, "the old words".into());
+        frag.embedding = Some(vec![1.0, 0.0]);
+        repo.add(frag).await.unwrap();
+        (repo, index)
+    }
+
+    #[tokio::test]
+    async fn rewording_a_memory_replaces_its_vector_in_the_row_and_the_index() {
+        let tmp = TempDir::new().unwrap();
+        let (repo, index) = reworded_store(&tmp).await;
+
+        repo.update_content("w1", "the new words", Some(&[0.0, 1.0]))
+            .await
+            .unwrap();
+
+        let row = repo
+            .search_recent(&ProfileScope::Household, 1)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(row.content, "the new words");
+        assert_eq!(row.embedding.as_deref(), Some(&[0.0, 1.0][..]));
+        let entry = index.get(Corpus::Memory, "w1").await.unwrap();
+        assert_eq!(
+            entry.map(|e| e.vector),
+            Some(vec![0.0, 1.0]),
+            "the index still scores the old words"
+        );
+    }
+
+    #[tokio::test]
+    async fn rewording_without_a_vector_leaves_the_row_for_the_sweep_and_drops_the_old_entry() {
+        let tmp = TempDir::new().unwrap();
+        let (repo, index) = reworded_store(&tmp).await;
+
+        repo.update_content("w1", "the new words", None)
+            .await
+            .unwrap();
+
+        let unembedded: Vec<String> = repo
+            .search_unembedded(10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(unembedded, vec!["w1"], "the sweep cannot see the row");
+        assert!(
+            index.get(Corpus::Memory, "w1").await.unwrap().is_none(),
+            "the old words' vector would keep scoring for the new ones"
+        );
+    }
+
+    #[tokio::test]
+    async fn rewording_a_missing_memory_indexes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let (repo, index) = reworded_store(&tmp).await;
+
+        repo.update_content("gone", "words", Some(&[0.0, 1.0]))
+            .await
+            .unwrap();
+
+        assert!(
+            index.get(Corpus::Memory, "gone").await.unwrap().is_none(),
+            "an edit to no row left an orphan in the index"
+        );
+    }
+
     #[tokio::test]
     async fn an_archived_memory_is_not_returned_by_search() {
         let tmp = TempDir::new().unwrap();
