@@ -516,6 +516,21 @@ t_source_managed_clone_is_cloned_and_moved_to_the_pin() {
   stubs; litert_prepare_source linux-arm64 && return 1
   contains "$(logged)" "has local changes; not moving it to the pin"
 }
+t_source_managed_clone_from_upstream_fetches_the_pin_from_the_fork() {
+  world; fakes; stubs
+  mk_repo "$W/upstream" >/dev/null
+  git clone -q "file://$W/upstream" "$W/fork" && ( cd "$W/fork" && printf 'giap\n' >> README && git commit -qam giap ) || return 1
+  pin="$(git -C "$W/fork" rev-parse HEAD)"
+  mkdir -p "$GIAP_LITERT_HOME" && git clone -q "file://$W/upstream" "$GIAP_LITERT_HOME/src" || return 1
+  LITERT_REPO_URL="file://$W/fork"; LITERT_COMMIT="$pin"
+  litert_prepare_source linux-arm64 || { logged; return 1; }
+  eq "$(git -C "$GIAP_LITERT_HOME/src" rev-parse HEAD)" "$pin" || return 1
+  contains "$(logged)" "fetch file://$W/fork $pin" || return 1
+  # a fork without the pin says to push it there
+  LITERT_COMMIT="$(printf '%040d' 1)"; stubs
+  litert_prepare_source linux-arm64 && { echo "accepted a pin the fork does not have"; return 1; }
+  contains "$(logged)" "does not have the pin; push giap-main there first"
+}
 t_source_dry_run_changes_nothing() {
   world; fakes; stubs; DRY_RUN=true
   litert_prepare_source macos-arm64 || { logged; return 1; }

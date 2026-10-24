@@ -67,7 +67,9 @@ stays behind `RTLD_LOCAL`. Their third-party notices are not collected into the 
 ## The pin
 
 `LITERT_COMMIT` and `LITERT_CAPI_VERSION` in `scripts/lib/litert-setup.sh`:
-`a5dd27b5bd363be38feb62af637facbdb043b11c` on `giap-main`, GIAP's fork of LiteRT-LM. That is
+`a5dd27b5bd363be38feb62af637facbdb043b11c` on `giap-main` in
+[jarida-io/LiteRT-LM](https://github.com/jarida-io/LiteRT-LM/tree/giap-main), GIAP's public fork of
+LiteRT-LM. That is
 LiteRT-LM `main` at `b320801b` (`version.bzl`: `VERSION = "0.18.0"`, `C_API_VERSION = "1.0.0"`; C
 API 1.0.0 is on `main`, in no release yet) plus GIAP's fixes, among them:
 
@@ -82,15 +84,16 @@ API 1.0.0 is on `main`, in no release yet) plus GIAP's fixes, among them:
 - **KV reuse through an unchanged image**: a key per picture, prefill chunks aligned to images, and
   a cache of encoded images.
 
-The fork has no public remote yet, so a build cannot fetch the pin: set `LITERT_LM_SRC` to a
-`giap-main` clone at that commit. The backend still runs on upstream LiteRT-LM. Without the GIAP
-calls it never sets a conversation aside or rematches one, and its GPU path keeps the fp16 fault.
+A build fetches the pin from the fork (`LITERT_REPO_URL`), so it needs nothing set. A managed
+clone made from upstream before the fork existed fetches the pin from the same URL. The backend
+still runs on upstream LiteRT-LM. Without the GIAP calls it never sets a conversation aside or
+rematches one, and its GPU path keeps the fp16 fault.
 
 To move it:
 
-1. Rebase `giap-main` onto the upstream commit you want, run the fork's tests, and read
-   `version.bzl` at the result. A different `C_API_VERSION` means the goose binding has to be
-   checked against `c/*.h` before anything else.
+1. Rebase `giap-main` onto the upstream commit you want, run the fork's tests, push it to the fork,
+   and read `version.bzl` at the result. A different `C_API_VERSION` means the goose binding has to
+   be checked against `c/*.h` before anything else. A pin that is not pushed cannot be fetched.
 2. Set `LITERT_COMMIT` (and `LITERT_CAPI_VERSION`) to the rebased head, then
    `bash scripts/lib/litert-setup.test.sh`.
 3. Build both platforms. Packages live under `<capi>-<commit8>/`, so the old one stays until you
@@ -109,9 +112,9 @@ bash scripts/giap.sh litert status                 # what is recorded, each veri
 bash scripts/giap.sh --dry-run litert build linux-arm64   # every command, nothing run
 ```
 
-The source is a clone this tool keeps at `~/.giap/litert-lm/src`, moved to the pin and given the
-Git LFS objects of that one platform. `LITERT_LM_SRC=<dir>` uses a clone of your own instead, which
-must already be at the pin; it is never moved.
+The source is a clone of the fork this tool keeps at `~/.giap/litert-lm/src`, moved to the pin and
+given the Git LFS objects of that one platform. `LITERT_LM_SRC=<dir>` uses a clone of your own
+instead, which must already be at the pin; it is never moved.
 
 - **macos-arm64** needs bazelisk, git-lfs and the Xcode command line tools, and runs
   `bazelisk build -c opt --config=macos_arm64 --define=litert_runtime_link_mode=dynamic //c:litert-lm`
