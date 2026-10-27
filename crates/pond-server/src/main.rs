@@ -3238,7 +3238,8 @@ async fn run_server(
                 Some(settings_repo.clone()),
             )
             .with_profiles(Arc::new(SqliteProfileRepository::new(db.system.clone())))
-            .with_device_registry(device_registry.clone()),
+            .with_device_registry(device_registry.clone())
+            .with_member_delivery(pond_mcp_server::member_notifier),
         );
         deferred_executor
             .init(

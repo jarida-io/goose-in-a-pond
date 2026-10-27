@@ -1,7 +1,10 @@
 //! The calling session from the `_meta` Goose stamps on each call: the only trustworthy
 //! per-call channel (a `session_id` param is model-filled; `current_session_id()` races).
 
+use pond_core::security::ports::draft_authority::DraftAuthority;
+use pond_core::user_data::domain::profile::ProfileScope;
 use rmcp::model::Meta;
+use std::sync::Arc;
 
 /// Goose's `SESSION_ID_HEADER`, duplicated: this crate must not depend on the goose submodule.
 pub const SESSION_ID_META_KEY: &str = "agent-session-id";
@@ -16,6 +19,65 @@ pub fn session_from_meta(meta: &Meta) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+}
+
+/// The household member speaking in this call, or why there is none. An unidentified
+/// speaker in a one-member household can only be that member; a guest is nobody's.
+pub async fn speaking_member(
+    authority: Option<Arc<dyn DraftAuthority>>,
+    meta: &Meta,
+) -> Result<String, &'static str> {
+    const NOT_ONE_MEMBER: &str = "the speaker is not identified as one household member";
+    let authority = authority.ok_or("this pond cannot tell who is speaking")?;
+    let session = session_from_meta(meta).ok_or("this call carries no session")?;
+    match authority.actor_for_engine_session(&session).await {
+        Some((ProfileScope::Owner(id), _)) => Ok(id),
+        Some((ProfileScope::Household, _)) => authority.sole_member().await.ok_or(NOT_ONE_MEMBER),
+        _ => Err(NOT_ONE_MEMBER),
+    }
+}
+
+/// A speaker resolver and a call's `_meta`, for the tools that act for the person speaking.
+#[cfg(test)]
+pub(crate) mod fakes {
+    use super::*;
+    use async_trait::async_trait;
+    use pond_core::security::ports::policy::{PolicyDecision, PolicyMode};
+    use pond_core::user_data::domain::session::IdentificationSource;
+
+    /// Resolves every session to `scope`; `sole` is the household's only member, if it has one.
+    pub(crate) struct FixedSpeaker {
+        pub(crate) scope: Option<ProfileScope>,
+        pub(crate) sole: Option<&'static str>,
+    }
+
+    #[async_trait]
+    impl DraftAuthority for FixedSpeaker {
+        async fn policy_mode(&self) -> PolicyMode {
+            PolicyMode::Audit
+        }
+        async fn actor_for_engine_session(
+            &self,
+            _engine_session_id: &str,
+        ) -> Option<(ProfileScope, IdentificationSource)> {
+            self.scope
+                .clone()
+                .map(|scope| (scope, IdentificationSource::Explicit))
+        }
+        async fn sole_member(&self) -> Option<String> {
+            self.sole.map(str::to_string)
+        }
+        async fn audit(&self, _s: &str, _a: &str, _d: &PolicyDecision) {}
+    }
+
+    pub(crate) fn meta() -> Meta {
+        let mut m = Meta::new();
+        m.0.insert(
+            crate::session_meta::SESSION_ID_META_KEY.to_string(),
+            serde_json::json!("engine-1"),
+        );
+        m
+    }
 }
 
 #[cfg(test)]
