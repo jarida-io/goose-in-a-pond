@@ -94,6 +94,18 @@ never overwrite them.
   between 2,048 and 16,384 (`MAX_CTX` is a latency cap: a cold 16K prefill is about 20 s on the
   Orin). A picture add-on is charged against the budget when declared; an allowlisted Gemma model
   keeps 16,384.
+- **Unified memory, at load** (Linux with an integrated GPU: the Orin). The engine narrows the
+  window it was asked for to what the memory free after the load buys (`MemoryFit` in
+  `goose-local-inference/src/llamacpp/memory.rs`, logged as `kind="context_sized"`). Free is the
+  kernel's `MemFree` once the model's files are out of the page cache, less the picture add-on's
+  weights; from it come a 256 MiB compute reserve (not yet measured with one logits row; replace it
+  with the `compute buffer size` llama.cpp logs on the Orin) and a 512 MiB margin. The KV cost per
+  token is read from the model's metadata and charges every layer that owns KV the full window at
+  the full key width, which over-states sliding-window layers under the windowed cache; the header
+  does not say which layers slide. A window that fits is kept exactly. One that does not steps down
+  16,384 / 12,288 / 8,192 / 6,144 / 4,096 and never below 4,096. The fit is fixed per load, so the
+  retained context and the preamble snapshot's key do not move with free memory turn to turn. A
+  prompt longer than a narrowed window is `ContextLengthExceeded`, which goose answers by compacting.
 - **Any other machine**: goose sizes the context from free memory, capped by the model's own
   training length.
 - **LiteRT-LM**: fixed per engine, 8,192 tokens on the budgeted device and 16,384 elsewhere
@@ -129,8 +141,9 @@ In `goose/crates/goose-local-inference/src/llamacpp/`.
   real turn finds its prefix cached. Its progress is `state.warmup`.
 - **Logits reservation.** Contexts reserve logits for one output (`with_n_outputs_max`), or for the
   draft depth plus one with a drafter attached, instead of a full vocabulary row per ubatch token.
-- **Weights are mmapped**, so on the Orin the CPU-side tensors stay reclaimable page cache. A picture
-  add-on's encoder is loaded per picture turn, not held resident.
+- **Weights are mmapped**, so on the Orin the CPU-side tensors stay reclaimable page cache. The copy
+  of the GPU-side weights the load leaves in the page cache is released (see [Memory fit](#memory-fit)).
+  A picture add-on's encoder is loaded per picture turn, not held resident.
 
 ### Speculative decoding (MTP)
 
@@ -186,7 +199,53 @@ at a fraction of that.
   `n_gpu_layers 99`.
 - On the Orin, NvMap cannot reclaim page cache, so a load can fail with `NvMap ... error 12` while
   `free` shows gigabytes available. Drop caches with the pond stopped (see
-  [jetson-power-loss-recovery.md](jetson-power-loss-recovery.md)).
+  [jetson-power-loss-recovery.md](jetson-power-loss-recovery.md)) when the cache is other files'.
+
+### Unified memory and the model's own page cache
+
+The Orin's GPU allocates from system memory through nvmap, which fails a `cudaMalloc` when `MemFree`
+runs low and does not reclaim page cache for it. llama.cpp maps the GGUF and copies the GPU-resident
+weights out of the mapping, so a load leaves those bytes in the page cache as a second copy, and
+llama.cpp reports `MemAvailable` (which counts that cache) as the device's free memory. On
+2026-10-27, switching to Gemma 4 E4B (`UD-Q2_K_XL`, a 3.2 GB file, about 2.2 GB of it on the GPU)
+failed every turn: with 4.0 GB of cache the 2,197 MiB weight allocation failed; after
+`drop_caches` the weights loaded but the cache grew by 2.2 GB, 251 MB stayed free, and a 42 MiB
+allocation and then the 256 MiB KV cache failed. The chat showed "Ran into this error: Execution
+error: null result from llama cpp."
+
+What the engine does now (`goose-local-inference/src/llamacpp/memory.rs`), on Linux with a GPU:
+
+- **Releases the model's files from the page cache** while llama.cpp loads them (its progress
+  callback, every 256 MiB), once the target and its drafter are loaded, and once a picture
+  add-on's encoder is. A released file's pages this process maps are paged out with
+  `madvise(MADV_PAGEOUT)` (Linux 5.4+; a no-op for file pages of a file the pond user neither owns
+  nor can write), then the file is advised away with `posix_fadvise(POSIX_FADV_DONTNEED)`, which by
+  itself skips mapped pages. Neither changes what the mapping reads: a CPU-side tensor row is read
+  back from disk the next time a token needs it. Logged as `kind="page_cache_released"` with
+  `MemFree` and `Cached` before and after.
+- **Maps the model on the first attempt, reads it on a retry.** Without mmap llama.cpp copies the
+  CPU-side tensors (1,872 MiB for E4B) into host memory nothing can reclaim; mapped, a token reads
+  only its own rows. But a load maps with `MAP_POPULATE` and `MADV_WILLNEED`, so the whole file
+  enters the page cache before the GPU buffers are allocated. On 2026-10-27 a released cache
+  (1,874 to 4,915 MiB free) refilled to 3.3 GB within a mapped retry and the 2,197 MiB weight
+  allocation failed again. So with unified memory the retry reads the file: the buffers are
+  allocated first and the progress release keeps the cache small (`retry_mapped=false`).
+- **Retries a failed allocation once** after releasing the loaded models' files, for the weights
+  and for a context (`kind="model_load_retry"`, with free memory before and after). A second
+  failure with `MemFree` short of what the stage needs plus the 512 MiB margin is
+  `ModelLoadError::OutOfGpuMemory` (`goose-local-inference/src/load_error.rs`,
+  `kind="model_out_of_gpu_memory"`); any other failure keeps llama.cpp's error.
+- **Says so in the chat.** The provider shim counts that typed error per session and
+  `GooseAdapter` replaces goose's "Ran into this error" prose with "The model could not load: the
+  Pond is out of GPU memory. Try a smaller model on the Models page, or restart the Pond."
+  (`kind="turn_out_of_gpu_memory"`), on both chat streaming endpoints.
+
+The preamble snapshot slot (`kv snapshot slot created`) allocates no context; the snapshot is read
+into the one context the turn already has. The drafter's context shares the target's KV.
+
+A row the goose adapter registers for a model takes the device stamp of another row naming the
+same file (`stamped_settings_for` in `goose_agent.rs`), so a live switch no longer leaves the row
+it loads with goose's defaults.
 
 ## Measuring
 

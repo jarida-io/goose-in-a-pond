@@ -64,6 +64,12 @@ const GOOSE_EMPTY_TURN_MESSAGE: &str =
 /// Only picks which text to replace; a picture failure comes typed from the provider shim.
 const GOOSE_PROVIDER_ERROR_PREFIX: &str = "Ran into this error: ";
 
+/// The reply in place of goose's "Ran into this error: ..." when the model could not load or
+/// start for lack of GPU memory, as the provider shim recorded it typed. Both chat streaming
+/// endpoints run through [`GooseAdapter::chat_stream`], so both show this.
+const OUT_OF_GPU_MEMORY_REPLY: &str = "The model could not load: the Pond is out of GPU memory. \
+Try a smaller model on the Models page, or restart the Pond.";
+
 /// Verbatim prefix of goose's notification each time its completeness check re-arms.
 const GOOSE_GOAL_NOTIFICATION_PREFIX: &str = "Goal: ";
 
@@ -271,6 +277,23 @@ fn fail_on_engine_error(
         "the turn ended on an engine error; its text is goose's report of it, not a reply",
     );
     Err(anyhow!("The model could not run: {error}"))
+}
+
+/// Goose's report of a provider error, replaced with [`OUT_OF_GPU_MEMORY_REPLY`] when this turn's
+/// calls ran out of GPU memory (`out_of_memory`, from the provider shim's typed count). Logged as
+/// `kind="turn_out_of_gpu_memory"`; any other text passes through.
+fn replace_out_of_gpu_memory_report(session_id: &str, text: String, out_of_memory: bool) -> String {
+    if !(out_of_memory && text.starts_with(GOOSE_PROVIDER_ERROR_PREFIX)) {
+        return text;
+    }
+    tracing::warn!(
+        target: "giap::trace",
+        kind = "turn_out_of_gpu_memory",
+        session_id = %session_id,
+        goose_report = %text,
+        "the turn ended on the model running out of GPU memory; telling the household plainly"
+    );
+    OUT_OF_GPU_MEMORY_REPLY.to_string()
 }
 
 /// Appended when re-engaging after an empty turn: an unchanged prompt gets the same reply.
@@ -2358,10 +2381,7 @@ impl GooseAdapter {
 
                 if needs_register {
                     // Keep existing tuning: a default would drop the Jetson `context_size` stamp.
-                    let mut settings = registry
-                        .get_model(&stem)
-                        .map(|entry| entry.settings.clone())
-                        .unwrap_or_default();
+                    let mut settings = stamped_settings_for(registry, &stem, &local_path);
                     // Probed from this file's own chat template; live turns resolve to this row.
                     settings.tool_calling = crate::model_traits::tool_mode_for_gguf(&local_path);
                     let entry = LocalModelEntry {
@@ -3159,6 +3179,7 @@ impl GooseAdapter {
             None
         };
         let image_failures_at_start = session_controls.image_failures();
+        let gpu_memory_failures_at_start = session_controls.gpu_memory_failures();
         let pictures = self.pictures.clone();
 
         // ── 7. GooseMode from model_role ──────────────────────────────────────
@@ -3665,6 +3686,13 @@ impl GooseAdapter {
                                 // Raw: the SSE ThoughtFilter strips think tags across chunks, and a
                                 // per-chunk strip here would eat close tags it is waiting for.
                                 let raw_text = msg.as_concat_text();
+                                // Out of GPU memory: goose's prose is llama.cpp's "null result",
+                                // which says nothing the household can act on.
+                                let raw_text = replace_out_of_gpu_memory_report(
+                                    &session_id,
+                                    raw_text,
+                                    guard_controls.gpu_memory_failures() > gpu_memory_failures_at_start,
+                                );
                                 // Refused picture: goose's prose names a screen GIAP lacks, so
                                 // use pond-core's line and hold the encoder at could-not-start.
                                 let raw_text = match local_picture_spec {
@@ -4869,6 +4897,38 @@ fn canonical_model_stem(model_name: &str, gguf_dir: &std::path::Path) -> String 
         }
     }
     stem.to_string()
+}
+
+/// The settings a (re-)registered row starts from: those of another row already naming the same
+/// file, else the row's own, else defaults.
+///
+/// The device stamp (`apply_jetson_settings` in pond-adapters-local-inference) tunes the rows
+/// naming a file that exist when it runs. On a live model switch this adapter can register its
+/// canonical row afterwards, and that row started from defaults: no Jetson window, cache types,
+/// batch sizes or thread count for the model the household then talks to. The row's own settings
+/// lose to a sibling because a row moved to another file carries the old file's stamp.
+fn stamped_settings_for(
+    registry: &goose::providers::local_inference::local_model_registry::LocalModelRegistry,
+    stem: &str,
+    local_path: &std::path::Path,
+) -> goose::providers::local_inference::local_model_registry::ModelSettings {
+    let file = crate::registry_rows::resolve(local_path);
+    let sibling = registry
+        .list_models()
+        .iter()
+        .find(|entry| entry.id != stem && crate::registry_rows::resolve(&entry.local_path) == file);
+    match (sibling, registry.get_model(stem)) {
+        (Some(entry), _) => {
+            tracing::info!(
+                row = stem,
+                from = %entry.id,
+                "registered row takes the device settings of a row naming the same file"
+            );
+            entry.settings.clone()
+        }
+        (None, Some(entry)) => entry.settings.clone(),
+        (None, None) => Default::default(),
+    }
 }
 
 /// Driven by the always-on `giap-toolkit` extension, so it's reachable in any narrowed session.
@@ -6926,6 +6986,68 @@ mod tests {
         assert_eq!(
             state("ollama", "llama3.2:3b", None),
             Some(EncoderState::NotDeclared)
+        );
+    }
+
+    /// The Jetson's E4B turns of 2026-10-27 read "Ran into this error: Execution error: null
+    /// result from llama cpp." Once the shim has counted the turn out of GPU memory, the household
+    /// reads what happened and what to do instead.
+    #[test]
+    fn goose_prose_for_running_out_of_gpu_memory_becomes_a_plain_reply() {
+        let goose_text = format!(
+            "{GOOSE_PROVIDER_ERROR_PREFIX}Execution error: out of GPU memory for the context: \
+             needs about 542 MiB, 251 MiB free.\n\nPlease retry if you think this is a transient \
+             or recoverable error."
+        );
+        assert_eq!(
+            replace_out_of_gpu_memory_report("s1", goose_text.clone(), true),
+            OUT_OF_GPU_MEMORY_REPLY
+        );
+        assert_eq!(
+            replace_out_of_gpu_memory_report("s1", goose_text.clone(), false),
+            goose_text,
+            "another failure keeps goose's report"
+        );
+        assert_eq!(
+            replace_out_of_gpu_memory_report("s1", "Mainly clear.".to_string(), true),
+            "Mainly clear.",
+            "an answer is never replaced"
+        );
+    }
+
+    /// The canonical row registered after the device stamp starts from the stamped sibling naming
+    /// the same file, not from defaults; a row alone keeps its own settings.
+    #[test]
+    fn a_registered_row_takes_the_stamp_of_a_row_naming_its_file() {
+        use goose::providers::local_inference::local_model_registry::LocalModelRegistry;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("gemma-4-E4B-it-qat-UD-Q2_K_XL.gguf");
+        std::fs::write(&file, b"GGUF").unwrap();
+        let mut stamped = crate::registry_rows::test_entry("gemma-4-E4B-it-qat-UD-Q2_K_XL", &file);
+        stamped.settings.context_size = Some(16_384);
+        stamped.settings.n_gpu_layers = Some(99);
+        let registry = LocalModelRegistry {
+            models: vec![stamped],
+        };
+        let settings = stamped_settings_for(&registry, "gemma-4-E4B-it-qat", &file);
+        assert_eq!(settings.context_size, Some(16_384));
+        assert_eq!(settings.n_gpu_layers, Some(99));
+
+        let other = dir.path().join("other.gguf");
+        std::fs::write(&other, b"GGUF").unwrap();
+        let mut alone = crate::registry_rows::test_entry("other", &other);
+        alone.settings.context_size = Some(8_192);
+        let registry = LocalModelRegistry {
+            models: vec![alone],
+        };
+        assert_eq!(
+            stamped_settings_for(&registry, "other", &other).context_size,
+            Some(8_192)
+        );
+        assert_eq!(
+            stamped_settings_for(&registry, "new", &file).context_size,
+            None,
+            "no row names the file: defaults"
         );
     }
 

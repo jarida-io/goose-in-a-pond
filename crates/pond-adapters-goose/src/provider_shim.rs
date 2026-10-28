@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use async_trait::async_trait;
 use goose::conversation::message::Message;
 use goose::providers::base::{MessageStream, Provider};
+use goose::providers::local_inference::load_error::ModelLoadError;
 use goose_providers::errors::ProviderError;
 use goose_providers::model::ModelConfig;
 use rmcp::model::Tool;
@@ -37,6 +38,10 @@ pub struct SessionControls {
     /// Goose answers a failed call with prose in the reply ("Ran into this error: ..."), so this
     /// is the only structured sign that a turn ended on an engine failure rather than a reply.
     provider_failure: Mutex<Option<String>>,
+    /// How many of this session's calls failed because the model ran out of GPU memory. Goose
+    /// rewrites the typed error into "Ran into this error" prose; the adapter compares this across
+    /// a turn to replace that prose with a line the household can act on.
+    gpu_memory_failures: AtomicU32,
 }
 
 // `pictures_readable` values. Zero, the default, is "no turn has said", which promotes.
@@ -134,6 +139,16 @@ impl SessionControls {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// Record that the model could not load or start for lack of GPU memory.
+    pub fn note_gpu_memory_failure(&self) {
+        self.gpu_memory_failures.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Out-of-GPU-memory count; compared across a turn like [`Self::image_failures`].
+    pub fn gpu_memory_failures(&self) -> u32 {
+        self.gpu_memory_failures.load(Ordering::SeqCst)
     }
 }
 
@@ -430,9 +445,34 @@ fn carries_image(messages: &[Message]) -> bool {
         .any(|m| crate::goose_agent::image_part_count(m) > 0)
 }
 
-/// Typed engine refusal, as seen before goose rewrites it into "Ran into this error" prose.
+/// Typed engine refusal, as seen before goose rewrites it into "Ran into this error" prose. Running
+/// out of GPU memory is not one: the picture is not what failed, and nothing about it should be
+/// scrubbed or marked could-not-start.
 fn is_engine_refusal(err: &ProviderError) -> bool {
     matches!(err, ProviderError::ExecutionError(_))
+        && ModelLoadError::from_provider_error(err).is_none()
+}
+
+/// Count `err` against `session` when it is the engine running out of GPU memory, logged as
+/// `kind="model_out_of_gpu_memory"`.
+fn note_if_out_of_gpu_memory(session: &SessionControls, err: &ProviderError) {
+    let Some(ModelLoadError::OutOfGpuMemory {
+        stage,
+        needed_mb,
+        free_mb,
+    }) = ModelLoadError::from_provider_error(err)
+    else {
+        return;
+    };
+    session.note_gpu_memory_failure();
+    tracing::warn!(
+        target: "giap::trace",
+        kind = "model_out_of_gpu_memory",
+        stage = ?stage,
+        needed_mb,
+        free_mb,
+        "the model could not load or start: the GPU is out of memory"
+    );
 }
 
 fn note_picture_refusal(session: &SessionControls, err: &ProviderError) {
@@ -855,6 +895,7 @@ impl Provider for GiapProviderShim {
         match (result, session) {
             (Err(e), Some(s)) => {
                 s.note_provider_outcome(Some(&e));
+                note_if_out_of_gpu_memory(&s, &e);
                 Err(e)
             }
             (Ok(stream), Some(s)) => {
@@ -863,6 +904,7 @@ impl Provider for GiapProviderShim {
                 Ok(Box::pin(stream.inspect(move |item| {
                     if let Err(e) = item {
                         s.note_provider_outcome(Some(e));
+                        note_if_out_of_gpu_memory(&s, e);
                     }
                 })))
             }
@@ -1802,6 +1844,7 @@ mod tests {
         None,
         AtSetup,
         AsAStreamItem,
+        OutOfGpuMemory,
     }
 
     #[async_trait]
@@ -1823,6 +1866,14 @@ mod tests {
                 Refusal::None => Ok(Box::pin(futures::stream::empty())),
                 Refusal::AtSetup => Err(refused()),
                 Refusal::AsAStreamItem => Ok(Box::pin(futures::stream::iter(vec![Err(refused())]))),
+                Refusal::OutOfGpuMemory => Ok(Box::pin(futures::stream::iter(vec![Err(
+                    ModelLoadError::OutOfGpuMemory {
+                        stage: goose::providers::local_inference::load_error::LoadStage::Context,
+                        needed_mb: 542,
+                        free_mb: 251,
+                    }
+                    .into(),
+                )]))),
             }
         }
     }
@@ -1865,6 +1916,24 @@ mod tests {
         Message::user()
             .with_text(text)
             .with_image("AAAA", "image/png")
+    }
+
+    /// The Jetson's E4B turns of 2026-10-27: the context could not allocate. The session counts it,
+    /// the picture is not blamed, and an ordinary refusal is not counted as memory.
+    #[tokio::test]
+    async fn running_out_of_gpu_memory_is_counted_and_not_blamed_on_the_picture() {
+        let (shim, controls, _) = engine(Refusal::OutOfGpuMemory);
+        let session = controls.session("s1");
+        call(&shim, "s1", &[picture("what is this?")]).await;
+        call(&shim, "s1", &[Message::user().with_text("hello")]).await;
+        assert_eq!(session.gpu_memory_failures(), 2);
+        assert_eq!(session.image_failures(), 0, "the picture did not fail");
+
+        let (shim, controls, _) = engine(Refusal::AsAStreamItem);
+        let session = controls.session("s2");
+        call(&shim, "s2", &[picture("what is this?")]).await;
+        assert_eq!(session.gpu_memory_failures(), 0);
+        assert_eq!(session.image_failures(), 1);
     }
 
     #[tokio::test]
