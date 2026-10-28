@@ -15,6 +15,19 @@ pub const BRAVE_WEB_SEARCH_PATH: &str = "/res/v1/web/search";
 /// Brave's LLM Context endpoint, under [`BRAVE_API_BASE`]: ranked page text for one query.
 pub const BRAVE_LLM_CONTEXT_PATH: &str = "/res/v1/llm/context";
 
+/// Brave's image search endpoint, under [`BRAVE_API_BASE`]: what `show_pictures` asks.
+pub const BRAVE_IMAGE_SEARCH_PATH: &str = "/res/v1/images/search";
+
+/// Where Brave's image proxy serves thumbnails. A card shows a thumbnail only from here, so a
+/// picture never tells the site it came from who is looking at it.
+pub const BRAVE_IMAGE_PROXY_ORIGIN: &str = "https://imgs.search.brave.com/";
+
+/// Whether `url` is a thumbnail served by Brave's image proxy.
+pub fn is_brave_thumbnail(url: &str) -> bool {
+    url.strip_prefix(BRAVE_IMAGE_PROXY_ORIGIN)
+        .is_some_and(|path| !path.is_empty() && !path.contains(char::is_whitespace))
+}
+
 /// How long the LLM Context request may take before search_web falls back to reading pages.
 /// Longer than [`BRAVE_TIMEOUT`]: Brave fetches and extracts the pages inside this one call.
 pub const BRAVE_LLM_CONTEXT_TIMEOUT: Duration = Duration::from_secs(8);
@@ -206,6 +219,23 @@ mod tests {
         let long = "é".repeat(80);
         let town = local_town(&long).unwrap();
         assert!(town.len() <= MAX_TOWN_BYTES, "{}", town.len());
+    }
+
+    #[test]
+    fn only_brave_proxied_thumbnails_are_shown() {
+        assert!(is_brave_thumbnail(
+            "https://imgs.search.brave.com/abc/rs:fit:500:0:0/g:ce/aHR0cHM6"
+        ));
+        for other in [
+            "https://upload.wikimedia.org/a.jpg",
+            "http://imgs.search.brave.com/abc",
+            "https://imgs.search.brave.com.evil.example/abc",
+            "https://imgs.search.brave.com/",
+            "https://imgs.search.brave.com/a b",
+            "",
+        ] {
+            assert!(!is_brave_thumbnail(other), "{other}");
+        }
     }
 
     #[test]

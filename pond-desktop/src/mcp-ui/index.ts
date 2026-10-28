@@ -10,8 +10,10 @@ import "./cards/SmartHomeCard";
 import "./cards/MapCard";
 import "./cards/MemoryCard";
 import "./cards/ScheduleListCard";
-// Before KnowledgeCard: its /knowledge/ pattern also matches "giap-knowledge__search_web".
+// Before KnowledgeCard: its /knowledge/ pattern also matches "giap-knowledge__search_web" and
+// "giap-knowledge__show_pictures".
 import "./cards/SearchCard";
+import "./cards/PicturesCard";
 import "./cards/KnowledgeCard";
 import "./cards/WolframCard";
 import "./cards/TimeCard";

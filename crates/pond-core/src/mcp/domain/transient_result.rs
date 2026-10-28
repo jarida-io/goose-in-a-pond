@@ -1,7 +1,7 @@
 //! A tool result the model reads during its turn and history never keeps: the tool marks it in
 //! `CallToolResult._meta`, and every store of tool results keeps the marker's stub instead.
-//! Web search is the one such tool: Brave's terms (3(b)(i)) allow Search Results only transient
-//! storage.
+//! Web search and its pictures are such tools: Brave's terms (3(b)(i)) allow Search Results only
+//! transient storage.
 
 use serde_json::{Map, Value};
 
@@ -19,8 +19,19 @@ const MAX_STUB_DOMAIN_BYTES: usize = 63;
 
 const WEB_SEARCH_KEPT: &str = "Web search results are not kept after the turn.";
 
+const WEB_PICTURES_KEPT: &str = "Pictures from the web are not kept after the turn.";
+
 /// What history keeps of a web search: the sources' domains and nothing they said.
 pub fn web_search_stub<S: AsRef<str>>(domains: &[S]) -> String {
+    stub_naming(WEB_SEARCH_KEPT, domains)
+}
+
+/// What history keeps of pictures shown from the web: the sites they came from.
+pub fn web_pictures_stub<S: AsRef<str>>(domains: &[S]) -> String {
+    stub_naming(WEB_PICTURES_KEPT, domains)
+}
+
+fn stub_naming<S: AsRef<str>>(kept: &str, domains: &[S]) -> String {
     let mut named: Vec<&str> = Vec::new();
     for domain in domains.iter().map(|d| d.as_ref().trim()) {
         if named.len() == MAX_STUB_DOMAINS {
@@ -31,9 +42,9 @@ pub fn web_search_stub<S: AsRef<str>>(domains: &[S]) -> String {
         }
     }
     if named.is_empty() {
-        WEB_SEARCH_KEPT.to_string()
+        kept.to_string()
     } else {
-        format!("{WEB_SEARCH_KEPT} Sources: {}.", named.join(", "))
+        format!("{kept} Sources: {}.", named.join(", "))
     }
 }
 
@@ -227,6 +238,19 @@ mod tests {
         assert_eq!(
             stub,
             "Web search results are not kept after the turn. Sources: nation.africa, kws.go.ke."
+        );
+    }
+
+    #[test]
+    fn a_pictures_stub_names_the_sites_by_the_same_rule() {
+        assert_eq!(
+            web_pictures_stub(&["commons.wikimedia.org", "not a domain", "kws.go.ke"]),
+            "Pictures from the web are not kept after the turn. Sources: commons.wikimedia.org, \
+             kws.go.ke."
+        );
+        assert_eq!(
+            web_pictures_stub::<&str>(&[]),
+            "Pictures from the web are not kept after the turn."
         );
     }
 

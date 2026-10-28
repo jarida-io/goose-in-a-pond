@@ -333,3 +333,62 @@ describe("ChatHubView, a result the pond did not keep", () => {
     expect(document.querySelectorAll(".kept-note")).toHaveLength(1);
   });
 });
+
+describe("ChatHubView, the web's results on screen", () => {
+  const THUMB = "https://imgs.search.brave.com/p/rs:fit:500:0:0/g:ce/aHR0cHM6";
+
+  function turn(tool: string, ui: Record<string, unknown>) {
+    vi.mocked(api.chatStream).mockImplementation(() =>
+      (async function* () {
+        yield { type: "tool_call", tool, id: "t1" };
+        yield { type: "tool_result", tool, id: "t1", content: "done", transient: true, ui };
+        yield { type: "text", content: "Here they are." };
+        yield { done: true, session_id: "sess-hub" };
+      })() as never,
+    );
+  }
+
+  async function ask(text: string) {
+    render(<ChatHubView />);
+    fireEvent.change(screen.getByLabelText("Message input"), { target: { value: text } });
+    fireEvent.click(screen.getByLabelText("Send message"));
+    await screen.findByText("Here they are.");
+  }
+
+  it("shows the pictures a turn put on the screen, under the answer", async () => {
+    turn("giap-knowledge__show_pictures", {
+      card_type: "pictures",
+      data: {
+        query: "lions at dawn",
+        pictures: [
+          { title: "Lions", url: "https://a.example/lions", domain: "a.example", thumbnail: THUMB, width: 500, height: 333 },
+        ],
+      },
+    });
+    await ask("show me lions");
+    const region = await screen.findByRole("region", { name: "Pictures result" });
+    expect(region.querySelector("img")?.getAttribute("src")).toBe(THUMB);
+    expect(screen.getByRole("link", { name: /Lions/ }).getAttribute("href")).toBe("https://a.example/lions");
+  });
+
+  it("shows a web search's card too, with the pages and the news Brave added", async () => {
+    turn("giap-knowledge__search_web", {
+      card_type: "search",
+      data: {
+        query: "the library",
+        results: [{ title: "Library hours", url: "https://lib.example/hours", domain: "lib.example", snippet: "9 to 1." }],
+        news: [{ title: "A new reading room", url: "https://news.example/room", domain: "news.example", publisher: "News", date: "2026-10-26", thumbnail: null, breaking: false }],
+      },
+    });
+    await ask("when does the library open");
+    const region = await screen.findByRole("region", { name: "Web search result" });
+    expect(region.textContent).toContain("Library hours");
+    expect(region.textContent).toContain("A new reading room");
+  });
+
+  it("draws no web card for a turn whose last tool was something else", async () => {
+    turn("giap-weather__get_current_weather", { card_type: "weather", data: { temp: 21 } });
+    await ask("weather?");
+    expect(screen.queryByRole("region", { name: /result$/ })).toBeNull();
+  });
+});

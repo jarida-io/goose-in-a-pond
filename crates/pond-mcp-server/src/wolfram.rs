@@ -984,10 +984,11 @@ mod tests {
         // And the ones this file's siblings own are still there.
         assert!(names.contains(&"get_wikipedia_article"), "got: {names:?}");
         assert!(names.contains(&"search_web"), "got: {names:?}");
+        assert!(names.contains(&"show_pictures"), "got: {names:?}");
         assert_eq!(
             names.len(),
-            3,
-            "giap-knowledge serves three tools: {names:?}"
+            4,
+            "giap-knowledge serves four tools: {names:?}"
         );
     }
 

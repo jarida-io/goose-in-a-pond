@@ -3918,3 +3918,21 @@ PAI-4 and PAI-7).** Design: [06 sections 8 and 9](./06-multi-agent-orchestration
 - **Still open.** Boot's first prewarm call is preceded by a goose side call of about 750 tokens
   under the compile scope, whose system prompt is not GIAP's (`system_appendix_dropped`); it is
   harmless to the compile and its caller is unidentified.
+
+**2026-10-28 — news, videos, place details and pictures from Brave (touches PAI-2 and PAI-3; not a
+PAI milestone).** Design and decisions: [small-model-tools.md §8.11](../small-model-tools.md).
+
+- **PAI-2: what leaves the pond.**
+  - Every `search_web` call now sends two requests to Brave's one host, LLM Context and a web
+    search, with the same question. Both carry `X-Loc-City` only with local places on.
+  - `show_pictures` sends what the user wants to see to Brave's image search. For a picture the
+    user attached, that is the model's words about it, never the picture.
+  - The desktop loads the cards' thumbnails from `https://imgs.search.brave.com/` alone, with no
+    referrer, never from the site a picture came from. So viewing a card tells Brave's image
+    proxy the viewer's address, and the web search panel's privacy line says so.
+  - Both tools' answers are transient (§8.10.6). The pictures stub reads "Pictures from the web are
+    not kept after the turn. Sources: ...".
+- **PAI-3.** `show_pictures` adds 480 bytes to the keyed block of the tool prefix (14,394 to 14,874
+  raw bytes with every key stored), only while the Brave key is stored. A voice turn is never
+  offered it (`SCREEN_ONLY_TOOLS`), so a voice turn's prefix differs from a text turn's from
+  `show_pictures` on, the same way a withheld keyed tool's does.

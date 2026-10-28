@@ -25,7 +25,7 @@ describe("the wording of web search", () => {
 
   it("states the privacy line and the dashboard exactly", () => {
     expect(PRIVACY_LINE).toBe(
-      "When the pond searches the web, your question is sent to Brave, and the top pages are read from their sites.",
+      "When the pond searches the web, your question is sent to Brave, and the top pages are read from their sites. Pictures in the results load from Brave's image server.",
     );
     expect(BRAVE_DASHBOARD_URL).toBe("https://api-dashboard.search.brave.com");
     expect(KEY_REFUSED).toBe("Brave did not accept this key.");

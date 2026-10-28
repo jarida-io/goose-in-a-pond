@@ -819,7 +819,7 @@ The same `ChatRequest`, answered as Server-Sent Events. Every frame is an unname
 | `thinking` | `content` | Reasoning text |
 | `text` | `content`, `token` (same value) | Answer text |
 | `tool_call` | `tool, id, input` | A tool call |
-| `tool_result` | `tool, id, content, ui?, transient?` | Its result; `ui` drives the MCP-UI renderer. `transient: true` (web search): show it in the conversation in view, never store it; history keeps only a stub |
+| `tool_result` | `tool, id, content, ui?, transient?` | Its result; `ui` drives the MCP-UI renderer. `transient: true` (web search and its pictures): show it in the conversation in view, never store it; history keeps only a stub. The `search` and `pictures` cards are specified in [small-model-tools.md §8.10.3 and §8.11](architecture/small-model-tools.md) |
 | `subagent_progress` | | A sub-agent's progress |
 | `review_status` | `content` | Answer review in progress |
 | `review_revision` | `content, score, rounds` | A revised answer replaces the streamed text |

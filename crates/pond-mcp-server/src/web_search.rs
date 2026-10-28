@@ -1,8 +1,9 @@
-//! `search_web` for `giap-knowledge`: Brave's LLM Context with the household's key, or, where
-//! that is unavailable, one Brave search with the top pages read through a client that reaches
-//! only public addresses; either way, the passages that answer the question. Every answer is
-//! marked transient: Brave's terms (3(b)(i)) allow Search Results only transient storage, so
-//! history keeps its stub (small-model-tools.md section 8.10).
+//! `search_web` for `giap-knowledge`: Brave's LLM Context with the household's key, and beside it
+//! one Brave web search, which brings the news, videos and places Brave judges the question wants
+//! and, where LLM Context is unavailable, the pages to read through a client that reaches only
+//! public addresses; either way, the passages that answer the question. Every answer is marked
+//! transient: Brave's terms (3(b)(i)) allow Search Results only transient storage, so history
+//! keeps its stub (small-model-tools.md sections 8.10 and 8.11).
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, OnceLock};
@@ -32,6 +33,10 @@ use crate::format::{format_api_error, format_dead_end, format_no_results};
 use crate::knowledge::KnowledgeMcpServer;
 
 mod bounded_html;
+mod pictures;
+mod sections;
+
+use sections::{news_card, read_sections, videos_card, News, PlaceDetails, Sections, Video};
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -80,6 +85,10 @@ const MAX_JSON_ITEMS: usize = 40;
 
 /// How many of the top results have their page read.
 const PAGES_READ: usize = 3;
+
+/// How long a grounded answer waits for the web search beside it once LLM Context has answered:
+/// news, videos and places are worth a moment, not a slow turn.
+const SIDE_SEARCH_GRACE: Duration = Duration::from_secs(1);
 
 /// One page, connect to last byte.
 const PAGE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -427,6 +436,26 @@ pub struct WebHit {
 #[derive(Debug, Deserialize)]
 struct BraveResponse {
     web: Option<BraveWeb>,
+    /// Read item by item ([`read_sections`]): one misshapen item must not lose the answer.
+    #[serde(default)]
+    news: Option<Value>,
+    #[serde(default)]
+    videos: Option<Value>,
+    #[serde(default)]
+    locations: Option<Value>,
+}
+
+/// One web search answer: its pages, and what Brave added beside them.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct WebAnswer {
+    hits: Vec<WebHit>,
+    sections: Sections,
+}
+
+/// An answer and what it said of the key, recorded once both requests are in.
+struct Asked<T> {
+    answer: T,
+    verdict: Option<WebSearchStatus>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -474,34 +503,129 @@ enum ContextAnswer {
 impl WebSearch<'_> {
     async fn run(&self, key: &str, question: &str) -> CallToolResult {
         let local_sent = self.town_header().is_some();
-        let fallback = match self.llm_context(key, question).await {
-            ContextAnswer::Grounded(context) => match context_result(question, &context) {
-                Some(result) => {
-                    tracing::info!(
-                        target: "giap::trace",
-                        kind = "web_search",
-                        source = "llm_context",
-                        results = context.sources.len(),
-                        places = context.places.len(),
-                        local_sent,
-                        "web search answered"
-                    );
-                    return result;
+        let (context, searched) = self.ask_both(key, question).await;
+        // The search's verdict first, so LLM Context's, the answer the model reads, stands.
+        if let Some(verdict) = searched.as_ref().and_then(|s| s.verdict) {
+            self.board.record(key, verdict);
+        }
+        if let Some(verdict) = context.verdict {
+            self.board.record(key, verdict);
+        }
+        let side = searched.map(|s| s.answer);
+        let fallback = match context.answer {
+            ContextAnswer::Grounded(context) => {
+                let sections = match &side {
+                    Some(Ok(answer)) => self.usable(&answer.sections),
+                    _ => Sections::default(),
+                };
+                let context = context.with_sections(&sections);
+                match context_result(question, &context) {
+                    Some(result) => {
+                        tracing::info!(
+                            target: "giap::trace",
+                            kind = "web_search",
+                            source = "llm_context",
+                            results = context.page_count(),
+                            places = context.places.len(),
+                            news = sections.news.len(),
+                            videos = sections.videos.len(),
+                            side_search = side.is_some(),
+                            local_sent,
+                            "web search answered"
+                        );
+                        return result;
+                    }
+                    None => "nothing_quotable",
                 }
-                None => "nothing_quotable",
-            },
+            }
             ContextAnswer::Miss(miss) => return text_result(&miss),
             ContextAnswer::Fallback(reason) => reason,
         };
-        self.search_and_read(key, question, fallback).await
+        let answer = match side {
+            Some(answer) => answer,
+            // Grounded but nothing quotable, and the search was cut at its grace: ask again.
+            None => {
+                let asked = self.search(key, question).await;
+                if let Some(verdict) = asked.verdict {
+                    self.board.record(key, verdict);
+                }
+                asked.answer
+            }
+        };
+        match answer {
+            Ok(answer) => self.read_and_answer(question, answer, fallback).await,
+            Err(miss) => text_result(&miss),
+        }
     }
 
-    /// The web search and page reads: what answers when LLM Context cannot.
-    async fn search_and_read(&self, key: &str, question: &str, fallback: &str) -> CallToolResult {
-        let hits = match self.search(key, question).await {
-            Ok(hits) => hits,
-            Err(miss) => return text_result(&miss),
+    /// Both requests at once. LLM Context answers; the web search brings what Brave adds beside
+    /// its pages, or answers in LLM Context's place. A grounded answer waits for the search only
+    /// [`SIDE_SEARCH_GRACE`]; a verdict on the key needs nothing more.
+    async fn ask_both(
+        &self,
+        key: &str,
+        question: &str,
+    ) -> (
+        Asked<ContextAnswer>,
+        Option<Asked<Result<WebAnswer, String>>>,
+    ) {
+        let search = self.search(key, question);
+        tokio::pin!(search);
+        let context = self.llm_context(key, question);
+        tokio::pin!(context);
+        let mut searched = None;
+        let mut context = loop {
+            tokio::select! {
+                asked = &mut context => break asked,
+                asked = &mut search, if searched.is_none() => searched = Some(asked),
+            }
         };
+        if let ContextAnswer::Grounded(grounded) = &context.answer {
+            if context_copy(question, grounded).is_none() {
+                context.answer = ContextAnswer::Fallback("nothing_quotable");
+            }
+        }
+        if searched.is_none() {
+            searched = match context.answer {
+                ContextAnswer::Grounded(_) => tokio::time::timeout(SIDE_SEARCH_GRACE, &mut search)
+                    .await
+                    .ok(),
+                ContextAnswer::Miss(_) => None,
+                ContextAnswer::Fallback(_) => Some(search.await),
+            };
+        }
+        (context, searched)
+    }
+
+    /// What of `sections` this search may show: places only with local places on, as LLM
+    /// Context's are.
+    fn usable(&self, sections: &Sections) -> Sections {
+        Sections {
+            news: sections.news.clone(),
+            videos: sections.videos.clone(),
+            places: if self.town_header().is_some() {
+                sections.places.clone()
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    /// The pages read and quoted: what answers when LLM Context cannot.
+    async fn read_and_answer(
+        &self,
+        question: &str,
+        answer: WebAnswer,
+        fallback: &str,
+    ) -> CallToolResult {
+        let sections = self.usable(&answer.sections);
+        let mut hits = answer.hits;
+        let web_results = hits.len();
+        for news in &sections.news {
+            if !hits.iter().any(|h| h.url == news.url) {
+                hits.push(news_hit(news));
+            }
+        }
         if hits.is_empty() {
             return text_result(&nothing_found(question));
         }
@@ -510,7 +634,7 @@ impl WebSearch<'_> {
             None => vec![None; hits.len()],
         };
         let pages = extract_off_thread(bodies).await;
-        let result = result_from(question, &hits, &pages);
+        let result = result_with(question, &hits, &pages, web_results, &sections);
         tracing::info!(
             target: "giap::trace",
             kind = "web_search",
@@ -518,6 +642,8 @@ impl WebSearch<'_> {
             fallback,
             results = hits.len(),
             pages_read = pages.iter().filter(|p| p.is_some()).count(),
+            news = sections.news.len(),
+            videos = sections.videos.len(),
             "web search answered"
         );
         result
@@ -529,10 +655,14 @@ impl WebSearch<'_> {
             .and_then(|town| reqwest::header::HeaderValue::from_bytes(town.as_bytes()).ok())
     }
 
-    /// One LLM Context request. Records what the answer said of the key, as a search does.
-    async fn llm_context(&self, key: &str, question: &str) -> ContextAnswer {
+    /// One LLM Context request, and what its answer said of the key.
+    async fn llm_context(&self, key: &str, question: &str) -> Asked<ContextAnswer> {
+        let unjudged = |answer| Asked {
+            answer,
+            verdict: None,
+        };
         let Some(url) = llm_context_url(self.brave_base, question) else {
-            return ContextAnswer::Fallback("address");
+            return unjudged(ContextAnswer::Fallback("address"));
         };
         let town = self.town_header();
         let response = crate::http::traced_get_with(self.brave, url.as_str(), |b| {
@@ -553,20 +683,24 @@ impl WebSearch<'_> {
                 if e.downcast_ref::<pond_core::shared::services::egress::EgressDenied>()
                     .is_some()
                 {
-                    return ContextAnswer::Miss(search_failed(&describe_failure(&e)));
+                    return unjudged(ContextAnswer::Miss(search_failed(&describe_failure(&e))));
                 }
-                return ContextAnswer::Fallback(failure_kind(&e));
+                return unjudged(ContextAnswer::Fallback(failure_kind(&e)));
             }
         };
         let status = response.status().as_u16();
         match LlmContextOutcome::from_http(status) {
             LlmContextOutcome::Rejected => {
-                self.board.record(key, WebSearchStatus::Rejected);
-                return ContextAnswer::Miss(key_rejected());
+                return Asked {
+                    answer: ContextAnswer::Miss(key_rejected()),
+                    verdict: Some(WebSearchStatus::Rejected),
+                };
             }
             LlmContextOutcome::Quota => {
-                self.board.record(key, WebSearchStatus::Quota);
-                return ContextAnswer::Miss(allowance_used_up());
+                return Asked {
+                    answer: ContextAnswer::Miss(allowance_used_up()),
+                    verdict: Some(WebSearchStatus::Quota),
+                };
             }
             LlmContextOutcome::Fallback => {
                 tracing::info!(
@@ -574,68 +708,106 @@ impl WebSearch<'_> {
                     kind = "web_search_llm_context_refused",
                     status,
                 );
-                return ContextAnswer::Fallback("http_status");
+                return unjudged(ContextAnswer::Fallback("http_status"));
             }
             LlmContextOutcome::Answered => {}
         }
-        self.board.record(key, WebSearchStatus::Ok);
+        let answered = |answer| Asked {
+            answer,
+            verdict: Some(WebSearchStatus::Ok),
+        };
         let Ok(body) = response.json::<LlmContextResponse>().await else {
-            return ContextAnswer::Fallback("unreadable");
+            return answered(ContextAnswer::Fallback("unreadable"));
         };
         let context = LlmContext::from_response(body);
         if context.is_empty() {
-            return ContextAnswer::Fallback("empty");
+            return answered(ContextAnswer::Fallback("empty"));
         }
-        ContextAnswer::Grounded(context)
+        answered(ContextAnswer::Grounded(context))
     }
 
-    /// Brave's results, or the model's text for a miss. Records what the answer said of the key.
-    async fn search(&self, key: &str, question: &str) -> Result<Vec<WebHit>, String> {
-        let url = brave_url(self.brave_base, question)
-            .ok_or_else(|| search_failed("the search address could not be built"))?;
+    /// Brave's web search, or the model's text for a miss, and what its answer said of the key.
+    /// It carries the town when local places are on, as LLM Context does.
+    async fn search(&self, key: &str, question: &str) -> Asked<Result<WebAnswer, String>> {
+        let unjudged = |answer| Asked {
+            answer,
+            verdict: None,
+        };
+        let Some(url) = brave_url(self.brave_base, question) else {
+            return unjudged(Err(search_failed("the search address could not be built")));
+        };
+        let town = self.town_header();
         let response = crate::http::traced_get_with(self.brave, url.as_str(), |b| {
-            b.header(BRAVE_TOKEN_HEADER, key)
+            let b = b
+                .header(BRAVE_TOKEN_HEADER, key)
                 .header(reqwest::header::ACCEPT, "application/json")
-                .timeout(BRAVE_TIMEOUT)
+                .timeout(BRAVE_TIMEOUT);
+            match town {
+                Some(town) => b.header(BRAVE_LOC_CITY_HEADER, town),
+                None => b,
+            }
         })
-        .await
-        .map_err(|e| search_failed(&describe_failure(&e)))?;
+        .await;
+        let response = match response {
+            Ok(r) => r,
+            Err(e) => return unjudged(Err(search_failed(&describe_failure(&e)))),
+        };
 
         let status = response.status().as_u16();
         let verdict = WebSearchStatus::from_brave_http(status);
-        if let Some(verdict) = verdict {
-            self.board.record(key, verdict);
-        }
-        match verdict {
-            Some(WebSearchStatus::Rejected) => return Err(key_rejected()),
-            Some(WebSearchStatus::Quota) => return Err(allowance_used_up()),
-            Some(WebSearchStatus::Ok) => {}
-            _ => return Err(search_failed(&format!("it answered HTTP {status}"))),
-        }
-        let body: BraveResponse = response
-            .json()
-            .await
-            .map_err(|_| search_failed("its answer could not be read"))?;
-        Ok(body
-            .web
-            .map(|w| w.results)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| !r.url.trim().is_empty())
-            .take(RESULT_COUNT)
-            .map(|r| WebHit {
-                title: plain_text(&r.title),
-                url: r.url.trim().to_string(),
-                description: plain_text(&r.description),
-                age: r.age.map(|a| plain_text(&a)).filter(|a| !a.is_empty()),
-                extra_snippets: r
-                    .extra_snippets
-                    .iter()
-                    .map(|s| plain_text(s))
-                    .filter(|s| !s.is_empty())
-                    .collect(),
-            })
-            .collect())
+        let answer = match verdict {
+            Some(WebSearchStatus::Rejected) => Err(key_rejected()),
+            Some(WebSearchStatus::Quota) => Err(allowance_used_up()),
+            Some(WebSearchStatus::Ok) => match response.json::<BraveResponse>().await {
+                Ok(body) => Ok(web_answer(body)),
+                Err(_) => Err(search_failed("its answer could not be read")),
+            },
+            _ => Err(search_failed(&format!("it answered HTTP {status}"))),
+        };
+        Asked { answer, verdict }
+    }
+}
+
+/// A web search answer's pages and sections, cleaned.
+fn web_answer(body: BraveResponse) -> WebAnswer {
+    let hits = body
+        .web
+        .map(|w| w.results)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| !r.url.trim().is_empty())
+        .take(RESULT_COUNT)
+        .map(|r| WebHit {
+            title: plain_text(&r.title),
+            url: r.url.trim().to_string(),
+            description: plain_text(&r.description),
+            age: r.age.map(|a| plain_text(&a)).filter(|a| !a.is_empty()),
+            extra_snippets: r
+                .extra_snippets
+                .iter()
+                .map(|s| plain_text(s))
+                .filter(|s| !s.is_empty())
+                .collect(),
+        })
+        .collect();
+    WebAnswer {
+        hits,
+        sections: read_sections(
+            body.news.as_ref(),
+            body.videos.as_ref(),
+            body.locations.as_ref(),
+        ),
+    }
+}
+
+/// A news item as a source the copy can quote: its description, its publisher's date.
+fn news_hit(news: &News) -> WebHit {
+    WebHit {
+        title: news.title.clone(),
+        url: news.url.clone(),
+        description: news.description.clone(),
+        age: news.date.clone(),
+        extra_snippets: Vec::new(),
     }
 }
 
@@ -852,31 +1024,94 @@ struct SourceMeta {
     site_name: Option<String>,
 }
 
-/// One page LLM Context quoted, cleaned for the copy and the card.
+/// One page LLM Context quoted, or a news item the web search beside it found, cleaned for the
+/// copy and the card.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct ContextSource {
     hit: WebHit,
     snippets: Vec<String>,
+    /// From the web search's news: the card shows it as news, not among the pages.
+    news: bool,
 }
 
-/// One place local recall returned.
+/// One place local recall or the web search returned.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct ContextPlace {
     name: String,
     url: String,
     snippets: Vec<String>,
+    /// What the web search knows of it, for the card.
+    details: Option<PlaceDetails>,
 }
 
-/// An LLM Context answer, as the copy and the card read it.
+/// An LLM Context answer, with what the web search beside it added, as the copy and the card
+/// read it.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct LlmContext {
     sources: Vec<ContextSource>,
     places: Vec<ContextPlace>,
+    /// The web search's news as the card shows it; the copy quotes them as sources.
+    news: Vec<News>,
+    /// For the card alone: the model never reads a video.
+    videos: Vec<Video>,
 }
 
 impl LlmContext {
     fn is_empty(&self) -> bool {
         self.sources.is_empty() && self.places.is_empty()
+    }
+
+    /// Pages LLM Context read, news left out: what the copy's budget is keyed by.
+    fn page_count(&self) -> usize {
+        self.sources.iter().filter(|s| !s.news).count()
+    }
+
+    /// The answer with the web search's sections added: news as sources the copy may quote, a
+    /// known place's details merged into the place local recall named, a new place after them.
+    fn with_sections(mut self, sections: &Sections) -> Self {
+        for news in &sections.news {
+            if self.sources.iter().any(|s| s.hit.url == news.url) {
+                continue;
+            }
+            self.sources.push(ContextSource {
+                hit: news_hit(news),
+                snippets: [news.description.clone()]
+                    .into_iter()
+                    .filter(|d| !d.is_empty())
+                    .collect(),
+                news: true,
+            });
+        }
+        for details in &sections.places {
+            let snippets = details.snippets();
+            match self
+                .places
+                .iter()
+                .position(|p| p.name.eq_ignore_ascii_case(&details.name))
+            {
+                Some(at) => {
+                    let place = &mut self.places[at];
+                    let mut merged = snippets;
+                    merged.retain(|s| !place.snippets.contains(s));
+                    merged.append(&mut place.snippets);
+                    place.snippets = merged;
+                    if place.url.is_empty() {
+                        place.url = details.url.clone();
+                    }
+                    place.details = Some(details.clone());
+                }
+                None if self.places.len() < MAX_PLACES => self.places.push(ContextPlace {
+                    name: details.name.clone(),
+                    url: details.url.clone(),
+                    snippets,
+                    details: Some(details.clone()),
+                }),
+                None => {}
+            }
+        }
+        self.news = sections.news.clone();
+        self.videos = sections.videos.clone();
+        self
     }
 
     fn from_response(body: LlmContextResponse) -> Self {
@@ -908,7 +1143,12 @@ impl LlmContext {
                 places.push(place);
             }
         }
-        Self { sources, places }
+        Self {
+            sources,
+            places,
+            news: Vec::new(),
+            videos: Vec::new(),
+        }
     }
 }
 
@@ -947,6 +1187,7 @@ fn context_source(
             extra_snippets: Vec::new(),
         },
         snippets,
+        news: false,
     })
 }
 
@@ -970,6 +1211,7 @@ fn context_place(item: GroundingItem) -> Option<ContextPlace> {
         name: passages::clip(&name, MAX_TITLE_BYTES),
         url: item.url.unwrap_or_default().trim().to_string(),
         snippets: snippet_texts(item.snippets.as_deref().unwrap_or_default()),
+        details: None,
     })
 }
 
@@ -1171,7 +1413,12 @@ struct ContextCopy {
 /// `None` when nothing in it is quotable.
 fn context_result(question: &str, context: &LlmContext) -> Option<CallToolResult> {
     let copy = context_copy(question, context)?;
-    let hits: Vec<WebHit> = context.sources.iter().map(|s| s.hit.clone()).collect();
+    let hits: Vec<WebHit> = context
+        .sources
+        .iter()
+        .filter(|s| !s.news)
+        .map(|s| s.hit.clone())
+        .collect();
     let places: Vec<CardPlace> = context
         .places
         .iter()
@@ -1180,12 +1427,21 @@ fn context_result(question: &str, context: &LlmContext) -> Option<CallToolResult
             name: place.name.clone(),
             url: place.url.clone(),
             snippet: snippet.clone(),
+            details: place.details.clone(),
         })
         .collect();
     Some(transient(
         vec![
             ContentBlock::text(copy.text),
-            card_block_with(question, &hits, &places),
+            card_block_with(
+                question,
+                &hits,
+                &CardExtras {
+                    places: &places,
+                    news: &context.news,
+                    videos: &context.videos,
+                },
+            ),
         ],
         &copy.domains,
     ))
@@ -1237,8 +1493,7 @@ fn context_copy(question: &str, context: &LlmContext) -> Option<ContextCopy> {
         })
         .collect();
 
-    let read = context.sources.len();
-    let (per_source_cap, budget) = selection_limits(read);
+    let (per_source_cap, budget) = selection_limits(context.page_count());
     let header = format!("Web results for: {}\n{WEB_TEXT_NOTICE}", echo(question));
     let mut used = header.len();
     let mut out = header;
@@ -1600,15 +1855,53 @@ pub fn result_from(
     hits: &[WebHit],
     pages: &[Option<Vec<String>>],
 ) -> CallToolResult {
+    result_with(question, hits, pages, hits.len(), &Sections::default())
+}
+
+/// [`result_from`] where `hits` after the first `web_results` are the search's news, and
+/// `sections` adds the card's news, videos and places.
+fn result_with(
+    question: &str,
+    hits: &[WebHit],
+    pages: &[Option<Vec<String>>],
+    web_results: usize,
+    sections: &Sections,
+) -> CallToolResult {
     let (copy, quoted) = match model_copy_quoting(question, hits, pages) {
         Some((copy, quoted)) => (copy, quoted),
         None => (nothing_found(question), (0..hits.len()).collect()),
     };
     let domains: Vec<String> = quoted.iter().map(|&i| domain_of(&hits[i].url)).collect();
-    transient(
-        vec![ContentBlock::text(copy), card_block(question, hits)],
-        &domains,
-    )
+    let places: Vec<CardPlace> = sections
+        .places
+        .iter()
+        .map(|details| CardPlace {
+            name: details.name.clone(),
+            url: details.url.clone(),
+            snippet: best_snippet(question, &details.snippets()),
+            details: Some(details.clone()),
+        })
+        .collect();
+    let card = card_block_with(
+        question,
+        &hits[..web_results.min(hits.len())],
+        &CardExtras {
+            places: &places,
+            news: &sections.news,
+            videos: &sections.videos,
+        },
+    );
+    transient(vec![ContentBlock::text(copy), card], &domains)
+}
+
+/// The snippet that best answers `question`, or the first when none shares a word with it.
+fn best_snippet(question: &str, snippets: &[String]) -> String {
+    passages::rank(question, snippets)
+        .first()
+        .filter(|r| r.score > 0.0)
+        .map(|r| snippets[r.index].clone())
+        .or_else(|| snippets.first().cloned())
+        .unwrap_or_default()
 }
 
 /// `content` as a result history keeps only as a stub naming `domains`.
@@ -1803,17 +2096,28 @@ struct CardPlace {
     name: String,
     url: String,
     snippet: String,
+    details: Option<PlaceDetails>,
+}
+
+/// What a card shows beside the pages.
+#[derive(Debug, Clone, Copy, Default)]
+struct CardExtras<'a> {
+    places: &'a [CardPlace],
+    news: &'a [News],
+    videos: &'a [Video],
 }
 
 /// The `[[[mcp-ui:search:{...}]]]` card, annotated for the user only: goose drops such blocks
 /// before the provider, so the model never reads it.
+#[cfg(test)]
 fn card_block(question: &str, hits: &[WebHit]) -> ContentBlock {
-    card_block_with(question, hits, &[])
+    card_block_with(question, hits, &CardExtras::default())
 }
 
-/// [`card_block`] with the places local recall returned; `places` is left out when there are none,
-/// so a card from before places reads the same.
-fn card_block_with(question: &str, hits: &[WebHit], places: &[CardPlace]) -> ContentBlock {
+/// The card with what Brave added beside the pages. Each of `places`, `news` and `videos` is left
+/// out when empty, so a card with none of them reads as it did before them.
+fn card_block_with(question: &str, hits: &[WebHit], extras: &CardExtras) -> ContentBlock {
+    let places = extras.places;
     let mut card = serde_json::json!({
         "query": sanitize(question),
         "results": hits.iter().map(|h| serde_json::json!({
@@ -1827,13 +2131,32 @@ fn card_block_with(question: &str, hits: &[WebHit], places: &[CardPlace]) -> Con
         card["places"] = places
             .iter()
             .map(|p| {
-                serde_json::json!({
+                let mut place = serde_json::json!({
                     "name": sanitize(&p.name),
                     "url": sanitize(&p.url),
                     "snippet": sanitize(&passages::clip(&p.snippet, MAX_SNIPPET_BYTES)),
-                })
+                });
+                if let Some(details) = &p.details {
+                    for (field, value) in [
+                        ("address", &details.address),
+                        ("hours", &details.hours),
+                        ("phone", &details.phone),
+                        ("rating", &details.rating),
+                    ] {
+                        if let Some(value) = value {
+                            place[field] = Value::String(sanitize(value));
+                        }
+                    }
+                }
+                place
             })
             .collect();
+    }
+    if !extras.news.is_empty() {
+        card["news"] = news_card(extras.news);
+    }
+    if !extras.videos.is_empty() {
+        card["videos"] = videos_card(extras.videos);
     }
     let marker = format!("[[[mcp-ui:search:{card}]]]");
     ContentBlock::Text(
@@ -2550,42 +2873,48 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let (tx, rx) = std::sync::mpsc::channel();
+        // Each connection on its own thread: search_web's two requests arrive together, and a
+        // slow answer to one must not hold the other.
         std::thread::spawn(move || {
             for _ in 0..requests {
                 let Ok((mut stream, _)) = listener.accept() else {
                     return;
                 };
-                let mut buf = vec![0u8; 16 * 1024];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                let head = String::from_utf8_lossy(&buf[..n]).to_string();
-                let path = head
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap_or("/")
-                    .split('?')
-                    .next()
-                    .unwrap_or("/")
-                    .to_string();
-                let _ = tx.send(head);
-                if let Some((slow_path, delay)) = slow {
-                    if slow_path == path {
-                        std::thread::sleep(delay);
+                let routes = routes.clone();
+                let tx = tx.clone();
+                std::thread::spawn(move || {
+                    let mut buf = vec![0u8; 16 * 1024];
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = head
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("/")
+                        .split('?')
+                        .next()
+                        .unwrap_or("/")
+                        .to_string();
+                    let _ = tx.send(head);
+                    if let Some((slow_path, delay)) = slow {
+                        if slow_path == path {
+                            std::thread::sleep(delay);
+                        }
                     }
-                }
-                let (status, content_type, body) = routes
-                    .iter()
-                    .find(|(p, ..)| *p == path)
-                    .map(|(_, s, ct, b)| (*s, *ct, b.clone()))
-                    .unwrap_or((404, "text/plain", "not here".to_string()));
-                let _ = stream.write_all(
-                    format!(
-                        "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\n\
-                         Content-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len()
-                    )
-                    .as_bytes(),
-                );
-                let _ = stream.write_all(body.as_bytes());
+                    let (status, content_type, body) = routes
+                        .iter()
+                        .find(|(p, ..)| *p == path)
+                        .map(|(_, s, ct, b)| (*s, *ct, b.clone()))
+                        .unwrap_or((404, "text/plain", "not here".to_string()));
+                    let _ = stream.write_all(
+                        format!(
+                            "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\n\
+                             Content-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    );
+                    let _ = stream.write_all(body.as_bytes());
+                });
             }
         });
         (port, rx)
@@ -2641,13 +2970,16 @@ mod tests {
         board: &'static WebSearchStatusBoard,
     ) -> CallToolResult {
         let base = format!("http://127.0.0.1:{brave_port}");
-        against(&base, pages, board, None)
-            .search_and_read(
-                "test-key-123",
-                "What time does Junction Mall close?",
-                "test",
-            )
-            .await
+        let search = against(&base, pages, board, None);
+        let question = "What time does Junction Mall close?";
+        let asked = search.search("test-key-123", question).await;
+        if let Some(verdict) = asked.verdict {
+            board.record("test-key-123", verdict);
+        }
+        match asked.answer {
+            Ok(answer) => search.read_and_answer(question, answer, "test").await,
+            Err(miss) => text_result(&miss),
+        }
     }
 
     /// A server answering every request with a redirect to `location`.
@@ -2982,14 +3314,27 @@ mod tests {
             .and_then(|m| pond_core::mcp::domain::transient_result::keep_from_meta(&m.0))
     }
 
+    /// The request `requests` saw for `path`: search_web's two arrive in either order.
+    fn request_to(requests: &std::sync::mpsc::Receiver<String>, path: &str) -> String {
+        let wanted = format!("GET {path}?");
+        loop {
+            let head = requests
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap_or_else(|_| panic!("no request to {path}"));
+            if head.starts_with(&wanted) {
+                return head;
+            }
+        }
+    }
+
     #[tokio::test]
     async fn the_llm_context_request_is_the_one_section_8_10_names() {
         let (port, requests) = stub(
             vec![(CONTEXT_PATH, 200, "application/json", context_body())],
-            1,
+            2,
         );
         let _ = context_against(port, fresh_board(), None).await;
-        let head = requests.recv().unwrap();
+        let head = request_to(&requests, CONTEXT_PATH);
         let line = head.lines().next().unwrap();
         assert!(line.starts_with("GET /res/v1/llm/context?"), "{line}");
         for param in [
@@ -3028,10 +3373,10 @@ mod tests {
     async fn with_local_places_on_the_town_alone_is_sent() {
         let (port, requests) = stub(
             vec![(CONTEXT_PATH, 200, "application/json", context_body())],
-            1,
+            2,
         );
         let _ = context_against(port, fresh_board(), Some("Nairobi")).await;
-        let head = requests.recv().unwrap();
+        let head = request_to(&requests, CONTEXT_PATH);
         let lower = head.to_ascii_lowercase();
         assert!(lower.contains("x-loc-city: nairobi"), "{head}");
         assert_eq!(lower.matches("x-loc-").count(), 1, "only the town: {head}");
@@ -3231,6 +3576,7 @@ mod tests {
                         "",
                     ),
                     snippets: (0..8).map(|j| long(i * 10 + j)).collect(),
+                    news: false,
                 })
                 .collect(),
             places: (0..5)
@@ -3238,8 +3584,10 @@ mod tests {
                     name: format!("Place {i} with a fairly long name for a place"),
                     url: format!("https://p{i}.example/"),
                     snippets: vec![long(100 + i)],
+                    details: None,
                 })
                 .collect(),
+            ..Default::default()
         };
         let copy = context_copy("When do the park gates close?", &context).unwrap();
         assert!(
@@ -3357,11 +3705,34 @@ mod tests {
         }
     }
 
+    /// The paths of the requests `requests` saw within a moment, in arrival order.
+    fn paths_seen(requests: &std::sync::mpsc::Receiver<String>) -> Vec<String> {
+        let mut paths = Vec::new();
+        while let Ok(head) = requests.recv_timeout(Duration::from_millis(300)) {
+            let path = head
+                .split_whitespace()
+                .nth(1)
+                .and_then(|p| p.split('?').next())
+                .unwrap_or("")
+                .to_string();
+            paths.push(path);
+        }
+        paths
+    }
+
+    fn sorted(mut paths: Vec<String>) -> Vec<String> {
+        paths.sort();
+        paths
+    }
+
     #[tokio::test]
-    async fn grounding_answers_without_a_search_and_records_the_key_ok() {
+    async fn a_grounded_answer_asks_the_web_search_once_beside_it_and_records_the_key_ok() {
         let (port, requests) = stub(
-            vec![(CONTEXT_PATH, 200, "application/json", context_body())],
-            2,
+            vec![
+                (CONTEXT_PATH, 200, "application/json", context_body()),
+                (SEARCH_PATH, 200, "application/json", brave_body(&[])),
+            ],
+            3,
         );
         let board = fresh_board();
         board.record("test-key-123", WebSearchStatus::Unverified);
@@ -3373,10 +3744,10 @@ mod tests {
         );
         assert!(stub_of(&result).is_some());
         assert_eq!(board.status_for(Some("test-key-123")), WebSearchStatus::Ok);
-        requests.recv().unwrap();
-        assert!(
-            requests.recv_timeout(Duration::from_millis(200)).is_err(),
-            "a grounded answer made a second request"
+        assert_eq!(
+            sorted(paths_seen(&requests)),
+            vec![CONTEXT_PATH.to_string(), SEARCH_PATH.to_string()],
+            "one of each, and no page read"
         );
     }
 
@@ -3424,10 +3795,11 @@ mod tests {
                 stub_of(&result).is_some(),
                 "{label}: the fallback is transient too"
             );
-            let first = requests.recv().unwrap();
-            let second = requests.recv().unwrap();
-            assert!(first.starts_with("GET /res/v1/llm/context?"), "{label}");
-            assert!(second.starts_with("GET /res/v1/web/search?"), "{label}");
+            assert_eq!(
+                sorted(paths_seen(&requests)),
+                vec![CONTEXT_PATH.to_string(), SEARCH_PATH.to_string()],
+                "{label}: the fallback reads the search already asked"
+            );
             assert_eq!(
                 board.status_for(Some("test-key-123")),
                 WebSearchStatus::Ok,
@@ -3459,11 +3831,16 @@ mod tests {
                 stub_of(&result).is_none(),
                 "{status}: a miss quotes nothing of Brave's"
             );
-            assert_eq!(board.status_for(Some("test-key-123")), verdict, "{status}");
-            requests.recv().unwrap();
+            assert_eq!(
+                board.status_for(Some("test-key-123")),
+                verdict,
+                "{status}: LLM Context's verdict stands over the search's"
+            );
+            let paths = paths_seen(&requests);
             assert!(
-                requests.recv_timeout(Duration::from_millis(200)).is_err(),
-                "{status}: fell back after a verdict on the key"
+                paths.iter().filter(|p| p.as_str() == SEARCH_PATH).count() <= 1
+                    && paths.iter().filter(|p| p.as_str() == CONTEXT_PATH).count() == 1,
+                "{status}: asked again after a verdict on the key: {paths:?}"
             );
         }
     }
@@ -3496,11 +3873,191 @@ mod tests {
         let result = context_against(port, fresh_board(), None).await;
         let copy = text_of(&result, 0);
         assert!(copy.contains("said the web search"), "{copy}");
-        requests.recv().unwrap();
-        assert!(requests
-            .recv()
+        assert_eq!(
+            sorted(paths_seen(&requests)),
+            vec![CONTEXT_PATH.to_string(), SEARCH_PATH.to_string()]
+        );
+    }
+
+    // ── The web search beside LLM Context (section 8.11) ──────────────────
+
+    const THUMB: &str = "https://imgs.search.brave.com/t/rs:fit:200:200:1/g:ce/aHR0cHM6";
+    const VIDEO_TITLE: &str = "A walk through the park at dusk";
+
+    /// A web search answer with every section Brave can add beside its pages.
+    fn sectioned_body() -> String {
+        serde_json::json!({
+            "type": "search",
+            "web": {"results": [{
+                "title": "Nairobi National Park", "url": PARK,
+                "description": "The park closes at 6 pm, said the web search.",
+            }]},
+            "news": {"results": [{
+                "title": "Park gates to close early for the census",
+                "url": "https://www.the-star.co.ke/news/park-gates",
+                "description": "The park gates close at 4 pm on census night, the wildlife service said.",
+                "page_age": "2026-10-27T09:00:00",
+                "profile": {"name": "The Star"},
+                "thumbnail": {"src": THUMB},
+            }]},
+            "videos": {"results": [{
+                "title": VIDEO_TITLE,
+                "url": "https://www.youtube.com/watch?v=park",
+                "video": {"duration": "4:12", "creator": "KWS"},
+                "thumbnail": {"src": THUMB},
+            }]},
+            "locations": {"results": [{
+                "title": "Java House Junction",
+                "url": "https://www.javahouseafrica.com/junction",
+                "opening_hours": {"current_day": [{"full_name": "Monday", "opens": "07:00", "closes": "22:00"}]},
+                "contact": {"telephone": "+254 709 000 000"},
+            }]},
+        })
+        .to_string()
+    }
+
+    fn card_of(result: &CallToolResult) -> Value {
+        let card = text_of(result, 1);
+        serde_json::from_str(
+            card.trim_start_matches("[[[mcp-ui:search:")
+                .trim_end_matches("]]]"),
+        )
+        .expect("the card's JSON")
+    }
+
+    #[tokio::test]
+    async fn the_web_search_adds_news_to_the_copy_and_news_and_videos_to_the_card() {
+        let (port, _requests) = stub(
+            vec![
+                (CONTEXT_PATH, 200, "application/json", context_body()),
+                (SEARCH_PATH, 200, "application/json", sectioned_body()),
+            ],
+            2,
+        );
+        let result = context_against(port, fresh_board(), None).await;
+        let copy = agent_visible_text(&result);
+        assert!(copy.contains("close at 4 pm on census night"), "{copy}");
+        assert!(
+            copy.contains("Park gates to close early for the census (the-star.co.ke, 2026-10-27)"),
+            "{copy}"
+        );
+        assert!(
+            !copy.contains(VIDEO_TITLE),
+            "a video is the user's alone: {copy}"
+        );
+        assert!(!copy.contains("://"), "{copy}");
+
+        let card = card_of(&result);
+        assert_eq!(card["news"][0]["publisher"], "The Star");
+        assert_eq!(card["news"][0]["date"], "2026-10-27");
+        assert_eq!(card["news"][0]["thumbnail"], THUMB);
+        assert_eq!(card["videos"][0]["title"], VIDEO_TITLE);
+        assert_eq!(card["videos"][0]["duration"], "4:12");
+        assert!(
+            card["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| !r["url"].as_str().unwrap().contains("the-star")),
+            "news is not listed among the pages: {card}"
+        );
+        assert!(
+            card["places"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .all(|p| p.get("phone").is_none() && p.get("hours").is_none()),
+            "the search's places are not read with local places off: {card}"
+        );
+        assert!(!copy.contains("+254"), "{copy}");
+        let stub = stub_of(&result).unwrap();
+        assert!(stub.contains("the-star.co.ke"), "{stub}");
+    }
+
+    #[tokio::test]
+    async fn with_local_places_on_both_requests_carry_the_town_and_places_gain_their_details() {
+        let (port, requests) = stub(
+            vec![
+                (CONTEXT_PATH, 200, "application/json", context_body()),
+                (SEARCH_PATH, 200, "application/json", sectioned_body()),
+            ],
+            2,
+        );
+        let base = format!("http://127.0.0.1:{port}");
+        let result = against(&base, None, fresh_board(), Some("Nairobi"))
+            .run("test-key-123", "Which phone do I call to book a table at Java?")
+            .await;
+        for _ in 0..2 {
+            let head = requests.recv().unwrap().to_ascii_lowercase();
+            assert!(head.contains("x-loc-city: nairobi"), "{head}");
+            assert_eq!(head.matches("x-loc-").count(), 1, "only the town: {head}");
+        }
+        let copy = agent_visible_text(&result);
+        assert!(
+            copy.contains("Java House Junction: phone: +254 709 000 000"),
+            "{copy}"
+        );
+        let card = card_of(&result);
+        let java = card["places"]
+            .as_array()
             .unwrap()
-            .starts_with("GET /res/v1/web/search?"));
+            .iter()
+            .find(|p| p["name"] == "Java House Junction")
+            .expect("the place local recall named");
+        assert_eq!(java["hours"], "Monday 07:00 to 22:00");
+        assert_eq!(java["phone"], "+254 709 000 000");
+        assert_eq!(
+            card["places"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|p| p["name"].as_str().unwrap().eq_ignore_ascii_case("java house junction"))
+                .count(),
+            1,
+            "merged into the place LLM Context named, not repeated: {card}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_slow_web_search_does_not_hold_a_grounded_answer() {
+        let (port, _requests) = slow_stub(
+            vec![
+                (CONTEXT_PATH, 200, "application/json", context_body()),
+                (SEARCH_PATH, 200, "application/json", sectioned_body()),
+            ],
+            2,
+            Some((SEARCH_PATH, Duration::from_secs(4))),
+        );
+        let started = std::time::Instant::now();
+        let result = context_against(port, fresh_board(), None).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            started.elapsed()
+        );
+        let copy = text_of(&result, 0);
+        assert!(copy.contains("open every day from 6:00 AM"), "{copy}");
+        assert!(card_of(&result).get("news").is_none());
+    }
+
+    #[tokio::test]
+    async fn the_fallback_quotes_news_and_shows_the_sections_in_its_card() {
+        let (port, _requests) = stub(
+            vec![
+                (CONTEXT_PATH, 404, "text/plain", "no".to_string()),
+                (SEARCH_PATH, 200, "application/json", sectioned_body()),
+            ],
+            2,
+        );
+        let result = context_against(port, fresh_board(), None).await;
+        let copy = agent_visible_text(&result);
+        assert!(copy.contains("said the web search"), "{copy}");
+        assert!(copy.contains("census night"), "{copy}");
+        assert!(!copy.contains(VIDEO_TITLE), "{copy}");
+        let card = card_of(&result);
+        assert_eq!(card["results"].as_array().unwrap().len(), 1, "{card}");
+        assert_eq!(card["news"].as_array().unwrap().len(), 1, "{card}");
+        assert_eq!(card["videos"].as_array().unwrap().len(), 1, "{card}");
     }
 
     // ── The MCP surface ───────────────────────────────────────────────────
@@ -3562,7 +4119,7 @@ mod tests {
     }
 
     /// Run by hand with a real key: `BRAVE_SEARCH_API_KEY=... cargo test -p pond-mcp-server
-    /// live_brave -- --ignored --nocapture`. Spends up to four requests of the month's allowance.
+    /// live_brave -- --ignored --nocapture`. Spends four requests of the month's allowance.
     /// Functional only: Brave's terms (3(b)(xiii)) forbid scoring a model on its results, and
     /// nothing here is written to disk.
     #[tokio::test]
@@ -3581,25 +4138,25 @@ mod tests {
                 town,
                 context_timeout: BRAVE_LLM_CONTEXT_TIMEOUT,
             };
-            match search.llm_context(&key, question).await {
-                ContextAnswer::Grounded(context) => {
-                    eprintln!(
-                        "town {town:?}: LLM Context grounded {} sources, {} places",
-                        context.sources.len(),
-                        context.places.len()
-                    );
-                    let copy = context_copy(question, &context).expect("a quotable copy");
-                    assert!(copy.text.len() <= RESULT_BUDGET.max(WIDE_RESULT_BUDGET));
-                    assert!(!copy.text.contains("://"), "{}", copy.text);
-                }
-                ContextAnswer::Miss(miss) => panic!("town {town:?}: {miss}"),
-                ContextAnswer::Fallback(reason) => {
-                    eprintln!("town {town:?}: LLM Context fell back ({reason}); a plan without it?")
-                }
-            }
             let result = search.run(&key, question).await;
             let copy = text_of(&result, 0);
-            eprintln!("{copy}");
+            let card = text_of(&result, 1);
+            let card: Value = serde_json::from_str(
+                card.trim_start_matches("[[[mcp-ui:search:")
+                    .trim_end_matches("]]]"),
+            )
+            .expect("the card's JSON");
+            let count = |field: &str| card[field].as_array().map_or(0, Vec::len);
+            eprintln!(
+                "town {town:?}: copy {} bytes; card: {} pages, {} places, {} news, {} videos",
+                copy.len(),
+                count("results"),
+                count("places"),
+                count("news"),
+                count("videos"),
+            );
+            assert!(copy.len() <= RESULT_BUDGET.max(WIDE_RESULT_BUDGET));
+            assert!(!copy.contains("://"), "{copy}");
             assert!(copy.starts_with("Web results for:"), "{copy}");
             assert_eq!(board.status_for(Some(&key)), WebSearchStatus::Ok);
             assert_eq!(result.content.len(), 2);

@@ -198,6 +198,13 @@ pub fn group_description(group: &ToolGroup, is_withheld: impl Fn(&str) -> bool) 
 /// Prefixed name of the web search tool.
 pub const SEARCH_WEB_TOOL: &str = "giap-knowledge__search_web";
 
+/// Prefixed name of the tool that puts pictures from the web on the user's screen.
+pub const SHOW_PICTURES_TOOL: &str = "giap-knowledge__show_pictures";
+
+/// Tools whose whole result is for the user's screen. A voice turn has no screen to show it on,
+/// so it is not offered them.
+pub const SCREEN_ONLY_TOOLS: &[&str] = &[SHOW_PICTURES_TOOL];
+
 /// Secret-store key holding the household's Brave Search API key.
 pub const BRAVE_SEARCH_API_KEY: &str = "BRAVE_SEARCH_API_KEY";
 
@@ -223,6 +230,10 @@ pub struct ToolRequirement {
 pub const TOOL_REQUIREMENTS: &[ToolRequirement] = &[
     ToolRequirement {
         tool: SEARCH_WEB_TOOL,
+        secret: BRAVE_SEARCH_API_KEY,
+    },
+    ToolRequirement {
+        tool: SHOW_PICTURES_TOOL,
         secret: BRAVE_SEARCH_API_KEY,
     },
     ToolRequirement {
@@ -409,6 +420,11 @@ mod requirement_tests {
             Some("BRAVE_SEARCH_API_KEY")
         );
         assert_eq!(
+            required_secret("giap-knowledge__show_pictures"),
+            Some("BRAVE_SEARCH_API_KEY"),
+            "pictures come from the same search key"
+        );
+        assert_eq!(
             required_secret("giap-knowledge__compute_answer"),
             Some("WOLFRAM_APP_ID")
         );
@@ -422,7 +438,16 @@ mod requirement_tests {
             "an account, not a key"
         );
         assert_eq!(required_secret("search_web"), None, "names are prefixed");
-        assert_eq!(TOOL_REQUIREMENTS.len(), 2);
+        assert_eq!(TOOL_REQUIREMENTS.len(), 3);
+    }
+
+    #[test]
+    fn only_a_tool_whose_whole_result_is_for_the_screen_is_screen_only() {
+        assert_eq!(SCREEN_ONLY_TOOLS, &[SHOW_PICTURES_TOOL]);
+        assert!(
+            !SCREEN_ONLY_TOOLS.contains(&SEARCH_WEB_TOOL),
+            "search_web answers in words, so a voice turn keeps it"
+        );
     }
 
     #[test]

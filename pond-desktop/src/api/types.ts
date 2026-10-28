@@ -1597,6 +1597,50 @@ export interface WebSearchPlace {
   /** May be empty. */
   url: string;
   snippet: string;
+  /** What Brave's web search knows of the place; each present only when known. */
+  address?: string;
+  /** The day Brave reports and its hours: "Monday 07:00 to 22:00". */
+  hours?: string;
+  phone?: string;
+  /** "4.5 of 5 from 120 reviews". */
+  rating?: string;
+}
+
+/** One row of a `search` card's optional `news`, present only when Brave added news. */
+export interface WebSearchNews {
+  title: string;
+  url: string;
+  domain: string;
+  publisher: string;
+  /** `YYYY-MM-DD`, or Brave's relative age ("2 days ago"); null when undated. */
+  date: string | null;
+  /** Only ever a thumbnail on Brave's image proxy; null without one. */
+  thumbnail: string | null;
+  breaking: boolean;
+}
+
+/** One row of a `search` card's optional `videos`, present only when Brave added videos. */
+export interface WebSearchVideo {
+  title: string;
+  url: string;
+  domain: string;
+  duration: string | null;
+  creator: string | null;
+  date: string | null;
+  /** Only ever a thumbnail on Brave's image proxy; null without one. */
+  thumbnail: string | null;
+}
+
+/** One picture of a `pictures` card, from `show_pictures`. */
+export interface WebPicture {
+  title: string;
+  /** The page the picture is on. */
+  url: string;
+  domain: string;
+  /** Brave's proxied thumbnail, never the original image. */
+  thumbnail: string;
+  width: number | null;
+  height: number | null;
 }
 
 // ── API Error ─────────────────────────────────────────────────

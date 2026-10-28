@@ -2926,9 +2926,17 @@ impl GooseAdapter {
             }
         };
 
-        // The keyed tools whose secret is not stored now, read once for the turn: the group lines
-        // must not promise them (6c), and the allow-set drops them (6e).
-        let keyless_tools = read_keyless_tools().await;
+        // The keyed tools whose secret is not stored now, read once for the turn, and in a voice
+        // turn the tools whose result is only for a screen: the group lines must not promise them
+        // (6c), and the allow-set drops them (6e).
+        let mut keyless_tools = read_keyless_tools().await;
+        if is_voice {
+            keyless_tools.extend(
+                pond_core::mcp::domain::tool_group::SCREEN_ONLY_TOOLS
+                    .iter()
+                    .map(|tool| tool.to_string()),
+            );
+        }
 
         // ── 6c. Per-session tool relevance ───────────────────────────────────
         // Goose always sends the full union, so narrowing is enforced by the shim per call.
@@ -3136,7 +3144,9 @@ impl GooseAdapter {
                 kind = "tools_withheld_for_missing_secret",
                 session_id = %session_id,
                 tools = ?withheld,
-                "tools whose key is not stored were withheld from the turn"
+                voice = is_voice,
+                "tools whose key is not stored, or that need a screen in a voice turn, were \
+                 withheld from the turn"
             );
             (
                 without(allowed_tools, &withheld),
@@ -5564,6 +5574,27 @@ mod tests {
         assert!(
             gate < authority,
             "delegation must not regain a withheld tool"
+        );
+    }
+
+    /// A voice turn has no screen, so its screen-only tools join the withheld set, and only then.
+    #[test]
+    fn a_voice_turn_withholds_the_screen_only_tools_before_the_gate() {
+        let lines = stream_body_code();
+        let at = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("`{needle}` is gone from the turn; re-anchor this test"))
+        };
+        let screen_only = at("SCREEN_ONLY_TOOLS");
+        let gate = at("without(allowed_tools, &withheld)");
+        assert!(screen_only < gate, "the gate must see the voice turn's set");
+        assert!(
+            lines[screen_only.saturating_sub(3)..screen_only]
+                .iter()
+                .any(|l| l.contains("if is_voice")),
+            "only a voice turn loses them"
         );
     }
 

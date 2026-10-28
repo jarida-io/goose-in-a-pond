@@ -3,8 +3,9 @@
 **Status (2026-10-28):** the knowledge-tool redesign (sections 4 and 6) is measured and not built:
 the pond still serves `get_wikipedia_article` and `compute_answer`. Built from this document:
 `search_web` (section 8, merged 2026-10-16; on Brave LLM Context with transient history since
-section 8.10), the per-turn withholding of keyed tools (section 8.9), `get_info` naming only the
-served tools, and decision D4.
+section 8.10, with news, videos and place details since section 8.11), `show_pictures` (section
+8.11), the per-turn withholding of keyed tools (section 8.9), `get_info` naming only the served
+tools, and decision D4.
 **Written:** 2026-10-14. Payload captured on `main` at `e440485b`; the decisive arms re-run
 on a capture from `68eef8cb` (section 2).
 **Evidence:** [`experiments/knowledge-tools/`](../../experiments/knowledge-tools/). It replays the
@@ -1118,7 +1119,8 @@ the conversation once per turn that searched.
 
 Brave's server (`brave/brave-search-mcp-server`, read 2026-10-28) offers eight tools: web, local,
 place, image, video, news, summarizer and LLM Context. `search_web` now covers what web, local,
-place and LLM Context give a household question, through the one tool. Not taken:
+place and LLM Context give a household question, through the one tool. Not taken here; §8.11
+revisits the first two rows, at Jerry's request:
 
 | tool | why not |
 |---|---|
@@ -1196,3 +1198,197 @@ place and LLM Context give a household question, through the one tool. Not taken
 | `X-Loc-Country` | accepted by Brave, but the pond stores no country code. The onboarding geocode could store one | Jerry |
 | Phone card and switch | Goose on the Go draws no `places` and has no local-places switch | GOTG follow-up |
 | Desktop dark link colour | a link in dark measured 2.85 to 3.11:1 because `--border-ink` there is the accent lifted to an edge's 3:1; the web search card and help links now use `--purple-200` in dark (9.1:1 and 8.7:1). Other `--border-ink` text in dark has not been measured | desktop follow-up |
+
+### 8.11 News, videos, place details and pictures from Brave; reverse image search on the pond
+
+**Status: Draft, measurements owed.** Jerry made the decisions below on 2026-10-28, and they are
+built on `feat/web-search-media` (draft PR #698). Not yet run: bench E9 on the nano, a release
+build there, and a functional live Brave check (§8.11.7). Jerry decided:
+
+| # | question | decided |
+|---|---|---|
+| 1 | Should `search_web` send one Brave web search beside LLM Context, so news, videos and places' details reach the card when Brave judges the question wants them? | yes, at $0.010 a search |
+| 2 | A tool for pictures only the person sees? | `show_pictures(question)`, card-only |
+| 3 | A separate `show_videos`? | no: videos reach the card through decision 1 |
+| 4 | Reverse image search: no Brave endpoint takes an image | (a) on the pond: the model says what is in the picture, in the call |
+| 5 | A news tool, a Place Search call, Suggest, Spellcheck, the Summarizer, Answers? | all left out (§8.11.5) |
+
+No routing reads the question. Brave's own answer decides what the card shows beyond the pages,
+and the model decides which tool to call.
+
+**The options put to Jerry, with what each costs per question** (Search plan, $5 per 1,000
+requests, $5 of credit a month):
+
+| option | what the model sees | cost per question | decided |
+|---|---|---|---|
+| A: `search_web` also asks the web search; Brave decides news, videos, places | unchanged tool; news and place details in the copy | $0.010 per search, was $0.005 | yes |
+| B: `show_pictures(question)` | one more tool, about 60 tokens | $0.005 per pictures question | yes |
+| B2: `show_videos(question)` | one more tool again | $0.005 per video question | no |
+| C: news tool, Place Search call, Suggest, Spellcheck, Summarizer, Answers | more tools, or none | $0.005 each; Suggest and Spellcheck $0.0005 on their own plans; Answers about $0.01 to $0.02 on its own plan | no |
+| reverse image (a): the model describes the attached picture in the call | one sentence in `question` | as any search, $0.005 to $0.010 | yes |
+| reverse image (b): Google Cloud Vision Web Detection | a separate tool, opt-in, confirmed per picture | first 1,000 a month free, then $0.0035 | not now |
+
+#### 8.11.1 What Brave offers
+
+Read 2026-10-28 from Brave's API reference and service pages (every page
+`api-dashboard.search.brave.com/llms.txt` lists), its pricing page and its terms (updated
+2026-09-01).
+
+| endpoint | returns | plan | price |
+|---|---|---|---|
+| LLM Context `/res/v1/llm/context` | page text ranked for the query; places with local recall | Search | $5 per 1,000 requests |
+| Web search `/res/v1/web/search` | web results, plus `news`, `videos`, `locations`, `infobox`, `faq` and `discussions` sections. Brave adds each only when it judges the query wants it. No `images` section | Search | $5 per 1,000 |
+| Image search `/res/v1/images/search` | pictures: title, page, source, a thumbnail on Brave's image proxy | Search | $5 per 1,000 |
+| Video search, news search | videos (duration, creator), articles (publisher, age) | Search | $5 per 1,000 |
+| Place Search `/res/v1/local/place_search` | places by `q` and a `location` string or coordinates | Search | $5 per 1,000 |
+| Suggest, Spellcheck | completions; a corrected query | their own plans and keys | $5 per 10,000 |
+| Answers `/res/v1/chat/completions` | AI-written text with citations | its own plan and key | $4 per 1,000 + $5 per million tokens each way |
+| Summarizer | AI-written summary | the legacy Pro AI plan; gone from the current docs | — |
+
+- Each plan's $5 monthly credit covers about 1,000 requests to that plan's endpoints.
+- `country` accepts no `KE` on any endpoint; it accepts `ALL`, and unset means `US`.
+- **No endpoint accepts an image.** Checked: every API reference page, the 13 endpoints of Brave's
+  Playground, the image search changelog, Brave's MCP server at `ee06f81`, and every page of the
+  docs for upload, base64, multipart, lens, similar and visual.
+- The terms have no clause about images. The image search guide says thumbnails are served
+  through Brave's proxy partly so source sites cannot see who is looking.
+
+#### 8.11.2 The web search beside LLM Context
+
+`search_web` sends §8.3's web search (`q`, `count=8`, `extra_snippets`, `safesearch=moderate`,
+`text_decorations=false`) at the same moment as its LLM Context request, with the same
+`X-Loc-City` when local places are on.
+
+- **Timing.** Once LLM Context has a quotable answer, the turn waits for the web search at most
+  one more second (`SIDE_SEARCH_GRACE`). A slow search costs the card its extras, never the turn.
+  When LLM Context cannot answer, the same search is the fallback's search (§8.10.4), so a
+  fallback no longer waits for a second round trip.
+- **The key's status.** Both answers are recorded once both are in: the search's first, then LLM
+  Context's, so the verdict on the answer the model reads stands. A verdict on the key from LLM
+  Context (401, 429) is still final, and the search's answer is not read.
+- **What is read**, item by item, so one misshapen item never loses the answer:
+  - `news`: at most 3. Title, link, description, publisher (`profile.name`, else the host), the
+    date (`page_age` as `YYYY-MM-DD`, else Brave's relative age), a thumbnail, `breaking`;
+  - `videos`: at most 3. Title, link, duration, creator, date, a thumbnail;
+  - `locations`: at most 5, **only with local places on** (§8.10.5), as LLM Context's places are.
+    Address (`displayAddress`), the day Brave reports with its hours (`current_day`), phone and
+    rating.
+  - A thumbnail is kept only when it is on `https://imgs.search.brave.com/`, and never
+    `original`, so the card never loads a picture from the site it came from.
+- **The model's copy.**
+  - News items join the ranked candidates as sources, with their dates. A news item whose page
+    LLM Context already read is not repeated. The budget stays keyed by the pages LLM Context
+    read (§8.8), so news does not narrow it.
+  - A place's details become short passages ("open Monday 07:00 to 22:00", "phone: ...",
+    "address: ...", "rating: 4.3 of 5 from 120 reviews"). They go in front of the place LLM
+    Context named, or make a new place up to five, and the ranker picks the line that answers.
+  - **Videos never reach the model.** A line saying they are on the screen would be false in a
+    voice turn, and the tool cannot tell a voice turn from a text one.
+- **The card** keeps its fields (§8.10.3) and gains, each only when non-empty:
+  - `news: [{title, url, domain, publisher, date, thumbnail, breaking}]`;
+  - `videos: [{title, url, domain, duration, creator, date, thumbnail}]`;
+  - on a place, `address`, `hours`, `phone` and `rating`.
+
+  `date`, `thumbnail`, `duration` and `creator` are `null` when unknown. `results` lists only the
+  web's pages; news is not repeated there.
+- **The fallback** quotes news as unread sources after the web results, and its card carries the
+  same extras.
+- **History** is unchanged (§8.10.6): the result is transient, and the stub names the domains the
+  copy quoted, news included.
+- **Trace:** `kind="web_search"` gains `news`, `videos` and `side_search`.
+- **Cost: $0.010 per question** that calls `search_web`, two Search requests, against $0.005
+  before. The monthly credit covers about 500 such questions.
+
+#### 8.11.3 `show_pictures`
+
+```text
+name:        giap-knowledge__show_pictures
+description: Show the user pictures from the web of what they want to see: a place, an animal, a
+             plant, a dish, a product. The pictures appear on their screen; you will not see them.
+question:    string, REQUIRED. "What the user wants to see, in their own words. For a picture they
+             attached, say what is in it."
+```
+
+- **Gate.** Offered only while the Brave key is stored, beside `search_web` (`TOOL_REQUIREMENTS`),
+  and **never in a voice turn**: a voice turn has no screen. `SCREEN_ONLY_TOOLS` joins the turn's
+  withheld set when `is_voice`, before the allow-set and the delegation authority.
+- **Request.** `GET /res/v1/images/search`, `q` cut to 50 words and 400 characters, `count=20`,
+  `safesearch=strict` (Brave's default, and the only filter besides `off`), `country=ALL`, the key
+  header, 6 s. No location.
+- **What the card shows.** Up to 12 pictures, each with a thumbnail on Brave's proxy and an
+  `http(s)` page. When Brave flags the set `extra.might_be_offensive`, none is shown.
+- **The model reads one line**, and no picture title, so it has nothing to describe as if it had
+  seen them:
+
+  > 4 pictures for "Show me pictures of the Maasai Mara" are on the user's screen, from kws.go.ke,
+  > commons.wikimedia.org, magicalkenya.com and 1 other site. You have not seen them.
+
+- **The card**, `audience: ["user"]`: `[[[mcp-ui:pictures:{query, pictures: [{title, url, domain,
+  thumbnail, width, height}]}]]]`.
+- **History.** Transient like `search_web`; the stub reads "Pictures from the web are not kept after
+  the turn. Sources: ...".
+- **Misses** are dead ends, so the model tells the user rather than trying another tool:
+  - none found;
+  - none shown, because the set may be offensive;
+  - the key rejected, or the allowance used up, as for `search_web`.
+- **Trace:** `kind="web_pictures"`, `shown`, `withheld`.
+- **Cost: $0.005 per question** that calls it. About 60 tokens in the cached prefix while the key is
+  stored.
+
+#### 8.11.4 Reverse image search, on the pond
+
+The chat model already sees a picture attached to the message (Gemma 4 E2B and E4B are
+multimodal). `show_pictures`' `question` carries one sentence: "For a picture they attached, say
+what is in it." `search_web`'s gains it only if bench E9 supports it (§8.11.7). So "Where is this
+building?" with a photo of the KICC should become a call that names the building, or describes
+it.
+
+- **Leaves the house:** the words the model wrote, never the picture.
+- **Finds:** what the model can recognise. It cannot find where a particular photo came from, or
+  copies of it.
+- **Recorded for later, not built:** Google Cloud Vision's Web Detection is the one third-party API
+  that does true reverse image search. The first 1,000 a month are free, then $3.50 per 1,000.
+  Google's data-usage page says synchronous pictures are processed in memory, not stored, and not
+  used for training. It needs the household's own Google Cloud project with billing, and since
+  the photo leaves the house it would be off by default, opt-in, and confirmed in the app for
+  each picture.
+  - Bing Visual Search retired on 2025-08-11.
+  - SerpApi's Google Lens scrapes Google, and keeps searches 31 days.
+  - TinEye costs $0.04 a search with a $200 minimum, and finds only copies.
+
+#### 8.11.5 Left out
+
+| what | why |
+|---|---|
+| a news tool | `search_web` already took 12 of 12 web questions on both Gemma models (E6), and a second tool for the same act splits the call rate (R1). News reaches the copy and the card through §8.11.2 |
+| Place Search | the web search's `locations` carry the same hours, address, phone and rating at no extra request |
+| Suggest, Spellcheck | each needs a second plan and key, and a spoken or typed turn has nowhere to put a suggestion. LLM Context and the search already correct spelling |
+| the Summarizer, Answers | AI-written text, which R4 and R6 keep out of a result; the Summarizer is deprecated, and Answers needs its own plan and key at about $0.01 to $0.02 a question |
+| `show_videos` | decision 3 |
+
+#### 8.11.6 What was verified (Mac, 2026-10-28, with Jerry's OK)
+
+- `cargo test -p pond-mcp-server --lib`: 334 passed, three runs in a row. They cover the side
+  search against a stub Brave (news in the copy, videos only in the card, place details merged,
+  both requests carrying the town only with local places on, a slow search not holding a
+  grounded answer, the fallback reusing the search), `show_pictures` (the request, the card, the
+  line, the offensive flag, each status, the stub) and the prefix oracle's new size.
+- `cargo test -p pond-core`: all passed except the known `device_budget` race (§8.10.8), which
+  passes alone.
+- `cargo check -p pond-adapters-goose --tests` passed only with a one-line type annotation that is
+  not on the branch. Current main fails on macOS with E0275 at `goose_agent.rs`'s `entitled_tools`
+  `collect()`: objc2's impls overflow inference. Linux, CI and the nano are unaffected.
+- The desktop: `tsc` is clean, vitest passed 2,405 of 2,405, and Playwright passed 43 of 43 on
+  local Chrome: the pictures spec, plus the web search card and panel specs, with contrast in light
+  and dark. Lint was not run.
+
+#### 8.11.7 Owed
+
+| item | what |
+|---|---|
+| E9 on the nano | call rates for `show_pictures`, and steals from `search_web`, on E2B and E4B with their QAT vision projectors. The `question` clause for attached pictures ships only if the bench supports it; it is in `show_pictures` and not yet in `search_web` |
+| Live check on the nano | a release build of the branch, then functional turns with the household's key: the card's news, videos, place details and pictures, and the stub in both stores. Nothing scored (§3(b)(xiii)) |
+| Voice and text in one process | a serve-mode switch between a voice turn and a text turn re-reads the prefix from `show_pictures` on, about 1,100 tokens of schemas. To be measured on the nano |
+| The phone | Goose on the Go draws neither the new rows nor the pictures card; its own PR |
+| `minimal` mode | giap-knowledge's group line does not mention pictures; unmeasured whether "show me" asks find the group |
+| Thumbnail host | the docs do not name the proxy's host; `imgs.search.brave.com` is checked on the first live answer |

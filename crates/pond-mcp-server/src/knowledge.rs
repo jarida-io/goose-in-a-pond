@@ -68,21 +68,24 @@ pub struct KnowledgeMcpServer {
 
 #[tool_router]
 impl KnowledgeMcpServer {
-    /// Every tool from all three routers, without constructing the server or its deps.
+    /// Every tool from all four routers, without constructing the server or its deps.
     pub(crate) fn tool_defs() -> Vec<rmcp::model::Tool> {
         let mut tools = Self::tool_router().list_all();
         tools.extend(Self::wolfram_tool_router().list_all());
         tools.extend(Self::web_search_tool_router().list_all());
+        tools.extend(Self::pictures_tool_router().list_all());
         tools
     }
 
     pub fn new(http_client: reqwest::Client) -> Self {
         Self {
             http_client,
-            // One extension, three routers: `wolfram.rs` and `web_search.rs` hold the others.
+            // One extension, four routers: `wolfram.rs`, `web_search.rs` and its `pictures`
+            // module hold the others.
             tool_router: Self::tool_router()
                 + Self::wolfram_tool_router()
-                + Self::web_search_tool_router(),
+                + Self::web_search_tool_router()
+                + Self::pictures_tool_router(),
         }
     }
 
@@ -160,17 +163,19 @@ impl ServerHandler for KnowledgeMcpServer {
 
 /// Every tool these instructions name must be one this server lists.
 const KNOWLEDGE_INSTRUCTIONS: &str = "\
-GIAP Knowledge server: encyclopedia articles, computation and web search.
+GIAP Knowledge server: encyclopedia articles, computation, web search and pictures.
 
 Tools: get_wikipedia_article (encyclopedia articles), compute_answer (computation; offered \
 while a computation key is stored), search_web (the web; offered while a web search key is \
-stored).
+stored), show_pictures (pictures from the web on the user's screen; offered while a web search \
+key is stored, never in a voice turn).
 
 If the answer has to be worked out (arithmetic, a unit or currency conversion, a date \
 difference, a statistic), use compute_answer. If it has to be read (who someone was, what \
 happened, what a place is like), use get_wikipedia_article; it auto-searches when the title is \
 not exact. If it is current, local or specific (news, opening hours, prices, products, \
-businesses, recent results), use search_web.
+businesses, recent results), use search_web. If the user wants to see something, use \
+show_pictures.
 After receiving results: synthesize in your own words. Do not parrot verbatim.
 In voice mode: 1-3 sentences. Offer to elaborate if the user wants more.";
 

@@ -174,18 +174,29 @@ mod tests {
         assert_eq!(entries.len(), 27, "tool count moved");
     }
 
-    /// Storing one key adds its one schema inside `giap-knowledge`: the prefix moves from there
-    /// on, once, and the core block and everything sorting before it stay byte-identical.
+    /// Storing one key adds its schemas inside `giap-knowledge`: the prefix moves from the first
+    /// of them on, once, and the core block and everything sorting before it stay byte-identical.
     #[test]
-    fn storing_a_key_moves_the_prefix_only_from_its_tool_on() {
+    fn storing_a_key_moves_the_prefix_only_from_its_tools_on() {
+        use pond_core::mcp::domain::tool_group::TOOL_REQUIREMENTS;
         let keyless = ordered_keyless_tools(DEFAULT_GROUPS);
-        for requirement in pond_core::mcp::domain::tool_group::TOOL_REQUIREMENTS {
+        for requirement in TOOL_REQUIREMENTS {
             let keyed = ordered_tools_with(DEFAULT_GROUPS, |s| s == requirement.secret);
-            assert_eq!(keyed.len(), keyless.len() + 1, "{}", requirement.secret);
+            let its_tools: Vec<&str> = TOOL_REQUIREMENTS
+                .iter()
+                .filter(|r| r.secret == requirement.secret)
+                .map(|r| r.tool)
+                .collect();
+            assert_eq!(
+                keyed.len(),
+                keyless.len() + its_tools.len(),
+                "{}",
+                requirement.secret
+            );
             let at = keyed
                 .iter()
-                .position(|e| e.name == requirement.tool)
-                .expect("the keyed tool is in the keyed block");
+                .position(|e| its_tools.contains(&e.name.as_str()))
+                .expect("the keyed tools are in the keyed block");
             let shared = keyed
                 .iter()
                 .zip(&keyless)
@@ -208,8 +219,8 @@ mod tests {
         }
         let total = total_bytes(&ordered_tools(DEFAULT_GROUPS));
         assert_eq!(
-            total, 14_394,
-            "the block with every key stored is now {total} raw bytes, was 14,394"
+            total, 14_874,
+            "the block with every key stored is now {total} raw bytes, was 14,874"
         );
     }
 

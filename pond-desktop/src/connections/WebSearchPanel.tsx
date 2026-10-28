@@ -300,8 +300,8 @@ export function WebSearchPanel() {
           <a href={BRAVE_DASHBOARD_URL} target="_blank" rel="noopener noreferrer">
             {BRAVE_DASHBOARD_HOST}
           </a>
-          . The free monthly credit covers about 1,000 searches. Brave asks for a card to
-          confirm who you are.
+          . The free monthly credit covers about 500 web searches, since each one asks Brave
+          twice. Brave asks for a card to confirm who you are.
         </p>
 
         <label className="connections-field">

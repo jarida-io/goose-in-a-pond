@@ -9,6 +9,7 @@ const NAME_MAP: Record<string, string> = {
   compute_answer: "Computed",
   // web
   search_web: "Web search",
+  show_pictures: "Pictures",
   // schedule
   list_schedules: "Schedules",
   create_schedule: "Create Schedule",
