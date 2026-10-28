@@ -510,6 +510,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/telemetry/summary", get(get_telemetry_summary))
         // ── Event log / telemetry ─────────────────────────────────────────────
         .route("/logs", get(list_logs))
+        .route("/logs/stream", get(stream_logs))
         .route("/logs/export", get(export_logs_csv))
         // ── Memories ──────────────────────────────────────────────────────────
         .route("/memories", get(list_memories).post(save_memory))
@@ -7515,6 +7516,14 @@ async fn activate_model(
         }
     }
 
+    // So a live log viewer sees the swap it is timing against.
+    tracing::info!(
+        target: "giap::trace",
+        kind = "model_activated",
+        role = %role,
+        model_id = %model_id,
+        "a model was assigned to a role"
+    );
     Ok(Json(json!({"role": role, "model_id": model_id})))
 }
 
@@ -11952,6 +11961,71 @@ async fn list_logs(
         )
             .into_response(),
     }
+}
+
+/// Live log viewers held open at once: a developer's tool, not something every phone keeps open.
+const LIVE_LOG_STREAMS: usize = 4;
+
+fn live_log_streams() -> &'static Arc<tokio::sync::Semaphore> {
+    static STREAMS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    STREAMS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(LIVE_LOG_STREAMS)))
+}
+
+/// `GET /api/v1/logs/stream` — the Logs viewer, live: a `status` event naming the running chat
+/// model, then each line as `/logs` stores it, scrubbed the same way. `level` filters as there;
+/// a viewer that falls behind gets a `skipped` count instead of the lines it missed.
+async fn stream_logs(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)>
+{
+    let Some(mut rx) = state
+        .operational_log
+        .as_ref()
+        .and_then(|repo| repo.subscribe())
+    else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "live logs not available" })),
+        ));
+    };
+    let permit = live_log_streams()
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "Too many concurrent streams" })),
+            )
+        })?;
+    let level = params.get("level").cloned();
+    let settings = state.settings_repo.get().await.unwrap_or_default();
+    let status = json!({
+        "chat_provider": settings.chat_provider,
+        "chat_model": settings.chat_model,
+    });
+
+    let stream = async_stream::stream! {
+        let _permit = permit;
+        yield Ok(Event::default().event("status").data(status.to_string()));
+        loop {
+            match rx.recv().await {
+                Ok(entry) => {
+                    if level.as_deref().is_some_and(|wanted| wanted != entry.level) {
+                        continue;
+                    }
+                    let data = serde_json::to_string(&entry).unwrap_or_default();
+                    yield Ok(Event::default().event("log").data(data));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                    let data = json!({ "count": count }).to_string();
+                    yield Ok(Event::default().event("skipped").data(data));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 /// `GET /api/v1/logs/export` — download the event log as a CSV file.

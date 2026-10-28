@@ -658,8 +658,7 @@ mod tests {
     #[test]
     fn no_giap_trace_event_is_emitted_at_a_level_the_filter_drops() {
         const GRANDFATHERED: &[&str] = &[
-            // Frequent and user-initiated; promote if a Matter fault needs a captured log.
-            "matter_device_command",
+            // Frequent; promote if a Matter fault needs a captured log.
             "matter_sources_refreshed",
             // Per-turn; its INFO sibling `turn_device_*` covers what's been needed.
             "turn_device_identified",

@@ -57,7 +57,7 @@ impl MatterDeviceControl {
                 let applied = serde_json::from_value::<ControlResult>(result)
                     .map(|r| r.applied)
                     .unwrap_or_default();
-                tracing::debug!(
+                tracing::info!(
                     target: "giap::trace",
                     kind = "matter_device_command",
                     device = %device_id,
