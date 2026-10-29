@@ -1,5 +1,6 @@
-//! Who may administer the pond right now: a member's device that presented the admin card,
-//! for [`ADMIN_IDLE`] after its last admin request. Held in memory, so a restart locks everyone.
+//! Who may administer the pond right now: a member's device that presented the admin card or its
+//! own key, for [`ADMIN_IDLE`] after its last admin request. Held in memory, so a restart locks
+//! everyone.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,7 +11,7 @@ use tokio::sync::Mutex;
 use crate::network::domain::claim::RetryAfter;
 use crate::network::services::setup_guess_throttle::SetupGuessThrottle;
 use crate::security::domain::admin_card::AdminPassword;
-use crate::security::ports::admin_card::{AdminCardStore, CardCheck};
+use crate::security::ports::admin_card::{AdminCardStore, AdminDeviceKeys, CardCheck};
 
 /// How long an unlocked device stays unlocked without an admin request.
 pub const ADMIN_IDLE: Duration = Duration::from_secs(15 * 60);
@@ -20,6 +21,8 @@ pub const ADMIN_IDLE: Duration = Duration::from_secs(15 * 60);
 pub enum UnlockRefusal {
     Malformed,
     Rejected,
+    /// The key is not this device's live one: revoked, replaced, or the card was rotated.
+    KeyRejected,
     CardMissing,
     Cooling(RetryAfter),
     /// The card could not be read; nobody is unlocked while that lasts.
@@ -32,6 +35,7 @@ impl UnlockRefusal {
         match self {
             Self::Malformed => "admin_password_malformed",
             Self::Rejected => "admin_password_rejected",
+            Self::KeyRejected => "admin_key_rejected",
             Self::CardMissing => "admin_card_missing",
             Self::Cooling(_) => "admin_cooling",
             Self::Unavailable(_) => "admin_card_unreadable",
@@ -64,6 +68,8 @@ impl Locked {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdminStatus {
     pub card_present: bool,
+    /// Whether this device holds a live key of its own.
+    pub key_held: bool,
     /// Time left before this device locks, if it is unlocked.
     pub unlocked_for: Option<Duration>,
     pub retry_after: Option<RetryAfter>,
@@ -71,7 +77,8 @@ pub struct AdminStatus {
 
 #[derive(Debug, Clone)]
 struct Grant {
-    card_id: String,
+    /// The card in force when the device unlocked; `None` on a pond that has no card yet.
+    card_id: Option<String>,
     last_used: Instant,
 }
 
@@ -83,19 +90,25 @@ struct Ledger {
 
 pub struct AdminElevation {
     cards: Arc<dyn AdminCardStore>,
+    keys: Arc<dyn AdminDeviceKeys>,
     idle: Duration,
     // Held across the card check, so concurrent guesses are judged one at a time.
     ledger: Mutex<Ledger>,
 }
 
 impl AdminElevation {
-    pub fn new(cards: Arc<dyn AdminCardStore>) -> Self {
-        Self::with_idle(cards, ADMIN_IDLE)
+    pub fn new(cards: Arc<dyn AdminCardStore>, keys: Arc<dyn AdminDeviceKeys>) -> Self {
+        Self::with_idle(cards, keys, ADMIN_IDLE)
     }
 
-    pub fn with_idle(cards: Arc<dyn AdminCardStore>, idle: Duration) -> Self {
+    pub fn with_idle(
+        cards: Arc<dyn AdminCardStore>,
+        keys: Arc<dyn AdminDeviceKeys>,
+        idle: Duration,
+    ) -> Self {
         Self {
             cards,
+            keys,
             idle,
             ledger: Mutex::new(Ledger::default()),
         }
@@ -131,13 +144,68 @@ impl AdminElevation {
                 ledger.grants.insert(
                     device.to_string(),
                     Grant {
-                        card_id,
+                        card_id: Some(card_id),
                         last_used: now,
                     },
                 );
                 Ok(self.idle)
             }
         }
+    }
+
+    /// Unlock `device` with the key the pond issued it. A wrong key is a wrong guess.
+    pub async fn unlock_with_key(
+        &self,
+        device: &str,
+        key: &str,
+        now: Instant,
+    ) -> Result<Duration, UnlockRefusal> {
+        let mut ledger = self.ledger.lock().await;
+        ledger.throttle.check(now).map_err(UnlockRefusal::Cooling)?;
+        let live = self
+            .keys
+            .check(device, key)
+            .await
+            .map_err(|e| UnlockRefusal::Unavailable(e.to_string()))?;
+        if !live {
+            ledger.throttle.record_failure(now);
+            return Err(UnlockRefusal::KeyRejected);
+        }
+        let card_id = self
+            .cards
+            .current()
+            .await
+            .map_err(|e| UnlockRefusal::Unavailable(e.to_string()))?;
+        ledger.throttle.record_success();
+        ledger.grants.insert(
+            device.to_string(),
+            Grant {
+                card_id,
+                last_used: now,
+            },
+        );
+        Ok(self.idle)
+    }
+
+    /// A key of `device`'s own, for an unlocked device; it replaces any older one.
+    pub async fn enroll(&self, device: &str, now: Instant) -> Result<String, Locked> {
+        self.admit(device, now).await?;
+        self.keys
+            .issue(device)
+            .await
+            .map_err(|e| Locked::Unavailable(e.to_string()))
+    }
+
+    /// The first activation user's key, issued without an unlock: the caller has proved `device`
+    /// claimed the pond and has just completed its setup.
+    pub async fn issue_first_key(&self, device: &str) -> anyhow::Result<String> {
+        self.keys.issue(device).await
+    }
+
+    /// End `device`'s unlock and revoke its key: it forgot My Pond, or was removed from the pond.
+    pub async fn revoke_device(&self, device: &str) -> anyhow::Result<bool> {
+        self.lock(device).await;
+        self.keys.revoke(device).await
     }
 
     /// Admit an admin request from `device`, renewing its idle window.
@@ -151,7 +219,7 @@ impl AdminElevation {
         let Some(grant) = ledger.grants.get_mut(device) else {
             return Err(Locked::NotUnlocked);
         };
-        if current.as_deref() != Some(grant.card_id.as_str()) {
+        if current != grant.card_id {
             ledger.grants.remove(device);
             return Err(Locked::CardChanged);
         }
@@ -171,9 +239,10 @@ impl AdminElevation {
     /// Where `device` stands, without renewing anything.
     pub async fn status(&self, device: &str, now: Instant) -> Result<AdminStatus, String> {
         let current = self.cards.current().await.map_err(|e| e.to_string())?;
+        let key_held = self.keys.holds(device).await.map_err(|e| e.to_string())?;
         let ledger = self.ledger.lock().await;
         let unlocked_for = ledger.grants.get(device).and_then(|grant| {
-            if current.as_deref() != Some(grant.card_id.as_str()) {
+            if current != grant.card_id {
                 return None;
             }
             self.idle
@@ -182,6 +251,7 @@ impl AdminElevation {
         });
         Ok(AdminStatus {
             card_present: current.is_some(),
+            key_held,
             unlocked_for,
             retry_after: ledger.throttle.check(now).err(),
         })
@@ -192,7 +262,7 @@ impl AdminElevation {
 mod tests {
     use super::*;
     use crate::network::services::setup_guess_throttle::FREE_SETUP_FAILURES;
-    use crate::security::mocks::mock_admin_card::MockAdminCardStore;
+    use crate::security::mocks::mock_admin_card::{MockAdminCardStore, MockAdminDeviceKeys};
 
     const CARD: &str = "0123-AJPV-ZYXW-9876";
     const WRONG: &str = "0123-AJPV-ZYXW-9877";
@@ -200,7 +270,7 @@ mod tests {
     fn pond_with_card() -> (Arc<MockAdminCardStore>, AdminElevation) {
         let cards = Arc::new(MockAdminCardStore::new());
         cards.issue("card-1", AdminPassword::parse(CARD).unwrap());
-        let elevation = AdminElevation::new(cards.clone());
+        let elevation = AdminElevation::new(cards.clone(), Arc::new(MockAdminDeviceKeys::new()));
         (cards, elevation)
     }
 
@@ -297,7 +367,7 @@ mod tests {
     #[tokio::test]
     async fn a_typo_or_a_missing_card_spends_no_guess() {
         let cards = Arc::new(MockAdminCardStore::new());
-        let admin = AdminElevation::new(cards.clone());
+        let admin = AdminElevation::new(cards.clone(), Arc::new(MockAdminDeviceKeys::new()));
         let t0 = Instant::now();
         for _ in 0..FREE_SETUP_FAILURES * 2 {
             assert_eq!(
@@ -338,5 +408,115 @@ mod tests {
         assert!(admin.lock("phone").await);
         assert!(!admin.lock("phone").await);
         assert_eq!(admin.admit("phone", later).await, Err(Locked::NotUnlocked));
+    }
+
+    fn pond_with_keys() -> (
+        Arc<MockAdminCardStore>,
+        Arc<MockAdminDeviceKeys>,
+        AdminElevation,
+    ) {
+        let cards = Arc::new(MockAdminCardStore::new());
+        cards.issue("card-1", AdminPassword::parse(CARD).unwrap());
+        let keys = Arc::new(MockAdminDeviceKeys::new());
+        let elevation = AdminElevation::new(cards.clone(), keys.clone());
+        (cards, keys, elevation)
+    }
+
+    #[tokio::test]
+    async fn an_unlocked_phone_enrolls_and_then_opens_with_its_own_key() {
+        let (_, _, admin) = pond_with_keys();
+        let t0 = Instant::now();
+        assert_eq!(admin.enroll("phone", t0).await, Err(Locked::NotUnlocked));
+        admin.unlock("phone", CARD, t0).await.unwrap();
+        let key = admin.enroll("phone", t0).await.unwrap();
+        assert!(admin.status("phone", t0).await.unwrap().key_held);
+        assert!(admin.lock("phone").await);
+        assert_eq!(
+            admin.unlock_with_key("phone", &key, t0).await,
+            Ok(ADMIN_IDLE)
+        );
+        assert!(admin.admit("phone", t0).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_key_opens_only_its_own_phone() {
+        let (_, keys, admin) = pond_with_keys();
+        let t0 = Instant::now();
+        let key = keys.issue("phone-a").await.unwrap();
+        assert_eq!(
+            admin.unlock_with_key("phone-b", &key, t0).await,
+            Err(UnlockRefusal::KeyRejected)
+        );
+        assert_eq!(admin.admit("phone-b", t0).await, Err(Locked::NotUnlocked));
+    }
+
+    #[tokio::test]
+    async fn wrong_keys_are_slowed_like_wrong_cards() {
+        let (_, keys, admin) = pond_with_keys();
+        let t0 = Instant::now();
+        let key = keys.issue("phone").await.unwrap();
+        for _ in 0..FREE_SETUP_FAILURES {
+            assert_eq!(
+                admin.unlock_with_key("phone", "guess", t0).await,
+                Err(UnlockRefusal::KeyRejected)
+            );
+        }
+        assert!(matches!(
+            admin.unlock_with_key("phone", &key, t0).await,
+            Err(UnlockRefusal::Cooling(_))
+        ));
+        assert!(matches!(
+            admin.unlock("other", CARD, t0).await,
+            Err(UnlockRefusal::Cooling(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_revoked_or_replaced_key_no_longer_opens() {
+        let (_, keys, admin) = pond_with_keys();
+        let t0 = Instant::now();
+        let first = keys.issue("phone").await.unwrap();
+        let second = keys.issue("phone").await.unwrap();
+        assert_eq!(
+            admin.unlock_with_key("phone", &first, t0).await,
+            Err(UnlockRefusal::KeyRejected),
+            "a new key replaces the old one"
+        );
+        admin.unlock_with_key("phone", &second, t0).await.unwrap();
+        assert!(admin.revoke_device("phone").await.unwrap());
+        assert_eq!(admin.admit("phone", t0).await, Err(Locked::NotUnlocked));
+        assert!(!admin.status("phone", t0).await.unwrap().key_held);
+        assert_eq!(
+            admin.unlock_with_key("phone", &second, t0).await,
+            Err(UnlockRefusal::KeyRejected)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pond_without_a_card_opens_to_its_first_users_key() {
+        let cards = Arc::new(MockAdminCardStore::new());
+        let keys = Arc::new(MockAdminDeviceKeys::new());
+        let admin = AdminElevation::new(cards.clone(), keys.clone());
+        let t0 = Instant::now();
+        let key = admin.issue_first_key("owner-phone").await.unwrap();
+        assert_eq!(
+            admin.unlock_with_key("owner-phone", &key, t0).await,
+            Ok(ADMIN_IDLE)
+        );
+        assert!(admin.admit("owner-phone", t0).await.is_ok());
+        let status = admin.status("owner-phone", t0).await.unwrap();
+        assert!(!status.card_present && status.key_held && status.unlocked_for.is_some());
+
+        cards.issue("card-1", AdminPassword::parse(CARD).unwrap());
+        assert_eq!(
+            admin.admit("owner-phone", t0).await,
+            Err(Locked::CardChanged),
+            "a card made later locks the session it did not exist for"
+        );
+        assert_eq!(
+            admin.unlock_with_key("owner-phone", &key, t0).await,
+            Ok(ADMIN_IDLE),
+            "but keeps the key: making the first card is not a rotation"
+        );
     }
 }

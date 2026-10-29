@@ -1,5 +1,5 @@
-//! `/api/v1/admin/*`: My Pond. A member's device unlocks it with the admin card; every route
-//! but status, unlock and lock then needs that device's unlock to be live.
+//! `/api/v1/admin/*`: My Pond. A member's device unlocks it with the admin card or its own key;
+//! every route but status, unlock, lock and forgetting the key then needs that unlock to be live.
 //! The design and the wire contract are in `docs/architecture/pond-administrator.md`.
 
 use std::sync::Arc;
@@ -17,7 +17,7 @@ use pond_core::security::domain::event::{
 };
 use pond_core::security::domain::proven_device::{DeviceRung, ProvenDevice};
 use pond_core::security::ports::policy::Principal;
-use pond_core::security::services::admin_elevation::{AdminElevation, UnlockRefusal};
+use pond_core::security::services::admin_elevation::{AdminElevation, Locked, UnlockRefusal};
 use pond_core::shared::domain::pond_admin::{AdminError, DataPath};
 use pond_core::shared::services::pond_admin::PondAdminService;
 use pond_core::user_data::ports::device_attribution::DeviceAttribution;
@@ -214,6 +214,7 @@ pub async fn status(
     match admin.elevation.status(&caller.device, Instant::now()).await {
         Ok(status) => Json(json!({
             "card": if status.card_present { "present" } else { "missing" },
+            "key": status.key_held,
             "unlocked": status.unlocked_for.is_some(),
             "expires_at": status.unlocked_for.map(expires_at),
             "idle_minutes": admin.elevation.idle().as_secs() / 60,
@@ -227,12 +228,16 @@ pub async fn status(
     }
 }
 
+/// The card's password, or the key the pond issued this device; a key wins if both are sent.
 #[derive(Deserialize)]
 pub struct UnlockBody {
-    password: String,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    key: Option<String>,
 }
 
-/// `POST /api/v1/admin/unlock {password}`
+/// `POST /api/v1/admin/unlock {password}` or `{key}`
 pub async fn unlock(
     State(state): State<Arc<AppState>>,
     principal: Option<Extension<Principal>>,
@@ -246,14 +251,28 @@ pub async fn unlock(
         Ok(caller) => caller,
         Err(refusal) => return refusal,
     };
-    match admin
-        .elevation
-        .unlock(&caller.device, &body.password, Instant::now())
-        .await
-    {
+    let now = Instant::now();
+    let by_key = body.key.is_some();
+    let attempt = match (body.key, body.password) {
+        (Some(key), _) => {
+            admin
+                .elevation
+                .unlock_with_key(&caller.device, &key, now)
+                .await
+        }
+        (None, Some(password)) => admin.elevation.unlock(&caller.device, &password, now).await,
+        (None, None) => Err(UnlockRefusal::Malformed),
+    };
+    match attempt {
         Ok(left) => {
-            tracing::info!(kind = "admin_unlocked", device = %caller.device, "My Pond unlocked");
-            audit(&state, "admin.unlocked", &caller.device, vec![]).await;
+            tracing::info!(kind = "admin_unlocked", device = %caller.device, by_key, "My Pond unlocked");
+            audit(
+                &state,
+                "admin.unlocked",
+                &caller.device,
+                vec![("by_key", by_key.into())],
+            )
+            .await;
             announce_unlock(&state, &caller.device).await;
             Json(json!({ "unlocked": true, "expires_at": expires_at(left) })).into_response()
         }
@@ -264,13 +283,18 @@ pub async fn unlock(
                 reason = refusal.code(),
                 "My Pond unlock refused"
             );
-            if matches!(refusal, UnlockRefusal::Rejected) {
+            if matches!(
+                refusal,
+                UnlockRefusal::Rejected | UnlockRefusal::KeyRejected
+            ) {
                 audit(&state, "admin.unlock_refused", &caller.device, vec![]).await;
             }
             let code = refusal.code();
             match refusal {
                 UnlockRefusal::Malformed => refuse(StatusCode::BAD_REQUEST, code),
-                UnlockRefusal::Rejected => refuse(StatusCode::FORBIDDEN, code),
+                UnlockRefusal::Rejected | UnlockRefusal::KeyRejected => {
+                    refuse(StatusCode::FORBIDDEN, code)
+                }
                 UnlockRefusal::CardMissing => refuse(StatusCode::CONFLICT, code),
                 UnlockRefusal::Cooling(retry) => {
                     let secs = retry.as_secs_ceil();
@@ -305,6 +329,90 @@ pub async fn lock(
             StatusCode::NO_CONTENT.into_response()
         }
         Err(refusal) => refusal,
+    }
+}
+
+/// `POST /api/v1/admin/enroll`: an unlocked device's own key, shown once, replacing any older one.
+pub async fn enroll(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+) -> Response {
+    let admin = match admin_of(&state) {
+        Ok(admin) => admin,
+        Err(refusal) => return refusal,
+    };
+    let caller = match member_device(&state, principal.as_ref()).await {
+        Ok(caller) => caller,
+        Err(refusal) => return refusal,
+    };
+    match admin.elevation.enroll(&caller.device, Instant::now()).await {
+        Ok(key) => {
+            audit(&state, "admin.key_issued", &caller.device, vec![]).await;
+            Json(json!({ "key": key })).into_response()
+        }
+        Err(Locked::Unavailable(why)) => {
+            tracing::warn!(error = %why, "admin: could not issue a device key");
+            refuse(StatusCode::SERVICE_UNAVAILABLE, "admin_key_unavailable")
+        }
+        Err(_) => refuse(StatusCode::FORBIDDEN, "admin_locked"),
+    }
+}
+
+/// `DELETE /api/v1/admin/key`: this device forgets My Pond; its key is revoked and it is locked.
+pub async fn forget_key(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+) -> Response {
+    let admin = match admin_of(&state) {
+        Ok(admin) => admin,
+        Err(refusal) => return refusal,
+    };
+    let caller = match member_device(&state, principal.as_ref()).await {
+        Ok(caller) => caller,
+        Err(refusal) => return refusal,
+    };
+    match admin.elevation.revoke_device(&caller.device).await {
+        Ok(_) => {
+            audit(&state, "admin.key_revoked", &caller.device, vec![]).await;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "admin: could not revoke a device key");
+            refuse(StatusCode::SERVICE_UNAVAILABLE, "admin_key_unavailable")
+        }
+    }
+}
+
+/// The household's first activation user: owner setup completing on the device that claimed the
+/// pond, now a member's, earns that device its key without the card. The caller has checked that
+/// this request is the one that completed onboarding.
+pub async fn first_activation_key(
+    state: &AppState,
+    principal: Option<&Extension<Principal>>,
+) -> Option<String> {
+    let admin = state.pond_admin.clone()?;
+    let claims = state.setup_claims.as_ref()?;
+    let caller = member_device(state, principal).await.ok()?;
+    let claimant = claims.claimed_by().await.ok().flatten()?;
+    if claimant != caller.device {
+        return None;
+    }
+    match admin.elevation.issue_first_key(&caller.device).await {
+        Ok(key) => {
+            tracing::info!(kind = "admin_first_key", device = %caller.device, "the first activation user's phone holds My Pond's key");
+            audit(
+                state,
+                "admin.key_issued",
+                &caller.device,
+                vec![("first_activation", true.into())],
+            )
+            .await;
+            Some(key)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "admin: could not issue the first activation user's key");
+            None
+        }
     }
 }
 

@@ -300,7 +300,8 @@ enum Commands {
     /// `bash scripts/giap.sh admin-card`, which also seals a copy that only this machine's root
     /// can print again.
     AdminCard {
-        /// Replace the card in force; every phone unlocked with the old card locks
+        /// Replace the card in force; every phone unlocked with the old card locks, and every
+        /// phone's own key is revoked
         #[arg(long)]
         rotate: bool,
 
@@ -4354,7 +4355,12 @@ async fn run_server(
         ));
         Arc::new(pond_api::pond_admin::PondAdmin::new(
             pond_core::shared::services::pond_admin::PondAdminService::new(host, tasks),
-            pond_core::security::services::admin_elevation::AdminElevation::new(cards),
+            pond_core::security::services::admin_elevation::AdminElevation::new(
+                cards,
+                Arc::new(pond_infra::sqlite_admin_keys::SqliteAdminDeviceKeys::new(
+                    db.system.clone(),
+                )),
+            ),
         ))
     };
 
@@ -10820,12 +10826,31 @@ async fn run_admin_card(rotate: bool, json: bool, status: bool) -> Result<()> {
     }
     let password = store.issue(rotate)?;
     let card_id = store.current().await?.unwrap_or_default();
+    // A new card is the recovery: every phone's own key goes with the old one.
+    let keys_revoked = if rotate {
+        use pond_core::security::ports::admin_card::AdminDeviceKeys as _;
+        let db = pond_infra::db::Database::init(&default_data_dir()).await?;
+        pond_infra::sqlite_admin_keys::SqliteAdminDeviceKeys::new(db.system.clone())
+            .revoke_all()
+            .await?
+    } else {
+        0
+    };
     if json {
         println!(
             "{}",
-            serde_json::json!({ "password": password.grouped(), "card_id": card_id })
+            serde_json::json!({
+                "password": password.grouped(),
+                "card_id": card_id,
+                "keys_revoked": keys_revoked,
+            })
         );
         return Ok(());
+    }
+    if keys_revoked > 0 {
+        println!(
+            "Revoked {keys_revoked} phone key(s): each phone unlocks with this card once more."
+        );
     }
     println!(
         "Admin card for this Pond (administrator: {})\n\n    {}\n\n\

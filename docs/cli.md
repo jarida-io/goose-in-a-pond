@@ -385,7 +385,7 @@ the next unlock. Use `bash scripts/giap.sh admin-card`, which also seals a recov
 | Flag | Description |
 |---|---|
 | `--json` | Print `{"password","card_id"}` instead of the card text |
-| `--rotate` | Replace the card in force; every phone unlocked with the old one locks |
+| `--rotate` | Replace the card in force; every phone unlocked with the old one locks, and every phone's own key is revoked |
 | `--status` | Print only `present` or `missing`; never makes a card. Conflicts with the other flags |
 
 ### dashboard

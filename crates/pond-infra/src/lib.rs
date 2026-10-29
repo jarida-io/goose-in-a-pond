@@ -16,6 +16,7 @@ pub(crate) mod push_token_log;
 pub mod rule_redactor;
 pub mod secret_crypto;
 pub mod secret_migration;
+pub mod sqlite_admin_keys;
 pub mod sqlite_agent_prefill;
 pub mod sqlite_agent_suggestion;
 pub mod sqlite_context;

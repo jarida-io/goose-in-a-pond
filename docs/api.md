@@ -515,8 +515,10 @@ Contract and refusals: [pond administrator](architecture/pond-administrator.md#w
 | Method | Path | Auth | Also | Summary |
 |---|---|---|---|---|
 | GET | /admin/status | token +onb | member | Whether the pond has an admin card and this device is unlocked |
-| POST | /admin/unlock | token +onb | member | Unlock this device with the admin card; wrong cards are slowed |
+| POST | /admin/unlock | token +onb | member | Unlock this device with the admin card or its own key; wrong ones are slowed |
 | POST | /admin/lock | token +onb | member | End this device's unlock |
+| POST | /admin/enroll | token +onb | unlocked | This device's own key, shown once, replacing any older one |
+| DELETE | /admin/key | token +onb | member | Revoke this device's key and lock it |
 | GET | /admin/overview | token +onb | unlocked | Disk, storage per area, databases and record counts |
 | GET | /admin/files | token +onb | unlocked | One data-directory folder, largest first; credentials never listed |
 | DELETE | /admin/files | token +onb | unlocked | Delete a file or folder the pond does not need |
