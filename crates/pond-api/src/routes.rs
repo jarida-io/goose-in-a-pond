@@ -260,6 +260,8 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/rooms/{id}",
             get(get_room).put(rename_room).delete(delete_room),
         )
+        .route("/rooms/{id}/devices", get(get_room_devices))
+        .route("/rooms/{id}/guest-access", put(set_room_guest_access))
         // Private mesh: trust-circle peers + self invite.
         .route("/mesh/peers", get(list_mesh_peers).post(add_mesh_peer))
         .route(
@@ -4543,6 +4545,21 @@ fn pairing_material(
     })
 }
 
+fn device_json(device: &pond_core::user_data::ports::device_registry::Device) -> Value {
+    json!({
+        "id":            device.id,
+        "name":          device.name,
+        "device_type":   device.device_type,
+        "hostname":      device.hostname,
+        "ip_address":    device.ip_address,
+        "capabilities":  device.capabilities,
+        "registered_at": device.registered_at,
+        "last_seen":     device.last_seen,
+        "is_online":     device.is_online,
+        "room_id":       device.room_id,
+    })
+}
+
 async fn list_devices(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
@@ -4552,23 +4569,7 @@ async fn list_devices(
             Json(json!({"error": e.to_string()})),
         )
     })?;
-    let list: Vec<Value> = devices
-        .iter()
-        .map(|d| {
-            json!({
-                "id":            d.id,
-                "name":          d.name,
-                "device_type":   d.device_type,
-                "hostname":      d.hostname,
-                "ip_address":    d.ip_address,
-                "capabilities":  d.capabilities,
-                "registered_at": d.registered_at,
-                "last_seen":     d.last_seen,
-                "is_online":     d.is_online,
-                "room_id":       d.room_id,
-            })
-        })
-        .collect();
+    let list: Vec<Value> = devices.iter().map(device_json).collect();
     Ok(Json(json!({ "devices": list })))
 }
 
@@ -5123,33 +5124,31 @@ async fn update_device(
                 Json(json!({"error": e.to_string()})),
             )
         })?;
-    Ok(Json(json!({
-        "id":            device.id,
-        "name":          device.name,
-        "device_type":   device.device_type,
-        "hostname":      device.hostname,
-        "ip_address":    device.ip_address,
-        "capabilities":  device.capabilities,
-        "registered_at": device.registered_at,
-        "last_seen":     device.last_seen,
-        "is_online":     device.is_online,
-        "room_id":       device.room_id,
-    })))
+    Ok(Json(device_json(&device)))
 }
 
 // ── Rooms ────────────────────────────────────────────────────────────────
 
-fn room_json(room: &pond_core::user_data::ports::room_registry::Room) -> Value {
+fn room_json(
+    room: &pond_core::user_data::ports::room_registry::Room,
+    guest_accessible: bool,
+) -> Value {
     json!({
-        "id":         room.id,
-        "name":       room.name,
-        "created_at": room.created_at,
+        "id":               room.id,
+        "name":             room.name,
+        "created_at":       room.created_at,
+        "guest_accessible": guest_accessible,
     })
 }
 
 #[derive(serde::Deserialize)]
 struct RoomBody {
     name: String,
+}
+
+#[derive(serde::Deserialize)]
+struct SetGuestAccessBody {
+    accessible: bool,
 }
 
 /// `GET /api/v1/rooms` — every room the household has named.
@@ -5162,9 +5161,16 @@ async fn list_rooms(
             Json(json!({"error": e.to_string()})),
         )
     })?;
-    Ok(Json(
-        json!({ "rooms": rooms.iter().map(room_json).collect::<Vec<_>>() }),
-    ))
+    let accessible = state
+        .guest_room_access
+        .accessible_room_ids()
+        .await
+        .unwrap_or_default();
+    let list: Vec<Value> = rooms
+        .iter()
+        .map(|r| room_json(r, accessible.contains(&r.id)))
+        .collect();
+    Ok(Json(json!({ "rooms": list })))
 }
 
 /// `POST /api/v1/rooms` — name a new room, e.g. while placing a freshly-added device.
@@ -5191,7 +5197,7 @@ async fn create_room(
             Json(json!({"error": e.to_string()})),
         )
     })?;
-    Ok((StatusCode::CREATED, Json(room_json(&room))))
+    Ok((StatusCode::CREATED, Json(room_json(&room, false))))
 }
 
 /// `GET /api/v1/rooms/{id}`.
@@ -5215,7 +5221,48 @@ async fn get_room(
                 Json(json!({"error": "room_not_found"})),
             )
         })?;
-    Ok(Json(room_json(&room)))
+    let guest_accessible = state
+        .guest_room_access
+        .is_guest_accessible(&room.id)
+        .await
+        .unwrap_or(false);
+    Ok(Json(room_json(&room, guest_accessible)))
+}
+
+/// `GET /api/v1/rooms/{id}/devices` — the devices placed in this room, so a client doesn't have
+/// to fetch every device and filter client-side.
+async fn get_room_devices(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    state
+        .room_registry
+        .get_room(&id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "room_not_found"})),
+            )
+        })?;
+    let devices = state.device_registry.list_devices().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
+    let list: Vec<Value> = devices
+        .iter()
+        .filter(|d| d.room_id.as_deref() == Some(id.as_str()))
+        .map(device_json)
+        .collect();
+    Ok(Json(json!({ "devices": list })))
 }
 
 /// `PUT /api/v1/rooms/{id}` — rename a room.
@@ -5275,7 +5322,53 @@ async fn rename_room(
                 Json(json!({"error": "room_not_found"})),
             )
         })?;
-    Ok(Json(room_json(&room)))
+    let guest_accessible = state
+        .guest_room_access
+        .is_guest_accessible(&room.id)
+        .await
+        .unwrap_or(false);
+    Ok(Json(room_json(&room, guest_accessible)))
+}
+
+/// `PUT /api/v1/rooms/{id}/guest-access` — grant or revoke guest access to a room's devices.
+async fn set_room_guest_access(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Result<Json<SetGuestAccessBody>, JsonRejection>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Json(req) = body.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("Invalid request: {}", e)})),
+        )
+    })?;
+    let room = state
+        .room_registry
+        .get_room(&id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "room_not_found"})),
+            )
+        })?;
+    state
+        .guest_room_access
+        .set_guest_accessible(&id, req.accessible)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?;
+    Ok(Json(room_json(&room, req.accessible)))
 }
 
 /// `DELETE /api/v1/rooms/{id}` — refused while any device is still placed in this room.
@@ -11424,7 +11517,10 @@ async fn dispatch_tool_direct(
         )
     })?;
     let args = if args.is_null() { json!({}) } else { args };
-    match dispatcher.dispatch(qualified, args).await {
+    // This path carries no caller identity (see the allowlist refusal above); it is reached only
+    // through authenticated HTTP routes a guest's chat turn never calls directly.
+    let scope = pond_core::user_data::domain::profile::ProfileScope::Household;
+    match dispatcher.dispatch(qualified, args, &scope).await {
         Ok(result) => Ok(Json(json!({
             "tool": qualified,
             "success": result.success,

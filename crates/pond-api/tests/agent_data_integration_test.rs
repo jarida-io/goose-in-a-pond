@@ -89,6 +89,7 @@ impl pond_core::mcp::ports::tools::tool_dispatcher::ToolDispatcher for StubDispa
         &self,
         tool_name: &str,
         arguments: serde_json::Value,
+        _scope: &pond_core::user_data::domain::profile::ProfileScope,
     ) -> anyhow::Result<pond_core::mcp::ports::tools::tool_dispatcher::ToolCallResult> {
         Ok(
             pond_core::mcp::ports::tools::tool_dispatcher::ToolCallResult {
@@ -160,6 +161,7 @@ async fn make_app_full(
         profile_repo: Arc::new(SqliteProfileRepository::new(pool.clone())),
         device_registry: Arc::new(NoDevices),
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
+        guest_room_access: Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedding_provider: None,
@@ -457,6 +459,7 @@ async fn prompt_template_delete_system_returns_403() {
         profile_repo: Arc::new(MockProfileRepository::new()),
         device_registry: Arc::new(NoDevices),
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
+        guest_room_access: Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedding_provider: None,
@@ -1286,6 +1289,7 @@ async fn returns_501_when_repos_not_configured() {
         profile_repo: Arc::new(MockProfileRepository::new()),
         device_registry: Arc::new(NoDevices),
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
+        guest_room_access: Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedding_provider: None,

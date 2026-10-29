@@ -25,6 +25,7 @@ pub mod sqlite_device_registry;
 pub mod sqlite_draft;
 pub mod sqlite_event_log;
 pub mod sqlite_face_recognition;
+pub mod sqlite_guest_room_access;
 pub mod sqlite_handshake;
 pub mod sqlite_lane_run_log;
 pub mod sqlite_long_task;

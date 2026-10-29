@@ -8,7 +8,9 @@ use pond_core::models::ports::embedding::EmbeddingProvider;
 use pond_core::user_data::domain::settings::Settings;
 use pond_core::user_data::ports::device_control::DeviceControlPort;
 use pond_core::user_data::ports::device_registry::DeviceRegistry;
+use pond_core::user_data::ports::guest_room_access::GuestRoomAccess;
 use pond_core::user_data::ports::memory_repository::MemoryRepository;
+use pond_core::user_data::ports::room_registry::RoomRegistry;
 use pond_core::user_data::ports::scheduler::SchedulerPort;
 use pond_core::user_data::ports::settings::SettingsRepository;
 use pond_core::user_data::ports::skill::UserSkillRepository;
@@ -35,6 +37,8 @@ pub fn register_giap_extensions(
     weather: Option<Arc<dyn WeatherProvider>>,
     settings_repo: Arc<dyn SettingsRepository + Send + Sync>,
     device_registry: Arc<dyn DeviceRegistry + Send + Sync>,
+    room_registry: Arc<dyn RoomRegistry + Send + Sync>,
+    guest_room_access: Arc<dyn GuestRoomAccess + Send + Sync>,
     skill_repo: Arc<dyn UserSkillRepository + Send + Sync>,
     device_control: Arc<dyn DeviceControlPort + Send + Sync>,
     tool_caller: Option<Arc<dyn ToolCaller>>,
@@ -100,6 +104,8 @@ pub fn register_giap_extensions(
     if settings.ext_device_enabled {
         pond_mcp_server::init_device_deps(
             device_registry.clone(),
+            room_registry,
+            guest_room_access.clone(),
             settings_repo.clone(),
             skill_repo,
         );
@@ -107,7 +113,11 @@ pub fn register_giap_extensions(
         registered.push("giap-device".into());
 
         // The registry resolves natural references ("the light") to device ids.
-        pond_mcp_server::init_device_control_deps(device_control, device_registry);
+        pond_mcp_server::init_device_control_deps(
+            device_control,
+            device_registry,
+            guest_room_access,
+        );
         register_builtin_extension(
             "giap-device-control",
             pond_mcp_server::spawn_device_control_server,

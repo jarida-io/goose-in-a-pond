@@ -141,6 +141,7 @@ async fn make_app_inner(with_secrets: bool) -> Harness {
         profile_repo: profiles.clone(),
         device_registry: Arc::new(NoDevices),
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
+        guest_room_access: Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedding_provider: None,

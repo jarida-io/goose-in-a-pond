@@ -7,7 +7,9 @@ use pond_core::mcp::ports::tools::tool_dispatcher::{ToolCallResult, ToolDispatch
 use pond_core::models::ports::embedding::EmbeddingProvider;
 use pond_core::user_data::ports::device_control::DeviceControlPort;
 use pond_core::user_data::ports::device_registry::DeviceRegistry;
+use pond_core::user_data::ports::guest_room_access::GuestRoomAccess;
 use pond_core::user_data::ports::memory_repository::MemoryRepository;
+use pond_core::user_data::ports::room_registry::RoomRegistry;
 use pond_core::user_data::ports::scheduler::SchedulerPort;
 use pond_core::user_data::ports::settings::SettingsRepository;
 use pond_core::user_data::ports::skill::UserSkillRepository;
@@ -110,9 +112,11 @@ impl McpToolDispatcher {
         scheduler: Option<Arc<dyn SchedulerPort>>,
         settings_repo: Arc<dyn SettingsRepository>,
         device_registry: Arc<dyn DeviceRegistry>,
+        room_registry: Arc<dyn RoomRegistry>,
         skill_repo: Arc<dyn UserSkillRepository>,
         embedding_provider: Option<Arc<dyn EmbeddingProvider + Send + Sync>>,
         device_control: Arc<dyn DeviceControlPort>,
+        guest_room_access: Arc<dyn GuestRoomAccess>,
     ) -> Self {
         let http_client = crate::build_http_client();
 
@@ -121,9 +125,15 @@ impl McpToolDispatcher {
         let memory_server = MemoryMcpServer::new(memory_repo, embedding_provider);
         let schedule_server = scheduler.map(|s| ScheduleMcpServer::new(s, settings_repo.clone()));
         let system_server = SystemMcpServer::new();
-        let device_server =
-            DeviceMcpServer::new(device_registry.clone(), settings_repo.clone(), skill_repo);
-        let device_control_server = DeviceControlMcpServer::new(device_control, device_registry);
+        let device_server = DeviceMcpServer::new(
+            device_registry.clone(),
+            room_registry,
+            guest_room_access.clone(),
+            settings_repo.clone(),
+            skill_repo,
+        );
+        let device_control_server =
+            DeviceControlMcpServer::new(device_control, device_registry, guest_room_access);
         // rmcp mints a `Peer` only from a running service; the dep-free system server backs it.
         let (_client_stream, server_stream) = tokio::io::duplex(64);
         let running = rmcp::service::serve_directly(SystemMcpServer::new(), server_stream, None);
@@ -182,6 +192,7 @@ impl ToolDispatcher for McpToolDispatcher {
         &self,
         tool_name: &str,
         arguments: serde_json::Value,
+        scope: &pond_core::user_data::domain::profile::ProfileScope,
     ) -> Result<ToolCallResult> {
         let (server_prefix, bare_name) = parse_tool_name(tool_name)?;
 
@@ -209,7 +220,10 @@ impl ToolDispatcher for McpToolDispatcher {
             CallToolRequestParams::new(bare_name.to_string())
         };
 
-        let ctx = self.make_context();
+        let mut ctx = self.make_context();
+        // Carried via the type-keyed extensions bag so a server's `#[tool]` methods can read the
+        // caller's scope without widening rmcp's own `RequestContext` or every tool's signature.
+        ctx.extensions.insert(scope.clone());
         match server.server.call_tool_bridged(params, ctx).await {
             Ok(rmcp_result) => Ok(convert_rmcp_result(rmcp_result)),
             Err(e) => Ok(ToolCallResult {

@@ -1561,6 +1561,11 @@ async fn run_server(
     let room_registry: Arc<
         dyn pond_core::user_data::ports::room_registry::RoomRegistry + Send + Sync,
     > = Arc::new(SqliteRoomRegistry::new(db.system.clone()));
+    let guest_room_access: Arc<
+        dyn pond_core::user_data::ports::guest_room_access::GuestRoomAccess + Send + Sync,
+    > = Arc::new(pond_infra::sqlite_guest_room_access::SqliteGuestRoomAccess::new(
+        db.system.clone(),
+    ));
     // Deterministic, rule-based redactor (no model in the loop), shared by both chokepoints below.
     let redactor: Arc<dyn pond_core::security::ports::redactor::Redactor> =
         Arc::new(pond_infra::rule_redactor::RuleRedactor::new());
@@ -3211,9 +3216,11 @@ async fn run_server(
                     scheduler.clone(),
                     settings_repo.clone(),
                     device_registry.clone(),
+                    room_registry.clone(),
                     skill_repo.clone(),
                     embedding_provider.clone(),
                     device_control.clone(),
+                    guest_room_access.clone(),
                 ));
 
             let provider = Arc::new(
@@ -3263,9 +3270,11 @@ async fn run_server(
                     scheduler.clone(),
                     settings_repo.clone(),
                     device_registry.clone(),
+                    room_registry.clone(),
                     skill_repo.clone(),
                     embedding_provider.clone(),
                     device_control.clone(),
+                    guest_room_access.clone(),
                 );
                 let disp: Arc<dyn pond_core::mcp::ports::tools::tool_dispatcher::ToolDispatcher> =
                     Arc::new(dispatcher);
@@ -3308,6 +3317,8 @@ async fn run_server(
             &data_dir,
             weather.clone(),
             device_registry.clone(),
+            room_registry.clone(),
+            guest_room_access.clone(),
             scheduler.clone(),
             settings_repo.clone(),
             memory_repo.clone(),
@@ -3687,9 +3698,11 @@ async fn run_server(
         scheduler.clone(),
         settings_repo.clone(),
         device_registry.clone(),
+        room_registry.clone(),
         skill_repo.clone(),
         embedding_provider.clone(),
         device_control.clone(),
+        guest_room_access.clone(),
     )));
 
     // Chokepoint 2: attributes are redacted on the way in, and a finding raises sensitivity
@@ -4381,6 +4394,7 @@ async fn run_server(
         matter: matter_runtime.clone(),
         device_registry,
         room_registry,
+        guest_room_access,
         memory_repo,
         embedding_provider,
         // Same handle the repos write through and the sweep repairs; never construct a second one.
@@ -5529,6 +5543,14 @@ async fn run_chat(
     let device_registry_arc: Arc<
         dyn pond_core::user_data::ports::device_registry::DeviceRegistry + Send + Sync,
     > = Arc::new(SqliteDeviceRegistry::new(db.system.clone()));
+    let room_registry_arc: Arc<
+        dyn pond_core::user_data::ports::room_registry::RoomRegistry + Send + Sync,
+    > = Arc::new(SqliteRoomRegistry::new(db.system.clone()));
+    let guest_room_access_arc: Arc<
+        dyn pond_core::user_data::ports::guest_room_access::GuestRoomAccess + Send + Sync,
+    > = Arc::new(pond_infra::sqlite_guest_room_access::SqliteGuestRoomAccess::new(
+        db.system.clone(),
+    ));
 
     // Upsert so existing installs get updated built-ins; user templates are never touched.
     {
@@ -5587,6 +5609,8 @@ async fn run_chat(
             &data_dir,
             weather,
             device_registry_arc,
+            room_registry_arc,
+            guest_room_access_arc,
             None, // scheduler not used in voice mode
             settings_repo_arc,
             memory_repo,
@@ -9457,6 +9481,10 @@ async fn build_goose_backend(
     device_registry: Arc<
         dyn pond_core::user_data::ports::device_registry::DeviceRegistry + Send + Sync,
     >,
+    room_registry: Arc<dyn pond_core::user_data::ports::room_registry::RoomRegistry + Send + Sync>,
+    guest_room_access: Arc<
+        dyn pond_core::user_data::ports::guest_room_access::GuestRoomAccess + Send + Sync,
+    >,
     scheduler: Option<Arc<dyn pond_core::user_data::ports::scheduler::SchedulerPort>>,
     settings_repo: Arc<dyn pond_core::user_data::ports::settings::SettingsRepository + Send + Sync>,
     memory_repo: Arc<
@@ -9529,9 +9557,11 @@ async fn build_goose_backend(
             scheduler,
             settings_repo.clone(),
             device_registry.clone(),
+            room_registry.clone(),
             skill_repo.clone(),
             embedding_provider,
             device_control.clone(),
+            guest_room_access.clone(),
         );
 
         let dispatcher: Arc<dyn pond_core::mcp::ports::tools::tool_dispatcher::ToolDispatcher> =
@@ -9602,6 +9632,8 @@ async fn build_goose_backend(
         weather,
         settings_repo.clone(),
         device_registry.clone(),
+        room_registry.clone(),
+        guest_room_access.clone(),
         skill_repo.clone(),
         device_control,
         tool_caller.clone(),
@@ -10214,6 +10246,13 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
     let device_registry: Arc<
         dyn pond_core::user_data::ports::device_registry::DeviceRegistry + Send + Sync,
     > = Arc::new(SqliteDeviceRegistry::new(db.system.clone()));
+    let room_registry: Arc<dyn pond_core::user_data::ports::room_registry::RoomRegistry + Send + Sync> =
+        Arc::new(SqliteRoomRegistry::new(db.system.clone()));
+    let guest_room_access: Arc<
+        dyn pond_core::user_data::ports::guest_room_access::GuestRoomAccess + Send + Sync,
+    > = Arc::new(pond_infra::sqlite_guest_room_access::SqliteGuestRoomAccess::new(
+        db.system.clone(),
+    ));
     // CLI turns must budget history with the same real context window as dashboard turns.
     let cli_model_repo: Arc<dyn ModelRepository + Send + Sync> =
         Arc::new(SqliteModelRepository::new(db.system.clone()));
@@ -10268,6 +10307,8 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 &data_dir,
                 weather,
                 device_registry,
+                room_registry,
+                guest_room_access,
                 None,
                 settings_repo,
                 memory_repo,
@@ -10313,6 +10354,8 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 &data_dir,
                 weather,
                 device_registry,
+                room_registry,
+                guest_room_access,
                 None,
                 settings_repo,
                 memory_repo,
@@ -10386,6 +10429,8 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 &data_dir,
                 weather,
                 device_registry,
+                room_registry,
+                guest_room_access,
                 None,
                 settings_repo,
                 memory_repo,
