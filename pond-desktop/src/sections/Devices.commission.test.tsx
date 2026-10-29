@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
 import { Devices } from "./Devices";
 import { api } from "../api/PondApiClient";
+import { ConfirmProvider } from "../components/shared";
 import { ApiError, type MatterStatus } from "../api/types";
 
 vi.mock("../api/PondApiClient", () => ({
@@ -13,10 +14,23 @@ vi.mock("../api/PondApiClient", () => ({
     getMatterStatus: vi.fn(),
     updateSettings: vi.fn(),
     invokeTool: vi.fn(),
+    listRooms: vi.fn(),
+    createRoom: vi.fn(),
+    renameRoom: vi.fn(),
+    deleteRoom: vi.fn(),
+    setRoomGuestAccess: vi.fn(),
   },
 }));
 
 const mocked = (fn: unknown) => fn as ReturnType<typeof vi.fn>;
+
+function renderDevices() {
+  return render(
+    <ConfirmProvider>
+      <Devices />
+    </ConfirmProvider>,
+  );
+}
 
 /** A Matter runtime in the given state, as `GET /matter/status` reports it. */
 function matterStatus(state: MatterStatus["state"], error?: string): MatterStatus {
@@ -26,6 +40,7 @@ function matterStatus(state: MatterStatus["state"], error?: string): MatterStatu
 beforeEach(() => {
   vi.clearAllMocks();
   mocked(api.listDevices).mockResolvedValue([]);
+  mocked(api.listRooms).mockResolvedValue([]);
   // Commissioning needs a live controller, so that's the baseline; other states are set per test.
   mocked(api.getMatterStatus).mockResolvedValue(matterStatus("connected"));
   mocked(api.updateSettings).mockResolvedValue({});
@@ -34,7 +49,7 @@ afterEach(() => cleanup());
 
 /** Open the add-device modal, once the Matter state has settled. */
 async function openModal() {
-  render(<Devices />);
+  renderDevices();
   // The empty state and the header both offer it; take the header button.
   const buttons = await screen.findAllByText("Register device");
   await waitFor(() => expect(api.getMatterStatus).toHaveBeenCalled());
@@ -139,13 +154,13 @@ describe("Add device — Matter vs other", () => {
 describe("Matter section — turning the fabric on", () => {
   it("shows the runtime's state, not just the saved setting", async () => {
     mocked(api.getMatterStatus).mockResolvedValue(matterStatus("connecting"));
-    render(<Devices />);
+    renderDevices();
 
     expect((await screen.findByTestId("matter-state")).textContent).toBe("Starting…");
   });
 
   it("offers nothing to switch on, because there is nothing to switch on", async () => {
-    render(<Devices />);
+    renderDevices();
     await screen.findByTestId("matter-state");
 
     // The controller address is an operator setting, in Settings.
@@ -168,7 +183,7 @@ describe("Matter section — turning the fabric on", () => {
     mocked(api.getMatterStatus).mockResolvedValue(
       matterStatus("unreachable", "connection refused"),
     );
-    render(<Devices />);
+    renderDevices();
 
     expect((await screen.findByTestId("matter-state")).textContent).toBe(
       "Cannot reach controller",

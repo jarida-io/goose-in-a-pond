@@ -55,6 +55,7 @@ import {
   type PrefillReport,
   type PromptTemplate,
   type RecipeValidation,
+  type Room,
   type RetitleOneResult,
   type RetitleResult,
   type Schedule,
@@ -633,7 +634,7 @@ export class PondApiClient {
     device_type: string;
     hostname?: string;
     capabilities: string[];
-    room?: string;
+    room_id?: string;
   }): Promise<Device> {
     return this.post<Device>("/api/v1/devices", req);
   }
@@ -681,12 +682,36 @@ export class PondApiClient {
   /**
    * Save edits from the Devices "Configure" panel (name, hostname, room). With the host
    * credential, because another phone's row is only the host's or that phone's to change.
+   * `room_id: null` clears it (shows under "Unassigned"); omit the key to leave it as is.
    */
   updateDevice(
     id: string,
-    req: { name: string; hostname?: string; room?: string },
+    req: { name: string; hostname?: string; room_id?: string | null },
   ): Promise<Device> {
     return this.hostRequest<Device>("PUT", `/api/v1/devices/${encodeURIComponent(id)}`, req);
+  }
+
+  // ── Rooms ─────────────────────────────────────────────────
+
+  listRooms(): Promise<Room[]> {
+    return this.get<{ rooms: Room[] }>("/api/v1/rooms").then((r) => r.rooms ?? []);
+  }
+
+  createRoom(name: string): Promise<Room> {
+    return this.post<Room>("/api/v1/rooms", { name });
+  }
+
+  renameRoom(id: string, name: string): Promise<Room> {
+    return this.put<Room>(`/api/v1/rooms/${encodeURIComponent(id)}`, { name });
+  }
+
+  deleteRoom(id: string): Promise<void> {
+    return this.del(`/api/v1/rooms/${encodeURIComponent(id)}`);
+  }
+
+  /** Whether an unidentified guest voice may use devices in this room. */
+  setRoomGuestAccess(id: string, accessible: boolean): Promise<Room> {
+    return this.put<Room>(`/api/v1/rooms/${encodeURIComponent(id)}/guest-access`, { accessible });
   }
 
   // ── Connections ───────────────────────────────────────────

@@ -4,6 +4,7 @@ vi.mock("../../api/PondApiClient", () => ({
   api: {
     getSettings: vi.fn(),
     listDevices: vi.fn(),
+    listRooms: vi.fn().mockResolvedValue([]),
     listSchedules: vi.fn(),
     listRecipes: vi.fn().mockResolvedValue([]),
     getWeather: vi.fn().mockResolvedValue({ enabled: false }),
@@ -20,17 +21,27 @@ import { getHomeData, refreshHomeData, refreshWeather, refreshNowPlaying,
 const apiMock = api as unknown as {
   getSettings: ReturnType<typeof vi.fn>;
   listDevices: ReturnType<typeof vi.fn>;
+  listRooms: ReturnType<typeof vi.fn>;
   listSchedules: ReturnType<typeof vi.fn>;
   listRecipes: ReturnType<typeof vi.fn>;
   getWeather: ReturnType<typeof vi.fn>;
   getNowPlaying: ReturnType<typeof vi.fn>;
 };
 
+/** The rooms every `room_id` used by this file's device fixtures resolves against. */
+const TEST_ROOMS = [
+  { id: "room-living", name: "Living Room", created_at: "", guest_accessible: false },
+  { id: "room-outdoor", name: "Outdoor", created_at: "", guest_accessible: false },
+  { id: "room-hall", name: "Hall", created_at: "", guest_accessible: false },
+];
+
 describe("hubDataStore", () => {
   beforeEach(() => {
     __resetHubDataForTests();
     apiMock.getSettings.mockReset();
     apiMock.listDevices.mockReset();
+    apiMock.listRooms.mockReset();
+    apiMock.listRooms.mockResolvedValue(TEST_ROOMS);
     apiMock.listSchedules.mockReset();
     apiMock.listRecipes.mockReset();
     apiMock.listRecipes.mockResolvedValue([]);
@@ -70,9 +81,9 @@ describe("hubDataStore", () => {
   it("invents no on, locked or setpoint for a device that reported none", async () => {
     apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
     apiMock.listDevices.mockResolvedValue([
-      { id: "lr1", name: "Lamp", device_type: "light",      is_online: true, room: "Living Room" },
-      { id: "fd",  name: "Door", device_type: "lock",       is_online: true, room: "Outdoor" },
-      { id: "th",  name: "Nest", device_type: "thermostat", is_online: true, room: "Living Room" },
+      { id: "lr1", name: "Lamp", device_type: "light",      is_online: true, room_id: "room-living" },
+      { id: "fd",  name: "Door", device_type: "lock",       is_online: true, room_id: "room-outdoor" },
+      { id: "th",  name: "Nest", device_type: "thermostat", is_online: true, room_id: "room-living" },
     ]);
     apiMock.listSchedules.mockResolvedValue([]);
 
@@ -87,9 +98,9 @@ describe("hubDataStore", () => {
   it("does not let a category chip claim a state nothing reported", async () => {
     apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
     apiMock.listDevices.mockResolvedValue([
-      { id: "fd",  name: "Door", device_type: "lock",       is_online: true, room: "Outdoor" },
-      { id: "lr1", name: "Lamp", device_type: "light",      is_online: true, room: "Living Room" },
-      { id: "th",  name: "Nest", device_type: "thermostat", is_online: true, room: "Living Room" },
+      { id: "fd",  name: "Door", device_type: "lock",       is_online: true, room_id: "room-outdoor" },
+      { id: "lr1", name: "Lamp", device_type: "light",      is_online: true, room_id: "room-living" },
+      { id: "th",  name: "Nest", device_type: "thermostat", is_online: true, room_id: "room-living" },
     ]);
     apiMock.listSchedules.mockResolvedValue([]);
 
@@ -105,8 +116,8 @@ describe("hubDataStore", () => {
   it("will not say all locked when one lock stayed silent", async () => {
     apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
     apiMock.listDevices.mockResolvedValue([
-      { id: "fd", name: "Front", device_type: "lock", is_online: true, room: "Outdoor", metadata: { locked: true } },
-      { id: "bd", name: "Back",  device_type: "lock", is_online: true, room: "Outdoor" },
+      { id: "fd", name: "Front", device_type: "lock", is_online: true, room_id: "room-outdoor", metadata: { locked: true } },
+      { id: "bd", name: "Back",  device_type: "lock", is_online: true, room_id: "room-outdoor" },
     ]);
     apiMock.listSchedules.mockResolvedValue([]);
 
@@ -128,9 +139,9 @@ describe("hubDataStore", () => {
   it("carries a device's capabilities through untouched", async () => {
     apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
     apiMock.listDevices.mockResolvedValue([
-      { id: "lr1", name: "Lamp", device_type: "light", is_online: true, room: "Living Room",
+      { id: "lr1", name: "Lamp", device_type: "light", is_online: true, room_id: "room-living",
         capabilities: ["power", "brightness"] },
-      { id: "cs1", name: "Contact", device_type: "sensor", is_online: true, room: "Hall", capabilities: [] },
+      { id: "cs1", name: "Contact", device_type: "sensor", is_online: true, room_id: "room-hall", capabilities: [] },
     ]);
     apiMock.listSchedules.mockResolvedValue([]);
 
@@ -152,9 +163,9 @@ describe("hubDataStore", () => {
   it("derives categories and rooms from real devices", async () => {
     apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
     apiMock.listDevices.mockResolvedValue([
-      { id: "lr1", name: "Lamp", device_type: "light",      is_online: true, room: "Living Room", metadata: { on: true } },
-      { id: "fd",  name: "Door", device_type: "lock",       is_online: true, room: "Outdoor",     metadata: { locked: true } },
-      { id: "th",  name: "Nest", device_type: "thermostat", is_online: true, room: "Living Room", metadata: { target: 72 } },
+      { id: "lr1", name: "Lamp", device_type: "light",      is_online: true, room_id: "room-living", metadata: { on: true } },
+      { id: "fd",  name: "Door", device_type: "lock",       is_online: true, room_id: "room-outdoor",     metadata: { locked: true } },
+      { id: "th",  name: "Nest", device_type: "thermostat", is_online: true, room_id: "room-living", metadata: { target: 72 } },
       { id: "cm",  name: "Cam",  device_type: "camera",     is_online: true, last_seen: "2026-06-01T13:48:00Z" },
     ]);
     apiMock.listSchedules.mockResolvedValue([]);
@@ -461,7 +472,7 @@ describe("hubDataStore", () => {
   it("derives scenes from schedules", async () => {
     apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
     apiMock.listDevices.mockResolvedValue([
-      { id: "lr1", name: "Lamp", device_type: "light", is_online: true, room: "Living Room" },
+      { id: "lr1", name: "Lamp", device_type: "light", is_online: true, room_id: "room-living" },
     ]);
     apiMock.listSchedules.mockResolvedValue([
       { id: "s1", name: "morning_routine", label: "Wake Up", cron: "0 7 * * *", prompt: "", enabled: true },

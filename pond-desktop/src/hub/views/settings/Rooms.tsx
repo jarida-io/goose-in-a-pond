@@ -23,19 +23,19 @@ function roomIconKey(name: string): keyof typeof HP_PATHS | null {
 
 // ─── Offline mock fallback ─────────────────────────────────────
 const MOCK_DEVICES: Device[] = [
-  { id: "mock-1", name: "Jetson Orin Nano",   device_type: "host",   room: "Office",  is_online: true,  last_seen: new Date().toISOString() },
-  { id: "mock-2", name: "Motion Sensor A",    device_type: "sensor", room: "Office",  is_online: true,  last_seen: new Date().toISOString() },
-  { id: "mock-3", name: "Front Door Camera",  device_type: "sensor", room: "Outdoor", is_online: false, last_seen: new Date(Date.now() - 3_600_000).toISOString() },
-  { id: "mock-4", name: "Backyard Sensor",    device_type: "sensor", room: "Outdoor", is_online: true,  last_seen: new Date().toISOString() },
-  { id: "mock-5", name: "Hub Controller",     device_type: "host",   room: "Living Room", is_online: true, last_seen: new Date().toISOString() },
-  { id: "mock-6", name: "Climate Sensor",     device_type: "sensor", room: "Living Room", is_online: false, last_seen: new Date(Date.now() - 7_200_000).toISOString() },
+  { id: "mock-1", name: "Jetson Orin Nano",   device_type: "host",   room_id: "Office",  is_online: true,  last_seen: new Date().toISOString() },
+  { id: "mock-2", name: "Motion Sensor A",    device_type: "sensor", room_id: "Office",  is_online: true,  last_seen: new Date().toISOString() },
+  { id: "mock-3", name: "Front Door Camera",  device_type: "sensor", room_id: "Outdoor", is_online: false, last_seen: new Date(Date.now() - 3_600_000).toISOString() },
+  { id: "mock-4", name: "Backyard Sensor",    device_type: "sensor", room_id: "Outdoor", is_online: true,  last_seen: new Date().toISOString() },
+  { id: "mock-5", name: "Hub Controller",     device_type: "host",   room_id: "Living Room", is_online: true, last_seen: new Date().toISOString() },
+  { id: "mock-6", name: "Climate Sensor",     device_type: "sensor", room_id: "Living Room", is_online: false, last_seen: new Date(Date.now() - 7_200_000).toISOString() },
 ];
 
 // ─── Group devices by room ─────────────────────────────────────
 function groupByRoom(devices: Device[]): Map<string, Device[]> {
   const map = new Map<string, Device[]>();
   for (const d of devices) {
-    const room = d.room ?? "Unassigned";
+    const room = d.room_id ?? "Unassigned";
     const list = map.get(room) ?? [];
     list.push(d);
     map.set(room, list);

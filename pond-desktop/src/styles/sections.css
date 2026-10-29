@@ -2293,6 +2293,28 @@
 @media (max-width: 1100px) { .devices-grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 680px)  { .devices-grid { grid-template-columns: 1fr; } }
 
+/* room section: one per named room, plus a final "Unassigned" bucket */
+.room-section { display: flex; flex-direction: column; gap: 14px; margin-bottom: 28px; }
+.room-section__head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.room-section__name {
+  font-family: var(--font-display); font-weight: 800; font-size: 16px;
+  color: var(--color-text); margin: 0;
+}
+.room-section__count {
+  font-size: 12px; font-weight: 600; color: var(--color-text-secondary);
+  background: var(--color-accent-subtle); padding: 3px 10px; border-radius: 999px;
+}
+.room-section__spacer { flex: 1; }
+.room-section__guest {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; font-weight: 600; color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+.room-section__actions { display: flex; gap: 2px; }
+@media (max-width: 680px) {
+  .room-section__head { gap: 8px; }
+}
+
 /* card base */
 .device-card {
   background: var(--color-surface);

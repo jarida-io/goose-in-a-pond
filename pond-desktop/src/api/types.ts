@@ -364,7 +364,8 @@ export interface Device {
   name: string;
   device_type?: string;
   hostname?: string;
-  room?: string;
+  /** The room this device is placed in; `null`/absent shows under "Unassigned". */
+  room_id?: string | null;
   is_online: boolean;
   last_seen?: string;
   /** `set_device_state` verbs it accepts (`power`, `brightness`, …); a contact sensor has none. */
@@ -372,6 +373,15 @@ export interface Device {
   /** The address the server knows, when it knows one. */
   ip_address?: string;
   metadata?: Record<string, unknown>;
+}
+
+// ── Rooms ─────────────────────────────────────────────────────
+export interface Room {
+  id: string;
+  name: string;
+  created_at: string;
+  /** Whether an unidentified guest voice may use devices in this room. */
+  guest_accessible: boolean;
 }
 
 // ── Mesh ──────────────────────────────────────────────────────

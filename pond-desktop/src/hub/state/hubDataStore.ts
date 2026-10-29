@@ -93,7 +93,7 @@ function inferKind(d: Device): DeviceKind | "camera" {
  * A device with only the state something reported. `GET /api/v1/devices` sends none, so fields
  * stay undefined ("not reported", never off/locked); live state is `HomeControlsCard`'s MCP read.
  */
-function deviceFromApi(d: Device, kind: DeviceKind): DeviceData {
+function deviceFromApi(d: Device, kind: DeviceKind, roomNameById: Map<string, string>): DeviceData {
   const meta = d.metadata ?? {};
   const on = typeof meta.on === "boolean" ? meta.on : undefined;
   const locked = typeof meta.locked === "boolean" ? meta.locked : undefined;
@@ -108,7 +108,7 @@ function deviceFromApi(d: Device, kind: DeviceKind): DeviceData {
     locked,
     target,
     value,
-    room: d.room ?? "Home",
+    room: (d.room_id && roomNameById.get(d.room_id)) || "Home",
     // Home offers a switch only to devices whose capabilities allow one.
     capabilities: d.capabilities,
   };
@@ -414,9 +414,10 @@ async function load() {
   if (state.loading) return;
   state.loading = true;
   try {
-    const [settings, devices, schedules, recipes, weather, nowPlaying] = await Promise.allSettled([
+    const [settings, devices, rooms, schedules, recipes, weather, nowPlaying] = await Promise.allSettled([
       api.getSettings(),
       api.listDevices(),
+      api.listRooms(),
       api.listSchedules(),
       api.listRecipes(),
       api.getWeather(),
@@ -425,6 +426,9 @@ async function load() {
 
     const sOK = settings.status === "fulfilled" ? (settings.value as Settings) : null;
     const dOK = devices.status === "fulfilled" ? devices.value : [];
+    const roomNameById = new Map(
+      (rooms.status === "fulfilled" ? rooms.value : []).map((r) => [r.id, r.name] as const),
+    );
     const schOK = schedules.status === "fulfilled" ? schedules.value : [];
     const rcOK = recipes.status === "fulfilled" ? recipes.value : [];
     // A rejected fetch is "unreachable", not `{enabled:false}`, and keeps the last reading.
@@ -439,7 +443,7 @@ async function load() {
     for (const d of dOK) {
       const k = inferKind(d);
       if (k === "camera") cams.push(cameraFromApi(d));
-      else ctlDevices.push(deviceFromApi(d, k));
+      else ctlDevices.push(deviceFromApi(d, k, roomNameById));
     }
 
     const userName = (sOK?.user_name && sOK.user_name.trim()) || EMPTY_HOME.user;

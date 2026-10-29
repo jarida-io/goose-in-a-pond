@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, cleanup, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, cleanup, fireEvent, within } from "@testing-library/react";
 import { Devices } from "./Devices";
 import { powerStateOf } from "./devicePower";
 import { api } from "../api/PondApiClient";
-import type { Device } from "../api/types";
+import { ConfirmProvider } from "../components/shared";
+import type { Device, Room } from "../api/types";
 
 // ── Mock PondApiClient ────────────────────────────────────────────────────────
 
@@ -18,8 +19,21 @@ vi.mock("../api/PondApiClient", () => ({
     updateDevice: vi.fn(),
     getMatterStatus: vi.fn(),
     updateSettings: vi.fn(),
+    listRooms: vi.fn(),
+    createRoom: vi.fn(),
+    renameRoom: vi.fn(),
+    deleteRoom: vi.fn(),
+    setRoomGuestAccess: vi.fn(),
   },
 }));
+
+function renderDevices() {
+  return render(
+    <ConfirmProvider>
+      <Devices />
+    </ConfirmProvider>,
+  );
+}
 
 // A Matter light as the bridge registers it.
 const matterLight: Device = {
@@ -48,6 +62,13 @@ const matterLock: Device = {
   capabilities: ["locked"],
 };
 
+const livingRoom: Room = {
+  id: "room-living",
+  name: "Living Room",
+  created_at: new Date().toISOString(),
+  guest_accessible: false,
+};
+
 /** `get_device_state`'s answer, in the shape `state_line` writes it. */
 function stateSaying(deviceId: string, power: "on" | "off") {
   return { tool: "get_device_state", success: true, content: `${deviceId} is:\n    power: ${power}` };
@@ -64,6 +85,8 @@ beforeEach(() => {
     state: "connected",
   });
   mocked(api.updateSettings).mockResolvedValue({});
+  // Most tests don't care about rooms; those that do override this.
+  mocked(api.listRooms).mockResolvedValue([]);
 });
 afterEach(() => cleanup());
 
@@ -71,7 +94,7 @@ describe("Devices section — Matter devices", () => {
   it("shows a commissioned Matter device in the list", async () => {
     (api.listDevices as ReturnType<typeof vi.fn>).mockResolvedValue([matterLight]);
 
-    render(<Devices />);
+    renderDevices();
 
     expect(await screen.findByText("Living Room Light")).toBeTruthy();
     expect(screen.getByText("light")).toBeTruthy();
@@ -83,7 +106,7 @@ describe("Devices section — Matter devices", () => {
       matterLock,
     ]);
 
-    const { container } = render(<Devices />);
+    const { container } = renderDevices();
     await screen.findByText("Living Room Light");
 
     // lucide-react renders `<svg class="lucide lucide-<name>">`.
@@ -96,7 +119,7 @@ describe("Devices section — Matter devices", () => {
       { id: "matter-6", name: "Generic Switch", device_type: "switch", is_online: true },
     ]);
 
-    const { container } = render(<Devices />);
+    const { container } = renderDevices();
     await screen.findByText("Generic Switch");
 
     expect(container.querySelector(".lucide-toggle-left")).toBeTruthy();
@@ -108,7 +131,7 @@ describe("Devices section — Matter devices", () => {
       { id: "matter-90", name: "Living Room Hub", device_type: "bridge", is_online: true },
     ]);
 
-    const { container } = render(<Devices />);
+    const { container } = renderDevices();
     await screen.findByText("Living Room Hub");
 
     expect(container.querySelector(".lucide-router")).toBeTruthy();
@@ -120,7 +143,7 @@ describe("Devices section — Matter devices", () => {
       { id: "matter-60", name: "Garden Valve", device_type: "valve", is_online: true },
     ]);
 
-    const { container } = render(<Devices />);
+    const { container } = renderDevices();
     await screen.findByText("Garden Valve");
 
     expect(container.querySelector(".lucide-droplet")).toBeTruthy();
@@ -132,7 +155,7 @@ describe("Devices section — Matter devices", () => {
       { id: "phone-1", name: "Emmanuel's Phone", device_type: "gotg", is_online: true },
     ]);
 
-    const { container } = render(<Devices />);
+    const { container } = renderDevices();
     await screen.findByText("Emmanuel's Phone");
 
     expect(container.querySelector(".lucide-smartphone")).toBeTruthy();
@@ -145,7 +168,7 @@ describe("Devices section — power button", () => {
     mocked(api.listDevices).mockResolvedValue([matterLight]);
     mocked(api.invokeTool).mockResolvedValue(stateSaying("matter-2", "off"));
 
-    render(<Devices />);
+    renderDevices();
     await screen.findByText("Living Room Light");
 
     await waitFor(() => expect(screen.getByText("Turn on")).toBeTruthy());
@@ -155,7 +178,7 @@ describe("Devices section — power button", () => {
     mocked(api.listDevices).mockResolvedValue([matterLight]);
     mocked(api.invokeTool).mockResolvedValue(stateSaying("matter-2", "on"));
 
-    render(<Devices />);
+    renderDevices();
     await screen.findByText("Living Room Light");
     await waitFor(() => expect(screen.getByText("Turn off")).toBeTruthy());
 
@@ -181,7 +204,7 @@ describe("Devices section — power button", () => {
   it("offers no power button to a device that cannot be switched", async () => {
     mocked(api.listDevices).mockResolvedValue([contactSensor]);
 
-    render(<Devices />);
+    renderDevices();
     await screen.findByText("Contact Sensor");
 
     expect(screen.queryByText("Turn on")).toBeNull();
@@ -195,7 +218,7 @@ describe("Devices section — power button", () => {
     mocked(api.listDevices).mockResolvedValue([offlineLight]);
     mocked(api.markDeviceOnline).mockResolvedValue(undefined);
 
-    render(<Devices />);
+    renderDevices();
     await screen.findByText("Living Room Light");
     fireEvent.click(screen.getByText("Configure"));
 
@@ -216,10 +239,15 @@ describe("power state parsing", () => {
 
 describe("Devices section — Configure modal", () => {
   it("opens editable, pre-filled with the device's current name/hostname/room", async () => {
-    const withHostname: Device = { ...matterLight, hostname: "light.local", room: "Living Room" };
-    (api.listDevices as ReturnType<typeof vi.fn>).mockResolvedValue([withHostname]);
+    const withHostname: Device = {
+      ...matterLight,
+      hostname: "light.local",
+      room_id: livingRoom.id,
+    };
+    mocked(api.listDevices).mockResolvedValue([withHostname]);
+    mocked(api.listRooms).mockResolvedValue([livingRoom]);
 
-    render(<Devices />);
+    renderDevices();
     await screen.findByText("Living Room Light");
 
     fireEvent.click(screen.getByText("Configure"));
@@ -227,26 +255,30 @@ describe("Devices section — Configure modal", () => {
     const nameInput = await screen.findByDisplayValue("Living Room Light");
     expect(nameInput.tagName).toBe("INPUT");
     expect(screen.getByDisplayValue("light.local")).toBeTruthy();
-    expect(screen.getByDisplayValue("Living Room")).toBeTruthy();
+    // The room picker is a <select>, pre-selected to the device's current room.
+    const roomSelect = screen.getByDisplayValue("Living Room") as HTMLSelectElement;
+    expect(roomSelect.tagName).toBe("SELECT");
   });
 
-  it("saving edited fields calls updateDevice with the new values", async () => {
-    (api.listDevices as ReturnType<typeof vi.fn>).mockResolvedValue([matterLight]);
-    (api.updateDevice as ReturnType<typeof vi.fn>).mockResolvedValue({
+  it("saving edited fields calls updateDevice with the new room_id", async () => {
+    const kitchen: Room = { ...livingRoom, id: "room-kitchen", name: "Kitchen" };
+    mocked(api.listDevices).mockResolvedValue([matterLight]);
+    mocked(api.listRooms).mockResolvedValue([livingRoom, kitchen]);
+    mocked(api.updateDevice).mockResolvedValue({
       ...matterLight,
       name: "Renamed Light",
-      room: "Kitchen",
+      room_id: kitchen.id,
     });
 
-    render(<Devices />);
+    renderDevices();
     await screen.findByText("Living Room Light");
     fireEvent.click(screen.getByText("Configure"));
 
     const nameInput = await screen.findByDisplayValue("Living Room Light");
     fireEvent.change(nameInput, { target: { value: "Renamed Light" } });
 
-    const roomInput = screen.getByPlaceholderText("Living Room");
-    fireEvent.change(roomInput, { target: { value: "Kitchen" } });
+    const roomSelect = screen.getByDisplayValue("Unassigned") as HTMLSelectElement;
+    fireEvent.change(roomSelect, { target: { value: kitchen.id } });
 
     fireEvent.click(screen.getByText("Save"));
 
@@ -254,8 +286,30 @@ describe("Devices section — Configure modal", () => {
       expect(api.updateDevice).toHaveBeenCalledWith("matter-2", {
         name: "Renamed Light",
         hostname: undefined,
-        room: "Kitchen",
+        room_id: kitchen.id,
       }),
+    );
+  });
+
+  it("clearing the room picker back to Unassigned sends room_id: null", async () => {
+    const assigned: Device = { ...matterLight, room_id: livingRoom.id };
+    mocked(api.listDevices).mockResolvedValue([assigned]);
+    mocked(api.listRooms).mockResolvedValue([livingRoom]);
+    mocked(api.updateDevice).mockResolvedValue({ ...assigned, room_id: null });
+
+    renderDevices();
+    await screen.findByText("Living Room Light");
+    fireEvent.click(screen.getByText("Configure"));
+
+    const roomSelect = await screen.findByDisplayValue("Living Room") as HTMLSelectElement;
+    fireEvent.change(roomSelect, { target: { value: "" } });
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() =>
+      expect(api.updateDevice).toHaveBeenCalledWith(
+        "matter-2",
+        expect.objectContaining({ room_id: null }),
+      ),
     );
   });
 
@@ -274,10 +328,89 @@ describe("Devices section — Configure modal", () => {
     ]);
     mocked(api.getMatterStatus).mockResolvedValue({ enabled: true, state: "connected" });
 
-    render(<Devices />);
+    renderDevices();
 
     await waitFor(() => expect(screen.getByText("Living Room Light")).toBeTruthy());
     expect(screen.getByText("now")).toBeTruthy();
     expect(screen.getByText("3h ago")).toBeTruthy();
+  });
+});
+
+describe("Devices section — rooms", () => {
+  it("groups devices under their room, and unassigned devices under 'Unassigned'", async () => {
+    const kitchen: Room = { ...livingRoom, id: "room-kitchen", name: "Kitchen" };
+    mocked(api.listRooms).mockResolvedValue([livingRoom, kitchen]);
+    mocked(api.listDevices).mockResolvedValue([
+      { ...matterLight, room_id: livingRoom.id },
+      { ...contactSensor, room_id: null },
+    ]);
+
+    renderDevices();
+
+    expect(await screen.findByText("Living Room")).toBeTruthy();
+    expect(screen.getByText("Kitchen")).toBeTruthy();
+    expect(screen.getByText("Unassigned")).toBeTruthy();
+    // Kitchen has no devices placed in it.
+    expect(screen.getByText("No devices in this room yet.")).toBeTruthy();
+  });
+
+  it("with no named rooms, every device falls under a single Unassigned section", async () => {
+    mocked(api.listRooms).mockResolvedValue([]);
+    mocked(api.listDevices).mockResolvedValue([matterLight]);
+
+    renderDevices();
+
+    expect(await screen.findByText("Living Room Light")).toBeTruthy();
+    expect(screen.getByText("Unassigned")).toBeTruthy();
+  });
+
+  it("creating a room calls createRoom and reloads", async () => {
+    mocked(api.listDevices).mockResolvedValue([]);
+    mocked(api.createRoom).mockResolvedValue({ ...livingRoom, id: "room-new", name: "Office" });
+
+    renderDevices();
+    await waitFor(() => expect(api.listRooms).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByText("New room"));
+    const nameInput = await screen.findByPlaceholderText("Kitchen");
+    fireEvent.change(nameInput, { target: { value: "Office" } });
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => expect(api.createRoom).toHaveBeenCalledWith("Office"));
+  });
+
+  it("toggling guest access calls setRoomGuestAccess, and reverts on failure", async () => {
+    mocked(api.listRooms).mockResolvedValue([livingRoom]);
+    mocked(api.listDevices).mockResolvedValue([]);
+    mocked(api.setRoomGuestAccess).mockRejectedValue(new Error("offline"));
+
+    renderDevices();
+    await screen.findByText("Living Room");
+
+    const toggle = screen.getByRole("switch", {
+      name: /let a guest use devices in living room/i,
+    }) as HTMLInputElement;
+    fireEvent.click(toggle);
+
+    await waitFor(() =>
+      expect(api.setRoomGuestAccess).toHaveBeenCalledWith(livingRoom.id, true),
+    );
+    // Reverted: the call failed, so the switch should read as it did before the click.
+    await waitFor(() => expect(toggle.checked).toBe(false));
+  });
+
+  it("deleting a room asks for confirmation, then calls deleteRoom", async () => {
+    mocked(api.listRooms).mockResolvedValue([livingRoom]);
+    mocked(api.listDevices).mockResolvedValue([]);
+    mocked(api.deleteRoom).mockResolvedValue(undefined);
+
+    renderDevices();
+    await screen.findByText("Living Room");
+
+    fireEvent.click(screen.getByText("Delete"));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(api.deleteRoom).toHaveBeenCalledWith(livingRoom.id));
   });
 });
