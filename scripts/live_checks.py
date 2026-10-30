@@ -1420,6 +1420,47 @@ def section_policy_telemetry():
     )
 
 
+# ── The household's notification history ──────────────────────────────────────
+
+def section_notification_history(label="the notice history", after_pairing=False):
+    """The dashboard's notification centre reads `GET /notifications/history`.
+
+    Under POND_DEV_ALLOW_LOOPBACK the caller is `Principal::loopback()`, which names no device,
+    so the history must refuse it rather than serve an unscoped household list (a member's
+    notices included). The scoped, authorised read is asserted with real paired tokens and the
+    bypass off, in `remote_auth_checks.py`. Here: the route is registered on the real binary,
+    its migration applied to a database on disk, and, on the restart pass (after
+    `setup_code_checks.py pairing` claimed this pond), that pairing's notice survived the restart.
+    """
+    print("\n=== %s ===" % label)
+    code, body = call("GET", "/api/v1/notifications/history")
+    expect(
+        "%s refuses a caller with no device" % label,
+        code,
+        403,
+        body,
+        ("says why", isinstance(body, dict) and "paired device" in body.get("error", "")),
+    )
+    code, body = call("POST", "/api/v1/notifications/history/read", {"ids": []})
+    expect("%s mark-read refuses a caller with no device" % label, code, 403, body)
+
+    con = db()
+    try:
+        applied = con.execute(
+            "SELECT success FROM _sqlx_migrations WHERE description = 'notification history'"
+        ).fetchone()
+        rows = con.execute("SELECT COUNT(*) FROM notification_history").fetchone()[0]
+    finally:
+        con.close()
+    check("%s: its migration applied" % label, applied == (1,), str(applied))
+    if after_pairing:
+        check(
+            "%s: the pairing that claimed this pond is still recorded" % label,
+            rows >= 1,
+            "%s rows" % rows,
+        )
+
+
 # ── The batch memory-extraction engine ───────────────────────────────────────
 
 
@@ -2089,6 +2130,7 @@ def main():
         section_picture_support_after_restart()
         section_memory_vectors_after_restart()
         section_vision_after_restart()
+        section_notification_history("the notice history after a restart", after_pairing=True)
     else:
         section_schema()
         jerry, liz = section_identity()
@@ -2110,6 +2152,7 @@ def main():
         section_inference_lane()
         section_composed_suggestions()
         section_reminders_surface()
+        section_notification_history()
         section_vision()
         # Last: it moves the chat model to a local one for a moment, and puts it back.
         section_picture_support()

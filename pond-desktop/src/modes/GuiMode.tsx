@@ -6,6 +6,7 @@ import { Hub } from "../hub/Hub";
 import { HubDrawer, type DrawerNav } from "../hub/HubDrawer";
 import { ShellBar } from "../hub/ShellBar";
 import { HubOverlay } from "../hub/overlays/HubOverlay";
+import { centreUnreadCount } from "../state/householdNotices";
 
 import { Dashboard } from "../sections/Dashboard";
 import { Chat } from "../sections/Chat";
@@ -72,7 +73,7 @@ export function GuiMode() {
         <ShellBar
           onMenu={() => setMenuOpen(true)}
           onBell={() => dispatch({ type: "SET_SECTION", payload: "notifications" })}
-          unread={state.unreadRunCount}
+          unread={centreUnreadCount(state.scheduleRuns, state.householdNotices)}
         />
         <main className="app-content">
           <SectionContent section={state.section} />

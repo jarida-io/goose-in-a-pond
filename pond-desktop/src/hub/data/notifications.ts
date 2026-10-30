@@ -1,14 +1,21 @@
-// ─── Notification center — type defs + mock data ─────────────────────────────
-// Only schedule debriefs are live (Notifications.tsx); other categories are mock data for now.
+// ─── Notification center — type defs ──────────────────────────────────────────
+// Two kinds of card: a schedule or routine run (Notifications.tsx builds them from scheduleRuns),
+// and a household notice from the Pond, styled by its own category.
 
 import type { ScheduleRunNotification } from "../../api/types";
 
+/** `schedule` and `routine` are run cards; the rest are a household notice's own category. */
 export type NotificationCategory =
   | "schedule"
-  | "security"
-  | "camera"
   | "routine"
-  | "battery";
+  | "info"
+  | "alert"
+  | "action_required";
+
+/** A household notice's category as the centre styles it; an unknown one reads as `info`. */
+export function noticeCategory(category: string): NotificationCategory {
+  return category === "alert" || category === "action_required" ? category : "info";
+}
 
 export type NotificationAction = {
   label: string;
@@ -19,6 +26,8 @@ export type NotificationAction = {
 
 export interface Notification {
   id: string;
+  /** Whether a run card or a household notice, for marking it read. */
+  source: "run" | "notice";
   category: NotificationCategory;
   title: string;
   body: string;
@@ -35,11 +44,11 @@ export interface NotificationGroup {
 
 // ─── Severity colour map ──────────────────────────────────────────────────────
 export const CATEGORY_COLOR: Record<NotificationCategory, { fg: string; bg: string }> = {
-  schedule: { fg: "#7C3AED", bg: "#EDE9FE" },
-  security: { fg: "#DC2626", bg: "#FEE2E2" },
-  camera:   { fg: "#0EA5E9", bg: "#E0F2FE" },
-  routine:  { fg: "#0D9488", bg: "#CCFBF1" },
-  battery:  { fg: "#D97706", bg: "#FEF3C7" },
+  schedule:        { fg: "#7C3AED", bg: "#EDE9FE" },
+  routine:         { fg: "#0D9488", bg: "#CCFBF1" },
+  info:            { fg: "#0EA5E9", bg: "#E0F2FE" },
+  alert:           { fg: "#DC2626", bg: "#FEE2E2" },
+  action_required: { fg: "#D97706", bg: "#FEF3C7" },
 };
 
 // ─── Grouping helper ──────────────────────────────────────────────────────────

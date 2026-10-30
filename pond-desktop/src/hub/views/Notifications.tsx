@@ -1,10 +1,15 @@
 import { useState, useCallback, useMemo } from "react";
-import { Bell, Calendar, Shield, Camera, Sparkles, BatteryLow } from "lucide-react";
-import { useAppState } from "../../state/useAppContext";
-import type { ScheduleRunNotification } from "../../api/types";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
+import { Bell, BellRing, Calendar, Info, Sparkles, TriangleAlert } from "lucide-react";
+import { useAppDispatch, useAppState } from "../../state/useAppContext";
+import { api } from "../../api/PondApiClient";
+import type { HouseholdNotice, ScheduleRunNotification } from "../../api/types";
+import { listedNotices, openSection } from "../../state/householdNotices";
 import {
   CATEGORY_COLOR,
   groupNotifications,
+  noticeCategory,
   relativeTime,
 } from "../data/notifications";
 import type {
@@ -16,12 +21,15 @@ import "./notifications.css";
 
 // ─── Category icon map ────────────────────────────────────────────────────────
 const CATEGORY_ICON: Record<NotificationCategory, React.ReactNode> = {
-  schedule: <Calendar size={20} strokeWidth={2} />,
-  security: <Shield size={20} strokeWidth={2} />,
-  camera:   <Camera size={20} strokeWidth={2} />,
-  routine:  <Sparkles size={20} strokeWidth={2} />,
-  battery:  <BatteryLow size={20} strokeWidth={2} />,
+  schedule:        <Calendar size={20} strokeWidth={2} />,
+  routine:         <Sparkles size={20} strokeWidth={2} />,
+  info:            <Info size={20} strokeWidth={2} />,
+  alert:           <TriangleAlert size={20} strokeWidth={2} />,
+  action_required: <BellRing size={20} strokeWidth={2} />,
 };
+
+/** The most ids one mark-read request may name (`HISTORY_MARK_READ_MAX` on the Pond). */
+const MARK_READ_BATCH = 500;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function formatRunBody(run: ScheduleRunNotification): string {
@@ -39,6 +47,7 @@ function buildNotificationFromRun(run: ScheduleRunNotification): Notification {
   const isRoutine = run.recipe === "routine";
   return {
     id: `run-${run.id}`,
+    source: "run",
     category: isRoutine ? "routine" : "schedule",
     title: `${run.scheduleName} ${isRoutine ? "ran" : "triggered"}`,
     body: formatRunBody(run),
@@ -48,36 +57,45 @@ function buildNotificationFromRun(run: ScheduleRunNotification): Notification {
   };
 }
 
-function countUnread(items: Notification[]): number {
-  return items.filter((n) => !n.read).length;
+function buildNotificationFromNotice(notice: HouseholdNotice, t: TFunction): Notification {
+  const section = openSection(notice);
+  const n: Notification = {
+    id: notice.id,
+    source: "notice",
+    category: noticeCategory(notice.category),
+    title: notice.title,
+    body: notice.body,
+    timestamp: notice.timestamp,
+    read: notice.read,
+  };
+  if (section) n.action = { label: t(`notifications.open.${section}`), route: section };
+  return n;
 }
 
 // ─── Notification card ────────────────────────────────────────────────────────
 interface NCardProps {
   notification: Notification;
-  onAction?: (route: string, run?: ScheduleRunNotification) => void;
+  onOpen: (n: Notification) => void;
 }
 
-function NCard({ notification: n, onAction }: NCardProps) {
+function NCard({ notification: n, onOpen }: NCardProps) {
+  const { t } = useTranslation();
   const color = CATEGORY_COLOR[n.category];
   const now = new Date();
-
-  function fire() {
-    if (!n.action) return;
-    onAction?.(n.action.route, n.action.run);
-  }
+  const flagged = n.category === "alert" || n.category === "action_required";
 
   return (
     <article
       className="ncard"
       data-read={String(n.read)}
+      data-category={n.category}
       role="article"
       aria-label={n.title}
-      onClick={fire}
+      onClick={() => onOpen(n)}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
-          fire();
+          onOpen(n);
         }
       }}
       tabIndex={0}
@@ -90,7 +108,14 @@ function NCard({ notification: n, onAction }: NCardProps) {
         {CATEGORY_ICON[n.category]}
       </span>
       <div className="ncard__body">
-        <div className="ncard__title">{n.title}</div>
+        <div className="ncard__title">
+          {flagged && (
+            <span className="ncard__tag" style={{ color: color.fg, background: color.bg }}>
+              {t(`notifications.category.${n.category}`)}
+            </span>
+          )}
+          {n.title}
+        </div>
         <div className="ncard__sub">{n.body}</div>
       </div>
       <div className="ncard__right">
@@ -100,7 +125,7 @@ function NCard({ notification: n, onAction }: NCardProps) {
             className="ncard__cta"
             onClick={(e) => {
               e.stopPropagation();
-              fire();
+              onOpen(n);
             }}
           >
             {n.action.label}
@@ -118,60 +143,96 @@ interface NotificationsViewProps {
 }
 
 export function NotificationsView({ go }: NotificationsViewProps) {
-  const { serverOnline, scheduleRuns } = useAppState();
-  const [readIds, setReadIds] = useState<Set<string>>(new Set());
+  const { t } = useTranslation();
+  const dispatch = useAppDispatch();
+  const { serverOnline, scheduleRuns, householdNotices, noticeFeedFailed } = useAppState();
+  const [saveFailed, setSaveFailed] = useState(false);
 
-  // scheduleRuns is kept fresh by AppContext, so nothing is fetched here.
-  const allItems = useMemo<Notification[]>(() => {
-    return scheduleRuns
-      .map(buildNotificationFromRun)
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-  }, [scheduleRuns]);
+  // Both lists are kept fresh by AppContext, so nothing is fetched here.
+  const items = useMemo<Notification[]>(() => {
+    return [
+      ...scheduleRuns.map(buildNotificationFromRun),
+      ...listedNotices(householdNotices, scheduleRuns).map((n) =>
+        buildNotificationFromNotice(n, t),
+      ),
+    ].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  }, [scheduleRuns, householdNotices, t]);
 
-  // Overlay local read state
-  const effectiveItems = useMemo<Notification[]>(
-    () => allItems.map((n) => (readIds.has(n.id) ? { ...n, read: true } : n)),
-    [allItems, readIds],
+  const unreadCount = items.filter((n) => !n.read).length;
+
+  /** Marks notices read here at once, and on the Pond so a reload agrees. */
+  const markNoticesRead = useCallback(
+    (ids: string[]) => {
+      if (ids.length === 0) return;
+      dispatch({ type: "MARK_NOTICES_READ", payload: ids });
+      const batches: string[][] = [];
+      for (let i = 0; i < ids.length; i += MARK_READ_BATCH) {
+        batches.push(ids.slice(i, i + MARK_READ_BATCH));
+      }
+      Promise.all(batches.map((batch) => api.markNotificationsRead(batch)))
+        .then(() => setSaveFailed(false))
+        .catch((err) => {
+          console.warn("[notifications] read state could not be saved:", err);
+          setSaveFailed(true);
+        });
+    },
+    [dispatch],
   );
 
-  const unreadCount = countUnread(effectiveItems);
-  const allRead = unreadCount === 0;
-
   const markAllRead = useCallback(() => {
-    setReadIds(new Set(allItems.map((n) => n.id)));
-  }, [allItems]);
+    dispatch({ type: "MARK_ALL_RUNS_READ" });
+    // Folded schedule notices too: their run's card has just been read.
+    markNoticesRead(householdNotices.filter((n) => !n.read).map((n) => n.id));
+  }, [dispatch, householdNotices, markNoticesRead]);
 
-  const groups: NotificationGroup[] = groupNotifications(effectiveItems);
-
-  function handleAction(route: string, run?: ScheduleRunNotification) {
-    go?.(route, run);
+  function open(n: Notification) {
+    if (!n.read) {
+      if (n.source === "run" && n.action?.run) {
+        dispatch({ type: "MARK_RUN_READ", payload: n.action.run.id });
+      } else if (n.source === "notice") {
+        markNoticesRead([n.id]);
+      }
+    }
+    if (n.action) go?.(n.action.route, n.action.run);
   }
+
+  const groups: NotificationGroup[] = groupNotifications(items);
 
   return (
     <div className="nfeed">
       {/* head */}
       <div className="nfeed__head">
         <div>
-          <div className="nfeed__title">Notifications</div>
+          <div className="nfeed__title">{t("notifications.title")}</div>
           <div className="nfeed__sub">
             {unreadCount > 0
-              ? `${unreadCount} unread`
-              : "You're all caught up"}
+              ? t("notifications.unread", { count: unreadCount })
+              : t("notifications.caughtUp")}
           </div>
         </div>
         <button
           className="nfeed__mark-all"
           onClick={markAllRead}
-          disabled={allRead}
+          disabled={unreadCount === 0}
         >
-          Mark all read
+          {t("notifications.markAllRead")}
         </button>
       </div>
 
       {/* offline note */}
-      {!serverOnline && scheduleRuns.length === 0 && (
-        <div className="nfeed__offline-note">
-          Connect to Goose server to see schedule and routine history
+      {!serverOnline && items.length === 0 && (
+        <div className="nfeed__offline-note">{t("notifications.offline")}</div>
+      )}
+
+      {serverOnline && noticeFeedFailed && (
+        <div className="nfeed__offline-note" role="status">
+          {t("notifications.feedFailed")}
+        </div>
+      )}
+
+      {saveFailed && (
+        <div className="nfeed__offline-note" role="alert">
+          {t("notifications.markReadFailed")}
         </div>
       )}
 
@@ -181,10 +242,8 @@ export function NotificationsView({ go }: NotificationsViewProps) {
           <div className="nfeed__empty-icon">
             <Bell size={24} color="var(--pp)" strokeWidth={2} />
           </div>
-          <div className="nfeed__empty-title">Nothing here yet</div>
-          <div className="nfeed__empty-body">
-            Notifications from Goose, your devices, and schedules will appear here.
-          </div>
+          <div className="nfeed__empty-title">{t("notifications.emptyTitle")}</div>
+          <div className="nfeed__empty-body">{t("notifications.emptyBody")}</div>
         </div>
       )}
 
@@ -193,7 +252,7 @@ export function NotificationsView({ go }: NotificationsViewProps) {
         <div key={group.label} className="nfeed__group">
           <div className="nfeed__group-label">{group.label}</div>
           {group.items.map((n) => (
-            <NCard key={n.id} notification={n} onAction={handleAction} />
+            <NCard key={`${n.source}-${n.id}`} notification={n} onOpen={open} />
           ))}
         </div>
       ))}

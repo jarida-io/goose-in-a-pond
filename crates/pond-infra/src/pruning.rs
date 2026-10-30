@@ -2,7 +2,8 @@
 //!
 //! Face embeddings are never auto-expired (user-managed biometrics); only orphans are swept.
 //! The notification queue's caps are constants ([`NOTIFICATIONS_DELIVERED_DAYS`],
-//! [`NOTIFICATIONS_MAX_AGE_DAYS`], [`NOTIFICATIONS_PER_DEVICE_KEEP`]), not settings.
+//! [`NOTIFICATIONS_MAX_AGE_DAYS`], [`NOTIFICATIONS_PER_DEVICE_KEEP`]), not settings, and the
+//! household's notification history follows the same age and count caps.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -124,6 +125,7 @@ pub async fn prune_once(logs: &Pool<Sqlite>, system: &Pool<Sqlite>, config: &Pru
     prune_session_messages(system, config.session_messages_keep).await;
     prune_orphan_face_embeddings(system).await;
     prune_notifications(system).await;
+    prune_notification_history(system).await;
 }
 
 /// Sweeps `>= Sensitive` past the sensitivity cap, then each category past its retention.
@@ -298,6 +300,37 @@ async fn prune_notifications(pool: &Pool<Sqlite>) {
         Err(e) => {
             warn!(kind = "notifications_prune_failed", error = %e, "pruning: notifications failed")
         }
+    }
+}
+
+/// The household's notification history: every row after [`NOTIFICATIONS_MAX_AGE_DAYS`], and
+/// anything beyond the newest [`NOTIFICATIONS_PER_DEVICE_KEEP`], so the dashboard never lists a
+/// notice older than a phone could still be holding. Recipients and read marks go by cascade.
+async fn prune_notification_history(pool: &Pool<Sqlite>) {
+    match sqlx::query(
+        "DELETE FROM notification_history \
+         WHERE created_at < datetime('now', ?) \
+            OR rowid NOT IN ( \
+                SELECT rowid FROM notification_history \
+                ORDER BY created_at DESC, rowid DESC \
+                LIMIT ? \
+            )",
+    )
+    .bind(format!("-{NOTIFICATIONS_MAX_AGE_DAYS} days"))
+    .bind(NOTIFICATIONS_PER_DEVICE_KEEP)
+    .execute(pool)
+    .await
+    {
+        Ok(r) => info!(
+            kind = "notification_history_pruned",
+            deleted = r.rows_affected(),
+            "pruning: notification history past retention"
+        ),
+        Err(e) => warn!(
+            kind = "notification_history_prune_failed",
+            error = %e,
+            "pruning: notification history failed"
+        ),
     }
 }
 
@@ -541,6 +574,77 @@ mod tests {
                 .fetch_one(&system)
                 .await
                 .unwrap();
+        assert!(!oldest_kept, "the oldest rows go first");
+    }
+
+    #[tokio::test]
+    async fn prune_notification_history_applies_the_queue_s_age_and_count_caps() {
+        let (logs, system, _tmp) = make_pools().await;
+        for (id, created) in [
+            ("fresh", "datetime('now')"),
+            ("old", "datetime('now', '-20 days')"),
+            ("stale", "datetime('now', '-31 days')"),
+        ] {
+            sqlx::query(&format!(
+                "INSERT INTO notification_history \
+                 (id, audience, category, title, body, timestamp, created_at) \
+                 VALUES (?, 'household', 'info', 't', 'b', '', {created})"
+            ))
+            .bind(id)
+            .execute(&system)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO notification_history_reads (notification_id, device_id) \
+             VALUES ('stale', 'dashboard'), ('fresh', 'dashboard')",
+        )
+        .execute(&system)
+        .await
+        .unwrap();
+
+        prune_once(&logs, &system, &PruningConfig::default()).await;
+
+        let mut left: Vec<String> = sqlx::query_scalar("SELECT id FROM notification_history")
+            .fetch_all(&system)
+            .await
+            .unwrap();
+        left.sort();
+        assert_eq!(left, vec!["fresh", "old"]);
+        let reads: Vec<String> =
+            sqlx::query_scalar("SELECT notification_id FROM notification_history_reads")
+                .fetch_all(&system)
+                .await
+                .unwrap();
+        assert_eq!(
+            reads,
+            vec!["fresh"],
+            "a pruned notice's read marks go with it"
+        );
+
+        for i in 0..(NOTIFICATIONS_PER_DEVICE_KEEP + 3) {
+            sqlx::query(
+                "INSERT INTO notification_history \
+                 (id, audience, category, title, body, timestamp) \
+                 VALUES (?, 'household', 'info', 't', 'b', '')",
+            )
+            .bind(format!("n{i}"))
+            .execute(&system)
+            .await
+            .unwrap();
+        }
+        prune_once(&logs, &system, &PruningConfig::default()).await;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notification_history")
+            .fetch_one(&system)
+            .await
+            .unwrap();
+        assert_eq!(count, i64::from(NOTIFICATIONS_PER_DEVICE_KEEP));
+        let oldest_kept: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM notification_history WHERE id = 'old')",
+        )
+        .fetch_one(&system)
+        .await
+        .unwrap();
         assert!(!oldest_kept, "the oldest rows go first");
     }
 

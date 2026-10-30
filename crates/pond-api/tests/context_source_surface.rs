@@ -203,6 +203,7 @@ async fn make_app_inner(with_secrets: bool) -> Harness {
         push_token_repo: None,
         notification_tx: tokio::sync::broadcast::channel(16).0,
         notification_queue: None,
+        notification_history: None,
         notification_sender: None,
         api_port: 4000,
         weather_provider: None,

@@ -103,6 +103,7 @@ pub async fn app_state() -> TestState {
         push_token_repo: None,
         notification_tx: tokio::sync::broadcast::channel::<Notification>(16).0,
         notification_queue: None,
+        notification_history: None,
         notification_sender: None,
         runs: Arc::new(crate::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),

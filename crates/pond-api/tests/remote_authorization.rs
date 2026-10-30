@@ -115,6 +115,7 @@ async fn make_app() -> Harness {
         notification_queue: Some(Arc::new(
             pond_infra::sqlite_notification_queue::SqliteNotificationQueue::new(pool.clone()),
         )),
+        notification_history: None,
         notification_sender: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),

@@ -131,6 +131,7 @@ async fn make_app() -> Harness {
         push_token_repo: None,
         notification_tx,
         notification_queue: Some(queue.clone()),
+        notification_history: None,
         notification_sender: Some(sender.clone()),
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),

@@ -4,7 +4,12 @@ import {
   normalizeDesktopMode,
   normalizeGuiSection,
 } from "../desktopState";
-import type { ScheduleRunNotification, DebriefContext } from "../api/types";
+import type {
+  ScheduleRunNotification,
+  DebriefContext,
+  HouseholdNotice,
+} from "../api/types";
+import { mergeNotices } from "./householdNotices";
 import { defaultServerUrl } from "../api/PondApiClient";
 import { isDesktopShell } from "../shell";
 
@@ -69,6 +74,10 @@ export interface AppState {
   /** Persistent schedule run notifications (survives page navigation, unlike toasts). */
   scheduleRuns: ScheduleRunNotification[];
   unreadRunCount: number;
+  /** The Pond's household notices for this device: its history plus the live stream, by id. */
+  householdNotices: HouseholdNotice[];
+  /** The last attempt to read the notice history failed; the feed is retrying. */
+  noticeFeedFailed: boolean;
   /** When set, Canvas should render a debrief card for this run. */
   debriefContext: DebriefContext | null;
 }
@@ -112,6 +121,10 @@ export type AppAction =
     }
   | { type: "MARK_RUN_READ"; payload: string }
   | { type: "MARK_ALL_RUNS_READ" }
+  /** History or live notices, already under their household ids; merged by id. */
+  | { type: "MERGE_HOUSEHOLD_NOTICES"; payload: HouseholdNotice[] }
+  | { type: "MARK_NOTICES_READ"; payload: string[] }
+  | { type: "SET_NOTICE_FEED_FAILED"; payload: boolean }
   | { type: "SET_DEBRIEF_CONTEXT"; payload: DebriefContext | null }
   | { type: "CLEAR_DEBRIEF_CONTEXT" };
 
@@ -160,6 +173,8 @@ export function buildInitialState(): AppState {
     latestScheduleResult: null,
     scheduleRuns: [],
     unreadRunCount: 0,
+    householdNotices: [],
+    noticeFeedFailed: false,
     debriefContext: null,
   };
 }
@@ -374,6 +389,27 @@ export function reducer(state: AppState, action: AppAction): AppState {
         unreadRunCount: 0,
       };
     }
+
+    case "MERGE_HOUSEHOLD_NOTICES":
+      return {
+        ...state,
+        householdNotices: mergeNotices(state.householdNotices, action.payload),
+      };
+
+    case "MARK_NOTICES_READ": {
+      const ids = new Set(action.payload);
+      return {
+        ...state,
+        householdNotices: state.householdNotices.map((n) =>
+          ids.has(n.id) ? { ...n, read: true } : n,
+        ),
+      };
+    }
+
+    case "SET_NOTICE_FEED_FAILED":
+      return state.noticeFeedFailed === action.payload
+        ? state
+        : { ...state, noticeFeedFailed: action.payload };
 
     case "SET_DEBRIEF_CONTEXT":
       return { ...state, debriefContext: action.payload };

@@ -75,6 +75,21 @@ void i18n.use(initReactI18next).init({
     onceAt: 'Runs once on {{date}} at {{time}}',
     oncePast: 'That date and time has already passed. Pick a moment in the future.',
     unchanged: 'Nothing changed, so the schedule was left as it was.',
+  }, notifications: {
+    title: 'Notifications',
+    unread_one: '{{count}} unread', unread_other: '{{count}} unread',
+    caughtUp: "You're all caught up",
+    markAllRead: 'Mark all read',
+    markReadFailed: 'Could not save that these were read. They may show as unread again after a reload.',
+    feedFailed: 'Notices from the Pond could not be loaded. Retrying.',
+    offline: 'Connect to Goose server to see schedule and routine history',
+    emptyTitle: 'Nothing here yet',
+    emptyBody: 'Notifications from Goose, your devices, and schedules will appear here.',
+    category: { alert: 'Alert', action_required: 'Action needed', info: 'Info' },
+    open: {
+      schedules: 'Open schedules', devices: 'Open devices', chat: 'Open chat',
+      models: 'Open models', extensions: 'Open extensions', pairing: 'Open remote access',
+    },
   }, pairing: {
     unavailable: 'HTTPS pairing is unavailable. Check the Pond server logs.',
     fingerprint: 'Public-key fingerprint', address: 'HTTPS address',

@@ -10,11 +10,12 @@ import { isSignInRequired } from "../api/hostCredential";
 import { refreshHomeData } from "../hub/state/hubDataStore";
 import { setChatRunBridge, resumeActiveRun } from "./chatRunStore";
 import { DispatchCtx, StateCtx } from "./useAppContext";
+import { reducer, buildInitialState } from "./reducer";
 import {
-  reducer,
-  buildInitialState,
-  type ScheduleToast,
-} from "./reducer";
+  followHouseholdNotices,
+  followScheduleRuns,
+  inferRecipe,
+} from "./liveFeeds";
 import type { ScheduleRunNotification } from "../api/types";
 
 /** Survives one dropped beat inside the registry's 5-minute online window; stays clear of the per-IP budget. */
@@ -22,72 +23,14 @@ const SELF_HEARTBEAT_MS = 120_000;
 
 export function AppContextProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, undefined, buildInitialState);
-  const scheduleEsRef = useRef<EventSource | null>(null);
 
-  // Schedule-result SSE lives here, not in a section, so toasts show on every page.
+  // The live feeds live here, not in a section, so toasts and the bell work on every page.
+  // `serverUrl` is a dependency so a sidecar that moved ports gets fresh connections.
   useEffect(() => {
     if (!state.serverOnline) return;
-
-    if (scheduleEsRef.current) {
-      scheduleEsRef.current.close();
-      scheduleEsRef.current = null;
-    }
-
-    const baseUrl = state.serverUrl || "http://127.0.0.1:4000";
-    const url = `${baseUrl}/api/v1/schedules/events`;
-    const es = new EventSource(url);
-    scheduleEsRef.current = es;
-
-    es.onmessage = (ev) => {
-      try {
-        const data = JSON.parse(ev.data) as {
-          id?: string;
-          schedule_id?: string;
-          schedule_label?: string;
-          status?: string;
-          result?: string;
-          error?: string;
-        };
-        const status = data.status;
-        if (
-          status !== "completed" &&
-          status !== "failed" &&
-          status !== "running"
-        )
-          return;
-        const toast: ScheduleToast = {
-          id: data.id || data.schedule_id || String(Date.now()),
-          schedule_id: data.schedule_id || data.id || "",
-          schedule_label: data.schedule_label || data.schedule_id || "Schedule",
-          status: status as "completed" | "failed" | "running",
-          result: data.result,
-          error: data.error,
-          timestamp: Date.now(),
-        };
-        dispatch({ type: "SCHEDULE_RESULT", payload: toast });
-
-        const notification: ScheduleRunNotification = {
-          id: toast.id,
-          scheduleId: toast.schedule_id,
-          scheduleName: toast.schedule_label,
-          status: toast.status,
-          result: toast.result ?? null,
-          error: toast.error ?? null,
-          startedAt: new Date().toISOString(),
-          finishedAt:
-            toast.status !== "running" ? new Date().toISOString() : null,
-          durationMs: null,
-          read: false,
-          excerpt: (toast.result ?? toast.error ?? "").slice(0, 80),
-          recipe: inferRecipe(toast.schedule_label),
-        };
-
-        // ADD_SCHEDULE_RUN dedupes by id, so this also covers a missed "running" event.
-        dispatch({ type: "ADD_SCHEDULE_RUN", payload: notification });
-      } catch {
-        // ignore parse errors
-      }
-    };
+    const controller = new AbortController();
+    void followScheduleRuns(api, dispatch, controller.signal);
+    void followHouseholdNotices(api, dispatch, controller.signal);
 
     api
       .getAllRecentRuns(5)
@@ -108,14 +51,11 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
         }));
         dispatch({ type: "SET_SCHEDULE_RUNS", payload: notifications });
       })
-      .catch(() => {
-        /* schedule runs fetch failed — non-fatal */
+      .catch((err) => {
+        console.warn("[schedules] recent runs could not be read (non-fatal):", err);
       });
 
-    return () => {
-      es.close();
-      scheduleEsRef.current = null;
-    };
+    return () => controller.abort();
   }, [state.serverOnline, state.serverUrl]);
 
   // hubDataStore fetches at import, racing a cold server boot; refetch once online.
@@ -314,13 +254,4 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
       <DispatchCtx.Provider value={dispatch}>{children}</DispatchCtx.Provider>
     </StateCtx.Provider>
   );
-}
-
-/** Infer a recipe identifier from the schedule name for debrief card routing. */
-function inferRecipe(name: string): string | null {
-  const lower = name.toLowerCase();
-  if (/morning|briefing|daily.*summ/.test(lower)) return "daily-summary";
-  if (/weekly.*report|week.*summ/.test(lower)) return "weekly-report";
-  if (/compact|consolidat|memory.*clean/.test(lower)) return "compact-memory";
-  return null;
 }

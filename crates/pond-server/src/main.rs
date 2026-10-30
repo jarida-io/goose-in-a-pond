@@ -3739,6 +3739,13 @@ async fn run_server(
         pond_infra::sqlite_notification_queue::SqliteNotificationQueue::new(db.system.clone()),
     );
 
+    // The household's record of durable notices, which the dashboard lists after a reload.
+    let notification_history: Arc<
+        dyn pond_core::mcp::ports::notification_history::NotificationHistory,
+    > = Arc::new(
+        pond_infra::sqlite_notification_history::SqliteNotificationHistory::new(db.system.clone()),
+    );
+
     let push_relay = push_relay(&data_dir, push_token_repo.clone());
     // Required: without it `send_to_profile` silently answers `AttributionUnavailable`.
     let device_attribution: Arc<
@@ -3760,7 +3767,8 @@ async fn run_server(
             pond_infra::sqlite_notification_recipients::SqliteNotificationRecipients::new(
                 db.system.clone(),
             ),
-        )),
+        ))
+        .with_history(notification_history.clone()),
     );
     let notification_sender: Arc<dyn pond_core::mcp::ports::notification::NotificationSender> =
         targeted_notification_sender.clone();
@@ -4477,6 +4485,7 @@ async fn run_server(
         schedule_result_tx: schedule_result_tx.clone(),
         notification_tx: notification_tx.clone(),
         notification_queue: Some(notification_queue.clone()),
+        notification_history: Some(notification_history.clone()),
         notification_sender: Some(notification_sender.clone()),
         telemetry,
         context_monitor: Arc::new(
@@ -5315,6 +5324,11 @@ async fn run_chat(
         )
         .with_device_attribution(Arc::new(
             pond_infra::sqlite_device_attribution::SqliteDeviceAttribution::new(db.system.clone()),
+        ))
+        .with_history(Arc::new(
+            pond_infra::sqlite_notification_history::SqliteNotificationHistory::new(
+                db.system.clone(),
+            ),
         )),
     ));
     // Which members connected Uber, for book_ride. The serve process owns the store; this one

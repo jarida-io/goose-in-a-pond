@@ -462,6 +462,31 @@ export interface ScheduleRunNotification {
   recipe: string | null;
 }
 
+/**
+ * One household notice from the Pond (`GET /notifications/history`, or live from
+ * `/notifications/stream`), always under its household id: a device's own queued copy carries
+ * `"{id}:{device}"`, which `historyId` maps back.
+ */
+export interface HouseholdNotice {
+  id: string;
+  /** `info`, `alert` or `action_required`; anything else renders as `info`. */
+  category: string;
+  title: string;
+  body: string;
+  /** RFC 3339, as the Pond stamped it. */
+  timestamp: string;
+  /** The payload: `open` names the screen a tap opens; `kind` names a system notice. */
+  data: Record<string, unknown> | null;
+  /** Whether this device marked it read. */
+  read: boolean;
+}
+
+/** `GET /notifications/history`: the caller's own device id and what it may read, newest first. */
+export interface NotificationHistoryResponse {
+  device_id: string;
+  notifications: HouseholdNotice[];
+}
+
 /** Context passed when navigating to Canvas to view a schedule debrief. */
 export interface DebriefContext {
   type: "debrief";

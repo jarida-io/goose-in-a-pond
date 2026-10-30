@@ -28,6 +28,7 @@ import { NotificationsDetail } from "./views/settings/Notifications";
 import { AppearanceView } from "./views/settings/Appearance";
 import { AccountDetail } from "./views/settings/Account";
 import { HubOverlay } from "./overlays/HubOverlay";
+import { centreUnreadCount } from "../state/householdNotices";
 import type { SettingsRowId } from "./data/settingsConfig";
 
 // ─── The drawer speaks GuiSection; the hub speaks its own routes ──
@@ -172,7 +173,7 @@ export function Hub() {
       <ShellBar
         onMenu={() => setMenuOpen(true)}
         onBell={() => go("notifications")}
-        unread={appState.unreadRunCount}
+        unread={centreUnreadCount(appState.scheduleRuns, appState.householdNotices)}
       />
       <main className="ghub__main" key={route}>
         {renderView()}

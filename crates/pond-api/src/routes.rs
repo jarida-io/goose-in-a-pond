@@ -195,6 +195,12 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // The stream's fallback for a phone a push wake brought back: the caller's own queue only.
         .route("/notifications/pending", get(notifications_pending))
         .route("/notifications/{id}/ack", post(acknowledge_notification))
+        // The household's notice history, scoped to the caller's device and with its read state.
+        .route("/notifications/history", get(notifications_history))
+        .route(
+            "/notifications/history/read",
+            post(mark_notification_history_read),
+        )
         .route("/models/download/control", post(download_control))
         .route("/models/{category}/{name}/download", post(download_model))
         .route("/models/{category}/{name}/activate", post(activate_model));
@@ -11408,6 +11414,152 @@ async fn acknowledge_notification(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "could not acknowledge the notification"})),
+            )
+        }
+    }
+}
+
+/// The calling device's id, from its pairing token only, plus the history it reads.
+type CallerHistory = (
+    String,
+    Arc<dyn pond_core::mcp::ports::notification_history::NotificationHistory>,
+);
+
+/// The calling device and the notification history, or the refusal. Like [`caller_queue`]: the
+/// device comes from the token, so a caller reads only what its own device may read.
+fn caller_history(
+    state: &AppState,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    operation: &'static str,
+) -> Result<CallerHistory, (StatusCode, Json<Value>)> {
+    let Some(device_id) = proven_device(principal).id().map(str::to_owned) else {
+        tracing::warn!(
+            kind = "notification_history_refused",
+            operation,
+            reason = "no_device",
+            "notifications: history request did not come from a paired device"
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "this request did not come from a paired device"})),
+        ));
+    };
+    let Some(history) = state.notification_history.clone() else {
+        tracing::warn!(
+            kind = "notification_history_unavailable",
+            operation,
+            "notifications: no history wired"
+        );
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "notification history not available"})),
+        ));
+    };
+    Ok((device_id, history))
+}
+
+#[derive(serde::Deserialize)]
+struct NotificationHistoryParams {
+    limit: Option<usize>,
+}
+
+/// How many notices `GET /notifications/history` returns when the caller does not say.
+const NOTIFICATION_HISTORY_DEFAULT_LIMIT: usize = 100;
+
+/// `GET /api/v1/notifications/history?limit=N` — the household's durable notices the calling
+/// device may read, newest first, each with that device's read state:
+/// `{"device_id": "...", "notifications": [{id, category, title, body, timestamp, data, read}]}`.
+///
+/// `device_id` is the caller's own device, from its token: the id its notification stream must
+/// name, and the suffix its own queued copies carry (`per_device_notification_id`), so a client
+/// can map a copy's id back to the history id. A member's notice is listed only to the devices it
+/// was queued for; live-only status is never listed. `limit` defaults to 100, at most 200.
+async fn notifications_history(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    axum::extract::Query(params): axum::extract::Query<NotificationHistoryParams>,
+) -> (StatusCode, Json<Value>) {
+    let (device_id, history) =
+        match caller_history(&state, principal.as_ref(), "notifications_history") {
+            Ok(found) => found,
+            Err(refusal) => return refusal,
+        };
+    let limit = params
+        .limit
+        .unwrap_or(NOTIFICATION_HISTORY_DEFAULT_LIMIT)
+        .clamp(
+            1,
+            pond_core::mcp::domain::notification_history::HISTORY_LIST_MAX,
+        );
+    match history.list_for_device(&device_id, limit).await {
+        Ok(entries) => {
+            tracing::debug!(
+                kind = "notification_history_served",
+                count = entries.len(),
+                limit,
+                "notifications: history served"
+            );
+            (
+                StatusCode::OK,
+                Json(json!({ "device_id": device_id, "notifications": entries })),
+            )
+        }
+        Err(e) => {
+            tracing::warn!(kind = "notification_history_failed", error = %e, "notifications: history query failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "could not read the notification history"})),
+            )
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct MarkHistoryReadRequest {
+    ids: Vec<String>,
+}
+
+/// `POST /api/v1/notifications/history/read` with `{"ids": [...]}` — mark these history notices
+/// read for the calling device only. An id the device may not read, or that does not exist, is
+/// skipped silently, so the answer never tells a caller which ids exist. `{"marked": n}` counts
+/// the newly marked; at most 500 ids per request (`400` beyond).
+async fn mark_notification_history_read(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    Json(request): Json<MarkHistoryReadRequest>,
+) -> (StatusCode, Json<Value>) {
+    let (device_id, history) =
+        match caller_history(&state, principal.as_ref(), "mark_notification_history_read") {
+            Ok(found) => found,
+            Err(refusal) => return refusal,
+        };
+    let max = pond_core::mcp::domain::notification_history::HISTORY_MARK_READ_MAX;
+    if request.ids.len() > max {
+        tracing::info!(
+            kind = "notification_history_read_refused",
+            count = request.ids.len(),
+            "notifications: too many ids in one mark-read request"
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("at most {max} ids per request")})),
+        );
+    }
+    match history.mark_read(&device_id, &request.ids).await {
+        Ok(marked) => {
+            tracing::info!(
+                kind = "notification_history_marked_read",
+                requested = request.ids.len(),
+                marked,
+                "notifications: history marked read"
+            );
+            (StatusCode::OK, Json(json!({ "marked": marked })))
+        }
+        Err(e) => {
+            tracing::warn!(kind = "notification_history_read_failed", error = %e, "notifications: mark read failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "could not mark the notifications read"})),
             )
         }
     }

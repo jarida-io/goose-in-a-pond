@@ -100,9 +100,10 @@ pub trait NotificationSender: Send + Sync {
     async fn send(&self, notification: Notification) -> Result<()>;
 
     /// A transient status for whichever screens are connected right now (the model warming up):
-    /// published live as a broadcast, never queued for a phone and never pushed. A phone that was
-    /// asleep through it has no use for it later. Use [`Self::broadcast`] for anything the
-    /// household should hear about.
+    /// published live as a broadcast, never queued for a phone, never pushed and never kept in the
+    /// household's history. A phone that was asleep through it has no use for it later. Its
+    /// `data` carries `"transient": true`, so a notification centre can leave it out. Use
+    /// [`Self::broadcast`] for anything the household should hear about.
     async fn publish_live(&self, notification: Notification) -> Result<()>;
 
     /// A household-wide notice: every connected screen sees it live, and every paired phone

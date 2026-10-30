@@ -52,6 +52,8 @@ const BASE: AppState = {
   latestScheduleResult: null,
   scheduleRuns: [],
   unreadRunCount: 0,
+  householdNotices: [],
+  noticeFeedFailed: false,
   debriefContext: null,
 };
 

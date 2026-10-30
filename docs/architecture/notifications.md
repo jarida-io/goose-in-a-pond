@@ -16,13 +16,13 @@ which caps the title at 200 characters and the body at 2000.
 
 Each producer picks how far its notice goes, through one `NotificationSender` method:
 
-| Method | Reaches | Queued and pushed to phones |
-|---|---|---|
-| `publish_live` | screens connected right now | never: transient status (the model warming up) |
-| `broadcast` | the household: connected screens, and every paired phone's own copy | yes |
-| `broadcast_except(device)` | every paired phone but `device`, which caused it | yes; no live broadcast copy, since the stream would hand that to `device` too |
-| `send` | one device | yes |
-| `MemberNotifier::notify_member` | one member's own devices, never a broadcast | yes |
+| Method | Reaches | Queued and pushed to phones | In the household's history |
+|---|---|---|---|
+| `publish_live` | screens connected right now | never: transient status (the model warming up) | never; marked `data.transient = true` |
+| `broadcast` | the household: connected screens, and every paired phone's own copy | yes | every device |
+| `broadcast_except(device)` | every paired phone but `device`, which caused it | yes; no live broadcast copy, since the stream would hand that to `device` too | every device but `device` |
+| `send` | one device | yes | that device |
+| `MemberNotifier::notify_member` | one member's own devices, never a broadcast | yes | that member's devices at the time |
 
 Before 2026-10-27 the warm-up status ("Pond is getting ready", "Pond is ready") went through
 `broadcast`, so once broadcasts became durable every restart queued and pushed both to every paired
@@ -69,6 +69,56 @@ bounded either way.
 
 The pruning pass (every 6 h) deletes delivered rows after 7 days, every row after 30 days, and
 anything beyond a device's newest 500 (`NOTIFICATIONS_*` in `crates/pond-infra/src/pruning.rs`).
+
+The household's history (below) keeps the same 30-day and 500-row caps, counted over the whole
+household rather than per device.
+
+## The household's history and the dashboard (2026-10-28)
+
+Before 2026-10-28 the dashboard's notification centre listed only schedule runs: it subscribed to
+`/schedules/events` and nothing else, so every notice in the catalogue below reached the phones and
+never the dashboard. The queue could not serve it either: it holds per-phone copies only, none at
+all for a household without a paired phone, and none for a member's notice to a member without one.
+
+**The history.** `BroadcastNotificationSender::with_history` records every durable notice once,
+under its household id, in `notification_history` (migration `0062`), through the
+`NotificationHistory` port (`crates/pond-core/src/mcp/ports/notification_history.rs`, SQLite adapter
+`crates/pond-infra/src/sqlite_notification_history.rs`). Who may read a row is its
+`HistoryAudience` (`crates/pond-core/src/mcp/domain/notification_history.rs`), decided when the
+notice is raised and following the queue's own scoping: a household notice is every device's
+except the one that caused it (`broadcast_except`), and a member's notice (a proposal, a ride link)
+belongs to the devices it was queued for at the time, in `notification_history_recipients`, so a
+member's notice never reaches another member's device or an unattributed shared screen. Read state
+is per device (`notification_history_reads`), so marking a notice read on the dashboard leaves it
+unread on a phone. A failed history write is logged (`notification_history_record_failed`) and the
+notice is still delivered. The `chat` process's member notifier (rides) records too.
+
+**Live-only status is not history.** A `publish_live` notice (the warm-up) is never recorded, and
+carries `data.transient = true` on the stream so a centre can leave it out. It is not listed even
+transiently: the dashboard's warm-up banner (`/warmup`) already shows that state, and a list entry
+saying "Pond is ready" would only be stale by the time anyone read it.
+
+**The dashboard.** `AppContext` runs two fetch-based streams (`state/liveFeeds.ts`; an
+`EventSource` cannot send the session token, and the old one on `/schedules/events` was refused by
+every Pond without the loopback bypass) that reconnect with a growing pause (2 s up to 60 s):
+
+1. On every (re)connect, `GET /notifications/history`, which also names the dashboard's own device
+   id; then `GET /notifications/stream?device_id=` for that id.
+2. Every notice is merged by household id (`state/householdNotices.ts`): a copy addressed to this
+   device carries `"{id}:{device_id}"` and is mapped back, so the live copy and the history row are
+   one entry. A notice read on either side stays read.
+3. A schedule-result notice (`open: "schedule"`) whose run already has a card in the centre is
+   folded into that card, which keeps its "View on Canvas"; one whose run has no card is listed.
+4. Each notice is styled by its category (`info`, `alert`, `action_required`), and its `open` hint
+   opens the dashboard's section: `schedule` the schedules, `devices`, `chat`, `models`,
+   `extensions` their own, `remote_access` the Pairing page that holds remote access. An unknown
+   hint offers no action.
+5. "Mark all read", or opening one notice, marks it read at once and on the Pond with
+   `POST /notifications/history/read`; a failure says so on the page. Schedule-run cards keep their
+   in-memory read state. The bell counts unread runs plus unread listed notices.
+
+A history read that fails (a dashboard with no paired device, such as one on loopback under
+`POND_DEV_ALLOW_LOOPBACK`, gets `403`) shows "could not be loaded" on the page and keeps retrying.
 
 ## Setting up push
 

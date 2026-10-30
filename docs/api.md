@@ -333,6 +333,8 @@ The route summary's "Also" column names these.
 | GET | /notifications/stream | token | own device | Notifications for one device (SSE) |
 | GET | /notifications/pending | token | paired device | The caller's unacknowledged notifications |
 | POST | /notifications/{id}/ack | token | paired device | Mark one of the caller's notifications delivered |
+| GET | /notifications/history | token | paired device | The household notices the caller may read, with its read state |
+| POST | /notifications/history/read | token | paired device | Mark history notices read for the caller |
 | GET | /devices | token +onb | | All registered devices |
 | POST | /devices | token +onb | | Register a device |
 | PUT | /devices/{id} | token +onb | own row or cred | Rename, set hostname or room |
@@ -1039,7 +1041,7 @@ that device's or the host's to change; a shared row (a Matter device, a sensor, 
 any authenticated caller's (`pond_core::user_data::services::device_edit`).
 
 How a notice reaches a phone, what the Pond notifies about, and how often, is in
-[architecture/notifications.md](architecture/notifications.md). The three routes below take a paired
+[architecture/notifications.md](architecture/notifications.md). The five routes below take a paired
 device's token in every onboarding state, never answer a tokenless caller, and act only on the
 caller's own device, named by its token.
 
@@ -1056,6 +1058,7 @@ for any other device the stream marks what it sends delivered. Each SSE `data` i
 | `action` | `open_url`, `ride_offer`, `ride_update` | travel; see [architecture/rides-and-maps.md](architecture/rides-and-maps.md) |
 | `open` | `schedule` (with `schedule_id`, `run_id`), `devices`, `chat`, `models`, `extensions`, `remote_access` | schedule runs, pairing outcomes, Matter, proposals, system notices |
 | `kind` | a system notice's catalogue name, e.g. `model_downloaded`; `pond_warmup` for the live-only warm-up status | system notices, warm-up |
+| `transient` | `true` | every live-only status (`publish_live`, the warm-up): never queued, never in the history; a notification centre leaves it out |
 
 `open` is written only through `OpenScreen` (`crates/pond-core/src/mcp/ports/notification.rs`) and
 names the screen a tap opens.
@@ -1071,6 +1074,24 @@ read, `503` when no queue is wired.
 copy of a household notice is `"{notification_id}:{device_id}"`. `404` when no notification by that
 id is the caller's (another device's answers the same, so the route cannot probe someone else's
 queue), `500 notification_ack_failed`, `503` when no queue is wired.
+
+**`GET /notifications/history?limit=N`** (2026-10-28) is the household's record of durable notices,
+which the dashboard's notification centre reads on start and on every reconnect of its stream. It
+answers `{device_id, notifications: [{id, category, title, body, timestamp, data, read}]}`, newest
+first. `device_id` is the caller's own device, from its token: the id its stream must name, and the
+suffix its own queued copies carry. Each notice appears once, under its household id, never a
+per-device copy's `"{id}:{device_id}"`. Only what the caller may read is listed: a household notice
+unless the caller's device caused it (`broadcast_except`), and a member's notice (a proposal, a
+ride link) only to the devices it was queued for. Live-only status is never listed. `read` is the
+caller's own read state. `limit` defaults to 100 and is held to 1..200. `403` when the request did
+not come from a paired device (a loopback caller under `POND_DEV_ALLOW_LOOPBACK` names no device,
+so it is refused rather than shown an unscoped list), `500 notification_history_failed`, `503`
+when no history is wired.
+
+**`POST /notifications/history/read`** with `{ids: [string]}` marks those notices read for the
+caller's device only and answers `{marked: n}`, the count newly marked. An id the caller may not
+read, or that does not exist, is skipped and not counted, so the answer never says which ids
+exist. At most 500 ids per request (`400` beyond); `403`, `500` and `503` as above.
 
 ## Sensors, camera and rules
 

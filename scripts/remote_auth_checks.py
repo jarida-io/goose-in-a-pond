@@ -102,6 +102,30 @@ def run():
         assert call(method, path, expected=401).get("notifications") is None
         assert call(method, path, token="not-a-token", expected=401).get("notifications") is None
     print("PASS  a pairing notice is queued for the phone; pending and ack answer for the caller's own device only")
+    # The household's notice history, the dashboard's notification centre: each pairing notice
+    # once, under its household id (never a phone copy's), scoped to and read by the caller only.
+    history_b = call("GET", "/notifications/history", token=b["session_token"])
+    assert history_b["device_id"] == "w3-live-b", history_b
+    pairings = [n for n in history_b["notifications"] if (n.get("data") or {}).get("open") == "devices"]
+    assert pairings and not any(n["id"].endswith(":w3-live-a") for n in pairings), history_b
+    history_a = call("GET", "/notifications/history", token=a["session_token"])
+    assert history_a["device_id"] == "w3-live-a", history_a
+    assert {n["id"] for n in pairings} <= {n["id"] for n in history_a["notifications"]}, history_a
+    first = pairings[0]["id"]
+    assert call("POST", "/notifications/history/read", {"ids": [first]}, token=b["session_token"]) == {"marked": 1}
+
+    def read_state(token):
+        listed = call("GET", "/notifications/history", token=token)["notifications"]
+        return {n["id"]: n["read"] for n in listed}
+
+    assert read_state(b["session_token"])[first] is True
+    assert read_state(a["session_token"])[first] is False, "one device's read mark is its own"
+    for method, path, body in [
+        ("GET", "/notifications/history", None),
+        ("POST", "/notifications/history/read", {"ids": [first]}),
+    ]:
+        assert call(method, path, body, expected=401).get("notifications") is None
+    print("PASS  the notice history lists each household notice once, per device, with its own read state")
     call("GET", "/notifications/stream?device_id=w3-live-a", token=a["session_token"])
     renewed = call("POST", "/handshake/refresh", {"refresh_token": a["refresh_token"]})
     assert renewed["accepted"] is True

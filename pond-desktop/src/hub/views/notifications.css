@@ -134,6 +134,15 @@
   border-left: 3px solid var(--pp);
 }
 
+/* An unread alert or action is edged in its own category's colour, not the brand's. */
+.ncard[data-read="false"][data-category="alert"] {
+  border-left-color: #DC2626;
+}
+
+.ncard[data-read="false"][data-category="action_required"] {
+  border-left-color: #D97706;
+}
+
 /* ── icon square ── */
 .ncard__icon {
   width: 40px;
@@ -161,6 +170,18 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.ncard__tag {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  border-radius: 6px;
+  padding: 1px 6px;
+  margin-right: 6px;
+  vertical-align: 1px;
 }
 
 .ncard__sub {

@@ -257,6 +257,9 @@ pub struct AppState {
     /// Offline queue, flushed on stream connect to a device that was disconnected.
     pub notification_queue:
         Option<Arc<dyn pond_core::mcp::ports::notification_queue::NotificationQueueRepository>>,
+    /// The household's record of durable notices, read by `GET /notifications/history`.
+    pub notification_history:
+        Option<Arc<dyn pond_core::mcp::ports::notification_history::NotificationHistory>>,
     /// What producers (`send_notification`, the schedule bridge) send through.
     pub notification_sender:
         Option<Arc<dyn pond_core::mcp::ports::notification::NotificationSender>>,
