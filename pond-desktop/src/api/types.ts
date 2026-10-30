@@ -1928,3 +1928,18 @@ export type ConnectionErrorCode =
   | "no_address"
   | "invalid_request"
   | "unsupported_security";
+
+// ── Household roles & guest device access ───────────────────────
+export type HouseholdRole = "owner" | "member" | "guest" | "developer";
+
+export interface HouseholdProfile {
+  id: string;
+  display_name: string;
+  avatar_emoji: string;
+  preferences: Record<string, string>;
+  role: HouseholdRole;
+  /** Only meaningful for `role: "guest"`; `null` means access never expires on its own. */
+  guest_until: string | null;
+  created_at: string;
+  updated_at: string;
+}

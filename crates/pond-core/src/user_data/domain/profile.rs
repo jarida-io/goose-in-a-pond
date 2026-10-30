@@ -12,8 +12,55 @@ pub struct Profile {
     pub avatar_emoji: String,
     /// Flat string map; pond-api converts to/from JSON objects at the HTTP boundary.
     pub preferences: HashMap<String, String>,
+    pub role: Role,
+    /// Only meaningful for `Role::Guest`; `None` means the access never expires on its own.
+    pub guest_until: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// What a household member may do, independent of `ProfileScope` (which is about whose data a
+/// turn may read, not what a caller may do). A profile with no role is never valid — every row
+/// gets one explicitly, defaulting to `Member` at creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    /// Set from `settings.primary_profile_id` at onboarding; the only role that may remove a
+    /// device, change the model, enroll remote access, or reset the Pond.
+    Owner,
+    /// Full household trust for device control; cannot do the Owner-only actions above.
+    Member,
+    /// An invited person, not an unidentified voice (that's `ProfileScope::Guest`). Device
+    /// control is restricted to an explicit per-guest allow-list, optionally time-limited by
+    /// `guest_until`.
+    Guest,
+    /// Builds on this role existing; test-pond-only scoping is a separate, later issue.
+    Developer,
+}
+
+impl Role {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Role::Owner => "owner",
+            Role::Member => "member",
+            Role::Guest => "guest",
+            Role::Developer => "developer",
+        }
+    }
+}
+
+impl std::str::FromStr for Role {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "owner" => Ok(Role::Owner),
+            "member" => Ok(Role::Member),
+            "guest" => Ok(Role::Guest),
+            "developer" => Ok(Role::Developer),
+            other => Err(format!("unknown role: {other}")),
+        }
+    }
 }
 
 /// Whose data a read or write is scoped to.

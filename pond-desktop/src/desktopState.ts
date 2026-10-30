@@ -18,6 +18,7 @@ export type GuiSection =
   | "faces"
   | "canvas"
   | "logs"
+  | "household"
   | "hub";
 
 export const DESKTOP_MODES: DesktopMode[] = ["gui", "voice"];
@@ -63,8 +64,10 @@ export const SIDEBAR_GROUPS: SidebarGroup[] = [
 export const DESKTOP_SECTIONS: Array<{ section: GuiSection; label: string }> =
   SIDEBAR_GROUPS.flatMap((g) => g.sections.map(({ section, label }) => ({ section, label })));
 
-// Routable but not in the sidebar; "hub" is entered via Settings > "Preview Goose Hub".
-const HIDDEN_SECTIONS: GuiSection[] = ["faces", "canvas", "hub"];
+// Routable but not in `SIDEBAR_GROUPS` below (the drawer's own row list is `HubDrawer.tsx`'s
+// `MANAGE_ROWS`, which does list "household" and "faces"); "hub" is entered via Settings >
+// "Preview Goose Hub".
+const HIDDEN_SECTIONS: GuiSection[] = ["faces", "canvas", "household", "hub"];
 const SECTION_SET = new Set<GuiSection>([
   ...DESKTOP_SECTIONS.map((s) => s.section),
   ...HIDDEN_SECTIONS,

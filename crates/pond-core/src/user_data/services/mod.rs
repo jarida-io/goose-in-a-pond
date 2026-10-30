@@ -2,6 +2,7 @@ pub mod activity_watcher;
 pub mod consolidation_schedule;
 pub mod device_edit;
 pub mod face_recognition_slot;
+pub mod household_permission;
 pub mod identity_resolution;
 pub mod inference_lane;
 pub mod location;

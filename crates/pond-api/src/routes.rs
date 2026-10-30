@@ -34,7 +34,7 @@ use pond_core::security::ports::handshake::{
 use pond_core::shared::ports::event_bus::BusEvent;
 use pond_core::shared::services::chat::ChatService;
 use pond_core::user_data::domain::onboarding::OnboardingStep;
-use pond_core::user_data::domain::profile::CreateProfileRequest;
+use pond_core::user_data::domain::profile::{CreateProfileRequest, Role};
 use pond_core::user_data::domain::schedule::{
     OneShotTimePassed, Schedule, SensorTriggerSpec, TaskKind,
 };
@@ -260,6 +260,8 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/rooms/{id}",
             get(get_room).put(rename_room).delete(delete_room),
         )
+        .route("/rooms/{id}/devices", get(get_room_devices))
+        .route("/rooms/{id}/guest-access", put(set_room_guest_access))
         // Private mesh: trust-circle peers + self invite.
         .route("/mesh/peers", get(list_mesh_peers).post(add_mesh_peer))
         .route(
@@ -299,6 +301,15 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/models/{category}/{name}", delete(delete_model))
         .route("/profiles", get(list_profiles))
         .route("/profiles/{id}", get(get_profile).delete(delete_profile))
+        .route("/profiles/{id}/role", put(set_profile_role))
+        .route(
+            "/profiles/{id}/devices",
+            get(list_guest_device_access),
+        )
+        .route(
+            "/profiles/{id}/devices/{device_id}",
+            put(allow_guest_device).delete(revoke_guest_device),
+        )
         .route("/sensors", post(record_sensor))
         .route("/sensors/{device_id}", get(get_recent_sensors))
         // The unified event log; DELETE clears it ("clear my activity").
@@ -1687,6 +1698,31 @@ async fn reset_onboarding(
             "onboarding_reset",
         )
         .await?;
+    }
+    // The host credential is already a stronger proof than any household role, so it stays
+    // sufficient on its own; otherwise (a bearer-token caller) the reset itself is owner-only —
+    // but only once onboarding has actually finished. Mid-wizard, profiles may already exist
+    // (added as setup steps run) with no owner settled yet (that's fixed by completion, which
+    // is also when the migration's backfill source, `primary_profile_id`, gets set); requiring
+    // an owner before then would lock the claimant out of its own in-progress setup.
+    let onboarded = state.skip_onboarding
+        || state.onboarding_repo.is_complete().await.unwrap_or(true);
+    let host_presented = crate::host_guard::presents_credential(
+        credential.as_ref().map(|axum::Extension(c)| c),
+        &headers,
+    );
+    if onboarded && !host_presented {
+        use pond_core::user_data::services::household_permission::{
+            may_reset_pond, PermissionDecision,
+        };
+        let role = resolve_role_from_principal(&state, principal.as_ref()).await;
+        if let PermissionDecision::Denied {
+            reason,
+            grantable_by,
+        } = may_reset_pond(role)
+        {
+            return Err(permission_denied(&state, reason, grantable_by).await);
+        }
     }
     let service = OnboardingService::new(state.onboarding_repo.clone());
 
@@ -4543,6 +4579,21 @@ fn pairing_material(
     })
 }
 
+fn device_json(device: &pond_core::user_data::ports::device_registry::Device) -> Value {
+    json!({
+        "id":            device.id,
+        "name":          device.name,
+        "device_type":   device.device_type,
+        "hostname":      device.hostname,
+        "ip_address":    device.ip_address,
+        "capabilities":  device.capabilities,
+        "registered_at": device.registered_at,
+        "last_seen":     device.last_seen,
+        "is_online":     device.is_online,
+        "room_id":       device.room_id,
+    })
+}
+
 async fn list_devices(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
@@ -4552,23 +4603,7 @@ async fn list_devices(
             Json(json!({"error": e.to_string()})),
         )
     })?;
-    let list: Vec<Value> = devices
-        .iter()
-        .map(|d| {
-            json!({
-                "id":            d.id,
-                "name":          d.name,
-                "device_type":   d.device_type,
-                "hostname":      d.hostname,
-                "ip_address":    d.ip_address,
-                "capabilities":  d.capabilities,
-                "registered_at": d.registered_at,
-                "last_seen":     d.last_seen,
-                "is_online":     d.is_online,
-                "room_id":       d.room_id,
-            })
-        })
-        .collect();
+    let list: Vec<Value> = devices.iter().map(device_json).collect();
     Ok(Json(json!({ "devices": list })))
 }
 
@@ -4802,6 +4837,16 @@ async fn unregister_device(
     use pond_core::user_data::ports::device_commissioning::{
         matter_bridged_endpoint, matter_node_id,
     };
+    use pond_core::user_data::services::household_permission::{may_remove_device, PermissionDecision};
+
+    let role = resolve_role_from_principal(&state, principal.as_ref()).await;
+    if let PermissionDecision::Denied {
+        reason,
+        grantable_by,
+    } = may_remove_device(role)
+    {
+        return Err(permission_denied(&state, reason, grantable_by).await);
+    }
 
     // Refuse bridged endpoints: Matter decommissions whole nodes (hub + siblings), and dropping
     // just the row lets the controller re-announce it; the hub's own app owns its children.
@@ -5123,33 +5168,31 @@ async fn update_device(
                 Json(json!({"error": e.to_string()})),
             )
         })?;
-    Ok(Json(json!({
-        "id":            device.id,
-        "name":          device.name,
-        "device_type":   device.device_type,
-        "hostname":      device.hostname,
-        "ip_address":    device.ip_address,
-        "capabilities":  device.capabilities,
-        "registered_at": device.registered_at,
-        "last_seen":     device.last_seen,
-        "is_online":     device.is_online,
-        "room_id":       device.room_id,
-    })))
+    Ok(Json(device_json(&device)))
 }
 
 // ── Rooms ────────────────────────────────────────────────────────────────
 
-fn room_json(room: &pond_core::user_data::ports::room_registry::Room) -> Value {
+fn room_json(
+    room: &pond_core::user_data::ports::room_registry::Room,
+    guest_accessible: bool,
+) -> Value {
     json!({
-        "id":         room.id,
-        "name":       room.name,
-        "created_at": room.created_at,
+        "id":               room.id,
+        "name":             room.name,
+        "created_at":       room.created_at,
+        "guest_accessible": guest_accessible,
     })
 }
 
 #[derive(serde::Deserialize)]
 struct RoomBody {
     name: String,
+}
+
+#[derive(serde::Deserialize)]
+struct SetGuestAccessBody {
+    accessible: bool,
 }
 
 /// `GET /api/v1/rooms` — every room the household has named.
@@ -5162,9 +5205,16 @@ async fn list_rooms(
             Json(json!({"error": e.to_string()})),
         )
     })?;
-    Ok(Json(
-        json!({ "rooms": rooms.iter().map(room_json).collect::<Vec<_>>() }),
-    ))
+    let accessible = state
+        .guest_room_access
+        .accessible_room_ids()
+        .await
+        .unwrap_or_default();
+    let list: Vec<Value> = rooms
+        .iter()
+        .map(|r| room_json(r, accessible.contains(&r.id)))
+        .collect();
+    Ok(Json(json!({ "rooms": list })))
 }
 
 /// `POST /api/v1/rooms` — name a new room, e.g. while placing a freshly-added device.
@@ -5191,7 +5241,7 @@ async fn create_room(
             Json(json!({"error": e.to_string()})),
         )
     })?;
-    Ok((StatusCode::CREATED, Json(room_json(&room))))
+    Ok((StatusCode::CREATED, Json(room_json(&room, false))))
 }
 
 /// `GET /api/v1/rooms/{id}`.
@@ -5215,7 +5265,48 @@ async fn get_room(
                 Json(json!({"error": "room_not_found"})),
             )
         })?;
-    Ok(Json(room_json(&room)))
+    let guest_accessible = state
+        .guest_room_access
+        .is_guest_accessible(&room.id)
+        .await
+        .unwrap_or(false);
+    Ok(Json(room_json(&room, guest_accessible)))
+}
+
+/// `GET /api/v1/rooms/{id}/devices` — the devices placed in this room, so a client doesn't have
+/// to fetch every device and filter client-side.
+async fn get_room_devices(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    state
+        .room_registry
+        .get_room(&id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "room_not_found"})),
+            )
+        })?;
+    let devices = state.device_registry.list_devices().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
+    let list: Vec<Value> = devices
+        .iter()
+        .filter(|d| d.room_id.as_deref() == Some(id.as_str()))
+        .map(device_json)
+        .collect();
+    Ok(Json(json!({ "devices": list })))
 }
 
 /// `PUT /api/v1/rooms/{id}` — rename a room.
@@ -5275,7 +5366,53 @@ async fn rename_room(
                 Json(json!({"error": "room_not_found"})),
             )
         })?;
-    Ok(Json(room_json(&room)))
+    let guest_accessible = state
+        .guest_room_access
+        .is_guest_accessible(&room.id)
+        .await
+        .unwrap_or(false);
+    Ok(Json(room_json(&room, guest_accessible)))
+}
+
+/// `PUT /api/v1/rooms/{id}/guest-access` — grant or revoke guest access to a room's devices.
+async fn set_room_guest_access(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Result<Json<SetGuestAccessBody>, JsonRejection>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Json(req) = body.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("Invalid request: {}", e)})),
+        )
+    })?;
+    let room = state
+        .room_registry
+        .get_room(&id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "room_not_found"})),
+            )
+        })?;
+    state
+        .guest_room_access
+        .set_guest_accessible(&id, req.accessible)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?;
+    Ok(Json(room_json(&room, req.accessible)))
 }
 
 /// `DELETE /api/v1/rooms/{id}` — refused while any device is still placed in this room.
@@ -5756,6 +5893,7 @@ fn geocode_target(
 
 async fn update_settings(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     body: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let Json(mut patch) = body.map_err(|e| {
@@ -5764,6 +5902,22 @@ async fn update_settings(
             Json(json!({"error": format!("Invalid settings body: {}", e)})),
         )
     })?;
+
+    // Only the model fields are owner-gated; the rest of this patch may touch unrelated settings
+    // (voice, appearance, retention, ...) that any household member may already freely change.
+    if patch.get("chat_model").is_some() || patch.get("chat_provider").is_some() {
+        use pond_core::user_data::services::household_permission::{
+            may_change_model, PermissionDecision,
+        };
+        let role = resolve_role_from_principal(&state, principal.as_ref()).await;
+        if let PermissionDecision::Denied {
+            reason,
+            grantable_by,
+        } = may_change_model(role)
+        {
+            return Err(permission_denied(&state, reason, grantable_by).await);
+        }
+    }
 
     let current = state.settings_repo.get().await.map_err(|e| {
         (
@@ -5887,6 +6041,22 @@ async fn update_settings(
     // Must follow the write (marks existing rows); exempts these keys from DEFAULT_ADOPTIONS.
     if let Err(e) = state.settings_repo.mark_user_set(&user_keys).await {
         tracing::warn!(error = %e, "failed to record user intent for settings patch");
+    }
+
+    // The only place a profile becomes Owner going forward (the migration backfill only covers
+    // profiles that existed when it ran): naming the primary profile is naming the owner.
+    if user_keys.contains("primary_profile_id") {
+        if let Some(primary) = merged.primary_profile_id.as_deref().filter(|id| !id.is_empty()) {
+            match state.profile_repo.get(primary).await {
+                Ok(Some(profile)) if profile.role != Role::Owner => {
+                    if let Err(e) = state.profile_repo.set_role(primary, Role::Owner, None).await {
+                        tracing::warn!(error = %e, profile_id = %primary, "failed to promote the primary profile to owner");
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, profile_id = %primary, "could not read the primary profile to promote it"),
+            }
+        }
     }
 
     // Privacy controls must apply now, not at the next restart.
@@ -7235,9 +7405,22 @@ fn refuse_unavailable_category(
 /// POST /api/v1/models/{category}/{name}/activate — assign to a role; mirrored into settings.
 async fn activate_model(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path((category, name)): Path<(String, String)>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use pond_core::user_data::services::household_permission::{
+        may_change_model, PermissionDecision,
+    };
+    let caller_role = resolve_role_from_principal(&state, principal.as_ref()).await;
+    if let PermissionDecision::Denied {
+        reason,
+        grantable_by,
+    } = may_change_model(caller_role)
+    {
+        return Err(permission_denied(&state, reason, grantable_by).await);
+    }
+
     let Some(model_repo) = state.model_repo.clone() else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -8207,6 +8390,19 @@ async fn link_or_copy_blob(src: &std::path::Path, dest: &std::path::Path) -> any
 
 // ── Profile handlers ──────────────────────────────────────────────────────────
 
+fn profile_json(p: &pond_core::user_data::domain::profile::Profile) -> Value {
+    json!({
+        "id":           p.id,
+        "display_name": p.display_name,
+        "avatar_emoji": p.avatar_emoji,
+        "preferences":  p.preferences,
+        "role":         p.role,
+        "guest_until":  p.guest_until.map(|t| t.to_rfc3339()),
+        "created_at":   p.created_at.to_rfc3339(),
+        "updated_at":   p.updated_at.to_rfc3339(),
+    })
+}
+
 async fn list_profiles(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
@@ -8216,19 +8412,7 @@ async fn list_profiles(
             Json(json!({"error": e.to_string()})),
         )
     })?;
-    let list: Vec<Value> = profiles
-        .iter()
-        .map(|p| {
-            json!({
-                "id":           p.id,
-                "display_name": p.display_name,
-                "avatar_emoji": p.avatar_emoji,
-                "preferences":  p.preferences,
-                "created_at":   p.created_at.to_rfc3339(),
-                "updated_at":   p.updated_at.to_rfc3339(),
-            })
-        })
-        .collect();
+    let list: Vec<Value> = profiles.iter().map(profile_json).collect();
     Ok(Json(json!({ "profiles": list })))
 }
 
@@ -8248,17 +8432,7 @@ async fn create_profile(
             Json(json!({"error": e.to_string()})),
         )
     })?;
-    Ok((
-        StatusCode::CREATED,
-        Json(json!({
-            "id":           profile.id,
-            "display_name": profile.display_name,
-            "avatar_emoji": profile.avatar_emoji,
-            "preferences":  profile.preferences,
-            "created_at":   profile.created_at.to_rfc3339(),
-            "updated_at":   profile.updated_at.to_rfc3339(),
-        })),
-    ))
+    Ok((StatusCode::CREATED, Json(profile_json(&profile))))
 }
 
 async fn get_profile(
@@ -8272,14 +8446,7 @@ async fn get_profile(
         )
     })?;
     match profile {
-        Some(p) => Ok(Json(json!({
-            "id":           p.id,
-            "display_name": p.display_name,
-            "avatar_emoji": p.avatar_emoji,
-            "preferences":  p.preferences,
-            "created_at":   p.created_at.to_rfc3339(),
-            "updated_at":   p.updated_at.to_rfc3339(),
-        }))),
+        Some(p) => Ok(Json(profile_json(&p))),
         None => Err((
             StatusCode::NOT_FOUND,
             Json(json!({"error": "profile not found"})),
@@ -8343,6 +8510,27 @@ async fn delete_profile(
                 Json(json!({"error": format!("no such profile: {id}")})),
             )
         })?;
+
+    // The last-owner guard also applies to deletion, not just demotion: either one would leave
+    // the household with no owner.
+    if profile.role == pond_core::user_data::domain::profile::Role::Owner {
+        let profiles = state.profile_repo.list().await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?;
+        let owners = profiles
+            .iter()
+            .filter(|p| p.role == pond_core::user_data::domain::profile::Role::Owner)
+            .count();
+        if owners <= 1 {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({"error": "this household would be left with no owner"})),
+            ));
+        }
+    }
 
     // Count before deleting: most `profile_id` foreign keys cascade.
     let memories = state
@@ -8443,6 +8631,229 @@ async fn delete_profile(
         },
         "cleared_primary_profile": cleared_primary,
     })))
+}
+
+// ── Household role & guest device access handlers ─────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct SetProfileRoleBody {
+    role: pond_core::user_data::domain::profile::Role,
+    #[serde(default)]
+    guest_until: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// `PUT /api/v1/profiles/{id}/role` — owner-only; refused if it would leave the household
+/// without an owner.
+async fn set_profile_role(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    body: Result<Json<SetProfileRoleBody>, JsonRejection>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use pond_core::user_data::domain::profile::Role;
+    use pond_core::user_data::services::household_permission::{
+        may_manage_household_roles, PermissionDecision,
+    };
+
+    let caller_role = resolve_role_from_principal(&state, principal.as_ref()).await;
+    if let PermissionDecision::Denied {
+        reason,
+        grantable_by,
+    } = may_manage_household_roles(caller_role)
+    {
+        return Err(permission_denied(&state, reason, grantable_by).await);
+    }
+
+    let Json(req) = body.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("Invalid request: {}", e)})),
+        )
+    })?;
+
+    let target = state
+        .profile_repo
+        .get(&id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "profile not found"})),
+            )
+        })?;
+
+    if target.role == Role::Owner && req.role != Role::Owner {
+        let profiles = state.profile_repo.list().await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?;
+        let owners = profiles.iter().filter(|p| p.role == Role::Owner).count();
+        if owners <= 1 {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({"error": "this household would be left with no owner"})),
+            ));
+        }
+    }
+
+    let updated = state
+        .profile_repo
+        .set_role(&id, req.role, req.guest_until)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?;
+    Ok(Json(profile_json(&updated)))
+}
+
+/// Owner-only gate shared by the three guest-device-access handlers below.
+async fn require_household_role_manager(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    use pond_core::user_data::services::household_permission::{
+        may_manage_household_roles, PermissionDecision,
+    };
+    let role = resolve_role_from_principal(state, principal).await;
+    if let PermissionDecision::Denied {
+        reason,
+        grantable_by,
+    } = may_manage_household_roles(role)
+    {
+        return Err(permission_denied(state, reason, grantable_by).await);
+    }
+    Ok(())
+}
+
+async fn require_profile_exists(
+    state: &Arc<AppState>,
+    id: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    state
+        .profile_repo
+        .get(id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "profile not found"})),
+            )
+        })?;
+    Ok(())
+}
+
+/// `GET /api/v1/profiles/{id}/devices` — the devices this guest profile may currently control.
+async fn list_guest_device_access(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_household_role_manager(&state, principal.as_ref()).await?;
+    require_profile_exists(&state, &id).await?;
+    let device_ids = state
+        .guest_device_access
+        .allowed_devices(&id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?;
+    Ok(Json(json!({ "device_ids": device_ids })))
+}
+
+async fn require_device_exists(
+    state: &Arc<AppState>,
+    device_id: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    state
+        .device_registry
+        .get_device(device_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "device not found"})),
+            )
+        })?;
+    Ok(())
+}
+
+/// `PUT /api/v1/profiles/{id}/devices/{device_id}` — grant a guest profile access to a device.
+async fn allow_guest_device(
+    State(state): State<Arc<AppState>>,
+    Path((id, device_id)): Path<(String, String)>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_household_role_manager(&state, principal.as_ref()).await?;
+    require_profile_exists(&state, &id).await?;
+    require_device_exists(&state, &device_id).await?;
+    state
+        .guest_device_access
+        .allow(&id, &device_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?;
+    let device_ids = state
+        .guest_device_access
+        .allowed_devices(&id)
+        .await
+        .unwrap_or_default();
+    Ok(Json(json!({ "device_ids": device_ids })))
+}
+
+/// `DELETE /api/v1/profiles/{id}/devices/{device_id}` — revoke a guest profile's access.
+async fn revoke_guest_device(
+    State(state): State<Arc<AppState>>,
+    Path((id, device_id)): Path<(String, String)>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_household_role_manager(&state, principal.as_ref()).await?;
+    require_profile_exists(&state, &id).await?;
+    state
+        .guest_device_access
+        .revoke(&id, &device_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?;
+    let device_ids = state
+        .guest_device_access
+        .allowed_devices(&id)
+        .await
+        .unwrap_or_default();
+    Ok(Json(json!({ "device_ids": device_ids })))
 }
 
 // ── Sensor handlers ───────────────────────────────────────────────────────────
@@ -11424,7 +11835,10 @@ async fn dispatch_tool_direct(
         )
     })?;
     let args = if args.is_null() { json!({}) } else { args };
-    match dispatcher.dispatch(qualified, args).await {
+    // This path carries no caller identity (see the allowlist refusal above); it is reached only
+    // through authenticated HTTP routes a guest's chat turn never calls directly.
+    let scope = pond_core::user_data::domain::profile::ProfileScope::Household;
+    match dispatcher.dispatch(qualified, args, &scope).await {
         Ok(result) => Ok(Json(json!({
             "tool": qualified,
             "success": result.success,
@@ -18391,6 +18805,76 @@ fn proven_device(
         Some(axum::Extension(principal)) => ProvenDevice::from_principal(principal),
         None => ProvenDevice::none(),
     }
+}
+
+/// Maps an already-resolved scope to a role. `Guest` (an unidentified voice) has no profile,
+/// hence no role; `Household` (a sole-member pond) is trusted as the owner, the same "no one
+/// else to defer to" trust `ProfileScope::Household` already carries elsewhere.
+async fn resolve_role(state: &Arc<AppState>, scope: &ProfileScope) -> Option<Role> {
+    match scope {
+        ProfileScope::Owner(id) => state.profile_repo.get(id).await.ok().flatten().map(|p| p.role),
+        ProfileScope::Household => Some(Role::Owner),
+        ProfileScope::Guest => None,
+    }
+}
+
+/// For a handler with no chat session (device removal, settings, model activation, remote-access
+/// enrollment): resolves this caller's role from its paired device, the same trust boundary
+/// `resolve_turn_scope` uses for a turn, just without a session identity to read or persist into.
+async fn resolve_role_from_principal(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+) -> Option<Role> {
+    let device = proven_device(principal);
+    let device_rung = match device.id() {
+        None => DeviceRung::NoDevice,
+        Some(device_id) => device.rung(device_attribution(state).device_profile(device_id).await),
+    };
+    let household_has_multiple_members = match state.profile_repo.list().await {
+        Ok(profiles) => profiles.len() > 1,
+        Err(_) => true,
+    };
+    let resolved = identity_resolution::resolve(&identity_resolution::ResolutionInputs {
+        paired_device_profile: device_rung.profile_id(),
+        session: &SessionIdentity::unknown(),
+        household_has_multiple_members,
+    });
+    resolve_role(state, &resolved.scope).await
+}
+
+/// Real owner names, for refusals that should say who to ask, not just which role.
+async fn owner_display_names(state: &Arc<AppState>) -> Vec<String> {
+    state
+        .profile_repo
+        .list()
+        .await
+        .map(|profiles| {
+            profiles
+                .into_iter()
+                .filter(|p| p.role == Role::Owner)
+                .map(|p| p.display_name)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A `PermissionDecision::Denied` as a 403: the role that can grant it, and — when the household
+/// has one — the actual owner(s) by name, so a client can say who to ask rather than only what
+/// role is needed.
+async fn permission_denied(
+    state: &Arc<AppState>,
+    reason: &'static str,
+    grantable_by: Role,
+) -> (StatusCode, Json<Value>) {
+    let owners = owner_display_names(state).await;
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "error": reason,
+            "who_can_grant": grantable_by.as_str(),
+            "owners": owners,
+        })),
+    )
 }
 
 // ── Connecting a source ────────────────────────────────────────────────────

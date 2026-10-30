@@ -1,10 +1,10 @@
 //! In-memory mock implementation of `ProfileRepository` for tests.
 
-use crate::user_data::domain::profile::{CreateProfileRequest, Profile};
+use crate::user_data::domain::profile::{CreateProfileRequest, Profile, Role};
 use crate::user_data::ports::profile::ProfileRepository;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -32,18 +32,25 @@ impl Default for MockProfileRepository {
 impl ProfileRepository for MockProfileRepository {
     async fn create(&self, request: CreateProfileRequest) -> Result<Profile> {
         let now = Utc::now();
+        let mut store = self.store.write().await;
+        // Mirrors `SqliteProfileRepository::create`: the first profile in an otherwise-empty
+        // household is unambiguously its owner.
+        let role = if store.is_empty() {
+            Role::Owner
+        } else {
+            Role::Member
+        };
         let profile = Profile {
             id: Uuid::new_v4().to_string(),
             display_name: request.display_name,
             avatar_emoji: request.avatar_emoji,
             preferences: HashMap::new(),
+            role,
+            guest_until: None,
             created_at: now,
             updated_at: now,
         };
-        self.store
-            .write()
-            .await
-            .insert(profile.id.clone(), profile.clone());
+        store.insert(profile.id.clone(), profile.clone());
         Ok(profile)
     }
 
@@ -67,6 +74,22 @@ impl ProfileRepository for MockProfileRepository {
             .get_mut(profile_id)
             .ok_or_else(|| anyhow!("profile not found: {}", profile_id))?;
         profile.preferences = prefs;
+        profile.updated_at = Utc::now();
+        Ok(profile.clone())
+    }
+
+    async fn set_role(
+        &self,
+        profile_id: &str,
+        role: Role,
+        guest_until: Option<DateTime<Utc>>,
+    ) -> Result<Profile> {
+        let mut store = self.store.write().await;
+        let profile = store
+            .get_mut(profile_id)
+            .ok_or_else(|| anyhow!("profile not found: {}", profile_id))?;
+        profile.role = role;
+        profile.guest_until = if role == Role::Guest { guest_until } else { None };
         profile.updated_at = Utc::now();
         Ok(profile.clone())
     }

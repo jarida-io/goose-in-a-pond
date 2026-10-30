@@ -751,6 +751,8 @@ mod tests {
             State(runtime),
             ConnectInfo("192.168.1.20:1234".parse().unwrap()),
             Extension(handshake),
+            Extension(super::super::tests::no_profiles()),
+            Extension(super::super::tests::no_attribution()),
             headers,
             Json(registration()),
         )

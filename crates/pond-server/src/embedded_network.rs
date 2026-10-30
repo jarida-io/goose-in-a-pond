@@ -12,7 +12,13 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use pond_api::network::{is_tailnet, EmbeddedAddress};
+use pond_core::security::domain::proven_device::DeviceRung;
 use pond_core::security::ports::remote_access::{RemoteMachines, TailnetMachine};
+use pond_core::user_data::domain::profile::{ProfileScope, Role};
+use pond_core::user_data::domain::session::SessionIdentity;
+use pond_core::user_data::ports::device_attribution::DeviceAttribution;
+use pond_core::user_data::ports::profile::ProfileRepository;
+use pond_core::user_data::services::identity_resolution;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -1688,11 +1694,43 @@ async fn remote_configuration(
         "lapsesAt": lapses_at,
     })))
 }
+/// Resolves a raw device id's role the same way `pond-api`'s `resolve_role_from_principal`
+/// does for a chat turn: attribution first, the sole-member household fallback otherwise.
+/// This module authenticates its own caller via `recovery::caller`, not `Principal`, so it has
+/// a device id directly rather than something to run `ProvenDevice` over.
+async fn resolve_role_for_device(
+    device_id: &str,
+    profile_repo: &dyn ProfileRepository,
+    device_attribution: &dyn DeviceAttribution,
+) -> Option<Role> {
+    let device_rung = DeviceRung::from_attribution(device_attribution.device_profile(device_id).await);
+    let household_has_multiple_members = match profile_repo.list().await {
+        Ok(profiles) => profiles.len() > 1,
+        Err(_) => true,
+    };
+    let resolved = identity_resolution::resolve(&identity_resolution::ResolutionInputs {
+        paired_device_profile: device_rung.profile_id(),
+        session: &SessionIdentity::unknown(),
+        household_has_multiple_members,
+    });
+    match resolved.scope {
+        ProfileScope::Owner(id) => profile_repo.get(&id).await.ok().flatten().map(|p| p.role),
+        ProfileScope::Household => Some(Role::Owner),
+        ProfileScope::Guest => None,
+    }
+}
+
 async fn register_phone(
     State(runtime): State<Arc<Runtime>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     axum::Extension(handshake): axum::Extension<
         Arc<dyn pond_core::security::ports::handshake::Handshake>,
+    >,
+    axum::Extension(profile_repo): axum::Extension<
+        Arc<dyn pond_core::user_data::ports::profile::ProfileRepository>,
+    >,
+    axum::Extension(device_attribution): axum::Extension<
+        Arc<dyn pond_core::user_data::ports::device_attribution::DeviceAttribution>,
     >,
     headers: axum::http::HeaderMap,
     Json(registration): Json<Registration>,
@@ -1703,6 +1741,20 @@ async fn register_phone(
         .await
         .map_err(IntoResponse::into_response)?
         .device;
+
+    let role = resolve_role_for_device(&device, profile_repo.as_ref(), device_attribution.as_ref())
+        .await;
+    if let pond_core::user_data::services::household_permission::PermissionDecision::Denied {
+        reason,
+        grantable_by,
+    } = pond_core::user_data::services::household_permission::may_enroll_remote_access(role)
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": reason, "who_can_grant": grantable_by.as_str()})),
+        )
+            .into_response());
+    }
     let lock = runtime.device_lock(&device);
     let _held = lock.lock().await;
     let store_failed = |error: anyhow::Error| {
@@ -1995,6 +2047,13 @@ pub fn companion_management(runtime: Arc<Runtime>, state: Arc<pond_api::AppState
         // fallback, charging every unknown path to this 20-a-minute budget.
         .route_layer(axum::extract::DefaultBodyLimit::max(4096))
         .route_layer(axum::Extension(state.handshake.clone()))
+        .route_layer(axum::Extension(state.profile_repo.clone()))
+        .route_layer(axum::Extension(Arc::new(
+            pond_infra::sqlite_device_attribution::SqliteDeviceAttribution::new(
+                state.db.system.clone(),
+            ),
+        )
+            as Arc<dyn pond_core::user_data::ports::device_attribution::DeviceAttribution>))
         .route_layer(middleware::from_fn_with_state(
             state,
             pond_api::middleware::auth_middleware,
@@ -2051,6 +2110,37 @@ mod tests {
         assert_eq!(helper_complaint(b"   \n  "), "and said nothing");
     }
     use super::*;
+
+    /// No profile owns any device; paired with `MockProfileRepository` (no profiles at all),
+    /// resolution falls through to the sole-member-household fallback — `Role::Owner` — the
+    /// same as today's unrestricted "any paired device enrolls" behaviour these tests expect.
+    struct NoAttribution;
+    #[async_trait::async_trait]
+    impl DeviceAttribution for NoAttribution {
+        async fn set_device_profile(&self, _: &str, _: Option<&str>) -> Result<()> {
+            Ok(())
+        }
+        async fn device_profile(&self, _: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+        async fn devices_for_profile(&self, _: &str) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn push_tokens_for_profile(
+            &self,
+            _: &str,
+        ) -> Result<Vec<pond_core::user_data::domain::push_token::PushToken>> {
+            Ok(vec![])
+        }
+    }
+
+    pub(crate) fn no_attribution() -> Arc<dyn DeviceAttribution> {
+        Arc::new(NoAttribution)
+    }
+
+    pub(crate) fn no_profiles() -> Arc<dyn ProfileRepository> {
+        Arc::new(pond_core::user_data::mocks::mock_profile::MockProfileRepository::new())
+    }
 
     #[test]
     fn a_removed_phone_replaces_its_stood_down_enrollment() {
@@ -2836,6 +2926,8 @@ mod tests {
             State(runtime.clone()),
             ConnectInfo("127.0.0.1:5555".parse().unwrap()),
             axum::Extension(handshake.clone()),
+            axum::Extension(no_profiles()),
+            axum::Extension(no_attribution()),
             headers.clone(),
             Json(Registration {
                 auth_url: "https://coord.example/register/abcdefghijklmnop".into(),
@@ -3411,6 +3503,8 @@ mod tests {
             State(runtime),
             ConnectInfo("127.0.0.1:5555".parse().unwrap()),
             axum::Extension(handshake as Arc<dyn Handshake>),
+            axum::Extension(no_profiles()),
+            axum::Extension(no_attribution()),
             headers,
             Json(Registration {
                 auth_url: "https://coord.example/register/abcdefghijklmnop".into(),

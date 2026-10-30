@@ -499,6 +499,25 @@ async fn deleting_a_member_forgets_their_uber_sign_in() {
     let service = credentials_service().await;
     let _at = CredentialsAt::set(&service.uri());
     let p = pond().await;
+    // The only profile in an empty household is its owner, and the last owner can't be deleted
+    // -- seed a second owner so deleting the member isn't refused on that ground.
+    {
+        use pond_core::user_data::domain::profile::Role;
+        let jerry = p
+            .state
+            .profile_repo
+            .create(CreateProfileRequest {
+                display_name: "Jerry".to_string(),
+                avatar_emoji: "Y".to_string(),
+            })
+            .await
+            .unwrap();
+        p.state
+            .profile_repo
+            .set_role(&jerry.id, Role::Owner, None)
+            .await
+            .unwrap();
+    }
 
     let nonce = start_sign_in(&p).await;
     let (_, page) = call(
@@ -540,6 +559,25 @@ async fn a_sign_in_that_outlives_its_member_keeps_nothing() {
         .await;
     let _at = CredentialsAt::set(&service.uri());
     let p = pond().await;
+    // The only profile in an empty household is its owner, and the last owner can't be deleted
+    // -- seed a second owner so deleting the member isn't refused on that ground.
+    {
+        use pond_core::user_data::domain::profile::Role;
+        let jerry = p
+            .state
+            .profile_repo
+            .create(CreateProfileRequest {
+                display_name: "Jerry".to_string(),
+                avatar_emoji: "Y".to_string(),
+            })
+            .await
+            .unwrap();
+        p.state
+            .profile_repo
+            .set_role(&jerry.id, Role::Owner, None)
+            .await
+            .unwrap();
+    }
 
     let nonce = start_sign_in(&p).await;
     let returning = tokio::spawn({
