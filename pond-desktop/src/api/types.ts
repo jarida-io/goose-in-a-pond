@@ -418,7 +418,10 @@ export interface Schedule {
   prompt: string;
   enabled: boolean;
   timezone?: string;
-  kind?: { type: "agent_prompt"; prompt: string } | { type: "webhook"; webhook_url: string };
+  kind?:
+    | { type: "agent_prompt"; prompt: string }
+    | { type: "webhook"; webhook_url: string }
+    | { type: "member_reminder"; profile_id: string; prompt: string };
   last_run?: string;
   next_run?: string;
   created_at?: string;

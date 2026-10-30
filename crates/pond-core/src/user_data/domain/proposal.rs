@@ -314,7 +314,9 @@ impl Proposal {
     /// One-line description of the action (never the rationale) for draft listings.
     pub fn summary(&self) -> String {
         match &self.proposed_action {
-            TaskKind::AgentPrompt { prompt } => truncate(prompt, 120),
+            TaskKind::AgentPrompt { prompt } | TaskKind::MemberReminder { prompt, .. } => {
+                truncate(prompt, 120)
+            }
             TaskKind::Webhook { webhook_url } => format!("POST to {}", truncate(webhook_url, 100)),
             TaskKind::SensorTrigger(spec) => format!(
                 "watch {} for {}",

@@ -98,6 +98,32 @@ pub fn speaker_authority(
     SPEAKER_AUTHORITY.get().cloned()
 }
 
+/// A dependency of the server: given at construction, or read from its process-wide slot each
+/// time a tool runs. Goose keeps the first server it spawns for the life of the process, and that
+/// can be before startup has installed the slots.
+pub(crate) enum Dep<T: ?Sized> {
+    Fixed(Option<Arc<T>>),
+    Installed(fn() -> Option<Arc<T>>),
+}
+
+impl<T: ?Sized> Dep<T> {
+    pub(crate) fn get(&self) -> Option<Arc<T>> {
+        match self {
+            Self::Fixed(dep) => dep.clone(),
+            Self::Installed(read) => read(),
+        }
+    }
+}
+
+impl<T: ?Sized> Clone for Dep<T> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Fixed(dep) => Self::Fixed(dep.clone()),
+            Self::Installed(read) => Self::Installed(*read),
+        }
+    }
+}
+
 // -- Member delivery: puts a tool's link on one member's own phones; unset → reply only --
 static MEMBER_NOTIFIER: OnceLock<Arc<dyn pond_core::mcp::ports::notification::MemberNotifier>> =
     OnceLock::new();

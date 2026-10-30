@@ -5,7 +5,9 @@ use axum::http::{Request, StatusCode};
 use pond_api::{build_router, AppState};
 use pond_core::shared::mocks::mock_agent::MockAgent;
 use pond_core::user_data::domain::onboarding::OnboardingStep;
-use pond_core::user_data::domain::schedule::{OneShotTimePassed, Schedule, ScheduleRun, CRON_ONCE};
+use pond_core::user_data::domain::schedule::{
+    OneShotTimePassed, Schedule, ScheduleRun, TaskKind, CRON_ONCE,
+};
 use pond_core::user_data::mocks::mock_memory::MockMemoryRepository;
 use pond_core::user_data::mocks::mock_profile::MockProfileRepository;
 use pond_core::user_data::mocks::mock_sensor::{MockCameraStorage, MockSensorStorage};
@@ -211,6 +213,10 @@ impl SchedulerPort for InMemoryScheduler {
 // ── App factory ───────────────────────────────────────────────────────────────
 
 async fn make_app() -> (axum::Router, tempfile::TempDir) {
+    make_app_with(Arc::new(InMemoryScheduler::new())).await
+}
+
+async fn make_app_with(scheduler: Arc<InMemoryScheduler>) -> (axum::Router, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let db = pond_infra::db::Database::init(tmp.path()).await.unwrap();
     let session_storage = Arc::new(SqliteSessionStorage::new(db.system.clone()));
@@ -218,7 +224,7 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
     let mock_hs = MockHandshake::new();
     mock_hs.add_valid_token("test-token".to_string()).await;
 
-    let scheduler: Option<Arc<dyn SchedulerPort>> = Some(Arc::new(InMemoryScheduler::new()));
+    let scheduler: Option<Arc<dyn SchedulerPort>> = Some(scheduler);
 
     let state = Arc::new(AppState {
         warmup: Default::default(),
@@ -338,6 +344,16 @@ fn auth_get(uri: &str) -> Request<Body> {
 fn auth_post(uri: &str, body: serde_json::Value) -> Request<Body> {
     Request::builder()
         .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("Authorization", "Bearer test-token")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+fn auth_put(uri: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method("PUT")
         .uri(uri)
         .header("content-type", "application/json")
         .header("Authorization", "Bearer test-token")
@@ -806,4 +822,86 @@ async fn upcoming_returns_active_schedules() {
             .any(|t| t.get("id").and_then(|v| v.as_str()) == Some("upcoming-task")),
         "upcoming task not found: {tasks:?}"
     );
+}
+
+#[tokio::test]
+async fn a_private_reminder_cannot_be_created_through_the_api() {
+    let (app, _tmp) = make_app().await;
+    let body = serde_json::json!({
+        "name": "Evening",
+        "cron": "0 0 20 * * *",
+        "kind": {"type": "member_reminder", "profile_id": "grace", "prompt": "Take the tablets"},
+    });
+    let resp = app
+        .oneshot(auth_post("/api/v1/schedules", body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn editing_a_private_reminders_prompt_keeps_it_the_members() {
+    let scheduler = Arc::new(InMemoryScheduler::new());
+    scheduler
+        .create_task(CreateScheduleRequest {
+            id: "r".into(),
+            label: "Evening".into(),
+            cron: "0 0 20 * * *".into(),
+            fire_at: None,
+            once: false,
+            timezone: "UTC".into(),
+            kind: TaskKind::MemberReminder {
+                profile_id: "grace".into(),
+                prompt: "Take the tablets".into(),
+            },
+        })
+        .await
+        .unwrap();
+    let (app, _tmp) = make_app_with(scheduler.clone()).await;
+
+    let resp = app
+        .oneshot(auth_put(
+            "/api/v1/schedules/r",
+            serde_json::json!({"prompt": "Take the blue tablets"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(!json_body(resp).await.to_string().contains("tablets"));
+    assert_eq!(
+        scheduler.list_tasks().await.unwrap()[0].kind,
+        TaskKind::MemberReminder {
+            profile_id: "grace".into(),
+            prompt: "Take the blue tablets".into(),
+        }
+    );
+}
+
+#[tokio::test]
+async fn listings_show_a_private_reminder_without_what_it_says() {
+    let scheduler = Arc::new(InMemoryScheduler::new());
+    scheduler
+        .create_task(CreateScheduleRequest {
+            id: "r".into(),
+            label: "Evening".into(),
+            cron: "0 0 20 * * *".into(),
+            fire_at: None,
+            once: false,
+            timezone: "UTC".into(),
+            kind: TaskKind::MemberReminder {
+                profile_id: "grace".into(),
+                prompt: "Take the tablets".into(),
+            },
+        })
+        .await
+        .unwrap();
+    let (app, _tmp) = make_app_with(scheduler).await;
+
+    for uri in ["/api/v1/schedules", "/api/v1/schedules/upcoming"] {
+        let resp = app.clone().oneshot(auth_get(uri)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        let listed = json_body(resp).await.to_string();
+        assert!(listed.contains("Evening"), "{uri}: {listed}");
+        assert!(!listed.contains("tablets"), "{uri}: {listed}");
+    }
 }

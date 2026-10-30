@@ -517,11 +517,15 @@ impl RecurringJob {
 
 /// Refuses a kind the scheduler must not store; every create and update passes here.
 fn validate_kind(kind: &TaskKind) -> Result<()> {
-    if let TaskKind::SensorTrigger(spec) = kind {
-        spec.validate()
-            .map_err(|rejected| anyhow::anyhow!("{rejected}"))?;
+    match kind {
+        TaskKind::SensorTrigger(spec) => spec
+            .validate()
+            .map_err(|rejected| anyhow::anyhow!("{rejected}")),
+        TaskKind::MemberReminder { profile_id, .. } if profile_id.trim().is_empty() => {
+            anyhow::bail!("a member's reminder must name the member it is for")
+        }
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// Whether a fire alone is worth a file rewrite: only cooldown rules read the stamp back, and
@@ -901,6 +905,7 @@ impl SchedulerPort for CronSchedulerAdapter {
                     result: None,
                     error: None,
                     duration_ms: None,
+                    for_member: kind.member().map(str::to_string),
                 });
             }
 
@@ -932,6 +937,7 @@ impl SchedulerPort for CronSchedulerAdapter {
                     result: result_text,
                     error: error_text,
                     duration_ms: Some(duration_ms),
+                    for_member: kind.member().map(str::to_string),
                 });
             }
 
@@ -1956,6 +1962,73 @@ mod tests {
         assert_eq!(sched.list_tasks().await.unwrap().len(), 1);
     }
 
+    fn reminder_req(id: &str, profile_id: &str) -> CreateScheduleRequest {
+        CreateScheduleRequest {
+            kind: TaskKind::MemberReminder {
+                profile_id: profile_id.to_string(),
+                prompt: "Take the evening tablets".to_string(),
+            },
+            ..create_req(id, "0 0 20 * * *")
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reminder_for_nobody_is_refused_at_the_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = make_scheduler(tmp.path()).await;
+
+        sched
+            .create_task(reminder_req("mine", "grace"))
+            .await
+            .unwrap();
+        let err = sched
+            .create_task(reminder_req("nobodys", " "))
+            .await
+            .expect_err("a reminder with no member was stored");
+        assert!(err.to_string().contains("member"), "{err}");
+        assert_eq!(sched.list_tasks().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_reminders_results_name_its_member() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        let exec: Arc<dyn ScheduleExecutor> = Arc::new(CountingExecutor(Arc::default()));
+        let sched = CronSchedulerAdapter::with_options(
+            tmp.path().join("schedules.json"),
+            tmp.path().join("schedule_runs.json"),
+            exec,
+            Some(tx),
+            10,
+        )
+        .await
+        .unwrap();
+        sched.create_task(reminder_req("r", "grace")).await.unwrap();
+        sched
+            .create_task(create_req("h", "0 0 20 * * *"))
+            .await
+            .unwrap();
+
+        sched.run_now("r").await.unwrap();
+        for _ in 0..2 {
+            let ev = next_result(&mut rx).await;
+            assert_eq!(ev.for_member.as_deref(), Some("grace"), "{:?}", ev.status);
+        }
+        sched.run_now("h").await.unwrap();
+        assert_eq!(next_result(&mut rx).await.for_member, None);
+    }
+
+    async fn next_result(
+        rx: &mut tokio::sync::broadcast::Receiver<
+            pond_core::user_data::domain::schedule::ScheduleResultEvent,
+        >,
+    ) -> pond_core::user_data::domain::schedule::ScheduleResultEvent {
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("no result event")
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn an_update_cannot_smuggle_in_a_rule_that_can_never_fire() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2299,6 +2372,7 @@ impl TaskRunContext {
                 result: None,
                 error: None,
                 duration_ms: None,
+                for_member: kind.member().map(str::to_string),
             });
         }
 
@@ -2331,6 +2405,7 @@ impl TaskRunContext {
                 result: result_text,
                 error: error_text,
                 duration_ms: Some(duration_ms),
+                for_member: kind.member().map(str::to_string),
             });
         }
 

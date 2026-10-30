@@ -24,6 +24,7 @@ rules when matching events cross the event bus.
                          AgentPrompt   agent.chat() in session sched-{id}-{unix_ts}
                          Webhook       HTTP POST through the egress gate
                          SensorTrigger each of the rule's actions
+                         MemberReminder agent.chat() as the member, reply to their own phones
                                                  │
                        ScheduleResultEvent broadcast ──> SSE /api/v1/schedules/events
                                                     └──> push notifications
@@ -31,9 +32,11 @@ rules when matching events cross the event bus.
 
 ## Domain types (`pond-core/src/user_data/domain/schedule.rs`)
 
-- **`TaskKind`**: `AgentPrompt { prompt }`, `Webhook { webhook_url }`, or
-  `SensorTrigger(SensorTriggerSpec)`. `TaskKind::is_event_triggered()` is true for a sensor rule,
-  which gets no timer; the rules engine fires it through `run_now`.
+- **`TaskKind`**: `AgentPrompt { prompt }`, `Webhook { webhook_url }`,
+  `SensorTrigger(SensorTriggerSpec)`, or `MemberReminder { profile_id, prompt }`.
+  `TaskKind::is_event_triggered()` is true for a sensor rule, which gets no timer; the rules engine
+  fires it through `run_now`. `TaskKind::member()` names a private reminder's member, and
+  `ScheduleResultEvent::for_member` carries it on every run event.
 - **`SensorTriggerSpec`**: `source` (`TriggerSource`: kind `Sensor` / `Camera` / `Device`, optional
   `device_id` and `signal`; unset fields match anything), `condition` (`TriggerCondition`: an
   optional numeric comparison `op` + `value`, and an optional `after` / `before` local-time window
@@ -132,6 +135,7 @@ text is spoken.
    - **Webhook**: `POST` to the URL, checked and recorded by the egress gate
      (`EgressPurpose::Schedules`); a non-2xx status fails the run.
    - **SensorTrigger**: runs every action; the run fails only when no action succeeded.
+   - **MemberReminder**: see [A member's reminder](#a-members-reminder).
 5. `JsonRunHistory::record_finish()` records the result or error and duration, and a
    `Completed` / `Failed` event is broadcast.
 6. The task is marked not running.
@@ -145,6 +149,26 @@ An `AgentPrompt` result is spoken aloud when the pond has voice output,
 `unprompted_speech_enabled` is on, and the current time, in the household's `timezone` setting,
 is outside `quiet_hours_start` to `quiet_hours_end` (`AgentScheduleExecutor::speakable_now`).
 There is no per-member presence check.
+
+### A member's reminder
+
+A reminder set with `private` (on `set_timer` or `create_schedule`) is a
+`MemberReminder` for the person speaking, resolved from the call's session as the travel tools
+resolve it. A speaker who can't be told apart gets nothing set and is asked whether it may be a
+household reminder. When it fires, `AgentScheduleExecutor` runs the prompt with
+`ProfileScope::Owner(member)` and without voice, sends the reply to that member's own devices
+through `MemberNotifier` (category `action_required`), and, under the same gate as above, says
+only "Grace, you have a reminder. I've sent it to your phone." Nothing that reaches the household
+carries what it says:
+
+- the run's result, which the run history, the SSE stream and the dashboard show, is "Sent to
+  Grace's phone", and an undelivered reminder is a failed run that does not quote it;
+- the household's "task finished" notice is skipped (`ResultSilence::MembersOwn`);
+- `GET /schedules`, `GET /schedules/upcoming`, the `PUT` answer, `list_schedules` and the upcoming
+  block in the system prompt show its label and time but not its prompt.
+
+Editing its prompt keeps it the member's (`TaskKind::with_prompt`). `POST /schedules` refuses a
+`member_reminder` kind, because that route can't tell who is asking.
 
 ### A turn with no reply
 
@@ -200,8 +224,8 @@ There is no MCP tool for rules.
 | Tool | Description |
 |------|-------------|
 | `list_schedules` | Every schedule with cron, timezone, kind and status; rules are summarised |
-| `set_timer` | One-shot after a natural-language delay; deletes itself after firing |
-| `create_schedule` | Create a recurring `AgentPrompt` schedule; with an existing `id`, update it instead (omitted fields keep their value) |
+| `set_timer` | One-shot after a natural-language delay; deletes itself after firing. `private` makes it the speaker's own reminder |
+| `create_schedule` | Create a recurring `AgentPrompt` schedule, or with `private` the speaker's own reminder; with an existing `id`, update it instead (omitted fields keep their value) |
 | `schedule_action` | `delete`, `pause`, `resume` or `run_now` by id |
 | `world_clock` | Current time in one or more IANA zones; defaults to the household's |
 

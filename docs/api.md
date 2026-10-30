@@ -1143,7 +1143,10 @@ See [architecture/scheduling.md](architecture/scheduling.md).
 
 Every schedule route answers `503 {"error":"scheduler not configured"}` when the scheduler did not
 start. A task is `Schedule {id, label, cron, fire_at, timezone, kind, paused, currently_running, last_run, next_run, created_at}`;
-`kind` is tagged by `type`: `agent_prompt {prompt}`, `webhook {webhook_url}` or `sensor_trigger`.
+`kind` is tagged by `type`: `agent_prompt {prompt}`, `webhook {webhook_url}`, `sensor_trigger` or
+`member_reminder {profile_id, prompt}`. A `member_reminder` is listed with an empty `prompt`, since
+these routes can't tell who is asking; see
+[A member's reminder](architecture/scheduling.md#a-members-reminder).
 `cron` is six fields with a leading seconds field.
 
 | Route | Request | Response |
@@ -1157,12 +1160,14 @@ start. A task is `Schedule {id, label, cron, fire_at, timezone, kind, paused, cu
 | `POST /schedules/{id}/resume` | | `{resumed}`; `409 code: "one_shot_time_passed"` for a one-off whose time passed while paused |
 | `POST /schedules/{id}/run-now` | | `202 {fired}` |
 | `GET /schedules/{id}/runs` | `?limit=` | `[ScheduleRun {id, schedule_id, status, result, error, started_at, finished_at, duration_ms}]` |
-| `GET /schedules/events` | | SSE; each `data` is `ScheduleResultEvent {schedule_id, schedule_label, run_id, status, result, error, duration_ms}` |
+| `GET /schedules/events` | | SSE; each `data` is `ScheduleResultEvent {schedule_id, schedule_label, run_id, status, result, error, duration_ms, for_member?}` |
 
 The task kind comes from `kind`, else `payload.webhook_url`, else `prompt` (or `payload.prompt`). A
 one-off is `fire_at` (an RFC 3339 instant, stored with cron `@once`), or `once: true` with a `cron`
 whose next occurrence is the instant; `fire_at` already past is `400 code: "fire_at_in_past"`. A
-`sensor_trigger` kind is validated as `/rules` validates it.
+`sensor_trigger` kind is validated as `/rules` validates it. A `member_reminder` kind is `400`: a
+private reminder is set by its member, by voice. Changing a `member_reminder`'s `prompt` keeps it
+the member's.
 
 ## Memory, reminders, suggestions and proposals
 

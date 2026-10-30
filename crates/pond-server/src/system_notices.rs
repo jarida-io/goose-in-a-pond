@@ -66,6 +66,8 @@ enum ResultSilence {
     /// A rule with a `Notify` action ran: that action already told the household, in the words
     /// they gave it, so "Schedule: ... notified: ..." would say it twice. A failure still speaks.
     RuleSpokeForItself,
+    /// A member's reminder: it went to their own phones, and is nobody else's business.
+    MembersOwn,
 }
 
 /// Whether `kind` is a rule that tells the household itself.
@@ -79,6 +81,9 @@ async fn result_silence(
     settings: &dyn SettingsRepository,
     scheduler: Option<&dyn SchedulerPort>,
 ) -> Option<ResultSilence> {
+    if ev.for_member.is_some() {
+        return Some(ResultSilence::MembersOwn);
+    }
     match settings.get().await {
         Ok(s) if !s.schedule_result_notify => return Some(ResultSilence::SwitchedOff),
         Ok(_) => {}
@@ -494,6 +499,7 @@ mod tests {
             result: Some("done".into()),
             error: Some("the pump is off".into()),
             duration_ms: Some(10),
+            for_member: None,
         }
     }
 
@@ -672,6 +678,21 @@ mod tests {
             .await,
             None
         );
+    }
+
+    #[tokio::test]
+    async fn a_members_reminder_is_never_announced_to_the_household() {
+        let settings = MockSettingsRepository::new();
+        for status in [RunStatus::Completed, RunStatus::Failed] {
+            let ev = ScheduleResultEvent {
+                for_member: Some("grace".into()),
+                ..finished("s-1", status)
+            };
+            assert_eq!(
+                result_silence(&ev, &settings, None).await,
+                Some(ResultSilence::MembersOwn)
+            );
+        }
     }
 
     #[tokio::test]

@@ -10368,7 +10368,7 @@ async fn list_schedules(State(state): State<Arc<AppState>>) -> (StatusCode, Json
         );
     };
     match scheduler.list_tasks().await {
-        Ok(tasks) => (StatusCode::OK, Json(json!(tasks))),
+        Ok(tasks) => (StatusCode::OK, Json(json!(household_view(tasks)))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
@@ -10453,6 +10453,14 @@ async fn create_schedule(
         );
     };
 
+    // This route can't tell who is asking, so it can't set a reminder that runs as a member.
+    if kind.member().is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "a private reminder is set by its member, by voice"})),
+        );
+    }
+
     // An explicit kind can smuggle a rule in here; validate it as `/rules` does or it's a bypass.
     if let TaskKind::SensorTrigger(spec) = &kind {
         if let Some((status, body)) = rule_spec_rejection(spec) {
@@ -10514,6 +10522,17 @@ async fn delete_schedule(
     }
 }
 
+/// Schedules as anyone in the household may see them: a member's reminder keeps its label and
+/// time but not what it says, since these routes can't tell who is asking.
+fn household_view(mut tasks: Vec<Schedule>) -> Vec<Schedule> {
+    for task in &mut tasks {
+        if let TaskKind::MemberReminder { prompt, .. } = &mut task.kind {
+            prompt.clear();
+        }
+    }
+    tasks
+}
+
 /// `PUT /api/v1/schedules/:id` — update an existing scheduled task.
 async fn update_schedule(
     State(state): State<Arc<AppState>>,
@@ -10536,7 +10555,21 @@ async fn update_schedule(
         }
     };
 
-    let kind = api_req.prompt.map(|p| TaskKind::AgentPrompt { prompt: p });
+    // A new prompt keeps a member's reminder theirs.
+    let kind = match api_req.prompt {
+        Some(prompt) => {
+            let current = scheduler
+                .list_tasks()
+                .await
+                .ok()
+                .and_then(|tasks| tasks.into_iter().find(|t| t.id == id));
+            Some(match current {
+                Some(task) => task.kind.with_prompt(prompt),
+                None => TaskKind::AgentPrompt { prompt },
+            })
+        }
+        None => None,
+    };
 
     let req = UpdateScheduleRequest {
         label: api_req.name,
@@ -10548,7 +10581,10 @@ async fn update_schedule(
     };
 
     match scheduler.update_task(&id, req).await {
-        Ok(task) => (StatusCode::OK, Json(json!(task))),
+        Ok(task) => (
+            StatusCode::OK,
+            Json(json!(household_view(vec![task]).pop())),
+        ),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))),
     }
 }
@@ -10665,7 +10701,7 @@ async fn list_upcoming_schedules(
         .and_then(|v: &String| v.parse().ok())
         .unwrap_or(10);
     match scheduler.list_upcoming(limit).await {
-        Ok(tasks) => (StatusCode::OK, Json(json!(tasks))),
+        Ok(tasks) => (StatusCode::OK, Json(json!(household_view(tasks)))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),

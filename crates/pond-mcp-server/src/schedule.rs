@@ -1,6 +1,8 @@
 //! Schedule MCP server: cron tasks, one-shot timers and world clock. Sensor rules live in
 //! `giap-sensors`; `sensor_rule_summary` stays here because `list_schedules` renders them too.
 
+use crate::Dep;
+use pond_core::security::ports::draft_authority::DraftAuthority;
 use pond_core::user_data::domain::schedule::{SensorTriggerSpec, TaskKind, TriggerSourceKind};
 use pond_core::user_data::ports::scheduler::{
     CreateScheduleRequest, SchedulerPort, UpdateScheduleRequest,
@@ -9,7 +11,7 @@ use pond_core::user_data::ports::settings::SettingsRepository;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, ErrorCode, ErrorData, Implementation, InitializeResult,
+        CallToolResult, ContentBlock, ErrorCode, ErrorData, Implementation, InitializeResult, Meta,
         ProtocolVersion, ServerCapabilities, ServerInfo,
     },
     service::RequestContext,
@@ -33,6 +35,10 @@ pub struct SetTimerParams {
     /// Label shown in the schedule list. Defaults to the duration.
     #[serde(default)]
     pub name: String,
+    // Undescribed and without a default in the schema: the tool block is prefilled every turn.
+    #[serde(default)]
+    #[schemars(transform = no_default)]
+    pub private: bool,
     /// Catch-all for unexpected fields the model sends.
     #[serde(flatten)]
     #[schemars(skip)]
@@ -100,6 +106,10 @@ pub struct CreateScheduleParams {
     pub prompt: String,
     /// IANA timezone; default: user's setting.
     pub timezone: Option<String>,
+    // Undescribed and without a default in the schema: the tool block is prefilled every turn.
+    #[serde(default)]
+    #[schemars(transform = no_default)]
+    pub private: bool,
     /// Catch-all for unexpected fields the model sends.
     #[serde(flatten)]
     #[schemars(skip)]
@@ -164,6 +174,10 @@ pub struct ScheduleUpsertParams {
     pub prompt: Option<String>,
     /// IANA timezone; default: user's setting.
     pub timezone: Option<String>,
+    // Undescribed and without a default in the schema: the tool block is prefilled every turn.
+    #[serde(default)]
+    #[schemars(transform = no_default)]
+    pub private: bool,
     /// Catch-all for unexpected fields the model sends.
     #[serde(flatten)]
     #[schemars(skip)]
@@ -186,6 +200,8 @@ pub struct WorldClockParams {
 pub struct ScheduleMcpServer {
     scheduler: Arc<dyn SchedulerPort>,
     settings_repo: Arc<dyn SettingsRepository + Send + Sync>,
+    /// Who is speaking, for a reminder that is theirs alone.
+    authority: Dep<dyn DraftAuthority>,
     #[allow(dead_code)] // accessed by rmcp's generated tool_handler code
     tool_router: ToolRouter<Self>,
 }
@@ -204,7 +220,38 @@ impl ScheduleMcpServer {
         Self {
             scheduler,
             settings_repo,
+            authority: Dep::Installed(crate::speaker_authority),
             tool_router: Self::tool_router(),
+        }
+    }
+
+    async fn current_kind(&self, id: &str) -> Option<TaskKind> {
+        let tasks = self.scheduler.list_tasks().await.ok()?;
+        tasks.into_iter().find(|t| t.id == id).map(|t| t.kind)
+    }
+
+    pub fn with_speaker_authority(mut self, authority: Option<Arc<dyn DraftAuthority>>) -> Self {
+        self.authority = Dep::Fixed(authority);
+        self
+    }
+
+    /// What `prompt` runs as: the speaker's own reminder when `private`, else the
+    /// household's. `Err` is the reply when the speaker can't be told apart.
+    async fn prompt_kind(
+        &self,
+        meta: &Meta,
+        prompt: String,
+        private: bool,
+    ) -> Result<TaskKind, CallToolResult> {
+        if !private {
+            return Ok(TaskKind::AgentPrompt { prompt });
+        }
+        match crate::session_meta::speaking_member(self.authority.get(), meta).await {
+            Ok(profile_id) => Ok(TaskKind::MemberReminder { profile_id, prompt }),
+            Err(why) => Err(CallToolResult::success(vec![ContentBlock::text(format!(
+                "Nothing was set: it was meant to be private, but {why}, so it could not be \
+                 kept to one person. Ask whether it may be a household reminder instead."
+            ))])),
         }
     }
 
@@ -225,6 +272,7 @@ impl ScheduleMcpServer {
                                 TaskKind::AgentPrompt { .. } => "agent",
                                 TaskKind::Webhook { .. } => "webhook",
                                 TaskKind::SensorTrigger(_) => "sensor-rule",
+                                TaskKind::MemberReminder { .. } => "private-reminder",
                             };
                             let status = if t.currently_running {
                                 "running"
@@ -248,11 +296,13 @@ impl ScheduleMcpServer {
                             TaskKind::AgentPrompt { .. } => "agent",
                             TaskKind::Webhook { .. } => "webhook",
                             TaskKind::SensorTrigger(_) => "sensor-rule",
+                            TaskKind::MemberReminder { .. } => "private-reminder",
                         };
                         let prompt_preview = match &t.kind {
                             TaskKind::AgentPrompt { prompt } => prompt.clone(),
                             TaskKind::Webhook { webhook_url } => webhook_url.clone(),
                             TaskKind::SensorTrigger(spec) => sensor_rule_summary(spec),
+                            TaskKind::MemberReminder { .. } => PRIVATE_REMINDER.to_string(),
                         };
                         let status = if t.currently_running {
                             "running"
@@ -292,12 +342,19 @@ One-shot timer or reminder: fires ONCE after a delay, then deletes itself \
 (\"in 10 minutes\"). Anything repeating: create_schedule.")]
     async fn set_timer(
         &self,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
         params: Parameters<SetTimerParams>,
     ) -> Result<CallToolResult, ErrorData> {
         crate::set_current_tool("set_timer");
-        let p = params.0;
+        self.timer_result(&ctx.meta, params.0).await
+    }
 
+    /// The body of `set_timer`, apart from the rmcp wrapper so tests can call it.
+    pub async fn timer_result(
+        &self,
+        meta: &Meta,
+        p: SetTimerParams,
+    ) -> Result<CallToolResult, ErrorData> {
         let raw = if p.duration.trim().is_empty() {
             ["in", "delay", "after", "for", "time"]
                 .iter()
@@ -335,6 +392,11 @@ One-shot timer or reminder: fires ONCE after a delay, then deletes itself \
             p.prompt.trim().to_string()
         };
 
+        let kind = match self.prompt_kind(meta, prompt, p.private).await {
+            Ok(kind) => kind,
+            Err(refusal) => return Ok(refusal),
+        };
+
         let id = format!("timer-{}", uuid::Uuid::new_v4());
         let req = pond_core::user_data::ports::scheduler::CreateScheduleRequest {
             id: id.clone(),
@@ -344,7 +406,7 @@ One-shot timer or reminder: fires ONCE after a delay, then deletes itself \
             fire_at: Some(fire_at),
             once: false,
             timezone,
-            kind: TaskKind::AgentPrompt { prompt },
+            kind,
         };
 
         match self.scheduler.create_task(req).await {
@@ -363,16 +425,25 @@ One-shot timer or reminder: fires ONCE after a delay, then deletes itself \
     )]
     async fn create_schedule(
         &self,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
         params: Parameters<ScheduleUpsertParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let p = params.0;
+        self.upsert_result(&ctx.meta, params.0).await
+    }
+
+    /// The body of `create_schedule`, apart from the rmcp wrapper so tests can call it.
+    pub async fn upsert_result(
+        &self,
+        meta: &Meta,
+        p: ScheduleUpsertParams,
+    ) -> Result<CallToolResult, ErrorData> {
         if p.id.trim().is_empty() {
             let c = CreateScheduleParams {
                 name: p.name.unwrap_or_default(),
                 cron: p.cron.unwrap_or_default(),
                 prompt: p.prompt.unwrap_or_default(),
                 timezone: p.timezone,
+                private: p.private,
                 extra: p.extra,
             };
 
@@ -488,6 +559,11 @@ One-shot timer or reminder: fires ONCE after a delay, then deletes itself \
                     .unwrap_or_else(|_| "UTC".to_string()),
             };
 
+            let kind = match self.prompt_kind(meta, prompt.clone(), c.private).await {
+                Ok(kind) => kind,
+                Err(refusal) => return Ok(refusal),
+            };
+
             let id = uuid::Uuid::new_v4().to_string();
             let req = CreateScheduleRequest {
                 fire_at: None,
@@ -496,9 +572,7 @@ One-shot timer or reminder: fires ONCE after a delay, then deletes itself \
                 label: name,
                 cron: cron.clone(),
                 timezone: timezone.clone(),
-                kind: TaskKind::AgentPrompt {
-                    prompt: prompt.clone(),
-                },
+                kind,
             };
 
             match self.scheduler.create_task(req).await {
@@ -571,8 +645,14 @@ One-shot timer or reminder: fires ONCE after a delay, then deletes itself \
                     .as_ref()
                     .and_then(|p| if p.is_empty() { None } else { Some(p.clone()) });
 
-            // ── Build TaskKind only if prompt changed ──
-            let kind = prompt.map(|p| TaskKind::AgentPrompt { prompt: p });
+            // ── Build TaskKind only if prompt changed; a member's reminder stays theirs ──
+            let kind = match prompt {
+                Some(p) => Some(match self.current_kind(&id).await {
+                    Some(kind) => kind.with_prompt(p),
+                    None => TaskKind::AgentPrompt { prompt: p },
+                }),
+                None => None,
+            };
 
             let req =
                 UpdateScheduleRequest {
@@ -608,6 +688,7 @@ One-shot timer or reminder: fires ONCE after a delay, then deletes itself \
                         }
                         TaskKind::Webhook { webhook_url } => format!("webhook: {webhook_url}"),
                         TaskKind::SensorTrigger(spec) => sensor_rule_summary(spec),
+                        TaskKind::MemberReminder { .. } => PRIVATE_REMINDER.to_string(),
                     };
                     Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                         "Schedule updated: \"{}\" [{}] — {} {} ({})",
@@ -996,6 +1077,7 @@ pub async fn try_upcoming_schedules_context(scheduler: &dyn SchedulerPort) -> Op
                 TaskKind::SensorTrigger(spec) => {
                     format!("rule: {}", sensor_rule_summary(spec))
                 }
+                TaskKind::MemberReminder { .. } => PRIVATE_REMINDER.to_string(),
             };
             format!(
                 "- \"{}\" — {} {} ({})",
@@ -1005,6 +1087,14 @@ pub async fn try_upcoming_schedules_context(scheduler: &dyn SchedulerPort) -> Op
         .collect();
     Some(format!("## Upcoming Scheduled Tasks\n{}", lines.join("\n")))
 }
+
+/// Leaves a field's schema at its type: a `false` default the model never needs costs tokens.
+fn no_default(schema: &mut schemars::Schema) {
+    schema.remove("default");
+}
+
+/// How every listing shows a member's reminder: listings reach the whole household.
+const PRIVATE_REMINDER: &str = "a private reminder";
 
 /// One-line human summary of a sensor rule, shared by every display site.
 pub(crate) fn sensor_rule_summary(spec: &SensorTriggerSpec) -> String {
@@ -1215,5 +1305,191 @@ mod tests {
         assert_eq!(parse_duration("3 months"), None);
         assert_eq!(parse_duration("3 mo"), None);
         assert_eq!(parse_duration("3 min").map(|d| d.num_seconds()), Some(180));
+    }
+}
+
+#[cfg(test)]
+mod private_reminder_tests {
+    //! A reminder said to be "just for me" belongs to the speaker, and stays theirs when edited.
+
+    use super::*;
+    use crate::session_meta::fakes::{meta, FixedSpeaker};
+    use pond_core::user_data::domain::profile::ProfileScope;
+    use pond_core::user_data::domain::schedule::{Schedule, ScheduleRun};
+    use pond_core::user_data::mocks::mock_settings::MockSettingsRepository;
+    use pond_core::user_data::ports::schedule_execution::ScheduleExecutor;
+    use std::sync::Mutex;
+
+    /// Stores what it is given; nothing fires.
+    #[derive(Default)]
+    struct Stored(Mutex<Vec<Schedule>>);
+
+    #[async_trait::async_trait]
+    impl SchedulerPort for Stored {
+        async fn create_task(&self, req: CreateScheduleRequest) -> anyhow::Result<Schedule> {
+            let schedule = Schedule {
+                id: req.id,
+                label: req.label,
+                cron: req.cron,
+                fire_at: req.fire_at,
+                timezone: req.timezone,
+                kind: req.kind,
+                paused: false,
+                currently_running: false,
+                last_run: None,
+                next_run: None,
+                created_at: chrono::Utc::now(),
+            };
+            self.0.lock().unwrap().push(schedule.clone());
+            Ok(schedule)
+        }
+        async fn list_tasks(&self) -> anyhow::Result<Vec<Schedule>> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+        async fn delete_task(&self, _: &str) -> anyhow::Result<()> {
+            anyhow::bail!("not used")
+        }
+        async fn pause_task(&self, _: &str) -> anyhow::Result<()> {
+            anyhow::bail!("not used")
+        }
+        async fn resume_task(&self, _: &str) -> anyhow::Result<()> {
+            anyhow::bail!("not used")
+        }
+        async fn run_now(&self, _: &str) -> anyhow::Result<()> {
+            anyhow::bail!("not used")
+        }
+        async fn update_task(
+            &self,
+            id: &str,
+            req: UpdateScheduleRequest,
+        ) -> anyhow::Result<Schedule> {
+            let mut tasks = self.0.lock().unwrap();
+            let task = tasks
+                .iter_mut()
+                .find(|t| t.id == id)
+                .ok_or_else(|| anyhow::anyhow!("no task {id}"))?;
+            if let Some(kind) = req.kind {
+                task.kind = kind;
+            }
+            Ok(task.clone())
+        }
+        async fn get_runs(&self, _: &str, _: u32) -> anyhow::Result<Vec<ScheduleRun>> {
+            Ok(vec![])
+        }
+        async fn list_upcoming(&self, _: u32) -> anyhow::Result<Vec<Schedule>> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+        async fn set_executor(&self, _: Arc<dyn ScheduleExecutor>) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn server(speaker: Option<ProfileScope>) -> (ScheduleMcpServer, Arc<Stored>) {
+        let stored = Arc::new(Stored::default());
+        let server =
+            ScheduleMcpServer::new(stored.clone(), Arc::new(MockSettingsRepository::new()))
+                .with_speaker_authority(Some(Arc::new(FixedSpeaker {
+                    scope: speaker,
+                    sole: None,
+                })));
+        (server, stored)
+    }
+
+    fn timer(private: bool) -> SetTimerParams {
+        SetTimerParams {
+            duration: "10 minutes".into(),
+            prompt: "Take the evening tablets".into(),
+            private,
+            ..Default::default()
+        }
+    }
+
+    fn text(result: &CallToolResult) -> String {
+        result
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_private_timer_belongs_to_the_speaker() {
+        let (server, stored) = server(Some(ProfileScope::Owner("grace".into())));
+        server.timer_result(&meta(), timer(true)).await.unwrap();
+        assert_eq!(
+            stored.0.lock().unwrap()[0].kind,
+            TaskKind::MemberReminder {
+                profile_id: "grace".into(),
+                prompt: "Take the evening tablets".into()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_timer_for_the_household_stays_a_household_prompt() {
+        let (server, stored) = server(Some(ProfileScope::Owner("grace".into())));
+        server.timer_result(&meta(), timer(false)).await.unwrap();
+        assert!(matches!(
+            stored.0.lock().unwrap()[0].kind,
+            TaskKind::AgentPrompt { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_private_reminder_from_an_unknown_speaker_is_not_set() {
+        let (server, stored) = server(Some(ProfileScope::Guest));
+        let reply = server.timer_result(&meta(), timer(true)).await.unwrap();
+        assert!(stored.0.lock().unwrap().is_empty());
+        assert!(text(&reply).contains("Nothing was set"), "{}", text(&reply));
+    }
+
+    #[tokio::test]
+    async fn editing_a_members_reminder_keeps_it_theirs_and_listings_hide_it() {
+        let (server, stored) = server(Some(ProfileScope::Owner("grace".into())));
+        let created = server
+            .upsert_result(
+                &meta(),
+                ScheduleUpsertParams {
+                    cron: Some("0 0 20 * * *".into()),
+                    prompt: Some("Take the evening tablets".into()),
+                    name: Some("Evening".into()),
+                    private: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let id = stored.0.lock().unwrap()[0].id.clone();
+        assert!(
+            text(&created).contains("Schedule created"),
+            "{}",
+            text(&created)
+        );
+
+        let updated = server
+            .upsert_result(
+                &meta(),
+                ScheduleUpsertParams {
+                    id: id.clone(),
+                    prompt: Some("Take the blue tablets".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            stored.0.lock().unwrap()[0].kind,
+            TaskKind::MemberReminder {
+                profile_id: "grace".into(),
+                prompt: "Take the blue tablets".into()
+            }
+        );
+        assert!(!text(&updated).contains("blue"), "{}", text(&updated));
+
+        let upcoming = try_upcoming_schedules_context(stored.as_ref())
+            .await
+            .unwrap();
+        assert!(upcoming.contains(PRIVATE_REMINDER), "{upcoming}");
+        assert!(!upcoming.contains("tablets"), "{upcoming}");
     }
 }
