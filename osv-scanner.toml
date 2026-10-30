@@ -105,12 +105,47 @@ id = "RUSTSEC-2026-0369"
 ignoreUntil = 2027-01-31
 reason = "zip 8.6.0 extract() and ZipStreamReader::extract() apply Unix permissions through symlinks. Same blocker and same non-reachability as RUSTSEC-2026-0367: neither function is called, and pond-server never applies archive permissions."
 
+[[IgnoredVulns]]
+id = "GHSA-m665-v7pm-7grj"
+ignoreUntil = 2027-01-31
+reason = "zip 8.6.0 parser differential ('zip cloaking'): ZipArchive trusts the central directory while ZipStreamReader trusts the local headers, so one archive can name different files to each. Patched only in zip 9.0.5; same blocker as RUSTSEC-2026-0367 (candle-core 0.11.0, docx-rs 0.4.22 and umya-spreadsheet 3.1.1, their latest releases, require zip ^8.6.0). Not reachable: the differential needs both readers on one archive, and nothing in the build uses ZipStreamReader; pond-server's buffalo_l download (model_download.rs) and goose-cli's updater use ZipArchive only."
+
+[[IgnoredVulns]]
+id = "GHSA-8hxf-qr8p-62x4"
+ignoreUntil = 2027-01-31
+reason = "zip 8.6.0 can accept an AES-encrypted entry whose HMAC was never checked when the stream ends early. Patched only in zip 9.0.0; same blocker as RUSTSEC-2026-0367 (candle-core 0.11.0, docx-rs 0.4.22 and umya-spreadsheet 3.1.1, their latest releases, require zip ^8.6.0). Not reachable: AES support is zip's aes-crypto feature, which nothing in GIAP or goose enables (cargo tree -e features -i zip shows only the deflate features)."
+
+[[IgnoredVulns]]
+id = "GHSA-9hj8-73fh-9963"
+ignoreUntil = 2027-01-31
+reason = "zip 8.6.0's legacy Shrink/Reduce/Implode decoder trusts an attacker-controlled ZIP64 size and can exhaust memory. Patched only in zip 9.0.0; same blocker as RUSTSEC-2026-0367 (candle-core 0.11.0, docx-rs 0.4.22 and umya-spreadsheet 3.1.1, their latest releases, require zip ^8.6.0). Not reachable: the legacy decoders are zip's legacy-zip feature, which nothing in GIAP or goose enables; only deflate is compiled in."
+
+[[IgnoredVulns]]
+id = "GHSA-hjqx-j4rw-g7xv"
+ignoreUntil = 2027-01-31
+reason = "zip 8.6.0 ZipArchive::extract() validates symlink targets lexically, so a crafted archive can write outside the destination. Patched only in zip 9.0.0; same blocker as RUSTSEC-2026-0367 (candle-core 0.11.0, docx-rs 0.4.22 and umya-spreadsheet 3.1.1, their latest releases, require zip ^8.6.0). Not reachable: no code in the build calls extract(); pond-server's buffalo_l download (model_download.rs) reads entries with by_index() and writes each to a fixed path chosen by file name."
+
+[[IgnoredVulns]]
+id = "GHSA-q7v9-x93c-xqv3"
+ignoreUntil = 2027-01-31
+reason = "zip 8.6.0 does not bound symlink targets during extraction, so a crafted archive can abort or exhaust memory. Patched only in zip 9.0.0; same blocker as RUSTSEC-2026-0367 (candle-core 0.11.0, docx-rs 0.4.22 and umya-spreadsheet 3.1.1, their latest releases, require zip ^8.6.0). Not reachable: it is in extraction, and no code in the build calls extract() or creates symlinks from archive entries."
+
 # ── A real vulnerability with no upstream fix ────────────────────────────────
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2023-0071"
 ignoreUntil = 2027-03-31
 reason = "rsa: Marvin Attack, key recovery through timing side channels (CVSS 5.9). No fixed version exists -- the fix requires a constant-time rewrite upstream. Reached transitively; GIAP does not perform RSA private-key operations on attacker-controlled timing paths. Named in security.yml's own comment. Re-check whether a fixed rsa release exists at the review date."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0387"
+ignoreUntil = 2027-01-31
+reason = "crypto-bigint 0.5.5: some operations meant to be constant-time branch on secret data. Fixed only in 0.7.6, a new major. Reached only through pond-adapters-lightning (pond-server's optional `lightning` feature, off by default and absent from the shipped binary), via breez-sdk-spark's k256 and elliptic-curve 0.13; breez-sdk-spark 0.27.2, its latest release, still locks crypto-bigint 0.5.5. Also in goose/Cargo.lock through the same RustCrypto 0.13 stack. Remove when breez-sdk-spark moves to elliptic-curve 0.14."
+
+[[IgnoredVulns]]
+id = "GHSA-qwgh-2vcv-g2f7"
+ignoreUntil = 2027-03-31
+reason = "block-buffer 0.10.4: a panic caught inside a compress callback can leave the buffer's cursor corrupt. Fixed only in 0.12.1; every digest 0.10 crate (sha2, hmac, blake2, ecdsa and the rest of RustCrypto's current release line) requires block-buffer 0.10, so this lockfile cannot move without that whole generation. Not reachable: the callbacks are the hash functions' own block compressors, which do not panic, and nothing catches a panic and reuses a hasher. Remove when the RustCrypto crates we use are on digest 0.11."
 
 # ── Go: present in the module graph, not in the build ────────────────────────
 
