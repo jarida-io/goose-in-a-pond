@@ -4163,6 +4163,21 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
   wait for a consolidation run to pass it.
 - P0 (EmbeddingGemma 2 on the Orin) started. No code has changed.
 
+**2026-10-31 — a member's own notes, and the setup interview that writes them.**
+
+- A prompt extra may now belong to one member (`profile_id`). Only that member's turns carry it, in
+  the turn's `<system-context>` and never the shared prefix (PAI-1, PAI-3). Guests and an
+  unidentified speaker in a household of several get none. The household's notes and the
+  speaker's share the existing caps from either side.
+- The setup interview asks one question a turn over ten topics, in its own chat session, offered
+  only the `giap-interview` tools. Topic order, skips, and the save gate live in code. A save from
+  the conversation needs the member's reply after the draft was shown (PAI-7: propose, do not
+  act), or a tap on their own phone. The answers are forgotten when it ends.
+- The routes answer only the member's own device (`may_act_for`): PAI-2's device rung, not the
+  request body.
+- Not done: a session that changes speaker still holds the earlier speaker's notes in its
+  history, as it holds their memories.
+
 **2026-10-30 — PAI-6: reading the pages it cites (section 8.14).**
 
 - **What landed.**

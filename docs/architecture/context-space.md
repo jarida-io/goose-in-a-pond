@@ -384,6 +384,14 @@ never turn time. P3 measures calls, seconds and accepted changes per run on the 
 - a planted set (instructions and false facts about members, hidden in mail and pages) leaves no
   unflagged fact that a turn or an agent would act on.
 
+**A member's standing notes are not memory.** They are prompt extras with a `profile_id`, written
+by hand on the phone or drafted by the setup interview, and saved only once the member approves
+them. They are the member's own instructions, not facts learned about them, so they stay outside
+the store: no agent writes, merges or retires one, and P1 gives them no item header. They follow
+the header's scope rule all the same, since a member's notes reach only that member's turns. A
+suggested agent that wants a note changed proposes it, and the member approves it as they approve
+the interview's drafts.
+
 ### 7.4 Four flows
 
 1. **Screenshot to outing.**
