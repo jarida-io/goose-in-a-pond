@@ -4175,6 +4175,12 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
   act), or a tap on their own phone. The answers are forgotten when it ends.
 - The routes answer only the member's own device (`may_act_for`): PAI-2's device rung, not the
   request body.
+- On the nano with E4B (`scripts/jetson/interview-live/`): two members finished their interviews
+  (a skip, a stop and resume, an edit, approval in the conversation and by tap), each one's next
+  turn followed their own notes and not the other's, and each read of the other's was `403`.
+  Seven and nine notes added 245 and 280 prompt tokens to a first turn of 8,247; an interview
+  turn starts at 2,483, with six tools. E4B never named a topic in a list of notes, so the draft
+  takes one field per topic.
 - Not done: a session that changes speaker still holds the earlier speaker's notes in its
   history, as it holds their memories.
 

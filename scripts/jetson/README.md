@@ -26,6 +26,7 @@ Other files here:
 
 | File | What it is |
 |---|---|
+| `interview-live/` | The setup interview against the live pond with the real model: two test members, a skip, a stop and resume, an edit, approval in the conversation and by tap, then each member's next turn. Run `python3 -I interview_live.py` on the board; `cleanup.py` removes what an interrupted run left |
 | `kiosk.sh` | Puts the dashboard on an attached panel with one Weston compositor and no desktop (`probe`, `enable-drm`, `start`, ...). Needs `nvidia-drm` loaded first |
 | `sudoers-giap` | A sudoers drop-in listing the commands a deploy needs without a password; its header has the install and removal commands |
 | `ggml-toolchain.cmake` | Pins `GGML_NATIVE=OFF` for builds that are not on the board |
