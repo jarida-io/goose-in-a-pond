@@ -4151,7 +4151,7 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
 - Corrected PAI-2 section 3.4, which said an Orin Nano devkit exposes no fTPM. The nano has an
   OP-TEE fTPM (`pond-administrator.md`). It does not guard a whole stolen board until OemK1 is fused.
 
-**2026-10-31 — the context space: storage chosen, memory agents specified; P0 started.**
+**2026-10-31 — the context space: storage chosen, memory agents specified; P0 measured.**
 
 - Storage is a shared item header over each kind's own table (decision 1). Today's tables become
   the detail tables, so P1 adds an `item_id` and a header rather than moving rows.
@@ -4161,7 +4161,10 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
   unsupported, scope and planted challenges, and `apply_actions` refuses any widening of scope
   (PAI-1, PAI-2). A fact whose only evidence is untrusted is labelled, and Profile and Proposal
   wait for a consolidation run to pass it.
-- P0 (EmbeddingGemma 2 on the Orin) started. No code has changed.
+- P0 measured EmbeddingGemma 2 on the Orin beside the serving pond (context-space section 5.1). Its
+  text encoder beats MiniLM on recall everywhere, most of all in Swahili and mixed speech (R@5
+  0.73 against 0.39), which matters for PAI-3 recall across the household's languages. It fits
+  only in MiniLM's place. No pond code has changed.
 
 **2026-10-30 — PAI-6: reading the pages it cites (section 8.14).**
 

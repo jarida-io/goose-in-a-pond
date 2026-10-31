@@ -4,8 +4,8 @@ One store, one multimodal index and a set of shipped agents for everything a pon
 household, from its phones, its home and its conversations. The model and the household search the
 same space, and each sees only what its principal may see.
 
-**Status: DESIGNED 2026-10-28, re-planned 2026-10-30, storage chosen 2026-10-31** against `main` at
-`0309bf0d`. The re-plan builds on what landed on 28 and 29 October, summarised in
+**Status: DESIGNED 2026-10-28, re-planned 2026-10-30, storage chosen and P0 measured 2026-10-31**
+against `main` at `0309bf0d`. The re-plan builds on what landed on 28 and 29 October, summarised in
 [changes-2026-10-28-29.md](./changes-2026-10-28-29.md): long tasks, agents as recipes, deep
 research, the line, My Pond and `agamemnon`. The context, memory and index code is unchanged since
 the first draft. No code has changed. This design replaces memories, summaries, the index,
@@ -214,7 +214,8 @@ in one 768-dimension space, with Matryoshka cuts to 512, 256 and 128, and an 8,1
 
 - **Size.** Google's page gives 740M parameters in total and a 270M text model. News reports add a
   170M vision encoder and a 300M audio encoder, loadable separately.
-- **Not yet measured on the Orin.** That is P0.
+- **Measured on the Orin by P0 (2026-10-31).** Section 5.1 has the figures;
+  [the full record](../../scripts/jetson/embed-p0/RESULTS.md) sits beside the harness.
 
 What it buys:
 
@@ -227,13 +228,60 @@ How it runs:
 
 | Part | Loaded | On the turn path? |
 |---|---|---|
-| Text encoder | Resident if the device budget allows; otherwise per batch, and the turn falls back to keyword recall | One query embed per turn, measured against the warm TTFT |
-| Vision encoder | Per batch, when free RAM covers it | No |
-| Audio encoder | Per batch, in quiet hours | No |
+| Text encoder | Resident, in MiniLM's place (about 140 MB net). If the budget refuses it, per batch, and the turn falls back to keyword recall | One query embed per turn: 18 ms on CUDA, 41 ms on the CPU, against a warm TTFT of 0.45 s |
+| Vision encoder | Per batch, when free RAM covers its 290 MB | No |
+| Audio encoder | Per batch, in quiet hours, when free RAM covers its 371 MB | No |
 
-On the nano, 518 MB was free while E4B served (2026-10-28). That figure moves with every helper
-snapshot and drafter change, so `device_budget.rs` gets one measured constant per encoder before
-any of them ships. Use the model card's task prompts word for word.
+Free RAM moves with every helper snapshot and drafter change, so `device_budget.rs` gets one
+constant per encoder, measured inside `pond-server`, before any of them ships. Use the model card's
+task prompts word for word: `task: search result | query: ` for queries and
+`title: {title or none} | text: ` for items.
+
+### 5.1 What P0 measured
+
+On the nano at MAXN_SUPER, beside E4B, its MTP drafter, the camera pipeline and the lane, with the
+service never stopped. A Q8_0 GGUF converted from Google's weights, on upstream llama.cpp.
+
+| Part | Memory beside the pond | Speed |
+|---|---|---|
+| Text encoder, CPU | 270 MB | Query 41 ms p50, 56 ms p95; 3 items per 250 ms batch |
+| Text encoder, CUDA | About 300 MB in process (derived; 413-492 MB plus 264-400 MB of NvMap as a process of its own) | Query 18 ms p50; 24 items per 250 ms batch |
+| Vision encoder | 290 MB on the CPU | 6.1 s an image on the CPU, 0.67 s on CUDA |
+| Audio encoder | 371 MB on the CPU | 2.1 s for an 11 s clip on the CPU, 0.17 s on CUDA |
+| MiniLM-L6, today's embedder | About 130 MB, standalone | 7 ms |
+
+| Recall@5 | MiniLM-L6 | EmbeddingGemma 2 |
+|---|---|---|
+| Memory reachability, 70 facts | 0.95 (R@1 0.62) | 0.95 (R@1 0.76) |
+| Personal context, 403 items | 0.80 | 0.84 |
+| Swahili, Sheng and mixed, 69 items | 0.39 | 0.73 |
+| All three in one index, 542 items | 0.53 | 0.74 |
+| Text to image, 11 photos | n/a | 1.00 (R@1 0.91) |
+
+What follows:
+
+- **It replaces MiniLM; it never sits beside it.** The pond keeps 450-518 MB free while it serves.
+  Beside MiniLM the text encoder would leave 180-250 MB, under the 300 MB margin; in MiniLM's place
+  it leaves about 310-380 MB.
+- **Vision and audio run per batch only.** Neither fits beside the serving pond.
+- **Store 256 dimensions** unless the household's own store says otherwise. On these sets 256 equal
+  or beat 768, at a third of the size. One query moves these small sets by 2 to 9 points.
+- **The runtime is llama.cpp in process, through goose's llama-cpp-2**, with the text encoder on
+  CUDA in the pond's own context and the same GGUF on the CPU when NvMap is scarcer. LiteRT-LM was
+  4 times slower on the CPU, no lighter, runs fp16 on the GPU (which the card warns against) and
+  does not batch. ONNX Runtime was not tried: Google publishes no ONNX and forbids fp16.
+- **Wiring it, in P2:**
+  1. Bump llama-cpp-rs-giap's llama.cpp (at `8ac8291`, v1 only) past upstream's `gemma-embedding2`
+     support (ggml-org/llama.cpp#30054), its no-cache attention fix (#30416) and its pooled graphs
+     without logits (#30255, #30445). The chat path shares it, so the bump needs the Orin
+     regression run: E4B, the drafter and KV snapshots.
+  2. Check the width against `n_embd_out` (768), not `n_embd` (512), which the GGUF provider
+     compares today and would refuse.
+  3. Keep one context: n_ctx 256-512, 16 sequences or fewer, unified KV.
+  4. Map the token table on CUDA rather than pinning it, which kept 136 MB out of NvMap.
+  5. Give it a `model_id` of its own, since nomic is also 768 wide.
+- **Not measured:** the cost inside `pond-server`, recall on the household's real store, audio
+  retrieval and video.
 
 ---
 
@@ -257,8 +305,8 @@ to the household's quiet hours, as PAI-6 section 8.3 asks of long tasks.
 
 - **When it runs.** It is new, and it runs only when nothing in steps 1 to 3 is active. It may
   overlap a chore, because both are background work.
-- **Batches.** Each batch must finish within a measured bound (the target is 250 ms on the Orin for
-  text). The slot checks the lane between batches.
+- **Batches.** Each batch must finish within a measured bound: 250 ms on the Orin for text, which
+  P0 measured as 24 items on CUDA and 3 on the CPU. The slot checks the lane between batches.
 - **Encoders.** The vision encoder loads only when free RAM covers its measured budget, and it
   unloads when serving starts.
 - **No queue.** Work is found by the staleness join. Agents keep cursors
@@ -562,9 +610,9 @@ same release. Before any restart on the nano, check that no long task is running
 
 | Phase | Builds | Deletes | Gate |
 |---|---|---|---|
-| P0 Measure | EmbeddingGemma 2 on the Orin: RAM per encoder beside E4B and its drafter; query-embed latency against the warm TTFT; recall against MiniLM on the two corpora, a Swahili and mixed-language set, and image queries. Pick the runtime | Nothing | It fits the budget and beats MiniLM |
+| P0 Measure | EmbeddingGemma 2 on the Orin: RAM per encoder beside E4B and its drafter; query-embed latency against the warm TTFT; recall against MiniLM on the two corpora, a Swahili and mixed-language set, and image queries. Pick the runtime | Nothing | It fits the budget and beats MiniLM. **Measured 2026-10-31:** it passes for the text encoder in MiniLM's place, on llama.cpp; vision and audio run per batch (5.1) |
 | P1 Store and keys | The item header and links, with a header for every memory, summary, context item and suggestion, each table kept as that kind's details; the lifecycle per kind. The LUKS2 volume on the fTPM with the admin card as recovery; TLS and secrets keys sealed; per-blob keys | The `Corpus` split, the unwired code, and the old tables a release later | The nano's real store migrated, then re-run; the volume opens at boot and not from a disk copy |
-| P2 Embedding slot | The slot in the lane's order, the text encoder, re-embedding | Startup backfill, `IndexMaintenance` | No turn or long-task step measurably slower while it runs |
+| P2 Embedding slot | The slot in the lane's order; the text encoder, wired as 5.1 lists; re-embedding | Startup backfill, `IndexMaintenance`, and MiniLM in the same release, since the budget has no room for both | No turn or long-task step measurably slower while it runs |
 | P3 Recipe catalog and default agents | `context.ingest` and `session.quiet` activations; `context`, `save_items` and `propose` hooks; Conversation and Consolidation; the unified retriever and `search_context`; contextual extraction and adversarial consolidation (7.3) | Extraction, summary refresh, titling, consolidation, `topical_memories`, `giap-memory`, `giap-context` | pai-bench PAI-3 and PAI-8 on the Orin; one activation fired there (P16 has none yet); the two memory tests in 7.3 |
 | P4 Phone | The ingest route, the share target, the outbox, wakes and APNs. Then OCR, visits, notifications and albums, each behind its switch | The chat-only photo path, as an ingest case | A shared screenshot is found by a text search on the Orin |
 | P5 Suggested agents | Understanding, Profile and Proposal; long-task results as items; feedback | Suggestion generation, proactive review | A real suggestion reaches a phone and is decided there |
@@ -594,6 +642,7 @@ same release. Before any restart on the nano, check that no long task is running
 | 8 | Conversation and Consolidation on by default; Understanding, Profile and Proposal suggested | Yes, as P19 already handles templates |
 | 9 | Mail sign-in beyond app passwords: OAuth for Gmail and Outlook | App passwords first. Read Google's and Microsoft's terms for mail scopes before building OAuth |
 | 10 | Adversarial consolidation by default: three calls a batch | Yes, once P3 shows it fits the Orin's quiet hours |
+| 11 | Where a pond downloads EmbeddingGemma 2's GGUF. Google ships safetensors only, and converting them needs torch, which cannot run beside the pond | `ggml-org/embeddinggemma-2-GGUF` at a pinned revision and sha256, once its vectors match P0's own conversion: the chat model already comes from `unsloth`. The alternatives are a GGUF we convert and host ourselves, or Google's LiteRT file on the slower runtime |
 
 ---
 
