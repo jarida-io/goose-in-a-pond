@@ -280,6 +280,11 @@ What follows:
   3. Keep one context: n_ctx 256-512, 16 sequences or fewer, unified KV.
   4. Map the token table on CUDA rather than pinning it, which kept 136 MB out of NvMap.
   5. Give it a `model_id` of its own, since nomic is also 768 wide.
+  6. Acquire it like any other model (decision 11): an entry in the catalog's Embedding category,
+     downloaded by the models pipeline into `<data_dir>/models/embedding/`, with its progress,
+     pause, resume and checksum, and chosen for the Memory role (`active_embedding_model`). Its
+     vision and audio encoders are that entry's companions, sized up front. The GGUF provider's
+     own download URL goes.
 - **Not measured:** the cost inside `pond-server`, recall on the household's real store, audio
   retrieval and video.
 
@@ -612,7 +617,7 @@ same release. Before any restart on the nano, check that no long task is running
 |---|---|---|---|
 | P0 Measure | EmbeddingGemma 2 on the Orin: RAM per encoder beside E4B and its drafter; query-embed latency against the warm TTFT; recall against MiniLM on the two corpora, a Swahili and mixed-language set, and image queries. Pick the runtime | Nothing | It fits the budget and beats MiniLM. **Measured 2026-10-31:** it passes for the text encoder in MiniLM's place, on llama.cpp; vision and audio run per batch (5.1) |
 | P1 Store and keys | The item header and links, with a header for every memory, summary, context item and suggestion, each table kept as that kind's details; the lifecycle per kind. The LUKS2 volume on the fTPM with the admin card as recovery; TLS and secrets keys sealed; per-blob keys | The `Corpus` split, the unwired code, and the old tables a release later | The nano's real store migrated, then re-run; the volume opens at boot and not from a disk copy |
-| P2 Embedding slot | The slot in the lane's order; the text encoder, wired as 5.1 lists; re-embedding | Startup backfill, `IndexMaintenance`, and MiniLM in the same release, since the budget has no room for both | No turn or long-task step measurably slower while it runs |
+| P2 Embedding slot | The slot in the lane's order; the text encoder, wired as 5.1 lists and acquired like any other model; EmbeddingGemma 2 as the recommended Memory model; re-embedding when the household switches | Startup backfill, `IndexMaintenance`, the GGUF provider's own download. MiniLM stays selectable, but one embedder is loaded at a time, since the budget has no room for both | No turn or long-task step measurably slower while it runs |
 | P3 Recipe catalog and default agents | `context.ingest` and `session.quiet` activations; `context`, `save_items` and `propose` hooks; Conversation and Consolidation; the unified retriever and `search_context`; contextual extraction and adversarial consolidation (7.3) | Extraction, summary refresh, titling, consolidation, `topical_memories`, `giap-memory`, `giap-context` | pai-bench PAI-3 and PAI-8 on the Orin; one activation fired there (P16 has none yet); the two memory tests in 7.3 |
 | P4 Phone | The ingest route, the share target, the outbox, wakes and APNs. Then OCR, visits, notifications and albums, each behind its switch | The chat-only photo path, as an ingest case | A shared screenshot is found by a text search on the Orin |
 | P5 Suggested agents | Understanding, Profile and Proposal; long-task results as items; feedback | Suggestion generation, proactive review | A real suggestion reaches a phone and is decided there |
@@ -642,7 +647,7 @@ same release. Before any restart on the nano, check that no long task is running
 | 8 | Conversation and Consolidation on by default; Understanding, Profile and Proposal suggested | Yes, as P19 already handles templates |
 | 9 | Mail sign-in beyond app passwords: OAuth for Gmail and Outlook | App passwords first. Read Google's and Microsoft's terms for mail scopes before building OAuth |
 | 10 | Adversarial consolidation by default: three calls a batch | Yes, once P3 shows it fits the Orin's quiet hours |
-| 11 | Where a pond downloads EmbeddingGemma 2's GGUF. Google ships safetensors only, and converting them needs torch, which cannot run beside the pond | `ggml-org/embeddinggemma-2-GGUF` at a pinned revision and sha256, once its vectors match P0's own conversion: the chat model already comes from `unsloth`. The alternatives are a GGUF we convert and host ourselves, or Google's LiteRT file on the slower runtime |
+| 11 | Where a pond downloads EmbeddingGemma 2's GGUF. Google ships safetensors only, and converting them needs torch, which cannot run beside the pond | Decided 2026-11-01: like any other model, into the models folder (5.1, step 6). The entry names `ggml-org/embeddinggemma-2-GGUF` at a pinned revision and sha256, once its vectors match P0's own conversion, as the chat model's names `unsloth` |
 
 ---
 
