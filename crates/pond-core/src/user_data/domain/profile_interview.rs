@@ -264,12 +264,14 @@ impl InterviewRefusal {
                     .to_string()
             }
             InterviewRefusal::NoDraft => {
-                "Nothing has been saved: there is no draft yet. Call propose_notes, show them the \
-                 notes, and ask whether to save them."
+                "Not saved. There is no draft yet, so nothing was saved: tell them their notes are \
+                 not saved yet. Call propose_notes, show them the notes, and ask whether to save \
+                 them."
                     .to_string()
             }
             InterviewRefusal::NotYetShown => {
-                "Show the person the drafted notes and wait for their reply before saving."
+                "Not saved. They have not seen this draft yet, so nothing was saved: tell them \
+                 their notes are not saved yet, show them the notes, and ask whether to save them."
                     .to_string()
             }
             InterviewRefusal::Note(v) => v.message(),
@@ -422,14 +424,17 @@ impl Interview {
         }
     }
 
-    /// Stores a draft for the person to approve and returns it as the notes it would save. A
-    /// note for a topic they skipped is dropped, not refused: it says what they chose not to.
+    /// Drafts one note per answered topic from what was recorded for it, for the person to
+    /// approve, and returns the notes it would save. Building the draft here, not from the
+    /// model's arguments, is what makes it whole: on Ollama the call arrived with none at all.
     ///
-    /// `household` and `existing` are the household's and this member's notes as stored; the
-    /// draft must fit beside them, since a turn reads all three.
+    /// `rewrites` replace a topic's recorded note first; one for a topic they skipped is
+    /// dropped, since it says what they chose not to. `household` and `existing` are the
+    /// household's and this member's notes as stored; the draft must fit beside them, since a
+    /// turn reads all three.
     pub fn propose(
         &mut self,
-        drafts: Vec<NoteDraft>,
+        rewrites: Vec<NoteDraft>,
         household: &[PromptExtra],
         existing: &[PromptExtra],
         now: DateTime<Utc>,
@@ -438,21 +443,38 @@ impl Interview {
         if self.next_topic().is_some() {
             return Err(InterviewRefusal::TopicsLeft);
         }
-        let mut drafts = drafts;
-        drafts.retain(|d| {
-            self.topics
-                .iter()
-                .any(|t| t.topic == d.topic && t.status == TopicStatus::Answered)
-        });
+        let mut seen = Vec::new();
+        for rewrite in &rewrites {
+            if seen.contains(&rewrite.topic) {
+                return Err(InterviewRefusal::DuplicateTopic);
+            }
+            seen.push(rewrite.topic);
+            validate_instruction(&rewrite.instruction)?;
+        }
+        for rewrite in rewrites {
+            if let Some(t) = self
+                .topics
+                .iter_mut()
+                .find(|t| t.topic == rewrite.topic && t.status == TopicStatus::Answered)
+            {
+                t.answer = Some(rewrite.instruction.trim().to_string());
+            }
+        }
+        let drafts: Vec<NoteDraft> = self
+            .topics
+            .iter()
+            .filter(|t| t.status == TopicStatus::Answered)
+            .filter_map(|t| {
+                t.answer.as_ref().map(|note| NoteDraft {
+                    topic: t.topic,
+                    instruction: note.clone(),
+                })
+            })
+            .collect();
         if drafts.is_empty() {
             return Err(InterviewRefusal::NothingToDraft);
         }
-        let mut seen = Vec::new();
         for draft in &drafts {
-            if seen.contains(&draft.topic) {
-                return Err(InterviewRefusal::DuplicateTopic);
-            }
-            seen.push(draft.topic);
             validate_instruction(&draft.instruction)?;
         }
 
@@ -612,7 +634,7 @@ impl Interview {
                  to it."
             ));
         }
-        out.push_str("\n</setup-interview>");
+        out.push_str(" Nothing is saved until save_notes succeeds.\n</setup-interview>");
         out
     }
 }
@@ -624,17 +646,17 @@ write their standing notes, which they approve before anything is saved. Each tu
 <setup-interview> says where it stands.
 - Ask exactly one question per reply, on the next topic. Keep it short and warm. One follow-up \
 on the same topic is fine when their answer is unclear.
-- After each answer, call record_answer with the topic and a short summary in their own terms. \
-If they decline, would rather not say, or want to move on, call skip_topic and never return to it.
+- After each answer, call record_answer with the topic and the note to keep: one short standing \
+instruction about them, in the third person, for example \"Call her Mama Amina.\" If they \
+decline, would rather not say, want to move on, or say nothing worth keeping, call skip_topic and \
+never return to it.
 - If they want to stop, call stop_interview, thank them, and say they can carry on another time. \
 Nothing is saved. If instead they want to finish now with what they have said, call skip_topic \
 with topic `all`.
-- When no topic is left, call propose_notes with one short standing instruction per answered \
-topic, each in that topic's own field, about them in the third person, for example address: \
-\"Call her Mama Amina.\" Then show them every note exactly as drafted and ask whether to save \
-them or change any.
-- Call save_notes only after they say yes to the notes you showed. For changes, call \
-propose_notes again and show the notes again.
+- When no topic is left, call propose_notes: it drafts their notes from what you recorded. Show \
+them every note exactly as drafted and ask whether to save them or change any.
+- Call save_notes only after they say yes to the notes you showed. For a change, call \
+record_answer with the new note for that topic, then propose_notes, and show the notes again.
 - Notes are saved only by save_notes. Never say they are saved unless save_notes said so.
 - Never add details they did not give. Never name the tools.
 </setup-interview-rules>";
@@ -694,9 +716,14 @@ mod tests {
         i.record(Topic::Address, "Mama Amina", t0()).unwrap();
         i.skip(Topic::Food, t0()).unwrap();
         i.skip_rest(t0()).unwrap();
+        let from_answers = i
+            .clone()
+            .propose(vec![draft(Topic::Food, "No pork.")], &[], &[], t0())
+            .unwrap();
+        assert_eq!(from_answers.len(), 1, "the skipped topic's note is dropped");
         assert_eq!(
-            i.propose(vec![draft(Topic::Food, "No pork.")], &[], &[], t0()),
-            Err(InterviewRefusal::NothingToDraft)
+            from_answers[0].instruction, "Mama Amina",
+            "drafted from what was recorded"
         );
         let kept = i
             .clone()
@@ -724,8 +751,10 @@ mod tests {
             ),
             Err(InterviewRefusal::DuplicateTopic)
         );
+        let mut nothing = Interview::new("amina", "s2", t0());
+        nothing.skip_rest(t0()).unwrap();
         assert_eq!(
-            i.propose(vec![], &[], &[], t0()),
+            nothing.propose(vec![], &[], &[], t0()),
             Err(InterviewRefusal::NothingToDraft)
         );
         let notes = i

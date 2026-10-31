@@ -97,8 +97,8 @@ pub struct RecordParams {
     /// The topic answered: address, identity, language, household, routine, food, access, style, avoid or other.
     #[serde(alias = "key", alias = "id")]
     pub topic: String,
-    /// What they said, summarised in their own terms.
-    #[serde(alias = "summary", alias = "text")]
+    /// The note to keep from their answer: one short standing instruction about them, in the third person, for example "Call her Mama Amina."
+    #[serde(alias = "note", alias = "summary", alias = "text")]
     pub answer: String,
 }
 
@@ -119,8 +119,8 @@ pub struct DraftNote {
     pub note: String,
 }
 
-/// One short standing instruction per answered topic, each in that topic's own field. A small
-/// model fills named fields reliably; it dropped `topic` from every item of a list.
+/// Optional rewrites, one field per topic: the draft itself comes from what record_answer kept,
+/// so an empty call (as Ollama delivered it) still drafts every answered topic.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ProposeParams {
     /// What to call them, for example "Call her Mama Amina."
@@ -238,7 +238,8 @@ skipped, the person's saved notes, and any draft waiting for their approval.")]
     }
 
     #[tool(description = "\
-Note the person's answer on one topic, right after they give it. Returns the next topic.")]
+Keep the note from the person's answer on one topic, right after they give it. Returns the next \
+topic.")]
     async fn record_answer(
         &self,
         ctx: RequestContext<RoleServer>,
@@ -278,8 +279,8 @@ Stop the interview because the person wants to. Nothing is saved; they can carry
     }
 
     #[tool(description = "\
-Draft the person's notes for them to approve: one short note per answered topic, each in that \
-topic's field. Show them the returned notes exactly and ask whether to save them.")]
+Draft the person's notes from what you recorded, for them to approve. Needs no arguments; a \
+topic's field replaces its note. Show them the returned notes exactly and ask whether to save them.")]
     async fn propose_notes(
         &self,
         ctx: RequestContext<RoleServer>,
@@ -402,14 +403,8 @@ impl InterviewMcpServer {
 
     async fn run_propose(&self, meta: &Meta, p: ProposeParams) -> Result<String, Refusal> {
         let (service, member) = self.member(meta).await?;
-        let (drafts, unplaced): (Vec<(String, String)>, usize) = p.drafts();
-        if unplaced > 0 || drafts.is_empty() {
-            return Ok(
-                "Nothing was drafted. Put each note in its topic's own field, for example \
-                 address: \"Call her Mama Amina.\" and food: \"No pork.\""
-                    .to_string(),
-            );
-        }
+        // A note with no topic replaces nothing; the draft comes from the record either way.
+        let (drafts, _unplaced): (Vec<(String, String)>, usize) = p.drafts();
         let given: Vec<Topic> = drafts
             .iter()
             .filter_map(|(t, _)| Topic::from_id(t))
@@ -419,24 +414,11 @@ impl InterviewMcpServer {
             .await
             .map_err(|_| Refusal::Unavailable)?
             .map_err(Refusal::Interview)?;
-        let left_out: Vec<&str> = interview
-            .topics
-            .iter()
-            .filter(|t| t.status == TopicStatus::Answered)
-            .filter(|t| !interview.draft.iter().any(|d| d.topic == t.topic))
-            .map(|t| t.topic.id())
-            .collect();
         let mut out = format!(
             "Drafted, not saved. Show them these notes exactly, and ask whether to save them or \
              change any:\n{}",
             notes_lines(&notes)
         );
-        if !left_out.is_empty() {
-            out.push_str(&format!(
-                "\nAnswered but not drafted: {}. If one matters, draft again with it.",
-                left_out.join(", ")
-            ));
-        }
         let dropped: Vec<&str> = given
             .iter()
             .filter(|t| !interview.draft.iter().any(|d| d.topic == **t))
@@ -678,6 +660,51 @@ mod tests {
             "notes": [{"note": "Call her Mama Amina."}, {"note": "No pork."}]
         }));
         assert_eq!(unplaced, 2);
+    }
+
+    /// Ollama delivered `propose_notes` with no arguments at all; the draft must still form.
+    #[tokio::test]
+    async fn an_empty_draft_call_drafts_what_was_recorded() {
+        let (srv, service, _) = server(None);
+        service.start("amina", Utc::now()).await.unwrap();
+        let record = |topic: &str, note: &str| RecordParams {
+            topic: topic.into(),
+            answer: note.into(),
+        };
+        srv.run_record(&meta("s-amina"), record("address", "Call her Mama Amina."))
+            .await
+            .unwrap();
+        srv.run_record(
+            &meta("s-amina"),
+            record("food", "No pork; allergic to peanuts."),
+        )
+        .await
+        .unwrap();
+        srv.run_skip(
+            &meta("s-amina"),
+            TopicParams {
+                topic: "all".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let drafted = srv
+            .run_propose(&meta("s-amina"), ProposeParams::default())
+            .await
+            .unwrap();
+        assert!(drafted.contains("- Call her Mama Amina."), "{drafted}");
+        assert!(
+            drafted.contains("- No pork; allergic to peanuts."),
+            "{drafted}"
+        );
+        assert_eq!(
+            srv.run_save(&meta("s-amina")).await,
+            Err(Refusal::Interview(InterviewRefusal::NotYetShown)),
+            "drafted and saved in one turn means the person never saw it"
+        );
+        assert!(Refusal::Interview(InterviewRefusal::NotYetShown)
+            .message()
+            .starts_with("Not saved."));
     }
 
     #[tokio::test]
