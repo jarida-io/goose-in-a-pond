@@ -354,6 +354,11 @@ async fn a_tap_saves_the_draft_and_without_one_there_is_nothing_to_approve() {
         .unwrap()
         .unwrap();
     p.interviews
+        .skip(&p.amina, "all", now)
+        .await
+        .unwrap()
+        .unwrap();
+    p.interviews
         .propose(
             &p.amina,
             vec![("address".into(), "Call her Mama Amina.".into())],

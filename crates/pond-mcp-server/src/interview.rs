@@ -95,22 +95,27 @@ pub struct NoParams {}
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct RecordParams {
     /// The topic answered: address, identity, language, household, routine, food, access, style, avoid or other.
+    #[serde(alias = "key", alias = "id")]
     pub topic: String,
     /// What they said, summarised in their own terms.
+    #[serde(alias = "summary", alias = "text")]
     pub answer: String,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct TopicParams {
-    /// The topic: address, identity, language, household, routine, food, access, style, avoid or other.
+    /// The topic: address, identity, language, household, routine, food, access, style, avoid or other; `all` for every topic not yet asked.
+    #[serde(alias = "key", alias = "id")]
     pub topic: String,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct DraftNote {
     /// The answered topic this note comes from.
+    #[serde(alias = "key", alias = "id")]
     pub topic: String,
     /// One short standing instruction about them, for example "Call her Mama Amina."
+    #[serde(alias = "instruction", alias = "text", alias = "content")]
     pub note: String,
 }
 
@@ -178,7 +183,8 @@ Note the person's answer on one topic, right after they give it. Returns the nex
     }
 
     #[tool(description = "\
-Skip a topic the person would rather not talk about. Returns the next topic.")]
+Skip a topic the person would rather not talk about, or `all` when they want to finish now. \
+Returns the next topic.")]
     async fn skip_topic(
         &self,
         ctx: RequestContext<RoleServer>,
@@ -328,15 +334,30 @@ impl InterviewMcpServer {
     async fn run_propose(&self, meta: &Meta, p: ProposeParams) -> Result<String, Refusal> {
         let (service, member) = self.member(meta).await?;
         let drafts = p.notes.into_iter().map(|n| (n.topic, n.note)).collect();
-        let (_, notes) = service
+        let (interview, notes) = service
             .propose(&member, drafts, Utc::now())
             .await
             .map_err(|_| Refusal::Unavailable)?
             .map_err(Refusal::Interview)?;
-        Ok(format!(
-            "Drafted. Show them these notes exactly, and ask whether to save them or change any:\n{}",
+        let left_out: Vec<&str> = interview
+            .topics
+            .iter()
+            .filter(|t| t.status == TopicStatus::Answered)
+            .filter(|t| !interview.draft.iter().any(|d| d.topic == t.topic))
+            .map(|t| t.topic.id())
+            .collect();
+        let mut out = format!(
+            "Drafted, not saved. Show them these notes exactly, and ask whether to save them or \
+             change any:\n{}",
             notes_lines(&notes)
-        ))
+        );
+        if !left_out.is_empty() {
+            out.push_str(&format!(
+                "\nAnswered but not drafted: {}. If one matters, draft again with it.",
+                left_out.join(", ")
+            ));
+        }
+        Ok(out)
     }
 
     async fn run_save(&self, meta: &Meta) -> Result<String, Refusal> {
@@ -514,6 +535,14 @@ mod tests {
         }
         assert_eq!(srv.run_status(&Meta::new()).await, Err(Refusal::NotAMember));
 
+        srv.run_skip(
+            &meta("s-amina"),
+            TopicParams {
+                topic: "all".into(),
+            },
+        )
+        .await
+        .unwrap();
         let drafted = srv
             .run_propose(
                 &meta("s-amina"),
@@ -533,6 +562,16 @@ mod tests {
             Err(Refusal::Interview(InterviewRefusal::NotYetShown))
         );
         assert!(extras.list_for_profile("amina").await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_draft_reads_the_names_a_small_model_reaches_for() {
+        let p: ProposeParams = serde_json::from_value(serde_json::json!({
+            "notes": [{"key": "me_address", "instruction": "Call him Baba Baraka."}]
+        }))
+        .unwrap();
+        assert_eq!(p.notes[0].topic, "me_address");
+        assert_eq!(p.notes[0].note, "Call him Baba Baraka.");
     }
 
     #[tokio::test]

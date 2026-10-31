@@ -222,6 +222,11 @@ impl InterviewService {
         now: DateTime<Utc>,
     ) -> Result<Result<(Interview, Option<Topic>), InterviewRefusal>> {
         let _held = self.lock.lock().await;
+        if topic.trim().eq_ignore_ascii_case("all") {
+            return self
+                .with_open(profile_id, |i| i.skip_rest(now).map(|()| None))
+                .await;
+        }
         let Some(topic) = Topic::from_id(topic) else {
             return Ok(Err(InterviewRefusal::UnknownTopic));
         };
@@ -432,6 +437,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        f.service.skip("amina", "all", t0()).await.unwrap().unwrap();
         f.service
             .propose(
                 "amina",

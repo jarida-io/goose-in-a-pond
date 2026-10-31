@@ -56,8 +56,12 @@ impl Topic {
         }
     }
 
+    /// A topic by its id, or by its note's key: a small model reaches for either.
     pub fn from_id(id: &str) -> Option<Topic> {
-        Topic::ALL.into_iter().find(|t| t.id() == id.trim())
+        let id = id.trim().to_ascii_lowercase();
+        Topic::ALL
+            .into_iter()
+            .find(|t| t.id() == id || t.note_key() == id)
     }
 
     /// The note this topic writes. Fixed, so a second interview updates a note, never adds one.
@@ -215,6 +219,8 @@ pub enum InterviewRefusal {
     /// Two drafted notes for one topic.
     DuplicateTopic,
     NothingToDraft,
+    /// A topic has not been asked or skipped yet, so a draft would miss it.
+    TopicsLeft,
     NoDraft,
     /// The person has not replied since the draft was shown, so cannot have approved it.
     NotYetShown,
@@ -231,6 +237,7 @@ impl InterviewRefusal {
             InterviewRefusal::TopicNotAnswered => "topic_not_answered",
             InterviewRefusal::DuplicateTopic => "duplicate_topic",
             InterviewRefusal::NothingToDraft => "nothing_to_draft",
+            InterviewRefusal::TopicsLeft => "topics_left",
             InterviewRefusal::NoDraft => "no_draft",
             InterviewRefusal::NotYetShown => "not_yet_shown",
             InterviewRefusal::Note(v) => v.code(),
@@ -257,7 +264,16 @@ impl InterviewRefusal {
                 "Nothing was answered, so there is nothing to save. Stop the interview instead."
                     .to_string()
             }
-            InterviewRefusal::NoDraft => "There is no draft to save.".to_string(),
+            InterviewRefusal::TopicsLeft => {
+                "Not every topic has been asked yet. Ask the next topic first. If they want to \
+                 finish now, call skip_topic with topic `all`, then propose_notes."
+                    .to_string()
+            }
+            InterviewRefusal::NoDraft => {
+                "Nothing has been saved: there is no draft yet. Call propose_notes, show them the \
+                 notes, and ask whether to save them."
+                    .to_string()
+            }
             InterviewRefusal::NotYetShown => {
                 "Show the person the drafted notes and wait for their reply before saving."
                     .to_string()
@@ -366,6 +382,18 @@ impl Interview {
         Ok(self.next_topic())
     }
 
+    /// Skips every topic not yet asked, when the person wants to finish now.
+    pub fn skip_rest(&mut self, now: DateTime<Utc>) -> Result<(), InterviewRefusal> {
+        self.require_open()?;
+        for t in &mut self.topics {
+            if t.status == TopicStatus::Pending {
+                t.status = TopicStatus::Skipped;
+            }
+        }
+        self.updated_at = now;
+        Ok(())
+    }
+
     pub fn skip(
         &mut self,
         topic: Topic,
@@ -412,6 +440,9 @@ impl Interview {
         now: DateTime<Utc>,
     ) -> Result<Vec<PromptExtra>, InterviewRefusal> {
         self.require_open()?;
+        if self.next_topic().is_some() {
+            return Err(InterviewRefusal::TopicsLeft);
+        }
         if drafts.is_empty() {
             return Err(InterviewRefusal::NothingToDraft);
         }
@@ -542,7 +573,20 @@ impl Interview {
                 .map(|t| t.topic.id())
                 .collect()
         };
-        let mut out = format!("<setup-interview>\nInterviewing {}.", name.trim());
+        let mut out = format!(
+            "<setup-interview>\nYou are interviewing {}, the person in this conversation; their \
+             notes are about them, never anyone else the prompt names.",
+            name.trim()
+        );
+        if let Some(address) = self
+            .topics
+            .iter()
+            .find(|t| t.topic == Topic::Address && t.status == TopicStatus::Answered)
+            .and_then(|t| t.answer.as_deref())
+        {
+            let address: String = address.chars().take(80).collect();
+            out.push_str(&format!(" They asked to be called: {address}."));
+        }
         for (label, status) in [
             ("Answered", TopicStatus::Answered),
             ("Skipped", TopicStatus::Skipped),
@@ -554,7 +598,8 @@ impl Interview {
         }
         match (self.status, self.next_topic()) {
             (InterviewStatus::AwaitingApproval, _) => out.push_str(&format!(
-                " A draft of {} notes is waiting for their approval.",
+                " A draft of {} notes is waiting for their approval. If they agree, call \
+                 save_notes: nothing is saved until you do.",
                 self.draft.len()
             )),
             (_, Some(topic)) => out.push_str(&format!(
@@ -562,7 +607,10 @@ impl Interview {
                 topic.id(),
                 topic.question()
             )),
-            (_, None) => out.push_str(" No topic is left: draft their notes now."),
+            (_, None) => out.push_str(
+                " No topic is left. Nothing is saved yet: call propose_notes now, then show \
+                 them the notes.",
+            ),
         }
         if let Some(opening) = &self.pending_opening {
             out.push_str(&format!(
@@ -585,12 +633,14 @@ on the same topic is fine when their answer is unclear.
 - After each answer, call record_answer with the topic and a short summary in their own terms. \
 If they decline, would rather not say, or want to move on, call skip_topic and never return to it.
 - If they want to stop, call stop_interview, thank them, and say they can carry on another time. \
-Nothing is saved.
-- When no topic is left, or they want to finish, call propose_notes with one short standing \
+Nothing is saved. If instead they want to finish now with what they have said, call skip_topic \
+with topic `all`.
+- When no topic is left, call propose_notes with one short standing \
 instruction per answered topic, about them in the third person, for example \"Call her Mama \
 Amina.\" Then show them every note exactly as drafted and ask whether to save them or change any.
 - Call save_notes only after they say yes to the notes you showed. For changes, call \
 propose_notes again and show the notes again.
+- Notes are saved only by save_notes. Never say they are saved unless save_notes said so.
 - Never add details they did not give. Never name the tools.
 </setup-interview-rules>";
 
@@ -648,6 +698,7 @@ mod tests {
         let mut i = Interview::new("amina", "s1", t0());
         i.record(Topic::Address, "Mama Amina", t0()).unwrap();
         i.skip(Topic::Food, t0()).unwrap();
+        i.skip_rest(t0()).unwrap();
         assert_eq!(
             i.propose(vec![draft(Topic::Food, "No pork.")], &[], &[], t0()),
             Err(InterviewRefusal::TopicNotAnswered)
@@ -702,6 +753,7 @@ mod tests {
             sort_order: 0,
             profile_id: Some("amina".to_string()),
         }];
+        i.skip_rest(t0()).unwrap();
         assert_eq!(
             i.propose(
                 vec![draft(Topic::Address, "Call her Mama Amina.")],
@@ -734,6 +786,7 @@ mod tests {
         let mut i = Interview::new("amina", "s1", t0());
         i.record(Topic::Address, "Mama Amina", t0()).unwrap();
         i.note_reply(t0());
+        i.skip_rest(t0()).unwrap();
         i.propose(
             vec![draft(Topic::Address, "Call her Mama Amina.")],
             &[],
@@ -765,6 +818,7 @@ mod tests {
     fn a_new_answer_after_a_draft_withdraws_it() {
         let mut i = Interview::new("amina", "s1", t0());
         i.record(Topic::Address, "Mama Amina", t0()).unwrap();
+        i.skip_rest(t0()).unwrap();
         i.propose(
             vec![draft(Topic::Address, "Call her Mama Amina.")],
             &[],
@@ -794,6 +848,8 @@ mod tests {
             .opening("Amina", true)
             .contains(Topic::Identity.question()));
 
+        i.skip_rest(t0()).unwrap();
+
         i.propose(
             vec![draft(Topic::Address, "Call her Mama Amina.")],
             &[],
@@ -817,6 +873,40 @@ mod tests {
         assert!(ctx.contains("Skipped: identity."));
         assert!(ctx.contains("Next topic: language"));
         assert!(ctx.contains("You opened this conversation by saying"));
+    }
+
+    #[test]
+    fn a_draft_waits_until_every_topic_is_asked_or_skipped() {
+        let mut i = Interview::new("amina", "s1", t0());
+        i.record(Topic::Address, "Mama Amina", t0()).unwrap();
+        assert_eq!(
+            i.propose(
+                vec![draft(Topic::Address, "Call her Mama Amina.")],
+                &[],
+                &[],
+                t0()
+            ),
+            Err(InterviewRefusal::TopicsLeft)
+        );
+        i.skip_rest(t0()).unwrap();
+        assert!(i.topics[1..]
+            .iter()
+            .all(|t| t.status == TopicStatus::Skipped));
+        assert!(i
+            .propose(
+                vec![draft(Topic::Address, "Call her Mama Amina.")],
+                &[],
+                &[],
+                t0()
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn a_topic_is_found_by_its_id_or_its_notes_key() {
+        assert_eq!(Topic::from_id(" Food "), Some(Topic::Food));
+        assert_eq!(Topic::from_id("me_address"), Some(Topic::Address));
+        assert_eq!(Topic::from_id("hobbies"), None);
     }
 
     #[test]

@@ -118,6 +118,7 @@ mod tests {
 
         let mut i = Interview::new("amina", "s1", now);
         i.record(Topic::Address, "Mama Amina", now).unwrap();
+        i.skip_rest(now).unwrap();
         i.propose(
             vec![NoteDraft {
                 topic: Topic::Address,
