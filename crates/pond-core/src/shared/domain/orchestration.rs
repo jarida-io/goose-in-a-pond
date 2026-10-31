@@ -11,8 +11,8 @@ use crate::mcp::domain::tool_group::{
 };
 #[cfg(test)]
 use crate::mcp::domain::tool_group::{
-    ORCHESTRATOR_EXTENSION, TASKS_EXTENSION, TOOLKIT_EXTENSION, TOOL_NAME_SEPARATOR,
-    TRAVEL_EXTENSION,
+    INTERVIEW_EXTENSION, ORCHESTRATOR_EXTENSION, TASKS_EXTENSION, TOOLKIT_EXTENSION,
+    TOOL_NAME_SEPARATOR, TRAVEL_EXTENSION,
 };
 use crate::models::services::context::model_class::{provider_locality, ProviderLocality};
 use crate::shared::domain::role_block::{
@@ -1029,7 +1029,7 @@ impl TaskRun {
 /// The groups no subagent may hold, each with the control a subagent would bypass.
 /// Kept apart from [`groups_denied_to_subagents`] so a removal from that list fails a test.
 #[cfg(test)]
-const GROUPS_NO_SUBAGENT_MAY_HOLD: [(&str, &str); 8] = [
+const GROUPS_NO_SUBAGENT_MAY_HOLD: [(&str, &str); 9] = [
     (
         TOOLKIT_EXTENSION,
         "enable_tool_group WIDENS an allow-set keyed by the process-global current_session_id(), \
@@ -1072,6 +1072,11 @@ const GROUPS_NO_SUBAGENT_MAY_HOLD: [(&str, &str); 8] = [
         TASKS_EXTENSION,
         "task_start queues work the step runner later runs as fresh helpers, so a helper holding \
          it could start helpers of its own that no delegation depth counts",
+    ),
+    (
+        INTERVIEW_EXTENSION,
+        "save_notes writes standing notes into every later turn of one member, and only that \
+         member's reply in their own interview may approve them; a subagent has neither",
     ),
 ];
 

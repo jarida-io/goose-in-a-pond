@@ -490,6 +490,20 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             get(list_prompt_extras).post(upsert_prompt_extra),
         )
         .route("/agent/extras/{key}", delete(delete_prompt_extra))
+        // A member's own notes and setup interview, from that member's own devices.
+        .route("/profiles/{id}/notes", get(crate::member_notes::list_notes))
+        .route(
+            "/profiles/{id}/notes/{key}",
+            put(crate::member_notes::put_note).delete(crate::member_notes::delete_note),
+        )
+        .route(
+            "/profiles/{id}/interview",
+            get(crate::member_notes::interview_status).post(crate::member_notes::start_interview),
+        )
+        .route(
+            "/profiles/{id}/interview/approve",
+            post(crate::member_notes::approve_interview),
+        )
         // ── Turn-level telemetry ──────────────────────────────────────────────
         .route("/telemetry/turns", get(get_telemetry_turns))
         .route("/telemetry/summary", get(get_telemetry_summary))
@@ -1516,7 +1530,27 @@ async fn complete_onboarding(
             )
         })?;
     attribute_claimant_to_owner(&state, settings.primary_profile_id.as_deref()).await;
-    Ok(Json(json!({"status": "completed"})))
+    Ok(Json(json!({
+        "status": "completed",
+        "interview": owner_interview_offer(&state, settings.primary_profile_id.as_deref()).await,
+    })))
+}
+
+/// The owner's setup interview, offered once setup completes: where it stands and how to start it.
+async fn owner_interview_offer(state: &Arc<AppState>, owner: Option<&str>) -> Value {
+    let Some(owner) = owner.filter(|id| !id.trim().is_empty()) else {
+        return Value::Null;
+    };
+    let Some(service) = crate::member_notes::interview_service(state) else {
+        return Value::Null;
+    };
+    let current = service.get(owner).await.ok().flatten();
+    let view = crate::member_notes::interview_json(owner, current.as_ref());
+    json!({
+        "profile_id": owner,
+        "status": view["status"],
+        "start": format!("/api/v1/profiles/{owner}/interview"),
+    })
 }
 
 /// The device that claimed the pond paired before it had members, so it belonged to nobody; it
@@ -2964,6 +2998,15 @@ async fn drive_turn(
 
     use pond_core::shared::domain::agent::AgentRequest;
 
+    // The speaker's own setup interview runs in this session: its state, and only its tools.
+    let interview = interview_turn_for(state, &session_id, &turn_scope).await;
+    let tool_group_allowlist = match &interview {
+        Some(_) => Some(vec![
+            pond_core::mcp::domain::tool_group::INTERVIEW_EXTENSION.to_string(),
+        ]),
+        None => req.tool_group_allowlist.clone(),
+    };
+
     let agent_req = AgentRequest {
         message: req.message.clone(),
         session_id: session_id.clone(),
@@ -2973,10 +3016,11 @@ async fn drive_turn(
         canvas_mode: req.canvas_mode,
         profile_scope: turn_scope.clone(),
         profile_context: profile_context_for(state, &turn_scope).await,
-        tool_group_allowlist: req.tool_group_allowlist.clone(),
+        tool_group_allowlist,
         warmup: false,
         suggestion_context: req.suggestion_context.clone(),
         deep_research_task: deep_research_task.clone(),
+        interview: interview.map(|turn| turn.context),
     };
 
     let mut turn = TurnAccumulator::new(if settings.show_thinking && !req.voice_mode {
@@ -8472,6 +8516,20 @@ async fn delete_profile(
             )
         })?;
 
+    // Explicit, since `PRAGMA foreign_keys` is per connection: the member's notes and interview.
+    if let Some(interviews) = crate::member_notes::interview_service(&state) {
+        interviews.forget_member(&id).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": format!(
+                        "could not remove the member's notes, so the member was not deleted: {e}"
+                    )
+                })),
+            )
+        })?;
+    }
+
     // `primary_profile_id` is a KV row, not a foreign key, so clear it by hand before the delete.
     // Both failures abort: proceeding would leave it dangling.
     let settings = state.settings_repo.get().await.map_err(|e| {
@@ -11755,6 +11813,7 @@ async fn agent_chat_stream(
             warmup: false,
             suggestion_context: None,
             deep_research_task: None,
+            interview: None,
         };
 
         let mut agent_stream = match agent.chat_stream(request).await {
@@ -14087,6 +14146,7 @@ async fn upsert_prompt_extra(
         instruction: req.instruction,
         active: req.active,
         sort_order: req.sort_order,
+        profile_id: None,
     };
     if let Err(violation) = extra.validate() {
         return prompt_extra_refusal(&extra.key, Some(&extra.instruction), violation);
@@ -14109,6 +14169,35 @@ async fn upsert_prompt_extra(
     };
     if let Err(violation) = check_active_set(&existing, &extra) {
         return prompt_extra_refusal(&extra.key, Some(&extra.instruction), violation);
+    }
+    // A member's turn reads the household's notes and theirs, so each such pair must still fit.
+    let members = match repo.list_all_members().await {
+        Ok(notes) => notes,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let mut owners: Vec<&str> = members
+        .iter()
+        .filter_map(|n| n.profile_id.as_deref())
+        .collect();
+    owners.sort_unstable();
+    owners.dedup();
+    for owner in owners {
+        let mut turn: Vec<PromptExtra> = existing.clone();
+        turn.extend(
+            members
+                .iter()
+                .filter(|n| n.profile_id.as_deref() == Some(owner))
+                .cloned(),
+        );
+        if let Err(violation) = check_active_set(&turn, &extra) {
+            return prompt_extra_refusal(&extra.key, Some(&extra.instruction), violation);
+        }
     }
     match repo.upsert(&extra).await {
         Ok(()) => {
@@ -19189,7 +19278,46 @@ async fn profile_context_for(
     };
 
     let profile = state.profile_repo.get(&profile_id).await.ok().flatten()?;
-    Some(particulars_for(attributed, &profile.preferences))
+    let mut context = particulars_for(attributed, &profile.preferences);
+    // A member's notes are theirs; in a household of one, an unattributed turn can only be them.
+    let notes_are_theirs = attributed
+        || crate::member_notes::sole_member(state).await.as_deref() == Some(profile_id.as_str());
+    if notes_are_theirs {
+        if let Some(repo) = &state.prompt_extra_repo {
+            match repo.list_for_profile(&profile_id).await {
+                Ok(notes) => context.member_notes = notes,
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "could not read the speaker's own notes; this turn goes without them"
+                ),
+            }
+        }
+    }
+    Some(context)
+}
+
+/// The interview this turn runs, when the session is the speaker's own open interview.
+async fn interview_turn_for(
+    state: &Arc<AppState>,
+    session_id: &str,
+    scope: &ProfileScope,
+) -> Option<pond_core::user_data::services::profile_interview::InterviewTurn> {
+    let speaker = match scope {
+        ProfileScope::Owner(id) => id.clone(),
+        ProfileScope::Household => crate::member_notes::sole_member(state).await?,
+        ProfileScope::Guest => return None,
+    };
+    let service = crate::member_notes::interview_service(state)?;
+    match service
+        .turn_for_session(session_id, &speaker, chrono::Utc::now())
+        .await
+    {
+        Ok(turn) => turn,
+        Err(e) => {
+            tracing::warn!(error = %e, session_id, "could not read the session's interview");
+            None
+        }
+    }
 }
 
 /// The pure half of [`profile_context_for`]: what the prompt may state from these preferences.
@@ -19210,6 +19338,7 @@ fn particulars_for(
             .get("accessibility_atypical_speech")
             .map(|v| v == "true")
             .unwrap_or(false),
+        member_notes: Vec::new(),
     }
 }
 

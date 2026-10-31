@@ -429,6 +429,7 @@ mod tests {
             birthday: Some("1990-03-05".to_string()),
             language: Some("sw".to_string()),
             atypical_speech: false,
+            member_notes: Vec::new(),
         };
 
         let partition = build_prompt_partition(&settings, Some(&profile), &state, PROMPT_BALANCED);

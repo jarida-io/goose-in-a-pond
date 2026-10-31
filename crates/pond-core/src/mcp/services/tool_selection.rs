@@ -224,6 +224,20 @@ where
         .collect()
 }
 
+/// Every tool but the setup interview's, which only an interview turn is offered.
+pub fn without_interview_tools<'a, I>(tools: I) -> Vec<String>
+where
+    I: IntoIterator<Item = &'a String>,
+{
+    tools
+        .into_iter()
+        .filter(|name| {
+            group_of_tool(name) != Some(crate::mcp::domain::tool_group::INTERVIEW_EXTENSION)
+        })
+        .cloned()
+        .collect()
+}
+
 /// Prefixes of goose's own injected tools: not personal data, and the shim's allow-set already
 /// vetoes them. Listed so the guest filter does not default-deny them.
 const ENGINE_TOOL_PREFIXES: &[&str] = &["platform", "recipe", "dynamic_task"];
@@ -299,6 +313,17 @@ mod tests {
         assert_eq!(kept, vec![weather], "only the helper-only group may go");
     }
     use super::*;
+
+    #[test]
+    fn an_ordinary_turn_never_holds_the_interviews_tools() {
+        let sep = crate::mcp::domain::tool_group::TOOL_NAME_SEPARATOR;
+        let save = format!(
+            "{}{sep}save_notes",
+            crate::mcp::domain::tool_group::INTERVIEW_EXTENSION
+        );
+        let weather = format!("giap-weather{sep}get_weather");
+        assert_eq!(without_interview_tools([&save, &weather]), vec![weather]);
+    }
 
     fn available() -> Vec<String> {
         TOOL_GROUPS

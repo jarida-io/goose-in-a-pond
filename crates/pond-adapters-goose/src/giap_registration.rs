@@ -176,6 +176,13 @@ pub fn register_giap_extensions(
         registered.push(pond_core::mcp::domain::tool_group::TASK_WORK_EXTENSION.into());
     }
 
+    // Always on: only an interview turn is offered these tools, and every other turn loses them.
+    register_builtin_extension(
+        pond_core::mcp::domain::tool_group::INTERVIEW_EXTENSION,
+        pond_mcp_server::spawn_interview_server,
+    );
+    registered.push(pond_core::mcp::domain::tool_group::INTERVIEW_EXTENSION.into());
+
     let _ = REGISTERED_EXTENSIONS.set(registered.clone());
 
     tracing::info!(

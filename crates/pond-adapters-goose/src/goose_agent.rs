@@ -2685,9 +2685,27 @@ impl GooseAdapter {
 
         // Outside prefix_hash by design; <extension-notes> sets it apart from core prompt sections.
         // Checked and escaped again here: rows saved before the write rules may break them.
-        if let Ok(extras) = extras_result {
-            shim_appendix.extend(render_extension_notes(&extras));
+        let household_extras = extras_result.unwrap_or_default();
+        shim_appendix.extend(render_extension_notes(&household_extras));
+        // Every turn of an interview's session is one, so its standing rules prefill once there.
+        if request.interview.is_some() {
+            shim_appendix
+                .push(pond_core::user_data::domain::profile_interview::INTERVIEW_RULES.to_string());
         }
+
+        // The speaker's own notes ride their turn once per conversation, never the shared prefix.
+        let member_notes_for_user_msg = match request.profile_context.as_ref() {
+            Some(profile) if !profile.member_notes.is_empty() => {
+                let earlier = self.earlier_user_texts(&goose_sid).await;
+                pond_core::user_data::domain::prompt_extra::member_notes_block(
+                    &household_extras,
+                    &profile.member_notes,
+                    &earlier,
+                )
+                .unwrap_or_default()
+            }
+            _ => String::new(),
+        };
 
         // Only name + description per turn; `giap-device__load_skill` fetches the rest on demand.
         // The same text feeds tool selection (6c), so a skill can pull in the groups it needs.
@@ -2936,7 +2954,8 @@ impl GooseAdapter {
         let mut dormant_groups_note = String::new();
         // Entitlement (all it could widen to; bounds delegation). `None` in "all" mode.
         let mut entitled_tools: Option<HashSet<String>> = None;
-        let allowed_tools = if settings.tool_selection_narrows() {
+        // An interview turn is narrowed to the interview's own group below, which no selection loads.
+        let allowed_tools = if settings.tool_selection_narrows() && request.interview.is_none() {
             let groups = self
                 .resolve_session_tool_groups(
                     &session_id,
@@ -3006,8 +3025,10 @@ impl GooseAdapter {
         ));
         // Standing too: the CURRENT CONTEXT line is news each turn, the rule for reading it is not.
         shim_appendix.push(pond_core::models::services::prompt_builder::TEMPORAL_RULE.to_string());
-        shim_appendix.push(
-            "VISION, CAMERAS, SCHEDULES & REMINDERS:\n\
+        // An interview turn holds none of these tools.
+        if request.interview.is_none() {
+            shim_appendix.push(
+                "VISION, CAMERAS, SCHEDULES & REMINDERS:\n\
              - Camera feed & face annotations (`giap-vision`, TEXT-FIRST): \
                1) Call `get_recent_camera_events` FIRST for who is in the room, recent activity, \
                or historical face sightings — it returns live face/motion/person detections as \
@@ -3028,8 +3049,9 @@ impl GooseAdapter {
                `update_schedule` / `schedule_action` (`delete` | `pause` | `resume` | `run_now`) \
                to inspect or control them. If a group is listed under ADDITIONAL CAPABILITIES, \
                enable it first with `giap-device__enable_capability_group`."
-                .to_string(),
-        );
+                    .to_string(),
+            );
+        }
         // Appendix, not envelope: it only changes with the tools block, so it's prefilled once.
         if !dormant_groups_note.is_empty() {
             shim_appendix.push(dormant_groups_note.clone());
@@ -3092,6 +3114,18 @@ impl GooseAdapter {
                 .into_iter()
                 .collect()
         });
+        // The interview's tools belong to its own turns; anywhere else they could reach notes.
+        let (allowed_tools, entitled_tools) = if request.interview.is_some() {
+            (allowed_tools, entitled_tools)
+        } else {
+            use pond_core::mcp::services::tool_selection::without_interview_tools;
+            (
+                without_interview_tools(allowed_tools.iter())
+                    .into_iter()
+                    .collect(),
+                entitled_tools.map(|t| without_interview_tools(t.iter()).into_iter().collect()),
+            )
+        };
 
         // A recipe's YAML `extensions:` narrow this turn to those groups, in every mode.
         let allowed_tools = if let Some(allowlist) = &request.tool_group_allowlist {
@@ -3205,6 +3239,14 @@ impl GooseAdapter {
             }
             if !dynamic_suffix_for_user_msg.is_empty() {
                 msg.push_str(&dynamic_suffix_for_user_msg);
+                msg.push('\n');
+            }
+            if let Some(ref interview) = request.interview {
+                msg.push_str(interview);
+                msg.push('\n');
+            }
+            if !member_notes_for_user_msg.is_empty() {
+                msg.push_str(&member_notes_for_user_msg);
                 msg.push('\n');
             }
             if !memory_block_for_user_msg.is_empty() {
@@ -4123,6 +4165,7 @@ impl AgentPort for GooseAdapter {
             warmup: true,
             suggestion_context: None,
             deep_research_task: None,
+            interview: None,
         };
 
         let shape = if voice_mode {
@@ -8068,6 +8111,7 @@ mod tests {
             warmup: false,
             suggestion_context: None,
             deep_research_task: None,
+            interview: None,
         };
 
         let mut stream = adapter.chat_stream(request).await.unwrap();

@@ -3371,6 +3371,7 @@ async fn run_server(
             security_policy.clone(),
         ),
     ));
+    init_interview_tools(&db.system);
 
     // ── Fill the deferred schedule executor now that the agent exists ─────────
     {
@@ -5283,6 +5284,7 @@ async fn run_chat(
             None,
         ),
     ));
+    init_interview_tools(&db.system);
 
     let settings_repo_chat = SqliteSettingsRepository::new(db.system.clone());
     let settings = settings_repo_chat.get().await.unwrap_or_default();
@@ -10361,6 +10363,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
             None,
         ),
     ));
+    init_interview_tools(&db.system);
     // Used only when chat_provider = "llamafile"; other providers route themselves.
     let llamafile_url = format!("http://127.0.0.1:{}", ports::llamafile_port());
 
@@ -10425,6 +10428,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 warmup: false,
                 suggestion_context: None,
                 deep_research_task: None,
+                interview: None,
             };
             stream_agent_response(&agent, request).await?;
         }
@@ -10498,6 +10502,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                     warmup: false,
                     suggestion_context: None,
                     deep_research_task: None,
+                    interview: None,
                 };
                 if let Err(e) = stream_agent_response(&agent, request).await {
                     eprintln!("\n  error: {e}");
@@ -11081,6 +11086,23 @@ async fn run_pairing(refresh: bool, member: Option<String>) -> Result<()> {
 
 // ── Unit tests ─────────────────────────────────────────────────────────────────
 
+/// The setup interview's tools act through this; every binary path that registers them needs it.
+fn init_interview_tools(pool: &sqlx::Pool<sqlx::Sqlite>) {
+    pond_mcp_server::init_interview_deps(Arc::new(
+        pond_core::user_data::services::profile_interview::InterviewService::new(
+            Arc::new(
+                pond_infra::sqlite_profile_interview::SqliteProfileInterviewRepository::new(
+                    pool.clone(),
+                ),
+            ),
+            Arc::new(
+                pond_infra::sqlite_prompt_extra::SqlitePromptExtraRepository::new(pool.clone()),
+            ),
+            Arc::new(SqliteSessionStorage::new(pool.clone())),
+            Arc::new(SqliteProfileRepository::new(pool.clone())),
+        ),
+    ));
+}
 #[cfg(test)]
 mod tests {
     /// A blocking thread that never finishes must not keep the process from exiting.

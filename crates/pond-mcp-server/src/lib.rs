@@ -4,6 +4,7 @@ pub mod context;
 pub mod device;
 pub mod device_control;
 pub mod dispatcher;
+pub mod interview;
 pub mod knowledge;
 pub mod long_task;
 pub mod memory;
@@ -180,6 +181,7 @@ pub use weather::WeatherMcpServer;
 pub use audio::init_audio_control;
 pub use device::{init_device_deps, spawn_device_server};
 pub use device_control::{init_device_control_deps, spawn_device_control_server};
+pub use interview::{init_interview_deps, spawn_interview_server};
 pub use knowledge::{init_knowledge_deps, spawn_knowledge_server};
 // Installed by pond-server once the Goose adapter exists, like the orchestrator's.
 pub use long_task::{

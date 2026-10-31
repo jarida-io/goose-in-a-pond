@@ -33,6 +33,9 @@ pub const TASKS_EXTENSION: &str = "giap-tasks";
 /// Extension a long task's helpers work through; only the step runner's authority grants it.
 pub const TASK_WORK_EXTENSION: &str = "giap-task-work";
 
+/// Extension carrying the setup interview's tools; only an interview turn is offered it.
+pub const INTERVIEW_EXTENSION: &str = "giap-interview";
+
 /// Separator in a prefixed tool name (`giap-weather__get_forecast`); Goose's convention.
 pub const TOOL_NAME_SEPARATOR: &str = "__";
 
@@ -152,6 +155,12 @@ pub const TOOL_GROUPS: &[ToolGroup] = &[
                       and comparing options or going through a long document: start it so the \
                       pond works on it while the house is quiet, ask how far it has got, or \
                       stop it.",
+        core: false,
+    },
+    ToolGroup {
+        extension: INTERVIEW_EXTENSION,
+        description: "Running a member's setup interview: note each answer or skipped question, \
+                      draft their standing notes, and save the notes once they approve them.",
         core: false,
     },
     ToolGroup {
@@ -286,6 +295,8 @@ pub fn groups_denied_to_guests() -> &'static [&'static str] {
         TASKS_EXTENSION,
         // A helper's ledger tools; no guest owns a task for a helper to work on.
         TASK_WORK_EXTENSION,
+        // Writes one member's own notes; a guest has none.
+        INTERVIEW_EXTENSION,
     ]
 }
 
@@ -318,6 +329,8 @@ pub fn groups_denied_to_subagents() -> &'static [&'static str] {
         "giap-vision",
         // A helper that starts a task gets more helpers through the runner, past the depth cap.
         TASKS_EXTENSION,
+        // Saves a member's notes, which only the member approves in their own conversation.
+        INTERVIEW_EXTENSION,
     ]
 }
 
