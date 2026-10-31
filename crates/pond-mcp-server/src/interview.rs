@@ -119,10 +119,79 @@ pub struct DraftNote {
     pub note: String,
 }
 
+/// One short standing instruction per answered topic, each in that topic's own field. A small
+/// model fills named fields reliably; it dropped `topic` from every item of a list.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ProposeParams {
-    /// One note per answered topic.
-    pub notes: Vec<DraftNote>,
+    /// What to call them, for example "Call her Mama Amina."
+    pub address: Option<String>,
+    /// Who they are and what fills their days.
+    pub identity: Option<String>,
+    /// Which languages to use with them.
+    pub language: Option<String>,
+    /// Who they live with.
+    pub household: Option<String>,
+    /// Their usual week.
+    pub routine: Option<String>,
+    /// Food preferences, allergies and dietary needs.
+    pub food: Option<String>,
+    /// Hearing, sight or speech to keep in mind.
+    pub access: Option<String>,
+    /// How to talk to them: length, tone, units.
+    pub style: Option<String>,
+    /// Topics to avoid or handle with care.
+    pub avoid: Option<String>,
+    /// Anything else to always keep in mind.
+    pub other: Option<String>,
+    /// The list shape a model sometimes sends instead: `[{topic, note}]` or `{topic: note}`.
+    #[serde(default)]
+    #[schemars(skip)]
+    pub notes: Option<serde_json::Value>,
+}
+
+impl ProposeParams {
+    /// Every note given, as `(topic, note)`, and how many came with no topic to place them under.
+    fn drafts(self) -> (Vec<(String, String)>, usize) {
+        let mut out: Vec<(String, String)> = [
+            ("address", self.address),
+            ("identity", self.identity),
+            ("language", self.language),
+            ("household", self.household),
+            ("routine", self.routine),
+            ("food", self.food),
+            ("access", self.access),
+            ("style", self.style),
+            ("avoid", self.avoid),
+            ("other", self.other),
+        ]
+        .into_iter()
+        .filter_map(|(topic, note)| {
+            note.filter(|n| !n.trim().is_empty())
+                .map(|n| (topic.to_string(), n))
+        })
+        .collect();
+        let mut unplaced = 0;
+        match self.notes {
+            Some(serde_json::Value::Object(map)) => {
+                for (topic, note) in map {
+                    match note.as_str() {
+                        Some(n) => out.push((topic, n.to_string())),
+                        None => unplaced += 1,
+                    }
+                }
+            }
+            Some(serde_json::Value::Array(items)) => {
+                for item in items {
+                    match serde_json::from_value::<DraftNote>(item) {
+                        Ok(d) => out.push((d.topic, d.note)),
+                        Err(_) => unplaced += 1,
+                    }
+                }
+            }
+            _ => {}
+        }
+        (out, unplaced)
+    }
 }
 
 #[derive(Clone)]
@@ -209,8 +278,8 @@ Stop the interview because the person wants to. Nothing is saved; they can carry
     }
 
     #[tool(description = "\
-Draft the person's notes, one per answered topic, for them to approve. Show them the returned \
-notes exactly and ask whether to save them.")]
+Draft the person's notes for them to approve: one short note per answered topic, each in that \
+topic's field. Show them the returned notes exactly and ask whether to save them.")]
     async fn propose_notes(
         &self,
         ctx: RequestContext<RoleServer>,
@@ -333,7 +402,18 @@ impl InterviewMcpServer {
 
     async fn run_propose(&self, meta: &Meta, p: ProposeParams) -> Result<String, Refusal> {
         let (service, member) = self.member(meta).await?;
-        let drafts = p.notes.into_iter().map(|n| (n.topic, n.note)).collect();
+        let (drafts, unplaced): (Vec<(String, String)>, usize) = p.drafts();
+        if unplaced > 0 || drafts.is_empty() {
+            return Ok(
+                "Nothing was drafted. Put each note in its topic's own field, for example \
+                 address: \"Call her Mama Amina.\" and food: \"No pork.\""
+                    .to_string(),
+            );
+        }
+        let given: Vec<Topic> = drafts
+            .iter()
+            .filter_map(|(t, _)| Topic::from_id(t))
+            .collect();
         let (interview, notes) = service
             .propose(&member, drafts, Utc::now())
             .await
@@ -355,6 +435,17 @@ impl InterviewMcpServer {
             out.push_str(&format!(
                 "\nAnswered but not drafted: {}. If one matters, draft again with it.",
                 left_out.join(", ")
+            ));
+        }
+        let dropped: Vec<&str> = given
+            .iter()
+            .filter(|t| !interview.draft.iter().any(|d| d.topic == **t))
+            .map(|t| t.id())
+            .collect();
+        if !dropped.is_empty() {
+            out.push_str(&format!(
+                "\nLeft out, since they skipped it: {}.",
+                dropped.join(", ")
             ));
         }
         Ok(out)
@@ -547,15 +638,15 @@ mod tests {
             .run_propose(
                 &meta("s-amina"),
                 ProposeParams {
-                    notes: vec![DraftNote {
-                        topic: "address".into(),
-                        note: "Call her Mama Amina.".into(),
-                    }],
+                    address: Some("Call her Mama Amina.".into()),
+                    household: Some("She does not want to discuss who lives with her.".into()),
+                    ..Default::default()
                 },
             )
             .await
             .unwrap();
         assert!(drafted.contains("- Call her Mama Amina."));
+        assert!(drafted.contains("Left out, since they skipped it: household."));
         // In the same turn as the draft, the person has not seen it yet.
         assert_eq!(
             srv.run_save(&meta("s-amina")).await,
@@ -565,13 +656,28 @@ mod tests {
     }
 
     #[test]
-    fn a_draft_reads_the_names_a_small_model_reaches_for() {
-        let p: ProposeParams = serde_json::from_value(serde_json::json!({
+    fn a_draft_reads_named_fields_and_the_shapes_a_small_model_reaches_for() {
+        let parse =
+            |v: serde_json::Value| serde_json::from_value::<ProposeParams>(v).unwrap().drafts();
+        let (named, unplaced) = parse(serde_json::json!({
+            "address": "Call him Baba Baraka.", "food": "Fish is his favourite.", "avoid": ""
+        }));
+        assert_eq!(unplaced, 0);
+        assert_eq!(named.len(), 2);
+        let (listed, _) = parse(serde_json::json!({
             "notes": [{"key": "me_address", "instruction": "Call him Baba Baraka."}]
-        }))
-        .unwrap();
-        assert_eq!(p.notes[0].topic, "me_address");
-        assert_eq!(p.notes[0].note, "Call him Baba Baraka.");
+        }));
+        assert_eq!(
+            listed,
+            vec![("me_address".into(), "Call him Baba Baraka.".into())]
+        );
+        let (mapped, _) = parse(serde_json::json!({"notes": {"food": "Fish."}}));
+        assert_eq!(mapped, vec![("food".into(), "Fish.".into())]);
+        // The shape E4B sent on the nano: notes with no topic are not guessed at.
+        let (_, unplaced) = parse(serde_json::json!({
+            "notes": [{"note": "Call her Mama Amina."}, {"note": "No pork."}]
+        }));
+        assert_eq!(unplaced, 2);
     }
 
     #[tokio::test]

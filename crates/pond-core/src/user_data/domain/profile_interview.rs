@@ -214,8 +214,6 @@ pub enum InterviewRefusal {
     NotOpen,
     EmptyAnswer,
     AnswerTooLong,
-    /// A note was drafted for a topic the person skipped or has not answered.
-    TopicNotAnswered,
     /// Two drafted notes for one topic.
     DuplicateTopic,
     NothingToDraft,
@@ -234,7 +232,6 @@ impl InterviewRefusal {
             InterviewRefusal::NotOpen => "not_open",
             InterviewRefusal::EmptyAnswer => "empty_answer",
             InterviewRefusal::AnswerTooLong => "answer_too_long",
-            InterviewRefusal::TopicNotAnswered => "topic_not_answered",
             InterviewRefusal::DuplicateTopic => "duplicate_topic",
             InterviewRefusal::NothingToDraft => "nothing_to_draft",
             InterviewRefusal::TopicsLeft => "topics_left",
@@ -255,9 +252,6 @@ impl InterviewRefusal {
             InterviewRefusal::EmptyAnswer => "The answer summary is empty.".to_string(),
             InterviewRefusal::AnswerTooLong => {
                 format!("Summarise the answer in at most {MAX_ANSWER_CHARS} characters.")
-            }
-            InterviewRefusal::TopicNotAnswered => {
-                "Draft notes only for topics the person answered.".to_string()
             }
             InterviewRefusal::DuplicateTopic => "Draft at most one note per topic.".to_string(),
             InterviewRefusal::NothingToDraft => {
@@ -428,7 +422,8 @@ impl Interview {
         }
     }
 
-    /// Stores a draft for the person to approve and returns it as the notes it would save.
+    /// Stores a draft for the person to approve and returns it as the notes it would save. A
+    /// note for a topic they skipped is dropped, not refused: it says what they chose not to.
     ///
     /// `household` and `existing` are the household's and this member's notes as stored; the
     /// draft must fit beside them, since a turn reads all three.
@@ -443,18 +438,17 @@ impl Interview {
         if self.next_topic().is_some() {
             return Err(InterviewRefusal::TopicsLeft);
         }
+        let mut drafts = drafts;
+        drafts.retain(|d| {
+            self.topics
+                .iter()
+                .any(|t| t.topic == d.topic && t.status == TopicStatus::Answered)
+        });
         if drafts.is_empty() {
             return Err(InterviewRefusal::NothingToDraft);
         }
         let mut seen = Vec::new();
         for draft in &drafts {
-            let answered = self
-                .topics
-                .iter()
-                .any(|t| t.topic == draft.topic && t.status == TopicStatus::Answered);
-            if !answered {
-                return Err(InterviewRefusal::TopicNotAnswered);
-            }
             if seen.contains(&draft.topic) {
                 return Err(InterviewRefusal::DuplicateTopic);
             }
@@ -635,9 +629,10 @@ If they decline, would rather not say, or want to move on, call skip_topic and n
 - If they want to stop, call stop_interview, thank them, and say they can carry on another time. \
 Nothing is saved. If instead they want to finish now with what they have said, call skip_topic \
 with topic `all`.
-- When no topic is left, call propose_notes with one short standing \
-instruction per answered topic, about them in the third person, for example \"Call her Mama \
-Amina.\" Then show them every note exactly as drafted and ask whether to save them or change any.
+- When no topic is left, call propose_notes with one short standing instruction per answered \
+topic, each in that topic's own field, about them in the third person, for example address: \
+\"Call her Mama Amina.\" Then show them every note exactly as drafted and ask whether to save \
+them or change any.
 - Call save_notes only after they say yes to the notes you showed. For changes, call \
 propose_notes again and show the notes again.
 - Notes are saved only by save_notes. Never say they are saved unless save_notes said so.
@@ -694,15 +689,29 @@ mod tests {
     }
 
     #[test]
-    fn only_answered_topics_can_be_drafted_once_each() {
+    fn a_skipped_topics_note_is_dropped_and_each_topic_drafts_once() {
         let mut i = Interview::new("amina", "s1", t0());
         i.record(Topic::Address, "Mama Amina", t0()).unwrap();
         i.skip(Topic::Food, t0()).unwrap();
         i.skip_rest(t0()).unwrap();
         assert_eq!(
             i.propose(vec![draft(Topic::Food, "No pork.")], &[], &[], t0()),
-            Err(InterviewRefusal::TopicNotAnswered)
+            Err(InterviewRefusal::NothingToDraft)
         );
+        let kept = i
+            .clone()
+            .propose(
+                vec![
+                    draft(Topic::Food, "No pork."),
+                    draft(Topic::Address, "Call her Mama."),
+                ],
+                &[],
+                &[],
+                t0(),
+            )
+            .unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].key, "me_address");
         assert_eq!(
             i.propose(
                 vec![
