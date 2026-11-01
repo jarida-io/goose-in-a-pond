@@ -17,6 +17,21 @@ pub trait EmbeddingProvider: Send + Sync {
         self.embed(text).await
     }
 
+    /// Embed several stored documents, one vector per text in order; callers pass at most
+    /// [`Self::max_batch`] texts.
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let mut vectors = Vec::with_capacity(texts.len());
+        for text in texts {
+            vectors.push(self.embed(text).await?);
+        }
+        Ok(vectors)
+    }
+
+    /// The most texts one [`Self::embed_batch`] call takes.
+    fn max_batch(&self) -> usize {
+        1
+    }
+
     /// The dimension of vectors returned by this provider (e.g. 384 for MiniLM).
     fn dimensions(&self) -> usize;
 

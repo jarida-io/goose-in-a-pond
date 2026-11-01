@@ -140,8 +140,8 @@ pub struct AppState {
     /// The personal-context index retrieval reads; `None` on CLI paths and in tests.
     /// Don't copy the model id here: [`Self::embedder`] owns it, and a copy drifts.
     pub vector_index: Option<Arc<dyn VectorIndex>>,
-    /// Wakes the maintenance sweep to refill after the rebuild route clears the index.
-    /// `None` with no sweep to wake; the route still clears, and the next process refills.
+    /// The embedding slot's bell, rung after the rebuild route clears the index.
+    /// `None` with no slot to wake; the route still clears, and the next process refills.
     pub index_reindex: Option<Arc<tokio::sync::Notify>>,
     /// Inference lane jobs and run-now; `None` (CLI, tests) is reported as no lane, not as empty.
     pub lane: Option<Arc<dyn pond_core::user_data::ports::lane_control::LaneControl>>,

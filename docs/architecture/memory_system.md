@@ -277,10 +277,11 @@ Preference, "working on / my project / deadline" Project, "right now / currently
 anything else Knowledge. `save_memory` also takes `supersedes` (ids marked `merged`) and
 `corrects`.
 
-Rows written without a vector are embedded by the index-maintenance lane job
-(`run_memory_embedding_sweep`, `pond-core/src/context/index_maintenance.rs`) and by a backfill
-spawned at startup (`memory_relevance::run_backfill`, then `run_dimension_repair` for rows
-embedded by another model).
+Rows written without a vector, and rows whose vector the index holds under another model, are
+embedded by the embedding slot (`pond-core/src/context/embedding_slot.rs`, run by
+`pond-server/src/embedding_slot_runner.rs`). It finds them by the index's staleness join, writes
+through `MemoryRepository::update_embedding` (row and index together), and runs only while no turn,
+compaction or due long-task step needs the device.
 
 ## Recall and injection
 
@@ -399,7 +400,6 @@ persist in `lane_job_runs` (migration `0059`) so a restart does not make every j
 | `titling` | none |
 | `proactive_review` | none |
 | `summary_refresh` | none |
-| `index_maintenance` | embeds memory rows that have no vector |
 | `memory_extraction` | writes memories and reminders |
 | `suggestion_generation` | composes Home suggestions from memories into `suggestion_queue` (migration `0058`), gated by `suggestion_generation_enabled` |
 
@@ -432,8 +432,8 @@ waiving its quiet period, interval floor and activity gate.
 
 `POST` and `PUT /api/v1/memories` embed with the same provider and index the extraction path
 uses. A row stored without a vector (the embedder failed, or the redactor dropped a vector of a
-credential) is embedded later by the boot backfill or by the index maintenance sweep, which runs in
-household quiet.
+credential) is embedded later by the embedding slot, at the next moment nothing the household waits
+on needs the device.
 
 ## Settings
 

@@ -165,22 +165,13 @@ pub trait VectorIndex: Send + Sync {
         limit: usize,
     ) -> Result<Vec<String>>;
 
-    /// Like [`Self::needs_embedding`], with each row's text: context items' only embedding path.
+    /// Like [`Self::needs_embedding`], with each row's text, for the embedding slot.
     async fn needs_embedding_with_text(
         &self,
         corpus: Corpus,
         model_id: &str,
         limit: usize,
     ) -> Result<Vec<(String, String)>>;
-
-    /// Copy source-store vectors in without re-embedding, making the index rebuildable.
-    /// `expected_dims` filters: another width came from another model.
-    async fn backfill_from_source(
-        &self,
-        corpus: Corpus,
-        model_id: &str,
-        expected_dims: usize,
-    ) -> Result<u64>;
 
     /// Delete index rows whose source row is gone. Returns how many.
     async fn prune_orphans(&self) -> Result<u64>;

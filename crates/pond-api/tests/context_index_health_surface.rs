@@ -1,4 +1,4 @@
-//! Index health/rebuild routes. Rebuild clears rows because the sweep re-embeds only absent ones.
+//! Index health/rebuild routes. Rebuild clears rows; the embedding slot re-embeds every one.
 
 use std::sync::Arc;
 
@@ -112,7 +112,7 @@ async fn make_app_with(wire_index: bool, embedder: ActiveEmbedder) -> Harness {
     let profiles = Arc::new(SqliteProfileRepository::new(system.clone()));
     // Built even when unwired, so a test can seed vectors into a pond that reports no index.
     let index = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-    // Also held by the harness, so a test can prove the route wakes the sweep.
+    // Also held by the harness, so a test can prove the route wakes the embedding slot.
     let reindex = Arc::new(tokio::sync::Notify::new());
     let hs = MockHandshake::new();
     hs.add_valid_token("test-token".to_string()).await;
@@ -144,7 +144,7 @@ async fn make_app_with(wire_index: bool, embedder: ActiveEmbedder) -> Harness {
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedder: Arc::new(embedder),
         vector_index: wire_index.then(|| index.clone() as Arc<dyn VectorIndex>),
-        // Only with an embedder, as in `main.rs`, which spawns the sweep only when one exists.
+        // Wired only with an embedder here, so a test can show a pond with no slot to wake.
         index_reindex: (wire_index && wire_embedder).then(|| reindex.clone()),
         lane: None,
         account_sync: None,
@@ -462,12 +462,12 @@ async fn rebuilding_wakes_the_sweep_that_refills_it() {
     assert_eq!(
         body["refilling"], true,
         "the answer has to say the refill was asked for, or a caller cannot tell this pond \
-         apart from one with no sweep to wake: {body}"
+         apart from one with no slot to wake: {body}"
     );
 
     tokio::time::timeout(std::time::Duration::from_secs(2), woken)
         .await
-        .expect("the sweep was never woken, so the index stays empty until the next pass")
+        .expect("the slot was never woken, so the index stays empty until the next poll")
         .expect("waiter task panicked");
 }
 
@@ -561,7 +561,7 @@ async fn rebuilding_reports_what_it_cleared_and_leaves_the_index_empty() {
         "a corpus is listed at zero rather than omitted, for the same reason the health rows are"
     );
 
-    // Now "missing", which the sweep re-embeds; the source row survives, so nothing is lost.
+    // Now "missing", which the slot re-embeds; the source row survives, so nothing is lost.
     let (_, after) = health(&h).await;
     assert_eq!(after["matching"], 0);
     assert_eq!(after["missing"], 1);

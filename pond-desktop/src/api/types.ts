@@ -524,6 +524,8 @@ export interface LaneStatus {
   running?: string | null;
   running_title?: string | null;
   running_for_secs?: number | null;
+  /** The embedding slot runs beside the lane, never holding its slot. */
+  embedding_slot?: { running: boolean; running_for_secs: number | null };
 }
 
 /** What asking for a job to run now did. */

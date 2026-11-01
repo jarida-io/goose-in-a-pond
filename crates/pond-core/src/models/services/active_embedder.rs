@@ -287,6 +287,14 @@ impl EmbedLease<'_> {
         self.provider.embed_query(text).await
     }
 
+    pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        self.provider.embed_batch(texts).await
+    }
+
+    pub fn max_batch(&self) -> usize {
+        self.provider.max_batch()
+    }
+
     pub fn model_id(&self) -> String {
         self.provider.model_id()
     }
@@ -301,6 +309,20 @@ impl EmbeddingProvider for ActiveEmbedder {
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let lease = self.lease().await.ok_or_else(|| self.not_ready())?;
         lease.embed(text).await
+    }
+
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let lease = self.lease().await.ok_or_else(|| self.not_ready())?;
+        lease.embed_batch(texts).await
+    }
+
+    /// The loaded model's, or 1 while none is loaded.
+    fn max_batch(&self) -> usize {
+        self.inner
+            .try_read()
+            .ok()
+            .and_then(|inner| inner.as_ref().map(|p| p.max_batch()))
+            .unwrap_or(1)
     }
 
     async fn embed_query(&self, text: &str) -> Result<Vec<f32>> {

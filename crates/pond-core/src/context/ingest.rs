@@ -124,20 +124,20 @@ impl IngestPipeline {
             );
         }
 
-        // Only one-chunk text is embedded inline; a long body is left unembedded for the sweep to
-        // chunk, since an item with a vector looks indexed and would never be picked up.
+        // Only one-chunk text is embedded inline; a long body is left unembedded for the embedding
+        // slot to chunk, since an item with a vector looks indexed and would never be picked up.
         let text = item.embedding_text();
         let one_chunk = text.len() <= crate::context::chunking::DEFAULT_CHUNK_BYTES;
         let item = match (&self.embedder, one_chunk) {
             (Some(embedder), true) if embedder.available() => match embedder.embed(&text).await {
                 Ok(vector) => item.with_embedding(vector),
                 Err(e) => {
-                    // Not fatal: `search_unembedded` + `update_embedding` backfill it.
+                    // Not fatal: the embedding slot embeds it later.
                     tracing::warn!(error = %e, item_id = %item.id(), "context item stored unembedded");
                     item
                 }
             },
-            // Long enough to chunk, or no model ready: stored now, embedded by the sweep.
+            // Long enough to chunk, or no model ready: stored now, embedded by the embedding slot.
             (Some(_), _) => item,
             (None, _) => item,
         };

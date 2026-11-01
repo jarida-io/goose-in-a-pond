@@ -426,7 +426,7 @@ impl ExtractionEngineStatus {
 }
 
 /// Whether the embedder is worth asking: wired and not failed recently. Not "no unembedded
-/// rows", which latches shut because only a one-shot startup backfill fills them.
+/// rows", which would latch shut while the embedding slot waits for quiet.
 #[derive(Debug, Default)]
 pub struct EmbedderHealth {
     /// When the embedder last failed; a sync `Mutex` so the lane can read it without an await.
@@ -1336,7 +1336,7 @@ impl BatchExtractionService {
                 tier,
             );
             // Reuse the banding vector if any. Best-effort: an embed failure leaves the row
-            // for `IndexMaintenance`'s sweep and never aborts the window.
+            // for the embedding slot and never aborts the window.
             fragment.embedding = match vector_for_row {
                 Some(vector) => Some(vector),
                 None => self.embed(&content).await,

@@ -61,7 +61,7 @@ type ItemRow = (
 pub struct SqliteContextRepository {
     pool: Pool<Sqlite>,
     redactor: Arc<dyn Redactor>,
-    /// Optional; without it items are still stored and the sweep indexes them later.
+    /// Optional; without it items are still stored and the embedding slot indexes them later.
     index: Option<Arc<dyn VectorIndex>>,
     /// Names the model behind a stored vector, read at write time since the model can change.
     embedder: Option<Arc<dyn EmbeddingProvider>>,
@@ -95,20 +95,26 @@ impl SqliteContextRepository {
         Some((embedder.model_id(), embedder.dimensions()))
     }
 
-    /// Never fails the caller: the index is derived and the sweep repairs it.
     async fn mirror(&self, item: &ContextItem) {
+        self.mirror_vector(item.id(), item.embedding(), sql_ts(item.ingested_at()))
+            .await
+    }
+
+    /// Never fails the caller: the index is derived and the embedding slot repairs it.
+    /// `ingested_at` is the row's own stamp: a re-sync rewrites it, which flags the vector stale.
+    async fn mirror_vector(&self, id: &str, embedding: Option<&[f32]>, ingested_at: String) {
         let Some(index) = &self.index else { return };
-        let outcome = match item.embedding().filter(|v| !v.is_empty()) {
+        let outcome = match embedding.filter(|v| !v.is_empty()) {
             // An upsert without an embedder NULLs the stored vector; the index must follow.
-            None => index.remove(Corpus::Context, item.id()).await,
+            None => index.remove(Corpus::Context, id).await,
             Some(vector) => {
-                // Unattributable vector: leave it to the sweep, not strip another writer's entry.
+                // Unattributable vector: leave it to the slot, not strip another writer's entry.
                 let Some((model_id, dims)) = self.current_model() else {
                     return;
                 };
                 if vector.len() != dims {
                     tracing::warn!(
-                        item_id = %item.id(),
+                        item_id = %id,
                         width = vector.len(),
                         dims,
                         %model_id,
@@ -119,20 +125,19 @@ impl SqliteContextRepository {
                 index
                     .upsert(&VectorEntry {
                         corpus: Corpus::Context,
-                        row_id: item.id().to_string(),
-                        // Whole-text vector; the sweep clears it before adding passage chunks.
+                        row_id: id.to_string(),
+                        // Whole-text vector; the slot clears it before adding passage chunks.
                         chunk_ix: 0,
                         chunk_span: None,
                         model_id,
                         vector: vector.to_vec(),
-                        // A re-sync rewrites the row in place; ingest time flags a stale vector.
-                        source_rev: Some(sql_ts(item.ingested_at())),
+                        source_rev: Some(ingested_at),
                     })
                     .await
             }
         };
         if let Err(e) = outcome {
-            tracing::warn!(item_id = %item.id(), "vector index write failed: {e:#}");
+            tracing::warn!(item_id = %id, "vector index write failed: {e:#}");
         }
     }
 
@@ -389,7 +394,7 @@ impl ContextRepository for SqliteContextRepository {
         if let Some(index) = &self.index {
             for (item_id,) in &doomed {
                 if let Err(e) = index.remove(Corpus::Context, item_id).await {
-                    // Best effort: the sweep is the backstop.
+                    // Best effort: the slot's orphan prune is the backstop.
                     tracing::warn!(item_id = %item_id, "index cleanup on disconnect failed: {e:#}");
                 }
             }
@@ -558,11 +563,17 @@ impl ContextRepository for SqliteContextRepository {
     }
 
     async fn update_embedding(&self, id: &str, embedding: &[f32]) -> Result<()> {
-        sqlx::query("UPDATE context_items SET embedding = ? WHERE id = ?")
-            .bind(vec_to_blob(embedding))
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let stamped: Option<(String,)> = sqlx::query_as(
+            "UPDATE context_items SET embedding = ? WHERE id = ? RETURNING ingested_at",
+        )
+        .bind(vec_to_blob(embedding))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        // A missing row gets no index entry.
+        if let Some((ingested_at,)) = stamped {
+            self.mirror_vector(id, Some(embedding), ingested_at).await;
+        }
         Ok(())
     }
 
@@ -1218,6 +1229,43 @@ mod tests {
             hits[0].1 > hits[1].1,
             "results are not ranked by similarity"
         );
+    }
+
+    /// The embedding slot's write: row and index together, stamped so the join sees it current.
+    #[tokio::test]
+    async fn attaching_a_vector_indexes_it_under_the_current_model() {
+        use crate::sqlite_vector_index::{tests_support::stamp, SqliteVectorIndex};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::init(tmp.path()).await.unwrap();
+        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
+        let repo = SqliteContextRepository::new(db.system.clone(), Arc::new(RuleRedactor::new()))
+            .with_vector_index(index.clone(), stamp("bge-small", 2));
+        add_member(&db.system, "jerry").await;
+        let src = source("s1", "jerry", SourceKind::Voice);
+        repo.upsert_source(&src).await.unwrap();
+        ingest(&repo, &src, raw("a", "words", Utc::now()))
+            .await
+            .unwrap();
+        let stale = || index.needs_embedding(Corpus::Context, "bge-small", 10);
+        assert_eq!(stale().await.unwrap(), vec!["s1:a".to_string()]);
+
+        repo.update_embedding("s1:a", &[1.0, 0.0]).await.unwrap();
+        let entry = index.get(Corpus::Context, "s1:a").await.unwrap();
+        assert_eq!(entry.map(|e| e.model_id).as_deref(), Some("bge-small"));
+        assert!(
+            stale().await.unwrap().is_empty(),
+            "stamped with the row's own ingest time, so the join counts it current"
+        );
+
+        repo.update_embedding("s1:missing", &[1.0, 0.0])
+            .await
+            .unwrap();
+        assert!(index
+            .get(Corpus::Context, "s1:missing")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     /// Two models of one width are two spaces: only items indexed under the current one score.

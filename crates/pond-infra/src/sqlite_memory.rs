@@ -21,7 +21,7 @@ const EVERY_ROW: usize = i64::MAX as usize;
 
 pub struct SqliteMemoryRepository {
     pool: Pool<Sqlite>,
-    /// Optional; without it memories are still stored and the sweep indexes them later.
+    /// Optional; without it memories are still stored and the embedding slot indexes them later.
     index: Option<Arc<dyn VectorIndex>>,
     /// Names the model behind a stored vector, read at write time since the model can change.
     embedder: Option<Arc<dyn EmbeddingProvider>>,
@@ -55,14 +55,14 @@ impl SqliteMemoryRepository {
         Some((embedder.model_id(), embedder.dimensions()))
     }
 
-    /// Never fails the caller: the index is derived and the sweep repairs it.
+    /// Never fails the caller: the index is derived and the embedding slot repairs it.
     async fn mirror(&self, id: &str, embedding: Option<&[f32]>) {
         let Some(index) = &self.index else { return };
         let outcome = match embedding.filter(|v| !v.is_empty()) {
             // No vector: remove any stale entry (the redactor drops secret-bearing vectors).
             None => index.remove(Corpus::Memory, id).await,
             Some(vector) => {
-                // No model to name (the CLI, or one still loading): leave the entry to the sweep.
+                // No model to name (the CLI, or one still loading): leave the entry to the slot.
                 let Some((model_id, dims)) = self.current_model() else {
                     return;
                 };
@@ -453,7 +453,6 @@ impl MemoryRepository for SqliteMemoryRepository {
     }
 
     async fn search_unembedded(&self, limit: usize) -> Result<Vec<MemoryFragment>> {
-        // Oldest first, so an interrupted backfill resumes where it stopped.
         let sql = format!(
             "SELECT {SELECT_ALL} FROM memory_fragments \
              WHERE embedding IS NULL AND (lifecycle IS NULL OR lifecycle = 'active') \
@@ -466,35 +465,13 @@ impl MemoryRepository for SqliteMemoryRepository {
         Ok(rows.into_iter().map(row_to_fragment).collect())
     }
 
-    async fn search_stale_dimension(
-        &self,
-        expected_dims: usize,
-        limit: usize,
-    ) -> Result<Vec<MemoryFragment>> {
-        // `length()` of a BLOB counts bytes (of TEXT, chars), so this filters width exactly.
-        let expected_bytes = (expected_dims * std::mem::size_of::<f32>()) as i64;
-        // Oldest first, as in `search_unembedded`.
-        let sql = format!(
-            "SELECT {SELECT_ALL} FROM memory_fragments \
-             WHERE embedding IS NOT NULL AND length(embedding) != ? \
-             AND (lifecycle IS NULL OR lifecycle = 'active') \
-             ORDER BY created_at ASC LIMIT ?"
-        );
-        let rows: Vec<FragmentRow> = sqlx::query_as(&sql)
-            .bind(expected_bytes)
-            .bind(limit as i64)
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(rows.into_iter().map(row_to_fragment).collect())
-    }
-
     async fn update_embedding(&self, id: &str, embedding: &[f32]) -> Result<()> {
         sqlx::query("UPDATE memory_fragments SET embedding = ? WHERE id = ?")
             .bind(vec_to_blob(embedding))
             .bind(id)
             .execute(&self.pool)
             .await?;
-        // Backfill and dimension repair both land here, so this also populates the index.
+        // The embedding slot lands here, so this also populates the index.
         self.mirror(id, Some(embedding)).await;
         Ok(())
     }
@@ -980,37 +957,6 @@ mod tests {
             "the unembedded row proves search_recent ran; without it the incomparable \
              row was merely scored 0.0 and returned as a semantic hit"
         );
-    }
-
-    #[tokio::test]
-    async fn search_stale_dimension_finds_wrong_width_rows_and_only_those() {
-        let (repo, _tmp) = make_repo().await;
-
-        let mut stale = MemoryFragment::from_chat("stale".to_string(), None, None, "old".into());
-        stale.embedding = Some(vec![0.5f32; 384]);
-        repo.add(stale).await.unwrap();
-
-        let mut current =
-            MemoryFragment::from_chat("current".to_string(), None, None, "new".into());
-        current.embedding = Some(vec![0.5f32; 768]);
-        repo.add(current).await.unwrap();
-
-        let never = MemoryFragment::from_chat("never".to_string(), None, None, "none".into());
-        repo.add(never).await.unwrap();
-
-        let stale_rows = repo.search_stale_dimension(768, 10).await.unwrap();
-        let ids: Vec<&str> = stale_rows.iter().map(|f| f.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec!["stale"],
-            "expected only the 384-dim row; a NULL-embedding row belongs to the \
-             backfill and a 768-dim row is already correct"
-        );
-
-        // The backfill sees only the never-embedded row, hence the separate selector.
-        let unembedded = repo.search_unembedded(10).await.unwrap();
-        let ids: Vec<&str> = unembedded.iter().map(|f| f.id.as_str()).collect();
-        assert_eq!(ids, vec!["never"]);
     }
 
     #[tokio::test]
