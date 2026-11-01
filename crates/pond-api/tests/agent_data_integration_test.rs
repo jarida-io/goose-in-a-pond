@@ -763,6 +763,7 @@ async fn prompt_extra_delete_with_a_malformed_key_is_refused_unless_a_legacy_row
         instruction: "legacy".into(),
         active: true,
         sort_order: 0,
+        profile_id: None,
     })
     .await
     .unwrap();
@@ -791,6 +792,7 @@ async fn hostile_rows_stored_in_the_database_cannot_close_the_note_wrapper() {
             instruction: instruction.into(),
             active: true,
             sort_order,
+            profile_id: None,
         })
         .await
         .unwrap();

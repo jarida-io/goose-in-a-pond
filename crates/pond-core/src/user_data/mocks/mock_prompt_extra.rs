@@ -25,39 +25,95 @@ impl Default for MockPromptExtraRepository {
     }
 }
 
+fn in_order(mut v: Vec<PromptExtra>) -> Vec<PromptExtra> {
+    v.sort_by(|a, b| a.sort_order.cmp(&b.sort_order).then(a.key.cmp(&b.key)));
+    v
+}
+
 #[async_trait]
 impl PromptExtraRepository for MockPromptExtraRepository {
     async fn list_active(&self) -> Result<Vec<PromptExtra>> {
-        let mut v: Vec<PromptExtra> = self
-            .extras
-            .read()
-            .await
-            .iter()
-            .filter(|e| e.active)
-            .cloned()
-            .collect();
-        v.sort_by(|a, b| a.sort_order.cmp(&b.sort_order).then(a.key.cmp(&b.key)));
-        Ok(v)
+        let store = self.extras.read().await;
+        Ok(in_order(
+            store
+                .iter()
+                .filter(|e| e.active && e.profile_id.is_none())
+                .cloned()
+                .collect(),
+        ))
     }
 
     async fn list_all(&self) -> Result<Vec<PromptExtra>> {
-        let mut v = self.extras.read().await.clone();
-        v.sort_by(|a, b| a.sort_order.cmp(&b.sort_order).then(a.key.cmp(&b.key)));
-        Ok(v)
+        let store = self.extras.read().await;
+        Ok(in_order(
+            store
+                .iter()
+                .filter(|e| e.profile_id.is_none())
+                .cloned()
+                .collect(),
+        ))
+    }
+
+    async fn list_for_profile(&self, profile_id: &str) -> Result<Vec<PromptExtra>> {
+        let store = self.extras.read().await;
+        Ok(in_order(
+            store
+                .iter()
+                .filter(|e| e.profile_id.as_deref() == Some(profile_id))
+                .cloned()
+                .collect(),
+        ))
+    }
+
+    async fn list_all_members(&self) -> Result<Vec<PromptExtra>> {
+        let store = self.extras.read().await;
+        Ok(in_order(
+            store
+                .iter()
+                .filter(|e| e.profile_id.is_some())
+                .cloned()
+                .collect(),
+        ))
     }
 
     async fn upsert(&self, extra: &PromptExtra) -> Result<()> {
+        self.upsert_all(std::slice::from_ref(extra)).await
+    }
+
+    async fn upsert_all(&self, extras: &[PromptExtra]) -> Result<()> {
         let mut store = self.extras.write().await;
-        if let Some(existing) = store.iter_mut().find(|e| e.key == extra.key) {
-            *existing = extra.clone();
-        } else {
-            store.push(extra.clone());
+        for extra in extras {
+            match store
+                .iter_mut()
+                .find(|e| e.key == extra.key && e.profile_id == extra.profile_id)
+            {
+                Some(existing) => *existing = extra.clone(),
+                None => store.push(extra.clone()),
+            }
         }
         Ok(())
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
-        self.extras.write().await.retain(|e| e.key != key);
+        self.extras
+            .write()
+            .await
+            .retain(|e| !(e.key == key && e.profile_id.is_none()));
         Ok(())
+    }
+
+    async fn delete_for_profile(&self, profile_id: &str, key: &str) -> Result<()> {
+        self.extras
+            .write()
+            .await
+            .retain(|e| !(e.key == key && e.profile_id.as_deref() == Some(profile_id)));
+        Ok(())
+    }
+
+    async fn delete_all_for_profile(&self, profile_id: &str) -> Result<u64> {
+        let mut store = self.extras.write().await;
+        let before = store.len();
+        store.retain(|e| e.profile_id.as_deref() != Some(profile_id));
+        Ok((before - store.len()) as u64)
     }
 }

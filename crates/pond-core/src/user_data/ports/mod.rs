@@ -19,6 +19,7 @@ pub mod memory_repository;
 pub mod onboarding;
 pub mod place_lookup;
 pub mod profile;
+pub mod profile_interview;
 pub mod prompt_extra;
 pub mod prompt_template;
 pub mod proposal;

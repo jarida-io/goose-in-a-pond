@@ -21,6 +21,11 @@ const KNOWN_MINTERS: &[(&str, &str)] = &[
         "an HTTP request opened it; the id is the caller's or a fresh UUID -- a person",
     ),
     (
+        "crates/pond-core/src/user_data/services/profile_interview.rs",
+        "a member's own phone asked for their setup interview (`POST /profiles/{id}/interview`); \
+         the id is a fresh UUID -- a person",
+    ),
+    (
         "crates/pond-server/src/main.rs",
         "the terminal voice/chat CLI's own session -- a person, in another process",
     ),

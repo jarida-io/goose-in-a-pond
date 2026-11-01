@@ -35,6 +35,7 @@ pub mod sqlite_notification_queue;
 pub mod sqlite_notification_recipients;
 pub mod sqlite_peer_directory;
 pub mod sqlite_profile;
+pub mod sqlite_profile_interview;
 pub mod sqlite_prompt_extra;
 pub mod sqlite_prompt_template;
 pub mod sqlite_proposal;

@@ -4166,6 +4166,28 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
   0.73 against 0.39), which matters for PAI-3 recall across the household's languages. It fits
   only in MiniLM's place. No pond code has changed.
 
+**2026-10-31 — a member's own notes, and the setup interview that writes them.**
+
+- A prompt extra may now belong to one member (`profile_id`). Only that member's turns carry it, in
+  the turn's `<system-context>` and never the shared prefix (PAI-1, PAI-3). Guests and an
+  unidentified speaker in a household of several get none. The household's notes and the
+  speaker's share the existing caps from either side.
+- The setup interview asks one question a turn over ten topics, in its own chat session, offered
+  only the `giap-interview` tools. Topic order, skips, and the save gate live in code. A save from
+  the conversation needs the member's reply after the draft was shown (PAI-7: propose, do not
+  act), or a tap on their own phone. The answers are forgotten when it ends.
+- The routes answer only the member's own device (`may_act_for`): PAI-2's device rung, not the
+  request body.
+- On the nano with E4B (`scripts/jetson/interview-live/`): two members finished their interviews
+  (a skip, a stop and resume, an edit, approval in the conversation and by tap), each one's next
+  turn followed their own notes and not the other's, and each read of the other's was `403`.
+  Seven and nine notes added 245 and 280 prompt tokens to a first turn of 8,247; an interview
+  turn starts at 2,483, with six tools. The draft is built in code from the note recorded for
+  each topic: E4B never named a topic in a list of notes, and Gemma 4 through Ollama sent the
+  draft call with no arguments at all.
+- Not done: a session that changes speaker still holds the earlier speaker's notes in its
+  history, as it holds their memories.
+
 **2026-10-30 — PAI-6: reading the pages it cites (section 8.14).**
 
 - **What landed.**
