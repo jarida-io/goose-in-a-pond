@@ -4405,10 +4405,17 @@ async fn run_server(
 
     // Load the model and prefill the static prompt prefix at boot, so turn 1 reuses it.
     let prewarm = pond_api::spawn_prefix_prewarm(state.clone(), false);
+    // TensorRT engines and a GPU embedder loading beside the language model's own GPU load risk
+    // an NvMap OOM, so both wait for the prewarm.
+    let (prewarm_done, prewarmed) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(600), prewarm).await;
+        let _ = prewarm_done.send(true);
+    });
     if let Some(plan) = onnx_gpu_plan {
+        let mut prewarmed = prewarmed.clone();
         tokio::spawn(async move {
-            // TensorRT engines loading beside the language model's own GPU load risk an NvMap OOM.
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(600), prewarm).await;
+            let _ = prewarmed.wait_for(|done| *done).await;
             pond_onnx_accel::enable_gpu(plan);
         });
     }
@@ -4458,10 +4465,11 @@ async fn run_server(
                 reindex: embedding_reindex,
                 arrived: embedding_arrived,
                 chat_model_warming: Box::new(move || {
-                    matches!(
-                        warmup.read().unwrap_or_else(|e| e.into_inner()).phase,
-                        pond_core::models::ports::agent::WarmupPhase::Warming
-                    )
+                    !*prewarmed.borrow()
+                        || matches!(
+                            warmup.read().unwrap_or_else(|e| e.into_inner()).phase,
+                            pond_core::models::ports::agent::WarmupPhase::Warming
+                        )
                 }),
             },
         ));
