@@ -97,7 +97,7 @@ pub struct RecordParams {
     /// The topic answered: address, identity, language, household, routine, food, access, style, avoid or other.
     #[serde(alias = "key", alias = "id")]
     pub topic: String,
-    /// The note to keep from their answer: one short standing instruction about them, in the third person, for example "Call her Mama Amina."
+    /// The note to keep from their answer: one short standing instruction about them, in the third person, for example "Call her Mama Amina." When the answer gives nothing to keep, call skip_topic instead.
     #[serde(alias = "note", alias = "summary", alias = "text")]
     pub answer: String,
 }
@@ -316,6 +316,24 @@ fn next_line(next: Option<Topic>) -> String {
     }
 }
 
+/// What to do next, after an answer or a skip: the next topic, or the draft that formed once
+/// none was left, so the model shows it rather than inventing a save.
+fn progress(interview: &Interview, next: Option<Topic>) -> String {
+    if interview.status == InterviewStatus::AwaitingApproval {
+        let draft: Vec<String> = interview
+            .draft
+            .iter()
+            .map(|d| format!("- {}", d.instruction))
+            .collect();
+        return format!(
+            "No topic is left, so their notes are drafted. They are NOT saved. Show them these \
+             notes exactly, and ask whether to save them or change any:\n{}",
+            draft.join("\n")
+        );
+    }
+    next_line(next)
+}
+
 fn notes_lines(notes: &[PromptExtra]) -> String {
     notes
         .iter()
@@ -370,24 +388,24 @@ impl InterviewMcpServer {
 
     async fn run_record(&self, meta: &Meta, p: RecordParams) -> Result<String, Refusal> {
         let (service, member) = self.member(meta).await?;
-        let (_, next) = service
+        let (interview, next) = service
             .record(&member, &p.topic, &p.answer, Utc::now())
             .await
             .map_err(|_| Refusal::Unavailable)?
             .map_err(Refusal::Interview)?;
-        Ok(format!("Noted. {}", next_line(next)))
+        Ok(format!("Noted. {}", progress(&interview, next)))
     }
 
     async fn run_skip(&self, meta: &Meta, p: TopicParams) -> Result<String, Refusal> {
         let (service, member) = self.member(meta).await?;
-        let (_, next) = service
+        let (interview, next) = service
             .skip(&member, &p.topic, Utc::now())
             .await
             .map_err(|_| Refusal::Unavailable)?
             .map_err(Refusal::Interview)?;
         Ok(format!(
             "Skipped; do not ask about it again. {}",
-            next_line(next)
+            progress(&interview, next)
         ))
     }
 
@@ -680,14 +698,17 @@ mod tests {
         )
         .await
         .unwrap();
-        srv.run_skip(
-            &meta("s-amina"),
-            TopicParams {
-                topic: "all".into(),
-            },
-        )
-        .await
-        .unwrap();
+        let settled = srv
+            .run_skip(
+                &meta("s-amina"),
+                TopicParams {
+                    topic: "all".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(settled.contains("They are NOT saved"), "{settled}");
+        assert!(settled.contains("- Call her Mama Amina."), "{settled}");
         let drafted = srv
             .run_propose(&meta("s-amina"), ProposeParams::default())
             .await

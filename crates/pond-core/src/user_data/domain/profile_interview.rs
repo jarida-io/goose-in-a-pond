@@ -648,13 +648,15 @@ write their standing notes, which they approve before anything is saved. Each tu
 on the same topic is fine when their answer is unclear.
 - After each answer, call record_answer with the topic and the note to keep: one short standing \
 instruction about them, in the third person, for example \"Call her Mama Amina.\" If they \
-decline, would rather not say, want to move on, or say nothing worth keeping, call skip_topic and \
-never return to it.
+decline, would rather not say, or want to move on, call skip_topic and never return to it. Call \
+skip_topic too when the answer gives nothing to keep, such as no needs or nothing to avoid: a note \
+that says nothing still rides every turn.
 - If they want to stop, call stop_interview, thank them, and say they can carry on another time. \
 Nothing is saved. If instead they want to finish now with what they have said, call skip_topic \
 with topic `all`.
-- When no topic is left, call propose_notes: it drafts their notes from what you recorded. Show \
-them every note exactly as drafted and ask whether to save them or change any.
+- When the last topic is answered or skipped, their notes are drafted at once and the tool result \
+lists them. Show them every note exactly as listed and ask whether to save them or change any. \
+If no draft formed, call propose_notes.
 - Call save_notes only after they say yes to the notes you showed. For a change, call \
 record_answer with the new note for that topic, then propose_notes, and show the notes again.
 - Notes are saved only by save_notes. Never say they are saved unless save_notes said so.

@@ -211,8 +211,13 @@ impl InterviewService {
         let Some(topic) = Topic::from_id(topic) else {
             return Ok(Err(InterviewRefusal::UnknownTopic));
         };
-        self.with_open(profile_id, |i| i.record(topic, answer, now))
-            .await
+        let (household, existing) = self.saved_notes(profile_id).await?;
+        self.with_open(profile_id, |i| {
+            let next = i.record(topic, answer, now)?;
+            draft_when_settled(i, &household, &existing, now);
+            Ok(next)
+        })
+        .await
     }
 
     pub async fn skip(
@@ -222,15 +227,32 @@ impl InterviewService {
         now: DateTime<Utc>,
     ) -> Result<Result<(Interview, Option<Topic>), InterviewRefusal>> {
         let _held = self.lock.lock().await;
-        if topic.trim().eq_ignore_ascii_case("all") {
-            return self
-                .with_open(profile_id, |i| i.skip_rest(now).map(|()| None))
-                .await;
-        }
-        let Some(topic) = Topic::from_id(topic) else {
+        let all = topic.trim().eq_ignore_ascii_case("all");
+        let one = Topic::from_id(topic);
+        if !all && one.is_none() {
             return Ok(Err(InterviewRefusal::UnknownTopic));
-        };
-        self.with_open(profile_id, |i| i.skip(topic, now)).await
+        }
+        let (household, existing) = self.saved_notes(profile_id).await?;
+        self.with_open(profile_id, |i| {
+            let next = match one {
+                Some(topic) if !all => i.skip(topic, now)?,
+                _ => {
+                    i.skip_rest(now)?;
+                    None
+                }
+            };
+            draft_when_settled(i, &household, &existing, now);
+            Ok(next)
+        })
+        .await
+    }
+
+    /// The household's notes and this member's, which a draft must fit beside.
+    async fn saved_notes(&self, profile_id: &str) -> Result<(Vec<PromptExtra>, Vec<PromptExtra>)> {
+        Ok((
+            self.extras.list_all().await?,
+            self.extras.list_for_profile(profile_id).await?,
+        ))
     }
 
     pub async fn stop(
@@ -299,6 +321,22 @@ impl InterviewService {
         let _held = self.lock.lock().await;
         self.extras.delete_all_for_profile(profile_id).await?;
         self.interviews.delete(profile_id).await
+    }
+}
+
+/// Once every topic is answered or skipped, the draft forms here, in the same turn, instead of
+/// waiting for the model to ask: on Ollama, Gemma 4 skipped that call and told the member their
+/// notes were saved. A changed answer redrafts, so the member must see the new draft before a save.
+fn draft_when_settled(
+    interview: &mut Interview,
+    household: &[PromptExtra],
+    existing: &[PromptExtra],
+    now: DateTime<Utc>,
+) {
+    if interview.next_topic().is_none() {
+        // A draft that cannot form (nothing answered, or past the caps) is left to propose_notes,
+        // whose refusal says why.
+        let _ = interview.propose(Vec::new(), household, existing, now);
     }
 }
 
@@ -513,6 +551,36 @@ mod tests {
         f.service.forget_member("amina").await.unwrap();
         assert!(f.service.get("amina").await.unwrap().is_none());
         assert!(f.extras.list_for_profile("amina").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_draft_forms_when_the_last_topic_settles_and_a_change_redrafts() {
+        let f = fixture().await;
+        f.service.start("amina", t0()).await.unwrap();
+        f.service
+            .record("amina", "address", "Call her Mama Amina.", t0())
+            .await
+            .unwrap()
+            .unwrap();
+        let (settled, next) = f.service.skip("amina", "all", t0()).await.unwrap().unwrap();
+        assert_eq!(next, None);
+        assert_eq!(settled.status, InterviewStatus::AwaitingApproval);
+        assert_eq!(settled.draft[0].instruction, "Call her Mama Amina.");
+
+        let later = t0() + Duration::seconds(30);
+        let (changed, _) = f
+            .service
+            .record("amina", "address", "Call her Mama.", later)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(changed.status, InterviewStatus::AwaitingApproval);
+        assert_eq!(changed.draft[0].instruction, "Call her Mama.");
+        assert_eq!(
+            changed.drafted_at,
+            Some(later),
+            "a changed draft must be seen again"
+        );
     }
 
     #[tokio::test]
