@@ -10,6 +10,7 @@ use goose::conversation::message::Message;
 use goose::providers::base::{MessageStream, Provider};
 use goose_providers::errors::ProviderError;
 use goose_providers::model::ModelConfig;
+use pond_core::models::domain::gpu_gate::{gpu_gate, ComputeLease};
 use rmcp::model::Tool;
 
 /// Found in Goose's default prompt and fallback; on the chat path it means GIAP's was lost.
@@ -477,6 +478,26 @@ fn enforce_tools(tools: &[Tool], allowed: &Option<HashSet<String>>) -> Option<Ve
     )
 }
 
+/// Keeps `lease` until the engine's stream closes, which happens when its decode thread returns.
+fn hold_until_closed(stream: MessageStream, lease: ComputeLease) -> MessageStream {
+    use futures::StreamExt;
+
+    Box::pin(futures::stream::unfold(
+        (stream, Some(lease)),
+        |(mut stream, mut lease)| async move {
+            match stream.next().await {
+                Some(item) => Some((item, (stream, lease))),
+                None => {
+                    if let Some(lease) = lease.take() {
+                        lease.finished();
+                    }
+                    None
+                }
+            }
+        },
+    ))
+}
+
 /// Write the final payload as an OpenAI chat body into `$GIAP_CAPTURE_PAYLOAD`, via goose's own
 /// `create_request` so replays differ only by transport. Failures are logged, never fatal.
 fn capture_payload(model_config: &ModelConfig, system: &str, messages: &[Message], tools: &[Tool]) {
@@ -818,7 +839,8 @@ impl Provider for GiapProviderShim {
             final_tools,
         );
 
-        let result = self
+        let lease = gpu_gate().lease().await;
+        let result = match self
             .inner
             .stream(
                 model_config,
@@ -826,7 +848,14 @@ impl Provider for GiapProviderShim {
                 final_messages,
                 final_tools,
             )
-            .await;
+            .await
+        {
+            Ok(stream) => Ok(hold_until_closed(stream, lease)),
+            Err(e) => {
+                lease.finished();
+                Err(e)
+            }
+        };
         if let Some(call) = egress {
             // Real status is hidden by the provider: synthesise 200/500; latency is time-to-stream.
             call.finish(Some(if result.is_ok() { 200 } else { 500 }));

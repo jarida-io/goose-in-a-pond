@@ -1,5 +1,6 @@
 //! ONNX sessions that serve on the CPU from the first call and move to the Jetson's GPU (TensorRT,
-//! then CUDA) once their engine is ready, so an engine build never holds up an event or a reply.
+//! then CUDA) once their engine is ready, so an engine build never holds up an event. A reply
+//! waits only if it starts while a session is being set up (see `gpu_gate`).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,6 +13,7 @@ use ort::ep::{self, ArenaExtendStrategy, ExecutionProviderDispatch};
 use ort::session::Session;
 use ort::value::Tensor;
 use pond_core::models::domain::acceleration::{record_onnx_device, OnnxDevice};
+use pond_core::models::domain::gpu_gate::gpu_gate;
 
 /// TensorRT's default workspace is the whole device, which on unified memory is the household's RAM.
 const WORKSPACE_BYTES: usize = 256 * 1024 * 1024;
@@ -163,11 +165,28 @@ impl AcceleratedSession {
     /// Builds or loads the GPU session and switches to it; the CPU session serves meanwhile.
     pub fn move_to_gpu(&self, plan: &GpuPlan) -> Result<OnnxDevice> {
         let name = self.name();
+        let waiting = Instant::now();
+        let _gpu = gpu_gate().setup_blocking();
+        let waited = waiting.elapsed();
+        if waited >= Duration::from_millis(10) {
+            tracing::info!(
+                model = name,
+                waited_ms = waited.as_millis() as u64,
+                "onnx: {name} waited {:.1} s for in-process decoding to finish before its GPU setup",
+                waited.as_secs_f64()
+            );
+        }
         let engine_dir = plan.cache_dir.join(name);
         let cached = engine_cached(&engine_dir, &self.0.path);
+        let may_build = has_room(mem_available_mb(), plan.build_headroom_mb);
         let started = Instant::now();
-        let (session, device, first) =
-            gpu_session(&self.0.path, &engine_dir, &plan.cache_dir, &self.0.spec)?;
+        let (session, device, first) = gpu_session(
+            &self.0.path,
+            &engine_dir,
+            &plan.cache_dir,
+            &self.0.spec,
+            may_build,
+        )?;
         let ready = started.elapsed();
         self.swap(session, device);
         tracing::info!(
@@ -317,11 +336,21 @@ fn gpu_session(
     engine_dir: &Path,
     timing_dir: &Path,
     spec: &ModelSpec,
+    may_build: bool,
 ) -> Result<(Session, OnnxDevice, Duration)> {
     let context = engine_dir.join(CONTEXT_MODEL);
     if engine_cached(engine_dir, path) {
         match load_context(&context, spec) {
             Ok((s, first)) => return Ok((s, OnnxDevice::TensorRt, first)),
+            // A rebuild deletes the cache first, and without the room it fails or starves the
+            // language model; keep the engine for the next start.
+            Err(e) if !may_build => {
+                return Err(e.context(format!(
+                    "the cached engine for {} does not load; it is kept, since building it again \
+                     needs more free memory than there is",
+                    spec.name
+                )))
+            }
             Err(e) => {
                 tracing::warn!(model = spec.name, error = %format!("{e:#}"), "onnx: the cached engine for {} does not load; building it again", spec.name)
             }

@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use goose::conversation::message::Message as GooseMessage;
 use goose::providers::base::Provider as GooseProvider;
 use goose_providers::model::ModelConfig;
+use pond_core::models::domain::gpu_gate::gpu_gate;
 use pond_core::models::domain::message::{ChatMessage, Role};
 use pond_core::models::ports::provider::LlmProvider;
 use std::sync::Arc;
@@ -82,7 +83,8 @@ impl LlmProvider for GooseProviderAdapter {
             .map(Self::to_goose_message)
             .collect();
 
-        let (response, _usage) = self
+        let lease = gpu_gate().lease().await;
+        let completed = self
             .provider
             .complete(
                 &self.model_config,
@@ -90,8 +92,9 @@ impl LlmProvider for GooseProviderAdapter {
                 &goose_messages,
                 &[], // no tools for direct completion
             )
-            .await
-            .map_err(|e| anyhow!("Goose provider error: {}", e))?;
+            .await;
+        lease.finished();
+        let (response, _usage) = completed.map_err(|e| anyhow!("Goose provider error: {}", e))?;
 
         Ok(Self::from_goose_message(&response))
     }

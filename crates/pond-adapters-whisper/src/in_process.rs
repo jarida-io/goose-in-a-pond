@@ -3,6 +3,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use pond_core::models::domain::gpu_gate::gpu_gate;
 use pond_core::models::ports::voice_input::{SpeculativeSignal, VoiceInput};
 use pond_voice::dsp::{RmsDetector, SpeechDetector};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -337,6 +338,7 @@ impl WhisperRsInput {
                 }
             }
 
+            let _gpu = gpu_gate().compute_blocking();
             state
                 .full(params, &samples)
                 .context("whisper-rs: full inference failed")?;
