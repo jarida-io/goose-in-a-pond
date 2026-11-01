@@ -257,6 +257,10 @@
   flex-direction: column;
 }
 
+.mdl-group__body {
+  padding: var(--space-3) var(--space-4) var(--space-4);
+}
+
 /* An engine's own stretch of a group: what it is, in one sentence, then its rows. */
 .mdl-engine {
   display: flex;

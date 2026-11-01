@@ -23,7 +23,8 @@ export type Consumer =
 export type OptionSource = "llm-models" | "chat-models" | "whisper-models" | "tts-voices" | "embedding-models" | "llm-providers" | "time-zones" | "audio-inputs" | "audio-outputs" | "household-members";
 
 export type Control =
-  | { kind: "toggle" }
+  /** A boolean, unless `values` names the two strings a text setting takes for on and off. */
+  | { kind: "toggle"; values?: { on: string; off: string } }
   | { kind: "text"; placeholder?: string }
   | { kind: "number"; step?: number; min?: number; max?: number; unit?: string }
   /** A short, consequential choice — all options visible without opening anything. */
@@ -261,18 +262,15 @@ export const CATALOGUE: CatalogueCategory[] = [
         ],
       },
       {
-        name: "Embeddings",
+        name: "Search by meaning",
         entries: [
           {
-            key: "embedding_provider", label: "Embedding provider", description: "What makes your memories searchable.", consumer: "live",
-            control: { kind: "radio", options: [
-              { value: "gguf",      label: "On-device (GGUF)", hint: "Runs through llama.cpp. The only one that starts on a Jetson" },
-              { value: "fastembed", label: "FastEmbed",        hint: "ONNX Runtime. Does not initialise on the Orin" },
-              { value: "none",      label: "Off",              hint: "No semantic memory or context search" },
-            ] },
-            validate: oneOf(["fastembed", "gguf", "none"]),
+            key: "embedding_provider", label: "Search memories by meaning", description: "Find a memory by what it means, not only the words in it, so a question in English can find a fact said in Swahili. Off, the pond searches by keyword. The model is chosen on the Models page.", consumer: "live",
+            // "none" is off; every other stored value, including the older "fastembed" and "gguf", is on.
+            control: { kind: "toggle", values: { on: "auto", off: "none" } },
+            validate: oneOf(["auto", "fastembed", "gguf", "none"]),
           },
-          { key: "active_embedding_model", label: "Embedding model", ownedBy: "models", description: "The model used to make memories searchable. Chosen on the Models page.", control: { kind: "lookup", source: "embedding-models", placeholder: "Not set" }, consumer: "live" },
+          { key: "active_embedding_model", label: "Memory model", ownedBy: "models", description: "The model used to make memories searchable. Chosen on the Models page.", control: { kind: "lookup", source: "embedding-models", placeholder: "Not set" }, consumer: "live" },
         ],
       },
     ],
