@@ -271,10 +271,12 @@ What follows:
   4 times slower on the CPU, no lighter, runs fp16 on the GPU (which the card warns against) and
   does not batch. ONNX Runtime was not tried: Google publishes no ONNX and forbids fp16.
 - **Wiring it, in P2:**
-  1. Bump llama-cpp-rs-giap's llama.cpp (at `8ac8291`, v1 only) past upstream's `gemma-embedding2`
-     support (ggml-org/llama.cpp#30054), its no-cache attention fix (#30416) and its pooled graphs
-     without logits (#30255, #30445). The chat path shares it, so the bump needs the Orin
-     regression run: E4B, the drafter and KV snapshots.
+  1. Backport into llama-cpp-rs-giap's August llama.cpp upstream's `gemma-embedding2` support
+     (ggml-org/llama.cpp#30054), its no-cache attention fix (#30416) and its pooled graphs without
+     logits (#30255, #30445). Moving the tree to October instead would bring upstream's reworked
+     chat API, which the OpenAI-compatible surface goose calls is written against. The chat path
+     shares the backported graph code, so it needs the Orin regression run: E4B, the drafter and
+     KV snapshots.
   2. Check the width against `n_embd_out` (768), not `n_embd` (512), which the GGUF provider
      compares today and would refuse.
   3. Keep one context: n_ctx 256-512, 16 sequences or fewer, unified KV.
