@@ -463,7 +463,7 @@ household quiet.
 | `memory_consolidation_interval_hours` | 24 | Minimum gap between runs |
 | `memory_consolidation_batch_size` | 50 | Rows per run (floor 6) |
 | `suggestion_generation_enabled` | true | Compose suggestions from memories |
-| `embedding_provider` | `fastembed` | `fastembed`, `gguf` or `none`; `none` stops batch extraction |
+| `embedding_provider` | `fastembed` | `none` turns semantic search off and stops batch extraction; `auto`, `fastembed` and `gguf` all mean on, with the engine taken from `active_embedding_model` |
 | `memory_graph_enabled` | false | Stored, but nothing reads it: graph retrieval over `memory_edges` is not wired |
 
 ## Database

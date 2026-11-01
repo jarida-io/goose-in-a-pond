@@ -85,8 +85,9 @@ pub const REVIEW_MODES: &[&str] = &["off", "on", "auto"];
 /// How memory consolidation is run.
 pub const CONSOLIDATION_MODES: &[&str] = &["single", "adversarial"];
 
-/// Which engine computes embeddings.
-pub const EMBEDDING_PROVIDERS: &[&str] = &["fastembed", "gguf", "none"];
+/// Semantic search on or off ("none"). The Memory-role model picks the engine; "fastembed" and
+/// "gguf" are older values that mean on.
+pub const EMBEDDING_PROVIDERS: &[&str] = &["auto", "fastembed", "gguf", "none"];
 
 /// Kokoro quality tiers, smallest first.
 pub const TTS_QUALITIES: &[&str] = &["q4", "q4f16", "q8", "q8f16", "fp16", "fp32"];
@@ -288,8 +289,7 @@ pub struct Settings {
     #[serde(default)]
     pub active_embedding_model: String,
 
-    /// `gguf` (llama.cpp) is the on-device path and needs the `local-inference` build.
-    /// fastembed's ONNX Runtime does not initialise on the Jetson Orin.
+    /// Off when "none"; any other value is on, with the engine taken from `active_embedding_model`.
     #[serde(default = "Settings::default_embedding_provider")]
     pub embedding_provider: String,
 

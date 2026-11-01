@@ -1,5 +1,9 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use async_trait::async_trait;
+
+use crate::models::domain::embedding_models::EmbeddingModel;
 
 /// Text embedding; all vectors from one provider must share one dimensionality.
 #[async_trait]
@@ -21,4 +25,20 @@ pub trait EmbeddingProvider: Send + Sync {
     fn model_id(&self) -> String {
         "unspecified".to_string()
     }
+
+    /// Whether a model is loaded and embedding now; semantic search is on only while it is.
+    fn available(&self) -> bool {
+        true
+    }
+
+    /// Changes whenever the model behind this provider changes, so a cache of its vectors can tell.
+    fn generation(&self) -> u64 {
+        0
+    }
+}
+
+/// Builds the provider for one embedding model; the only place a model is loaded.
+#[async_trait]
+pub trait EmbedderFactory: Send + Sync {
+    async fn build(&self, model: &'static EmbeddingModel) -> Result<Arc<dyn EmbeddingProvider>>;
 }

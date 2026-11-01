@@ -92,7 +92,7 @@ async fn make_app_with_settings(
         voice_samples: Default::default(),
         pond_admin: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
-        embedding_provider: None,
+        embedder: Default::default(),
         vector_index: None,
         index_reindex: None,
         lane: None,

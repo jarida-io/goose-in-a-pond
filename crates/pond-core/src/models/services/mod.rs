@@ -3,6 +3,7 @@ pub mod providers;
 pub mod voice;
 
 // Services that stay at the `models/services/` root.
+pub mod active_embedder;
 pub mod history_manager;
 pub mod model_service;
 pub mod prompt_builder;

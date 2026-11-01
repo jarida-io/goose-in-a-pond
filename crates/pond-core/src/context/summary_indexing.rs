@@ -24,6 +24,10 @@ pub async fn run_summary_indexing(
     batch_size: usize,
     pause_ms: u64,
 ) -> usize {
+    if !embedder.available() {
+        return 0;
+    }
+    let generation = embedder.generation();
     let model_id = embedder.model_id();
     let mut indexed = 0usize;
 
@@ -61,6 +65,11 @@ pub async fn run_summary_indexing(
                 continue;
             };
             match embedder.embed(&text).await {
+                // A switch since the pass began: this vector is not `model_id`'s.
+                Ok(_) if embedder.generation() != generation => {
+                    tracing::info!("[summary-index] the embedding model changed; pass ended");
+                    return indexed;
+                }
                 Ok(vector) => {
                     // Whole: a summary is already a compression; chunking it gains nothing.
                     let entry = VectorEntry::whole(

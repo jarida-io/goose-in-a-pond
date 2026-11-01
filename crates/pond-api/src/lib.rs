@@ -59,12 +59,12 @@ use pond_core::mcp::ports::extension_marketplace::ExtensionMarketplace;
 use pond_core::mcp::ports::mcp_knowledge::McpKnowledgePort;
 use pond_core::mcp::ports::mcp_server::McpServerRepository;
 use pond_core::models::ports::agent::Agent;
-use pond_core::models::ports::embedding::EmbeddingProvider;
 use pond_core::models::ports::model_catalog_provider::ModelCatalogProvider;
 use pond_core::models::ports::model_repository::ModelRepository;
 use pond_core::models::ports::model_scheduler::ModelScheduler;
 use pond_core::models::ports::provider::LlmProvider;
 use pond_core::models::ports::voice_output::VoiceOutput;
+use pond_core::models::services::active_embedder::ActiveEmbedder;
 use pond_core::security::ports::handshake::Handshake;
 use pond_core::security::ports::policy::SecurityPolicy;
 use pond_core::security::ports::telemetry::TelemetryPort;
@@ -135,10 +135,10 @@ pub struct AppState {
     pub matter: Option<Arc<dyn pond_core::user_data::ports::matter_runtime::MatterRuntimePort>>,
     /// Memory fragment repository for semantic/recency-based retrieval.
     pub memory_repo: Arc<dyn MemoryRepository + Send + Sync>,
-    /// `None` until a real embedding model is configured.
-    pub embedding_provider: Option<Arc<dyn EmbeddingProvider + Send + Sync>>,
+    /// The Memory-role embedder, switched live by [`apply_embedding_choice`]; off in tests.
+    pub embedder: Arc<ActiveEmbedder>,
     /// The personal-context index retrieval reads; `None` on CLI paths and in tests.
-    /// Don't copy the model id here: [`Self::embedding_provider`] owns it, and a copy drifts.
+    /// Don't copy the model id here: [`Self::embedder`] owns it, and a copy drifts.
     pub vector_index: Option<Arc<dyn VectorIndex>>,
     /// Wakes the maintenance sweep to refill after the rebuild route clears the index.
     /// `None` with no sweep to wake; the route still clears, and the next process refills.
@@ -354,6 +354,16 @@ fn unix_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or_default()
+}
+
+/// Applies the embedding settings now: a new model replaces the loaded one and loads in the
+/// background, so a save never waits on a model load.
+pub async fn apply_embedding_choice(
+    state: &AppState,
+    settings: &pond_core::user_data::domain::settings::Settings,
+) {
+    let choice = pond_core::models::domain::embedding_models::EmbedderChoice::resolve(settings);
+    state.embedder.choose(choice).await;
 }
 
 /// Background prefix warm-up, mirrored into `state.warmup`; a failed warm-up just starts cold.

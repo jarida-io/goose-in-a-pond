@@ -129,7 +129,7 @@ impl IngestPipeline {
         let text = item.embedding_text();
         let one_chunk = text.len() <= crate::context::chunking::DEFAULT_CHUNK_BYTES;
         let item = match (&self.embedder, one_chunk) {
-            (Some(embedder), true) => match embedder.embed(&text).await {
+            (Some(embedder), true) if embedder.available() => match embedder.embed(&text).await {
                 Ok(vector) => item.with_embedding(vector),
                 Err(e) => {
                     // Not fatal: `search_unembedded` + `update_embedding` backfill it.
@@ -137,8 +137,8 @@ impl IngestPipeline {
                     item
                 }
             },
-            // Long enough to chunk: stored now, passages embedded by the sweep.
-            (Some(_), false) => item,
+            // Long enough to chunk, or no model ready: stored now, embedded by the sweep.
+            (Some(_), _) => item,
             (None, _) => item,
         };
 
