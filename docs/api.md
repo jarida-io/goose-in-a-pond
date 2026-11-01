@@ -1037,7 +1037,9 @@ forgotten when the interview ends.
 
 The member answers in `POST /chat/stream` on `session_id`. While the interview is open and the
 member is the speaker, that turn carries the interview's state and is offered only the
-`giap-interview` tools: record an answer, skip a topic, stop, draft notes, save them. A save from
+`giap-interview` tools: record an answer, skip a topic, stop, draft notes, save them. The answer or
+skip that settles the last topic drafts the notes in that turn, so `status` becomes
+`awaiting_approval` without the model asking. A save from
 the conversation is refused until the member has replied after the draft was shown; the approve
 route is the tap on their own phone. Notes from the interview use one key per topic (`me_address`,
 `me_identity`, `me_language`, `me_household`, `me_routine`, `me_food`, `me_access`, `me_style`,
