@@ -536,6 +536,32 @@ pub fn device_window(gguf_path: Option<&Path>, chat_model: &str) -> DeviceWindow
     }
 }
 
+// ── The resident embedder ───────────────────────────────────────────────────
+
+/// EmbeddingGemma 2's text encoder resident on CUDA beside the pond (MB). NOT measured in
+/// pond-server: derived from P0's standalone Orin run (2026-10-31); the P2 gate replaces it.
+pub const EG2_TEXT_ENCODER_CUDA_MB: u64 = 300;
+
+/// MemAvailable the pond keeps once a GPU embedder loads (MB): context-space 5.1's margin, a
+/// choice, not a measurement.
+pub const EMBEDDER_GPU_MARGIN_MB: u64 = 300;
+
+/// What `model_id` costs resident on CUDA, for the one embedder allowed there; every other model
+/// stays on the CPU, off the GPU the chat model needs.
+pub fn embedder_gpu_cost_mb(model_id: &str) -> Option<u64> {
+    (model_id == super::embedding_models::EMBEDDINGGEMMA_2.model_id)
+        .then_some(EG2_TEXT_ENCODER_CUDA_MB)
+}
+
+/// Whether the embedder goes on the GPU: a CUDA build, a model with a CUDA cost, and MemAvailable
+/// covering it and the margin. No reading (no `/proc`) does not refuse.
+pub fn embedder_on_gpu(cuda_build: bool, model_id: &str, available_mb: Option<u64>) -> bool {
+    let Some(cost) = embedder_gpu_cost_mb(model_id) else {
+        return false;
+    };
+    cuda_build && available_mb.is_none_or(|a| a >= cost + EMBEDDER_GPU_MARGIN_MB)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1116,5 +1142,28 @@ mod tests {
 
         clear_vision_allowlist();
         assert!(!is_vision_allowlisted("gemma-4-e2b-it"));
+    }
+
+    #[test]
+    fn the_embedder_goes_on_the_gpu_only_with_room_on_a_cuda_build() {
+        let eg2 = "embeddinggemma-2-256";
+        let enough = EG2_TEXT_ENCODER_CUDA_MB + EMBEDDER_GPU_MARGIN_MB;
+        assert!(embedder_on_gpu(true, eg2, Some(enough)));
+        assert!(
+            !embedder_on_gpu(true, eg2, Some(enough - 1)),
+            "the budget refuses"
+        );
+        assert!(!embedder_on_gpu(false, eg2, Some(8_000)), "no CUDA, no GPU");
+        assert!(
+            embedder_on_gpu(true, eg2, None),
+            "no reading does not refuse"
+        );
+        for other in [
+            "all-MiniLM-L6-v2",
+            "nomic-embed-text-v1.5",
+            "bge-base-en-v1.5",
+        ] {
+            assert!(!embedder_on_gpu(true, other, Some(8_000)), "{other}");
+        }
     }
 }

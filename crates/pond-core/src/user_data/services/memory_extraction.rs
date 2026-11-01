@@ -257,7 +257,8 @@ pub struct BandHistogram {
     pub related: usize,
     /// Below the relate threshold.
     pub fresh: usize,
-    /// No embedder, an embed failure, or no comparable vectors; not evidence the candidate is new.
+    /// No embedder, an embed failure, no comparable vectors, or a model whose cosine scale is
+    /// unmeasured; not evidence the candidate is new.
     pub unscored: usize,
 }
 
@@ -1269,6 +1270,10 @@ impl BatchExtractionService {
             } else {
                 match self.embed(&content).await {
                     None => Band::Unscored,
+                    Some(vector) if !self.cosine_bands_apply() => {
+                        vector_for_row = Some(vector);
+                        Band::Unscored
+                    }
                     Some(vector) => {
                         let neighbours = repo
                             .search_similar(&vector, scope, BAND_NEIGHBOURS)
@@ -1429,6 +1434,14 @@ impl BatchExtractionService {
         }
     }
 
+    /// The relate and reinforce dials are cosines on MiniLM's scale; a model whose scale is
+    /// unmeasured dedups by the lexical check alone.
+    fn cosine_bands_apply(&self) -> bool {
+        self.embedding_provider
+            .as_ref()
+            .is_some_and(|p| p.similarity_floors().is_some())
+    }
+
     /// Embed, recording health; `None` whether there is no embedder or it failed.
     async fn embed(&self, text: &str) -> Option<Vec<f32>> {
         let provider = self.embedding_provider.as_ref()?;
@@ -1493,6 +1506,7 @@ fn segment_label(segment: &MemorySegment) -> &'static str {
 #[cfg(test)]
 mod batch_tests {
     use super::*;
+    use crate::models::domain::embedding_models::{SimilarityFloors, ALL_MINILM_L6_V2};
     use crate::models::domain::message::ChatMessage;
     use crate::user_data::domain::memory::MemoryTier;
     use crate::user_data::domain::session::SessionMessage;
@@ -1540,6 +1554,29 @@ mod batch_tests {
 
         fn dimensions(&self) -> usize {
             64
+        }
+
+        /// Stands in for the shipped MiniLM, whose scale the relate and reinforce dials are on.
+        fn similarity_floors(&self) -> Option<SimilarityFloors> {
+            ALL_MINILM_L6_V2.floors
+        }
+    }
+
+    /// Every text lands on one vector, so every cosine is 1.0 and only the floors decide.
+    struct ConstantEmbedder(Option<SimilarityFloors>);
+
+    #[async_trait]
+    impl EmbeddingProvider for ConstantEmbedder {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![1.0, 0.0, 0.0, 0.0])
+        }
+
+        fn dimensions(&self) -> usize {
+            4
+        }
+
+        fn similarity_floors(&self) -> Option<SimilarityFloors> {
+            self.0
         }
     }
 
@@ -2402,6 +2439,73 @@ mod batch_tests {
         assert_eq!(report.bands.same, 1, "bands: {:?}", report.bands);
         assert_eq!(report.bands.fresh, 1, "bands: {:?}", report.bands);
         assert_eq!(report.bands.total(), 2);
+    }
+
+    /// MiniLM drops a candidate its cosine bands match; a model with no measured floors (EG2 for
+    /// now) drops only what the lexical check calls a repeat, and stores the rest with its vector.
+    #[tokio::test]
+    async fn an_unmeasured_model_dedups_by_the_lexical_check_alone() {
+        let known = "Jerry waters the greenhouse before work.";
+        let unrelated = "Jerry's sister Amara lives in Kisumu.";
+        for (floors, stored) in [(ALL_MINILM_L6_V2.floors, false), (None, true)] {
+            let storage = InMemorySessionStorage::new();
+            seed(&storage, "sess-1", 4).await;
+            let repo = MockMemoryRepository::new();
+            let mut fragment = MemoryFragment::from_extraction(
+                "existing".to_string(),
+                None,
+                known.to_string(),
+                MemorySegment::Preference,
+                0.7,
+                None,
+            );
+            fragment.embedding = Some(vec![1.0, 0.0, 0.0, 0.0]);
+            repo.add(fragment).await.unwrap();
+
+            let extractor = ScriptedExtractor::yielding(vec![
+                (known, MemoryKind::Routine),
+                (unrelated, MemoryKind::Relationship),
+            ]);
+            let service = BatchExtractionService::new()
+                .with_embedding_provider(
+                    Arc::new(ConstantEmbedder(floors)) as Arc<dyn EmbeddingProvider>
+                )
+                .with_reminder_repository(Arc::new(MockReminderRepository::new()));
+            let report = service
+                .run_pass(
+                    &storage,
+                    &repo,
+                    &extractor,
+                    &BatchExtractionConfig {
+                        mode: ExtractionMode::Write,
+                        ..config()
+                    },
+                    &CancellationToken::new(),
+                )
+                .await;
+
+            let rows = repo
+                .search_recent(&ProfileScope::Household, 10)
+                .await
+                .unwrap();
+            let kept = rows.iter().find(|f| f.content.contains("Amara"));
+            if stored {
+                assert_eq!(
+                    report.bands.same, 1,
+                    "only the lexical repeat: {:?}",
+                    report.bands
+                );
+                assert_eq!(report.bands.unscored, 1, "bands: {:?}", report.bands);
+                let kept = kept.expect("the unrelated fact is stored");
+                assert!(kept.embedding.is_some(), "it is stored with its vector");
+            } else {
+                assert_eq!(report.bands.same, 2, "bands: {:?}", report.bands);
+                assert!(
+                    kept.is_none(),
+                    "a cosine of 1.0 is the same memory to MiniLM"
+                );
+            }
+        }
     }
 
     #[tokio::test]

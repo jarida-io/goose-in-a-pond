@@ -88,16 +88,9 @@ pub fn rank_by_relevance(candidates: &mut [(MemoryFragment, Option<f32>)], now: 
     });
 }
 
-// ── Semantic dedup ───────────────────────────────────────────────────────────
-
-/// Cosine paraphrase floor. High: a false skip loses a fact; a false keep is only a redundant row.
-pub const SEMANTIC_DEDUP_THRESHOLD: f32 = 0.92;
-
-/// How many nearest neighbours to inspect when checking for a paraphrase.
-pub const SEMANTIC_DEDUP_NEIGHBOURS: usize = 5;
-
-// ── Lexical dedup (the no-embeddings path) ──────────────────────────────────
-// Sole dedup with `embedding_provider = "none"`, so it must catch rewordings, not just substrings.
+// ── Lexical dedup ────────────────────────────────────────────────────────────
+// Sole dedup with no embedder, or one whose cosine scale is unmeasured, so it must catch
+// rewordings, not just substrings.
 
 /// Recent memories compared against a new fact; never sent to the LLM, so sized for recall.
 pub const DEDUP_RECENT_WINDOW: usize = 50;

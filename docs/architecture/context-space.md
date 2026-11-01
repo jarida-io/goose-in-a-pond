@@ -277,16 +277,26 @@ What follows:
      chat API, which the OpenAI-compatible surface goose calls is written against. The chat path
      shares the backported graph code, so it needs the Orin regression run: E4B, the drafter and
      KV snapshots.
-  2. Check the width against `n_embd_out` (768), not `n_embd` (512), which the GGUF provider
-     compares today and would refuse.
-  3. Keep one context: n_ctx 256-512, 16 sequences or fewer, unified KV.
-  4. Map the token table on CUDA rather than pinning it, which kept 136 MB out of NvMap.
-  5. Give it a `model_id` of its own, since nomic is also 768 wide.
-  6. Acquire it like any other model (decision 11): an entry in the catalog's Embedding category,
-     downloaded by the models pipeline into `<data_dir>/models/embedding/`, with its progress,
-     pause, resume and checksum, and chosen for the Memory role (`active_embedding_model`). Its
-     vision and audio encoders are that entry's companions, sized up front. The GGUF provider's
-     own download URL goes.
+  2. The GGUF provider (`pond-inference/src/embedding.rs`) checks the width against `n_embd_out`
+     (768), not `n_embd` (512), and stores the leading 256 dimensions, re-normalised.
+  3. It keeps one context: n_ctx 512, 16 sequences or fewer, unified KV. `embed_batch` packs up to
+     16 texts into one decode, each cut to 512 tokens.
+  4. On a CUDA build it runs every layer on the GPU with the token table mapped rather than pinned
+     (`no_host`), which kept 136 MB out of NvMap. It runs on the CPU when MemAvailable cannot cover
+     `EG2_TEXT_ENCODER_CUDA_MB` (P0's derived 300 MB) plus a 300 MB margin (a choice), or when the
+     GPU load fails.
+  5. Its `model_id` is `embeddinggemma-2-256`: nomic is also 768 wide, and the 256 cut is part of
+     the space.
+  6. It is acquired like any other model (decision 11): the catalog row `embeddinggemma-2` pins
+     `ggml-org/embeddinggemma-2-GGUF` at `6ea3e3a3` by size and sha256, its vectors matching P0's
+     own conversion at cosine 0.9997 or better (checked on a Mac). The models pipeline downloads
+     it into `<data_dir>/models/embedding/`, with its progress, pause, resume and checksum, and the
+     Memory role (`active_embedding_model`) chooses it. The GGUF provider has no download of its
+     own. Its vision and audio encoders are not yet the entry's companions.
+  7. `recommended.rs` suggests it for the Memory role with P0's Orin numbers; nothing switches to
+     it, and MiniLM stays the default. Tool selection's 0.28 and memory dedup's cosine bands are
+     set on MiniLM's scale, so under EmbeddingGemma 2 tool selection keeps every group and dedup
+     is lexical until its floors are measured on the Orin.
 - **Not measured:** the cost inside `pond-server`, recall on the household's real store, audio
   retrieval and video.
 

@@ -8,7 +8,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use tokio::sync::{Notify, RwLock, RwLockReadGuard};
 
-use crate::models::domain::embedding_models::{EmbedderChoice, EmbeddingModel};
+use crate::models::domain::embedding_models::{EmbedderChoice, EmbeddingModel, SimilarityFloors};
 use crate::models::ports::embedding::{EmbedderFactory, EmbeddingProvider};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -352,6 +352,16 @@ impl EmbeddingProvider for ActiveEmbedder {
             .to_string()
     }
 
+    /// The loaded provider's, else the chosen row's, so the floors always match the model in use.
+    fn similarity_floors(&self) -> Option<SimilarityFloors> {
+        if let Ok(inner) = self.inner.try_read() {
+            if let Some(provider) = inner.as_ref() {
+                return provider.similarity_floors();
+            }
+        }
+        self.status().chosen_model().and_then(|m| m.floors)
+    }
+
     fn available(&self) -> bool {
         matches!(self.status().state, EmbedderState::Ready { .. })
     }
@@ -365,7 +375,7 @@ impl EmbeddingProvider for ActiveEmbedder {
 mod tests {
     use super::*;
     use crate::models::domain::embedding_models::{
-        ALL_MINILM_L6_V2, BGE_SMALL_EN_V1_5, NOMIC_EMBED_TEXT_V1_5,
+        ALL_MINILM_L6_V2, BGE_SMALL_EN_V1_5, EMBEDDINGGEMMA_2, NOMIC_EMBED_TEXT_V1_5,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -373,6 +383,7 @@ mod tests {
     const MINILM: EmbedderChoice = EmbedderChoice::Model(&ALL_MINILM_L6_V2);
     const BGE_SMALL: EmbedderChoice = EmbedderChoice::Model(&BGE_SMALL_EN_V1_5);
     const NOMIC: EmbedderChoice = EmbedderChoice::Model(&NOMIC_EMBED_TEXT_V1_5);
+    const EG2: EmbedderChoice = EmbedderChoice::Model(&EMBEDDINGGEMMA_2);
 
     struct Counted {
         model: &'static EmbeddingModel,
@@ -473,6 +484,23 @@ mod tests {
         assert_eq!(*factory.live_at_build.lock().unwrap(), vec![0, 0]);
         assert_eq!(factory.live.load(Ordering::SeqCst), 1);
         assert_eq!(embedder.dimensions(), 768);
+    }
+
+    /// Cosine cut-offs follow the model in use, chosen or loaded, so a switch cannot keep MiniLM's.
+    #[tokio::test]
+    async fn the_floors_are_the_current_models() {
+        let factory = CountingFactory::default();
+        let embedder = ready(MINILM, &factory).await;
+        assert_eq!(embedder.similarity_floors(), ALL_MINILM_L6_V2.floors);
+        assert!(embedder.similarity_floors().is_some());
+
+        embedder.choose(EG2).await;
+        assert_eq!(embedder.similarity_floors(), None, "chosen, not yet loaded");
+        embedder.ensure_loaded(&factory).await;
+        assert_eq!(embedder.similarity_floors(), None, "loaded");
+
+        embedder.choose(EmbedderChoice::Off).await;
+        assert_eq!(embedder.similarity_floors(), None);
     }
 
     #[tokio::test]

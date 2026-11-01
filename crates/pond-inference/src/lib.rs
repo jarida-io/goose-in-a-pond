@@ -46,5 +46,5 @@ mod provider;
 mod sampling;
 mod tool_calling;
 
-pub use embedding::{EmbeddingModelSpec, GgufEmbeddingProvider};
+pub use embedding::{ContextPlan, EmbeddingModelSpec, GgufEmbeddingProvider, Placement};
 pub use engine::LlamaCppEngine;
