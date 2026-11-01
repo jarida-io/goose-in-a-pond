@@ -26,6 +26,7 @@ Other files here:
 
 | File | What it is |
 |---|---|
+| `embed-p0/` | The P0 EmbeddingGemma 2 harness: memory beside the serving pond, latency, throughput and recall against MiniLM; see [its README](embed-p0/README.md) |
 | `kiosk.sh` | Puts the dashboard on an attached panel with one Weston compositor and no desktop (`probe`, `enable-drm`, `start`, ...). Needs `nvidia-drm` loaded first |
 | `sudoers-giap` | A sudoers drop-in listing the commands a deploy needs without a password; its header has the install and removal commands |
 | `ggml-toolchain.cmake` | Pins `GGML_NATIVE=OFF` for builds that are not on the board |
