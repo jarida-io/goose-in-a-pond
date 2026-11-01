@@ -1571,6 +1571,9 @@ async fn run_server(
     // ── Embedding provider (gguf / fastembed / none) ─────────────────────────
     // Before the memory/context repos (they need its model id) and the agent (semantic recall).
     // "gguf" suits the Jetson (fastembed's ORT won't init there); it loads lazily on first embed.
+    // A missing GGUF is fetched by the models pipeline once AppState exists, so it shows there.
+    #[cfg_attr(not(feature = "local-inference"), allow(unused_mut))]
+    let mut missing_embedding_model: Option<String> = None;
     let embedding_provider: Option<
         Arc<dyn pond_core::models::ports::embedding::EmbeddingProvider + Send + Sync>,
     > = {
@@ -1593,37 +1596,18 @@ async fn run_server(
                             );
                             pond_inference::EmbeddingModelSpec::nomic_embed_text_v1_5()
                         });
-                let dest = embedding_dir.join(&spec.filename);
-                if !dest.exists() {
-                    if let Err(e) = std::fs::create_dir_all(&embedding_dir) {
-                        tracing::warn!("could not create embedding model dir: {e}");
-                    }
+                if !embedding_dir.join(&spec.filename).exists() {
                     tracing::info!(
                         model_id = %spec.model_id,
-                        size_mb = spec.size_hint_mb,
-                        "fetching GGUF embedding model in the background (one-time, egress-gated)"
+                        "GGUF embedding model not on disk; retrieval falls back to keyword until \
+                         its download arrives"
                     );
-                    // Not awaited: ~146 MB would keep the port unbound; the provider loads lazily.
-                    // Egress-gated in `pond_hf_cache`; HF URLs bypass `download_file`'s own gate.
-                    let url = spec.download_url.clone();
-                    let size_hint = spec.size_hint_mb;
-                    let model_id = spec.model_id.clone();
-                    let dest_bg = dest.clone();
-                    tokio::spawn(async move {
-                        use pond_core::models::ports::model_downloader::ModelDownloader as _;
-                        let downloader = crate::http_model_downloader::HttpModelDownloader::new();
-                        match downloader.download(&url, &dest_bg, size_hint).await {
-                            Ok(()) => tracing::info!(
-                                model_id = %model_id,
-                                "GGUF embedding model downloaded; it loads on the next embed"
-                            ),
-                            Err(e) => tracing::warn!(
-                                model_id = %model_id,
-                                "GGUF embedding model download failed: {e:#} -- retrieval \
-                                 falls back to keyword until it succeeds"
-                            ),
-                        }
-                    });
+                    missing_embedding_model = Some(
+                        pond_core::models::domain::model_record::ModelRecord::id_for(
+                            &pond_core::models::domain::model_record::ModelCategory::Embedding,
+                            spec.name,
+                        ),
+                    );
                 }
                 let provider = pond_inference::GgufEmbeddingProvider::new(spec, &embedding_dir);
                 tracing::info!(
@@ -4710,9 +4694,13 @@ async fn run_server(
     {
         let state = state.clone();
         tokio::spawn(async move {
-            let n = pond_api::model_acquisition::restore_assigned_models(state).await;
+            let n = pond_api::model_acquisition::restore_assigned_models(state.clone()).await;
             if n > 0 {
                 tracing::info!("restore: started {n} download(s) for role-assigned models");
+            }
+            // After the assigned ones: a Memory-role assignment of this model shares its transfer.
+            if let Some(model_id) = missing_embedding_model {
+                pond_api::model_acquisition::restore_model(state, &model_id).await;
             }
         });
     }

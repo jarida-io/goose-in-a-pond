@@ -180,16 +180,20 @@ fn model_file(data_dir: &Path, record: &ModelRecord) -> Result<TrackedFile, Refu
             )
         })?;
     Ok(TrackedFile {
-        url,
         dest,
         key: filename.to_string(),
         category: record.category.as_str().to_string(),
         model_id: Some(record.id.clone()),
         part: Some(PART_MODEL),
-        size_bytes: curated::for_record(record)
-            .map(|pick| pick.size_bytes)
-            .or((record.size_mb > 0).then(|| record.size_mb * 1_048_576)),
+        size_bytes: pinned_size(&url).or((record.size_mb > 0).then(|| record.size_mb * 1_048_576)),
+        url,
     })
+}
+
+/// The exact size of a pinned Hugging Face file: a pick, a drafter, an add-on or an embedder.
+fn pinned_size(url: &str) -> Option<u64> {
+    let (repo, revision, file) = pond_hf_cache::parse_hf_url(url)?;
+    curated::file_pin(&repo, &revision, &file).map(|pin| pin.size_bytes)
 }
 
 /// The add-on's encoder, pinned, into its own directory.
@@ -647,30 +651,61 @@ pub async fn restore_assigned_models(state: Arc<AppState>) -> usize {
             tracing::info!(model = %record.id, "restore: another quant of this model is on disk; not fetching");
             continue;
         }
-        let model = match model_file(&data_dir, record) {
-            Ok(f) => f,
-            Err((_, Json(why))) => {
-                tracing::warn!(model = %record.id, reason = %why["error"], "restore: cannot fetch an assigned model");
-                continue;
-            }
-        };
-        let picture = match pictures_for(&data_dir, record) {
-            Pictures::Available(spec) if had_pictures(&data_dir, &spec) => {
-                Some(picture_file(&data_dir, &record.id, &spec))
-            }
-            _ => None,
-        };
-        let files: Vec<TrackedFile> = std::iter::once(model).chain(picture).collect();
-        if let Err((_, Json(why))) = check_egress(&files) {
-            tracing::warn!(model = %record.id, reason = %why["error"], "restore: the network mode refuses it");
-            continue;
-        }
-        tracing::info!(model = %record.id, parts = files.len(), "restore: fetching an assigned model whose file is missing");
-        if start(&state, files).await > 0 {
+        if fetch_missing(&state, &data_dir, record).await {
             started += 1;
         }
     }
     started
+}
+
+/// Brings back one model's missing file the same way, for a model the pond runs that no role
+/// assignment names, such as the GGUF embedder `embedding_provider` picks. Returns whether a
+/// download started.
+pub async fn restore_model(state: Arc<AppState>, model_id: &str) -> bool {
+    let (Some(repo), Some(data_dir)) = (state.model_repo.clone(), state.data_dir.clone()) else {
+        return false;
+    };
+    let record = match repo.get_by_id(model_id).await {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            tracing::warn!(model = %model_id, "restore: no catalogue row to fetch it from");
+            return false;
+        }
+        Err(e) => {
+            tracing::warn!(model = %model_id, error = %e, "restore: cannot read the catalogue");
+            return false;
+        }
+    };
+    let missing = record
+        .filename
+        .as_deref()
+        .and_then(|f| model_layout::path_for(&data_dir, &record.category, f))
+        .is_some_and(|path| !path.exists());
+    missing && fetch_missing(&state, &data_dir, &record).await
+}
+
+/// Starts `record`'s file, with its add-on when one was installed before, through the tracker.
+async fn fetch_missing(state: &Arc<AppState>, data_dir: &Path, record: &ModelRecord) -> bool {
+    let model = match model_file(data_dir, record) {
+        Ok(f) => f,
+        Err((_, Json(why))) => {
+            tracing::warn!(model = %record.id, reason = %why["error"], "restore: cannot fetch a model the pond needs");
+            return false;
+        }
+    };
+    let picture = match pictures_for(data_dir, record) {
+        Pictures::Available(spec) if had_pictures(data_dir, &spec) => {
+            Some(picture_file(data_dir, &record.id, &spec))
+        }
+        _ => None,
+    };
+    let files: Vec<TrackedFile> = std::iter::once(model).chain(picture).collect();
+    if let Err((_, Json(why))) = check_egress(&files) {
+        tracing::warn!(model = %record.id, reason = %why["error"], "restore: the network mode refuses it");
+        return false;
+    }
+    tracing::info!(model = %record.id, parts = files.len(), "restore: fetching a model whose file is missing");
+    start(state, files).await > 0
 }
 
 /// Whether another quant of the model `target` names is on disk: a `.gguf` sharing the stem before
@@ -822,6 +857,43 @@ mod tests {
         let without = super::plan(tmp.path(), &row, false).unwrap();
         assert_eq!(without.files.len(), 1, "unticked: no add-on is fetched");
         assert_eq!(without.pictures.wire(false), "left_out");
+    }
+
+    /// A GGUF embedder is acquired like any other model; fastembed fetches its own weights.
+    #[test]
+    fn a_gguf_embedder_plans_its_pinned_file_into_the_embedding_folder() {
+        use pond_core::models::domain::embedding_models::EMBEDDING_MODELS;
+        use pond_core::models::domain::taxonomy::Acquisition;
+
+        let tmp = tempfile::tempdir().unwrap();
+        for model in EMBEDDING_MODELS {
+            let row = model.record();
+            let Some(gguf) = model.gguf() else {
+                assert_eq!(Acquisition::of(&row, false), Acquisition::External);
+                assert!(plan(tmp.path(), &row, true).is_err(), "{}", row.name);
+                continue;
+            };
+            assert_eq!(Acquisition::of(&row, false), Acquisition::Download);
+            let plan = plan(tmp.path(), &row, true).unwrap();
+            assert_eq!(plan.files.len(), 1, "an embedder has no add-on");
+            let file = &plan.files[0];
+            assert_eq!(file.part, Some(PART_MODEL));
+            assert_eq!(file.model_id.as_deref(), Some(row.id.as_str()));
+            assert_eq!(file.url, gguf.url());
+            assert_eq!(
+                file.dest,
+                tmp.path().join("models/embedding").join(gguf.filename)
+            );
+            assert_eq!(file.size_bytes, Some(gguf.size_bytes));
+            let (repo, revision, name) = pond_hf_cache::parse_hf_url(&file.url).unwrap();
+            assert_eq!(curated::file_pin(&repo, &revision, &name), Some(gguf.pin()));
+            assert!(
+                plan.message()
+                    .ends_with(&format!("({} MB)", gguf.size_bytes / 1_048_576)),
+                "{}",
+                plan.message()
+            );
+        }
     }
 
     /// A file named by URL is planned like a pick: a listed file brings its add-on, and once its
