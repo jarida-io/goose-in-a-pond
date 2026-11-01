@@ -281,7 +281,8 @@ pub fn member_notes_block(
         return None;
     }
     Some(format!(
-        "<member-notes>\nThe person speaking asked you to keep these in mind:\n{}\n</member-notes>",
+        "<member-notes>\nNotes about the person you are talking with, which they asked you to keep in \
+         mind. Speak to them as \"you\".\n{}\n</member-notes>",
         fresh.join("\n")
     ))
 }
