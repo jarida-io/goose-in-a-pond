@@ -4207,3 +4207,29 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
   - A linked page in chat was read in 1.8 s.
   - A deep-research acknowledgement with a link took 9.9 s once the note said the helpers read it (39.5 s before).
   - Not verified on the Orin: `reply_as_draft`, since no helper left work in a reply in round four; and the bench (R1).
+
+**2026-11-02 — the context space, P2: the embedding slot, EmbeddingGemma 2 for Memory.**
+
+- **What is built** (PRs #735 with llama-cpp-rs-giap#4, #734, #736, #737, #738, open):
+  - the four upstream llama.cpp commits for EmbeddingGemma 2, backported, since the October chat
+    API would have meant porting the OpenAI-compatible surface;
+  - embedders as pinned catalogue rows downloaded by the models pipeline;
+  - live switching with one embedder loaded, and same-width vector spaces never compared;
+  - the embedding slot in place of the startup backfill and `IndexMaintenance`;
+  - EmbeddingGemma 2 (`embeddinggemma-2-256`, 256 of 768 dims) as the recommended Memory model.
+- **PAI-3.** Recall across the household's languages is the point (Swahili and mixed R@5 0.73
+  against MiniLM's 0.39, P0). Similarity floors tuned on MiniLM now apply only to MiniLM; other
+  models keep every tool group and dedup lexically until theirs are measured.
+- **PAI-1.** Retrieval scope is unchanged; vectors carry the model that made them.
+- **Verified on the Orin** (the stack on `feat/p2-embeddinggemma2`, E4B QAT):
+  - The backport changes no time to first token, decode speed (a fixed counting reply at the same
+    length), Whisper, or KV snapshot (an old build's snapshot loads `Valid`).
+  - Switching Memory to EmbeddingGemma 2 downloaded the pinned file through the pipeline in about
+    2 minutes, loaded it on the GPU and re-embedded 219 rows in 2.6 s, with no restart.
+  - Turns are not slower with the slot idle, re-indexing between turns, or interrupted mid-pass.
+  - The first GPU load took 494 MB of MemAvailable from a fresh pond; later swaps with MiniLM
+    take 180-220 MB and return it.
+  - An English question found a member's Swahili memory among 139 others with either embedder,
+    so it showed recall working end to end, not EmbeddingGemma 2's advantage.
+- Not done: EmbeddingGemma 2's own tool and dedup floors; long-task steps beside the slot; the
+  phone app's embedding setting still offers gguf/fastembed/none and says a restart is needed.
