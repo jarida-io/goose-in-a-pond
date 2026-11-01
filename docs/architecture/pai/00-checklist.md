@@ -4179,8 +4179,9 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
   (a skip, a stop and resume, an edit, approval in the conversation and by tap), each one's next
   turn followed their own notes and not the other's, and each read of the other's was `403`.
   Seven and nine notes added 245 and 280 prompt tokens to a first turn of 8,247; an interview
-  turn starts at 2,483, with six tools. E4B never named a topic in a list of notes, so the draft
-  takes one field per topic.
+  turn starts at 2,483, with six tools. The draft is built in code from the note recorded for
+  each topic: E4B never named a topic in a list of notes, and Gemma 4 through Ollama sent the
+  draft call with no arguments at all.
 - Not done: a session that changes speaker still holds the earlier speaker's notes in its
   history, as it holds their memories.
 
