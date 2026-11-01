@@ -351,6 +351,7 @@ impl Agent for MistralRsAgent {
         let dispatcher = self.tools.clone();
         let session_id = request.session_id.clone();
         let model_role = request.model_role.clone();
+        let profile_scope = request.profile_scope.clone();
         let context_limit = caps.context_window_tokens;
 
         Ok(Box::pin(async_stream::stream! {
@@ -454,7 +455,7 @@ impl Agent for MistralRsAgent {
                     });
 
                     pond_core::shared::services::egress::set_current_tool(&call.name);
-                    let (content, keep) = match disp.dispatch(&call.name, args).await {
+                    let (content, keep) = match disp.dispatch(&call.name, args, &profile_scope).await {
                         Ok(r) => (r.content, r.keep),
                         // A failed tool is a result the model can react to, not a dead turn.
                         Err(e) => (format!("Tool '{}' failed: {}", call.name, e), None),
@@ -519,7 +520,9 @@ impl Agent for MistralRsAgent {
             return Err(anyhow::anyhow!("no tool dispatcher is wired"));
         };
         let args = serde_json::from_str(args_json).unwrap_or_else(|_| serde_json::json!({}));
-        Ok(disp.dispatch(tool_name, args).await?.content)
+        // A direct, authenticated API invocation, not a conversational guest turn.
+        let scope = pond_core::user_data::domain::profile::ProfileScope::Household;
+        Ok(disp.dispatch(tool_name, args, &scope).await?.content)
     }
 }
 

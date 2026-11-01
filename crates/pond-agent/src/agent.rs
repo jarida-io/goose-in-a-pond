@@ -482,9 +482,10 @@ impl Agent for PondAgent {
                         let name = name.clone();
                         let args = args.clone();
                         let id = id.clone();
+                        let scope = request.profile_scope.clone();
                         async move {
                             let result_text = if let Some(ref d) = disp {
-                                match d.dispatch(&name, args).await {
+                                match d.dispatch(&name, args, &scope).await {
                                     Ok(result) => result.content,
                                     Err(e) => format!("Tool '{}' failed: {}", name, e),
                                 }

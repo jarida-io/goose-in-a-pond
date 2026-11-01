@@ -30,10 +30,18 @@ vi.mock("../api/followSignIn", async (importActual) => ({
 const m = vi.mocked(api);
 
 function household(connected: string[]) {
+  const base = {
+    avatar_emoji: "*",
+    preferences: {},
+    role: "member" as const,
+    guest_until: null,
+    created_at: "2024-01-01T00:00:00Z",
+    updated_at: "2024-01-01T00:00:00Z",
+  };
   m.listProfiles.mockResolvedValue({
     profiles: [
-      { id: "p-liz", display_name: "Liz", avatar_emoji: "*" },
-      { id: "p-jerry", display_name: "Jerry", avatar_emoji: "*" },
+      { ...base, id: "p-liz", display_name: "Liz" },
+      { ...base, id: "p-jerry", display_name: "Jerry" },
     ],
   });
   m.uberAccounts.mockResolvedValue({ connected });

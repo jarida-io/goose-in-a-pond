@@ -1,8 +1,9 @@
 //! Profile port — driven port for household member profile persistence.
 
-use crate::user_data::domain::profile::{CreateProfileRequest, Profile};
+use crate::user_data::domain::profile::{CreateProfileRequest, Profile, Role};
 use anyhow::Result;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
 #[async_trait]
@@ -14,6 +15,13 @@ pub trait ProfileRepository: Send + Sync {
         &self,
         profile_id: &str,
         prefs: HashMap<String, String>,
+    ) -> Result<Profile>;
+    /// `guest_until` is only persisted when `role` is `Guest`; ignored (stored `NULL`) otherwise.
+    async fn set_role(
+        &self,
+        profile_id: &str,
+        role: Role,
+        guest_until: Option<DateTime<Utc>>,
     ) -> Result<Profile>;
     async fn delete(&self, profile_id: &str) -> Result<()>;
 }
