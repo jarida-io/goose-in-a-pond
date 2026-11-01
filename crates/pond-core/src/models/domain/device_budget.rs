@@ -538,9 +538,10 @@ pub fn device_window(gguf_path: Option<&Path>, chat_model: &str) -> DeviceWindow
 
 // ── The resident embedder ───────────────────────────────────────────────────
 
-/// EmbeddingGemma 2's text encoder resident on CUDA beside the pond (MB). NOT measured in
-/// pond-server: derived from P0's standalone Orin run (2026-10-31); the P2 gate replaces it.
-pub const EG2_TEXT_ENCODER_CUDA_MB: u64 = 300;
+/// EmbeddingGemma 2's text encoder loading on CUDA inside pond-server (MB). Measured on the Orin
+/// Nano, 2026-11-02, as MemAvailable: the first GPU load took 494 MB from a fresh pond; later
+/// swaps from MiniLM take 180-220 MB and return it, since CUDA keeps the first load's pools.
+pub const EG2_TEXT_ENCODER_CUDA_MB: u64 = 500;
 
 /// MemAvailable the pond keeps once a GPU embedder loads (MB): context-space 5.1's margin, a
 /// choice, not a measurement.
