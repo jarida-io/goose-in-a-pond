@@ -361,6 +361,27 @@
 
 /* ── Arrange sheet ────────────────────────────────────────── */
 
+/*
+  The panel scrolls, not the dialog around it. Ink's right sheet pins its panel
+  to the full height and leaves overflow alone, so once the rows outgrew the
+  screen the browser scrolled the transparent <dialog> instead: the last card's
+  size and page chips scrolled up out of the bottom of the white panel and sat
+  on the grey backdrop, looking like they belonged to nothing. Scrolling inside
+  the panel keeps every control on the surface it belongs to.
+
+  flex-shrink: 0 on the children because the panel is a flex column: without
+  it, a scrolling column squeezes its rows before it starts scrolling them.
+*/
+.dash__sheet .ink-sheet__panel {
+  box-sizing: border-box;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.dash__sheet .ink-sheet__panel > * {
+  flex-shrink: 0;
+}
+
 .dash__sheet-label {
   margin: 0 0 8px;
   font-size: 0.78rem;
@@ -455,9 +476,18 @@
   outline-offset: 2px;
 }
 
+/* Legible as unavailable rather than faded out: at opacity 0.4 the chevron
+   came to about 2.5:1 and read as missing, not disabled. The secondary text
+   token holds the glyph and edge above the 3:1 a non-text mark needs in both
+   schemes, and the dashed edge carries "not now" without relying on colour. */
+/* opacity: 1 overrides base.css's blanket `button:disabled` fade. */
 .dash__icon-btn:disabled {
-  opacity: 0.4;
-  cursor: default;
+  opacity: 1;
+  border-style: dashed;
+  border-color: var(--color-text-secondary);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: not-allowed;
 }
 
 /* One chevron glyph, turned over. A second path would be a second thing to

@@ -160,6 +160,8 @@ pub struct JpegFrame {
     pub jpeg: Arc<Vec<u8>>,
     /// The same picture already decoded off the CPU; `None` leaves decoding to the pipeline.
     pub luma: Option<LumaPlane>,
+    /// The same picture scaled for the detector off the CPU, on the frames that carry one.
+    pub analysis: Option<Frame>,
     pub captured_at: DateTime<Utc>,
 }
 
@@ -194,9 +196,75 @@ pub struct Detection {
     pub confidence: f64,
 }
 
+/// A box in fractions of the frame's width and height, origin top-left, so it means the same
+/// at any resolution.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FractionBox {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl FractionBox {
+    pub fn area(&self) -> f32 {
+        self.w.max(0.0) * self.h.max(0.0)
+    }
+
+    /// Intersection over union; 0 for boxes that do not overlap.
+    pub fn iou(&self, other: &Self) -> f32 {
+        let w = (self.x + self.w).min(other.x + other.w) - self.x.max(other.x);
+        let h = (self.y + self.h).min(other.y + other.h) - self.y.max(other.y);
+        if w <= 0.0 || h <= 0.0 {
+            return 0.0;
+        }
+        let inter = w * h;
+        inter / (self.area() + other.area() - inter)
+    }
+
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.x && x <= self.x + self.w && y >= self.y && y <= self.y + self.h
+    }
+}
+
+/// One object a detector found, and where.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetectedObject {
+    /// Event label, e.g. `"pet"`, `"package"`, `"person"`.
+    pub label: String,
+    pub confidence: f64,
+    pub bbox: FractionBox,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlap_is_measured_in_fractions_of_the_frame() {
+        let a = FractionBox {
+            x: 0.0,
+            y: 0.0,
+            w: 0.5,
+            h: 0.5,
+        };
+        let b = FractionBox {
+            x: 0.25,
+            y: 0.0,
+            w: 0.5,
+            h: 0.5,
+        };
+        assert!((a.iou(&a) - 1.0).abs() < 1e-6);
+        assert!((a.iou(&b) - 1.0 / 3.0).abs() < 1e-6);
+        let apart = FractionBox {
+            x: 0.6,
+            y: 0.6,
+            w: 0.1,
+            h: 0.1,
+        };
+        assert_eq!(a.iou(&apart), 0.0);
+        assert!(a.contains(0.25, 0.25) && !a.contains(0.75, 0.25));
+    }
 
     #[test]
     fn frame_well_formedness() {

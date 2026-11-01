@@ -151,6 +151,8 @@ impl RecordingScheduler {
 impl SchedulerPort for RecordingScheduler {
     async fn create_task(&self, req: CreateScheduleRequest) -> Result<Schedule> {
         let schedule = Schedule {
+            ask_if_missed: false,
+            missed_run: None,
             id: req.id,
             label: req.label,
             cron: req.cron,

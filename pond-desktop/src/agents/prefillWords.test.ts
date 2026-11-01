@@ -140,3 +140,11 @@ describe("one sentence over every agent", () => {
     expect(prefillSummary([])).toBeNull();
   });
 });
+
+describe("an agent a plan made for one step", () => {
+  it("shows by its own name, marked as made for the task", () => {
+    expect(agentLabel("new:Fare Checker")).toBe("Fare Checker (made for this task)");
+    expect(agentLabel("new-ish")).toBe("new-ish");
+  });
+});
+

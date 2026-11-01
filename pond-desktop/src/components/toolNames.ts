@@ -3,12 +3,14 @@
 const NAME_MAP: Record<string, string> = {
   // weather
   get_current_weather: "Weather",
+  get_weather_forecast: "Forecast",
   // wikipedia
   get_wikipedia_article: "Wikipedia",
   // computation
   compute_answer: "Computed",
   // web
   search_web: "Web search",
+  read_web_page: "Web page",
   // schedule
   list_schedules: "Schedules",
   create_schedule: "Create Schedule",

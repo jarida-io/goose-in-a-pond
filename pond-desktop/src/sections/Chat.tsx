@@ -432,7 +432,7 @@ export function Chat() {
     }
 
     if (asResearch) {
-      sendTurn({ text, deepResearch: true });
+      sendTurn({ text, deepResearch: true, deepResearchAnswer: deepResearch.answer });
       leaveResearch();
       setAttachError(null);
       return;
@@ -442,7 +442,7 @@ export function Chat() {
     sendTurn({ text, attachments });
     setAttachments([]);
     setAttachError(null);
-  }, [input, attachments, busy, state.serverOnline, gateBlocked, deepResearch.on, leaveResearch]);
+  }, [input, attachments, busy, state.serverOnline, gateBlocked, deepResearch.on, deepResearch.answer, leaveResearch]);
 
   // On the busy -> idle edge: refresh the list (it carries the server-derived title) and refocus.
   const prevBusyRef = useRef(busy);
@@ -955,7 +955,15 @@ export function Chat() {
           reply queues the message instead of being swallowed. */}
       {busy && <TypingIndicator seed={turnSeed} />}
 
-      {deepResearch.on && <ResearchModeChip variant="classic" waiting={busy} onLeave={onLeaveResearch} />}
+      {deepResearch.on && (
+        <ResearchModeChip
+          variant="classic"
+          waiting={busy}
+          onLeave={onLeaveResearch}
+          answer={deepResearch.answer}
+          onAnswer={deepResearch.setAnswer}
+        />
+      )}
 
       <div className={`chat2__composer${busy ? " is-busy" : ""}`}>
         <ComposerMenu

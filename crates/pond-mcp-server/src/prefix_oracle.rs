@@ -164,14 +164,14 @@ mod tests {
         let total = total_bytes(&entries);
         assert_eq!(
             total,
-            13_592,
-            "the default tool block is now {total} raw bytes, was 13,592. That is \
+            14_258,
+            "the default tool block is now {total} raw bytes, was 14,258. That is \
              the PRE-minification form (see the module docs); the provider shim minifies it further. If the change is deliberate, update this number and \
              say why in the commit.\nfull order:\n{}",
             rendered.join("\n")
         );
 
-        assert_eq!(entries.len(), 27, "tool count moved");
+        assert_eq!(entries.len(), 28, "tool count moved");
     }
 
     /// Storing one key adds its one schema inside `giap-knowledge`: the prefix moves from there
@@ -208,8 +208,8 @@ mod tests {
         }
         let total = total_bytes(&ordered_tools(DEFAULT_GROUPS));
         assert_eq!(
-            total, 14_394,
-            "the block with every key stored is now {total} raw bytes, was 14,394"
+            total, 15_060,
+            "the block with every key stored is now {total} raw bytes, was 15,060"
         );
     }
 

@@ -69,6 +69,17 @@ cargo test -p pond-adapters-weather
   then the context block. The card is also served as the MCP App resource
   `ui://giap-weather/weather-card.html` (`crates/pond-mcp-server/apps/weather-card.html`), which
   `GET /api/v1/agent/tools` advertises on `get_current_weather`.
+- Both tools ask for the same `weather` card with different payloads: `get_current_weather` sends one
+  reading (`temperature`, `condition`, `humidity`, `wind_speed`, ...), `get_weather_forecast` sends
+  `location` plus a `forecast` array of days (`date` as `YYYY-MM-DD`, `description`, `temp_max_c`,
+  `temp_min_c`, `precipitation_probability_pct`, ...) and no reading. The dashboard tells them apart
+  by shape in `pond-desktop/src/mcp-ui/cards/weatherPayload.ts`, as the phone does in
+  `models/weather-card.ts`: a `forecast` array is a forecast card (a row per day, at most seven, the
+  rest counted), a temperature or condition is the current card, and anything else is a plain
+  "nothing to show" note (the spinner is only for the placeholder a card holds before its result
+  arrives). Forecast dates are calendar days at the place, so they
+  are parsed as local dates, not with `new Date("YYYY-MM-DD")` (midnight UTC, the previous day west
+  of Greenwich). Renaming any of these fields breaks both clients, so change them together.
 - Dependencies arrive through `init_weather_deps`; `spawn_weather_server` serves the server on the
   duplex pair Goose hands it.
 

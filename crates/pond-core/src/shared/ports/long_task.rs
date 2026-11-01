@@ -2,7 +2,7 @@
 //! No method has a default body: a plausible default would hide a missing override.
 
 use crate::shared::domain::long_task::{
-    Artifact, ArtifactSummary, LongTask, LongTaskState, PlanStep, ValidatedPlan,
+    AnswerShape, Artifact, ArtifactSummary, LongTask, LongTaskState, PlanStep, ValidatedPlan,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -45,6 +45,10 @@ pub trait LongTaskRepository: Send + Sync {
         at: DateTime<Utc>,
     ) -> Result<Option<LongTask>>;
 
+    /// Record the planner's reading of how long the answer should be, only on a task whose answer
+    /// is still `Auto`, so a member's choice stands. `Ok(false)` when nothing changed.
+    async fn decide_task_answer(&self, id: &str, answer: AnswerShape) -> Result<bool>;
+
     /// Write a replan atomically: delete every open step (Pending, Failed, Skipped,
     /// AwaitingApproval), keep Completed and Running ones untouched, insert the plan's steps.
     /// Refused, writing nothing, if the task is gone or finished, a kept step has left Completed
@@ -71,4 +75,7 @@ pub trait LongTaskRepository: Send + Sync {
 
     /// Delete a task with its steps and artifacts; `Ok(false)` if there was none.
     async fn delete_task(&self, id: &str) -> Result<bool>;
+
+    /// Delete one artifact, only if it belongs to `task_id`; `Ok(false)` if there was none.
+    async fn delete_artifact(&self, task_id: &str, artifact_id: &str) -> Result<bool>;
 }

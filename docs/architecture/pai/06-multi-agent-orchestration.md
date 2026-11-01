@@ -1479,6 +1479,93 @@ task waits and lets the member choose what keeps going.
 | The prime | A deep-research turn and `task_start`'s result say where the new task waits and whose tasks are ahead, so the reply tells the person it waits its turn and that its card lets them stop what they no longer need. |
 | The card | A waiting task says "Waiting its turn: 3rd in line" rather than "Planning". Below that are the member's own tasks ahead and this one, each with Keep going or Stop, and one button to stop the ones picked. |
 
+### 8.10 Pace (Jerry, 2026-10-29)
+
+Research has to stay deep and checked and get faster. Every change here removes waiting and
+re-reading. None removes a check.
+
+| Piece | Design |
+|---|---|
+| The lane | `select_next` gave the slot to whichever eligible job had waited longest, so a long task, which runs most often, lost every gap between steps to a chore. A member's task now goes before the pond's chores, after only a compaction a returning member waits on. A chore that has gone `CHORE_PATIENCE` (30 minutes, §8.12) since its last run still gets one turn. |
+| Background subagents | The lane's "turn in flight" now also counts a held subagent permit. A background child outlives its parent's turn, and a chore used to start beside it. |
+| Between steps | A run that moved a task on is followed at once, with no 30 s poll and no 5 s floor, so a chore can't take the gap. The quiet before a task starts is 10 s since §8.13. |
+| Inputs | A step's inputs up to `INLINE_ARTIFACT_TOKENS` each and `INLINE_TOTAL_TOKENS` in all go in its brief whole. A worker then spends no turn and no re-prefill calling `artifact_read` first, and a small model can't skip reading them. Larger inputs stay pull-only (rule 2). |
+| Reliability | A helper that runs out of turns fails its first try instead of having half-done work counted as done. Its retry gets half again as many turns (capped at `MAX_ROLE_MAX_TURNS`), with what it saved inlined so it continues. A "completed" report with no artifact and a summary under 20 characters fails as empty and retries. The verifier, the retry and the planner's replan are unchanged. |
+
+### 8.11 Briefs (Jerry, 2026-10-29)
+
+A helper starts in an empty window and saw only the goal, so anything said earlier in the
+conversation was lost. "I'm lactose intolerant", said three messages before the ask, never reached
+the plan.
+
+| Piece | Design |
+|---|---|
+| The brief | A task-level `Brief` artifact (kind `note`, no step), saved when the task starts. It is in the planner's brief and inlined into every step's, ahead of the step's own inputs. No migration: it's an artifact like any other, scoped to the task's owner |
+| Deep research | The pond writes the brief itself from the conversation before the ask, up to `BRIEF_CHARS` (4,000), keeping the newest. The ask itself is the goal. No model call |
+| `task_start` | Takes `brief`. Its description asks for who it is for, dates and places, budget, diets and allergies, and what was decided or ruled out |
+| `delegate` | `instructions` asks for the same: a full brief, since the agent sees nothing of the conversation |
+| Saved or made agents | A plan step names a saved role, or carries `new_agent` (name, instructions, tools) when none fits. It is stored with the step (migration 0071) and named `new:<name>`. `role_for_agent` builds it from the shipped worker's turns and window share. Its tools are those it asked for within `LONG_TASK_ROOT_GROUPS` and the house's read-only tools (§8.12), always with the task-work tools. It runs on the conversation's model with the task's scope. It has no compiled snapshot, so its first run starts cold |
+| `delegate` with `new_agent` | The prime may make an agent for one request. `made_role` builds it, and `DelegationAuthority::delegate` narrows its tools to the prime's own, as for any delegate. The prime still can't choose a model |
+| Fuller sections | A research step writing a section is asked for 400 to 900 words of specifics, and a plan for every day or item with its times, places and costs. This is in the step's brief, not its role, so no snapshot is rebuilt |
+
+### 8.12 Plans that read the house (Jerry, 2026-10-29)
+
+A deep-research question about what the cameras saw ran 23.7 minutes. 10 of them went to planning,
+where 8 plans were refused, 7 of them for fields a step doesn't read. The steps then searched the
+web for what happened in the house, because no helper could read the house, and the result said
+nothing useful.
+
+| Piece | Design |
+|---|---|
+| Plans | A step's unknown fields are ignored, and `plan_write`'s answer names them. A field spelt like one a step reads (`dependsOn`, `dependson`) is read as that field, since a dropped `depends_on` costs the step its inputs (`read_step_draft`). A key that is only misspelt is taken as its suggestion (`step_1` is `step-1`), and `depends_on` is matched the same way. One refusal names every unreadable step |
+| Refusals | Every refused long-task tool call is traced with the first 400 characters of what the model was told. Goose doesn't keep a helper's session, so this is the only record |
+| Reading the house | `HOUSEHOLD_READ_TOOLS` are single tools a long task's helper may hold from groups no subagent holds whole: `get_recent_camera_events`, `list_vision_automations`, `list_schedules` and `list_registered_devices`. They show no camera picture, send nothing, and schedule or switch nothing. Only `long_task_authority` grants them, through `with_read_tools`, which keeps nothing outside that list. A child gets one only when its role asks for the tool's group, and a guest child gets none that guests can't see. A chat turn's delegations get none. The worker asks for vision, schedule, device and sensors |
+| Where answers live | The planner and every research step are told to decide first whether an answer is in the house or in the world, and to search the web only for the world |
+| Out of reach | When part of the answer is out of every helper's reach, such as old footage or a picture, the plan has no step for it, and the Result says what is missing and how the person can get it |
+| Relevance | The verifier is given the task's goal and brief, and fails a step whose work doesn't serve them, including web results for a question about the house |
+| Save and report | `artifact_write` takes `finish`. On the last save it also reports the step completed with the save's summary and every artifact the run saved. This saves the turn a helper spent calling `step_report` |
+| Nudge | A step or check helper that stops with turns left and no report is sent one more message in its own session (`REPORT_NUDGE`, at most `NUDGE_TURNS`). It costs a short decode on a warm cache, where a retry re-reads its brief and redoes the step. A helper out of turns isn't nudged: its retry gets more turns |
+| Chores | `CHORE_PATIENCE` is 30 minutes. A chore's turn costs a task its slot for about a minute, and a deep-research task runs about 20 |
+| The prime's cold turns | Goose's `SNAPSHOT_MAX_TOKENS` is 10,240, above the chat preamble. E4B stores about 20 KiB a token, so the snapshot is about 200 MB, written once. At 6,144 a cold chat turn re-decoded the rest of the preamble |
+
+### 8.13 The answer the person wants (Jerry, 2026-10-29)
+
+The pipeline answered every ask with a sectioned report, so a question with a one-line answer paid
+for gathering, sections and a summary, then showed one line and a sheet to open. Long tasks are the
+base other features build on, so length is now a property of the task. The person decides it, or
+the pond reads it from the ask.
+
+| Piece | Design |
+|---|---|
+| The shape | `AnswerShape` on the task (migration 0073): `auto`, `short` or `report`. `short` is the answer itself in a few sentences, at most 150 words with its sources. `report` is sections with a Result that opens them |
+| Who decides | The member, beside the deep-research chip on the desktop and the phone ("Pond decides", "Short answer", "Full report"). Or the prime, through `task_start`'s `answer`, when the person said how much they want. Otherwise the planner reads the ask and passes `answer` to `plan_write`. Report is the exception it names: a report, a plan, a comparison of many options, or thoroughness; a softer "short when unsure" gave the same question both shapes across runs. `decide_task_answer` changes only an `auto` task, so a member's choice stands |
+| Report sections | A report plans only the sections the goal asks for or cannot do without: given the composer's examples, it added a meal plan and packing list to a weekend nobody asked one for. A Result as long as its sections, from a last step that compiled them, is not followed by them again (`holds_its_sections`) |
+| A chosen short answer | `open_task` stores the task paused with one worker step (`short_answer_plan`), then sets it running. No planner runs |
+| Briefs | `answer_plan` and `answer_step` size the planner's and the workers' briefs. A short plan has one or two steps and no sections, and `plan_write` refuses a longer one (`MAX_SHORT_STEPS`): told so, the planner still once wrote three, and the answer took 5.9 minutes instead of about 1.5. A report keeps its sections and their 400 to 900 words |
+| The answer's home | The pond tells the plan's last step to title its answer "Result" (`last_step_line`), whatever the planner wrote. A short task with no Result takes the newest thing its steps saved (`answer_artifact`): a helper told to title its answer Result called it "Current Presence and Camera Status". One that saved nothing and put its answer in its summary keeps that summary as its Result (`summary_as_result`) |
+| The card | The task view carries `answer` and, for a finished short answer, `answer_text`. The card shows the answer whole in place of the result line and the report sheet. The notification carries it too, links read as words, cut at 700 characters |
+| Names | A plan step with no key takes one from its name or its place (`step-2`), and an unreadable step's refusal names the fields it had. A wait may name a step by its name, title or number (`match_waits_by_name`). One that matches nothing waits for every step before it (`RelaxedWait`), and `plan_write` says so, rather than refusing the plan. A `new_agent` that can't be read as one (a string, or an object with no name) is dropped, and a step with neither a role nor an agent goes to the general worker. `step_report` reads an artifact named by its title as that artifact, and a made-up id as what the run saved |
+| Sources | A link saved to a bare web address gets `https://`. A camera with no events reads the household's camera and says so, since a helper asked about an imagined "front door" camera and gave up |
+| Tools by job | `tools_withheld` keeps each helper to the task tools its job uses: the planner is not offered `artifact_write` or `step_report`, the checker not `artifact_write` or `plan_write`, a worker not `plan_write`. The planner used to try the step itself first, a turn each time. The prefill compile withholds the same, so each role's snapshot still matches its runs |
+| Correctness | A question about the house plans no web step, and research looks only where the goal points. A helper writes only what its tools returned, and never that the house has nothing unless the house's own tool said so. The verifier fails off-goal work (§8.12) |
+| Start | Every `open_task` rings the runner. A task waits 10 s of quiet, not 30, and the runner looks again when the quiet is due rather than at its next 30 s poll. A step the household interrupts reruns without spending a try |
+| The prime's turn | The deep-research note promises the answer that will come and asks for no tool call: the prime used to look up the task it had just been told about |
+
+### 8.14 Reading the pages it cites (Jerry, 2026-10-30)
+
+A search quotes a few passages a page and no address, so a helper wrote prices and times from
+snippets: one short answer gave the train from Nairobi to Mombasa as 1 h 26 min. Forager Gosling
+now reads the page with `read_web_page` ([small-model-tools §9](../small-model-tools.md#9-reading-a-web-page-read_web_page)).
+
+| Piece | Design |
+|---|---|
+| The tool | `giap-knowledge__read_web_page(url, question, part?)` fetches one page through the search's public-only client. It turns the page into Markdown lines, in parts of about 800 tokens, and returns the lines that answer the question, or a part whole by its number. No key and no model call |
+| Who reads | Forager Gosling's recipe names it beside `search_web`. The research step reads the page before writing a number, price, time or date from the web, and cites the address the tool gave. Nestmaker Goose and the chat turn hold it through `giap-knowledge`. The planner and the verifier do not |
+| Which pages | Only an address the person wrote, a task's goal names, or a search returned. A helper holds the memory tools, and a page could tell it to "read" an address carrying what it knows. The runner notes the goal's links on every pass, so a long task can read them however long it runs. A helper names a search source by its domain, as the copy shows it |
+| Cost | The tool block grows by 666 raw bytes, so every helper's snapshot is compiled again once. Each read is one more model turn: helpers that read two or three pages a step doubled a weekend plan's research time on the Orin, so a step reads one page, two at most, and one more part at most |
+| Work left in a reply | A composer wrote its draft as a reply, answered the report nudge with a `step_report` that was refused for saving nothing, and lost the step, twice in two reports (3 to 5 minutes and a replan each). The nudge now names `artifact_write` first. And when a step's helper reports nothing and saves nothing, a reply of 60 words or more is saved as the step's draft (`reply_as_draft`), titled "Result" on the plan's last step. A nudged helper hands back the longer of its two replies (`after_nudge`) |
+| Gathering | A report gathers in one step per thing the question is about, such as each option a comparison weighs, not one per question about it: a train-against-bus comparison was planned as six gathering steps and took 20 minutes |
+
 ---
 
 ## 9. Agents are recipes (designed 2026-10-28; P14-P18)

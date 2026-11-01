@@ -28,17 +28,28 @@ setup_code_bin() {
   fi
 }
 
-# setup_code_doctor <pond-server> <data_dir>: one doctor line. Sets SETUP_CODE_LEVEL to ok, info
-# or warn so the caller can count it. Never prints the code: `--status` does not know it.
+# Tests stand a fake in for sudo.
+SETUP_CODE_SUDO="${SETUP_CODE_SUDO-sudo}"
+
+# setup_code_doctor <pond-server> <data_dir> [service user]: one doctor line. Sets SETUP_CODE_LEVEL
+# to ok, info or warn so the caller can count it. Never prints the code: `--status` does not know it.
 # shellcheck disable=SC2034  # SETUP_CODE_LEVEL is read by giap.sh's doctor
 setup_code_doctor() {
-  local bin="$1" data="$2" out rc
+  local bin="$1" data="$2" user="${3:-}" out rc
   SETUP_CODE_LEVEL=info
   if [ -z "$bin" ] || [ ! -x "$bin" ]; then
     info "setup code: no pond-server binary to ask yet"
     return 0
   fi
-  out="$(POND_DATA_DIR="$data" "$bin" setup-code --status 2>&1)"; rc=$?
+  if [ -n "$user" ] && [ "$user" != "$(id -un)" ] && [ -n "$SETUP_CODE_SUDO" ]; then
+    # The code sits in the service account's private setup/; the doctor never asks for a password.
+    out="$($SETUP_CODE_SUDO -n -u "$user" env POND_DATA_DIR="$data" "$bin" setup-code --status 2>&1)"; rc=$?
+    case "$rc:$out" in
+      *"sudo:"*) info "setup code: kept by $user; doctor cannot read it without sudo"; return 0 ;;
+    esac
+  else
+    out="$(POND_DATA_DIR="$data" "$bin" setup-code --status 2>&1)"; rc=$?
+  fi
   case "$rc:$out" in
     0:claimed)
       ok "setup code: claimed (the printed card is no longer accepted)"

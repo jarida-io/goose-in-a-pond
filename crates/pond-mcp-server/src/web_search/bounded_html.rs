@@ -18,7 +18,7 @@ const CHUNK_BYTES: usize = 64;
 type NodeId = <HtmlTreeSink as TreeSink>::Handle;
 
 /// `html` as a document, of at most about `max_nodes` nodes, parsed for at most `max_time`.
-pub(super) fn parse_within(html: &str, max_nodes: usize, max_time: Duration) -> Html {
+pub(crate) fn parse_within(html: &str, max_nodes: usize, max_time: Duration) -> Html {
     let started = Instant::now();
     let mut parser = html5ever::parse_document(BudgetSink::new(max_nodes), Default::default());
     let mut rest = html;

@@ -24,6 +24,7 @@ rules when matching events cross the event bus.
                          AgentPrompt   agent.chat() in session sched-{id}-{unix_ts}
                          Webhook       HTTP POST through the egress gate
                          SensorTrigger each of the rule's actions
+                         Routine       each device action in order, no agent
                                                  │
                        ScheduleResultEvent broadcast ──> SSE /api/v1/schedules/events
                                                     └──> push notifications
@@ -31,8 +32,8 @@ rules when matching events cross the event bus.
 
 ## Domain types (`pond-core/src/user_data/domain/schedule.rs`)
 
-- **`TaskKind`**: `AgentPrompt { prompt }`, `Webhook { webhook_url }`, or
-  `SensorTrigger(SensorTriggerSpec)`. `TaskKind::is_event_triggered()` is true for a sensor rule,
+- **`TaskKind`**: `AgentPrompt { prompt }`, `Webhook { webhook_url }`,
+  `SensorTrigger(SensorTriggerSpec)`, or `Routine { actions }`. `TaskKind::is_event_triggered()` is true for a sensor rule,
   which gets no timer; the rules engine fires it through `run_now`.
 - **`SensorTriggerSpec`**: `source` (`TriggerSource`: kind `Sensor` / `Camera` / `Device`, optional
   `device_id` and `signal`; unset fields match anything), `condition` (`TriggerCondition`: an
@@ -43,10 +44,13 @@ rules when matching events cross the event bus.
 - **`TriggerAction`**: `AgentPrompt { prompt }`, `DevicePower { device_id, on }`,
   `Notify { title, body }`.
 - **`Schedule`**: id, label, cron, fire_at, timezone (IANA), kind, paused, currently_running,
-  last_run, next_run, created_at. `cron` holds the sentinel `"@once"` (`CRON_ONCE`) for a one-shot
+  last_run, next_run, created_at, `ask_if_missed`, and `missed_run` (`MissedRun {due_at}`, the
+  missed fire time waiting for an answer; see [Missed runs](#missed-runs)). `cron` holds the sentinel `"@once"` (`CRON_ONCE`) for a one-shot
   and `"@event"` for a sensor rule; neither is ever parsed.
-- **`ScheduleRun`**: id, schedule_id, status (`Running` / `Completed` / `Failed`), result, error,
-  started_at, finished_at, duration_ms.
+- **`ScheduleRun`**: id, schedule_id, status (`Running` / `Completed` / `Failed` / `Skipped`),
+  result, error, started_at, finished_at, duration_ms, and `caught_up_from` on a missed run someone
+  chose to make late. A `Skipped` run is a missed fire time that did not happen: `started_at` is when
+  it was due and `result` says why (`JsonRunHistory::record_skipped`). It sends no notification.
 - **`ScheduleResultEvent`**: broadcast when a run starts and when it finishes.
 - **`OneShotTimePassed`**: the error for resuming a paused one-shot whose instant has passed.
 
@@ -118,6 +122,31 @@ chat path is unchanged: there the user still sees goose's text. A run that speak
 does not see the provider failure yet: such a run is still recorded `completed`, and the error
 text is spoken.
 
+## Missed runs
+
+A recurring schedule with `ask_if_missed` asks before running a fire time the pond slept through,
+instead of skipping it as every other schedule does. When the pond starts
+(`CronSchedulerAdapter::ask_about_a_missed_run`), such a schedule, unless it is paused, takes the
+latest occurrence of its cron after it last fired (`missed_occurrence`) and keeps it as
+`missed_run`. Only the latest is asked about, however long the outage. A question still open from
+before closes as a `Skipped` run, "Nobody answered before the next run", once a newer fire time has
+passed. One-shots, which already fire late, and event rules ignore the setting.
+
+Once notifications are ready, `serve` asks every paired phone about each waiting question
+(`announce_missed_runs` in `pond-server/src/system_notices.rs`): an `action_required` broadcast,
+"Morning routine didn't run at 06:30. Run it now?", in the schedule's time zone, whose tap opens
+that schedule (`OpenScreen::ScheduleDetail`). The question is answered through
+`SchedulerPort::answer_missed_run` (`POST /schedules/{id}/missed/run` or `.../skip`). The answer
+is taken under the scheduler's lock, so the first one settles it and a later one is refused with
+`NoMissedRun`. Run starts it now with `caught_up_from` set; skip records it `Skipped`, "Skipped by
+a household member". A question also closes, as a skipped run, when the schedule's next fire time
+comes first ("Nobody answered before the next run") or when `ask_if_missed` is switched off
+("Asking was turned off"). `asked_through` keeps the latest missed time asked about, so an
+answered question is not asked again after a restart.
+
+The decision reads `last_run`, so a schedule that asks writes it to disk as each run starts
+(`durable_fire_stamp`); otherwise a stale stamp would ask about a run that happened.
+
 ## Execution flow
 
 1. The task's job fires (or `run_now` is called) and marks the task `currently_running`.
@@ -132,6 +161,11 @@ text is spoken.
    - **Webhook**: `POST` to the URL, checked and recorded by the egress gate
      (`EgressPurpose::Schedules`); a non-2xx status fails the run.
    - **SensorTrigger**: runs every action; the run fails only when no action succeeded.
+   - **Routine**: runs every action in order through device control, never the agent, and
+     carries on past a failed one. The run fails if any action failed: its error names what did
+     not run (`did not run: water-heater-plug`) and its result still lists every action's
+     outcome (`ActionsFailed`, which `run_outcome` unpacks). The store refuses a routine with no
+     actions or with an `agent_prompt` action (`routine_rejection`), on create and on update.
 5. `JsonRunHistory::record_finish()` records the result or error and duration, and a
    `Completed` / `Failed` event is broadcast.
 6. The task is marked not running.

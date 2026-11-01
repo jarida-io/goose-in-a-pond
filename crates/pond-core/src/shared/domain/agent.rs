@@ -64,6 +64,9 @@ pub struct DeepResearchTurn {
     /// What the prime tells the person about the line; `None` when the task runs at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<String>,
+    /// How long the answer is meant to be, so the prime promises what will come.
+    #[serde(default)]
+    pub answer: crate::shared::domain::long_task::AnswerShape,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

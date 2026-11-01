@@ -67,7 +67,7 @@ function Mark({ consumer }: { consumer: Consumer }) {
 /** Registry filters per picker, by `provider` (the Models page's equivalent is `rolesFor`). The
  *  chat picker offers only what can hold a conversation: a helper is never one. */
 const PROVIDERS: Record<
-  Exclude<OptionSource, "llm-providers" | "time-zones" | AudioSource>,
+  Exclude<OptionSource, "llm-providers" | "time-zones" | "household-members" | AudioSource>,
   (m: ModelEntry) => boolean
 > = {
   "llm-models": (m) => ["gguf", "llamafile", "ollama"].includes(m.provider),
@@ -145,8 +145,8 @@ function optionsFor(
   zones: ZoneChoice[],
   meshEnabled?: boolean,
 ): Option[] {
-  // Devices come from the pond's last test, not the registry; the call site reads them.
-  if (isAudioSource(source)) return [];
+  // Devices come from the pond's last test and members from `/profiles`; the call site reads them.
+  if (isAudioSource(source) || source === "household-members") return [];
   if (source === "time-zones") {
     // "Africa/Nairobi — Nairobi (+03:00)"; today's offset tells similar-named zones apart.
     return zones.map((z) => ({
@@ -174,6 +174,20 @@ function optionsFor(
     (m) => (source === "tts-voices" ? (m.filename ?? m.name) : m.name),
     source === "chat-models" || source === "llm-models",
   );
+}
+
+/** Members by name; the value saved is the id, which is what `primary_profile_id` holds. */
+function memberOptions(members: { id: string; display_name: string }[]): Option[] {
+  return members
+    .map((m) => ({ value: m.id, label: m.display_name }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+/** How a stored value the picker does not list is labelled, so it is never silently dropped. */
+function unlistedSuffix(source: OptionSource): string {
+  if (isAudioSource(source)) return "not connected";
+  if (source === "household-members") return "not a household member";
+  return "not installed";
 }
 
 // ─── The sentence ─────────────────────────────────────────────────────────
@@ -388,7 +402,7 @@ function EntryRow({
                   ) && (
                     <option value={String(value)}>
                       {String(value)} —{" "}
-                      {isAudioSource(control.source) ? "not connected" : "not installed"}
+                      {unlistedSuffix(control.source)}
                     </option>
                   )}
                 {options.map((o) => (
@@ -459,6 +473,7 @@ export function SettingsCatalogueView({
   const [models, setModels] = useState<ModelEntry[] | null>(null);
   const [zones, setZones] = useState<ZoneChoice[]>([]);
   const [audio, setAudio] = useState<AudioDeviceStatus | null>(null);
+  const [members, setMembers] = useState<{ id: string; display_name: string }[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -548,6 +563,11 @@ export function SettingsCatalogueView({
     allZones()
       .then((z) => !cancelled && setZones(z))
       .catch(() => {});
+    // A failed read leaves the member picker a text box, which the pond checks on save.
+    api
+      .listProfiles()
+      .then((r) => !cancelled && setMembers(r.profiles))
+      .catch((e) => console.warn("[settings] could not read the household members", e));
     // The device pickers list what the pond last saw; without it they fall back to text.
     void (async () => {
       try {
@@ -1269,6 +1289,10 @@ export function SettingsCatalogueView({
                               ? isAudioSource(e.control.source)
                                 ? audio
                                   ? audioOptions(audio, e.control.source)
+                                  : null
+                                : e.control.source === "household-members"
+                                ? members
+                                  ? memberOptions(members)
                                   : null
                                 : // Zones come from their own call, so they must not wait on `models`.
                                 e.control.source === "time-zones"

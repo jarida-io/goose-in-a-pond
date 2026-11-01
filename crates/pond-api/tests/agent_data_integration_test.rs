@@ -240,6 +240,7 @@ async fn make_app_full(
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        pond_admin: None,
     });
 
     (
@@ -538,6 +539,7 @@ async fn prompt_template_delete_system_returns_403() {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        pond_admin: None,
     });
 
     let app = build_router(state, std::path::PathBuf::from("pond-desktop/dist"));
@@ -1368,6 +1370,7 @@ async fn returns_501_when_repos_not_configured() {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        pond_admin: None,
     });
     let app = build_router(state, std::path::PathBuf::from("pond-desktop/dist"));
 
@@ -1777,6 +1780,74 @@ async fn deleting_someone_else_does_not_touch_the_primary_setting() {
 
     let settings = body_json(app.oneshot(get("/api/v1/settings")).await.unwrap()).await;
     assert_eq!(settings["primary_profile_id"], jerry);
+}
+
+/// A household on 2026-10-27 typed its owner's display name into a free-text "Household profile"
+/// box; the pond stored it, and every reader that looks the id up found nobody, silently.
+#[tokio::test]
+async fn a_primary_profile_that_names_no_member_is_refused_and_nothing_is_saved() {
+    let (app, _storage, _tmp) = make_app_with_sessions().await;
+    let jerry = seed_profile(&app, "Jerry").await;
+    app.clone()
+        .oneshot(put(
+            "/api/v1/settings",
+            serde_json::json!({ "primary_profile_id": jerry }),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(put(
+            "/api/v1/settings",
+            serde_json::json!({ "primary_profile_id": "Jerry", "home_name": "Exile" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = body_json(resp).await;
+    assert_eq!(
+        body["fields"][0]["field"], "primary_profile_id",
+        "a form marks the box from `fields`; body: {body}"
+    );
+
+    let settings = body_json(app.oneshot(get("/api/v1/settings")).await.unwrap()).await;
+    assert_eq!(
+        settings["primary_profile_id"], jerry,
+        "a refused patch must not replace the member already named"
+    );
+    assert_ne!(
+        settings["home_name"], "Exile",
+        "a refused patch saves none of its keys"
+    );
+}
+
+#[tokio::test]
+async fn the_primary_profile_takes_a_member_and_can_be_cleared() {
+    let (app, _storage, _tmp) = make_app_with_sessions().await;
+    let liz = seed_profile(&app, "Liz").await;
+
+    for (value, expected) in [
+        (serde_json::json!(liz), serde_json::json!(liz)),
+        (serde_json::json!(""), serde_json::Value::Null),
+        (serde_json::json!(liz), serde_json::json!(liz)),
+        (serde_json::Value::Null, serde_json::Value::Null),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(put(
+                "/api/v1/settings",
+                serde_json::json!({ "primary_profile_id": value }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "writing {value}");
+        let settings = body_json(app.clone().oneshot(get("/api/v1/settings")).await.unwrap()).await;
+        assert_eq!(
+            settings["primary_profile_id"], expected,
+            "after writing {value}"
+        );
+    }
 }
 
 // ── Profile context follows the speaker ──────────────────────────────────────

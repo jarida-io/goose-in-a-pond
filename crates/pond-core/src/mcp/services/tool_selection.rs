@@ -793,9 +793,9 @@ mod tests {
         assert_eq!(
             knowledge.description,
             "Looking things up, working things out and searching the web: encyclopedia articles \
-             about people, places and events, exact arithmetic, unit conversions and dates, and \
-             the web for anything current, local or specific, such as news, opening hours, \
-             prices and products."
+             about people, places and events, exact arithmetic, unit conversions and dates, the \
+             web for anything current, local or specific, such as news, opening hours, prices \
+             and products, and reading a web page from its link."
         );
         let note = dormant_groups_note(&available(), &[], |_| false);
         assert!(

@@ -35,9 +35,12 @@ use std::sync::Arc;
 /// property is preserved rather than re-implemented here.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct DelegateParams {
-    /// The exact name of the saved role to run.
+    /// The exact name of the saved role to run; leave it out when you give `new_agent`.
     pub role: Option<String>,
-    /// What this particular agent is being asked to do, in plain words.
+    /// Only when no saved role fits: an agent made for this request.
+    pub new_agent: Option<NewAgentParams>,
+    /// What this agent is asked to do, as a full brief: it sees nothing of this conversation, so
+    /// say who it is for, the details and limits the person gave, and what was decided or ruled out.
     pub instructions: Option<String>,
     /// Optional structured inputs, passed through to the agent unchanged.
     pub inputs: Option<serde_json::Value>,
@@ -52,6 +55,55 @@ pub struct DelegateParams {
     #[serde(flatten)]
     #[schemars(skip)]
     pub extra: HashMap<String, serde_json::Value>,
+}
+
+/// An agent made for one delegation when no saved role fits. Its tools are narrowed to the
+/// caller's like any delegate's, and it runs on the conversation's model.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct NewAgentParams {
+    /// A short name for it.
+    pub name: Option<String>,
+    /// Who it is and how it works; `instructions` says what to do this time.
+    pub instructions: Option<String>,
+    /// The tool groups it needs, from those you have.
+    pub tools: Option<Vec<String>>,
+}
+
+/// Longest name a made agent may have.
+const MADE_AGENT_NAME_CHARS: usize = 40;
+
+/// The role a made agent runs as: the shipped worker's turns and window share, its own words.
+fn made_role(agent: NewAgentParams) -> Result<AgentRole, Refusal> {
+    let name: String = agent
+        .name
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .chars()
+        .take(MADE_AGENT_NAME_CHARS)
+        .collect();
+    let persona = agent
+        .instructions
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
+    if name.is_empty() || persona.is_empty() {
+        return Err(Refusal::Malformed(
+            "`new_agent` needs a `name` and `instructions` saying who it is and how it works"
+                .to_string(),
+        ));
+    }
+    let worker = pond_core::shared::services::long_task_roles::worker_role()
+        .map_err(|e| Refusal::Malformed(e.to_string()))?;
+    AgentRole::new(
+        format!("new:{name}"),
+        format!("You are {name}, an agent made for this one request. {persona}"),
+        agent.tools.unwrap_or_default().into_iter().collect(),
+        pond_core::shared::domain::orchestration::RolePersonalData::Inherit,
+        worker.max_turns(),
+        worker.context_fraction(),
+    )
+    .map_err(|e| Refusal::Malformed(e.to_string()))
 }
 
 /// Names a small model invents for `role` and `instructions`. Only synonyms of those two: an
@@ -470,14 +522,23 @@ and is refused when the model runs on this device (one agent at a time).")]
         let authority = authorise(deps.authorities.authority_for_engine_session(&session))?;
 
         // Only now is the payload parsed and the database touched.
+        let mut params = params;
+        let made = params.new_agent.take().map(made_role).transpose()?;
+        if let Some(role) = &made {
+            params.role = Some(role.name().to_string());
+        }
         let request = into_request(params)?;
-        let recipe = deps
-            .recipes
-            .get_by_name(&request.role)
-            .await
-            .map_err(|e| Refusal::RoleLookupFailed(e.to_string()))?;
-        let lookup =
-            RoleLookup::from_recipe(&request.role, recipe.as_ref().map(|r| r.yaml.as_str()));
+        let lookup = match made {
+            Some(role) => RoleLookup::Found(role),
+            None => {
+                let recipe = deps
+                    .recipes
+                    .get_by_name(&request.role)
+                    .await
+                    .map_err(|e| Refusal::RoleLookupFailed(e.to_string()))?;
+                RoleLookup::from_recipe(&request.role, recipe.as_ref().map(|r| r.yaml.as_str()))
+            }
+        };
 
         let spec = decide(&authority, lookup, request)?;
         tracing::info!(
@@ -500,8 +561,8 @@ and is refused when the model runs on this device (one agent at a time).")]
     }
 
     #[tool(description = "\
-Check a background delegation by `task_id`: what the agent is doing, or its findings if \
-finished. Only tasks started in this conversation.")]
+Check a background delegation or a long task by `task_id`: what it is doing, or its findings \
+if finished. Without a `task_id`, lists the person's long tasks still running.")]
     async fn check_task(
         &self,
         ctx: RequestContext<RoleServer>,
@@ -541,14 +602,28 @@ finished. Only tasks started in this conversation.")]
         };
         let authority = authorise(deps.authorities.authority_for_engine_session(&session))?;
 
-        let task_id = check_task_id(params)?;
+        // A long task's id, or no id while long tasks run, gets task_status's answer: the prime
+        // reaches for this tool for both, and every such call used to be refused.
+        let scope = authority.profile_scope();
+        let task_id = match check_task_id(params) {
+            Ok(id) => id,
+            Err(refusal) => {
+                return crate::long_task::long_task_status_for(scope, None)
+                    .await
+                    .ok_or(refusal)
+            }
+        };
         let run = deps
             .orchestrator
             .poll(&task_id)
             .await
             .map_err(|e| Refusal::TaskLookupFailed(e.to_string()))?;
-        let run = authorise_task(run, authority.session_id(), &task_id)?;
-        Ok(describe_run(&run))
+        match authorise_task(run, authority.session_id(), &task_id) {
+            Ok(run) => Ok(describe_run(&run)),
+            Err(refusal) => crate::long_task::long_task_status_for(scope, Some(&task_id))
+                .await
+                .ok_or(refusal),
+        }
     }
 }
 
@@ -833,6 +908,48 @@ mod tests {
         assert!(!spec.child_authority("c").may_delegate());
         for denied in groups_denied_to_subagents() {
             assert!(!spec.tool_groups().contains(*denied));
+        }
+    }
+
+    #[test]
+    fn a_made_agent_is_narrowed_to_the_callers_tools_and_must_say_who_it_is() {
+        let authority = root(ProfileScope::Household);
+        let role = made_role(NewAgentParams {
+            name: Some("Rain Watcher".into()),
+            instructions: Some("You read forecasts and say when to go.".into()),
+            tools: Some(vec![
+                "giap-weather".into(),
+                "giap-memory".into(),
+                "giap-made-up".into(),
+            ]),
+        })
+        .unwrap();
+        assert_eq!(role.name(), "new:Rain Watcher");
+        let asked = TaskRequest {
+            role: role.name().to_string(),
+            ..request()
+        };
+        let spec = decide(&authority, RoleLookup::Found(role), asked).unwrap();
+        assert!(spec.grants_tool("giap-weather__get_forecast"));
+        assert_eq!(
+            spec.tool_groups()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["giap-weather"],
+            "a made agent gets no tool its caller lacks"
+        );
+        for missing in [
+            NewAgentParams {
+                name: Some("x".into()),
+                ..Default::default()
+            },
+            NewAgentParams {
+                instructions: Some("y".into()),
+                ..Default::default()
+            },
+        ] {
+            assert!(matches!(made_role(missing), Err(Refusal::Malformed(_))));
         }
     }
 

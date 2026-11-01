@@ -95,6 +95,19 @@ describe("chatStream() and deep research", () => {
     expect(String(fetchMock.mock.calls[0][0])).toBe("http://localhost:4000/api/v1/chat/stream");
   });
 
+  it("carries the chosen length with a research question, and leaves auto to the pond", async () => {
+    fetchMock.mockResolvedValueOnce(sse(["data: [DONE]"]));
+    await drain(client().chatStream("Who rang the bell?", undefined, undefined, undefined, undefined, true, true, "short"));
+    expect(sentBody()).toMatchObject({ deep_research: true, deep_research_answer: "short" });
+    fetchMock.mockResolvedValueOnce(sse(["data: [DONE]"]));
+    await drain(client().chatStream("Plan our trip", undefined, undefined, undefined, undefined, true, true, "auto"));
+    expect("deep_research_answer" in sentBody(1)).toBe(false);
+    // A length means nothing without the research flag, so an ordinary turn never carries one.
+    fetchMock.mockResolvedValueOnce(sse(["data: [DONE]"]));
+    await drain(client().chatStream("hi", undefined, undefined, undefined, undefined, true, false, "report"));
+    expect("deep_research_answer" in sentBody(2)).toBe(false);
+  });
+
   it("leaves the field out of every other body", async () => {
     fetchMock.mockResolvedValueOnce(sse(["data: [DONE]"]));
     await drain(client().chatStream("hi", undefined, undefined, undefined, undefined, true));

@@ -52,7 +52,7 @@ impl LaneRunLog for SqliteLaneRunLog {
                 Ok(at) => out.push((job, at)),
                 Err(e) => tracing::warn!(
                     job = job.as_str(),
-                    raw = %raw,
+                    stamp = %raw,
                     error = %e,
                     "discarding an unreadable lane run stamp"
                 ),

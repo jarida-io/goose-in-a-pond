@@ -67,7 +67,7 @@ gives it a control, and the server-side rule if any.
 | Key | Default | Notes |
 |---|---|---|
 | `user_name` | `"Friend"` |  |
-| `primary_profile_id` | `null` |  |
+| `primary_profile_id` | `null` | rule: a member's id or empty (picker of members, never free text) |
 | `home_name` | `""` | app only: the server never reads it |
 | `timezone` | `"UTC"` | rule: IANA zone, canonicalised |
 | `weather_location_name` | `""` |  |

@@ -72,11 +72,12 @@ jetson_ssh() {
 
 # rsync <local dir/> to <path on the device>, mirroring it, retried like jetson_ssh. rsync's 255,
 # 12 and 30 are a lost or stalled connection.
-jetson_rsync() {
-  local src="$1" dest="$2" try=1 rc delay="$JETSON_RETRY_DELAY" shell
+jetson_rsync() { # <src> <dest> [the device's rsync command, e.g. sudo -n -u agamemnon rsync]
+  local src="$1" dest="$2" try=1 rc delay="$JETSON_RETRY_DELAY" shell extra=()
   shell="ssh $(jetson_ssh_opts | tr '\n' ' ')-o HostName=$JETSON_ADDR -o HostKeyAlias=$JETSON_NAME"
+  [ -n "${3:-}" ] && extra=(--rsync-path="$3")
   while :; do
-    if rsync -az --delete -e "$shell" "$src" "${JETSON_ALIAS}:${dest}"; then return 0; else rc=$?; fi
+    if rsync -az --delete ${extra[@]+"${extra[@]}"} -e "$shell" "$src" "${JETSON_ALIAS}:${dest}"; then return 0; else rc=$?; fi
     case "$rc" in 255 | 12 | 30) ;; *) return "$rc" ;; esac
     [ "$try" -ge 5 ] && return "$rc"
     echo "    (copy to ${JETSON_NAME} interrupted; trying again in ${delay}s)" >&2
@@ -214,6 +215,14 @@ jetson_follow() {
   done
 }
 
+# Device-side shell: the pond's unit at whatever scope runs it. A pond run by agamemnon goes through
+# the sudo rule `giap.sh service-account` gives the login, which never asks for a password.
+# shellcheck disable=SC2016  # expanded by the device's shell
+JETSON_POND_FNS='pond_sys="${JETSON_POND_UNIT:-/etc/systemd/system/goose-in-a-pond.service}"
+pond_ctl() { if grep -qs "^User=agamemnon$" "$pond_sys"; then sudo -n systemctl "$1" goose-in-a-pond.service; else systemctl --user "$1" goose-in-a-pond.service; fi; }
+pond_status() { if [ -f "$pond_sys" ]; then systemctl --no-pager status goose-in-a-pond.service; else systemctl --user --no-pager status goose-in-a-pond.service; fi; }'
+JETSON_POND_START_HINT="systemctl --user start goose-in-a-pond.service (run by agamemnon: sudo -n systemctl start goose-in-a-pond.service)"
+
 # Make room for the build: its final link needs a few GB, and with a model loaded the board has a
 # few hundred MB, so the kernel kills the link or the pond. Decided from what is free right now;
 # below JETSON_BUILD_MIN_MB the pond is stopped, when the deploy is going to restart it anyway.
@@ -228,8 +237,9 @@ jetson_make_room_for_build() {
     echo "    ${free_mb} MB free on the device: enough to build without stopping anything"
   elif [ "$will_restart" = 1 ]; then
     echo "    ${free_mb} MB free on the device: stopping the pond for the build (step 5 starts it again)"
-    jetson_ssh "mkdir -p ~/$JETSON_REMOTE_DIR && touch ~/$JETSON_REMOTE_DIR/$JETSON_POND_STOPPED_MARK \
-      && systemctl --user stop goose-in-a-pond.service" || true
+    jetson_ssh "$JETSON_POND_FNS
+      mkdir -p ~/$JETSON_REMOTE_DIR && touch ~/$JETSON_REMOTE_DIR/$JETSON_POND_STOPPED_MARK \
+      && pond_ctl stop" || true
   else
     echo "    WARNING: only ${free_mb} MB free and --no-restart leaves the pond running; the link may run out of memory" >&2
   fi
@@ -245,9 +255,10 @@ jetson_restore_pond() {
   local dir="$JETSON_REMOTE_DIR" out
   [ "$JETSON_POND_SETTLED" = 1 ] && return 0
   [ -n "$JETSON_ADDR" ] || return 0
-  out="$(jetson_ssh "cd ~/$dir 2>/dev/null && [ -f $JETSON_POND_STOPPED_MARK ] || exit 0
+  out="$(jetson_ssh "$JETSON_POND_FNS
+    cd ~/$dir 2>/dev/null && [ -f $JETSON_POND_STOPPED_MARK ] || exit 0
     if flock -n build.lock true; then
-      systemctl --user start goose-in-a-pond.service && rm -f $JETSON_POND_STOPPED_MARK && echo started
+      pond_ctl start && rm -f $JETSON_POND_STOPPED_MARK && echo started
     else
       echo building
     fi")" || out="unreachable"
@@ -258,7 +269,7 @@ jetson_restore_pond() {
       echo "    Run the deploy again: it follows that build and starts the pond after it." >&2 ;;
     unreachable)
       echo "WARNING: the pond may still be stopped for the build. Start it with:" >&2
-      echo "  ssh ${JETSON_ALIAS} systemctl --user start goose-in-a-pond.service" >&2 ;;
+      echo "  ssh ${JETSON_ALIAS} ${JETSON_POND_START_HINT}" >&2 ;;
   esac
   return 0
 }

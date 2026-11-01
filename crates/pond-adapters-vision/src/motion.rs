@@ -50,6 +50,7 @@ pub struct MotionDetector {
     cfg: MotionConfig,
     /// Oldest first; the front is the newest grid old enough to compare against, once one is.
     history: VecDeque<(DateTime<Utc>, Vec<u8>)>,
+    last_change: Option<f64>,
 }
 
 impl MotionDetector {
@@ -57,6 +58,7 @@ impl MotionDetector {
         Self {
             cfg,
             history: VecDeque::new(),
+            last_change: None,
         }
     }
 
@@ -106,7 +108,13 @@ impl MotionDetector {
             self.history.pop_front();
         }
         self.history.push_back((at, grid));
+        self.last_change = fraction;
         fraction.filter(|f| *f >= self.cfg.changed_fraction)
+    }
+
+    /// The fraction of the grid the last observed frame changed, threshold or not.
+    pub fn last_change(&self) -> Option<f64> {
+        self.last_change
     }
 
     /// Point-sample one pixel per cell into a `grid_w`×`grid_h` BT.601 luma grid.
@@ -162,6 +170,18 @@ mod tests {
             }
         }
         f
+    }
+
+    #[test]
+    fn a_change_below_the_threshold_is_still_reported_as_the_last_change() {
+        let mut d = MotionDetector::new(MotionConfig {
+            changed_fraction: 0.9,
+            ..Default::default()
+        });
+        assert_eq!(d.observe(&flat_frame(64, 36, 20)), None);
+        assert_eq!(d.last_change(), None, "nothing to compare with yet");
+        assert_eq!(d.observe(&frame_with_square(64, 36, 20)), None);
+        assert!(d.last_change().is_some_and(|f| f > 0.1 && f < 0.9));
     }
 
     #[test]

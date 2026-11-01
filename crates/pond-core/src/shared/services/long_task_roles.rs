@@ -31,6 +31,18 @@ giap_role:
       inputs: ids of artifacts this step needs, from the brief, or []
       depends_on: keys of steps that must finish first, or []
       acceptance: one sentence a checker can verify, or leave it out
+      new_agent: in place of role, only when no listed role is for the step: its name, its
+        instructions, and tools, the groups it needs from giap-knowledge (web search and
+        Wikipedia), giap-weather, giap-memory (what the household has said), giap-sensors,
+        giap-vision (what the cameras saw recently, and camera automations), giap-schedule (what
+        is scheduled) and giap-device (the devices in the house)
+
+    First ask where each answer lives. What happened in this house, who was seen, what the
+    cameras or sensors recorded, what is scheduled and what the household has said are in the
+    house: a helper reads them with its tools, never from the web. Plan a web search only for
+    what is outside the house. When the answer needs something no helper can read, such as a
+    camera picture or video from the past, plan no step for it: the last step says what is out
+    of reach and how the person can get it.
 
     A good step answers one question, reads one part of one document, or writes one draft.
     Split long reading across steps. A later step sees an earlier step's work only through
@@ -53,6 +65,10 @@ giap_role:
     - giap-knowledge
     - giap-memory
     - giap-weather
+    - giap-sensors
+    - giap-vision
+    - giap-schedule
+    - giap-device
   personal_data: inherit
   max_turns: 8
   instructions: |
@@ -62,11 +78,14 @@ giap_role:
 
     1. Read only what your step needs. artifact_read pages through a long artifact; ask for the
        next part rather than all of it.
-    2. Do the step with your tools.
+    2. Do the step with your tools. search_web finds web pages; read_web_page reads one, by a
+       source's domain from search_web or a link the brief gives, and returns the lines that
+       answer your question, or a part by its number.
     3. Save what later steps need with artifact_write: a short title, a one-line summary, and the
-       body.
-    4. Finish with step_report: outcome "completed" or "failed", a summary of a few sentences, and
-       why, if it failed.
+       body. On your last save, when the step is done, set finish to true: that also reports the
+       step completed, and you are done.
+    4. If the step failed, or you saved nothing, finish with step_report instead: outcome
+       "completed" or "failed", a summary of a few sentences, and why, if it failed.
 
     Do only your step. You cannot reach the person, so do not ask them anything.
 "#;
@@ -125,8 +144,9 @@ giap_role:
     4. Save it with artifact_write as a draft titled as the reader should see it, such as
        "Itinerary" or "Meal plan". When the plan has dates, also save its dated events as a data
        artifact titled "Calendar": one JSON object per line with title, start and end (ISO 8601
-       with the time zone, or a date for a whole day), location and notes.
-    5. Finish with step_report: outcome "completed" or "failed" and a few sentences.
+       with the time zone, or a date for a whole day), location and notes. Set finish to true on
+       the last of these saves: that reports the step completed.
+    5. If the step failed, finish with step_report instead: outcome "failed" and why.
 
     Never put a person's name, health or diet in a web search: search for the place, the dish
     or the thing. Do only your step. You cannot reach the person, so do not ask them anything.

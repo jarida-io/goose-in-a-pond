@@ -149,6 +149,13 @@ export function resultOf(task: Pick<LongTask, "artifacts" | "result_artifact_id"
   return task.artifacts.find((a) => a.id === task.result_artifact_id) ?? null;
 }
 
+/** A finished short answer's text, which the card shows whole; `null` for a report or an older pond. */
+export function shortAnswerOf(task: Pick<LongTask, "answer" | "answer_text">): string | null {
+  if (task.answer !== "short") return null;
+  const text = task.answer_text?.trim();
+  return text ? text : null;
+}
+
 /** The one line a finished task shows: the result's summary, else its title. */
 export function resultLine(artifact: LongTaskArtifact): string {
   return artifact.summary.trim() || artifact.title.trim();

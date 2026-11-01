@@ -1,5 +1,5 @@
-//! Knowledge MCP server: Wikipedia lookup, plus the Wolfram tool from [`crate::wolfram`] and web
-//! search from [`crate::web_search`].
+//! Knowledge MCP server: Wikipedia lookup, plus the Wolfram tool from [`crate::wolfram`], web
+//! search from [`crate::web_search`] and page reads from [`crate::web_page`].
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -68,21 +68,24 @@ pub struct KnowledgeMcpServer {
 
 #[tool_router]
 impl KnowledgeMcpServer {
-    /// Every tool from all three routers, without constructing the server or its deps.
+    /// Every tool from all four routers, without constructing the server or its deps.
     pub(crate) fn tool_defs() -> Vec<rmcp::model::Tool> {
         let mut tools = Self::tool_router().list_all();
         tools.extend(Self::wolfram_tool_router().list_all());
         tools.extend(Self::web_search_tool_router().list_all());
+        tools.extend(Self::web_page_tool_router().list_all());
         tools
     }
 
     pub fn new(http_client: reqwest::Client) -> Self {
         Self {
             http_client,
-            // One extension, three routers: `wolfram.rs` and `web_search.rs` hold the others.
+            // One extension, four routers: `wolfram.rs`, `web_search.rs` and `web_page.rs` hold
+            // the others.
             tool_router: Self::tool_router()
                 + Self::wolfram_tool_router()
-                + Self::web_search_tool_router(),
+                + Self::web_search_tool_router()
+                + Self::web_page_tool_router(),
         }
     }
 
@@ -144,7 +147,7 @@ verbatim.")]
 }
 
 // `router = self.tool_router` is load-bearing: the default is this impl block's router
-// alone, which would drop the composed Wolfram and web search tools from `list_tools`.
+// alone, which would drop the composed Wolfram, web search and page tools from `list_tools`.
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for KnowledgeMcpServer {
     fn get_info(&self) -> ServerInfo {
@@ -160,17 +163,18 @@ impl ServerHandler for KnowledgeMcpServer {
 
 /// Every tool these instructions name must be one this server lists.
 const KNOWLEDGE_INSTRUCTIONS: &str = "\
-GIAP Knowledge server: encyclopedia articles, computation and web search.
+GIAP Knowledge server: encyclopedia articles, computation, web search and web pages.
 
 Tools: get_wikipedia_article (encyclopedia articles), compute_answer (computation; offered \
 while a computation key is stored), search_web (the web; offered while a web search key is \
-stored).
+stored), read_web_page (one web page: a link the person gave, or a source search_web found).
 
 If the answer has to be worked out (arithmetic, a unit or currency conversion, a date \
 difference, a statistic), use compute_answer. If it has to be read (who someone was, what \
 happened, what a place is like), use get_wikipedia_article; it auto-searches when the title is \
 not exact. If it is current, local or specific (news, opening hours, prices, products, \
-businesses, recent results), use search_web.
+businesses, recent results), use search_web. When the person gives a link, or a number, \
+price, time or date matters and a search source has it, read that page with read_web_page.
 After receiving results: synthesize in your own words. Do not parrot verbatim.
 In voice mode: 1-3 sentences. Offer to elaborate if the user wants more.";
 

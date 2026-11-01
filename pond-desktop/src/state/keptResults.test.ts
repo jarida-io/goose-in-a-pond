@@ -57,6 +57,14 @@ describe("keptLine", () => {
     expect(keptLine({ ...kept, tool: "" })).toMatch(/^Tool: /);
   });
 
+  it("names the page a page read came from, by its host", () => {
+    const stub =
+      "A web page's text is not kept after the turn. Read it again with giap-knowledge__read_web_page: https://www.krc.co.ke/sgr/fares";
+    expect(keptLine({ callId: "c", tool: "giap-knowledge__read_web_page", stub })).toBe(
+      "Web page: its text isn't kept after the turn. Page: krc.co.ke.",
+    );
+  });
+
   it("never lets a long stub run on", () => {
     const line = keptLine({ ...kept, stub: `Sources: ${"a.example, ".repeat(100)}` });
     expect(line.length).toBeLessThan(300);

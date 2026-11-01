@@ -1,5 +1,16 @@
-import { Loader } from "lucide-react";
+import { Droplet, Loader } from "lucide-react";
+import i18n from "../../i18n";
 import { registerMcpCard, type McpCardProps } from "../registry";
+import {
+  FORECAST_ROWS,
+  awaitingResult,
+  conditionIcon,
+  dayLabel,
+  rangeEnd,
+  readWeatherPayload,
+  type CurrentWeather,
+  type WeatherForecast,
+} from "./weatherPayload";
 
 // ── Weather icons ───────────────────────────────────────────────────────────
 
@@ -165,18 +176,6 @@ function weatherIcon(condition: string, size = 32) {
   return <SunIcon size={size} />;
 }
 
-// ── Forecast day type ───────────────────────────────────────────────────────
-
-interface ForecastDay {
-  date: string;
-  description?: string;
-  condition?: string;
-  temp_max_c?: number;
-  temp_min_c?: number;
-  high?: number;
-  low?: number;
-}
-
 // ── Styles ──────────────────────────────────────────────────────────────────
 
 const styles = {
@@ -281,43 +280,6 @@ const styles = {
     borderRadius: 9,
     border: "1px solid #E2E8F0",
   },
-  forecastContainer: {
-    padding: "14px 16px 16px",
-    display: "flex" as const,
-    flexDirection: "row" as const,
-    gap: 6,
-  },
-  forecastDay: {
-    flex: 1,
-    display: "flex" as const,
-    flexDirection: "column" as const,
-    alignItems: "center" as const,
-    gap: 6,
-    padding: "10px 4px",
-    background: "#F8FAFC",
-    border: "1px solid #F1F5F9",
-    borderRadius: 11,
-  },
-  dayLabel: {
-    fontSize: 10,
-    fontWeight: 700,
-    color: "#64748B",
-    textTransform: "uppercase" as const,
-    letterSpacing: 0.5,
-    lineHeight: 1,
-  },
-  hiTemp: {
-    fontSize: 13,
-    fontWeight: 800,
-    color: "#1E293B",
-    lineHeight: 1,
-  },
-  loTemp: {
-    fontSize: 11,
-    color: "var(--color-text-tertiary)",
-    fontWeight: 500,
-    lineHeight: 1,
-  },
   loading: {
     display: "flex" as const,
     flexDirection: "column" as const,
@@ -337,48 +299,13 @@ const styles = {
 
 const spinKeyframes = `@keyframes weather-spin { to { transform: rotate(360deg); } }`;
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
-
-function shortDay(dateStr: string): string {
-  try {
-    const d = new Date(dateStr);
-    if (isNaN(d.getTime())) return dateStr.slice(0, 3);
-    return d.toLocaleDateString("en-US", { weekday: "short" }).toUpperCase();
-  } catch {
-    return dateStr.slice(0, 3).toUpperCase();
-  }
-}
+const degrees = (v: number | null) => (v === null ? "" : `${Math.round(v)}°`);
 
 // ── Component ───────────────────────────────────────────────────────────────
 
-export function WeatherCard({ data, variant }: McpCardProps) {
-  const hasData = data.temperature != null || data.temp != null;
-  const location = String(data.location ?? data.city ?? data.location_name ?? "");
-  const temp = data.temperature ?? data.temp;
-  const condition = String(data.condition ?? data.description ?? data.weather ?? "");
-  const humidity = data.humidity as number | undefined;
-  const windSpeed = (data.wind_speed ?? data.wind_speed_kmh) as number | undefined;
-  const isCompact = variant === "compact";
-
-  // From get_weather_forecast tool results.
-  const forecast = (data.forecast ?? data.days) as ForecastDay[] | undefined;
-  const hasForecast = Array.isArray(forecast) && forecast.length > 0;
-
-  // Loading state -- card created on tool_call but tool_result not yet received
-  if (!hasData && !condition) {
-    return (
-      <div style={styles.loading}>
-        <Loader
-          size={22}
-          style={{ animation: "weather-spin 1.5s linear infinite", color: "var(--color-info-fg)" }}
-        />
-        <span style={styles.loadingText}>Fetching weather...</span>
-        <style>{spinKeyframes}</style>
-      </div>
-    );
-  }
-
-  const tempDisplay = temp != null ? String(Math.round(Number(temp))) : "--";
+function CurrentWeatherCard({ weather, isCompact }: { weather: CurrentWeather; isCompact: boolean }) {
+  const { location, temperature, condition, humidity, wind } = weather;
+  const tempDisplay = temperature !== null ? String(Math.round(temperature)) : "--";
 
   return (
     <div style={styles.card}>
@@ -393,7 +320,7 @@ export function WeatherCard({ data, variant }: McpCardProps) {
 
         <div style={styles.infoCol}>
           <span style={isCompact ? styles.conditionCompact : styles.condition}>
-            {condition || "Unknown"}
+            {condition || i18n.t("weather.unknownCondition")}
           </span>
           {location && (
             <span style={styles.location}>{location}</span>
@@ -402,45 +329,110 @@ export function WeatherCard({ data, variant }: McpCardProps) {
       </div>
 
       {/* Stats row -- humidity and wind */}
-      {!isCompact && (humidity != null || windSpeed != null) && (
+      {!isCompact && (humidity !== null || wind !== null) && (
         <div style={styles.statsRow}>
-          {humidity != null && (
+          {humidity !== null && (
             <div style={styles.pill}>
               <DropletIcon size={13} />
-              <span>{humidity}%</span>
+              <span>{i18n.t("weather.humidity", { value: humidity })}</span>
             </div>
           )}
-          {windSpeed != null && (
+          {wind !== null && (
             <div style={styles.pill}>
               <WindIcon size={13} />
-              <span>{windSpeed} km/h</span>
+              <span>{i18n.t("weather.wind", { value: wind })}</span>
             </div>
           )}
         </div>
       )}
+    </div>
+  );
+}
 
-      {/* 5-day forecast -- only when data is available */}
-      {!isCompact && hasForecast && (
-        <div style={styles.forecastContainer}>
-          {forecast!.slice(0, 5).map((day, i) => {
-            const dayCondition = day.description ?? day.condition ?? "";
-            const hi = day.temp_max_c ?? day.high;
-            const lo = day.temp_min_c ?? day.low;
-            return (
-              <div key={day.date || i} style={styles.forecastDay}>
-                <span style={styles.dayLabel}>{shortDay(day.date)}</span>
-                {weatherIcon(dayCondition, 18)}
-                {hi != null && (
-                  <span style={styles.hiTemp}>{Math.round(hi)}&deg;</span>
+/** The place, the dates covered, and one row per day, a week at most with the rest counted. */
+function ForecastCard({ forecast }: { forecast: WeatherForecast }) {
+  const shown = forecast.days.slice(0, FORECAST_ROWS);
+  const first = forecast.days[0];
+  const last = forecast.days[forecast.days.length - 1];
+  const range =
+    first === last
+      ? rangeEnd(first.date)
+      : i18n.t("weather.range", { from: rangeEnd(first.date), to: rangeEnd(last.date) });
+  const hidden = forecast.days.length - shown.length;
+
+  return (
+    <div className="ui-forecast">
+      <div className="ui-forecast__header">
+        <span className="ui-forecast__place">{forecast.location || i18n.t("weather.forecast")}</span>
+        <span className="ui-forecast__range">{range}</span>
+      </div>
+      <ol className="ui-forecast__days">
+        {shown.map((d) => {
+          const label = dayLabel(d.date);
+          const Icon = conditionIcon(d.condition);
+          const spoken = [
+            label,
+            d.condition,
+            d.high !== null ? i18n.t("weather.high", { value: Math.round(d.high) }) : "",
+            d.low !== null ? i18n.t("weather.low", { value: Math.round(d.low) }) : "",
+            d.rainChance !== null ? i18n.t("weather.rain", { value: Math.round(d.rainChance) }) : "",
+          ].filter(Boolean);
+          return (
+            <li key={d.iso} className="ui-forecast__day" aria-label={spoken.join(", ")}>
+              <span className="ui-forecast__label">{label}</span>
+              <span className="ui-forecast__icon" title={d.condition}>
+                <Icon size={16} aria-hidden />
+              </span>
+              <span className="ui-forecast__high">{degrees(d.high)}</span>
+              <span className="ui-forecast__low">{degrees(d.low)}</span>
+              <span className="ui-forecast__rain">
+                {d.rainChance !== null && (
+                  <>
+                    <Droplet size={11} aria-hidden />
+                    {i18n.t("weather.rainChance", { value: Math.round(d.rainChance) })}
+                  </>
                 )}
-                {lo != null && (
-                  <span style={styles.loTemp}>{Math.round(lo)}&deg;</span>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+      {hidden > 0 && <p className="ui-forecast__more">{i18n.t("weather.moreDays", { count: hidden })}</p>}
+    </div>
+  );
+}
+
+/**
+ * Either weather card, by what the payload holds. Progress shows only while the card still holds
+ * its pre-result placeholder; a finished call with nothing to draw says so, with the tool's own
+ * text when it sent some, instead of spinning forever.
+ */
+export function WeatherCard({ data, variant }: McpCardProps) {
+  const weather = readWeatherPayload(data);
+
+  if (weather?.kind === "forecast") return <ForecastCard forecast={weather} />;
+  if (weather?.kind === "current") {
+    return <CurrentWeatherCard weather={weather} isCompact={variant === "compact"} />;
+  }
+
+  if (awaitingResult(data)) {
+    return (
+      <div style={styles.loading} role="status">
+        <Loader
+          size={22}
+          aria-hidden
+          style={{ animation: "weather-spin 1.5s linear infinite", color: "var(--color-info-fg)" }}
+        />
+        <span style={styles.loadingText}>{i18n.t("weather.fetching")}</span>
+        <style>{spinKeyframes}</style>
+      </div>
+    );
+  }
+
+  const text = typeof data.result === "string" ? data.result.trim() : "";
+  return (
+    <div className="ui-forecast" role="status">
+      <p className="ui-forecast__none">{text || i18n.t("weather.nothing")}</p>
     </div>
   );
 }
@@ -466,12 +458,5 @@ registerMcpCard({
     is_day: true,
     sunrise: "06:32",
     sunset: "18:28",
-    forecast: [
-      { date: "2026-05-16", description: "Sunny", temp_max_c: 25, temp_min_c: 14 },
-      { date: "2026-05-17", description: "Partly cloudy", temp_max_c: 23, temp_min_c: 13 },
-      { date: "2026-05-18", description: "Light rain", temp_max_c: 19, temp_min_c: 12 },
-      { date: "2026-05-19", description: "Overcast", temp_max_c: 20, temp_min_c: 11 },
-      { date: "2026-05-20", description: "Sunny", temp_max_c: 26, temp_min_c: 15 },
-    ],
   },
 });

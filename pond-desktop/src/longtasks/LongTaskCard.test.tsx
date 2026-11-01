@@ -252,6 +252,25 @@ describe("reading the whole report", () => {
     expect(card.querySelector(".lt__resultline")?.textContent).toBe("Three days in Lamu, with ferry times.");
   });
 
+  it("shows a finished short answer whole, with no sheet to open", () => {
+    show(
+      doneTask({
+        answer: "short",
+        answer_text: "Jerry was at the front door at 16:10. [Camera events](https://pond.local/events)",
+      }),
+    );
+    const card = document.querySelector(".lt") as HTMLElement;
+    expect(card.querySelector(".lt__answer")?.textContent).toContain("Jerry was at the front door at 16:10.");
+    expect(card.querySelector(".lt__resultline")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Read the result" })).toBeNull();
+  });
+
+  it("keeps a report, or a short answer from an older pond, to its line and its sheet", () => {
+    show(doneTask({ answer: "short", answer_text: null }));
+    expect(document.querySelector(".lt__resultline")).toBeTruthy();
+    expect(readButton()).toBeTruthy();
+  });
+
   it("shows Opening while the report is on its way", async () => {
     let arrive: (r: LongTaskReport) => void = () => {};
     vi.mocked(api.getLongTaskReport).mockReturnValue(new Promise<LongTaskReport>((resolve) => (arrive = resolve)));

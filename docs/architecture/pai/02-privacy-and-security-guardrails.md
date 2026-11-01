@@ -314,9 +314,10 @@ down**, rather than promised. Re-open it when someone is prepared to own the cro
 - **Jetson specifics.** The rootfs is usually on removable media, which makes "stolen device" mean
   "pulled the SD card" and makes the key-beside-ciphertext default worth stating out loud. Power is
   removed by whoever is nearest the socket, which is why the directory `fsync` after the rename is
-  there. There is no fTPM or secure element exposed on an Orin Nano devkit, so there is no hardware
-  sealing to fall back on. Write volume is unchanged from the plaintext store (whole file per set),
-  so flash wear is not a new concern.
+  there. The nano does expose an OP-TEE firmware TPM (`/dev/tpmrm0`; see
+  [the pond administrator](../pond-administrator.md)), but this key is not sealed to it yet; the
+  [context space](../context-space.md) section 9 plans that. Write volume is unchanged from the
+  plaintext store (whole file per set), so flash wear is not a new concern.
 
 ### 3.5 Egress becomes enforcement
 

@@ -25,7 +25,7 @@ step()    { echo -e "\n${BOLD}  -- Step $1: $2 --${NC}"; }
 # Each installer stage sets these; the summary uses them at the end.
 S_RUST=""; S_SUBMODULE=""; S_DEPS=""; S_BUILD=""; S_SETUP=""
 S_WHISPER=""; S_PIPER=""; S_LLM=""; S_VERIFY=""; S_DESKTOP=""
-S_SYSTEMD=""; S_MDNS=""
+S_SYSTEMD=""; S_MDNS=""; S_ACCOUNT=""
 
 status_icon() {
   case "$1" in
@@ -270,6 +270,7 @@ print_summary() {
 
   if [ "$MODE" = "production" ] || [ "$MODE" = "jetson" ]; then
     print_row "Systemd service"    "$S_SYSTEMD"
+    [ -n "$S_ACCOUNT" ] && print_row "Service account" "ok" "$S_ACCOUNT"
     print_row "mDNS (avahi)"       "$S_MDNS"
   fi
 

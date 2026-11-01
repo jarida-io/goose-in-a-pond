@@ -7,8 +7,9 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use pond_core::shared::domain::long_task::{
-    Artifact, ArtifactKind, ArtifactParts, ArtifactSummary, LongTask, LongTaskKind, LongTaskParts,
-    LongTaskState, PlanStep, PlanStepParts, StepKey, StepState, StepStateRefused, ValidatedPlan,
+    AnswerShape, Artifact, ArtifactKind, ArtifactParts, ArtifactSummary, LongTask, LongTaskKind,
+    LongTaskParts, LongTaskState, PlanStep, PlanStepParts, StepKey, StepState, StepStateRefused,
+    ValidatedPlan,
 };
 use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository};
 use pond_core::user_data::domain::profile::ProfileScope;
@@ -16,10 +17,10 @@ use sqlx::{Pool, Sqlite};
 
 /// Column order must match `TaskRow`.
 const TASK_COLUMNS: &str = "id, owner_profile_id, scope, goal, origin_session_id, state, \
-     max_steps, deadline, created_at, updated_at, finished_at, kind";
+     max_steps, deadline, created_at, updated_at, finished_at, kind, answer";
 
 /// `(id, owner_profile_id, scope, goal, origin_session_id, state, max_steps, deadline,
-/// created_at, updated_at, finished_at, kind)`.
+/// created_at, updated_at, finished_at, kind, answer)`.
 type TaskRow = (
     String,
     Option<String>,
@@ -33,14 +34,15 @@ type TaskRow = (
     String,
     Option<String>,
     String,
+    String,
 );
 
 /// Column order must match `StepRow`.
 const STEP_COLUMNS: &str = "task_id, step_key, ordinal, role, instructions, inputs, depends_on, \
-     acceptance, state, attempts, summary, failure, started_at, finished_at";
+     acceptance, state, attempts, summary, failure, started_at, finished_at, agent";
 
 /// `(task_id, step_key, ordinal, role, instructions, inputs, depends_on, acceptance, state,
-/// attempts, summary, failure, started_at, finished_at)`.
+/// attempts, summary, failure, started_at, finished_at, agent)`.
 type StepRow = (
     String,
     String,
@@ -52,6 +54,7 @@ type StepRow = (
     Option<String>,
     String,
     i64,
+    Option<String>,
     Option<String>,
     Option<String>,
     Option<String>,
@@ -174,12 +177,15 @@ fn row_to_task(row: TaskRow) -> Result<LongTask> {
         updated_at,
         finished_at,
         kind,
+        answer,
     ) = row;
     let scope = scope_from_columns(&scope, owner_profile_id.as_deref())?;
     let state = LongTaskState::parse(&state)
         .with_context(|| format!("unreadable state on long task {id}: {state}"))?;
     let kind = LongTaskKind::parse(&kind)
         .with_context(|| format!("unreadable kind on long task {id}: {kind}"))?;
+    let answer = AnswerShape::parse(&answer)
+        .with_context(|| format!("unreadable answer on long task {id}: {answer}"))?;
     let parts = LongTaskParts {
         owner_profile_id,
         scope,
@@ -189,6 +195,7 @@ fn row_to_task(row: TaskRow) -> Result<LongTask> {
         max_steps: u32_column(max_steps, "max_steps")?,
         deadline: parse_opt_ts(deadline)?,
         kind,
+        answer,
         created_at: parse_ts(&created_at)?,
         updated_at: parse_ts(&updated_at)?,
         finished_at: parse_opt_ts(finished_at)?,
@@ -213,6 +220,7 @@ fn row_to_step(row: StepRow) -> Result<PlanStep> {
         failure,
         started_at,
         finished_at,
+        agent,
     ) = row;
     let state = StepState::parse(&state)
         .with_context(|| format!("unreadable state on step {step_key} of {task_id}: {state}"))?;
@@ -230,6 +238,11 @@ fn row_to_step(row: StepRow) -> Result<PlanStep> {
         failure,
         started_at: parse_opt_ts(started_at)?,
         finished_at: parse_opt_ts(finished_at)?,
+        agent: agent
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .with_context(|| format!("unreadable agent on {context}"))?,
         task_id,
         key: step_key,
     };
@@ -281,8 +294,8 @@ impl LongTaskRepository for SqliteLongTaskRepository {
         sqlx::query(
             "INSERT INTO long_tasks \
              (id, owner_profile_id, scope, goal, origin_session_id, state, max_steps, deadline, \
-              created_at, updated_at, finished_at, kind) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              created_at, updated_at, finished_at, kind, answer) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(task.id())
         .bind(task.owner_profile_id())
@@ -296,6 +309,7 @@ impl LongTaskRepository for SqliteLongTaskRepository {
         .bind(sql_ts(task.updated_at()))
         .bind(task.finished_at().map(sql_ts))
         .bind(task.kind().as_str())
+        .bind(task.answer().as_str())
         .execute(&self.pool)
         .await
         .with_context(|| format!("storing long task {}", task.id()))?;
@@ -356,6 +370,20 @@ impl LongTaskRepository for SqliteLongTaskRepository {
                 }
             })
             .collect())
+    }
+
+    async fn decide_task_answer(&self, id: &str, answer: AnswerShape) -> Result<bool> {
+        if answer == AnswerShape::Auto {
+            return Ok(false);
+        }
+        let result =
+            sqlx::query("UPDATE long_tasks SET answer = ? WHERE id = ? AND answer = 'auto'")
+                .bind(answer.as_str())
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .with_context(|| format!("recording long task {id}'s answer"))?;
+        Ok(result.rows_affected() > 0)
     }
 
     async fn set_task_state(
@@ -439,8 +467,8 @@ impl LongTaskRepository for SqliteLongTaskRepository {
             sqlx::query(
                 "INSERT INTO long_task_steps \
                  (task_id, step_key, ordinal, role, instructions, inputs, depends_on, acceptance, \
-                  state, attempts, summary, failure, started_at, finished_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  state, attempts, summary, failure, started_at, finished_at, agent) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(step.task_id())
             .bind(step.key().as_str())
@@ -456,6 +484,7 @@ impl LongTaskRepository for SqliteLongTaskRepository {
             .bind(step.failure())
             .bind(step.started_at().map(sql_ts))
             .bind(step.finished_at().map(sql_ts))
+            .bind(step.agent().map(serde_json::to_string).transpose()?)
             .execute(&mut *tx)
             .await
             .with_context(|| format!("storing step {} of long task {task_id}", step.key()))?;
@@ -592,6 +621,16 @@ impl LongTaskRepository for SqliteLongTaskRepository {
             .with_context(|| format!("deleting long task {id}"))?;
         Ok(result.rows_affected() > 0)
     }
+
+    async fn delete_artifact(&self, task_id: &str, artifact_id: &str) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM long_task_artifacts WHERE id = ? AND task_id = ?")
+            .bind(artifact_id)
+            .bind(task_id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("deleting artifact {artifact_id}"))?;
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 #[cfg(test)]
@@ -630,6 +669,77 @@ mod tests {
             at,
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_step_keeps_the_agent_its_plan_made() {
+        use pond_core::shared::domain::long_task::StepAgent;
+        let (_tmp, _pool, repo) = repo().await;
+        let task = household_task(t(0));
+        repo.create_task(&task).await.unwrap();
+        let made = StepDraft {
+            role: String::new(),
+            new_agent: Some(StepAgent {
+                name: "Fare Checker".into(),
+                instructions: "Compare matatu and SGR fares.".into(),
+                tools: vec!["giap-knowledge".into()],
+            }),
+            ..draft("fares", &[])
+        };
+        plan(&repo, &task, vec![made, draft("write", &["fares"])]).await;
+        let fares = step(&repo, &task, "fares").await;
+        assert_eq!(fares.role(), "new:Fare Checker");
+        assert_eq!(
+            fares.agent().unwrap().tools,
+            vec!["giap-knowledge".to_string()]
+        );
+        assert!(step(&repo, &task, "write").await.agent().is_none());
+    }
+
+    #[tokio::test]
+    async fn the_planner_decides_a_tasks_answer_only_when_nobody_chose() {
+        let (_tmp, pool, repo) = repo().await;
+        let auto = household_task(t(0));
+        repo.create_task(&auto).await.unwrap();
+        assert_eq!(
+            repo.get_task(auto.id()).await.unwrap().unwrap().answer(),
+            AnswerShape::Auto
+        );
+        assert!(!repo
+            .decide_task_answer(auto.id(), AnswerShape::Auto)
+            .await
+            .unwrap());
+        assert!(repo
+            .decide_task_answer(auto.id(), AnswerShape::Short)
+            .await
+            .unwrap());
+        assert!(!repo
+            .decide_task_answer(auto.id(), AnswerShape::Report)
+            .await
+            .unwrap());
+        assert_eq!(
+            repo.get_task(auto.id()).await.unwrap().unwrap().answer(),
+            AnswerShape::Short
+        );
+
+        let chosen = household_task(t(1)).with_answer(AnswerShape::Report);
+        repo.create_task(&chosen).await.unwrap();
+        assert!(!repo
+            .decide_task_answer(chosen.id(), AnswerShape::Short)
+            .await
+            .unwrap());
+        assert_eq!(
+            repo.get_task(chosen.id()).await.unwrap().unwrap().answer(),
+            AnswerShape::Report
+        );
+        assert!(
+            sqlx::query("UPDATE long_tasks SET answer = 'essay' WHERE id = ?")
+                .bind(chosen.id())
+                .execute(&pool)
+                .await
+                .is_err(),
+            "the column accepts only the shapes the domain knows"
+        );
     }
 
     #[tokio::test]
@@ -1244,6 +1354,32 @@ mod tests {
             repo.insert_artifact(&orphan).await.is_err(),
             "the foreign key let it in"
         );
+    }
+
+    #[tokio::test]
+    async fn an_artifact_is_deleted_only_through_its_own_task() {
+        let (_tmp, _pool, repo) = repo().await;
+        let mine = household_task(t(0));
+        let theirs = household_task(t(0));
+        repo.create_task(&mine).await.unwrap();
+        repo.create_task(&theirs).await.unwrap();
+        let kept = note(&theirs, None, "kept", t(1));
+        let gone = note(&theirs, None, "gone", t(2));
+        repo.insert_artifact(&kept).await.unwrap();
+        repo.insert_artifact(&gone).await.unwrap();
+
+        assert!(!repo.delete_artifact(mine.id(), gone.id()).await.unwrap());
+        assert!(repo.delete_artifact(theirs.id(), gone.id()).await.unwrap());
+        assert!(!repo.delete_artifact(theirs.id(), gone.id()).await.unwrap());
+        let left: Vec<String> = repo
+            .list_artifacts(theirs.id())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(left, [kept.id().to_string()]);
+        assert!(repo.get_task(theirs.id()).await.unwrap().is_some());
     }
 
     #[tokio::test]

@@ -418,21 +418,30 @@ export interface Schedule {
   prompt: string;
   enabled: boolean;
   timezone?: string;
-  kind?: { type: "agent_prompt"; prompt: string } | { type: "webhook"; webhook_url: string };
+  kind?:
+    | { type: "agent_prompt"; prompt: string }
+    | { type: "webhook"; webhook_url: string }
+    | { type: "routine"; actions: Array<{ type: string } & Record<string, unknown>> };
   last_run?: string;
   next_run?: string;
   created_at?: string;
+  /** Ask before running a fire time missed while the Pond was down. */
+  ask_if_missed?: boolean;
+  /** The missed fire time waiting for an answer. */
+  missed_run?: { due_at: string } | null;
 }
 
 export interface ScheduleRun {
   id: string;
   schedule_id: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "skipped";
   result?: string;
   error?: string;
   started_at: string;
   finished_at?: string;
   duration_ms?: number;
+  /** Set on a missed run someone chose to make late: when it was originally due. */
+  caught_up_from?: string;
 }
 
 /** Enriched schedule run for UI notification display. */
@@ -440,7 +449,7 @@ export interface ScheduleRunNotification {
   id: string;
   scheduleId: string;
   scheduleName: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "skipped";
   result: string | null;
   error: string | null;
   startedAt: string;
@@ -1010,6 +1019,10 @@ export interface LongTask {
   state: LongTaskState;
   /** Absent from an older pond, which only has general tasks. */
   kind?: LongTaskKind;
+  /** How long the answer is meant to be; absent from an older pond. `auto` until its planner decides. */
+  answer?: ResearchAnswer;
+  /** A finished short answer's whole text, shown on the card; `null` for anything else. */
+  answer_text?: string | null;
   origin_session_id: string | null;
   created_at: string;
   updated_at: string;
@@ -1087,7 +1100,12 @@ export interface ChatStreamRequest {
   resumable?: boolean;
   /** The message is a research question: the pond starts deep research on it. */
   deep_research?: boolean;
+  /** How long that research's answer should be; absent lets the pond decide from the question. */
+  deep_research_answer?: ResearchAnswer;
 }
+
+/** How long a long task's answer should be: `auto` leaves it to the pond's reading of the ask. */
+export type ResearchAnswer = "auto" | "short" | "report";
 
 /**
  * Answer of `GET /long-tasks/deep-research`. `off` means the household switched long tasks or the
@@ -1288,9 +1306,14 @@ export interface RecoveryRequest {
 export interface PairingCodeResponse {
   code: string | null;
   expires_at?: string;
+  /** The household member a device pairing with this code becomes; null binds it to nobody. */
+  profile_id?: string | null;
   /** Where a phone connects and which key it pins; sent only on this host-only route. */
   pairing: PairingMaterial;
 }
+
+/** Whose a device pairing with a new code becomes: a named member, or explicitly nobody. */
+export type PairingCodeBinding = { profile_id: string } | { unattributed: true };
 
 export interface PairingMaterial {
   hostname: string;

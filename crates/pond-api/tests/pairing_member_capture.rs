@@ -144,6 +144,7 @@ async fn make_app() -> Harness {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        pond_admin: None,
     });
 
     let dist = std::path::PathBuf::from("pond-desktop/dist");
@@ -624,4 +625,47 @@ async fn devices_self_requires_a_token() {
     let h = make_app().await;
     let (status, body) = device_self(&h, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
+}
+
+/// The household of 2026-10-27, end to end through the routes: a phone that paired before the
+/// pond had any member stays nobody's once members exist, a code issued with no body still binds
+/// nobody once there are two, and the one way back is pairing the same phone again with a code
+/// issued for its member. No `profile_id` is written by hand anywhere in this test.
+#[tokio::test]
+async fn a_phone_paired_before_any_member_existed_is_claimed_by_pairing_again_for_its_member() {
+    let h = make_app().await;
+    let (_, before_members) = issue(&h.loopback, None).await;
+    let first = pair(&h, &code_of(&before_members), "a57-install").await;
+
+    let emmanuel = a_member(&h, "Emmanuel Charles Oyugi").await;
+    a_member(&h, "Jerry").await;
+    let (status, body) = device_self(&h, Some(&first)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(
+        body["profile"].is_null(),
+        "creating members attributes no device already paired; body: {body}"
+    );
+
+    let (_, no_body) = issue(&h.loopback, None).await;
+    assert!(
+        no_body["profile_id"].is_null(),
+        "with two members a code nobody was named for binds nobody; body: {no_body}"
+    );
+
+    let (status, for_him) = issue(
+        &h.loopback,
+        Some(&format!(r#"{{"profile_id":"{emmanuel}"}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {for_him}");
+    let again = pair(&h, &code_of(&for_him), "a57-install").await;
+
+    let (status, body) = device_self(&h, Some(&again)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        body["device_id"], "a57-install",
+        "the same install id, so the same device row; body: {body}"
+    );
+    assert_eq!(body["profile"]["id"], emmanuel, "body: {body}");
+    assert_eq!(body["profile"]["display_name"], "Emmanuel Charles Oyugi");
 }

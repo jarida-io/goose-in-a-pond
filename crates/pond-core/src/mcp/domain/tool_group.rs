@@ -165,18 +165,19 @@ pub const TOOL_GROUPS: &[ToolGroup] = &[
 /// giap-knowledge's line with both its keyed tools on offer: the line E8 measured.
 const KNOWLEDGE_WITH_WEB_AND_COMPUTE: &str =
     "Looking things up, working things out and searching the web: encyclopedia articles about \
-     people, places and events, exact arithmetic, unit conversions and dates, and the web for \
-     anything current, local or specific, such as news, opening hours, prices and products.";
+     people, places and events, exact arithmetic, unit conversions and dates, the web for \
+     anything current, local or specific, such as news, opening hours, prices and products, and \
+     reading a web page from its link.";
 /// The same line without the Wolfram tool, keeping E8's words for the web.
 const KNOWLEDGE_WITH_WEB: &str =
     "Looking things up and searching the web: encyclopedia articles about people, places and \
-     events, and the web for anything current, local or specific, such as news, opening hours, \
-     prices and products.";
+     events, the web for anything current, local or specific, such as news, opening hours, \
+     prices and products, and reading a web page from its link.";
 const KNOWLEDGE_WITH_COMPUTE: &str =
     "Looking things up and working things out: encyclopedia articles about people, places and \
-     events, and exact arithmetic, unit conversions and dates.";
-const KNOWLEDGE_ALONE: &str =
-    "Looking things up: encyclopedia articles about people, places and events.";
+     events, exact arithmetic, unit conversions and dates, and reading a web page from its link.";
+const KNOWLEDGE_ALONE: &str = "Looking things up: encyclopedia articles about people, places and \
+     events, and reading a web page from its link.";
 
 /// `group`'s line as a turn shows it to the model: giap-knowledge's names only the keyed tools
 /// `is_withheld` lets the turn offer, so it never promises one the turn holds back.
@@ -287,6 +288,15 @@ pub fn groups_denied_to_guests() -> &'static [&'static str] {
         TASK_WORK_EXTENSION,
     ]
 }
+
+/// Tools a long task's helper may hold from groups no subagent holds whole. Each reads the house
+/// and changes nothing: it shows no camera picture, sends nothing, and schedules or switches nothing.
+pub const HOUSEHOLD_READ_TOOLS: &[&str] = &[
+    "giap-vision__get_recent_camera_events",
+    "giap-vision__list_vision_automations",
+    "giap-schedule__list_schedules",
+    "giap-device__list_registered_devices",
+];
 
 /// Groups a subagent must never be given, however wide its parent. It has no identity or approval
 /// path, so the tool set is the only boundary; subtract from the DERIVED set or core groups return.
@@ -464,7 +474,11 @@ mod requirement_tests {
             (compute_only, false, true),
             (neither, false, false),
         ] {
-            assert_eq!(shown.contains("web"), promises_web, "{shown}");
+            assert_eq!(shown.contains("searching the web"), promises_web, "{shown}");
+            assert!(
+                shown.contains("reading a web page from its link"),
+                "a page read needs no key: {shown}"
+            );
             assert_eq!(
                 shown.contains("working things out") || shown.contains("arithmetic"),
                 promises_compute,

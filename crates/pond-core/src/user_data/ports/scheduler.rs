@@ -1,6 +1,6 @@
 //! SchedulerPort — schedule recurring tasks via cron expressions.
 
-use crate::user_data::domain::schedule::{Schedule, ScheduleRun, TaskKind};
+use crate::user_data::domain::schedule::{MissedRunAnswer, Schedule, ScheduleRun, TaskKind};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -23,6 +23,9 @@ pub struct CreateScheduleRequest {
     pub timezone: String,
     /// What to do on each fire.
     pub kind: TaskKind,
+    /// Ask before running a fire time missed while the pond was down.
+    #[serde(default)]
+    pub ask_if_missed: bool,
 }
 
 /// Partial update of a scheduled task: only provided fields change.
@@ -39,6 +42,8 @@ pub struct UpdateScheduleRequest {
     /// Convert to a one-shot at `cron`'s next occurrence; ignored if `fire_at` is set.
     #[serde(default)]
     pub once: bool,
+    #[serde(default)]
+    pub ask_if_missed: Option<bool>,
 }
 
 #[async_trait]
@@ -62,6 +67,13 @@ pub trait SchedulerPort: Send + Sync {
 
     /// List schedules sorted by next fire time (soonest first).
     async fn list_upcoming(&self, limit: u32) -> Result<Vec<Schedule>>;
+
+    /// Settle the missed run `id` is asking about: run it now or record it skipped. The first
+    /// answer wins; a later one is refused with
+    /// [`NoMissedRun`](crate::user_data::domain::schedule::NoMissedRun).
+    async fn answer_missed_run(&self, id: &str, _answer: MissedRunAnswer) -> Result<()> {
+        anyhow::bail!("schedule '{id}': this scheduler does not ask about missed runs")
+    }
 
     /// Inject the real executor once the agent exists (breaks a circular init dependency).
     async fn set_executor(

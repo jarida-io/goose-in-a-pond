@@ -43,7 +43,7 @@ CUR_USED_KB="$(awk '/^\/swapfile/ {print $4}' /proc/swaps 2>/dev/null || echo 0)
 if [ -f /swapfile ]; then
   if [ "${CUR_USED_KB:-0}" -gt 262144 ]; then
     note "WARNING: /swapfile holds $((CUR_USED_KB/1024)) MB — swapoff must page it back into RAM."
-    note "Stop the pond first:  systemctl --user stop goose-in-a-pond"
+    note "Stop the pond first:  systemctl --user stop goose-in-a-pond   (run by agamemnon: sudo systemctl stop goose-in-a-pond)"
     read -r -p "   Continue anyway? [y/N] " a; [ "$a" = y ] || { note "skipped swap"; SKIP_SWAP=1; }
   fi
   if [ -z "${SKIP_SWAP:-}" ]; then

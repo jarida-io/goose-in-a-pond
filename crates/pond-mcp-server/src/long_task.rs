@@ -7,15 +7,17 @@
 use chrono::Utc;
 use pond_core::mcp::domain::tool_group::{TASKS_EXTENSION, TASK_WORK_EXTENSION};
 use pond_core::shared::domain::long_task::{
-    next_ready_step, validate_plan, Artifact, ArtifactKind, ArtifactSummary, LongTask,
-    LongTaskBudget, LongTaskState, LongTaskStateRefused, OutcomeKind, PlanStep, StalePlan,
-    StepDraft, StepOutcome, StepState, DEFAULT_LONG_TASK_STEPS,
+    match_waits_by_name, next_ready_step, read_step_draft, validate_plan, AnswerShape, Artifact,
+    ArtifactKind, ArtifactSummary, LongTask, LongTaskBudget, LongTaskState, LongTaskStateRefused,
+    OutcomeKind, PlanStep, StalePlan, StepDraft, StepOutcome, StepState, DEFAULT_LONG_TASK_STEPS,
 };
 use pond_core::shared::domain::orchestration::DelegationAuthority;
 use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository};
 use pond_core::shared::services::child_sessions::{process_child_sessions, ChildSessionRegistry};
+use pond_core::shared::services::long_task_open::{open_task, OpeningBrief};
 use pond_core::shared::services::long_task_queue::{place_of, run_order, waiting_line};
-use pond_core::shared::services::long_task_runner::result_artifact;
+use pond_core::shared::services::long_task_roles::WORKER_ROLE;
+use pond_core::shared::services::long_task_runner::{clip_brief, result_artifact};
 use pond_core::shared::services::step_bindings::{
     process_step_bindings, StepBinding, StepBindings, StepWork,
 };
@@ -33,7 +35,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use tokio::io::DuplexStream;
 use tokio::sync::Notify;
@@ -231,18 +233,24 @@ fn quoted(items: &[String]) -> String {
 }
 
 /// Wrap an answer or a refusal as tool success, logging the refusal.
+const REFUSAL_TRACE_CHARS: usize = 400;
+
 fn answer(tool: &'static str, outcome: Result<String, Refusal>) -> CallToolResult {
     let text = match outcome {
         Ok(text) => text,
         Err(refusal) => {
+            let message = refusal.message();
+            // The model's own session is not kept, so this is the only record of what it was told.
+            let said: String = message.chars().take(REFUSAL_TRACE_CHARS).collect();
             tracing::warn!(
                 target: "giap::trace",
                 kind = "long_task_tool_refused",
                 tool,
                 reason = refusal.trace(),
+                message = %said,
                 "a long-task tool call was refused"
             );
-            refusal.message()
+            message
         }
     };
     CallToolResult::success(vec![ContentBlock::text(text)])
@@ -294,6 +302,13 @@ fn token_count(value: Option<Value>, field: &str) -> Result<Option<u32>, Refusal
 pub struct TaskStartParams {
     /// What the finished work should give the person, in one or two sentences.
     pub goal: Option<String>,
+    /// Everything from this conversation the helpers need that the goal leaves out: who it is for,
+    /// dates and places, budget, diets and allergies, what was decided or ruled out. They see
+    /// nothing of the conversation but this and the goal.
+    pub brief: Option<String>,
+    /// short or report, only when the person said how much they want: short is the answer in a
+    /// few sentences, report is the whole of it in sections. Leave it out otherwise.
+    pub answer: Option<String>,
     #[serde(flatten)]
     #[schemars(skip)]
     pub extra: HashMap<String, Value>,
@@ -456,6 +471,10 @@ impl TasksMcpServer {
             })?;
         let budget = LongTaskBudget::new(DEFAULT_LONG_TASK_STEPS, None)
             .map_err(|e| Refusal::Rejected(e.to_string()))?;
+        let answer = non_blank(params.answer.take())
+            .or_else(|| take_alias(&mut params.extra, &ANSWER_ALIASES))
+            .and_then(|raw| AnswerShape::read(&raw))
+            .unwrap_or_default();
         let task = LongTask::start(
             authority.profile_scope().clone(),
             None,
@@ -464,8 +483,19 @@ impl TasksMcpServer {
             budget,
             Utc::now(),
         )
-        .map_err(|e| Refusal::Rejected(e.to_string()))?;
-        deps.repo.create_task(&task).await.map_err(store)?;
+        .map_err(|e| Refusal::Rejected(e.to_string()))?
+        .with_answer(answer);
+        let brief = params
+            .brief
+            .as_deref()
+            .and_then(clip_brief)
+            .map(|body| OpeningBrief {
+                summary: "What the conversation said that the goal leaves out",
+                body,
+            });
+        let task = open_task(deps.repo.as_ref(), task, brief)
+            .await
+            .map_err(store)?;
         deps.wake_runner();
         let open = deps
             .repo
@@ -496,23 +526,7 @@ impl TasksMcpServer {
 
     async fn run_status(&self, meta: &Meta, params: TaskIdParams) -> Result<String, Refusal> {
         let (deps, authority) = self.caller(meta)?;
-        let scope = authority.profile_scope();
-        if let Some(task_id) = task_id_of(params) {
-            let task = reached_task(&deps, scope, &task_id).await?;
-            let steps = deps.repo.list_steps(task.id()).await.map_err(store)?;
-            let result = result_of(deps.repo.as_ref(), task.id()).await?;
-            return Ok(task_summary_for_notice(&task, &steps, result.as_ref()));
-        }
-        let tasks = reached_tasks(&deps, scope).await?;
-        if tasks.is_empty() {
-            return Ok("There are no long tasks running for this person.".to_string());
-        }
-        let mut lines = vec![format!("Long tasks still running: {}", tasks.len())];
-        for task in &tasks {
-            let steps = deps.repo.list_steps(task.id()).await.map_err(store)?;
-            lines.push(task_line(task, &steps));
-        }
-        Ok(lines.join("\n"))
+        status_text(&deps, authority.profile_scope(), task_id_of(params)).await
     }
 
     async fn run_cancel(&self, meta: &Meta, params: TaskIdParams) -> Result<String, Refusal> {
@@ -554,6 +568,52 @@ impl TasksMcpServer {
 }
 
 /// One task if this scope reaches it; a foreign id and an unknown one read the same.
+/// What `task_status` answers: one task, or every task still running for this person.
+async fn status_text(
+    deps: &LongTaskDeps,
+    scope: &ProfileScope,
+    task_id: Option<String>,
+) -> Result<String, Refusal> {
+    if let Some(task_id) = task_id {
+        let task = reached_task(deps, scope, &task_id).await?;
+        let steps = deps.repo.list_steps(task.id()).await.map_err(store)?;
+        let result = result_of(deps.repo.as_ref(), task.id()).await?;
+        return Ok(task_summary_for_notice(&task, &steps, result.as_ref()));
+    }
+    let tasks = reached_tasks(deps, scope).await?;
+    if tasks.is_empty() {
+        return Ok(NO_TASKS_RUNNING.to_string());
+    }
+    let mut lines = vec![format!("Long tasks still running: {}", tasks.len())];
+    for task in &tasks {
+        let steps = deps.repo.list_steps(task.id()).await.map_err(store)?;
+        lines.push(task_line(task, &steps));
+    }
+    Ok(lines.join("\n"))
+}
+
+const NO_TASKS_RUNNING: &str = "There are no long tasks running for this person.";
+
+/// `task_status`'s answer for a call that reached `check_task` instead: the prime often asks it
+/// about a task `task_start` began. `None` when the id is no long task of theirs, or none runs.
+pub(crate) async fn long_task_status_for(
+    scope: &ProfileScope,
+    task_id: Option<&str>,
+) -> Option<String> {
+    long_task_status_with(&installed_long_task_deps()?, scope, task_id).await
+}
+
+async fn long_task_status_with(
+    deps: &LongTaskDeps,
+    scope: &ProfileScope,
+    task_id: Option<&str>,
+) -> Option<String> {
+    status_text(deps, scope, task_id.map(str::to_string))
+        .await
+        .ok()
+        .filter(|text| text != NO_TASKS_RUNNING)
+}
+
 async fn reached_task(
     deps: &LongTaskDeps,
     scope: &ProfileScope,
@@ -781,12 +841,31 @@ pub struct ArtifactWriteParams {
     /// The content itself.
     #[schemars(with = "Option<String>")]
     pub body: Option<Value>,
+    /// true on your step's last save when the step is done: it also reports the step completed,
+    /// so you need no step_report.
+    #[schemars(with = "Option<bool>")]
+    pub finish: Option<Value>,
     #[serde(flatten)]
     #[schemars(skip)]
     pub extra: HashMap<String, Value>,
 }
 
 const TITLE_ALIASES: [&str; 1] = ["name"];
+const ANSWER_ALIASES: [&str; 3] = ["answer_shape", "length", "shape"];
+/// The most steps a short answer's plan may have: one to find it, a second for another place.
+const MAX_SHORT_STEPS: usize = 2;
+const FINISH_ALIASES: [&str; 3] = ["done", "final", "last"];
+
+/// A yes from a bool or the words a model writes for one; anything else is no.
+fn says_yes(value: Option<Value>) -> bool {
+    match value {
+        Some(Value::Bool(yes)) => yes,
+        Some(Value::String(text)) => {
+            matches!(text.trim().to_ascii_lowercase().as_str(), "true" | "yes")
+        }
+        _ => false,
+    }
+}
 const SUMMARY_ALIASES: [&str; 2] = ["description", "one_line"];
 const BODY_ALIASES: [&str; 3] = ["content", "text", "contents"];
 
@@ -823,6 +902,9 @@ pub struct PlanWriteParams {
     /// Every step still to do, in order.
     #[schemars(with = "Option<Vec<PlanStepSchema>>")]
     pub steps: Option<Value>,
+    /// short or report: how long the person wants the answer, when the brief asks you to decide.
+    #[schemars(with = "Option<String>")]
+    pub answer: Option<Value>,
     #[serde(flatten)]
     #[schemars(skip)]
     pub extra: HashMap<String, Value>,
@@ -916,7 +998,8 @@ many tokens remain, so read a long one part by part.")]
 
     #[tool(description = "\
 Save what this step found, for later steps to read: `kind` (note, findings, draft or data), a \
-short `title`, a one-line `summary` and the `body`. Returns the artifact's id.")]
+short `title`, a one-line `summary` and the `body`. Returns the artifact's id. On the step's last \
+save, set `finish` to true to report the step completed in the same call.")]
     async fn artifact_write(
         &self,
         ctx: RequestContext<RoleServer>,
@@ -945,8 +1028,10 @@ found, in a few sentences; `failure` = why, if it failed; `artifacts` = ids of w
     }
 
     #[tool(description = "\
-Write this task's plan: every step still to do, in order. Steps already started or finished \
-stay as they are. If it is refused, fix what the message names and call it again.")]
+Write this task's plan: every step still to do, in order. Each step names a listed `role`, or \
+carries a `new_agent` (name, instructions, tools) when none is for it. Give `answer`, short or \
+report, when the brief asks you to decide it. Steps already started or finished stay as they are. \
+If it is refused, fix what the message names and call it again.")]
     async fn plan_write(
         &self,
         ctx: RequestContext<RoleServer>,
@@ -1107,7 +1192,14 @@ impl TaskWorkMcpServer {
                 Value::String(text) => text,
                 other => other.to_string(),
             })
+            .map(|text| absolute_links(&text))
             .unwrap_or_default();
+        let finish = says_yes(
+            params
+                .finish
+                .take()
+                .or_else(|| take_value(&mut params.extra, &FINISH_ALIASES)),
+        );
 
         let artifact = Artifact::new(
             &helper.binding.task_id,
@@ -1126,11 +1218,27 @@ impl TaskWorkMcpServer {
             .await
             .map_err(store)?;
         self.bindings.note_artifact(&helper.root, artifact.id());
+        if !finish {
+            return Ok(format!(
+                "Saved artifact `{}` ({} tokens). Name it in step_report's artifacts so later \
+                 steps can find it, or save your last artifact with finish true.",
+                artifact.id(),
+                artifact.tokens()
+            ));
+        }
+        let said = if summary.is_empty() { &title } else { &summary };
+        let outcome = StepOutcome::new(
+            OutcomeKind::Completed,
+            said,
+            self.bindings.written_by(&helper.root),
+            None,
+        );
+        if !self.bindings.report(&helper.root, outcome) {
+            return Err(Refusal::ReportTooLate);
+        }
         Ok(format!(
-            "Saved artifact `{}` ({} tokens). Name it in step_report's artifacts so later steps \
-             can find it.",
-            artifact.id(),
-            artifact.tokens()
+            "Saved artifact `{}` and recorded the step as completed. Your step is done; stop here.",
+            artifact.id()
         ))
     }
 
@@ -1139,27 +1247,25 @@ impl TaskWorkMcpServer {
         if helper.binding.work == StepWork::Plan {
             return Err(Refusal::PlannerDoesNotReport);
         }
-        let outcome = StepOutcome::from_json(&report_object(params))
+        let mut outcome = StepOutcome::from_json(&report_object(params))
             .map_err(|e| Refusal::Rejected(e.to_string()))?;
         if !outcome.artifacts().is_empty() {
-            let held: HashSet<String> = helper
+            let held = helper
                 .deps
                 .repo
                 .list_artifacts(&helper.binding.task_id)
                 .await
-                .map_err(store)?
-                .into_iter()
-                .map(|artifact| artifact.id)
-                .collect();
-            let unknown: Vec<String> = outcome
-                .artifacts()
-                .iter()
-                .filter(|id| !held.contains(*id))
-                .cloned()
-                .collect();
-            if !unknown.is_empty() {
-                return Err(Refusal::UnknownArtifacts(unknown));
-            }
+                .map_err(store)?;
+            let written = self.bindings.written_by(&helper.root);
+            // Reported before saving anything: say what to do, not only which names were wrong.
+            let named = name_artifacts(outcome.artifacts(), &held, &written).map_err(|_| {
+                Refusal::Rejected(
+                    "You have saved nothing yet, so there is no artifact to name. Save your work \
+                     with artifact_write and finish true: that also reports the step."
+                        .to_string(),
+                )
+            })?;
+            outcome = outcome.with_artifacts(named);
         }
         let said = outcome_phrase(outcome.outcome());
         if !self.bindings.report(&helper.root, outcome) {
@@ -1179,7 +1285,12 @@ impl TaskWorkMcpServer {
             .steps
             .take()
             .or_else(|| take_value(&mut params.extra, &["plan"]));
-        let drafts = plan_drafts(raw)?;
+        let (drafts, ignored) = plan_drafts(raw)?;
+        let answer = params
+            .answer
+            .take()
+            .or_else(|| take_value(&mut params.extra, &ANSWER_ALIASES))
+            .and_then(|value| value.as_str().and_then(AnswerShape::read));
 
         let repo = &helper.deps.repo;
         let Some(task) = repo
@@ -1192,8 +1303,28 @@ impl TaskWorkMcpServer {
             ));
         };
         let current = repo.list_steps(task.id()).await.map_err(store)?;
+        // Told to plan one step for a short answer, the planner still wrote three, and the answer
+        // took minutes more; one refusal costs less.
+        let shape = match task.answer() {
+            AnswerShape::Auto => answer.unwrap_or(AnswerShape::Auto),
+            chosen => chosen,
+        };
+        if shape == AnswerShape::Short && drafts.len() > MAX_SHORT_STEPS {
+            return Err(Refusal::Rejected(format!(
+                "This is a short answer, and you planned {} steps. Plan one step that finds the \
+                 answer and saves it as the Result, or two when it needs two different places \
+                 looked in, then call plan_write again.",
+                drafts.len()
+            )));
+        }
         let plan =
             validate_plan(&task, drafts, &current).map_err(|e| Refusal::Rejected(e.to_string()))?;
+        // Before the steps, so the first worker is briefed for the answer the planner chose.
+        if let Some(answer) = answer {
+            repo.decide_task_answer(task.id(), answer)
+                .await
+                .map_err(store)?;
+        }
         if let Err(e) = repo.replace_open_steps(&plan).await {
             return Err(match e.downcast_ref::<StalePlan>() {
                 Some(stale) => Refusal::Rejected(stale.to_string()),
@@ -1217,6 +1348,24 @@ impl TaskWorkMcpServer {
                 " Kept as they are, already started or finished: {}.",
                 quoted(&kept)
             ));
+        }
+        for wait in plan.relaxed_waits() {
+            text.push_str(&format!(
+                " `{}` waited for `{}`, which is not a step here, so it waits for every step \
+                 before it.",
+                wait.step, wait.missing
+            ));
+        }
+        if !ignored.is_empty() {
+            text.push_str(&format!(
+                " Ignored, as no step reads them: {}.",
+                quoted(&ignored)
+            ));
+            if ignored.iter().any(|name| name.contains("tool")) {
+                text.push_str(
+                    " A step's tools come from its role; give a step other tools with `new_agent`.",
+                );
+            }
         }
         Ok(text)
     }
@@ -1269,10 +1418,93 @@ fn outcome_phrase(outcome: OutcomeKind) -> &'static str {
     }
 }
 
-/// Each step parsed on its own, so one unreadable step is named instead of failing the call.
-fn plan_drafts(raw: Option<Value>) -> Result<Vec<StepDraft>, Refusal> {
-    let shape = "plan_write needs `steps`: a list of steps, each with `key`, `role` and \
-                 `instructions`.";
+/// A Markdown link whose target is a bare web address, `[Guide](rome2rio.com/x)`, with `https://`
+/// put in front: the model shortens the address the search gave, and the card would open it as a
+/// path on the pond.
+fn absolute_links(body: &str) -> String {
+    let mut out = String::with_capacity(body.len() + 16);
+    let mut rest = body;
+    while let Some(at) = rest.find("](") {
+        let start = at + 2;
+        out.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let end = rest.find(')').unwrap_or(rest.len());
+        let target = &rest[..end];
+        // `rome2rio.com, 2023-04-14`: the address, then words the model added to it.
+        let (address, extra) = match target.find([',', ' ']) {
+            Some(at) => (&target[..at], target[at..].trim_start_matches([',', ' '])),
+            None => (target, ""),
+        };
+        let host = address.split('/').next().unwrap_or("");
+        let bare = !address.contains("://")
+            && !address.starts_with(['/', '#', '.'])
+            && !address.starts_with("mailto:")
+            && host.contains('.')
+            && host
+                .rsplit('.')
+                .next()
+                .is_some_and(|tld| tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic()));
+        rest = &rest[end..];
+        if !bare {
+            out.push_str(target);
+            continue;
+        }
+        out.push_str("https://");
+        out.push_str(address);
+        if !extra.is_empty() && rest.starts_with(')') {
+            out.push_str(&format!(") ({extra}"));
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A report's artifacts as ids. A model names one by its title, or by a placeholder it made up;
+/// refusing that cost a whole try, so a title is read as its artifact, and anything else as what
+/// this run saved. Only a run that saved nothing is refused, with the names it got wrong.
+fn name_artifacts(
+    asked: &[String],
+    held: &[ArtifactSummary],
+    written: &[String],
+) -> Result<Vec<String>, Vec<String>> {
+    let mut ids = Vec::with_capacity(asked.len());
+    let mut unknown = Vec::new();
+    for raw in asked {
+        let wanted = raw.trim();
+        let found = held
+            .iter()
+            .find(|a| a.id == wanted)
+            .or_else(|| {
+                held.iter()
+                    .filter(|a| a.title.trim().eq_ignore_ascii_case(wanted))
+                    .max_by_key(|a| a.created_at)
+            })
+            .map(|a| a.id.clone());
+        match found {
+            Some(id) if !ids.contains(&id) => ids.push(id),
+            Some(_) => {}
+            None => unknown.push(raw.clone()),
+        }
+    }
+    if unknown.is_empty() {
+        return Ok(ids);
+    }
+    if written.is_empty() {
+        return Err(unknown);
+    }
+    for id in written {
+        if !ids.contains(id) {
+            ids.push(id.clone());
+        }
+    }
+    Ok(ids)
+}
+
+/// Each step parsed on its own, so every unreadable step is named in one refusal. Also returns the
+/// fields no step reads, which are ignored rather than refused.
+fn plan_drafts(raw: Option<Value>) -> Result<(Vec<StepDraft>, Vec<String>), Refusal> {
+    let shape = "plan_write needs `steps`: a list of steps, each with `key`, `role` (or \
+                 `new_agent`) and `instructions`.";
     let Some(mut value) = raw else {
         return Err(Refusal::Malformed(shape.to_string()));
     };
@@ -1285,19 +1517,66 @@ fn plan_drafts(raw: Option<Value>) -> Result<Vec<StepDraft>, Refusal> {
         object @ Value::Object(_) => vec![object],
         _ => return Err(Refusal::Malformed(shape.to_string())),
     };
-    items
+    let mut read = Vec::with_capacity(items.len());
+    let mut unreadable = Vec::new();
+    let mut ignored: Vec<String> = Vec::new();
+    for (i, item) in items.into_iter().enumerate() {
+        let had: Vec<String> = item
+            .as_object()
+            .map(|fields| fields.keys().cloned().collect())
+            .unwrap_or_default();
+        match read_step_draft(item, i + 1) {
+            Ok(step) => {
+                for name in &step.ignored {
+                    if !ignored.contains(name) {
+                        ignored.push(name.clone());
+                    }
+                }
+                read.push(step);
+            }
+            Err(e) if had.is_empty() => {
+                unreadable.push(format!("step {} cannot be read: {e}", i + 1))
+            }
+            Err(e) => unreadable.push(format!(
+                "step {} cannot be read: {e} (it has {})",
+                i + 1,
+                quoted(&had)
+            )),
+        }
+    }
+    if !unreadable.is_empty() {
+        let fine = if read.is_empty() {
+            String::new()
+        } else {
+            " The other steps are fine; send them again unchanged with these fixed.".to_string()
+        };
+        return Err(Refusal::Malformed(format!(
+            "{}. Each step takes `key`, `role` or `new_agent`, `instructions`, and optionally \
+             `inputs`, `depends_on` and `acceptance`.{fine}",
+            capitalised(&unreadable.join("; "))
+        )));
+    }
+    match_waits_by_name(&mut read);
+    let drafts = read
         .into_iter()
-        .enumerate()
-        .map(|(i, item)| {
-            serde_json::from_value::<StepDraft>(item).map_err(|e| {
-                Refusal::Malformed(format!(
-                    "Step {} cannot be read: {e}. Each step takes only `key`, `role`, \
-                     `instructions`, `inputs`, `depends_on` and `acceptance`.",
-                    i + 1
-                ))
-            })
+        .map(|step| {
+            let mut draft = step.draft;
+            // A step that names neither a role nor an agent is the general hand's.
+            if draft.role.trim().is_empty() && draft.new_agent.is_none() {
+                draft.role = WORKER_ROLE.to_string();
+            }
+            draft
         })
-        .collect()
+        .collect();
+    Ok((drafts, ignored))
+}
+
+fn capitalised(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 /// The part of `artifact` to return and how to ask for the next one.
@@ -1531,6 +1810,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_primes_brief_is_saved_for_every_helper_and_a_blank_one_is_not() {
+        let pond = Pond::new();
+        let prime = pond.prime();
+        let _liz = pond.turn("engine-liz", "giap-liz", ProfileScope::Owner("liz".into()));
+        let started = prime
+            .run_start(
+                &meta_for("engine-liz"),
+                params(serde_json::json!({
+                    "goal": "a four-day Mombasa plan",
+                    "brief": "Four friends, 12-15 December. Liz is lactose intolerant. No flights."
+                })),
+            )
+            .await
+            .unwrap();
+        let tasks = pond
+            .repo
+            .list_tasks(LongTaskOwnerFilter::Everyone, true)
+            .await
+            .unwrap();
+        assert!(started.contains(tasks[0].id()), "{started}");
+        let artifacts = pond.repo.list_artifacts(tasks[0].id()).await.unwrap();
+        let brief = pond_core::shared::services::long_task_runner::brief_artifact(&artifacts)
+            .expect("the brief is saved as the task's own artifact");
+        let body = pond
+            .repo
+            .get_artifact(tasks[0].id(), &brief.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(body.body().contains("lactose intolerant"));
+
+        prime
+            .run_start(
+                &meta_for("engine-liz"),
+                params(serde_json::json!({"goal": "compare plumbers", "brief": "  "})),
+            )
+            .await
+            .unwrap();
+        let tasks = pond
+            .repo
+            .list_tasks(LongTaskOwnerFilter::Everyone, true)
+            .await
+            .unwrap();
+        let plumbers = tasks
+            .iter()
+            .find(|t| t.goal() == "compare plumbers")
+            .unwrap();
+        assert!(pond
+            .repo
+            .list_artifacts(plumbers.id())
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn a_guest_cannot_start_a_task_and_a_member_can() {
         let pond = Pond::new();
         let prime = pond.prime();
@@ -1609,6 +1944,43 @@ mod tests {
             tasks[0].owner_profile_id(),
             None,
             "a household task has no owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_long_task_asked_about_through_check_task_gets_its_status() {
+        let pond = Pond::new();
+        let deps = pond.deps();
+        let liz = ProfileScope::Owner("liz".into());
+        let hers = pond.task(liz.clone(), "plan the school trip").await;
+        let his = pond
+            .task(ProfileScope::Owner("jerry".into()), "his task")
+            .await;
+
+        let one = long_task_status_with(&deps, &liz, Some(hers.id()))
+            .await
+            .unwrap();
+        assert!(one.contains("plan the school trip"), "{one}");
+        let listed = long_task_status_with(&deps, &liz, None).await.unwrap();
+        assert!(
+            listed.contains(hers.id()) && !listed.contains(his.id()),
+            "{listed}"
+        );
+
+        assert_eq!(
+            long_task_status_with(&deps, &liz, Some(his.id())).await,
+            None,
+            "not hers"
+        );
+        assert_eq!(
+            long_task_status_with(&deps, &liz, Some("no-such-task")).await,
+            None
+        );
+        let nobody = ProfileScope::Owner("ola".into());
+        assert_eq!(
+            long_task_status_with(&deps, &nobody, None).await,
+            None,
+            "with nothing running, check_task keeps its own refusal"
         );
     }
 
@@ -2028,9 +2400,11 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(
-            phantom,
-            Refusal::UnknownArtifacts(vec!["made-up".to_string()])
+        assert!(
+            phantom.message().contains("saved nothing yet")
+                && phantom.message().contains("finish true"),
+            "{}",
+            phantom.message()
         );
         assert_eq!(run.take_report(), None);
 
@@ -2127,20 +2501,25 @@ mod tests {
             .await
             .unwrap_err();
         assert!(circle.message().contains("circle"), "{}", circle.message());
-        let bad_field = worker
+        let unreadable = worker
             .run_plan(
                 &meta,
                 params(serde_json::json!({"steps": [
-                    {"key": "a", "role": "r", "instructions": "x", "tools": ["giap-system"]},
+                    {"key": "a", "role": "r", "instructions": "x"},
+                    {"key": "b", "role": "r", "instructions": 5},
+                    {"key": "c", "role": "r"},
                 ]})),
             )
             .await
-            .unwrap_err();
+            .unwrap_err()
+            .message();
         assert!(
-            bad_field.message().starts_with("Step 1 cannot be read"),
-            "{}",
-            bad_field.message()
+            unreadable.starts_with("Step 2 cannot be read"),
+            "{unreadable}"
         );
+        assert!(unreadable.contains("step 3 cannot be read"), "{unreadable}");
+        assert!(!unreadable.contains("step 1"), "{unreadable}");
+        assert!(unreadable.contains("other steps are fine"), "{unreadable}");
         assert!(matches!(
             worker.run_plan(&meta, PlanWriteParams::default()).await,
             Err(Refusal::Malformed(_))
@@ -2153,6 +2532,153 @@ mod tests {
         });
         worker.run_plan(&meta, params(stringified)).await.unwrap();
         assert_eq!(pond.repo.list_steps(task.id()).await.unwrap().len(), 1);
+
+        // Fields no step reads are ignored and named, and a misspelt key is taken as its slug.
+        let saved = worker
+            .run_plan(
+                &meta,
+                params(serde_json::json!({"steps": [
+                    {"key": "Find_Events", "role": "r", "instructions": "x", "title": "Find",
+                     "tools": ["giap-system"]},
+                    {"key": "sum", "role": "r", "instructions": "y", "depends_on": ["Find_Events"]},
+                ]})),
+            )
+            .await
+            .unwrap();
+        assert!(saved.contains("`find-events`, `sum`"), "{saved}");
+        assert!(
+            saved.contains("Ignored, as no step reads them: `tools`"),
+            "{saved}"
+        );
+        assert!(saved.contains("`new_agent`"), "{saved}");
+        let steps = pond.repo.list_steps(task.id()).await.unwrap();
+        assert_eq!(steps[1].depends_on()[0].as_str(), "find-events");
+
+        // The planner's reading of the ask is kept, and a later one does not overturn it.
+        for answer in ["Short", "report"] {
+            worker
+                .run_plan(
+                    &meta,
+                    params(serde_json::json!({"answer": answer, "steps": [
+                        {"role": "r", "instructions": "x"},
+                    ]})),
+                )
+                .await
+                .unwrap();
+        }
+        let task = pond.repo.get_task(task.id()).await.unwrap().unwrap();
+        assert_eq!(task.answer(), AnswerShape::Short);
+        let steps = pond.repo.list_steps(task.id()).await.unwrap();
+        assert_eq!(
+            steps[0].key().as_str(),
+            "step-1",
+            "a step with no key takes its place"
+        );
+
+        // A short answer's plan is one step, or two; a longer one is sent back with what to do.
+        let long = worker
+            .run_plan(
+                &meta,
+                params(serde_json::json!({"steps": [
+                    {"role": "r", "instructions": "x"},
+                    {"role": "r", "instructions": "y"},
+                    {"role": "r", "instructions": "z"},
+                ]})),
+            )
+            .await
+            .unwrap_err()
+            .message();
+        assert!(
+            long.contains("short answer, and you planned 3 steps"),
+            "{long}"
+        );
+    }
+
+    #[test]
+    fn every_withheld_task_tool_is_one_the_server_offers_and_each_role_keeps_its_own() {
+        use pond_core::shared::services::long_task_roles::{PLANNER_ROLE, VERIFIER_ROLE};
+        use pond_core::shared::services::long_task_runner::tools_withheld;
+        let offered: Vec<String> = TaskWorkMcpServer::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|tool| format!("{TASK_WORK_EXTENSION}__{}", tool.name))
+            .collect();
+        for role in [PLANNER_ROLE, VERIFIER_ROLE, WORKER_ROLE] {
+            for tool in tools_withheld(role) {
+                assert!(
+                    offered.iter().any(|o| o == tool),
+                    "{role} withholds {tool}, no such tool"
+                );
+            }
+        }
+        let keeps = |role: &str, tool: &str| {
+            !tools_withheld(role).contains(&format!("{TASK_WORK_EXTENSION}__{tool}").as_str())
+        };
+        assert!(keeps(PLANNER_ROLE, "plan_write"));
+        assert!(keeps(VERIFIER_ROLE, "step_report"));
+        assert!(keeps(WORKER_ROLE, "artifact_write") && keeps(WORKER_ROLE, "step_report"));
+        assert!(!keeps(PLANNER_ROLE, "artifact_write") && !keeps(WORKER_ROLE, "plan_write"));
+    }
+
+    #[test]
+    fn a_bare_web_address_in_a_link_gets_its_scheme_and_nothing_else_changes() {
+        assert_eq!(
+            absolute_links("Train [Rome2rio](rome2rio.com/s/Nairobi) or [KR](https://krc.co.ke)."),
+            "Train [Rome2rio](https://rome2rio.com/s/Nairobi) or [KR](https://krc.co.ke)."
+        );
+        assert_eq!(
+            absolute_links("[Guide](rome2rio.com, 2023-04-14) says so."),
+            "[Guide](https://rome2rio.com) (2023-04-14) says so."
+        );
+        for kept in [
+            "[snap](/api/v1/camera/porch/snapshot)",
+            "[top](#result)",
+            "[mail](mailto:a@b.co)",
+            "[file](report.v2)",
+            "[odd](not a link)",
+            "[odd](see rome2rio.com)",
+            "no link (rome2rio.com) here",
+        ] {
+            assert_eq!(absolute_links(kept), kept);
+        }
+    }
+
+    #[test]
+    fn a_report_may_name_its_artifacts_by_title_or_fall_back_to_what_the_run_saved() {
+        let summary = |id: &str, title: &str, at: i64| ArtifactSummary {
+            id: id.into(),
+            task_id: "t".into(),
+            step_key: None,
+            kind: ArtifactKind::Draft,
+            title: title.into(),
+            summary: String::new(),
+            tokens: 10,
+            created_at: chrono::DateTime::from_timestamp(1_790_000_000 + at, 0).unwrap(),
+        };
+        let held = [
+            summary("a1", "Draft: Camera Events", 0),
+            summary("a2", "Result", 5),
+        ];
+        let asked = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+
+        assert_eq!(
+            name_artifacts(&asked(&["a2", "draft: camera events"]), &held, &[]),
+            Ok(asked(&["a2", "a1"]))
+        );
+        assert_eq!(
+            name_artifacts(
+                &asked(&["the_artifact_id_from_previous_write_call"]),
+                &held,
+                &asked(&["a1"])
+            ),
+            Ok(asked(&["a1"])),
+            "a placeholder reads as what this run saved"
+        );
+        assert_eq!(
+            name_artifacts(&asked(&["made-up"]), &held, &[]),
+            Err(asked(&["made-up"])),
+            "a run that saved nothing is told which names were wrong"
+        );
     }
 
     #[test]

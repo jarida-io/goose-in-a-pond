@@ -9,6 +9,7 @@ import {
   type ChallengeResponse,
   type ChatEvent,
   type ChatStreamRequest,
+  type ResearchAnswer,
   type CleanupResponse,
   type CompactionReport,
   type ContextIndexHealth,
@@ -53,6 +54,7 @@ import {
   type ModelEngine,
   type ModelMemoryStatus,
   type OllamaModel,
+  type PairingCodeBinding,
   type PairingCodeResponse,
   type PrefillReport,
   type PromptTemplate,
@@ -1378,12 +1380,17 @@ export class PondApiClient {
     );
   }
 
-  /** Issue a fresh pairing code, replacing any existing one. Host-only. */
-  issuePairingCode(): Promise<PairingCodeResponse> {
+  /**
+   * Issue a fresh pairing code, replacing any existing one. Host-only.
+   *
+   * `binding` decides whose the device that pairs with it becomes. Omitted, the Pond decides: a
+   * household of one binds to that member, any other binds to nobody.
+   */
+  issuePairingCode(binding?: PairingCodeBinding): Promise<PairingCodeResponse> {
     return this.handshakeFetch<PairingCodeResponse>(
       "POST",
       "/api/v1/handshake/pairing-code",
-      undefined,
+      binding,
       true,
     );
   }
@@ -1822,6 +1829,7 @@ export class PondApiClient {
     images?: ImageAttachment[],
     resumable?: boolean,
     deepResearch?: boolean,
+    deepResearchAnswer?: ResearchAnswer,
   ): AsyncGenerator<ChatEvent> {
     const reqBody: ChatStreamRequest = {
       message,
@@ -1832,6 +1840,9 @@ export class PondApiClient {
       // Only when asked, so other bodies stay unchanged.
       ...(resumable ? { resumable: true } : {}),
       ...(deepResearch ? { deep_research: true } : {}),
+      ...(deepResearch && deepResearchAnswer && deepResearchAnswer !== "auto"
+        ? { deep_research_answer: deepResearchAnswer }
+        : {}),
     };
     yield* this.streamSse("/api/v1/chat/stream", reqBody, token);
   }

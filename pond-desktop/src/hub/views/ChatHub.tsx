@@ -294,7 +294,7 @@ export function ChatHubView() {
       setText("");
 
       if (asResearch) {
-        sendTurn({ text: t, deepResearch: true });
+        sendTurn({ text: t, deepResearch: true, deepResearchAnswer: deepResearch.answer });
         leaveResearch();
         setAttachError(null);
         return;
@@ -305,7 +305,7 @@ export function ChatHubView() {
       setAttachments([]);
       setAttachError(null);
     },
-    [text, attachments, busy, gateBlocked, deepResearch.on, leaveResearch],
+    [text, attachments, busy, gateBlocked, deepResearch.on, deepResearch.answer, leaveResearch],
   );
 
   // Take focus back when the model stops.
@@ -476,7 +476,15 @@ export function ChatHubView() {
       <AttachmentTray attachments={attachments} onRemove={removeAttachment} />
       {attachError && <p className="attach-error" role="alert">{attachError}</p>}
 
-      {deepResearch.on && <ResearchModeChip variant="hub" waiting={false} onLeave={onLeaveResearch} />}
+      {deepResearch.on && (
+        <ResearchModeChip
+          variant="hub"
+          waiting={false}
+          onLeave={onLeaveResearch}
+          answer={deepResearch.answer}
+          onAnswer={deepResearch.setAnswer}
+        />
+      )}
 
       {/* Input */}
       <div className="chat2__input">

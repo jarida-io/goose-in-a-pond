@@ -317,6 +317,20 @@ def section_deletion(jerry, liz):
                   ("bound", body and body.get("bound") is True)):
         return
 
+    # A display name is not a member's id: a household once stored one and matched nobody.
+    code, body = call("PUT", "/api/v1/settings", {"primary_profile_id": "Liz"})
+    expect(
+        "primary_profile_id refuses a name that is not a member's id",
+        code,
+        422,
+        body,
+        (
+            "names the field",
+            body is not None
+            and any(f.get("field") == "primary_profile_id" for f in body.get("fields", [])),
+        ),
+    )
+
     # Make Liz the primary member, so the dangling-reference fix is exercised.
     code, _ = call("PUT", "/api/v1/settings", {"primary_profile_id": liz})
     check("set Liz as primary member", code == 200)

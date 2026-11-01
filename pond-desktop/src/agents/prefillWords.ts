@@ -9,7 +9,12 @@ const BUILT_IN_LABELS: Record<string, string> = {
 };
 
 /** A built-in by its job; anything else by the name it was saved under. */
+/** An agent a plan made for one step is named `new:<name>`; it shows by its name. */
+const MADE_AGENT = /^new:(.+)$/;
+
 export function agentLabel(name: string): string {
+  const made = MADE_AGENT.exec(name);
+  if (made) return `${made[1].trim()} (made for this task)`;
   return BUILT_IN_LABELS[name] ?? name;
 }
 

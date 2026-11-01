@@ -226,7 +226,7 @@ impl KokoroOutput {
             // Not fatal, but the word will sound wrong: the model never learned that phoneme.
             tracing::warn!(
                 dropped,
-                text = %text.chars().take(80).collect::<String>(),
+                text_chars = text.chars().count(),
                 "Kokoro dropped phonemes outside the model vocab"
             );
         }

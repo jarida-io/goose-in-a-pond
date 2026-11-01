@@ -39,6 +39,7 @@ Paths below are relative to `/api/v1` unless they start with `/api/v1` or are li
 - [Agent, tools, prompts, skills and recipes](#agent-tools-prompts-skills-and-recipes)
 - [Music player](#music-player)
 - [Rides and Uber accounts](#rides-and-uber-accounts)
+- [My Pond (administration)](#my-pond-administration)
 - [Faces](#faces)
 - [Mesh](#mesh)
 - [Remote access](#remote-access)
@@ -137,6 +138,7 @@ The route summary's "Also" column names these.
 | cred if tokenless | A caller admitted without a token must present the host credential (`bearer_or_host_credential`) | as above |
 | own device | The device named in the path or query is the caller's own (`require_own_device`) | `403` |
 | member | The caller's paired device is attributed to a household member | `403`; another member's record reads as `404` |
+| unlocked | A member's device that unlocked My Pond with the admin card in the last 15 minutes ([pond administrator](architecture/pond-administrator.md)) | `403 admin_members_only`, `403 admin_locked` |
 | changer | The host credential, the device that claimed the pond, or a member's device (`connection_changes`) | `403 not_allowed` |
 | run owner | Only the device that started the run; unknown and not-yours are the same `404` | `404 unknown run` |
 | internal | The internal extension token as the bearer | `401` |
@@ -506,6 +508,28 @@ The route summary's "Also" column names these.
 | POST | /uber/accounts/connect | token +onb | loopback, cred | Start a member's Uber sign-in |
 | DELETE | /uber/accounts/{profile_id} | token +onb | loopback, cred | Forget a member's Uber sign-in |
 
+### My Pond (administration)
+
+Contract and refusals: [pond administrator](architecture/pond-administrator.md#wire-contract).
+
+| Method | Path | Auth | Also | Summary |
+|---|---|---|---|---|
+| GET | /admin/status | token +onb | member | Whether the pond has an admin card and this device is unlocked |
+| POST | /admin/unlock | token +onb | member | Unlock this device with the admin card; wrong cards are slowed |
+| POST | /admin/lock | token +onb | member | End this device's unlock |
+| GET | /admin/overview | token +onb | unlocked | Disk, storage per area, databases and record counts |
+| GET | /admin/files | token +onb | unlocked | One data-directory folder, largest first; credentials never listed |
+| DELETE | /admin/files | token +onb | unlocked | Delete a file or folder the pond does not need |
+| GET | /admin/caches | token +onb | unlocked | KV snapshots, download leftovers and accelerator caches |
+| POST | /admin/caches/{id}/clear | token +onb | unlocked | Clear one cache |
+| GET | /admin/tasks | token +onb | unlocked | Long tasks and their artifacts; another member's words withheld |
+| DELETE | /admin/tasks/{id} | token +onb | unlocked | Delete a finished task with its report |
+| DELETE | /admin/tasks/{id}/artifacts/{artifact_id} | token +onb | unlocked | Delete one artifact of a finished task |
+| GET | /admin/health | token +onb | unlocked | Host, memory, disk, temperatures and checks |
+| GET | /admin/power | token +onb | unlocked | Power mode, modes, supply and battery |
+| PUT | /admin/power/mode | token +onb | unlocked | Switch power mode |
+| POST | /admin/power/restart | token +onb | unlocked | Restart the computer; waits for `force` while a long task runs |
+
 ### Faces
 
 | Method | Path | Auth | Also | Summary |
@@ -634,8 +658,9 @@ only and is refused here. `init` answers `PakeChallenge {challenge_id, challenge
 
 `verify` takes `PakeVerifyRequest {challenge_id, share, confirm, device_name?}` and answers
 `HandshakeResponse`: `accepted`, `session_token`, `refresh_token`, `expires_at`, `hostname`,
-`server_version`, `capabilities`, `rejection_reason`, and `server_proof` (T_server in hex), which
-the phone must verify before keeping the tokens. A refusal is a `200` with `accepted: false` and the
+`server_version`, `capabilities` (`chat`, `devices`, `settings`, and `routines` for device-action
+routines and asking before a missed run), `rejection_reason`, and `server_proof` (T_server in hex),
+which the phone must verify before keeping the tokens. A refusal is a `200` with `accepted: false` and the
 same code in both `rejection_reason` and `error`.
 
 | Route | Status | `error` | Meaning |
@@ -690,8 +715,16 @@ but loopback: `403 pairing_requires_lan` for a tailnet or unclassifiable peer, e
 `GET /handshake/pairing-code` answers `{code, expires_at, profile_id, pairing}` (`code: null` when
 none is live). `POST /handshake/pairing-code` issues a fresh single-use code; its optional body
 `{profile_id?, unattributed?}` (unknown fields refused) binds the device that pairs with it to a
-member. With no body, a household with exactly one member binds to that member. `pairing` is the
-pairing material: `hostname`, `lan_address`, `tailnet_address`, `https_port`, `tls_spki_sha256`.
+member. With no body, a household with exactly one member binds to that member, and any other
+household binds to nobody. `pairing` is the pairing material: `hostname`, `lan_address`,
+`tailnet_address`, `https_port`, `tls_spki_sha256`.
+
+The binding is the only way a device becomes a member's after the pond has members: nothing
+re-attributes a device later, and `PUT /devices/{id}` does not take a member. A phone already paired
+to nobody is linked by pairing it again with a code issued for its member; the app keeps its install
+id as `client_id`, so the same `devices` row takes the new owner. The dashboard's Pairing page asks
+whose the device will be and issues the code for that choice, and `pond-server pairing --member
+<PROFILE_ID>` does the same from a shell on the pond.
 
 ### `POST /handshake/spoken-code`
 
@@ -798,6 +831,8 @@ Matter controller, and the warmed prompt prefix is re-warmed in the background.
 | 422 | `{"error": "...", "fields": [{"field", "message"}]}` from `settings_validation::validate_patch` |
 | 422 | `agent_backend: "pond"`: the pond agent is quarantined |
 | 422 | `{"error": "...", "field": "matter_ws_url"}` for an unusable Matter URL |
+| 422 | `{"error": "...", "fields": [{"field": "primary_profile_id", ...}]}` when `primary_profile_id` is neither `null`, `""`, nor a member's `id` from `GET /profiles`. Nothing in the patch is saved |
+| 500 | The household members could not be read to check `primary_profile_id`; nothing is saved |
 
 ## Chat and runs
 
@@ -1058,7 +1093,16 @@ queue), `500 notification_ack_failed`, `503` when no queue is wired.
 `CameraEvent` is `{id, camera_id, event_type, confidence, snapshot_path, snapshot_url, metadata,
 acknowledged, created_at}`. `snapshot_url` is `/api/v1/camera/events/{id}/snapshot`, or null when
 the event has no snapshot. `metadata` is an object or null; pond vision events carry
-`{changed_fraction, source, face_detected, face_unknown, identified_profile?, face_confidence?}`.
+`{changed_fraction?, source, face_detected, face_unknown, track_id?, identified_profile?,
+identified_name?, face_confidence?, face_bbox?, face_landmarks?}`. With the YOLOX detector the pond
+follows people instead of sampling motion: it looks five times a second while anyone is in view or
+for 5 s after any change of 2% of the picture (or `vision_motion_threshold`, if lower), and each
+person seen on two looks running becomes a track. A track raises one
+`person` event when it starts and one more when its face is first recognised (faces are tried once
+a second, five times at most); both carry its `track_id`, and `changed_fraction` only when the
+frame also moved. A person unseen for 3 s is gone, so coming back is a new track. While anyone is
+followed no other motion event is raised; otherwise motion is named by the same look (`pet`,
+`package`, else `motion`) under the cooldown.
 
 With `cameras_enabled` off, the snapshot, stream, event-snapshot and SSE routes and
 `POST /faces/register-from-camera` answer `403 {"error", "reason": "cameras_disabled"}`, read from
@@ -1118,27 +1162,31 @@ See [architecture/scheduling.md](architecture/scheduling.md).
 ## Schedules
 
 Every schedule route answers `503 {"error":"scheduler not configured"}` when the scheduler did not
-start. A task is `Schedule {id, label, cron, fire_at, timezone, kind, paused, currently_running, last_run, next_run, created_at}`;
-`kind` is tagged by `type`: `agent_prompt {prompt}`, `webhook {webhook_url}` or `sensor_trigger`.
+start. A task is `Schedule {id, label, cron, fire_at, timezone, kind, paused, currently_running, last_run, next_run, created_at, ask_if_missed, missed_run}`, where `missed_run` is `{due_at}` while a missed run waits for an answer and `null` otherwise;
+`kind` is tagged by `type`: `agent_prompt {prompt}`, `webhook {webhook_url}`, `sensor_trigger` or
+`routine {actions}`, where each action is a rule action (`device_power`, `notify`).
 `cron` is six fields with a leading seconds field.
 
 | Route | Request | Response |
 |---|---|---|
 | `GET /schedules` | | `[Schedule]` |
-| `POST /schedules` | `ApiCreateScheduleRequest {id?, name (alias label), cron, prompt?, timezone?, kind?, payload?, fire_at?, once?}` | `201` with the task |
+| `POST /schedules` | `ApiCreateScheduleRequest {id?, name (alias label), cron, prompt?, timezone?, kind?, payload?, fire_at?, once?, ask_if_missed?}` | `201` with the task |
 | `GET /schedules/upcoming` | `?limit=` | active tasks by next fire |
-| `PUT /schedules/{id}` | `ApiUpdateScheduleRequest {name?, cron?, timezone?, prompt?, fire_at?, once?}` | the task |
+| `PUT /schedules/{id}` | `ApiUpdateScheduleRequest {name?, cron?, timezone?, prompt?, kind?, fire_at?, once?, ask_if_missed?}`; `kind` wins over `prompt` | the task |
 | `DELETE /schedules/{id}` | | `{deleted}` |
 | `POST /schedules/{id}/pause` | | `{paused}` |
 | `POST /schedules/{id}/resume` | | `{resumed}`; `409 code: "one_shot_time_passed"` for a one-off whose time passed while paused |
 | `POST /schedules/{id}/run-now` | | `202 {fired}` |
-| `GET /schedules/{id}/runs` | `?limit=` | `[ScheduleRun {id, schedule_id, status, result, error, started_at, finished_at, duration_ms}]` |
+| `POST /schedules/{id}/missed/run` | | `202 {fired}`: runs the waiting missed run now; its run carries `caught_up_from`. `409 code: "no_missed_run"` when nothing is waiting, including when another answer came first |
+| `POST /schedules/{id}/missed/skip` | | `200 {skipped}`: records it `skipped`, "Skipped by a household member". `409 code: "no_missed_run"` as above |
+| `GET /schedules/{id}/runs` | `?limit=` | `[ScheduleRun {id, schedule_id, status, result, error, started_at, finished_at, duration_ms, caught_up_from?}]`; `status` is `running`, `completed`, `failed` or `skipped` |
 | `GET /schedules/events` | | SSE; each `data` is `ScheduleResultEvent {schedule_id, schedule_label, run_id, status, result, error, duration_ms}` |
 
 The task kind comes from `kind`, else `payload.webhook_url`, else `prompt` (or `payload.prompt`). A
 one-off is `fire_at` (an RFC 3339 instant, stored with cron `@once`), or `once: true` with a `cron`
 whose next occurrence is the instant; `fire_at` already past is `400 code: "fire_at_in_past"`. A
-`sensor_trigger` kind is validated as `/rules` validates it.
+`sensor_trigger` kind is validated as `/rules` validates it. A `routine` with no actions, or with an
+`agent_prompt` action, is `400`, on create and on update.
 
 ## Memory, reminders, suggestions and proposals
 

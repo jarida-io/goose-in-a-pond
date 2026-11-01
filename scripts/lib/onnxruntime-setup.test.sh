@@ -47,7 +47,7 @@ world() {
   export GIAP_ORTGPU_HOME="$W/home/.giap/onnxruntime" POND_DATA_DIR="$W/data"
   export ORTGPU_TEGRA_RELEASE="$W/nv_tegra_release" ORTGPU_DT_COMPATIBLE="$W/compatible"
   export ORTGPU_CUDA_HOME="$W/cuda" ORTGPU_NV_HOME="$W/nvlib" ORTGPU_NV_INCLUDE="$W/inc" ORTGPU_MEMINFO="$W/meminfo"
-  export ORTGPU_POND_BIN="$W/no-pond"
+  export ORTGPU_POND_BIN="$W/no-pond" ORTGPU_SYSTEM_UNIT="$W/no-unit"
   unset DRY_RUN FAKE_BUILD_RC FAKE_MEM_AFTER_STOP FAKE_DF_KB FAKE_TAG_COMMIT FAKE_OOM_RUNS FAKE_BUILD_TAG
   : > "$TOOL_LOG"
   printf '# R36 (release), REVISION: 4.7\n' > "$W/nv_tegra_release"
@@ -75,7 +75,8 @@ fakes() {
   fake "$W/bin/df" 'printf "Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 1 1 %s 1%% /\n" "${FAKE_DF_KB:-50000000}"'
   fake "$W/bin/systemctl" '
 echo "systemctl $*" >> "$TOOL_LOG"
-case "$2" in
+v="$1"; [ "$1" = --user ] && v="$2"
+case "$v" in
   is-active) cat "$W/svc" ;;
   show) echo 0 ;;
   stop) echo inactive > "$W/svc"
@@ -411,6 +412,23 @@ t_engines_are_built_while_the_pond_is_stopped() {
   ( ortgpu_build_run ) || { logged; return 1; }
   contains "$(tools_log)" "pond onnx-engines (service inactive)" || { tools_log; return 1; }
   contains "$(tools_log)" "systemctl --user start goose-in-a-pond.service" || return 1
+  eq "$(cat "$W/svc")" active
+}
+t_a_pond_run_by_agamemnon_is_stopped_installed_into_and_started_as_agamemnon() {
+  world; stubs
+  export FAKE_MEM_AFTER_STOP=5972 ORTGPU_POND_BIN="$W/pond-server"
+  printf '[Service]\nUser=agamemnon\n' > "$W/unit"; export ORTGPU_SYSTEM_UNIT="$W/unit"
+  fake "$W/bin/sudo" 'echo "sudo $*" >> "$TOOL_LOG"
+while [ $# -gt 0 ]; do case "$1" in -n|-H) shift ;; -u) shift 2 ;; *) break ;; esac; done
+exec "$@"'
+  fake "$W/pond-server" 'echo "pond $* (service $(cat "$W/svc"))" >> "$TOOL_LOG"; exit 0'
+  ( ortgpu_build_run ) || { logged; tools_log; return 1; }
+  ortgpu_verify "$(ortgpu_install_dir)" || { echo "$ORTGPU_VERIFY_PROBLEMS"; return 1; }
+  contains "$(tools_log)" "sudo -n systemctl stop goose-in-a-pond.service" || return 1
+  contains "$(tools_log)" "sudo -n -H -u agamemnon cp -R $(ortgpu_home)/stage/.stage." || return 1
+  contains "$(tools_log)" "sudo -n -H -u agamemnon env POND_DATA_DIR=$W/data $W/pond-server onnx-engines" || return 1
+  contains "$(tools_log)" "sudo -n systemctl start goose-in-a-pond.service" || return 1
+  lacks "$(tools_log)" "systemctl --user" || return 1
   eq "$(cat "$W/svc")" active
 }
 t_a_second_start_reports_the_running_build() {

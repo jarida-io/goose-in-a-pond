@@ -29,6 +29,7 @@ that apply. Every verb also runs without the menu:
 | `giap.sh litert status\|build\|import` | the LiteRT-LM library that runs `.litertlm` models |
 | `giap.sh models pairings [--check]` | regenerate the vision pairing table |
 | `giap.sh wifi-grant [remove\|status]` | Linux: the polkit grant for the BLE setup channel |
+| `giap.sh service-account [undo\|status]` | Linux: run the pond as its own locked account, `agamemnon`, or move it back |
 | `giap.sh provision --host H --key F` | operator: fetch a pond's setup card, give it a device certificate |
 
 Global flags: `--dry-run` prints each command instead of running it; `-y` answers yes to
@@ -161,7 +162,8 @@ Its steps, in order:
    terminal it downloads nothing: the app's Models page shows the same picks and waits. On a
    Jetson whose L4T release caps large GPU allocations it says E4B will not load and defaults to
    none. `--ollama` and `--llamafile` replace the step.
-8. Production and Jetson: the systemd unit and mDNS.
+8. Production and Jetson: the systemd unit and mDNS. A new pond is offered its own locked
+   account, `agamemnon` (default yes); a pond that already has a unit keeps its account (below).
 9. Linux: the Wi-Fi polkit grant on production and Jetson; a dev machine only prints the command.
 10. `--desktop`: `npm install` in `pond-desktop`.
 11. Unless `--no-verify` or systemd already runs it: start the server and check its health.
@@ -182,6 +184,7 @@ checks for the ONNX Runtime, `espeak-ng-data` and a microphone. Whisper runs in-
 | macOS | `~/Library/Application Support/goose-in-a-pond/` |
 | Linux | `~/.local/share/goose-in-a-pond/` (`$XDG_DATA_HOME` honoured by the installer) |
 | Any | `POND_DATA_DIR=/path`, or `install.sh --data-dir` |
+| Linux, run as `agamemnon` | `/var/lib/goose-in-a-pond/` (the unit sets `POND_DATA_DIR`; a link stays at the old path) |
 
 ```
 $DATA_DIR/
@@ -272,6 +275,36 @@ bash scripts/install.sh --production --dedicated --port 80
 
 Service control afterwards is the `giap.sh` menu, items 20 to 25: install, start, stop, restart,
 remove the unit, run in the foreground. The pond logs to files, not journald (`giap.sh logs`).
+
+### The pond's own account (`agamemnon`)
+
+On a new production or Jetson install, the service step asks whether the pond runs as its own
+locked system account, `agamemnon`, and defaults to yes. A pond that already has a unit, at either
+scope, keeps its account until someone runs `giap.sh service-account`.
+
+| Piece | What it is |
+|---|---|
+| Account | `useradd --system`, locked, shell `/usr/sbin/nologin`, home `/var/lib/goose-in-a-pond`, in whichever of `video`, `render`, `audio`, `i2c` and `gpio` exist |
+| Data | moved to `/var/lib/goose-in-a-pond` (`0750`, owned by `agamemnon`); a link stays at the old path. The login keeps read access through an ACL that leaves private files (`setup/`, `secrets/`, the host credential) private |
+| Binary | stays in the login's checkout. An ACL gives `agamemnon` traverse-only access to the login's home (usually `0750`) |
+| Sound | `loginctl enable-linger agamemnon` starts its user manager at boot, which runs its own PulseAudio (or PipeWire) like any login's; the unit sets `XDG_RUNTIME_DIR=/run/user/<uid>` so ALSA's `default` and `pactl` reach it |
+| Unit | `/etc/systemd/system/goose-in-a-pond.service`, `User=agamemnon`, after `user@<uid>.service` |
+| Power | the sudoers rule `giap.sh admin-card` writes names `agamemnon` |
+| Login | `/etc/sudoers.d/goose-in-a-pond-login`: the login may start, stop and restart the unit and run commands as `agamemnon` (`sudo -n -u agamemnon ...`) without a password, so deploys and builds run unattended |
+
+```bash
+bash scripts/giap.sh service-account          # move this pond to agamemnon (sudo)
+bash scripts/giap.sh service-account status   # the doctor line
+bash scripts/giap.sh service-account undo     # back to the account, unit and data dir it came from
+```
+
+The move keeps what undo needs in `/var/lib/goose-in-a-pond-admin/before-agamemnon/` (root only):
+the old scope, user, data directory and unit file. Undo leaves the account in place, locked and
+owning nothing (`sudo userdel agamemnon` removes it), and removes the login's drop-in. After a
+move, run the pond's own commands as it: `sudo -u agamemnon env POND_DATA_DIR=/var/lib/goose-in-a-pond
+XDG_RUNTIME_DIR=/run/user/$(id -u agamemnon) <checkout>/target/release/pond-server chat --voice`. The
+desktop app's voice loop does not do this yet; see
+[what this does not cover yet](../architecture/pond-administrator.md#not-in-this-change).
 
 ### Wi-Fi from the BLE setup channel (the polkit grant)
 

@@ -107,6 +107,13 @@
   overflow-wrap: anywhere;
 }
 
+/* The answer is the card's content, read at body size with nothing clamped. */
+.lt__answer {
+  color: var(--color-text);
+  font-size: var(--text-base);
+  overflow-wrap: anywhere;
+}
+
 .lt__steps {
   display: flex;
   flex-direction: column;

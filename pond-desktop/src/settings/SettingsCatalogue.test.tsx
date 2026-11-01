@@ -56,6 +56,7 @@ vi.mock("../api/PondApiClient", () => ({
     listTimeZones: vi.fn(),
     detectLocation: vi.fn(),
     getAudioDevices: vi.fn().mockRejectedValue(new Error("not under test here")),
+    listProfiles: vi.fn(),
     testAudioDevices: vi.fn(),
     getConnections: vi.fn(),
     getSetupStatus: vi.fn(),
@@ -75,7 +76,13 @@ const mockApi = api as unknown as {
   getConnections: ReturnType<typeof vi.fn>;
   getSetupStatus: ReturnType<typeof vi.fn>;
   getSystemInfo: ReturnType<typeof vi.fn>;
+  listProfiles: ReturnType<typeof vi.fn>;
 };
+
+const MEMBERS = [
+  { id: "7491ea2c", display_name: "Emmanuel Charles Oyugi", avatar_emoji: "*" },
+  { id: "2c9c9225", display_name: "Jerry", avatar_emoji: "*" },
+];
 
 /** A re-titling reply with the boring fields filled in. */
 function retitleReply(over: Record<string, unknown> = {}) {
@@ -86,6 +93,7 @@ function retitleReply(over: Record<string, unknown> = {}) {
 async function renderPage(overrides: Record<string, unknown> = {}, models: unknown[] = MODELS) {
   mockApi.getSettings.mockResolvedValue(serverSettings(overrides));
   mockApi.listModels.mockResolvedValue(models);
+  mockApi.listProfiles.mockResolvedValue({ profiles: MEMBERS });
   mockApi.listTimeZones.mockResolvedValue({
     zones: [
       { zone: "Africa/Nairobi", offset: "+03:00", place: "Nairobi" },
@@ -381,6 +389,40 @@ describe("SettingsCatalogue", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Save 1 change/ }));
 
     await screen.findByText(/is not one of/);
+  });
+
+  it("offers the household profile as a pick of members by name, and saves the id", async () => {
+    await renderPage({ primary_profile_id: null });
+    const picker = (await waitFor(() => {
+      const el = screen.getByLabelText("Household profile");
+      if (el.tagName !== "SELECT") throw new Error("still a text box");
+      return el;
+    })) as HTMLSelectElement;
+    expect([...picker.options].map((o) => o.text)).toEqual([
+      "Not set",
+      "Emmanuel Charles Oyugi",
+      "Jerry",
+    ]);
+
+    fireEvent.change(picker, { target: { value: "7491ea2c" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Save 1 change/ }));
+    await waitFor(() =>
+      expect(mockApi.updateSettings).toHaveBeenCalledWith({ primary_profile_id: "7491ea2c" }),
+    );
+  });
+
+  it("says a stored household profile names nobody rather than hiding it", async () => {
+    // What one pond held on 2026-10-28: a display name typed into the old text box.
+    await renderPage({ primary_profile_id: "Emmanuel Charles Oyugi" });
+    const picker = (await waitFor(() => {
+      const el = screen.getByLabelText("Household profile");
+      if (el.tagName !== "SELECT") throw new Error("still a text box");
+      return el;
+    })) as HTMLSelectElement;
+    expect(picker.value).toBe("Emmanuel Charles Oyugi");
+    expect([...picker.options].map((o) => o.text)).toContain(
+      "Emmanuel Charles Oyugi — not a household member",
+    );
   });
 
   it("fills pickers from the model registry", async () => {

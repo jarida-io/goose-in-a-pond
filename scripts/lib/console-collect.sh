@@ -6,10 +6,15 @@
 # than its own. Reads only; bash 3.2. CPU arrives as raw counters: a percentage needs two samples,
 # and only the console keeps the previous one.
 
-# console_data_dir: the pond's data directory, as the server picks it.
+CC_SYSTEM_UNIT="${CC_SYSTEM_UNIT:-/etc/systemd/system/goose-in-a-pond.service}"
+
+# console_data_dir: the pond's data directory, as the server picks it (a system unit names its own).
 console_data_dir() {
+  local unit_dir=""
+  [ -f "$CC_SYSTEM_UNIT" ] && unit_dir="$(sed -n 's/^Environment="\{0,1\}POND_DATA_DIR=\([^"]*\)"\{0,1\}$/\1/p' "$CC_SYSTEM_UNIT" | head -1)"
   if [ -n "${POND_DATA_DIR:-}" ]; then printf '%s' "$POND_DATA_DIR"
   elif [ "$(uname -s)" = Darwin ]; then printf '%s' "$HOME/Library/Application Support/goose-in-a-pond"
+  elif [ -n "$unit_dir" ]; then printf '%s' "$unit_dir"
   else printf '%s' "${XDG_DATA_HOME:-$HOME/.local/share}/goose-in-a-pond"; fi
 }
 
@@ -106,7 +111,11 @@ _cc_pond() {
   if [ -n "$port" ] && command -v curl >/dev/null 2>&1; then
     echo "health=$(curl -s -o /dev/null -m 1 -w '%{http_code}' "http://127.0.0.1:$port/api/v1/health" 2>/dev/null)"
   fi
-  if command -v systemctl >/dev/null 2>&1 && systemctl --user cat goose-in-a-pond.service >/dev/null 2>&1; then
+  if command -v systemctl >/dev/null 2>&1 && [ -f "$CC_SYSTEM_UNIT" ]; then
+    echo "svc=$(systemctl is-active goose-in-a-pond.service 2>/dev/null)"
+    pid="$(systemctl show -p MainPID --value goose-in-a-pond.service 2>/dev/null)"
+    [ "$pid" = 0 ] && pid=""
+  elif command -v systemctl >/dev/null 2>&1 && systemctl --user cat goose-in-a-pond.service >/dev/null 2>&1; then
     echo "svc=$(systemctl --user is-active goose-in-a-pond.service 2>/dev/null)"
     pid="$(systemctl --user show -p MainPID --value goose-in-a-pond.service 2>/dev/null)"
     [ "$pid" = 0 ] && pid=""

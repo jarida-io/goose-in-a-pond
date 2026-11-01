@@ -428,8 +428,8 @@ fn split_llama3_tool_calls(
                 let args: serde_json::Map<String, Value> = serde_json::from_str(&json_str)
                     .unwrap_or_else(|e| {
                         tracing::warn!(
-                            raw = %raw_args,
-                            normalized = %json_str,
+                            raw_chars = raw_args.chars().count(),
+                            normalized_chars = json_str.chars().count(),
                             error = %e,
                             "failed to parse tool call arguments"
                         );

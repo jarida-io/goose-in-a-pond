@@ -20,7 +20,7 @@ export type Consumer =
 
 /** Where a picker's options come from when they are not a fixed list. `chat-models` adds LiteRT-LM
  *  models to `llm-models`: they can hold the conversation, the tool-call helper cannot. */
-export type OptionSource = "llm-models" | "chat-models" | "whisper-models" | "tts-voices" | "embedding-models" | "llm-providers" | "time-zones" | "audio-inputs" | "audio-outputs";
+export type OptionSource = "llm-models" | "chat-models" | "whisper-models" | "tts-voices" | "embedding-models" | "llm-providers" | "time-zones" | "audio-inputs" | "audio-outputs" | "household-members";
 
 export type Control =
   | { kind: "toggle" }
@@ -92,7 +92,8 @@ export const CATALOGUE: CatalogueCategory[] = [
         name: "Who lives here",
         entries: [
           { key: "user_name", label: "Your name", description: "What the pond should call you.", control: { kind: "text", placeholder: "Friend" }, consumer: "live" },
-          { key: "primary_profile_id", label: "Household profile", description: "The main person this pond belongs to.", control: { kind: "text", placeholder: "Not set" }, consumer: "live" },
+          // A picker, never a text box: the value is a member's id, and a typed name was stored and matched nobody.
+          { key: "primary_profile_id", label: "Household profile", description: "The main person this pond belongs to.", control: { kind: "lookup", source: "household-members", placeholder: "Not set" }, consumer: "live" },
         ],
       },
       {

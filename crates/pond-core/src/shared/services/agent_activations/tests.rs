@@ -103,6 +103,7 @@ fn step(key: &str, role: &str, ordinal: u32, deps: &[&str], state: StepState) ->
         failure: (state == StepState::Failed).then(|| "it broke".to_string()),
         started_at: None,
         finished_at: None,
+        agent: None,
     })
     .unwrap()
 }
@@ -127,6 +128,7 @@ fn running_task() -> LongTask {
         max_steps: 12,
         deadline: None,
         kind: Default::default(),
+        answer: Default::default(),
         created_at: t(0),
         updated_at: t(0),
         finished_at: None,

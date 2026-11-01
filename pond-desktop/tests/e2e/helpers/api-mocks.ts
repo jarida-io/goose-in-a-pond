@@ -183,6 +183,18 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     route.fulfill({ json: { available: true } }),
   );
 
+  // Asked on mount by Home, Recipes and the agents hub; unmocked they fail console checks too.
+  await page.route("**/api/v1/agents/prefills", (route) =>
+    route.fulfill({
+      json: {
+        building: { active: false, current: null, done: 0, total: 0 },
+        retention_days: 30,
+        agents: [],
+      },
+    }),
+  );
+  await page.route("**/api/v1/agents/suggestions", (route) => route.fulfill({ json: [] }));
+
   await page.route("**/api/v1/devices", (route) =>
     route.fulfill({
       json: {

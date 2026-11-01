@@ -27,8 +27,9 @@ pub struct Notification {
 /// The set is closed on purpose. A client validates `open` against its own allow-list and ignores
 /// anything else, so a value added here does nothing until the client learns it, and a client
 /// talking to an older pond, which sends no hint, opens its default screen as before.
-/// [`OpenScreen::Schedule`] becomes `{"open": "schedule", "schedule_id": "...", "run_id": "..."}`;
-/// every other screen carries only its name, e.g. `{"open": "devices"}`.
+/// [`OpenScreen::Schedule`] becomes `{"open": "schedule", "schedule_id": "...", "run_id": "..."}`
+/// and [`OpenScreen::ScheduleDetail`] the same without `run_id`; every other screen carries only
+/// its name, e.g. `{"open": "devices"}`.
 ///
 /// `models`, `extensions` and `remote_access` (2026-10-27) are newer than the app's allow-list:
 /// an app that does not know one opens where it was, exactly as for a notice with no hint.
@@ -36,6 +37,8 @@ pub struct Notification {
 pub enum OpenScreen {
     /// The schedules list, with the schedule and the run the notification reports on.
     Schedule { schedule_id: String, run_id: String },
+    /// One schedule's detail screen, where a missed run is answered.
+    ScheduleDetail { schedule_id: String },
     /// The paired and smart-home devices list.
     Devices,
     /// The chat screen.
@@ -72,6 +75,10 @@ impl OpenScreen {
             } => {
                 fields.insert("schedule_id".into(), schedule_id.as_str().into());
                 fields.insert("run_id".into(), run_id.as_str().into());
+                "schedule"
+            }
+            Self::ScheduleDetail { schedule_id } => {
+                fields.insert("schedule_id".into(), schedule_id.as_str().into());
                 "schedule"
             }
             Self::Devices => "devices",
@@ -153,6 +160,17 @@ mod tests {
         assert_eq!(
             hint.data(),
             json!({"open": "schedule", "schedule_id": "sched-1", "run_id": "run-9"})
+        );
+    }
+
+    #[test]
+    fn a_schedule_detail_hint_names_the_schedule_and_no_run() {
+        let hint = OpenScreen::ScheduleDetail {
+            schedule_id: "sched-1".into(),
+        };
+        assert_eq!(
+            hint.data(),
+            json!({"open": "schedule", "schedule_id": "sched-1"})
         );
     }
 

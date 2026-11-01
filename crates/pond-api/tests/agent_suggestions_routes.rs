@@ -523,6 +523,70 @@ async fn a_member_sees_and_stops_their_long_task_and_nobody_else_does() {
     );
 }
 
+/// Deep research asked partway through a conversation carries what was said before it, so the
+/// helpers, who start in empty windows, still know it.
+#[tokio::test]
+async fn deep_research_takes_what_was_said_before_the_ask_into_its_brief() {
+    use pond_core::shared::ports::long_task::LongTaskOwnerFilter;
+    let pond = pond(true, false).await;
+    turn_long_tasks_on(&pond).await;
+    let (status, frames) = stream(
+        &pond,
+        call(
+            Method::POST,
+            "/api/v1/chat/stream",
+            Some(serde_json::json!({"message": "We're four, and I'm lactose intolerant."})),
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{frames:?}");
+    let session = frames
+        .iter()
+        .find_map(|f| f["session_id"].as_str())
+        .expect("the turn names its session")
+        .to_string();
+    let (status, frames) = stream(
+        &pond,
+        call(
+            Method::POST,
+            "/api/v1/chat/stream",
+            Some(serde_json::json!({
+                "message": "Plan our Mombasa trip.",
+                "session_id": session,
+                "deep_research": true
+            })),
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{frames:?}");
+    let tasks = pond
+        .tasks
+        .list_tasks(LongTaskOwnerFilter::Member(&pond.member), true)
+        .await
+        .unwrap();
+    let task = &tasks[0];
+    let artifacts = pond.tasks.list_artifacts(task.id()).await.unwrap();
+    let brief = pond_core::shared::services::long_task_runner::brief_artifact(&artifacts)
+        .expect("the conversation before the ask is the task's brief");
+    let body = pond
+        .tasks
+        .get_artifact(task.id(), &brief.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        body.body().contains("lactose intolerant"),
+        "{}",
+        body.body()
+    );
+    assert!(
+        !body.body().contains("Plan our Mombasa trip"),
+        "the ask is the goal, not the brief"
+    );
+}
+
 /// Open tasks wait in the order they were asked for. A member sees where theirs stands and the
 /// goals of their own tasks ahead of it, and can stop one to move up; another member's task is only
 /// a place in the line. Deep research asked for behind them tells the turn where it waits.

@@ -17,6 +17,7 @@ pub mod toolkit;
 pub mod travel;
 pub mod vision;
 pub mod weather;
+pub mod web_page;
 pub mod web_search;
 pub mod wolfram;
 
@@ -40,6 +41,8 @@ pub use pond_core::shared::services::egress::{
 };
 
 pub fn set_last_user_message(msg: &str) {
+    // An address the person wrote is one `read_web_page` may fetch.
+    pond_core::mcp::services::page_addresses::global().note_words(msg);
     if let Ok(mut guard) = LAST_USER_MESSAGE.write() {
         *guard = msg.to_string();
     }

@@ -963,7 +963,7 @@ export function Schedules() {
                     ) : (
                       (runsCache[s.id] ?? []).map((r) => (
                         <div key={r.id} className="sched-run-row">
-                          <span className={`sched-card__chip sched-card__chip--${r.status === "completed" ? "active" : r.status === "failed" ? "paused" : "running"}`}>
+                          <span className={`sched-card__chip sched-card__chip--${r.status === "completed" ? "active" : r.status === "running" ? "running" : "paused"}`}>
                             {r.status}
                           </span>
                           <span className="sched-run-row__time" title={new Date(r.started_at).toLocaleString()}>

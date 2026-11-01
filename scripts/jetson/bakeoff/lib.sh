@@ -135,7 +135,8 @@ tegra_summary() { # tegra_summary <logfile> -> JSON
 # the condition is genuinely advisory.
 gate_exclusive() {
   local busy=0
-  if systemctl --user is-active goose-in-a-pond.service >/dev/null 2>&1; then
+  if systemctl --user is-active goose-in-a-pond.service >/dev/null 2>&1 \
+     || systemctl is-active goose-in-a-pond.service >/dev/null 2>&1; then
     add_warning "goose-in-a-pond.service is ACTIVE — it holds the model and the port"; busy=1
   fi
   if command -v docker >/dev/null && [ -n "$(docker ps -q 2>/dev/null)" ]; then

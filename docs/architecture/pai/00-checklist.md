@@ -19,7 +19,7 @@ the hardware in every row.
 
 | Workstream | Done | Partial | Open or removed | On hardware | Next concrete step |
 |---|---|---|---|---|---|
-| [PAI-1 Identity and profile boundaries](./01-identity-and-profile-boundaries.md) | 10: P1-P10 | 0 | No open phase. Three gaps outside the phase list: `get_session_messages` and `get_session_attachment` (`pond-api/src/routes.rs`) take no `Principal`, so any paired client reads any conversation by id; the `giap-memory` tools search at `ProfileScope::Household` (`pond-mcp-server/src/memory.rs`), so on a pond of two members one member's turn can read the other's memories (guests are not offered the group); `language` is collected by the onboarding locale step and never written to `profiles.preferences` (`buildProfilePatch` in `useOnboardingPersist.ts`) | VERIFIED on the Orin 2026-08-12 (pai-bench PAI-1); the 2026-09-24 scope fixes are Mac-only | Scope `get_session_messages` and `get_session_attachment` by the caller's `Principal`, as `/reminders` and `/suggestions` already are |
+| [PAI-1 Identity and profile boundaries](./01-identity-and-profile-boundaries.md) | 10: P1-P10 | 0 | No open phase. Four gaps outside the phase list. **2026-10-28, from a household on the Orin:** a device paired to nobody stays nobody's, because nothing re-attributes a device after pairing (`PUT /devices/{id}` takes no member) and, until `fix/profile-attribution`, neither the dashboard nor `pond-server pairing` could issue a member-bound code, so on a pond of two members every newly paired phone resolved `Guest` and a phone paired before the first member existed could never be linked; that branch adds the issuing side (Pairing-page member picker, `pairing --member`) and refuses a `primary_profile_id` that names no member, and linking still means pairing the phone again (section 4c of the PAI-1 document). The others: `get_session_messages` and `get_session_attachment` (`pond-api/src/routes.rs`) take no `Principal`, so any paired client reads any conversation by id; the `giap-memory` tools search at `ProfileScope::Household` (`pond-mcp-server/src/memory.rs`), so on a pond of two members one member's turn can read the other's memories (guests are not offered the group); `language` is collected by the onboarding locale step and never written to `profiles.preferences` (`buildProfilePatch` in `useOnboardingPersist.ts`) | VERIFIED on the Orin 2026-08-12 (pai-bench PAI-1); the 2026-09-24 scope fixes are Mac-only | Scope `get_session_messages` and `get_session_attachment` by the caller's `Principal`, as `/reminders` and `/suggestions` already are |
 | [PAI-2 Privacy and security guardrails](./02-privacy-and-security-guardrails.md) | 9: P0-P5 (P3's third chokepoint and P5's last senders arrived with P6a and P6b), P6a, P7, P8a | 1: P6b (its outbound-connector-action gate) | Open: P8b, the enforce flip (`security_policy_mode` still defaults to `audit`). Regressed: the staged-action gate went with `giap-draft` on 2026-09-10 (`793556b1`, section 3.6); the one outbound connector action, `book_ride`, is confirmed on the member's own phone instead | VERIFIED on the Orin 2026-08-12 (pai-bench PAI-2) | Fill `Principal.proven_profile_id` from the paired device's member in the auth middleware (it is `None` on every path today), which P8b waits on |
 | [PAI-3 Context governor](./03-context-governor.md) | 7: P1, P2, P3 with P3b, P4, P5, P6, and 4b's completeness check (`goal_check_enabled`) | 0 | None open. Since 2026-09-11 (`465373df`) goose trims and compacts the live conversation: the window reaches it as `GOOSE_CONTEXT_LIMIT`, and `CompactionProfile`'s history budget and output reserve size only `plan_replay` (hydrating a conversation goose's store lost) | VERIFIED on the Orin 2026-08-12, for code before the 2026-09-11 hand-over and the 2026-09-24 `device_budget` move; 4b is NOT VERIFIED on the Orin | Re-run `scripts/pai-bench.sh` PAI-3 on the Orin against the current binary |
 | [PAI-4 Smart compaction](./04-smart-compaction.md) | 4: P5 (`prefix_cache.rs`), P6 (now `run_quiet_compaction` in `pond-server/src/main.rs`), P7a (the compact route calls goose through the `Agent` port's `compact_session`), P7b (`ContextPressureNote`) | 2: P1 (`ModelClass` has no production consumer), P3 (the age rung runs only in `plan_replay`) | Removed 2026-09-11 (`75ba0747`): P2 re-summarisation, P4 compact-on-resume, and the claim and cooldown P7b-fix added (`claim_manual_compaction` has no caller). Open: P5's second clause | VERIFIED on the Orin 2026-08-12 for the code before the hand-over; quiet compaction measured on the Orin 2026-10-04/05 (section 4); pai-bench PAI-4 not re-run since | Re-run pai-bench PAI-4 on the Orin, and settle P5's second clause from a TTFT trace of the deployed binary |
@@ -3841,6 +3841,34 @@ not a PAI milestone).**
   (`cargo test --release -p goose-local-inference --features cuda --lib`): 197 passed, 0 failed,
   9 ignored.
 
+**2026-10-27 — The camera follows people (touches PAI-7 and PAI-8 through camera events and
+presence; not a PAI milestone).**
+
+- **What landed.** With YOLOX loaded, `pond-adapters-vision` looks five times a second while anyone
+  is in view or for 5 s after a 2% change of the picture, below the motion events' threshold (the
+  nano's is 0.5). Person boxes become tracks by overlap (`tracker.rs`): one `person` event when a
+  track starts, one more when its face is first recognised, faces tried once a second up to five
+  times. A face counts for the person whose box holds it. Events carry `track_id`. Motion with
+  nobody in view is named by the same look. On a Jetson the capture sends a 416-wide RGBA picture
+  of every frame on fd 0, a stream of its own, and the pond keeps five a second.
+- **Two capture bugs found on the way.** An HTTP MJPEG camera ran at 1 fps since the any-camera
+  capture: jpegparse claims 1/1 on a stream with no frame rate and videorate held it there. A
+  videorate in the detector's branch held every branch of the C920 to the picture rate. Both are
+  fixed, and the device test now checks the frame rate.
+- **What it changes for rules and context.** A person standing in view is one event, not one per
+  cooldown; presence `Arrived` is published once a track's face is known. While anyone is
+  followed no motion events are raised. The rules engine and the context ingest read events as
+  before.
+- **Invariants.** No migration, no setting, no prompt change, no egress; frames stay on the
+  device.
+- **Verified on the Orin** (E4B QAT at 16,384, YOLOX, SCRFD and AdaFace on TensorRT, 19:45–19:55Z).
+  A looping 14 s pedestrian clip served as a network MJPEG camera: 54 tracks in 60 s, an event per
+  track at a median 146 ms from the frame (163 ms at most), YOLOX 7–10 ms a look, one face match a
+  look at 123–141 ms; the pond 25% of a core, gst-launch 15%, GPU 8.6%. The quiet room on the
+  C920 at its own 14 fps: the pond 5%, gst-launch 7%, GPU 2.5%. LLM decode with the clip playing
+  33.2, 33.6 and 40.1 tok/s against 36.0, 35.7 and 40.7 in the quiet room. A walk past the real
+  camera by an enrolled member is owed.
+
 **2026-10-28 — `search_web` on Brave LLM Context, and its results kept out of history (touches
 PAI-2, PAI-3 and PAI-4; not a PAI milestone).** Design and store audit:
 [small-model-tools.md §8.10](../small-model-tools.md).
@@ -4002,5 +4030,155 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
 - **PAI-3.** The prime's preamble is unchanged: the waiting line rides the deep-research note in the
   turn's `<system-context>`, and `task_start`'s result is a tool result.
 - **PAI-7.** Stopping is the member's own choice on their card. Nothing is stopped for them.
-- **Not verified on the Orin yet.** The nano was running three of a member's research tasks while
-  this was written, and a deploy restarts the pond, so it waits until they finish.
+- **Verified on the Orin** (main at `c4b4786f`, E4B QAT, 2026-10-29, a member's paired test device):
+  two deep-research asks in a row. The second's view said `position 2 of 2` with the first's goal
+  ahead, and `GET /long-tasks/queue` listed both in order. The prime replied that it was waiting its
+  turn behind another task and that the task card can stop the person's tasks. Stopping the first
+  moved the second to the front. Both were stopped and the device and its chats removed afterwards.
+  The phone's queue card (goose-on-the-go #204) is not checked on a device.
+
+**2026-10-29 — PAI-1 and PAI-2: My Pond and the admin card ([pond administrator](../pond-administrator.md)).**
+
+- **Why.** Jerry asked for a phone area to administer the pond: storage, files, caches, long-task
+  artifacts and reports, health and power. Each of those deletes or reveals something, and being
+  paired was the only proof any route asked for.
+- **What landed.** `/api/v1/admin/*` answers only a member's device (`DeviceRung::Member`; a
+  guest's or an unattributed device gets `403 admin_members_only`) that unlocked it with the admin
+  card in the last 15 minutes (`AdminElevation`, `pond-core/src/security/services/`). The card is
+  made on the device by `giap.sh admin-card`, which keeps only a verifier on the pond and seals the
+  plaintext to the TPM. Wrong cards are slowed like the setup code.
+- **PAI-1.** A long task of another member shows its state, dates and artifact count, never its goal
+  or artifact titles, as the run queue already shows it. The unlock binds to the device, not to the
+  household.
+- **PAI-2.** The file browser never lists `setup/`, `tls/`, `secrets*`, `embedded-network/`,
+  `lightning/` or `.runtime_*`, and refuses `..`, absolute paths and paths through a symlink. Every
+  unlock, refusal and change is an `admin.*` audit event, with a file's top-level area only, and
+  every unlock is pushed to the household. Nothing new reaches `Settings` or leaves the device.
+- **Invariants.** No preamble or prompt change, no egress, no LLM call on the path.
+- **Not verified on the Orin yet.** The TPM seal and the `nvpmodel` switch need the board and
+  Jerry's sudo password; the deploy waits for his go-ahead.
+
+**2026-10-29 — PAI-2: the pond's own account, `agamemnon` ([pond administrator](../pond-administrator.md#the-service-account)).**
+
+- **What landed.** `install.sh` offers a new pond its own locked system account; `giap.sh
+  service-account [undo|status]` moves an existing one and back. The service runs as `agamemnon`
+  from `/var/lib/goose-in-a-pond`, with its own PulseAudio from a lingering user manager.
+- **PAI-2.** The data directory is `0750` and other local users lose the group read they had
+  through the login's home. The login keeps read access through an ACL that leaves every file's own
+  mask alone, so `setup/`, `secrets/`, `tls/` and the host credential stay the service account's.
+  Nothing new leaves the device; the scripts change only who owns the data.
+- **Invariants.** No server code, preamble, prompt or setting changed.
+- **On hardware.** In containers on the nano: the installer's step ran the real `pond-server` as
+  `agamemnon`, and a live voice turn ran with Whisper on CUDA and the USB pair. The nano itself
+  was not moved. A desktop shell's voice loop, which runs as the login, is the next step.
+
+**2026-10-29 — PAI-6: briefs, made agents and fuller sections (section 8.11).**
+
+- **What landed.**
+  - Every long task carries a `Brief` artifact. The planner sees it, and it's inlined into every step. Deep research writes it from the conversation before the ask, and `task_start` takes one from the prime.
+  - A plan step or a delegation may carry `new_agent` when no saved role fits (migration 0071). The runner and `made_role` hold its tools to the task's ceiling or to the prime's own.
+  - Research steps are asked for 400 to 900 words of specifics per section.
+- **PAI-1.** The brief holds the owner's own conversation and is scoped like any artifact of the task.
+- **PAI-2.** A made agent asks for tools and is given only those within its ceiling: device control and unknown groups are dropped.
+- **PAI-3.** No preamble changed except the planner's, which rebuilds once. The brief and the section guide ride in step briefs.
+- **Verified on the Orin** (branch `feat/descriptive-dispatch`, E4B QAT, 2026-10-29, a member's paired test device). One turn said "four friends, 12 to 15 December, one vegetarian, we'd rather not fly"; the next asked for deep research with "Plan our trip."
+  - The brief carried that turn, and the prime's acknowledgement named the dates and diet.
+  - The plan went by train and road: SGR and road sections, no flights. Vegetarian appears in the dining section, the meal plan, the itinerary and the result.
+  - Sections were 536 to 617 words, where earlier runs gave about 150 to 600.
+  - 8 steps took 18.3 minutes, two of them on a second try. No draft had an emoji.
+  - The planner chose saved roles for every step, so a made agent is verified by tests only.
+
+**2026-10-29 — PAI-6: plans that read the house (section 8.12, #717).**
+
+- **What landed.**
+  - A long task's helpers may read the house through `HOUSEHOLD_READ_TOOLS`: recent camera events, camera automations, schedules and the device list.
+  - Plans are no longer refused over extra or misspelt fields, and every refused tool call is traced with its message.
+  - The verifier checks relevance to the goal. `artifact_write` can finish a step. A helper that stops without reporting is nudged once in its own session.
+  - A chore waits 30 minutes behind a member's task. Goose#23 raises the snapshot cap to 10,240 tokens.
+- **PAI-1.** The read tools return what a member's own turn would. A guest child gets none of those that guests can't see.
+- **PAI-2.** The read tools are named singly. `with_read_tools` keeps only names on that list, so no caller can grant a tool that sends a picture, acts or schedules. A chat turn's delegations get none.
+- **PAI-3.** The prime's snapshot now holds its whole preamble: 7,418 tokens loaded where 6,144 were before. The worker's preamble grew by its new tools and rebuilt once.
+
+**2026-10-29 — PAI-6: the answer the person wants (section 8.13, #718).**
+
+- **What landed.**
+  - Each task has an answer shape (migration 0073): short, report, or auto. The member chooses it beside the deep-research chip (desktop here, phone in goose-on-the-go#209), or the prime passes it to `task_start`, or the planner reads it from the ask.
+  - A chosen short answer runs one step with no planner, and the card shows it whole.
+  - Waits, keys, string agents and report artifacts that name things loosely are resolved, not refused.
+  - Each helper holds only the task tools its job uses.
+  - The quiet before a task starts is 10 s, re-checked when it is due.
+- **PAI-1.** `answer_text` goes only in the views that already scope a task to its owner.
+- **PAI-2.** `tools_withheld` only narrows a spec, never widens it. The link fix touches only a bare web address in a link's target.
+- **PAI-3.** Each helper's preamble shrank by the tools it no longer holds and rebuilt once. The prefill compile withholds the same, so snapshots match their runs.
+- **Verified on the Orin** (branch `feat/answer-shape`, E4B QAT, 2026-10-29, a member's paired test device). Four rounds of the same five asks, fixing between rounds. Round three:
+
+  | Ask | Chosen by | Shape | Time | Steps (tries) |
+  |---|---|---|---|---|
+  | Who did the cameras see in the last hour? | member: short | short | 1.0 min | 1 (1) |
+  | Is anyone at home right now? | pond | short | 1.2 min | 1 (1) |
+  | Fastest way from Nairobi to Mombasa? | pond | short | 1.5 min | 1 (1) |
+  | Create a report of all vision events | pond | report | 7.5 min | 4 (4) |
+  | Who did the cameras see in the last hour? | member: report | report | 4.2 min | 3 (3) |
+
+  - The same vision report took 23.7 minutes before #717, and 8.9 with #717 alone.
+  - Rounds four to six found, and #718 fixes, five more ways a run lost time or its answer:
+    - a Result not titled as one;
+    - the same question read as short three times and as a report once;
+    - a Result that compiled its sections;
+    - a weekend plan given a meal plan and a packing list nobody asked for (12.9 minutes and 7 steps, then 8.9 minutes and 5);
+    - a short answer left only in a step's summary.
+  - In round five the pond chose correctly in all four asks, and in round six in all three.
+  - Not verified: a made agent's step on the Orin. The planner made one only when its `new_agent` was unreadable, and that is now dropped.
+
+**2026-10-28, re-planned 2026-10-30 — the context space, designed; no code.**
+
+- [`context-space.md`](../context-space.md) proposes one item store, one multimodal index
+  (EmbeddingGemma 2) and context agents in place of memories, summaries, the three corpora,
+  suggestions and proactive review. It touches PAI-1, -2, -3, -6, -7 and -8. Status: `DESIGNED`,
+  re-checked against `0309bf0d`.
+- The re-plan builds on what landed on 28 and 29 October rather than beside it:
+  - the context agents are shipped recipes (PAI-6 section 9), with two activations and three hooks
+    added to the catalog;
+  - planning is the existing long-task composer;
+  - the embedding slot sits below member tasks in the lane's order;
+  - the data key is sealed to the nano's fTPM the way the admin card is.
+- It reverses the personal-context index's "one index, separate stores" deliberately, in writing
+  (its section 2). Decision 1 in its section 12 is Jerry's.
+- Found while checking the tree:
+  - MCP `save_memory` writes `profile_id: None`, so a member's own save is household-visible;
+  - turn recall reads vector BLOBs on source rows, not the index;
+  - the `SuggestionGeneration` lane job has no cancel watcher.
+- Corrected PAI-2 section 3.4, which said an Orin Nano devkit exposes no fTPM. The nano has an
+  OP-TEE fTPM (`pond-administrator.md`). It does not guard a whole stolen board until OemK1 is fused.
+
+**2026-10-31 — the context space: storage chosen, memory agents specified; P0 started.**
+
+- Storage is a shared item header over each kind's own table (decision 1). Today's tables become
+  the detail tables, so P1 adds an `item_id` and a header rather than moving rows.
+- The Conversation agent extracts contextually: each fact carries a context line (who, when, what
+  it refers to), which is embedded with it and comes out of the same call (PAI-3).
+- Consolidation's existing Proposer, Adversary and Judge become the default. The Adversary adds
+  unsupported, scope and planted challenges, and `apply_actions` refuses any widening of scope
+  (PAI-1, PAI-2). A fact whose only evidence is untrusted is labelled, and Profile and Proposal
+  wait for a consolidation run to pass it.
+- P0 (EmbeddingGemma 2 on the Orin) started. No code has changed.
+
+**2026-10-30 — PAI-6: reading the pages it cites (section 8.14).**
+
+- **What landed.**
+  - `giap-knowledge__read_web_page` reads one page into Markdown lines in parts, and returns the lines that answer a question or a part whole (small-model-tools §9).
+  - Forager Gosling's recipe and the research step use it before writing a number, price, time or date from the web.
+  - The deep-research note tells the acknowledging turn the helpers read any linked page.
+  - The report nudge tells a helper that saved nothing to save its work with `artifact_write`.
+- **PAI-2.**
+  - The tool reads only an address the person wrote, a task's goal names, or a search returned (`page_addresses`), so a page cannot steer a helper holding the memory tools into sending data out inside an address.
+  - Every fetch goes through the public-only client and `traced_get_with`. A refusal is traced by host alone.
+- **PAI-3.**
+  - The default tool block grows by 666 raw bytes, so each shape's snapshot compiles again once.
+  - A page result is transient: history keeps a stub with the address.
+- **PAI-1.** It touches no personal data, and no member-scoped data passes through it.
+- **Verified on the Orin** (branch `feat/read-web-page`, E4B QAT, 2026-10-30, a member's paired test device). Four rounds, fixing between them (small-model-tools §9.5):
+  - Round four: a comparison report took 9.7 minutes (14.4 and 20.0 before its fixes), and a weekend plan 11.9 (19.7). Every short answer took 1.5 to 2.4 minutes. Every answer was right.
+  - A linked page in chat was read in 1.8 s.
+  - A deep-research acknowledgement with a link took 9.9 s once the note said the helpers read it (39.5 s before).
+  - Not verified on the Orin: `reply_as_draft`, since no helper left work in a reply in round four; and the bench (R1).

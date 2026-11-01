@@ -243,7 +243,7 @@ impl InferenceProvider for OllamaInferenceProvider {
                                 Err(e) => {
                                     tracing::warn!(
                                         error = %e,
-                                        line = %line,
+                                        line_chars = line.chars().count(),
                                         "Failed to parse Ollama stream chunk"
                                     );
                                     continue;

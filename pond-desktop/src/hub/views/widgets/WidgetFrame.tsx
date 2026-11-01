@@ -55,7 +55,7 @@ export function WidgetFrame({
             disabled={!canMoveUp}
             onClick={onMoveUp}
           >
-            <HubIco d={HP_PATHS.chevD} size={18} color="var(--color-text)" sw={2.4} className="wframe__up" />
+            <HubIco d={HP_PATHS.chevD} size={18} sw={2.4} className="wframe__up" />
           </button>
 
           <button
@@ -65,7 +65,7 @@ export function WidgetFrame({
             disabled={!canMoveDown}
             onClick={onMoveDown}
           >
-            <HubIco d={HP_PATHS.chevD} size={18} color="var(--color-text)" sw={2.4} />
+            <HubIco d={HP_PATHS.chevD} size={18} sw={2.4} />
           </button>
 
           <div className="wframe__seg">
@@ -90,7 +90,7 @@ export function WidgetFrame({
             disabled={!canRemove}
             onClick={onRemove}
           >
-            <HubIco d={HP_PATHS.x} size={16} color="var(--color-text)" sw={2.4} />
+            <HubIco d={HP_PATHS.x} size={16} sw={2.4} />
           </button>
         </div>
       )}

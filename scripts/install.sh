@@ -59,6 +59,7 @@ source "${SCRIPT_DIR}/lib/pond-health.sh"
 source "${SCRIPT_DIR}/lib/install-systemd.sh"
 source "${SCRIPT_DIR}/lib/install-desktop.sh"
 source "${SCRIPT_DIR}/lib/setup-code.sh"
+source "${SCRIPT_DIR}/lib/admin-card.sh"
 source "${SCRIPT_DIR}/lib/connect-setup.sh"
 # setup-code.sh and connect-setup.sh talk through giap.sh's names for these.
 ok()   { success "$@"; }
@@ -85,6 +86,14 @@ parse_args "$@"
 detect_os
 detect_mode
 resolve_data_dir
+
+# Every step below writes the data directory as this login, which a pond run by agamemnon refuses.
+if [ "$OS" = "linux" ] && [ "$(agamemnon_unit_user)" = "$AGAMEMNON" ]; then
+  error "this pond runs as $AGAMEMNON, which alone writes $AGAMEMNON_DATA"
+  log "update it: bash scripts/giap.sh update"
+  log "to run the installer again, first: bash scripts/giap.sh service-account undo"
+  exit 1
+fi
 
 # ── Banner ───────────────────────────────────────────────────────────────────
 MODE_DISPLAY=$(printf "%-12s" "$MODE")
@@ -120,6 +129,8 @@ SETUP_BIN="${REPO_DIR}/target/release/pond-server"
 [ "$MODE" = "dev" ] && SETUP_BIN="${REPO_DIR}/target/debug/pond-server"
 if [ -x "$SETUP_BIN" ]; then
   setup_code_install_card "$SETUP_BIN" "$DATA_DIR" || true
+  # My Pond's admin card, with its recovery copy sealed to this machine.
+  admin_card_run "" "$SETUP_BIN" "$DATA_DIR" "$(id -un)" || true
 else
   warn "no pond-server binary yet, so no setup card: run pond-server setup-code --card \"$DATA_DIR/setup/card.svg\" once it is built"
 fi

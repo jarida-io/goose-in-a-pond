@@ -100,6 +100,8 @@ impl SchedulerPort for InMemoryScheduler {
             anyhow::bail!("task '{}' already exists", req.id);
         }
         let schedule = Schedule {
+            ask_if_missed: false,
+            missed_run: None,
             fire_at: None,
             id: req.id.clone(),
             label: req.label,
@@ -300,6 +302,7 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        pond_admin: None,
     });
     (
         build_router(state, std::path::PathBuf::from("pond-desktop/dist")),

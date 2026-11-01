@@ -10,6 +10,9 @@ use std::sync::Mutex;
 
 static IN_FLIGHT: Mutex<BTreeSet<&'static str>> = Mutex::new(BTreeSet::new());
 
+/// Drafted tokens per step when the registry names none; a household's own setting is kept.
+const PREFERRED_DRAFT_DEPTH: i32 = 2;
+
 /// Register `model_name`'s drafter in `data_dir` and point the row(s) at it; returns the drafter's id.
 /// If absent on disk, a background fetch is spawned and subsequent turns will attach it.
 pub fn attach_drafter(data_dir: &Path, model_name: &str) -> Option<String> {
@@ -104,6 +107,12 @@ fn register_and_attach(
     let mut attached = false;
     for id in matching_ids {
         if let Some(mut settings) = registry.get_model(&id).map(|e| e.settings.clone()) {
+            // Depth 2 decoded about 10% faster than the engine's 4 on the Orin at the pond's own
+            // sampling (temperature 0.8): deeper drafts are rejected more often than they pay.
+            if settings.draft_n_max.is_none() {
+                settings.draft_n_max = Some(PREFERRED_DRAFT_DEPTH);
+                let _ = registry.update_model_settings(&id, settings.clone());
+            }
             if settings.draft_model.as_deref() != Some(spec.id) {
                 settings.draft_model = Some(spec.id.to_string());
                 match registry.update_model_settings(&id, settings) {

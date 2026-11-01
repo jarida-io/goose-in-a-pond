@@ -3,7 +3,8 @@ import { AlertCircle, AlertTriangle, Check, CircleSlash, Clock, Loader2, Pause, 
 import "./longTasks.css";
 import type { LongTask, LongTaskState } from "../api/types";
 import { useConfirm } from "../components/shared";
-import { isEnded, isOwnAhead, isResearch, isWaiting, resultLine, resultOf, stepAgent, stepWords, taskKindLabel, taskWords } from "./longTaskWords";
+import { isEnded, isOwnAhead, isResearch, isWaiting, resultLine, resultOf, shortAnswerOf, stepAgent, stepWords, taskKindLabel, taskWords } from "./longTaskWords";
+import { MarkdownText } from "../components/MarkdownText";
 import type { LongTasksState } from "./useLongTasks";
 import { useLongTaskReport } from "./useLongTaskReport";
 import { ReportExport } from "./ReportExport";
@@ -79,6 +80,8 @@ function LongTaskBody({ task, longTasks, variant }: { task: LongTask; longTasks:
   const stopping = longTasks.stopping[id] === true;
   const stopError = longTasks.stopErrors[id];
   const result = task.state === "completed" ? resultOf(task) : null;
+  // A short answer is the answer itself, so the card shows it whole rather than a line about it.
+  const shortAnswer = result ? shortAnswerOf(task) : null;
 
   async function onStop() {
     const ok = await confirm("Stop this task? A step that is already under way finishes first.", {
@@ -140,10 +143,14 @@ function LongTaskBody({ task, longTasks, variant }: { task: LongTask; longTasks:
         </ol>
       ) : null}
 
-      {result ? <p className="lt__resultline">{resultLine(result)}</p> : null}
+      {shortAnswer ? (
+        <MarkdownText source={shortAnswer} className="lt__answer" />
+      ) : result ? (
+        <p className="lt__resultline">{resultLine(result)}</p>
+      ) : null}
 
       <div className="lt__actions">
-        {result ? (
+        {result && !shortAnswer ? (
           <>
             {/* Not disabled while opening: a disabled button drops focus, and the sheet would have nowhere to return it. */}
             <button

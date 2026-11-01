@@ -22,6 +22,8 @@
 #   bash scripts/giap.sh models pairings         # regenerate the vision pairing table from Hugging Face
 #   bash scripts/giap.sh models pairings --check # only compare it (exit 1 if the committed table is stale)
 #   bash scripts/giap.sh wifi-grant [remove|status]  # Linux: let the pond's user join Wi-Fi from the BLE setup channel (sudo)
+#   bash scripts/giap.sh admin-card [show|rotate]  # My Pond's admin card: make it and seal a recovery copy (sudo), print it again, or replace it
+#   bash scripts/giap.sh service-account [undo|status]  # Linux: run the pond as its own locked account, agamemnon (sudo); undo moves it back
 #   bash scripts/giap.sh provision --host HOST --key FILE  # save a Pond's setup card, give it a device certificate (operator; must come first)
 #   bash scripts/giap.sh check [AREA…] [--all|--e2e|--full|--base REF|--dry-run]  # the checks CI runs, for what this branch changes (must come first)
 #   bash scripts/giap.sh --dry-run …  # print every command instead of running it
@@ -71,8 +73,13 @@ source "$HERE/lib/onnxruntime-setup.sh"
 source "$HERE/lib/model-pairings.sh"
 # shellcheck source=lib/setup-code.sh
 source "$HERE/lib/setup-code.sh"
+# shellcheck source=lib/admin-card.sh
+source "$HERE/lib/admin-card.sh"
 # shellcheck source=lib/connect-setup.sh
 source "$HERE/lib/connect-setup.sh"
+# The agamemnon_* functions: the pond's own locked account.
+# shellcheck source=lib/install-systemd.sh
+source "$HERE/lib/install-systemd.sh"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 # Which Node the repo runs on, finding one, and downloading one. REPO_ROOT has to be set first: the
@@ -316,6 +323,7 @@ detect_service() {
 resolve_data_dir() {
   if [ -n "${POND_DATA_DIR:-}" ]; then D_DATA_DIR="$POND_DATA_DIR"
   elif [ "$D_OS" = "macos" ]; then D_DATA_DIR="$HOME/Library/Application Support/goose-in-a-pond"
+  elif [ -n "$(agamemnon_unit_data_dir)" ]; then D_DATA_DIR="$(agamemnon_unit_data_dir)"
   else D_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/goose-in-a-pond"; fi
 }
 
@@ -645,6 +653,10 @@ doctor() {
     none)              warn "no service unit installed"; DOC_WARN=$((DOC_WARN+1)) ;;
     *)                 unk "service: $D_SVC_SCOPE"; DOC_UNK=$((DOC_UNK+1)) ;;
   esac
+  if [ "$D_OS" = "linux" ]; then
+    agamemnon_doctor "$D_SVC_SCOPE" "$(connect_pond_user 2>/dev/null)"
+    [ "$AGAMEMNON_LEVEL" = warn ] && DOC_WARN=$((DOC_WARN+1))
+  fi
 
   # 6. duplicate servers
   if [ "${D_PROCS:-0}" -gt 1 ] 2>/dev/null; then
@@ -798,8 +810,10 @@ doctor() {
   fi
 
   # The printed setup card: claimed is a pond in use, unclaimed one waiting for its first phone.
-  setup_code_doctor "$(setup_code_bin "$REPO_ROOT")" "$D_DATA_DIR"
+  setup_code_doctor "$(setup_code_bin "$REPO_ROOT")" "$D_DATA_DIR" "$(connect_pond_user 2>/dev/null)"
   [ "$SETUP_CODE_LEVEL" = warn ] && DOC_WARN=$((DOC_WARN+1))
+  admin_card_doctor "$(setup_code_bin "$REPO_ROOT")" "$D_DATA_DIR" "$(connect_pond_user 2>/dev/null)"
+  [ "$ADMIN_CARD_LEVEL" = warn ] && DOC_WARN=$((DOC_WARN+1))
 
   # The BLE setup channel's radios and the Wi-Fi grant. A pond without them still runs, so these
   # warn rather than fail. macOS asks for its own permissions.
@@ -927,7 +941,8 @@ doctor_onnxruntime() {
   esac
   if [ -z "$(ortgpu_running_pid)" ] && [ -f "$(ortgpu_stopped_file)" ]; then
     warn "a GPU ONNX Runtime build stopped the pond and did not start it again"
-    note "fix: systemctl --user start $ORTGPU_SERVICE"
+    if [ "$D_SVC_SCOPE" = system ]; then note "fix: sudo systemctl start $ORTGPU_SERVICE"
+    else note "fix: systemctl --user start $ORTGPU_SERVICE"; fi
     DOC_WARN=$((DOC_WARN+1))
   fi
   return 0
@@ -1062,6 +1077,12 @@ action_install() {
   info "Host:  $D_OS/$D_ARCH${D_IS_JETSON:+ }$( [ "$D_IS_JETSON" = true ] && echo '(Jetson)' )"
   info "Accel: $D_ACCEL"
 
+  if [ "$(agamemnon_unit_user)" = "$AGAMEMNON" ]; then
+    bad "this pond runs as $AGAMEMNON, which alone writes $AGAMEMNON_DATA; the installer's steps run as $(id -un)"
+    note "update it: bash scripts/giap.sh update; to run the installer again, first: bash scripts/giap.sh service-account undo"
+    return 1
+  fi
+
   # Guardrail 1: never let install.sh add a SECOND service unit.
   #
   # setup_systemd in scripts/lib/install-systemd.sh writes a root-owned unit to
@@ -1090,8 +1111,7 @@ action_install() {
   if [ "$D_IS_JETSON" = true ] && [ "$D_SVC_ACTIVE" = "active" ]; then
     warn "the service is running and holding a model; the release link may be OOM-killed."
     if confirm "Stop it for the install and restart afterwards?"; then
-      run systemctl --user stop "$SERVICE_NAME"
-      RESTART_SVC_AFTER=true
+      svc_ctl stop && RESTART_SVC_AFTER=true
     fi
   fi
 
@@ -1112,7 +1132,7 @@ action_install() {
   [ -n "$why_no_service" ] && info "Passing --no-service because $why_no_service."
   info "install.sh auto-detects its own mode (dev / production / jetson)."
   if ! confirm "Run: bash scripts/install.sh$args ?"; then
-    [ "${RESTART_SVC_AFTER:-false}" = true ] && { run systemctl --user start "$SERVICE_NAME"; RESTART_SVC_AFTER=false; }
+    [ "${RESTART_SVC_AFTER:-false}" = true ] && { svc_ctl start; RESTART_SVC_AFTER=false; }
     return 1
   fi
 
@@ -1122,7 +1142,7 @@ action_install() {
 
   BUILD_STARTED_SVC=false
   if [ "${RESTART_SVC_AFTER:-false}" = true ]; then
-    run systemctl --user start "$SERVICE_NAME"; RESTART_SVC_AFTER=false; BUILD_STARTED_SVC=true
+    svc_ctl start; RESTART_SVC_AFTER=false; BUILD_STARTED_SVC=true
   fi
   detect_all
   if [ $rc -eq 0 ]; then
@@ -1215,8 +1235,7 @@ action_build_server() {
     detect_resources
     if [ "$D_SVC_ACTIVE" = "active" ]; then
       info "stopping the pond for the build to free memory and CPU cores; it starts again after"
-      run systemctl --user stop "$SERVICE_NAME"
-      RESTART_SVC_AFTER=true
+      svc_ctl stop && RESTART_SVC_AFTER=true
     fi
     info "This is the slow one — roughly 35 minutes from clean on an Orin Nano."
   fi
@@ -1240,7 +1259,7 @@ action_build_server() {
   fi
   if [ $rc -eq 0 ]; then write_build_stamp; ok "pond-server built"; else bad "build failed (exit $rc)"; fi
   if [ "${RESTART_SVC_AFTER:-false}" = true ]; then
-    run systemctl --user start "$SERVICE_NAME"; RESTART_SVC_AFTER=false
+    svc_ctl start; RESTART_SVC_AFTER=false
   fi
   detect_binaries
   return $rc
@@ -1354,7 +1373,8 @@ action_litert_menu() {
 svc_ctl() { # $1 = start|stop|restart|status
   case "$D_SVC_SCOPE" in
     user)   run systemctl --user "$1" "$SERVICE_NAME" ;;
-    system) run sudo systemctl "$1" "$SERVICE_NAME" ;;
+    system) if [ "$1" = status ]; then run systemctl --no-pager status "$SERVICE_NAME"
+            else run sudo systemctl "$1" "$SERVICE_NAME"; fi ;;
     "BOTH") bad "two units named $SERVICE_NAME exist — resolve that first (menu 24)"; return 1 ;;
     *) bad "no service unit installed on this host"; return 1 ;;
   esac
@@ -1377,20 +1397,7 @@ action_service_install() {
   confirm "Proceed?" || return 1
   if [ "$DRY_RUN" != true ]; then
     mkdir -p "$(dirname "$unit")"
-    cat > "$unit" <<UNIT
-[Unit]
-Description=Goose In A Pond — local AI home hub (user service)
-After=network-online.target
-
-[Service]
-WorkingDirectory=$REPO_ROOT
-ExecStart=$REPO_ROOT/target/release/pond-server serve --port $port
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-UNIT
+    agamemnon_user_unit_text "$REPO_ROOT/target/release/pond-server serve --port $port" "$REPO_ROOT" > "$unit"
   fi
   run systemctl --user daemon-reload
   run systemctl --user enable --now "$SERVICE_NAME"
@@ -1569,13 +1576,7 @@ action_update() {
       if [ "$D_SVC_ACTIVE" != "active" ] || { [ "$rebuilt" = true ] && [ "$BUILD_STARTED_SVC" != true ]; }; then
         svc_ctl restart || return 1
       fi
-      local tries=0
-      detect_runtime
-      while [ "$DRY_RUN" != true ] && [ "$D_HEALTH" != "200" ] && [ $tries -lt 30 ]; do
-        sleep 2; tries=$((tries+1)); detect_runtime
-      done
-      if [ "$DRY_RUN" = true ] || [ "$D_HEALTH" = "200" ]; then ok "the pond is up (health 200)"
-      else bad "the pond did not answer its health check after the restart"; note "see: bash scripts/giap.sh logs"; fi
+      await_health
       ;;
     *) info "no service unit here; run the pond as you usually do (menu 20 installs one)" ;;
   esac
@@ -1616,6 +1617,88 @@ action_deploy() {
   info "Expect roughly 35 minutes for a full CUDA build."
   confirm "Run scripts/jetson.sh deploy?" || return 1
   run bash scripts/jetson.sh deploy
+}
+
+# My Pond's admin card, made as the account that runs the pond (docs/architecture/pond-administrator.md).
+action_admin_card() {
+  head1 "Admin card (My Pond)"
+  local user
+  user="$(connect_pond_user)" || { bad "could not tell which user runs the pond"; return 1; }
+  admin_card_run "${1:-}" "$(setup_code_bin "$REPO_ROOT")" "$D_DATA_DIR" "$user"
+}
+
+# `giap.sh service-account [undo|status]`: the pond's own locked account, agamemnon
+# (docs/architecture/pond-administrator.md). A new install offers it; an existing pond moves here.
+action_service_account() { # $1 = "" | undo | status
+  head1 "The pond's own account ($AGAMEMNON)"
+  if [ "$D_OS" != "linux" ] || ! command -v systemctl >/dev/null 2>&1; then
+    bad "a service account is for Linux ponds that systemd runs"; return 1
+  fi
+  local me unit_user
+  me="$(id -un)"; unit_user="$(agamemnon_unit_user)"
+  case "${1:-}" in
+    status)
+      agamemnon_doctor "$D_SVC_SCOPE" "$(connect_pond_user 2>/dev/null)"
+      info "data: $D_DATA_DIR"
+      return 0 ;;
+    ""|undo) ;;
+    *) bad "service-account takes undo or status, not: $1"; return 2 ;;
+  esac
+  if [ "$me" = root ]; then bad "run this as the login the pond belongs to; it asks for sudo itself"; return 1; fi
+
+  if [ "${1:-}" = undo ]; then
+    if [ "$unit_user" != "$AGAMEMNON" ]; then ok "the pond does not run as $AGAMEMNON; nothing to undo"; return 0; fi
+    info "This stops the pond, moves $AGAMEMNON_DATA back to your login, and runs the pond as $me again."
+    confirm "Move the pond back to $me?" || return 1
+    [ "$DRY_RUN" = true ] && { info "dry run: nothing changed"; return 0; }
+    agamemnon_undo "$me" "$REPO_ROOT" || { bad "the pond did not move back"; return 1; }
+  else
+    local old_unit from busy rc=0
+    case "$D_SVC_SCOPE" in
+      user)   old_unit="$(systemctl --user show -p FragmentPath --value "$SERVICE_NAME" 2>/dev/null)" ;;
+      system)
+        if [ "$unit_user" = "$AGAMEMNON" ]; then ok "the pond already runs as $AGAMEMNON"; agamemnon_doctor system "$AGAMEMNON"; return 0; fi
+        [ "$unit_user" = "$me" ] || { bad "the service runs as ${unit_user:-root}; run this as that login"; return 1; }
+        old_unit="/etc/systemd/system/$SERVICE_NAME" ;;
+      BOTH)   bad "two units named $SERVICE_NAME exist; remove one first (menu 24)"; return 1 ;;
+      *)      bad "no service runs this pond yet; bash scripts/giap.sh install offers the account"; return 1 ;;
+    esac
+    from="$D_DATA_DIR"
+    busy="$(sqlite3 "$from/pond_system.db" "SELECT count(*) FROM long_tasks WHERE state IN ('planning','running');" 2>/dev/null)"
+    if [ "${busy:-0}" -gt 0 ] 2>/dev/null; then
+      warn "$busy long task(s) are running; the move restarts the pond, which redoes the step in flight"
+    fi
+    if systemctl --user cat giap-kiosk.service >/dev/null 2>&1; then
+      warn "this board's kiosk runs its voice loop and dashboard sign-in as $me; after the move it can do"
+      note "neither, because the pond's data and host credential belong to $AGAMEMNON. A phone's voice still works."
+    fi
+    info "This stops the pond, makes the locked account $AGAMEMNON (no password, no shell), moves"
+    info "$from to $AGAMEMNON_DATA (a link stays behind), and starts the pond as $AGAMEMNON."
+    info "Your login keeps reading the pond's data. Undo: bash scripts/giap.sh service-account undo"
+    confirm "Move the pond to $AGAMEMNON?" || return 1
+    [ "$DRY_RUN" = true ] && { info "dry run: nothing changed"; return 0; }
+    agamemnon_move "$D_SVC_SCOPE" "$old_unit" "$from" "$me" "$REPO_ROOT" || rc=$?
+    case "$rc" in
+      0) ;;
+      1) bad "nothing was moved; the pond runs as $me as before"; return 1 ;;
+      *) bad "the move stopped part way"; note "put it back: bash scripts/giap.sh service-account undo"; return 1 ;;
+    esac
+  fi
+  detect_all
+  await_health
+  agamemnon_doctor "$D_SVC_SCOPE" "$(connect_pond_user 2>/dev/null)"
+}
+
+# Waits up to a minute for the restarted pond to answer.
+await_health() {
+  local tries=0
+  detect_runtime
+  while [ "$DRY_RUN" != true ] && [ "$D_HEALTH" != "200" ] && [ $tries -lt 30 ]; do
+    sleep 2; tries=$((tries+1)); detect_runtime
+  done
+  if [ "$DRY_RUN" = true ] || [ "$D_HEALTH" = "200" ]; then ok "the pond is up (health 200)"; return 0; fi
+  bad "the pond did not answer its health check after the restart"; note "see: bash scripts/giap.sh logs"
+  return 1
 }
 
 action_jetson_power() {
@@ -1659,6 +1742,7 @@ show_menu() {
   say "  21) Start / 22) Stop / 23) Restart"
   say "  24) Remove the service"
   say "  25) Run the server in the foreground"
+  [ "$D_OS" = "linux" ] && say "  26) Run the pond as its own locked account ($AGAMEMNON), or move it back"
   say ""
   say "  ${C_B}Desktop${C_RST}"
   say "  31) Build the desktop app (macOS only)"
@@ -1700,6 +1784,7 @@ menu_loop() {
       23) svc_ctl restart; detect_service; detect_runtime; pause ;;
       24) action_service_remove; pause ;;
       25) action_serve_foreground; pause ;;
+      26) if [ "$(agamemnon_unit_user)" = "$AGAMEMNON" ]; then action_service_account undo; else action_service_account; fi; pause ;;
       31) action_build_desktop; pause ;;
       32) action_launch_gui; pause ;;
       40) action_logs; pause ;;
@@ -1722,7 +1807,8 @@ usage() {
 
 # ── entry ────────────────────────────────────────────────────────────────────
 # The first word is the command; only `litert` (a subcommand and a platform), `models`,
-# `onnxruntime`, `wifi-grant` (a subcommand) and `console` (a host) take more.
+# `onnxruntime`, `wifi-grant`, `admin-card`, `service-account` (a subcommand) and `console` (a host)
+# take more.
 CMD=""; CMD_SUB=""; CMD_ARG=""; CONSOLE_ONCE=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -1747,7 +1833,7 @@ while [ $# -gt 0 ]; do
 done
 case "$CMD" in
   litert) ;;
-  models|wifi-grant|onnxruntime|console) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
+  models|wifi-grant|onnxruntime|console|admin-card|service-account) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
   *)      if [ -n "$CMD_SUB" ]; then bad "'$CMD' takes no arguments (got: $CMD_SUB)"; exit 2; fi ;;
 esac
 
@@ -1778,5 +1864,7 @@ case "$CMD" in
   onnxruntime) action_onnxruntime "$CMD_SUB" ;;
   models)    action_models "$CMD_SUB" ;;
   wifi-grant) action_wifi_grant "$CMD_SUB" ;;
+  admin-card) action_admin_card "$CMD_SUB" ;;
+  service-account) action_service_account "$CMD_SUB" ;;
   *)         bad "unknown command: $CMD"; usage; exit 1 ;;
 esac

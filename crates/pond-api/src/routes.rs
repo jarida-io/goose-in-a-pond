@@ -36,7 +36,8 @@ use pond_core::shared::services::chat::ChatService;
 use pond_core::user_data::domain::onboarding::OnboardingStep;
 use pond_core::user_data::domain::profile::{CreateProfileRequest, Role};
 use pond_core::user_data::domain::schedule::{
-    OneShotTimePassed, Schedule, SensorTriggerSpec, TaskKind,
+    routine_rejection, MissedRunAnswer, NoMissedRun, OneShotTimePassed, Schedule,
+    SensorTriggerSpec, TaskKind,
 };
 use pond_core::user_data::domain::sensor::SensorReading;
 use pond_core::user_data::domain::session::{IdentificationSource, SessionIdentity};
@@ -365,6 +366,8 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/schedules/{id}/pause", post(pause_schedule))
         .route("/schedules/{id}/resume", post(resume_schedule))
         .route("/schedules/{id}/run-now", post(run_schedule_now))
+        .route("/schedules/{id}/missed/run", post(run_missed_schedule))
+        .route("/schedules/{id}/missed/skip", post(skip_missed_schedule))
         .route("/schedules/{id}/runs", get(list_schedule_runs))
         .route("/schedules/events", get(schedule_events_sse))
         // ── Sensor rules ───────────────────────────────────────────────────
@@ -549,6 +552,30 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/long-tasks/{id}/report", get(get_long_task_report))
         .route("/long-tasks/{id}/export", get(export_long_task))
+        // My Pond: a member's device, unlocked with the admin card (`pond_admin.rs`).
+        .route("/admin/status", get(crate::pond_admin::status))
+        .route("/admin/unlock", post(crate::pond_admin::unlock))
+        .route("/admin/lock", post(crate::pond_admin::lock))
+        .route("/admin/overview", get(crate::pond_admin::overview))
+        .route(
+            "/admin/files",
+            get(crate::pond_admin::list_files).delete(crate::pond_admin::delete_file),
+        )
+        .route("/admin/caches", get(crate::pond_admin::caches))
+        .route(
+            "/admin/caches/{id}/clear",
+            post(crate::pond_admin::clear_cache),
+        )
+        .route("/admin/tasks", get(crate::pond_admin::tasks))
+        .route("/admin/tasks/{id}", delete(crate::pond_admin::delete_task))
+        .route(
+            "/admin/tasks/{id}/artifacts/{artifact_id}",
+            delete(crate::pond_admin::delete_artifact),
+        )
+        .route("/admin/health", get(crate::pond_admin::health))
+        .route("/admin/power", get(crate::pond_admin::power))
+        .route("/admin/power/mode", put(crate::pond_admin::set_power_mode))
+        .route("/admin/power/restart", post(crate::pond_admin::restart))
         .route("/agents/prefills", get(agent_prefills))
         .route("/agents/prefills/rebuild", post(rebuild_all_prefills))
         .route(
@@ -890,7 +917,8 @@ async fn emit_pairing_outcome(
     } else {
         tracing::warn!(
             kind = "pairing_rejected",
-            device = device_name.unwrap_or("unnamed"),
+            // A phone's name is often its owner's ("Amina's iPhone").
+            named = device_name.is_some(),
             reason = reason.unwrap_or("unspecified"),
             method,
             "pairing rejected"
@@ -1514,7 +1542,8 @@ async fn attribute_claimant_to_owner(state: &Arc<AppState>, primary_profile_id: 
             device = device.unwrap_or("unknown"),
             error = %why,
             "onboarding completed, but the device that claimed this pond was not attributed \
-             to its owner; it stays unattributed until a pairing code or Devices binds it"
+             to its owner; it stays unattributed until it pairs again with a code issued for a \
+             member"
         );
     };
     let claimant = match claims.claimed_by().await {
@@ -1744,6 +1773,10 @@ struct ChatRequest {
     /// The member asked for deep research: the pond starts a research task on the message.
     #[serde(default)]
     deep_research: bool,
+    /// How long that research's answer should be: `short`, `report`, or `auto` (or absent) for
+    /// the planner to read from the ask. Anything else is read as `auto`.
+    #[serde(default)]
+    deep_research_answer: Option<String>,
     /// Who that task belongs to, settled by `chat_stream` from the caller and never from the body.
     #[serde(skip)]
     deep_research_for: Option<String>,
@@ -2945,7 +2978,15 @@ async fn drive_turn(
     // the prime's own `task_start` call is, so the chat card finds it live and in history.
     let deep_research_task = match req.deep_research_for.as_deref() {
         None => None,
-        Some(member) => match start_deep_research(state, member, &req.message, &session_id).await {
+        Some(member) => match start_deep_research(
+            state,
+            member,
+            &req.message,
+            &session_id,
+            req.deep_research_answer.as_deref(),
+        )
+        .await
+        {
             Ok(research) => Some(research),
             Err(e) => {
                 let data =
@@ -3099,7 +3140,10 @@ async fn drive_turn(
                                     }
                                 }
                             } else {
-                                tracing::warn!("Unrecognised tool-call envelope: {body}");
+                                tracing::warn!(
+                                    body_chars = body.chars().count(),
+                                    "Unrecognised tool-call envelope"
+                                );
                             }
                         }
                     }
@@ -4351,7 +4395,7 @@ async fn retitle_session(
                 kind = "session_retitled",
                 trigger = "manual_one",
                 session_id = %session_id,
-                title = %title,
+                title_chars = title.chars().count(),
             );
             json!({ "session_id": session_id, "outcome": "retitled", "title": title })
         }
@@ -5867,6 +5911,64 @@ fn geocode_target(
     (name_changed || coords_unset).then(|| name.to_string())
 }
 
+/// `primary_profile_id` must name a household member or be cleared (`null` or `""`).
+///
+/// It is a key-value row, not a foreign key, so nothing else stops a display name landing in it,
+/// and a dashboard once offered it as a free-text box: one household typed its owner's name, and
+/// every reader that looks the id up (the claimant's attribution at onboarding completion, the
+/// `Household` prompt particulars) then found nobody, without a word.
+async fn refuse_primary_profile_that_is_not_a_member(
+    state: &Arc<AppState>,
+    patch: &Value,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let Some(id) = patch
+        .get("primary_profile_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(());
+    };
+    match state.profile_repo.get(id).await {
+        Ok(Some(member)) => {
+            tracing::info!(
+                kind = "primary_profile_set",
+                profile_id = %member.id,
+                "the household's primary member is set"
+            );
+            Ok(())
+        }
+        Ok(None) => {
+            tracing::warn!(
+                kind = "primary_profile_refused",
+                value = %id,
+                "refused a primary_profile_id that names no household member"
+            );
+            let message = "Choose a household member. This takes a member's id from \
+                           GET /api/v1/profiles, not a name.";
+            Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": format!("primary_profile_id: {message}"),
+                    "fields": [{ "field": "primary_profile_id", "message": message }],
+                })),
+            ))
+        }
+        Err(e) => {
+            tracing::warn!(
+                kind = "primary_profile_unverified",
+                error = %e,
+                "could not read the household members, so primary_profile_id was not saved"
+            );
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Could not check that household member, so nothing was saved.",
+                })),
+            ))
+        }
+    }
+}
+
 async fn update_settings(
     State(state): State<Arc<AppState>>,
     principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
@@ -5927,6 +6029,8 @@ async fn update_settings(
             })),
         ));
     }
+
+    refuse_primary_profile_that_is_not_a_member(&state, &patch).await?;
 
     let mut base =
         serde_json::to_value(&current).unwrap_or(serde_json::Value::Object(Default::default()));
@@ -7289,23 +7393,10 @@ async fn cleanup_models(
     };
 
     // Never delete a blob whose basename matches an assigned model.
-    let mut protected: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if let Some(model_repo) = &state.model_repo {
-        if let Ok(assignments) = model_repo.list_assignments().await {
-            for a in &assignments {
-                if let Ok(Some(m)) = model_repo.get_by_id(&a.model_id).await {
-                    if let Some(fname) = m.filename {
-                        protected.insert(fname);
-                    }
-                    // Legacy migrations left blobs named by bare model name.
-                    protected.insert(m.name.clone());
-                    if let Some(cfg) = m.config_filename {
-                        protected.insert(cfg);
-                    }
-                }
-            }
-        }
-    }
+    let protected = match &state.model_repo {
+        Some(model_repo) => crate::cleanup::protected_model_names(model_repo.as_ref()).await,
+        None => std::collections::HashSet::new(),
+    };
 
     let report = crate::cleanup::run_cleanup(&data_dir, &protected)
         .await
@@ -10800,6 +10891,9 @@ struct ApiCreateScheduleRequest {
     /// Fire once at `cron`'s next occurrence instead of recurring; ignored if `fire_at` is set.
     #[serde(default)]
     once: bool,
+    /// Ask before running a fire time missed while the pond was down.
+    #[serde(default)]
+    ask_if_missed: bool,
 }
 
 /// `POST /api/v1/schedules` — create a new scheduled task.
@@ -10877,6 +10971,7 @@ async fn create_schedule(
     }
 
     let req = CreateScheduleRequest {
+        ask_if_missed: api_req.ask_if_missed,
         fire_at: api_req.fire_at,
         once: api_req.once,
         id: api_req
@@ -10936,9 +11031,26 @@ async fn update_schedule(
         }
     };
 
-    let kind = api_req.prompt.map(|p| TaskKind::AgentPrompt { prompt: p });
+    // Refused here, not by the store, so a 404 still means only that there is no such task.
+    match &api_req.kind {
+        Some(TaskKind::SensorTrigger(spec)) => {
+            if let Some((status, body)) = rule_spec_rejection(spec) {
+                return (status, Json(body));
+            }
+        }
+        Some(TaskKind::Routine { actions }) => {
+            if let Some(why) = routine_rejection(actions) {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error": why})));
+            }
+        }
+        _ => {}
+    }
+    let kind = api_req
+        .kind
+        .or_else(|| api_req.prompt.map(|p| TaskKind::AgentPrompt { prompt: p }));
 
     let req = UpdateScheduleRequest {
+        ask_if_missed: api_req.ask_if_missed,
         label: api_req.name,
         cron: api_req.cron,
         timezone: api_req.timezone,
@@ -10960,12 +11072,15 @@ struct ApiUpdateScheduleRequest {
     cron: Option<String>,
     timezone: Option<String>,
     prompt: Option<String>,
+    /// Replaces the task's kind, such as a routine's actions; wins over `prompt`.
+    kind: Option<TaskKind>,
     /// Fire once at this instant instead of recurring.
     #[serde(default)]
     fire_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Fire once at `cron`'s next occurrence instead of recurring.
     #[serde(default)]
     once: bool,
+    ask_if_missed: Option<bool>,
 }
 
 /// `POST /api/v1/schedules/:id/pause` — pause a scheduled task.
@@ -11020,6 +11135,47 @@ async fn run_schedule_now(
     };
     match scheduler.run_now(&id).await {
         Ok(()) => (StatusCode::ACCEPTED, Json(json!({"fired": id}))),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))),
+    }
+}
+
+/// `POST /api/v1/schedules/:id/missed/run` — run the missed run being asked about, now.
+async fn run_missed_schedule(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    answer_missed_schedule(&state, &id, MissedRunAnswer::Run).await
+}
+
+/// `POST /api/v1/schedules/:id/missed/skip` — record the missed run being asked about skipped.
+async fn skip_missed_schedule(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    answer_missed_schedule(&state, &id, MissedRunAnswer::Skip).await
+}
+
+/// The first answer settles a missed run; a later one is `409`, as is answering none.
+async fn answer_missed_schedule(
+    state: &AppState,
+    id: &str,
+    answer: MissedRunAnswer,
+) -> (StatusCode, Json<Value>) {
+    let Some(scheduler) = &state.scheduler else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "scheduler not configured"})),
+        );
+    };
+    match scheduler.answer_missed_run(id, answer).await {
+        Ok(()) => match answer {
+            MissedRunAnswer::Run => (StatusCode::ACCEPTED, Json(json!({"fired": id}))),
+            MissedRunAnswer::Skip => (StatusCode::OK, Json(json!({"skipped": id}))),
+        },
+        Err(e) if e.downcast_ref::<NoMissedRun>().is_some() => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": e.to_string(), "code": "no_missed_run"})),
+        ),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))),
     }
 }
@@ -11224,6 +11380,7 @@ async fn create_rule(
 
     // Duplicate ids and the cron are the scheduler's to reject, not this handler's.
     let create = CreateScheduleRequest {
+        ask_if_missed: false,
         fire_at: None,
         once: false,
         id: req.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
@@ -11296,6 +11453,7 @@ async fn update_rule(
     }
 
     let update = UpdateScheduleRequest {
+        ask_if_missed: None,
         label: Some(req.name),
         cron: None,
         timezone: None,
@@ -12078,7 +12236,10 @@ async fn agent_chat_stream(
                                 }
                             }
                         } else {
-                            tracing::warn!("Unrecognised tool-call envelope: {body}");
+                            tracing::warn!(
+                                body_chars = body.chars().count(),
+                                "Unrecognised tool-call envelope"
+                            );
                         }
                     }
                 }
@@ -15797,6 +15958,30 @@ fn long_task_reaches(member: &str, task: &pond_core::shared::domain::long_task::
     pond_core::shared::services::long_task_queue::reaches(Some(member), task)
 }
 
+/// The conversation before a deep-research ask, as the task's brief; the ask itself is the goal.
+async fn deep_research_brief(
+    state: &Arc<AppState>,
+    session_id: &str,
+    question: &str,
+) -> Option<String> {
+    let mut rows = state
+        .session_storage
+        .get_recent_messages(session_id, 24)
+        .await
+        .ok()?;
+    if rows
+        .last()
+        .is_some_and(|row| row.message.content.trim() == question.trim())
+    {
+        rows.pop();
+    }
+    let earlier: Vec<(pond_core::models::domain::message::Role, &str)> = rows
+        .iter()
+        .map(|row| (row.message.role.clone(), row.message.content.as_str()))
+        .collect();
+    pond_core::shared::services::long_task_runner::conversation_brief(&earlier)
+}
+
 /// Every open task, in the order the runner takes them, read once for a request.
 async fn open_long_tasks(
     repo: &pond_infra::sqlite_long_task::SqliteLongTaskRepository,
@@ -15834,6 +16019,9 @@ fn long_task_repo(state: &Arc<AppState>) -> pond_infra::sqlite_long_task::Sqlite
     pond_infra::sqlite_long_task::SqliteLongTaskRepository::new(state.db.system.clone())
 }
 
+/// Room for a short answer of 150 words with its links, and a margin for a model that ran over.
+const SHORT_ANSWER_VIEW_CHARS: usize = 4000;
+
 /// One task as the chat card shows it: its steps with their agents, and its artifacts without
 /// their bodies.
 async fn long_task_view(
@@ -15844,12 +16032,27 @@ async fn long_task_view(
     use pond_core::shared::ports::long_task::LongTaskRepository as _;
     let steps = repo.list_steps(task.id()).await?;
     let artifacts = repo.list_artifacts(task.id()).await?;
-    let result = pond_core::shared::services::long_task_runner::result_artifact(&artifacts)
+    let result = pond_core::shared::services::long_task_runner::answer_artifact(task, &artifacts)
         .map(|a| a.id.clone());
+    // A short answer is shown whole on the card, so it comes with the view rather than a sheet.
+    let answer_text = match (&result, task.answer()) {
+        (Some(id), pond_core::shared::domain::long_task::AnswerShape::Short) => {
+            repo.get_artifact(task.id(), id).await?.map(|artifact| {
+                artifact
+                    .body()
+                    .chars()
+                    .take(SHORT_ANSWER_VIEW_CHARS)
+                    .collect::<String>()
+            })
+        }
+        _ => None,
+    };
     Ok(json!({
         "id": task.id(),
         "goal": task.goal(),
         "kind": task.kind(),
+        "answer": task.answer(),
+        "answer_text": answer_text,
         "state": task.state(),
         "origin_session_id": task.origin_session_id(),
         "created_at": task.created_at(),
@@ -15957,17 +16160,29 @@ async fn start_deep_research(
     member: &str,
     question: &str,
     session_id: &str,
+    answer: Option<&str>,
 ) -> anyhow::Result<pond_core::shared::domain::agent::DeepResearchTurn> {
+    use pond_core::shared::domain::long_task::AnswerShape;
     use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository as _};
+    use pond_core::shared::services::long_task_open::{open_task, OpeningBrief};
     use pond_core::shared::services::long_task_queue::{place_of, run_order, waiting_line};
     let repo = long_task_repo(state);
+    let answer = answer.and_then(AnswerShape::read).unwrap_or_default();
     let task = pond_core::shared::services::deep_research::research_task(
         member,
         question,
         session_id,
         chrono::Utc::now(),
-    )?;
-    repo.create_task(&task).await?;
+    )?
+    .with_answer(answer);
+    // The helpers start in empty windows; what was said before the ask reaches them only here.
+    let brief = deep_research_brief(state, session_id, question)
+        .await
+        .map(|body| OpeningBrief {
+            summary: "What the conversation said before the ask",
+            body,
+        });
+    let task = open_task(&repo, task, brief).await?;
     let open = repo
         .list_tasks(LongTaskOwnerFilter::Everyone, false)
         .await?;
@@ -15978,12 +16193,14 @@ async fn start_deep_research(
         task_id = %task.id(),
         origin_session_id = %session_id,
         research = true,
+        answer = task.answer().as_str(),
         position = place.as_ref().map(|p| p.position),
         "a member asked for deep research"
     );
     Ok(pond_core::shared::domain::agent::DeepResearchTurn {
         task_id: task.id().to_string(),
         waiting: place.as_ref().and_then(waiting_line),
+        answer: task.answer(),
     })
 }
 
@@ -16140,6 +16357,7 @@ async fn long_task_queue(
             "id": task.id(),
             "goal": task.goal(),
             "kind": task.kind(),
+            "answer": task.answer(),
             "state": task.state(),
             "origin_session_id": task.origin_session_id(),
             "created_at": task.created_at(),
@@ -16242,7 +16460,12 @@ async fn long_task_report(
     if events.is_empty() {
         events = report::itinerary_events(&markdown, task.created_at().date_naive());
     }
-    Ok((markdown, events, sections.len()))
+    let shown = if report::holds_its_sections(summary.as_deref().unwrap_or(""), &sections) {
+        0
+    } else {
+        sections.len()
+    };
+    Ok((markdown, events, shown))
 }
 
 /// `GET /api/v1/long-tasks/{id}/report` -- the whole report, as long as its plan made it, with
@@ -17094,6 +17317,7 @@ async fn run_recipe(
         tool_group_allowlist,
         suggestion_context: None,
         deep_research: false,
+        deep_research_answer: None,
         deep_research_for: None,
     };
 
@@ -19984,6 +20208,8 @@ mod tests {
 
         fn schedule(id: &str, kind: TaskKind) -> Schedule {
             Schedule {
+                ask_if_missed: false,
+                missed_run: None,
                 fire_at: None,
                 id: id.into(),
                 label: format!("label of {id}"),

@@ -12,11 +12,25 @@
 
 /* The idle border is dashed transparent rather than absent, so entering
    arrange mode adds the toolbar lane and one pixel of side padding — not a
-   whole border's worth of reflow underneath the card. */
+   whole border's worth of reflow underneath the card.
+
+   A column: the toolbar and the body are both IN FLOW, toolbar first. The
+   toolbar used to be absolutely positioned into a padding lane reserved by
+   size (48px, or 98px for size s on the guess that only a small frame is
+   narrower than the toolbar). Width does not follow size: a medium frame
+   sharing a row is squeezed to about 300px, the toolbar (2 chevrons + a 3-up
+   segmented control + X, ~282px at the 44px touch floor) wrapped to a second
+   row inside a one-row lane, and the remove button sat on top of the card
+   below it. In flow, however many rows the toolbar wraps to is the room it
+   takes, at every width, and a small frame wide enough for one row no longer
+   carries an empty second one. */
 .wframe {
   position: relative;
   flex: none;
   box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   border: 2px dashed transparent;
   border-radius: 16px;
   padding: 5px;
@@ -24,16 +38,7 @@
 
 .wframe[data-arranging] {
   border-color: var(--color-border-strong);
-  padding: 48px 6px 6px;
-}
-
-/* The toolbar (2 chevrons + a 3-up segmented control + X, ~282px at the
-   44px touch floor) is wider than a small 220px square tile. Two rows
-   instead of a one-row overflow that ran past the card's own edge -- see
-   .wframe__bar's flex-wrap below -- so the lane needs to reserve for two
-   44px rows, not one. */
-.wframe[data-size="s"][data-arranging] {
-  padding-top: 98px;
+  padding: 6px;
 }
 
 /* The design paints one widget's border in the accent — the one under the
@@ -55,11 +60,12 @@
    opened on. A flex column with the child at `flex: 1` hands the reserved
    height to the thing that was supposed to occupy it.
 
-   `min-height: 0` on the child because a flex item's automatic minimum is its
-   content, which would let a card with a long list push the frame past the size
-   the household chose for it. */
+   No `min-height: 0` on the child. It let the card shrink below its own content
+   while that content stayed visible, so a card taller than its slot painted
+   over the frame below it. A size is a minimum (the min-heights further down):
+   a card with more to show makes its frame taller and the row reflows. */
 .wframe__body {
-  height: 100%;
+  flex: 1 0 auto;
   display: flex;
   flex-direction: column;
 }
@@ -74,8 +80,7 @@
 }
 
 .wframe__body > * {
-  flex: 1;
-  min-height: 0;
+  flex: 1 0 auto;
 }
 
 /* What data-size buys, measured on the BODY rather than on the frame.
@@ -97,15 +102,12 @@
 
 /* ── Toolbar ──────────────────────────────────────────────── */
 
+/* In flow above the body (see .wframe). It wraps within the frame's width,
+   so a frame narrower than its ~282px natural width wraps it instead of
+   running past the card's own edge. */
 .wframe__bar {
-  position: absolute;
-  top: 2px;
-  right: 8px;
-  /* Bounded on the left too, not just anchored from the right: without a
-     left edge the bar has no width to wrap within, so a frame narrower than
-     its ~282px natural width (every small square tile) let it run straight
-     past the card's own left edge instead of wrapping. */
-  left: 8px;
+  flex: none;
+  padding: 0 2px;
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
@@ -128,9 +130,20 @@
   cursor: pointer;
 }
 
+/* Legible as unavailable, not faded out: opacity 0.35 took the chevron to
+   about 2.2:1, so a household could not tell a disabled arrow from a missing one.
+   The secondary text token keeps the glyph and edge above the 3:1 a non-text
+   mark needs in both schemes, and the dashed edge says "not now" without
+   leaning on the colour change alone. */
+/* opacity: 1 overrides base.css's blanket `button:disabled` fade, which would
+   otherwise dim everything below right back down. */
 .wframe__btn:disabled {
-  opacity: 0.35;
-  cursor: default;
+  opacity: 1;
+  border-style: dashed;
+  border-color: var(--color-text-secondary);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: not-allowed;
 }
 
 /* One chevron turned over rather than a second path to keep in step with it. */

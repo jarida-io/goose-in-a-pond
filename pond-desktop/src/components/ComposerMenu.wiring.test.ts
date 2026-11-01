@@ -28,9 +28,11 @@ describe("both chat UIs carry the plus menu and research mode", () => {
 
       it("sends the flag with the box's text only, then leaves the mode", () => {
         expect(
-          src.includes("sendTurn({ text: t, deepResearch: true })") || src.includes("sendTurn({ text, deepResearch: true })"),
-          `${surface} never marks a turn as research`,
+          src.includes("sendTurn({ text: t, deepResearch: true, deepResearchAnswer: deepResearch.answer })") ||
+            src.includes("sendTurn({ text, deepResearch: true, deepResearchAnswer: deepResearch.answer })"),
+          `${surface} never marks a turn as research, or drops the length the person chose`,
         ).toBe(true);
+        expect(src.includes("onAnswer={deepResearch.setAnswer}"), `${surface} gives no way to choose the length`).toBe(true);
         expect(src.includes("directText === undefined") || src.includes("raw === undefined"), `${surface} would send a chip's words as research`).toBe(true);
       });
 
@@ -50,6 +52,7 @@ describe("both chat UIs carry the plus menu and research mode", () => {
   it("the turn driver passes the flag to the stream, and never queues a research turn", () => {
     const src = read("state/chatRunStore.ts");
     expect(src.includes("turn.deepResearch ? true : undefined"), "the flag never reaches chatStream").toBe(true);
+    expect(src.includes("turn.deepResearch ? turn.deepResearchAnswer : undefined"), "the length never reaches chatStream").toBe(true);
     expect(src.includes("turn.deepResearch) return"), "a research turn can be queued as an ordinary message").toBe(true);
   });
 

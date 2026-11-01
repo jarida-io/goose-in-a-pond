@@ -135,8 +135,42 @@ impl LaneDecision {
     }
 }
 
-/// Pick the one job that may run this tick: least-recently-run wins (never-run beats all),
-/// ties go to declaration order. Not a priority queue, which would starve rare jobs.
+/// How long a chore may wait behind a member's long task before it gets one turn anyway. Each such
+/// turn costs the task its slot for a minute or so, and a deep-research task runs about 20.
+pub const CHORE_PATIENCE: Duration = Duration::from_secs(30 * 60);
+
+/// Who goes first between two jobs that may run, before their waits are compared: a compaction a
+/// returning member waits on, then a member's long task, then the pond's own chores, which keep
+/// their order among themselves. A chore that has waited [`CHORE_PATIENCE`] since it last ran goes
+/// before the long task once, so a long line of tasks never starves it.
+fn precedence(a: &JobState, b: &JobState) -> std::cmp::Ordering {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    let starved = |s: &JobState| s.since_last_run.is_some_and(|d| d >= CHORE_PATIENCE);
+    match (a.job, b.job) {
+        (LaneJob::Compaction, LaneJob::Compaction) => Equal,
+        (LaneJob::Compaction, _) => Less,
+        (_, LaneJob::Compaction) => Greater,
+        (LaneJob::LongTaskStep, LaneJob::LongTaskStep) => Equal,
+        (LaneJob::LongTaskStep, _) => {
+            if starved(b) {
+                Greater
+            } else {
+                Less
+            }
+        }
+        (_, LaneJob::LongTaskStep) => {
+            if starved(a) {
+                Less
+            } else {
+                Greater
+            }
+        }
+        _ => Equal,
+    }
+}
+
+/// Pick the one job that may run this tick: by [`precedence`], then least-recently-run (never-run
+/// beats all), ties in declaration order. Not a priority queue, which would starve rare jobs.
 pub fn select_next(inputs: LaneInputs<'_>) -> LaneDecision {
     let mut best: Option<(&JobState, Duration)> = None;
     let mut blocked: Option<SkipReason> = None;
@@ -163,11 +197,15 @@ pub fn select_next(inputs: LaneInputs<'_>) -> LaneDecision {
             consolidation_schedule::GateDecision::Run => {
                 let waited = state.since_last_run.unwrap_or(Duration::MAX);
                 let wins = match best {
-                    // Equal waits go to the asker, else stay with the earlier-declared job.
-                    Some((_, best_waited)) => {
-                        waited > best_waited
-                            || (waited == best_waited && inputs.asking == Some(state.job))
-                    }
+                    Some((leader, best_waited)) => match precedence(state, leader) {
+                        std::cmp::Ordering::Less => true,
+                        std::cmp::Ordering::Greater => false,
+                        // Equal waits go to the asker, else stay with the earlier-declared job.
+                        std::cmp::Ordering::Equal => {
+                            waited > best_waited
+                                || (waited == best_waited && inputs.asking == Some(state.job))
+                        }
+                    },
                     None => true,
                 };
                 if wins {
@@ -404,6 +442,57 @@ mod tests {
             idle_threshold: IDLE_THRESHOLD,
             exempt_from_activity_gate: false,
         }
+    }
+
+    #[test]
+    fn a_members_long_task_goes_before_the_ponds_chores_but_none_starves() {
+        let pick = |jobs: &[JobState], asking: LaneJob| {
+            select_next(LaneInputs {
+                saw_activity_since_start: true,
+                idle_for: LONG_IDLE,
+                jobs,
+                asking: Some(asking),
+            })
+        };
+        // The task just ran a step; the chores have waited minutes, and once would have won.
+        let step = job(LaneJob::LongTaskStep, Some(2), 0);
+        let chores = [
+            job(LaneJob::MemoryExtraction, Some(600), 0),
+            job(LaneJob::SummaryRefresh, Some(300), 0),
+            job(LaneJob::SuggestionGeneration, None, 0),
+        ];
+        let mut jobs = chores.to_vec();
+        jobs.push(step.clone());
+        assert_eq!(
+            pick(&jobs, LaneJob::MemoryExtraction),
+            LaneDecision::Run(LaneJob::LongTaskStep)
+        );
+
+        let mut with_compaction = jobs.clone();
+        with_compaction.push(job(LaneJob::Compaction, Some(1), 0));
+        assert_eq!(
+            pick(&with_compaction, LaneJob::LongTaskStep),
+            LaneDecision::Run(LaneJob::Compaction),
+            "a returning member waits on a compaction"
+        );
+
+        let mut starved = vec![job(
+            LaneJob::MemoryExtraction,
+            Some(CHORE_PATIENCE.as_secs()),
+            0,
+        )];
+        starved.push(step);
+        assert_eq!(
+            pick(&starved, LaneJob::LongTaskStep),
+            LaneDecision::Run(LaneJob::MemoryExtraction),
+            "a chore that has waited its patience gets one turn"
+        );
+
+        assert_eq!(
+            pick(&chores, LaneJob::SummaryRefresh),
+            LaneDecision::Run(LaneJob::SuggestionGeneration),
+            "with no task, the chores keep their own order"
+        );
     }
 
     #[test]

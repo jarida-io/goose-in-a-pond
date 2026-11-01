@@ -454,6 +454,29 @@ jobs:
       - name: Tests
         run: bash scripts/lib/setup-code.test.sh
 
+  # My Pond's admin card tooling (scripts/lib/admin-card.sh): making and sealing a card without a
+  # TPM, show and rotate, the power rule only after visudo passes, and the doctor line.
+  admin-card:
+    name: Admin card scripts - bash tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tests
+        run: bash scripts/lib/admin-card.test.sh
+
+  # The pond's own locked account (the agamemnon_* functions in scripts/lib/install-systemd.sh): the
+  # unit, the account, the data move and its link, the round trip back from user and system units,
+  # and the power rule following the account, against a scratch root and fake useradd and systemctl.
+  service-account:
+    name: Service account scripts - bash tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tests
+        run: bash scripts/lib/install-systemd.test.sh
+
   # The Linux setup channel's host side (scripts/lib/connect-setup.sh): the polkit grant in both
   # flavours, its idempotence, dry run and removal, and the doctor lines, against a scratch root and
   # fake pkaction, systemctl, busctl, btmgmt and nmcli.

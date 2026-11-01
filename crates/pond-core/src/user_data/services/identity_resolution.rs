@@ -1,7 +1,8 @@
 //! Decides whose turn this is: a session's evidence becomes the turn's [`ProfileScope`].
 //!
-//! Every caller still passes `paired_device_profile: None`; wiring it changes what an
-//! unidentified speaker reaches, so `device_profile_rung_is_not_wired_yet` fails when it does.
+//! The paired-device rung is only as good as `devices.profile_id`: a device paired with a code
+//! bound to nobody answers `None` here on every turn, and on a pond of two members that speaker is a
+//! `Guest`. `crates/pond-infra/tests/device_rung_wiring.rs` pins where the rung is fed.
 //! Never infer the owner from `settings.primary_profile_id`: every phone would be one person's.
 
 use crate::user_data::domain::profile::ProfileScope;
@@ -9,7 +10,7 @@ use crate::user_data::domain::session::{IdentificationSource, SessionIdentity};
 
 /// Who is speaking, gathered per turn; no `Default`, as every field is an authorisation input.
 pub struct ResolutionInputs<'a> {
-    /// Owner of the paired device that authenticated this request; always `None` for now.
+    /// Owner of the paired device that authenticated this request; `None` for an unattributed one.
     pub paired_device_profile: Option<&'a str>,
     /// What the session row says, from [`SessionStorage::get_session_identity`].
     ///

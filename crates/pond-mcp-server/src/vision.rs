@@ -425,13 +425,28 @@ camera saw.")]
         _ctx: RequestContext<RoleServer>,
         params: Parameters<RecentCameraEventsParams>,
     ) -> Result<CallToolResult, rmcp::model::ErrorData> {
-        let camera_id = self.default_camera(params.0.camera_id).await;
+        let household_camera = self.default_camera(None).await;
+        let mut camera_id = self.default_camera(params.0.camera_id).await;
         let limit = params
             .0
             .limit
             .map(|l| l as usize)
             .unwrap_or(DEFAULT_LIMIT)
             .clamp(1, MAX_LIMIT);
+        let scan_limit = limit.max(250);
+
+        // A model names a camera it imagined ("front door"); an empty answer then reads as "nothing
+        // happened" and it gives up, so a camera with no events reads the household's instead.
+        let mut redirected = None;
+        if camera_id != household_camera
+            && self
+                .camera_storage
+                .list_events(&camera_id, 1)
+                .await
+                .is_ok_and(|events| events.is_empty())
+        {
+            redirected = Some(std::mem::replace(&mut camera_id, household_camera));
+        }
 
         let reg = LiveCameraRegistry::global();
         let live_ann = reg.get_annotation(&camera_id);
@@ -443,8 +458,7 @@ camera saw.")]
             .recent_face_context(&camera_id, live_ann.as_ref())
             .await;
 
-        let scan_limit = limit.max(250);
-        match self
+        let answer = match self
             .camera_storage
             .list_events(&camera_id, scan_limit)
             .await
@@ -538,6 +552,19 @@ camera saw.")]
                     "Sorry, I couldn't read the camera events right now.",
                 )]))
             }
+        };
+        match (redirected, answer) {
+            (Some(asked), Ok(mut result)) => {
+                result.content.insert(
+                    0,
+                    ContentBlock::text(format!(
+                        "There is no camera '{asked}' with events. These are from the household's \
+                         camera, '{camera_id}'."
+                    )),
+                );
+                Ok(result)
+            }
+            (_, answer) => answer,
         }
     }
 
@@ -1042,6 +1069,7 @@ face:<profile_id>). Never for an image attached to the message.")]
             .unwrap_or_else(|_| "UTC".to_string());
         let id = uuid::Uuid::new_v4().to_string();
         let req = CreateScheduleRequest {
+            ask_if_missed: false,
             id: id.clone(),
             label: label.clone(),
             cron: "@event".to_string(),
@@ -1276,6 +1304,58 @@ mod tests {
     #[tokio::test]
     async fn server_constructs() {
         let _server = server(true).await;
+    }
+
+    #[tokio::test]
+    async fn a_camera_with_no_events_reads_the_households_own_and_says_so() {
+        use pond_core::user_data::mocks::mock_settings::MockSettingsRepository;
+        use rmcp::model::RequestId;
+        let settings = MockSettingsRepository::new();
+        settings
+            .update(&pond_core::user_data::domain::settings::Settings {
+                vision_camera_id: "porch".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let seen = CameraEvent {
+            id: Some(1),
+            camera_id: "porch".into(),
+            event_type: "person".into(),
+            confidence: Some(0.9),
+            snapshot_path: None,
+            metadata: None,
+            acknowledged: false,
+            created_at: chrono::Utc::now(),
+        };
+        let server = VisionMcpServer::new(Arc::new(StubStorage(vec![seen])), Arc::new(settings));
+        let (_client, stream) = tokio::io::duplex(64);
+        let running = rmcp::service::serve_directly(server.clone(), stream, None);
+        let ctx = RequestContext::new(RequestId::Number(0), running.peer().clone());
+        let asked = |camera: &str| RecentCameraEventsParams {
+            camera_id: Some(camera.into()),
+            ..Default::default()
+        };
+
+        let text = text_of(
+            &server
+                .get_recent_camera_events(ctx.clone(), Parameters(asked("front door")))
+                .await
+                .unwrap(),
+        );
+        assert!(
+            text.starts_with("There is no camera 'front door' with events."),
+            "{text}"
+        );
+        assert!(text.contains("person"), "{text}");
+
+        let text = text_of(
+            &server
+                .get_recent_camera_events(ctx, Parameters(asked("porch")))
+                .await
+                .unwrap(),
+        );
+        assert!(!text.contains("There is no camera"), "{text}");
     }
 
     fn text_of(result: &CallToolResult) -> String {

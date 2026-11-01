@@ -172,6 +172,15 @@ the device's enrolled machine; an open SSE stream is not re-checked per event, t
 requests with a revoked token fail at once. Clearing a client's local credentials does not revoke
 anything on the server.
 
+### Administration (My Pond)
+
+`/api/v1/admin/*` needs more than a token. The caller must be a member's device, and that device
+must have unlocked My Pond with the admin card in the last 15 minutes. The unlock is held in memory
+per device, so a restart or a rotated card locks every phone. The card itself is checked against a
+verifier in `<data_dir>/setup/admin.json`. Wrong cards are slowed as the setup code is, across
+every client. Design, recovery and the wire contract are in the
+[pond administrator](architecture/pond-administrator.md) note.
+
 ### Bootstrap answers
 
 - `GET /health` answers `{status, version}` to a loopback peer (not on the plaintext listener) and

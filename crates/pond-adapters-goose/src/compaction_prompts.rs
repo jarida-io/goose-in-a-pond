@@ -113,8 +113,8 @@ pub fn apply_for_this_device() {
             bounded,
             budgeted_device = budgeted,
             override_value = override_value.as_deref().unwrap_or(""),
-            prompt = ?applied[0].1,
-            summary = ?applied[1].1,
+            prompt_file = ?applied[0].1,
+            summary_file = ?applied[1].1,
             dir = %prompts_dir.display(),
             "compaction prompts for this device"
         ),

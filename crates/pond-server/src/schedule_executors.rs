@@ -7,7 +7,9 @@ use pond_core::models::ports::agent::Agent;
 use pond_core::models::ports::voice_output::VoiceOutput;
 use pond_core::shared::domain::agent::AgentRequest;
 use pond_core::user_data::domain::profile::ProfileScope;
-use pond_core::user_data::domain::schedule::{TaskKind, TriggerAction};
+use pond_core::user_data::domain::schedule::{
+    routine_rejection, ActionsFailed, TaskKind, TriggerAction,
+};
 use pond_core::user_data::ports::device_control::DeviceControlPort;
 use pond_core::user_data::ports::schedule_execution::ScheduleExecutor;
 use pond_core::user_data::ports::session_storage::SessionStorage;
@@ -208,6 +210,45 @@ impl AgentScheduleExecutor {
             }
         }
     }
+
+    /// Run every action of a routine, even after one fails: a dead plug must not leave the
+    /// lights off. Fails if any action failed, naming those.
+    async fn run_routine(&self, task_id: &str, actions: &[TriggerAction]) -> Result<String> {
+        if let Some(why) = routine_rejection(actions) {
+            bail!("task {task_id}: {why}");
+        }
+        let mut outcomes = Vec::with_capacity(actions.len());
+        let mut failed = Vec::new();
+        for action in actions {
+            match self.run_trigger_action(task_id, action).await {
+                Ok(outcome) => outcomes.push(outcome),
+                Err(e) => {
+                    tracing::warn!("[routine] task {task_id} action failed: {e}");
+                    let what = action_target(action);
+                    outcomes.push(format!("{what} failed: {e}"));
+                    failed.push(what);
+                }
+            }
+        }
+        let outcomes = outcomes.join(" · ");
+        if failed.is_empty() {
+            return Ok(outcomes);
+        }
+        Err(ActionsFailed {
+            error: format!("did not run: {}", failed.join(", ")),
+            outcomes,
+        }
+        .into())
+    }
+}
+
+/// What an action acts on, to name it when it fails.
+fn action_target(action: &TriggerAction) -> String {
+    match action {
+        TriggerAction::DevicePower { device_id, .. } => device_id.clone(),
+        TriggerAction::Notify { .. } => "the notification".to_string(),
+        TriggerAction::AgentPrompt { .. } => "the assistant".to_string(),
+    }
 }
 
 #[async_trait]
@@ -217,6 +258,7 @@ impl ScheduleExecutor for AgentScheduleExecutor {
 
         match kind {
             TaskKind::AgentPrompt { prompt } => self.run_agent_prompt(task_id, prompt).await,
+            TaskKind::Routine { actions } => self.run_routine(task_id, actions).await,
             TaskKind::Webhook { webhook_url } => {
                 tracing::info!("[scheduler] firing webhook for task {task_id}: {webhook_url}");
                 // A user-typed URL is the most direct exfiltration path: `begin` gates it and
@@ -342,6 +384,7 @@ mod tests {
     use futures::stream::BoxStream;
     use pond_core::models::ports::agent::{AgentResponse, AgentStreamEvent};
     use pond_core::user_data::mocks::mock_session::InMemorySessionStorage;
+    use pond_core::user_data::ports::device_control::{DeviceControlOutcome, DeviceStatePatch};
 
     /// An engine whose model call failed: the adapter reports it as an `Err`.
     struct FailingEngine;
@@ -382,6 +425,106 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "The model could not run: Execution error: null result from llama cpp"
+        );
+    }
+
+    /// Switches every device but `water-heater-plug`, which is offline; keeps what it switched.
+    #[derive(Default)]
+    struct OfflinePlug(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait]
+    impl DeviceControlPort for OfflinePlug {
+        async fn set_power(&self, device_id: &str, on: bool) -> Result<DeviceControlOutcome> {
+            if device_id == "water-heater-plug" {
+                bail!("device offline");
+            }
+            self.0.lock().unwrap().push(device_id.to_string());
+            Ok(DeviceControlOutcome::new(
+                device_id,
+                DeviceStatePatch {
+                    on: Some(on),
+                    ..Default::default()
+                },
+            ))
+        }
+        async fn set_brightness(&self, _: &str, _: u8) -> Result<DeviceControlOutcome> {
+            unimplemented!("a routine here only switches power")
+        }
+        async fn set_target_temp(&self, _: &str, _: f32) -> Result<DeviceControlOutcome> {
+            unimplemented!("a routine here only switches power")
+        }
+        async fn set_locked(&self, _: &str, _: bool) -> Result<DeviceControlOutcome> {
+            unimplemented!("a routine here only switches power")
+        }
+    }
+
+    fn power(device_id: &str) -> TriggerAction {
+        TriggerAction::DevicePower {
+            device_id: device_id.to_string(),
+            on: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_routine_runs_every_action_without_the_assistant_and_names_what_failed() {
+        let devices = Arc::new(OfflinePlug::default());
+        let executor = AgentScheduleExecutor::new(
+            Arc::new(FailingEngine),
+            Arc::new(InMemorySessionStorage::new()),
+            Some(devices.clone()),
+            1,
+            None,
+            None,
+        );
+        let routine = TaskKind::Routine {
+            actions: vec![
+                power("water-heater-plug"),
+                power("kitchen-lights"),
+                power("porch-light"),
+            ],
+        };
+
+        let err = executor
+            .execute("morning", &routine)
+            .await
+            .expect_err("a routine with a failed device is a failed run");
+
+        assert_eq!(
+            *devices.0.lock().unwrap(),
+            ["kitchen-lights", "porch-light"]
+        );
+        let failed = err
+            .downcast_ref::<ActionsFailed>()
+            .expect("the outcomes travel with it");
+        assert_eq!(failed.error, "did not run: water-heater-plug");
+        assert!(
+            failed.outcomes.contains("kitchen-lights switched on"),
+            "{}",
+            failed.outcomes
+        );
+        assert!(
+            failed.outcomes.contains("water-heater-plug failed"),
+            "{}",
+            failed.outcomes
+        );
+    }
+
+    #[tokio::test]
+    async fn a_routine_whose_devices_all_answer_completes() {
+        let executor = AgentScheduleExecutor::new(
+            Arc::new(FailingEngine),
+            Arc::new(InMemorySessionStorage::new()),
+            Some(Arc::new(OfflinePlug::default())),
+            1,
+            None,
+            None,
+        );
+        let routine = TaskKind::Routine {
+            actions: vec![power("kitchen-lights")],
+        };
+        assert_eq!(
+            executor.execute("morning", &routine).await.unwrap(),
+            "kitchen-lights switched on"
         );
     }
 }

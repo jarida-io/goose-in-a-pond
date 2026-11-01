@@ -7,11 +7,12 @@
 //! ([`crate::shared::services::egress`]); an out-of-process child needs a [`TaskSpec`] field.
 
 use crate::mcp::domain::tool_group::{
-    group_of_tool, groups_denied_to_guests, groups_denied_to_subagents,
+    group_of_tool, groups_denied_to_guests, groups_denied_to_subagents, HOUSEHOLD_READ_TOOLS,
 };
 #[cfg(test)]
 use crate::mcp::domain::tool_group::{
-    ORCHESTRATOR_EXTENSION, TASKS_EXTENSION, TOOLKIT_EXTENSION, TRAVEL_EXTENSION,
+    ORCHESTRATOR_EXTENSION, TASKS_EXTENSION, TOOLKIT_EXTENSION, TOOL_NAME_SEPARATOR,
+    TRAVEL_EXTENSION,
 };
 use crate::models::services::context::model_class::{provider_locality, ProviderLocality};
 use crate::shared::domain::role_block::{
@@ -22,6 +23,7 @@ use crate::user_data::domain::profile::ProfileScope;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::fmt;
 use thiserror::Error;
 
 /// Depth cap: root is 0, so 1 bars subagents from delegating; each level multiplies GPU load.
@@ -397,6 +399,12 @@ impl AgentRole {
         self.max_turns
     }
 
+    /// The same role with a different turn budget, kept within [`MAX_ROLE_MAX_TURNS`].
+    pub fn with_max_turns(mut self, max_turns: u32) -> Self {
+        self.max_turns = max_turns.clamp(1, MAX_ROLE_MAX_TURNS);
+        self
+    }
+
     pub fn context_fraction(&self) -> f32 {
         self.context_fraction
     }
@@ -551,6 +559,8 @@ pub struct DelegationAuthority {
     session_id: String,
     scope: ProfileScope,
     tool_groups: BTreeSet<String>,
+    /// Single tools from [`HOUSEHOLD_READ_TOOLS`] a child may hold though their group is denied.
+    read_tools: BTreeSet<String>,
     depth: DelegationDepth,
 }
 
@@ -566,8 +576,20 @@ impl DelegationAuthority {
             session_id: session_id.into(),
             scope,
             tool_groups,
+            read_tools: BTreeSet::new(),
             depth: DelegationDepth::ROOT,
         }
+    }
+
+    /// Let children hold these read-only tools when their role asks for the tool's group. Only
+    /// names in [`HOUSEHOLD_READ_TOOLS`] are kept, so no caller can grant a tool that acts.
+    pub fn with_read_tools<'a>(mut self, tools: impl IntoIterator<Item = &'a str>) -> Self {
+        self.read_tools = tools
+            .into_iter()
+            .filter(|tool| HOUSEHOLD_READ_TOOLS.contains(tool))
+            .map(str::to_string)
+            .collect();
+        self
     }
 
     /// The authority of a turn, derived from the exact tool names it was given.
@@ -628,6 +650,7 @@ impl DelegationAuthority {
         let scope = ChildScope::for_role(role.personal_data, &self.scope);
         // The child's scope, not the parent's: a Deny role's Guest child must lose `giap-memory`.
         let tool_groups = narrow_child_groups(&role.tool_groups, &self.tool_groups, scope.get());
+        let read_tools = narrow_read_tools(&role.tool_groups, &self.read_tools, scope.get());
         Ok(TaskSpec {
             id: uuid::Uuid::new_v4().to_string(),
             role: role.name.clone(),
@@ -636,6 +659,8 @@ impl DelegationAuthority {
             parent_session_id: self.session_id.clone(),
             scope,
             tool_groups,
+            read_tools,
+            withheld: BTreeSet::new(),
             depth,
             max_turns: role.max_turns,
             context_fraction: role.context_fraction,
@@ -647,6 +672,7 @@ impl DelegationAuthority {
             prefill_retention: None,
             prefill_rebuild: false,
             persona: role.instructions.clone(),
+            nudge: None,
         })
     }
 }
@@ -709,6 +735,26 @@ fn narrow_child_groups(
     groups
 }
 
+/// The read-only tools a child holds: those its parent may hand on whose group the role asks for,
+/// minus any whose group the child's scope denies.
+fn narrow_read_tools(
+    requested: &BTreeSet<String>,
+    parent: &BTreeSet<String>,
+    child: &ProfileScope,
+) -> BTreeSet<String> {
+    parent
+        .iter()
+        .filter(|tool| {
+            let Some(group) = group_of_tool(tool) else {
+                return false;
+            };
+            requested.contains(group)
+                && !(child.excludes_everything() && groups_denied_to_guests().contains(&group))
+        })
+        .cloned()
+        .collect()
+}
+
 /// An authorised, not yet started child run; only [`DelegationAuthority::delegate`] makes one.
 #[derive(Debug, Clone)]
 pub struct TaskSpec {
@@ -720,6 +766,9 @@ pub struct TaskSpec {
     /// A [`ChildScope`], not a `ProfileScope`, so only a clamped scope fits.
     scope: ChildScope,
     tool_groups: BTreeSet<String>,
+    read_tools: BTreeSet<String>,
+    /// Tools of its groups this run is not offered: a helper reaches for a tool it should not use.
+    withheld: BTreeSet<String>,
     depth: DelegationDepth,
     max_turns: u32,
     context_fraction: f32,
@@ -736,6 +785,24 @@ pub struct TaskSpec {
     prefill_rebuild: bool,
     /// The role's own instructions, examples included: the child's persona in its preamble.
     persona: String,
+    nudge: Option<ReportNudge>,
+}
+
+/// One more turn for a child that stopped with turns left but never reported: in its own session
+/// it costs a short decode, where a retry re-reads its brief and redoes the step.
+#[derive(Clone)]
+pub struct ReportNudge {
+    pub text: String,
+    /// Whether the child has reported, asked once its run has ended.
+    pub reported: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+}
+
+impl fmt::Debug for ReportNudge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReportNudge")
+            .field("text", &self.text)
+            .finish_non_exhaustive()
+    }
 }
 
 impl TaskSpec {
@@ -827,13 +894,39 @@ impl TaskSpec {
         &self.persona
     }
 
+    /// Offer the child none of these tools, though its groups hold them. Only ever narrows.
+    pub fn withholding<'a>(mut self, tools: impl IntoIterator<Item = &'a str>) -> Self {
+        self.withheld.extend(tools.into_iter().map(str::to_string));
+        self
+    }
+
+    /// Nudge the child once when it stops without reporting; see [`ReportNudge`].
+    pub fn nudging(mut self, nudge: ReportNudge) -> Self {
+        self.nudge = Some(nudge);
+        self
+    }
+
+    pub fn nudge(&self) -> Option<&ReportNudge> {
+        self.nudge.as_ref()
+    }
+
     /// May the child call this fully-qualified tool?
     /// Stricter than `filter_tools_by_groups`: unprefixed and user-added MCP tools are denied.
     pub fn grants_tool(&self, tool_name: &str) -> bool {
+        if self.withheld.contains(tool_name) {
+            return false;
+        }
         match group_of_tool(tool_name) {
-            Some(extension) => self.tool_groups.contains(extension),
+            Some(extension) => {
+                self.tool_groups.contains(extension) || self.read_tools.contains(tool_name)
+            }
             None => false,
         }
+    }
+
+    /// The single read-only tools granted outside [`tool_groups`](Self::tool_groups).
+    pub fn read_tools(&self) -> &BTreeSet<String> {
+        &self.read_tools
     }
 
     /// The authority the child runs under, once the adapter has created its session.
@@ -844,6 +937,7 @@ impl TaskSpec {
             // Unwrapped: this is the parent scope for the next `delegate`, which clamps afresh.
             scope: self.scope.get().clone(),
             tool_groups: self.tool_groups.clone(),
+            read_tools: self.read_tools.clone(),
             depth: self.depth,
         }
     }
@@ -1037,6 +1131,79 @@ mod depth_tests {
     #[test]
     fn the_depth_cap_is_one() {
         assert_eq!(MAX_DELEGATION_DEPTH, 1);
+    }
+
+    #[test]
+    fn a_read_tool_reaches_a_child_only_when_its_authority_and_role_both_name_it() {
+        let groups: BTreeSet<String> = ["giap-weather".to_string()].into_iter().collect();
+        let asks_vision = AgentRole::new(
+            "researcher",
+            "go",
+            ["giap-weather", "giap-vision"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            RolePersonalData::Inherit,
+            3,
+            0.4,
+        )
+        .unwrap();
+        let events = "giap-vision__get_recent_camera_events";
+        let send = "giap-vision__send_camera_snapshot";
+
+        // A chat turn's authority hands on no read tools, so nothing changes for `delegate`.
+        let turn = DelegationAuthority::root("s1", ProfileScope::Household, groups.clone());
+        let spec = turn
+            .delegate(&asks_vision, request("researcher", "go"))
+            .unwrap();
+        assert!(!spec.grants_tool(events));
+
+        // A tool that acts is dropped even when a caller names it.
+        let lane = DelegationAuthority::root("s1", ProfileScope::Household, groups.clone())
+            .with_read_tools([events, send]);
+        let spec = lane
+            .delegate(&asks_vision, request("researcher", "go"))
+            .unwrap();
+        assert!(spec.grants_tool(events));
+        assert!(!spec.grants_tool(send));
+        assert!(!spec.tool_groups().contains("giap-vision"));
+
+        // The role must ask for the group.
+        let spec = lane
+            .delegate(&weather_role(), request("researcher", "go"))
+            .unwrap();
+        assert!(!spec.grants_tool(events));
+
+        // A guest child loses what guests may not see.
+        let guest =
+            DelegationAuthority::root("s1", ProfileScope::Guest, groups).with_read_tools([events]);
+        let spec = guest
+            .delegate(&asks_vision, request("researcher", "go"))
+            .unwrap();
+        assert!(!spec.grants_tool(events));
+    }
+
+    #[test]
+    fn a_withheld_tool_is_never_granted_though_its_group_is() {
+        let groups: BTreeSet<String> = ["giap-weather".to_string()].into_iter().collect();
+        let spec = DelegationAuthority::root("s1", ProfileScope::Household, groups)
+            .delegate(&weather_role(), request("researcher", "go"))
+            .unwrap()
+            .withholding(["giap-weather__get_forecast"]);
+        assert!(!spec.grants_tool("giap-weather__get_forecast"));
+        assert!(spec.grants_tool("giap-weather__get_current_weather"));
+    }
+
+    #[test]
+    fn every_household_read_tool_is_a_read() {
+        for tool in HOUSEHOLD_READ_TOOLS {
+            let bare = tool.split(TOOL_NAME_SEPARATOR).nth(1).unwrap();
+            assert!(
+                bare.starts_with("get_") || bare.starts_with("list_"),
+                "{tool} does not read as a read"
+            );
+            assert!(group_of_tool(tool).is_some(), "{tool} has no group");
+        }
     }
 
     fn weather_role() -> AgentRole {

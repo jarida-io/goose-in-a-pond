@@ -2,7 +2,8 @@
 //! all-or-nothing replans, cascading deletes and insertion order as every tiebreak.
 
 use crate::shared::domain::long_task::{
-    Artifact, ArtifactSummary, LongTask, LongTaskState, PlanStep, StepStateRefused, ValidatedPlan,
+    AnswerShape, Artifact, ArtifactSummary, LongTask, LongTaskState, PlanStep, StepStateRefused,
+    ValidatedPlan,
 };
 use crate::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository};
 use anyhow::{bail, Result};
@@ -95,6 +96,15 @@ impl LongTaskRepository for MockLongTaskRepository {
         };
         task.transition_to(state, at)?;
         Ok(Some(task.clone()))
+    }
+
+    async fn decide_task_answer(&self, id: &str, answer: AnswerShape) -> Result<bool> {
+        let mut ledger = self.ledger.lock().unwrap();
+        Ok(ledger
+            .tasks
+            .iter_mut()
+            .find(|task| task.id() == id)
+            .is_some_and(|task| task.decide_answer(answer)))
     }
 
     async fn replace_open_steps(&self, plan: &ValidatedPlan) -> Result<()> {
@@ -216,6 +226,15 @@ impl LongTaskRepository for MockLongTaskRepository {
         ledger.steps.retain(|step| step.task_id() != id);
         ledger.artifacts.retain(|artifact| artifact.task_id() != id);
         Ok(true)
+    }
+
+    async fn delete_artifact(&self, task_id: &str, artifact_id: &str) -> Result<bool> {
+        let mut ledger = self.ledger.lock().unwrap();
+        let before = ledger.artifacts.len();
+        ledger
+            .artifacts
+            .retain(|artifact| !(artifact.task_id() == task_id && artifact.id() == artifact_id));
+        Ok(ledger.artifacts.len() < before)
     }
 }
 

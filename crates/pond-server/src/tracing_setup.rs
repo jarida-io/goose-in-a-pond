@@ -10,7 +10,9 @@ use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
+use pond_core::security::domain::redaction::RedactionLevel;
 use pond_core::security::ports::event_log::OperationalLogRepository;
+use pond_core::security::ports::redactor::Redactor;
 
 // ── Internal channel entry ────────────────────────────────────────────────────
 
@@ -19,8 +21,169 @@ struct ChannelEntry {
     /// tracing target (e.g. `"giap::trace"`, `"pond_server"`)
     source: String,
     message: String,
-    /// JSON blob of all structured key-value fields except `message`.
-    metadata: Option<String>,
+    /// All structured key-value fields except `message`.
+    fields: serde_json::Map<String, serde_json::Value>,
+}
+
+// ── What the Logs viewer may keep ─────────────────────────────────────────────
+
+/// Fields whose text is what a household said or was told, or what the model wrote. Call sites
+/// log a length instead; this catches the ones that don't, and the Matter controller's relay.
+const HOUSEHOLD_CONTENT_FIELDS: &[&str] = &[
+    "text",
+    "reply",
+    "response",
+    "transcript",
+    "utterance",
+    "spoken",
+    "prompt",
+    "content",
+    "title",
+    "leaked",
+    "line",
+    "args",
+    "raw",
+    "normalized",
+    "body",
+];
+
+/// Fields a call site may log as text because they explain a fault: hidden like the above on a
+/// household's Pond, shown where a developer may see content.
+const DEVELOPER_ONLY_FIELDS: &[&str] = &["tool_error"];
+
+/// Ids the Pond and its engine generate (`session_id`, `tool_id`, `goose_sid`): never anything a
+/// household said, and what a developer follows a turn by. A random id can look like a key or a
+/// phone number to the rule redactor, which would leave a turn's lines with nothing in common.
+fn is_generated_id(field: &str) -> bool {
+    field == "id" || field.ends_with("_id") || field.ends_with("_sid")
+}
+
+const NAME_PLACEHOLDER: &str = "[redacted:name]";
+
+/// The household's members' names, kept current by the server. Matched as whole words in the
+/// case they are written, so "Hope" goes and "hope" stays.
+#[derive(Clone, Default)]
+pub struct HouseholdNames(Arc<std::sync::RwLock<Vec<String>>>);
+
+impl HouseholdNames {
+    /// Each display name whole, then each of its words of three letters or more: longest first,
+    /// so "Grace Wanjiku" is replaced as one before "Grace" alone is looked for.
+    pub fn set<'a>(&self, display_names: impl IntoIterator<Item = &'a str>) {
+        let mut names: Vec<String> = Vec::new();
+        for full in display_names {
+            let full = full.trim();
+            for name in std::iter::once(full).chain(full.split_whitespace()) {
+                if name.chars().count() >= 3 && !names.iter().any(|n| n == name) {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        names.sort_by_key(|name| std::cmp::Reverse(name.len()));
+        if let Ok(mut held) = self.0.write() {
+            *held = names;
+        }
+    }
+
+    fn redact(&self, text: &str) -> String {
+        let Ok(names) = self.0.read() else {
+            return text.to_string();
+        };
+        names
+            .iter()
+            .fold(text.to_string(), |acc, name| replace_word(&acc, name))
+    }
+}
+
+/// `text` with every whole-word `word` replaced by [`NAME_PLACEHOLDER`].
+fn replace_word(text: &str, word: &str) -> String {
+    let is_boundary = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric());
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(word) {
+        let before = rest[..at].chars().next_back().or(out.chars().next_back());
+        let after = rest[at + word.len()..].chars().next();
+        out.push_str(&rest[..at]);
+        out.push_str(if is_boundary(before) && is_boundary(after) {
+            NAME_PLACEHOLDER
+        } else {
+            word
+        });
+        rest = &rest[at + word.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Scrubs an entry before it reaches the Logs viewer: household content is replaced by its
+/// length, members' names by a placeholder, and the rule redactor removes personal data from
+/// every remaining string.
+#[derive(Clone)]
+pub struct LogScrubber {
+    redactor: Option<Arc<dyn Redactor>>,
+    names: HouseholdNames,
+    show_household_content: bool,
+}
+
+impl LogScrubber {
+    /// Every Pond's setting: only a developer on a test Pond has a reason to see content.
+    pub fn household(redactor: Arc<dyn Redactor>, names: HouseholdNames) -> Self {
+        Self {
+            redactor: Some(redactor),
+            names,
+            show_household_content: false,
+        }
+    }
+
+    fn scrub(
+        &self,
+        message: &str,
+        fields: &mut serde_json::Map<String, serde_json::Value>,
+    ) -> String {
+        if !self.show_household_content {
+            for (name, value) in fields.iter_mut() {
+                if !HOUSEHOLD_CONTENT_FIELDS.contains(&name.as_str())
+                    && !DEVELOPER_ONLY_FIELDS.contains(&name.as_str())
+                {
+                    continue;
+                }
+                if let Some(text) = value.as_str() {
+                    *value = format!("[redacted:household {} chars]", text.chars().count()).into();
+                }
+            }
+        }
+        let message = if self.show_household_content {
+            message.to_string()
+        } else {
+            for (name, value) in fields.iter_mut() {
+                if is_generated_id(name) {
+                    continue;
+                }
+                if let Some(text) = value.as_str() {
+                    let named = self.names.redact(text);
+                    if named != text {
+                        *value = named.into();
+                    }
+                }
+            }
+            self.names.redact(message)
+        };
+        let message = message.as_str();
+        let Some(redactor) = &self.redactor else {
+            return message.to_string();
+        };
+        for (name, value) in fields.iter_mut() {
+            if is_generated_id(name) {
+                continue;
+            }
+            if let Some(text) = value.as_str() {
+                let redacted = redactor.redact(text, RedactionLevel::Full);
+                if !redacted.findings.is_empty() {
+                    *value = redacted.text.into();
+                }
+            }
+        }
+        redactor.redact(message, RedactionLevel::Full).text
+    }
 }
 
 // ── Visitor: captures message + all key-value fields ─────────────────────────
@@ -90,17 +253,12 @@ impl<S: Subscriber> Layer<S> for EventLogLayer {
         if visitor.message.is_empty() && visitor.fields.is_empty() {
             return;
         }
-        let metadata = if visitor.fields.is_empty() {
-            None
-        } else {
-            serde_json::to_string(&visitor.fields).ok()
-        };
         let meta = event.metadata();
         let _ = self.tx.send(ChannelEntry {
             level: meta.level().to_string(),
             source: meta.target().to_string(),
             message: visitor.message,
-            metadata,
+            fields: visitor.fields,
         });
     }
 }
@@ -120,19 +278,24 @@ pub struct LogDrainHandle {
 
 impl LogDrainHandle {
     /// Spawn the DB drain (`None` discards events); hold the returned guard until exit.
-    pub fn drain_into(self, repo: Option<Arc<dyn OperationalLogRepository>>) -> FileWriterGuard {
+    pub fn drain_into(
+        self,
+        repo: Option<Arc<dyn OperationalLogRepository>>,
+        scrubber: LogScrubber,
+    ) -> FileWriterGuard {
         let LogDrainHandle { rx, file_guard } = self;
         if let Some(repo) = repo {
             let mut rx = rx;
             tokio::spawn(async move {
-                while let Some(entry) = rx.recv().await {
+                while let Some(mut entry) = rx.recv().await {
+                    let message = scrubber.scrub(&entry.message, &mut entry.fields);
+                    let metadata = if entry.fields.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&entry.fields).ok()
+                    };
                     let _ = repo
-                        .insert(
-                            &entry.level,
-                            &entry.source,
-                            &entry.message,
-                            entry.metadata.as_deref(),
-                        )
+                        .insert(&entry.level, &entry.source, &message, metadata.as_deref())
                         .await;
                 }
             });
@@ -234,6 +397,264 @@ pub fn init_tracing_with_console(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use pond_infra::rule_redactor::RuleRedactor;
+    use serde_json::{json, Map, Value};
+
+    fn fields(value: Value) -> Map<String, Value> {
+        value.as_object().cloned().expect("an object")
+    }
+
+    #[test]
+    fn household_content_is_kept_as_its_length_only() {
+        let scrubber =
+            LogScrubber::household(Arc::new(RuleRedactor::new()), HouseholdNames::default());
+        let mut f = fields(json!({
+            "text": "remind Grace to take her tablets",
+            "session_id": "6f1c2e9a-3b4d-4c5e-9f0a-1b2c3d4e5f60",
+            "line": 42,
+        }));
+
+        scrubber.scrub("tool call failed", &mut f);
+
+        assert_eq!(f["text"], "[redacted:household 32 chars]");
+        // Ids and numbers are what a developer debugs with; a numeric field is never text.
+        assert_eq!(f["session_id"], "6f1c2e9a-3b4d-4c5e-9f0a-1b2c3d4e5f60");
+        assert_eq!(f["line"], 42);
+    }
+
+    #[test]
+    fn personal_data_is_redacted_from_the_message_and_every_field() {
+        let scrubber =
+            LogScrubber::household(Arc::new(RuleRedactor::new()), HouseholdNames::default());
+        let mut f = fields(json!({ "error": "no account for amina@example.com" }));
+
+        let message = scrubber.scrub("sign-in failed for amina@example.com", &mut f);
+
+        assert_eq!(message, "sign-in failed for [redacted:email]");
+        assert_eq!(f["error"], "no account for [redacted:email]");
+    }
+
+    #[test]
+    fn a_generated_id_is_kept_even_where_it_looks_like_a_key_or_a_phone_number() {
+        let scrubber =
+            LogScrubber::household(Arc::new(RuleRedactor::new()), HouseholdNames::default());
+        // A tool call's id and a session's, as a Pond logged them and the redactor took them.
+        let ids = json!({
+            "tool_id": "k4EaZ7ZbU8YZAGuHOaXhOhueinXyb0FQ",
+            "session_id": "ede1e522-194e-4f72-a020-7946095858c563b0",
+            "goose_sid": "20261030_1",
+        });
+        let mut f = fields(ids.clone());
+
+        scrubber.scrub("", &mut f);
+
+        assert_eq!(Value::Object(f), ids);
+    }
+
+    #[test]
+    fn showing_household_content_keeps_it() {
+        let scrubber = LogScrubber {
+            redactor: None,
+            names: HouseholdNames::default(),
+            show_household_content: true,
+        };
+        let mut f = fields(json!({ "reply": "It is 21 degrees outside." }));
+        scrubber.scrub("", &mut f);
+        assert_eq!(f["reply"], "It is 21 degrees outside.");
+    }
+
+    fn names(display_names: &[&str]) -> HouseholdNames {
+        let names = HouseholdNames::default();
+        names.set(display_names.iter().copied());
+        names
+    }
+
+    #[test]
+    fn a_members_name_is_hidden_wherever_it_appears() {
+        let scrubber = LogScrubber::household(
+            Arc::new(RuleRedactor::new()),
+            names(&["Grace Wanjiku", "Amina"]),
+        );
+        let mut f = fields(json!({ "error": "no contact called Amina", "device_id": "dev-7" }));
+
+        let message = scrubber.scrub("pairing from Amina's iPhone for Grace Wanjiku", &mut f);
+
+        assert_eq!(
+            message,
+            "pairing from [redacted:name]'s iPhone for [redacted:name]"
+        );
+        assert_eq!(f["error"], "no contact called [redacted:name]");
+        assert_eq!(f["device_id"], "dev-7");
+    }
+
+    #[test]
+    fn a_name_inside_a_longer_word_or_in_lower_case_is_left_alone() {
+        let n = names(&["Grace", "Hope"]);
+        // "Gracefully" is not Grace; "hope" written in lower case is the word, not the member.
+        assert_eq!(
+            n.redact("Gracefully retried; we hope Grace sees it"),
+            "Gracefully retried; we hope [redacted:name] sees it"
+        );
+    }
+
+    #[test]
+    fn a_short_name_is_not_matched_on_its_own() {
+        // Two letters match too much ordinary text to hide safely.
+        let n = names(&["Jo Kamau"]);
+        assert_eq!(
+            n.redact("Jo asked; Kamau answered"),
+            "Jo asked; [redacted:name] answered"
+        );
+    }
+
+    #[test]
+    fn a_developer_sees_names() {
+        let scrubber = LogScrubber {
+            redactor: None,
+            names: names(&["Amina"]),
+            show_household_content: true,
+        };
+        let mut f = fields(json!({}));
+        assert_eq!(scrubber.scrub("Amina paired", &mut f), "Amina paired");
+    }
+
+    #[test]
+    fn a_tool_error_is_hidden_from_a_household_and_shown_to_a_developer() {
+        let error = json!({ "tool_error": "No reminder named 'Grace's tablets'" });
+
+        let mut household = fields(error.clone());
+        LogScrubber::household(Arc::new(RuleRedactor::new()), HouseholdNames::default())
+            .scrub("", &mut household);
+        assert_eq!(household["tool_error"], "[redacted:household 35 chars]");
+
+        let mut developer = fields(error);
+        LogScrubber {
+            redactor: None,
+            names: HouseholdNames::default(),
+            show_household_content: true,
+        }
+        .scrub("", &mut developer);
+        assert_eq!(
+            developer["tool_error"],
+            "No reminder named 'Grace's tablets'"
+        );
+    }
+
+    /// The scrubber is the net; the rule is that no drained log line writes content at all.
+    #[test]
+    fn no_drained_log_line_writes_household_content() {
+        let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/ is the parent of this crate");
+
+        let mut offenders = Vec::new();
+        let mut stack = vec![crates_dir.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    // `target/` holds generated copies; `tests/` never reaches a household's log.
+                    if path
+                        .file_name()
+                        .is_some_and(|n| n == "target" || n == "tests")
+                    {
+                        continue;
+                    }
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let Ok(src) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    let src = src.split("#[cfg(test)]").next().unwrap_or_default();
+                    let shown = path.display().to_string();
+                    offenders.extend(
+                        content_written_by_drained_logs(src)
+                            .into_iter()
+                            .map(|(line, field)| format!("{shown}:{line} {field}")),
+                    );
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "these warn!/error!/giap::trace lines reach the Logs viewer with a household \
+             content field as text. Log its length (`text_chars = text.chars().count()`) \
+             instead:\n  {}",
+            offenders.join("\n  ")
+        );
+    }
+
+    /// `(line, field)` for each content field a drained macro writes as text.
+    fn content_written_by_drained_logs(src: &str) -> Vec<(usize, String)> {
+        let lines: Vec<&str> = src.lines().collect();
+        let mut found = Vec::new();
+        for (start, line) in lines.iter().enumerate() {
+            let drained = line.contains("tracing::warn!(")
+                || line.contains("tracing::error!(")
+                || (line.contains("tracing::info!(")
+                    && lines
+                        .get(start + 1)
+                        .is_some_and(|next| next.contains("target: \"giap::trace\"")));
+            if !drained {
+                continue;
+            }
+            // Follow the macro's own parentheses, so a one-line call ends where it closes.
+            let mut depth = 0i32;
+            let opening = line.find("!(").map_or(0, |i| i + 1);
+            for (offset, body) in lines[start..].iter().enumerate() {
+                let counted = if offset == 0 { &body[opening..] } else { body };
+                let trimmed = body.trim_start();
+                for field in HOUSEHOLD_CONTENT_FIELDS {
+                    let as_value = trimmed
+                        .strip_prefix(field)
+                        .map(str::trim_start)
+                        .and_then(|rest| rest.strip_prefix('='))
+                        .is_some_and(|rest| {
+                            let rest = rest.trim_start();
+                            rest.starts_with('%') || rest.starts_with('?')
+                        });
+                    let shorthand =
+                        trimmed == format!("{field},") || trimmed == format!("%{field},");
+                    let interpolated = body.contains(&format!("{{{field}}}"))
+                        || body.contains(&format!("{{{field}:"));
+                    if as_value || shorthand || interpolated {
+                        found.push((start + offset + 1, field.to_string()));
+                    }
+                }
+                depth += counted.matches('(').count() as i32;
+                depth -= counted.matches(')').count() as i32;
+                if depth <= 0 {
+                    break;
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn the_source_scan_sees_each_way_a_field_is_written() {
+        let src = "tracing::warn!(\n    text = %text,\n    \"x\"\n);\n\
+                   tracing::error!(reply, \"y\");\n\
+                   tracing::warn!(\"envelope: {body}\");\n\
+                   tracing::info!(\n    target: \"giap::trace\",\n    title = ?title,\n);\n\
+                   tracing::warn!(\n    text_chars = text.chars().count(),\n);\n\
+                   tracing::debug!(\n    text = %text,\n);\n\
+                   Err(e) => tracing::warn!(error = %e, \"push failed\"),\n\
+                   format!(\"sent {}\",\n    title,\n);\n";
+        let fields: Vec<String> = content_written_by_drained_logs(src)
+            .into_iter()
+            .map(|(_, f)| f)
+            .collect();
+        // The one-line `reply,` form is not caught: a shorthand must sit on its own line. The
+        // `title,` after a one-line warn belongs to a `format!`, not to the log line.
+        assert_eq!(fields, vec!["text", "body", "title"]);
+    }
+
     #[test]
     fn no_giap_trace_event_is_emitted_at_a_level_the_filter_drops() {
         const GRANDFATHERED: &[&str] = &[

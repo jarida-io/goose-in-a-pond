@@ -3,7 +3,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/PondApiClient";
-import type { DeepResearchAvailability } from "../api/types";
+import type { DeepResearchAvailability, ResearchAnswer } from "../api/types";
 
 /** `hidden` covers off, an older pond, and any answer that could not be read; the item is not shown. */
 export type DeepResearchAccess = "unknown" | "available" | "unidentified" | "hidden";
@@ -14,6 +14,9 @@ export interface UseDeepResearch {
   access: DeepResearchAccess;
   /** The composer is in research mode: the next message it sends is the question. */
   on: boolean;
+  /** How long the answer should be. Kept while this composer is mounted: it is the person's habit. */
+  answer: ResearchAnswer;
+  setAnswer: (answer: ResearchAnswer) => void;
   /** No-op unless the pond offers it. */
   enter: () => void;
   leave: () => void;
@@ -30,6 +33,7 @@ function accessOf(answer: DeepResearchAvailability | null): DeepResearchAccess {
 export function useDeepResearch(serverOnline: boolean): UseDeepResearch {
   const [access, setAccess] = useState<DeepResearchAccess>("unknown");
   const [on, setOn] = useState(false);
+  const [answer, setAnswer] = useState<ResearchAnswer>("auto");
   const accessRef = useRef(access);
   accessRef.current = access;
 
@@ -59,5 +63,8 @@ export function useDeepResearch(serverOnline: boolean): UseDeepResearch {
     setOn(false);
   }, []);
 
-  return useMemo(() => ({ access, on, enter, leave, refused }), [access, on, enter, leave, refused]);
+  return useMemo(
+    () => ({ access, on, answer, setAnswer, enter, leave, refused }),
+    [access, on, answer, enter, leave, refused],
+  );
 }

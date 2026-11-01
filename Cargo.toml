@@ -289,6 +289,16 @@ opt-level = 3
 [profile.dev.package.pond-ear]
 opt-level = 3
 
+# A debug pond checks the admin card in 600,000 PBKDF2 rounds: seconds per unlock at opt-level 0.
+[profile.dev.package.pbkdf2]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.hmac]
+opt-level = 3
+
 # NOTE: goose's own [patch.crates-io] (vendored v8, cudaforge) is ignored when building from this
 # root; replicate entries here if its build graph ever needs them.
 
