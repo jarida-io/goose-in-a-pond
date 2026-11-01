@@ -63,8 +63,8 @@ model is listed as unavailable and refused with 409 rather than failing its firs
 
 `llama-cpp-2` and `llama-cpp-sys-2` are patched in the root `Cargo.toml` to the
 `jarida-io/llama-cpp-rs-giap` fork, pinned by full SHA: 0.1.156 (which has MTP) with the
-0.1.146 OpenAI-compatible template surface re-applied, plus allocation-failure fixes listed in the
-fork's `llama-cpp-sys-2/POND-PATCH.md`. No published version has both APIs; the history is in
+0.1.146 OpenAI-compatible template surface re-applied, plus allocation-failure fixes and the
+EmbeddingGemma 2 backports listed in the fork's `llama-cpp-sys-2/POND-PATCH.md`. No published version has both APIs; the history is in
 [jetson-mtp-in-process-scope.md](jetson-mtp-in-process-scope.md).
 
 ## Per-model settings
