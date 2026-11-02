@@ -91,6 +91,11 @@ id = "RUSTSEC-2026-0374"
 ignoreUntil = 2027-03-31
 reason = "basic-toml is unmaintained (archived 2025-03). Only in goose/Cargo.lock, through askama_derive in the goose submodule; not in this workspace's Cargo.lock. Clearing it is a goose-side askama upgrade, not something this repo can do without editing goose/."
 
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0433"
+ignoreUntil = 2027-01-31
+reason = "pulldown-cmark 0.13.5: quadratic parsing of nested image wikilinks under ENABLE_WIKILINKS. This workspace's Cargo.lock is on the fixed 0.13.6; what remains is goose/Cargo.lock, the submodule's own lockfile, which GIAP's build never reads (goose's crates resolve against this workspace's lockfile). Nothing in GIAP or goose enables ENABLE_WIKILINKS. Remove when the goose fork's lockfile moves to 0.13.6."
+
 # ── Real vulnerabilities whose fix is a major our dependencies have not taken ─
 
 [[IgnoredVulns]]

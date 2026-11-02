@@ -4216,7 +4216,11 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
   - embedders as pinned catalogue rows downloaded by the models pipeline;
   - live switching with one embedder loaded, and same-width vector spaces never compared;
   - the embedding slot in place of the startup backfill and `IndexMaintenance`;
-  - EmbeddingGemma 2 (`embeddinggemma-2-256`, 256 of 768 dims) as the recommended Memory model.
+  - EmbeddingGemma 2 (`embeddinggemma-2-256`, 256 of 768 dims) as the recommended Memory model;
+  - then, merged as `ffe2ef23`: catalogue rows named by title (#748), EmbeddingGemma 2's own
+    floors (#749), and the design gate's fixes to the desktop surfaces in both UIs (#750);
+  - on the phone, Search memories by meaning as one on/off switch that applies without a restart
+    (goose-on-the-go#223).
 - **PAI-3.** Recall across the household's languages is the point (Swahili and mixed R@5 0.73
   against MiniLM's 0.39, P0). Similarity floors are per model: MiniLM keeps 0.28 and the dedup
   dials set on it; EmbeddingGemma 2 has its own, measured on the Orin over
@@ -4238,8 +4242,10 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
   - Long-task steps beside the slot: Memory switched to EmbeddingGemma 2 three seconds into a
     step. The slot loaded and embedded nothing until the task's last step settled 68 s later, then
     loaded the model and re-indexed 86 rows in 4 s.
-- Not done: the phone app's embedding setting (an on/off switch, in its own pull request); the
-  desktop surfaces' design gate scored revise, and its fixes are their own pull request.
+  - `ffe2ef23` on the nano: EmbeddingGemma 2 loads on the GPU after the prefix prewarm and the
+    TensorRT moves, and the slot finds all 86 rows current.
+- Not done: the design gate scored the desktop surfaces revise (A 4.0, B 3.85), and #750's fixes
+  are not yet re-scored; `docs/design/gate/2026-11-02-memory-embedder.md` lists what is still open.
 
 **2026-11-02 — PAI-1: the memory tools and the session reads follow the speaker.**
 
