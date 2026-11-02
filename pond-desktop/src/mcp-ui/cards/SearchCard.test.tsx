@@ -155,3 +155,153 @@ describe("SearchCard", () => {
     expect(container.textContent?.toLowerCase()).not.toContain("powered by");
   });
 });
+
+const PLACES = [
+  {
+    name: "Java House Junction",
+    url: "https://www.javahouseafrica.com/junction",
+    snippet: "day: Monday; hours: 7 am - 10 pm",
+  },
+  { name: "Artcaffe Junction", url: "", snippet: "" },
+];
+
+function manyPlaces(n: number) {
+  return Array.from({ length: n }, (_, i) => ({
+    name: `Place ${i + 1}`,
+    url: `https://place${i + 1}.example.org/`,
+    snippet: `Snippet ${i + 1}`,
+  }));
+}
+
+describe("SearchCard, nearby places", () => {
+  const withPlaces = { ...DATA, places: PLACES };
+
+  it("shows each place's name and what is known of it, above the pages", () => {
+    render(<SearchCard data={withPlaces} toolName="t" />);
+    const group = screen.getByRole("list", { name: "Nearby places" });
+    expect(group.querySelectorAll("li")).toHaveLength(2);
+    expect(screen.getByText("Nearby places")).toBeTruthy();
+    expect(screen.getByText("day: Monday; hours: 7 am - 10 pm")).toBeTruthy();
+    expect(screen.getByText("javahouseafrica.com")).toBeTruthy();
+
+    const everything = document.querySelector(".ui-search")!.textContent!;
+    expect(everything.indexOf("Java House Junction")).toBeLessThan(
+      everything.indexOf("Opening hours - Example Town Library"),
+    );
+    // The pages keep their own label, so they are not read as more places.
+    expect(screen.getByText("Pages")).toBeTruthy();
+    expect(screen.getAllByRole("listitem")).toHaveLength(4);
+  });
+
+  it("links a place only when its address is a web address", () => {
+    render(
+      <SearchCard
+        data={{
+          query: "q",
+          places: [
+            { name: "Web", url: "https://a.example.org/x", snippet: "" },
+            { name: "Plain http", url: "http://b.example.org/", snippet: "" },
+            { name: "No address", url: "", snippet: "" },
+            { name: "Script", url: "javascript:alert(1)", snippet: "" },
+            { name: "File", url: "file:///etc/passwd", snippet: "" },
+          ],
+        }}
+        toolName="t"
+        variant="large"
+      />,
+    );
+    const links = screen.getAllByRole("link") as HTMLAnchorElement[];
+    expect(links.map((l) => l.href)).toEqual(["https://a.example.org/x", "http://b.example.org/"]);
+    for (const link of links) {
+      expect(link.target).toBe("_blank");
+      expect(link.rel).toContain("noopener");
+      expect(link.rel).toContain("noreferrer");
+    }
+    // Every place is still named, linked or not.
+    for (const name of ["No address", "Script", "File"]) expect(screen.getByText(name)).toBeTruthy();
+  });
+
+  it("does not leak a place link's click to the chat chip around it", () => {
+    const outer = vi.fn();
+    render(
+      <div onClick={outer}>
+        <SearchCard data={withPlaces} toolName="t" />
+      </div>,
+    );
+    fireEvent.click(screen.getByRole("link", { name: /Java House Junction/ }));
+    expect(outer).not.toHaveBeenCalled();
+  });
+
+  it("tells a screen reader that a place link leaves the app", () => {
+    render(<SearchCard data={{ query: "q", places: [PLACES[0]] }} toolName="t" />);
+    expect(screen.getAllByText("(opens in your browser)")).toHaveLength(1);
+  });
+
+  it("draws the place name as text, never as markup", () => {
+    render(
+      <SearchCard
+        data={{ query: "q", places: [{ name: "<img src=x onerror=alert(1)> Cafe", url: "", snippet: "<b>x</b>" }] }}
+        toolName="t"
+      />,
+    );
+    expect(document.querySelector(".ui-search img, .ui-search b")).toBeNull();
+    expect(screen.getByText("<img src=x onerror=alert(1)> Cafe")).toBeTruthy();
+  });
+
+  it("is unchanged without places", () => {
+    render(<SearchCard data={DATA} toolName="t" />);
+    expect(screen.queryByText("Nearby places")).toBeNull();
+    expect(screen.queryByText("Pages")).toBeNull();
+    expect(screen.queryByRole("list", { name: "Nearby places" })).toBeNull();
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+  });
+
+  it("shows places alone when no page came back, and does not say nothing did", () => {
+    render(<SearchCard data={{ query: "q", results: [], places: PLACES }} toolName="t" />);
+    expect(screen.getByText("Java House Junction")).toBeTruthy();
+    expect(screen.queryByText("No pages came back for this search.")).toBeNull();
+    expect(screen.queryByText("Pages")).toBeNull();
+  });
+
+  it("is a card, not a loading line, when only places arrived", () => {
+    render(<SearchCard data={{ places: PLACES }} toolName="t" />);
+    expect(screen.queryByText("Searching the web…")).toBeNull();
+    expect(screen.getByText("Web search")).toBeTruthy();
+    expect(screen.getByText("Artcaffe Junction")).toBeTruthy();
+  });
+
+  it("skips a place with no name, and a field of the wrong kind", () => {
+    render(
+      <SearchCard
+        data={{
+          query: "q",
+          places: [{ name: "", url: "https://a.example.org/", snippet: "s" }, { name: 3 }, null, "x", { name: "Kept", url: 7, snippet: 9 }],
+        }}
+        toolName="t"
+      />,
+    );
+    const group = screen.getByRole("list", { name: "Nearby places" });
+    expect(group.querySelectorAll("li")).toHaveLength(1);
+    expect(screen.getByText("Kept")).toBeTruthy();
+    expect(screen.queryAllByRole("link")).toHaveLength(0);
+  });
+
+  it("ignores a places field that is not a list", () => {
+    render(<SearchCard data={{ query: "q", results: RESULTS, places: "nope" }} toolName="t" />);
+    expect(screen.queryByText("Nearby places")).toBeNull();
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+  });
+
+  it("shows fewer places in the chat than on the canvas, and never more than the pond sends", () => {
+    const data = { query: "q", places: manyPlaces(5) };
+    const count = (variant: "compact" | "normal" | "large") => {
+      const { unmount } = render(<SearchCard data={data} toolName="t" variant={variant} />);
+      const n = screen.getByRole("list", { name: "Nearby places" }).querySelectorAll("li").length;
+      unmount();
+      return n;
+    };
+    expect(count("compact")).toBe(3);
+    expect(count("normal")).toBe(5);
+    expect(count("large")).toBe(5);
+  });
+});

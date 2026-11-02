@@ -1,0 +1,16 @@
+{
+ "source": "Wikimedia Commons, CC0 or public domain only (LicenseShortName checked through the Commons API on 2026-10-31)",
+ "images": [
+  {"id": "img01", "file": "File:Dog sleeping in a dog bed.JPG", "license": "CC0", "query": "the dog asleep in its bed"},
+  {"id": "img02", "file": "File:Cute-wildlife-pet-cat-sleeping-feline.jpg", "license": "CC0", "query": "picha ya paka akilala"},
+  {"id": "img03", "file": "File:Rain on a blue umbrella.jpg", "license": "CC0", "query": "rain falling on the blue umbrella"},
+  {"id": "img04", "file": "File:Potted succulents in window (Unsplash).jpg", "license": "CC0", "query": "the little plants on the windowsill"},
+  {"id": "img05", "file": "File:Icing around Cherry Topping on a Birthday Cake with Candles.jpg", "license": "CC0", "query": "keki ya siku ya kuzaliwa yenye mishumaa"},
+  {"id": "img06", "file": "File:Food into a refrigerator - 20111002.jpg", "license": "CC0", "query": "what is inside the fridge"},
+  {"id": "img07", "file": "File:-365 Tomato plants (26240119863).jpg", "license": "CC0", "query": "the tomato plants we grew"},
+  {"id": "img08", "file": "File:Bermuda photos number 61 outdoor furniture with clothes hanging to dry.jpg", "license": "CC0", "query": "viti vyeupe vya nje kwenye nyasi"},
+  {"id": "img09", "file": "File:Traditional Clay Stove Cooking in Rural Bengal.jpg", "license": "CC0", "query": "cooking on the clay stove with firewood"},
+  {"id": "img10", "file": "File:Fixed bollard bicycle stand.jpg", "license": "CC0", "query": "where the bicycles are parked"},
+  {"id": "img11", "file": "File:Laptop in the living room (Unsplash).jpg", "license": "CC0", "query": "laptop kwenye sebule"}
+ ]
+}

@@ -398,6 +398,11 @@ impl Bells {
         self.by_hand.clone()
     }
 
+    /// A nudge that keeps every gate: for work that arrived and should run once it is polite to.
+    pub fn nudge_bell(&self) -> Arc<tokio::sync::Notify> {
+        self.scheduled.clone()
+    }
+
     /// Which bell rang; for the sweep, whose own `select!` can't use `wait_for_tick`.
     pub async fn rang(&self) -> Tick {
         tokio::select! {

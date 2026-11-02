@@ -1,12 +1,14 @@
 //! A capture child process (ffmpeg or gst-launch): stdout carries frames, stderr explains failures.
 
 use std::ffi::OsStr;
+use std::os::fd::OwnedFd;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::net::unix::pipe::Receiver;
 use tokio::process::{Child, ChildStdout, Command};
 
 /// How long a killed capture may take to release its camera before a reopen goes ahead anyway.
@@ -30,9 +32,35 @@ pub struct CaptureProcess {
 impl CaptureProcess {
     /// `input` is the camera address, whose credentials never reach an error message.
     pub fn spawn(bin: &OsStr, args: &[String], program: &'static str, input: &str) -> Result<Self> {
+        Self::start(bin, args, program, input, Stdio::null())
+    }
+
+    /// [`CaptureProcess::spawn`] with a second stream out of the child, which writes it to its
+    /// fd 0: a pipe in place of stdin.
+    pub fn spawn_with_second_stream(
+        bin: &OsStr,
+        args: &[String],
+        program: &'static str,
+        input: &str,
+    ) -> Result<(Self, Receiver)> {
+        let (reader, writer) =
+            std::io::pipe().context("no pipe for the capture's second stream")?;
+        let process = Self::start(bin, args, program, input, Stdio::from(writer))?;
+        let second = Receiver::from_owned_fd(OwnedFd::from(reader))
+            .context("the capture's second stream cannot be read")?;
+        Ok((process, second))
+    }
+
+    fn start(
+        bin: &OsStr,
+        args: &[String],
+        program: &'static str,
+        input: &str,
+        stdin: Stdio,
+    ) -> Result<Self> {
         let mut child = Command::new(bin)
             .args(args)
-            .stdin(Stdio::null())
+            .stdin(stdin)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)

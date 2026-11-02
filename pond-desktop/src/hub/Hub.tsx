@@ -9,6 +9,7 @@ import { HomeView } from "./views/Home";
 import { ChatHubView } from "./views/ChatHub";
 import { CanvasHubView } from "./views/CanvasHub";
 import { RoutinesView } from "./views/Routines";
+import { AgentsView } from "./views/AgentsHub";
 import { SettingsHubView } from "./views/SettingsHub";
 import { NotificationsView } from "./views/Notifications";
 import { ModelsDetail } from "./views/settings/Models";
@@ -38,6 +39,7 @@ const HUB_ROUTE_FOR: Partial<Record<GuiSection, string>> = {
   chat:          "chat",
   canvas:        "canvas",
   schedules:     "routines",
+  recipes:       "agents",
   settings:      "settings",
   notifications: "notifications",
   models:        "models",
@@ -52,6 +54,7 @@ const SECTION_FOR_HUB_ROUTE: Record<string, GuiSection> = {
   chat:          "chat",
   canvas:        "canvas",
   routines:      "schedules",
+  agents:        "recipes",
   settings:      "settings",
   notifications: "notifications",
   models:        "models",
@@ -152,6 +155,7 @@ export function Hub() {
     if (route === "chat")          return <ChatHubView />;
     if (route === "canvas")        return <CanvasHubView />;
     if (route === "routines")      return <RoutinesView />;
+    if (route === "agents")        return <AgentsView go={go} />;
     if (route === "settings")      return <SettingsHubView go={go} />;
     if (route === "notifications") return <NotificationsView go={openFromNotification} />;
 

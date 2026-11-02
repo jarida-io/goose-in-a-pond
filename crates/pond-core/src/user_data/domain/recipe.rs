@@ -34,4 +34,11 @@ pub struct AgentRecipe {
     pub active: bool,
     /// ISO datetime when this recipe was created.
     pub created_at: String,
+    /// The member whose paired device saved it; an agent's own runs are theirs when an event
+    /// names nobody. `None` for recipes saved from no paired device.
+    #[serde(default)]
+    pub owner_profile_id: Option<String>,
+    /// The shipped template this recipe was copied from; `None` for one written by hand.
+    #[serde(default)]
+    pub template: Option<String>,
 }

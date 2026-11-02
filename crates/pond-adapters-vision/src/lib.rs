@@ -14,6 +14,7 @@ mod pipeline;
 mod process;
 mod snapshot;
 mod supervisor;
+mod tracker;
 
 pub use annotate::{
     annotate_frame, annotate_jpeg, annotate_jpeg_for_model, compress_frame_for_model,

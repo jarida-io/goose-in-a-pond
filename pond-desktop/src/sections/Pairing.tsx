@@ -5,6 +5,7 @@ import { Button, Chip } from "@heroui/react";
 import { RefreshCw, Smartphone, Wifi } from "lucide-react";
 import QRCode from "qrcode";
 import { api } from "../api/PondApiClient";
+import type { PairingCodeBinding } from "../api/types";
 import { isSignInRequired } from "../api/hostCredential";
 import { signInRefusalKey } from "../api/signInRefusal";
 import { PageHeader } from "../components/shared";
@@ -13,6 +14,22 @@ interface PairingInfo {
   code: string;
   expiresAt: string;
   pairUrl: string;
+  /** The member a device pairing with this code becomes, as the Pond reports it; null is nobody. */
+  profileId: string | null;
+}
+
+interface Member {
+  id: string;
+  display_name: string;
+}
+
+/** The picker's value for a code bound to nobody; member ids are never empty. */
+const NOBODY = "";
+
+/** What a choice in the picker asks the Pond for. Nobody is asked for explicitly, so a household
+ *  of one can still pair a guest's phone. */
+function bindingFor(choice: string): PairingCodeBinding {
+  return choice === NOBODY ? { unattributed: true } : { profile_id: choice };
 }
 
 function timeUntil(isoString: string): string {
@@ -29,14 +46,19 @@ export function Pairing() {
   const [error, setError] = useState<string | null>(null);
   const [timeLeft, setTimeLeft] = useState("");
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  /** Null until read; the read failing is said on screen, not shown as an empty household. */
+  const [members, setMembers] = useState<Member[] | null>(null);
+  const [membersFailed, setMembersFailed] = useState(false);
+  /** The operator's choice, once made; every later code (New code, expiry) is issued for it. */
+  const binding = useRef<PairingCodeBinding | undefined>(undefined);
 
   const loadPairingInfo = useCallback(async (forceNew = false) => {
     setLoading(true);
     setError(null);
     try {
       const pc = await (forceNew
-        ? api.issuePairingCode()
-        : api.getPairingCode().then((r) => (r.code ? r : api.issuePairingCode())));
+        ? api.issuePairingCode(binding.current)
+        : api.getPairingCode().then((r) => (r.code ? r : api.issuePairingCode(binding.current))));
       if (!pc.code) throw new Error("Server returned no pairing code");
       // Pairing material comes with the code, from the host-only route, not /system/info.
       const sysInfo = pc.pairing;
@@ -54,7 +76,7 @@ export function Pairing() {
       if (sysInfo.lan_address) params.set("ip", sysInfo.lan_address);
       if (sysInfo.tailnet_address) params.set("ts", sysInfo.tailnet_address);
       const pairUrl = `pond://pair?${params.toString()}`;
-      setInfo({ code: pc.code, expiresAt: pc.expires_at ?? "", pairUrl });
+      setInfo({ code: pc.code, expiresAt: pc.expires_at ?? "", pairUrl, profileId: pc.profile_id ?? null });
     } catch (e) {
       setError(isSignInRequired(e) ? i18n.t(signInRefusalKey()) : String(e));
     } finally {
@@ -85,6 +107,28 @@ export function Pairing() {
   useEffect(() => {
     loadPairingInfo(false);
   }, [loadPairingInfo]);
+
+  useEffect(() => {
+    let live = true;
+    api
+      .listProfiles()
+      .then((r) => live && setMembers(r.profiles))
+      .catch((e) => {
+        console.warn("[pairing] could not read the household members", e);
+        if (live) setMembersFailed(true);
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const chooseOwner = (choice: string) => {
+    binding.current = bindingFor(choice);
+    void loadPairingInfo(true);
+  };
+  const ownerName = info?.profileId
+    ? (members?.find((m) => m.id === info.profileId)?.display_name ?? info.profileId)
+    : null;
 
   return (
     <div className="screen screen--pairing">
@@ -148,6 +192,39 @@ export function Pairing() {
             >
               {info?.code ?? "——————"}
             </div>
+            <label className="muted-12" htmlFor="pairing-owner" style={{ display: "block", marginTop: 16, marginBottom: 8 }}>
+              {i18n.t("pairing.owner")}
+            </label>
+            <select
+              id="pairing-owner"
+              className="native-select"
+              disabled={loading || !info || members === null}
+              value={info?.profileId ?? NOBODY}
+              onChange={(e) => chooseOwner(e.target.value)}
+            >
+              <option value={NOBODY}>{i18n.t("pairing.ownerNobody")}</option>
+              {/* A code bound to a member this list does not have still shows whose it is. */}
+              {info?.profileId && members && !members.some((m) => m.id === info.profileId) && (
+                <option value={info.profileId}>{info.profileId}</option>
+              )}
+              {(members ?? []).map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.display_name}
+                </option>
+              ))}
+            </select>
+            {info && (
+              <p className="muted-12" role="status" style={{ marginTop: 8 }}>
+                {ownerName
+                  ? i18n.t("pairing.boundTo", { name: ownerName })
+                  : i18n.t("pairing.boundToNobody")}
+              </p>
+            )}
+            {membersFailed && (
+              <p className="muted-12 text-error" style={{ marginTop: 8 }}>
+                {i18n.t("pairing.membersFailed")}
+              </p>
+            )}
           </div>
 
           {info && <div style={{ overflowWrap: "anywhere", marginBottom: 20 }}>

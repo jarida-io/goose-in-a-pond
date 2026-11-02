@@ -1,6 +1,5 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { WarmupBanner } from "../../components/WarmupBanner";
-import { Paperclip } from "lucide-react";
 import { api } from "../../api/PondApiClient";
 import { useAppState, useAppDispatch } from "../../state/useAppContext";
 import { useChatRun, sendTurn, takeRefusedDraft } from "../../state/chatRunStore";
@@ -16,8 +15,14 @@ import type { CardKind } from "./chat/ResultCard";
 import { TurnStatsFooter } from "../../components/TurnStatsFooter";
 import { ContextPressureNote } from "../../components/ContextPressureNote";
 import { SubagentTree } from "../../components/SubagentTree";
+import { LongTaskCards, LongTaskStrays } from "../../longtasks/LongTaskCards";
+import { useLongTasks } from "../../longtasks/useLongTasks";
+import { KeptResultNote } from "../../components/KeptResultNote";
+import type { KeptResult } from "../../state/keptResults";
 import type { SubagentRun } from "../../components/subagentRuns";
 import { AttachmentTray } from "../../components/AttachmentTray";
+import { ComposerMenu } from "../../components/ComposerMenu";
+import { ResearchModeChip } from "../../components/ResearchModeChip";
 import { ImageSupportStatus } from "../../components/ImageSupportStatus";
 import {
   ATTACH_BLOCKED_COPY,
@@ -25,11 +30,13 @@ import {
   NOT_DECLARED_COPY,
   refusalClientClause,
 } from "../../components/imageSupportCopy";
+import { ADD_PICTURES, PICTURES_NOT_IN_RESEARCH, RESEARCH_PLACEHOLDER, RESEARCH_SEND } from "../../components/deepResearchCopy";
 import { useVisionStatus } from "../../api/useVisionStatus";
 import { prepareImage, validateAttachmentSet } from "../../lib/imageAttach";
 import type { PreparedImage } from "../../lib/imageAttach";
 import { useSuggestedPrompts } from "../../hooks/useSuggestedPrompts";
 import { useConversationModel } from "../../hooks/useConversationModel";
+import { useDeepResearch } from "../../hooks/useDeepResearch";
 import { NoModelPicks } from "../../components/models/NoModelPicks";
 import "./chat.css";
 
@@ -48,7 +55,9 @@ interface Row {
   /** Set when the server said the context window is filling. */
   contextWarning?: ContextWarning;
   delegations?: SubagentRun[];
+  longTaskIds?: string[];
   images?: string[];
+  keptResults?: KeptResult[];
 }
 
 // ── Constants ─────────────────────────────────────────────────
@@ -90,7 +99,9 @@ function toRow(m: Message): Row {
     turnLimit: m.turnLimit,
     contextWarning: m.contextWarning,
     delegations: m.delegations,
+    longTaskIds: m.longTaskIds,
     images: m.images,
+    keptResults: m.keptResults,
   };
 }
 
@@ -113,8 +124,14 @@ export function ChatHubView() {
   const run = useChatRun();
   const { messages, busy } = run;
 
+  const startedTasks = useMemo(() => messages.flatMap((m) => m.longTaskIds ?? []), [messages]);
+  const startedTaskSet = useMemo(() => new Set(startedTasks), [startedTasks]);
+  const longTasks = useLongTasks(run.sessionId ?? null, startedTasks);
+
   const chips = useSuggestedPrompts(state.sessionId);
   const conversationModel = useConversationModel();
+  const deepResearch = useDeepResearch(state.serverOnline);
+  const { leave: leaveResearch } = deepResearch;
 
   // Presentation only: shown until the first real message, never stored.
   const [seed, setSeed] = useState<Row[]>(() => makeSeed(""));
@@ -138,7 +155,7 @@ export function ChatHubView() {
   const [capabilitiesKnown, setCapabilitiesKnown] = useState(false);
   // Primary attach gate; the `capabilities.vision` probe is the fallback while this is unknown.
   const { status: visionStatus, refresh: refreshVisionStatus } = useVisionStatus();
-  // Set when they reach for the paperclip or paste: only then does a permanent reason show.
+  // Set when they press Add pictures or paste: only then does a permanent reason show.
   const [attachReasonShown, setAttachReasonShown] = useState(false);
 
   useEffect(() => {
@@ -155,7 +172,7 @@ export function ChatHubView() {
     ? visionKind !== "ready"
     : capabilitiesKnown && !visionCapable;
   const attachTitle = !gateBlocked
-    ? "Attach image"
+    ? ADD_PICTURES
     : (visionStatus?.message ??
         (visionKind === "not_declared" ? NOT_DECLARED_COPY : ATTACH_BLOCKED_COPY));
 
@@ -169,6 +186,12 @@ export function ChatHubView() {
     setAttachments(draft.attachments);
     setAttachError(draft.message + refusalClientClause(draft.code));
     if (draft.code === "no_model") conversationModel.markNone();
+    if (draft.code === "deep_research_off" || draft.code === "deep_research_unidentified") {
+      deepResearch.refused(draft.code);
+    } else if (draft.deepResearch) {
+      // Refused for another reason: the question goes back as it was, mode included.
+      deepResearch.enter();
+    }
     refreshVisionStatus();
     // `text` excluded: once per refusal, not per keystroke.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -209,7 +232,7 @@ export function ChatHubView() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Never disabled for vision: a disabled button's title can't reach touch, so a tap shows why.
+  // Never disabled for vision: a disabled item's title can't reach touch, so a tap shows why.
   function onAttachClick() {
     if (gateBlocked) setAttachReasonShown(true);
     fileInputRef.current?.click();
@@ -225,6 +248,10 @@ export function ChatHubView() {
     const files = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/"));
     if (files.length === 0) return;
     e.preventDefault();
+    if (deepResearch.on) {
+      setAttachError(PICTURES_NOT_IN_RESEARCH);
+      return;
+    }
     if (gateBlocked) {
       setAttachReasonShown(true);
       setAttachError(COMPOSER_GATE_LINE);
@@ -235,6 +262,16 @@ export function ChatHubView() {
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // The mode belongs to one message in one conversation. A first id arriving for a new chat is
+  // that same conversation getting saved, so only a change from one id to another ends it.
+  const lastSessionRef = useRef(run.sessionId);
+  useEffect(() => {
+    const before = lastSessionRef.current;
+    lastSessionRef.current = run.sessionId;
+    if (before !== undefined && before !== run.sessionId) leaveResearch();
+  }, [run.sessionId, leaveResearch]);
+
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
@@ -245,6 +282,9 @@ export function ChatHubView() {
     (raw?: string) => {
       const t = (raw ?? text).trim();
       if ((!t && attachments.length === 0) || busy) return;
+      // A chip or Continue sends its own words: only the box's text is the question.
+      const asResearch = raw === undefined && deepResearch.on;
+      if (asResearch && !t) return;
       // Gated here, not on Send: every way of sending (button, Enter, chip, Continue) lands here.
       if (attachments.length > 0 && gateBlocked) {
         setAttachError(COMPOSER_GATE_LINE);
@@ -253,12 +293,19 @@ export function ChatHubView() {
 
       setText("");
 
+      if (asResearch) {
+        sendTurn({ text: t, deepResearch: true, deepResearchAnswer: deepResearch.answer });
+        leaveResearch();
+        setAttachError(null);
+        return;
+      }
+
       // The store owns revoking previewUrls; revoking here would blank the sent message's thumbnail.
       sendTurn({ text: t, attachments });
       setAttachments([]);
       setAttachError(null);
     },
-    [text, attachments, busy, gateBlocked],
+    [text, attachments, busy, gateBlocked, deepResearch.on, deepResearch.answer, leaveResearch],
   );
 
   // Take focus back when the model stops.
@@ -277,6 +324,25 @@ export function ChatHubView() {
       e.preventDefault();
       sendMessage();
     }
+    // An open menu has already taken this Escape (and marked it handled).
+    if (e.key === "Escape" && deepResearch.on && !e.defaultPrevented) {
+      e.preventDefault();
+      leaveResearch();
+    }
+  }
+
+  function onLeaveResearch() {
+    leaveResearch();
+    inputRef.current?.focus();
+  }
+
+  function onToggleResearch() {
+    if (deepResearch.on) {
+      leaveResearch();
+      return;
+    }
+    deepResearch.enter();
+    inputRef.current?.focus();
   }
 
   function goToVoice() {
@@ -332,6 +398,7 @@ export function ChatHubView() {
               {m.who === "goose" && m.delegations && m.delegations.length > 0 && (
                 <SubagentTree runs={m.delegations} />
               )}
+              {m.who === "goose" && <LongTaskCards ids={m.longTaskIds} longTasks={longTasks} variant="hub" />}
               <div className={`ch-bubble ch-bubble--${m.who}`}>
                 {m.images && m.images.length > 0 && (
                   <div className="ch-bubble__images">
@@ -342,6 +409,9 @@ export function ChatHubView() {
                 )}
                 {m.text || (m.streaming ? " " : "")}
               </div>
+              {m.who === "goose" && m.keptResults?.map((kept, i) => (
+                <KeptResultNote key={`${kept.callId}-${i}`} result={kept} />
+              ))}
               {m.card && !m.streaming && (
                 <div className="ch-card">
                   <ResultCard kind={m.card} />
@@ -373,6 +443,9 @@ export function ChatHubView() {
             </div>
           </div>
         ))}
+        {messages.length > 0 && !run.loadingSession && (
+          <LongTaskStrays anchored={startedTaskSet} longTasks={longTasks} variant="hub" />
+        )}
         {busy && rows[rows.length - 1]?.text === "" && (
           <TypingIndicator />
         )}
@@ -403,6 +476,16 @@ export function ChatHubView() {
       <AttachmentTray attachments={attachments} onRemove={removeAttachment} />
       {attachError && <p className="attach-error" role="alert">{attachError}</p>}
 
+      {deepResearch.on && (
+        <ResearchModeChip
+          variant="hub"
+          waiting={false}
+          onLeave={onLeaveResearch}
+          answer={deepResearch.answer}
+          onAnswer={deepResearch.setAnswer}
+        />
+      )}
+
       {/* Input */}
       <div className="chat2__input">
         <button
@@ -414,17 +497,17 @@ export function ChatHubView() {
         >
           <HubIco d={micEl} size={19} color="#fff" />
         </button>
-        <button
-          className="ch-attach"
-          onClick={onAttachClick}
+        <ComposerMenu
+          variant="hub"
           disabled={busy}
-          aria-disabled={gateBlocked || undefined}
-          aria-label="Attach image"
-          title={attachTitle}
-          type="button"
-        >
-          <Paperclip size={18} />
-        </button>
+          picturesTitle={attachTitle}
+          picturesBlocked={gateBlocked}
+          hasPictures={attachments.length > 0}
+          access={deepResearch.access}
+          researchOn={deepResearch.on}
+          onAddPictures={onAttachClick}
+          onToggleResearch={onToggleResearch}
+        />
         <input
           ref={fileInputRef}
           type="file"
@@ -439,7 +522,7 @@ export function ChatHubView() {
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKeyDown}
           onPaste={onPaste}
-          placeholder="Message Goose or speak a command…"
+          placeholder={deepResearch.on ? RESEARCH_PLACEHOLDER : "Message Goose or speak a command…"}
           disabled={busy}
           aria-label="Message input"
           autoComplete="off"
@@ -449,7 +532,8 @@ export function ChatHubView() {
           className="ch-send"
           onClick={() => sendMessage()}
           disabled={!canSend}
-          aria-label="Send message"
+          aria-label={deepResearch.on ? RESEARCH_SEND : "Send message"}
+          title={deepResearch.on ? RESEARCH_SEND : undefined}
           type="button"
         >
           <HubIco d={HP_PATHS.chevR} size={18} color="#fff" sw={2.5} />

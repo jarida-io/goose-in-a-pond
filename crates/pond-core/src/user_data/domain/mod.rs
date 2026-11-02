@@ -4,6 +4,7 @@ pub mod face_recognition;
 pub mod memory;
 pub mod onboarding;
 pub mod profile;
+pub mod profile_interview;
 pub mod prompt_extra;
 pub mod prompt_template;
 pub mod proposal;

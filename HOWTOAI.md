@@ -93,6 +93,7 @@ The full walkthrough is [docs/developer/creating-ports-and-adapters.md](docs/dev
 | Settings storage | `crates/pond-infra/src/sqlite_settings.rs` |
 | MCP tools the model sees | `crates/pond-mcp-server/src/*.rs` (one `*McpServer` per module) |
 | Which MCP servers start | `crates/pond-adapters-goose/src/giap_registration.rs` |
+| My Pond (administration): unlock, rules, host adapter, routes | `pond-core/src/security/services/admin_elevation.rs`, `pond-core/src/shared/services/pond_admin.rs`, `pond-infra/src/host_pond_admin.rs`, `pond-api/src/pond_admin.rs` |
 | Desktop IPC contract | `pond-desktop/src/shell/contract.ts` |
 | Desktop voice child | `pond-desktop/electron/main/voice/` |
 | Goose itself | `goose/crates/goose/src/` |

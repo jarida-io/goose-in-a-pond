@@ -5,7 +5,7 @@ use anyhow::{bail, Result};
 use ndarray::Array4;
 use pond_core::user_data::domain::vision::Frame;
 
-/// Letterboxed `[1, 3, size, size]` BGR tensor. No scale ratio: only labels are used.
+/// Letterboxed `[1, 3, size, size]` BGR tensor, the picture top-left and grey to its right and below.
 pub fn letterbox_bgr_chw(frame: &Frame, size: usize) -> Result<Array4<f32>> {
     if !frame.is_well_formed() || frame.width == 0 || frame.height == 0 {
         bail!("malformed frame ({}x{})", frame.width, frame.height);
@@ -16,8 +16,12 @@ pub fn letterbox_bgr_chw(frame: &Frame, size: usize) -> Result<Array4<f32>> {
     let ratio = (size as f32 / frame.width as f32).min(size as f32 / frame.height as f32);
     let new_w = ((frame.width as f32 * ratio).round() as u32).max(1);
     let new_h = ((frame.height as f32 * ratio).round() as u32).max(1);
-    let resized =
-        image::imageops::resize(&img, new_w, new_h, image::imageops::FilterType::Triangle);
+    // The Jetson's analysis branch already scaled the frame to fit, so most frames skip this.
+    let resized = if (new_w, new_h) == (frame.width, frame.height) {
+        img
+    } else {
+        image::imageops::resize(&img, new_w, new_h, image::imageops::FilterType::Triangle)
+    };
 
     // Grey letterbox background, matching YOLOX's training-time padding.
     let hw = size * size;

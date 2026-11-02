@@ -50,7 +50,7 @@ not_here() { echo "$*"; exit "$NOT_HERE"; }
 # brings one; no otool, codesign, patchelf or readelf, which are faked per test.
 TOOLS="$SCRATCH/tools"; mkdir -p "$TOOLS"
 for tool in bash sh env cat cp mv rm mkdir ln ls chmod find sort sed awk grep head tail tr cut wc date \
-            dirname basename mktemp uname id sha256sum shasum perl timeout git touch dd od cmp; do
+            dirname basename mktemp uname id sha256sum shasum perl timeout git touch dd od cmp stat; do
   p="$(command -v "$tool" 2>/dev/null)" && [ -n "$p" ] && [ -x "$p" ] && ln -sf "$p" "$TOOLS/$tool"
 done
 
@@ -735,6 +735,27 @@ t_status_reports_the_deployed_package_on_linux() {
   mkdir -p "$W/data/lib/litert-lm"; mv "$PKG" "$W/data/$(litert_device_subdir)"
   litert_status "$W/data" || { logged; return 1; }
   contains "$(logged)" "ok: deployed: 14 files match MANIFEST.sha256"
+}
+t_status_names_the_package_the_server_loads_when_it_is_off_the_pin() {
+  world; mk_pkg linux-arm64 || return 1; stubs; fake_host Linux aarch64
+  local old="$W/data/lib/litert-lm/1.0.0-b320801b"
+  mkdir -p "$W/data/lib/litert-lm"; mv "$PKG" "$old"
+  sed "1s/$LITERT_COMMIT/b320801b0123456789abcdef0123456789abcdef/" "$old/MANIFEST.sha256" > "$W/m"; mv "$W/m" "$old/MANIFEST.sha256"
+  litert_status "$W/data"
+  contains "$(logged)" "warn: the server loads $LITERT_CAPI_VERSION-b320801b; the pin is $(litert_tag)" || return 1
+  lacks "$(logged)" "deployed: none"
+}
+t_the_server_loads_the_package_whose_library_changed_last() {
+  world
+  local root="$W/data/lib/litert-lm"
+  mkdir -p "$root/1.0.0-aaaaaaaa" "$root/1.0.0-bbbbbbbb" "$root/1.0.0-cccccccc.metal" "$root/empty"
+  : > "$root/1.0.0-aaaaaaaa/liblitert-lm.so"; : > "$root/1.0.0-bbbbbbbb/liblitert-lm.so"; : > "$root/1.0.0-cccccccc.metal/liblitert-lm.so"
+  touch -t 202601010000 "$root/1.0.0-bbbbbbbb/liblitert-lm.so"
+  touch -t 202602010000 "$root/1.0.0-aaaaaaaa/liblitert-lm.so" "$root/1.0.0-cccccccc.metal/liblitert-lm.so"
+  eq "$(litert_device_in_use "$W/data")" "$root/1.0.0-aaaaaaaa" || return 1
+  touch -t 202602010000 "$root/1.0.0-bbbbbbbb/liblitert-lm.so"
+  eq "$(litert_device_in_use "$W/data")" "$root/1.0.0-bbbbbbbb" || return 1
+  eq "$(litert_device_in_use "$W/nowhere")" ""
 }
 
 # ── giap.sh is the front door ────────────────────────────────────────────────

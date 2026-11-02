@@ -1,0 +1,306 @@
+/* Elevation is state: a task still going sits on the plate, one that has ended is a hairline note, and only a failure takes colour.
+   Secondary text, light and dark: 6.22:1 and 5.45:1 on --color-surface, about 5.6:1 and 5.64:1 on --color-bg; destructive-fg on surface 6.47:1 and 6.12:1. */
+
+.lt {
+  --lt-control-h: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: 100%;
+  max-width: 72ch;
+  box-sizing: border-box;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-left: 2px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  line-height: var(--leading-base);
+}
+
+.lt--hub {
+  --lt-control-h: var(--tap-min);
+}
+
+@media (pointer: coarse) {
+  .lt {
+    --lt-control-h: var(--tap-min);
+  }
+}
+
+.lt[data-state="planning"],
+.lt[data-state="running"],
+.lt[data-state="awaiting_approval"],
+.lt[data-state="paused"] {
+  background: var(--color-surface);
+}
+
+.lt--quiet {
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+}
+
+.lt__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: var(--space-3) 0 0;
+}
+
+.lt__grouplabel {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.lt__kind {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-secondary);
+}
+
+.lt__head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.lt__head > svg {
+  flex: none;
+  margin-top: 4px;
+  color: var(--color-text-secondary);
+}
+
+.lt[data-state="failed"] .lt__head > svg,
+.lt[data-state="failed"] .lt__state {
+  color: var(--color-destructive-fg);
+}
+
+.lt__goal {
+  margin: 0;
+  min-width: 0;
+  font-weight: var(--weight-semibold);
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.lt__state,
+.lt__note,
+.lt__resultline {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.lt__resultline {
+  color: var(--color-text);
+  font-size: var(--text-base);
+  overflow-wrap: anywhere;
+}
+
+/* The answer is the card's content, read at body size with nothing clamped. */
+.lt__answer {
+  color: var(--color-text);
+  font-size: var(--text-base);
+  overflow-wrap: anywhere;
+}
+
+.lt__steps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lt__step {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0 var(--space-3);
+  padding: var(--space-1) 0;
+  border-top: 1px solid var(--color-border);
+  font-size: var(--text-sm);
+}
+
+.lt__agent {
+  font-weight: var(--weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+.lt__stepstate {
+  color: var(--color-text-secondary);
+  text-align: right;
+}
+
+.lt__summary,
+.lt__failure {
+  grid-column: 1 / -1;
+  color: var(--color-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.lt__failure {
+  color: var(--color-destructive-fg);
+}
+
+.lt__step[data-state="pending"] .lt__agent {
+  font-weight: var(--weight-regular, 400);
+  color: var(--color-text-secondary);
+}
+
+.lt__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.lt__actions:empty {
+  display: none;
+}
+
+.lt__btn {
+  min-height: var(--lt-control-h);
+  padding: 0 var(--space-3);
+  font-size: var(--text-base);
+}
+
+.lt__error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-destructive-fg);
+}
+
+.lt__error > svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+/* The line a waiting task stands in. Each of the member's tasks is a two-way choice; the chosen side
+   rises on the compact offset and the other lies flat, so the choice reads without colour. */
+.lt__queue {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-border);
+}
+
+.lt__queuehead,
+.lt__queuehint,
+.lt__queuedone {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.lt__queuehint {
+  color: var(--color-text-secondary);
+}
+
+.lt__queuelist {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lt__queuechoice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.lt__queuegoal {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-2);
+  float: left;
+  width: 100%;
+  padding: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+.lt__queuewhere {
+  color: var(--color-text-secondary);
+}
+
+.lt__queueopt {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--lt-control-h);
+  padding: 0 var(--space-3);
+  border: 2px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-bold);
+  cursor: pointer;
+  transition: border-color 0.16s, box-shadow 0.16s, color 0.16s;
+}
+
+.lt__queueopt input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.lt__queueopt:hover {
+  border-color: var(--color-text);
+}
+
+.lt__queueopt[data-on="true"] {
+  border-color: var(--color-text);
+  color: var(--color-text);
+  box-shadow: 2px 2px 0 var(--border-ink);
+}
+
+.lt__queueopt:has(input:focus-visible) {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.lt__queuechoice:disabled .lt__queueopt {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.lt__queueapply {
+  align-self: flex-start;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lt .animate-spin {
+    animation: none;
+  }
+
+  .lt__queueopt {
+    transition: none;
+  }
+}

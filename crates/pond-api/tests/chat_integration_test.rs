@@ -183,6 +183,7 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        pond_admin: None,
     });
     (
         build_router(state, std::path::PathBuf::from("pond-desktop/dist")),
@@ -487,6 +488,7 @@ impl pond_core::models::ports::agent::Agent for ToolEmittingMockAgent {
                 tool: "giap__get_weather".to_string(),
                 content: "Sunny, 28°C".to_string(),
                 card: None,
+                keep: None,
             });
             yield Ok(AgentStreamEvent::Text { content: "Tool done".to_string() });
             yield Ok(AgentStreamEvent::Done { session_id, model_role, usage: None, stats: None });
@@ -602,6 +604,7 @@ async fn make_app_with_agent(
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        pond_admin: None,
     });
     (
         build_router(state, std::path::PathBuf::from("pond-desktop/dist")),
@@ -672,6 +675,127 @@ async fn chat_stream_persists_tool_result_rows() {
         roles
     );
     assert_eq!(messages.last().unwrap()["role"], "assistant");
+}
+
+/// Emits a web search result marked transient, as `search_web` marks every answer.
+struct TransientToolMockAgent;
+
+const TRANSIENT_PAGE_TEXT: &str = "Nairobi National Park closes at 6:00 PM every day.";
+const TRANSIENT_STUB: &str = "Web search results are not kept after the turn. Sources: kws.go.ke.";
+
+#[async_trait::async_trait]
+impl pond_core::models::ports::agent::Agent for TransientToolMockAgent {
+    async fn chat(
+        &self,
+        _request: pond_core::models::ports::agent::AgentRequest,
+    ) -> anyhow::Result<pond_core::models::ports::agent::AgentResponse> {
+        Ok(pond_core::models::ports::agent::AgentResponse {
+            text: "It closes at 6 pm.".to_string(),
+            metadata: std::collections::HashMap::new(),
+        })
+    }
+
+    async fn chat_stream(
+        &self,
+        request: pond_core::models::ports::agent::AgentRequest,
+    ) -> anyhow::Result<
+        futures::stream::BoxStream<
+            'static,
+            anyhow::Result<pond_core::models::ports::agent::AgentStreamEvent>,
+        >,
+    > {
+        use futures::StreamExt;
+        use pond_core::models::ports::agent::AgentStreamEvent;
+        let session_id = request.session_id.clone();
+        let model_role = request.model_role.clone();
+        let stream = async_stream::stream! {
+            yield Ok(AgentStreamEvent::ToolCall {
+                id: "tc-web".to_string(),
+                tool: "giap-knowledge__search_web".to_string(),
+                input: Some(serde_json::json!({"question": "when does the park close"})),
+            });
+            yield Ok(AgentStreamEvent::ToolResult {
+                id: "tc-web".to_string(),
+                tool: "giap-knowledge__search_web".to_string(),
+                content: format!("Web results for: when does the park close\n{TRANSIENT_PAGE_TEXT}"),
+                card: Some(
+                    "[[[mcp-ui:search:{\"query\":\"q\",\"results\":[{\"title\":\"KWS\",\"url\":\"https://www.kws.go.ke/park\",\"domain\":\"kws.go.ke\",\"snippet\":\"BRAVE SNIPPET\"}]}]]]"
+                        .to_string(),
+                ),
+                keep: Some(TRANSIENT_STUB.to_string()),
+            });
+            yield Ok(AgentStreamEvent::Text { content: "It closes at 6 pm.".to_string() });
+            yield Ok(AgentStreamEvent::Done { session_id, model_role, usage: None, stats: None });
+        };
+        Ok(stream.boxed())
+    }
+}
+
+/// The turn streams the search result whole; `pond_system.db` keeps only its stub.
+#[tokio::test]
+async fn chat_stream_keeps_only_the_stub_of_a_transient_result() {
+    let (app, _tmp) = make_app_with_agent(Arc::new(TransientToolMockAgent)).await;
+    let session_id = "transient-persist-test";
+
+    let stream_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/chat/stream")
+                .header("content-type", "application/json")
+                .header("Authorization", "Bearer test-token")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "session_id": session_id,
+                        "message": "when does the park close?"
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stream_resp.status(), StatusCode::OK);
+    let streamed = axum::body::to_bytes(stream_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let streamed = String::from_utf8_lossy(&streamed);
+    assert!(
+        streamed.contains(TRANSIENT_PAGE_TEXT),
+        "the turn shows the result: {streamed}"
+    );
+    assert!(streamed.contains("\"transient\":true"), "{streamed}");
+
+    let get_resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/v1/sessions/{}/messages", session_id))
+                .header("Authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(get_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let history = String::from_utf8_lossy(&bytes);
+    assert!(history.contains("Sources: kws.go.ke."), "{history}");
+    for gone in [
+        TRANSIENT_PAGE_TEXT,
+        "BRAVE SNIPPET",
+        "mcp-ui",
+        "kws.go.ke/park",
+    ] {
+        assert!(
+            !history.contains(gone),
+            "{gone:?} reached history: {history}"
+        );
+    }
+    assert!(history.contains("It closes at 6 pm."), "{history}");
 }
 
 /// A mock agent whose Done event carries TurnStats.

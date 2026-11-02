@@ -255,8 +255,87 @@
   text-decoration: underline;
   text-underline-offset: 2px;
 }
+/* In dark, --border-ink is the accent lifted only to the 3:1 an edge needs, 2.85:1 on this hint.
+   --purple-200 is 8.7:1 on the tinted hint. */
+:root[data-theme="dark"] .connections-hint a { color: var(--purple-200); }
 .connections-hint a:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
   border-radius: 2px;
+}
+
+/* Nearby places. The switch is a track and a thumb, so On and Off differ by where the thumb sits and
+ * not by hue alone. Off draws in --color-text-secondary (5.97:1 light, 5.45:1 or better dark) so
+ * the control's edge clears the 3:1 WCAG asks of a UI boundary; On fills with --border-ink. */
+.websearch-places { align-items: start; }
+
+.websearch-places__text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.websearch-places__label {
+  font-size: 14px;
+  font-weight: var(--weight-bold);
+  line-height: 1.4;
+  color: var(--color-text);
+}
+.websearch-places__hint {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--color-text-secondary);
+}
+.websearch-places .connections-sync { min-height: var(--tap-min); }
+
+.websearch-switch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--tap-min);
+  min-height: var(--tap-min);
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+.websearch-switch__track {
+  position: relative;
+  box-sizing: border-box;
+  width: 44px;
+  height: 24px;
+  border: 2px solid var(--color-text-secondary);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  transition: background var(--dur-base) ease, border-color var(--dur-base) ease;
+}
+.websearch-switch__thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--color-text-secondary);
+  transition: transform var(--dur-base) ease, background var(--dur-base) ease;
+}
+.websearch-switch[aria-checked="true"] .websearch-switch__track {
+  border-color: var(--border-ink);
+  background: var(--border-ink);
+}
+.websearch-switch[aria-checked="true"] .websearch-switch__thumb {
+  transform: translateX(20px);
+  background: var(--color-surface);
+}
+.websearch-switch[aria-disabled="true"] { cursor: not-allowed; opacity: 0.6; }
+.websearch-switch:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-md);
+}
+@media (prefers-reduced-motion: reduce) {
+  .websearch-switch__track,
+  .websearch-switch__thumb { transition: none; }
 }

@@ -77,6 +77,25 @@ litert_src_dir()     { printf '%s' "${LITERT_LM_SRC:-$(litert_home)/src}"; }
 # Where scripts/jetson/deploy.sh puts the linux-arm64 package, under the pond's data directory.
 litert_device_subdir() { printf 'lib/litert-lm/%s' "$(litert_tag)"; }
 
+# litert_device_in_use <data-dir>: the package the server loads, picked as litert_runtime.rs picks
+# it: the subdirectory of <data-dir>/lib/litert-lm whose library changed last, ties to the later
+# name, never a .metal view. Prints nothing when there is none.
+litert_device_in_use() {
+  local root="$1/lib/litert-lm" d lib t best="" best_t=-1
+  [ -d "$root" ] || return 0
+  for d in "$root"/*/; do
+    d="${d%/}"
+    case "$d" in *.metal) continue ;; esac
+    lib="$d/liblitert-lm.so"
+    [ -f "$lib" ] || continue
+    t="$(stat -c %Y "$lib" 2>/dev/null || stat -f %m "$lib" 2>/dev/null || echo 0)"
+    if [ "$t" -gt "$best_t" ] || { [ "$t" -eq "$best_t" ] && [[ "$d" > "$best" ]]; }; then
+      best="$d"; best_t="$t"
+    fi
+  done
+  printf '%s' "$best"
+}
+
 litert_recorded_dir() {
   local f; f="$(litert_record_file "$1")"
   if [ -f "$f" ]; then sed -n 1p "$f"; fi
@@ -870,9 +889,17 @@ litert_status() { # [data-dir]
     esac
   done
   if [ -n "${1:-}" ] && [ "$(uname -s)" = Linux ]; then
-    deployed="$1/$(litert_device_subdir)"
-    if [ -d "$deployed" ]; then litert_report_dir "deployed" "$deployed" || rc=1
-    else info "deployed: none at $deployed"; fi
+    deployed="$(litert_device_in_use "$1")"
+    if [ -n "$deployed" ]; then
+      litert_report_dir "deployed" "$deployed" || rc=1
+      _litert_dir_state "$deployed"
+      if [ "$LITERT_STATE" = other-pin ]; then
+        warn "the server loads $LITERT_STATE_TAG; the pin is $(litert_tag)"
+        note "fix: build linux-arm64 on the Mac and deploy it, or: bash scripts/giap.sh litert import DIR"
+      fi
+    else
+      info "deployed: none under $1/lib/litert-lm (the pin goes to $1/$(litert_device_subdir))"
+    fi
   fi
   return $rc
 }

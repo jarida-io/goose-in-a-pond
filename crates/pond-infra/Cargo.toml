@@ -46,6 +46,12 @@ once_cell = { workspace = true }
 # feature pulls rand_core 0.6, which is the same rand_core the `rand = "0.8"`
 # above resolves to -- see the E0464 note in [dev-dependencies].
 chacha20poly1305 = { workspace = true }
+# The admin card's verifier; already in the lock through other crates, with this sha2 and hmac.
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+# My Pond's health page: memory, load, uptime and the process's own size.
+sysinfo = { version = "0.38", default-features = false, features = ["system", "component"] }
+# My Pond's disk space, as pond-server already measures it.
+fs2 = { workspace = true }
 # PAI-2 P3: the rule-based redactor's candidate finders. Regex stays out of
 # pond-core on purpose -- the accept/reject rules live there and must not
 # depend on an engine.

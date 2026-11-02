@@ -59,7 +59,8 @@ pub fn drafter_for(chat_model: &str) -> Option<DrafterSpec> {
 pub fn drafter_pin(repo: &str, filename: &str) -> Option<DrafterSpec> {
     for model in ["gemma-4-E2B-it", "gemma-4-E4B-it"] {
         if let Some(spec) = drafter_for(model) {
-            if spec.repo.eq_ignore_ascii_case(repo) && spec.filename.eq_ignore_ascii_case(filename) {
+            if spec.repo.eq_ignore_ascii_case(repo) && spec.filename.eq_ignore_ascii_case(filename)
+            {
                 return Some(spec);
             }
         }
@@ -129,15 +130,23 @@ mod tests {
 
     #[test]
     fn drafter_pin_matches_and_pins_identity() {
-        let e2b = drafter_pin("unsloth/gemma-4-E2B-it-qat-GGUF", "mtp-gemma-4-E2B-it.gguf").unwrap();
+        let e2b =
+            drafter_pin("unsloth/gemma-4-E2B-it-qat-GGUF", "mtp-gemma-4-E2B-it.gguf").unwrap();
         assert_eq!(e2b.id, "mtp-gemma-4-E2B-it");
         assert_eq!(e2b.size_bytes, 59_235_648);
-        assert_eq!(e2b.sha256, "586f2460b909008640981ec34060aa864e03c144fbabfb3173c4335087e4aae0");
+        assert_eq!(
+            e2b.sha256,
+            "586f2460b909008640981ec34060aa864e03c144fbabfb3173c4335087e4aae0"
+        );
 
-        let e4b = drafter_pin("unsloth/gemma-4-E4B-it-qat-GGUF", "mtp-gemma-4-E4B-it.gguf").unwrap();
+        let e4b =
+            drafter_pin("unsloth/gemma-4-E4B-it-qat-GGUF", "mtp-gemma-4-E4B-it.gguf").unwrap();
         assert_eq!(e4b.id, "mtp-gemma-4-E4B-it");
         assert_eq!(e4b.size_bytes, 59_678_016);
-        assert_eq!(e4b.sha256, "423074e537504b4f9ec5eafed5c639fac82c96631626efccacdd3c4039b20605");
+        assert_eq!(
+            e4b.sha256,
+            "423074e537504b4f9ec5eafed5c639fac82c96631626efccacdd3c4039b20605"
+        );
 
         assert!(drafter_pin("unsloth/unknown", "mtp-gemma-4-E2B-it.gguf").is_none());
     }

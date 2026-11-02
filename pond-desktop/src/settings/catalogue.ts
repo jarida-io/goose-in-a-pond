@@ -20,7 +20,7 @@ export type Consumer =
 
 /** Where a picker's options come from when they are not a fixed list. `chat-models` adds LiteRT-LM
  *  models to `llm-models`: they can hold the conversation, the tool-call helper cannot. */
-export type OptionSource = "llm-models" | "chat-models" | "whisper-models" | "tts-voices" | "embedding-models" | "llm-providers" | "time-zones" | "audio-inputs" | "audio-outputs";
+export type OptionSource = "llm-models" | "chat-models" | "whisper-models" | "tts-voices" | "embedding-models" | "llm-providers" | "time-zones" | "audio-inputs" | "audio-outputs" | "household-members";
 
 export type Control =
   | { kind: "toggle" }
@@ -44,9 +44,10 @@ export interface Entry {
   note?: string;
   /** No desktop control existed before this catalogue (API only); rendered with a "New" badge. */
   proposed?: boolean;
-  /** A mirror owned elsewhere: `pond-server` syncs `active_*` from `model_role_assignments`, so a
-   *  control here would lose to the next sync. Settings shows a pointer to the owner instead. */
-  ownedBy?: "models";
+  /** A setting owned elsewhere. `models`: `pond-server` syncs `active_*` from `model_role_assignments`,
+   *  so a control here would lose to the next sync. `web-search`: its switch sits beside the town it
+   *  sends and cannot turn on without one, which a plain toggle here could not say. */
+  ownedBy?: "models" | "web-search";
   /** Checked on every edit; a message blocks Save (see `validation.ts` for why). */
   validate?: Validator;
 }
@@ -91,7 +92,8 @@ export const CATALOGUE: CatalogueCategory[] = [
         name: "Who lives here",
         entries: [
           { key: "user_name", label: "Your name", description: "What the pond should call you.", control: { kind: "text", placeholder: "Friend" }, consumer: "live" },
-          { key: "primary_profile_id", label: "Household profile", description: "The main person this pond belongs to.", control: { kind: "text", placeholder: "Not set" }, consumer: "live" },
+          // A picker, never a text box: the value is a member's id, and a typed name was stored and matched nobody.
+          { key: "primary_profile_id", label: "Household profile", description: "The main person this pond belongs to.", control: { kind: "lookup", source: "household-members", placeholder: "Not set" }, consumer: "live" },
         ],
       },
       {
@@ -440,6 +442,11 @@ export const CATALOGUE: CatalogueCategory[] = [
             key: "searxng_url", label: "Search server", description: "Address of your own search server, if you run one.",
             control: { kind: "text", placeholder: "Not set" }, consumer: "live", proposed: true,
             validate: optional(url(["http://", "https://"], "http://127.0.0.1:8888")),
+          },
+          {
+            key: "web_search_local_results", label: "Nearby places in web search", ownedBy: "web-search",
+            description: "Send your town with each web search, so results can include places near you. Off by default: it tells the search provider where you are. Chosen in the web search panel.",
+            control: { kind: "toggle" }, consumer: "live",
           },
         ],
       },

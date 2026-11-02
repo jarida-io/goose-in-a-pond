@@ -94,6 +94,7 @@ impl pond_core::mcp::ports::tools::tool_dispatcher::ToolDispatcher for StubDispa
             pond_core::mcp::ports::tools::tool_dispatcher::ToolCallResult {
                 content: format!("dispatched {tool_name} with {arguments}"),
                 success: true,
+                keep: None,
             },
         )
     }
@@ -237,6 +238,7 @@ async fn make_app_full(
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        pond_admin: None,
     });
 
     (
@@ -534,6 +536,7 @@ async fn prompt_template_delete_system_returns_403() {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        pond_admin: None,
     });
 
     let app = build_router(state, std::path::PathBuf::from("pond-desktop/dist"));
@@ -762,6 +765,7 @@ async fn prompt_extra_delete_with_a_malformed_key_is_refused_unless_a_legacy_row
         instruction: "legacy".into(),
         active: true,
         sort_order: 0,
+        profile_id: None,
     })
     .await
     .unwrap();
@@ -790,6 +794,7 @@ async fn hostile_rows_stored_in_the_database_cannot_close_the_note_wrapper() {
             instruction: instruction.into(),
             active: true,
             sort_order,
+            profile_id: None,
         })
         .await
         .unwrap();
@@ -1028,6 +1033,132 @@ async fn recipe_create_missing_yaml_returns_400() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+// ── Recipe validation ─────────────────────────────────────────────────────────
+
+const AGENT_YAML: &str = "title: Greeter\n\
+instructions: Greets whoever comes home.\n\
+giap_role:\n  \
+  tool_groups: [giap-weather]\n  \
+  activations:\n    \
+    - event: { on: presence.arrive, member: any, brief: Say hello. }\n  \
+  hooks:\n    \
+    after: [notify_owner]\n";
+
+#[tokio::test]
+async fn recipe_validate_names_every_wrong_field_by_its_path() {
+    let (app, _tmp) = make_app().await;
+    let bad = AGENT_YAML
+        .replace("presence.arrive", "presence.arive")
+        .replace("notify_owner", "notify_everyone");
+    let resp = app
+        .clone()
+        .oneshot(post(
+            "/api/v1/recipes/validate",
+            serde_json::json!({"name": "greeter", "yaml": bad}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a refused block is an answer"
+    );
+    let body = body_json(resp).await;
+    assert_eq!(body["ok"], false);
+    assert!(body["role"].is_null());
+    let paths: Vec<&str> = body["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["path"].as_str())
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            "giap_role.activations[0].event.on",
+            "giap_role.hooks.after[0]"
+        ]
+    );
+
+    // Vacuity control: the same agent spelled right is valid and summarised.
+    let resp = app
+        .oneshot(post(
+            "/api/v1/recipes/validate",
+            serde_json::json!({"name": "greeter", "yaml": AGENT_YAML}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["ok"], true, "{body}");
+    assert_eq!(body["role"]["name"], "greeter");
+    assert_eq!(body["role"]["tool_groups"][0], "giap-weather");
+    assert_eq!(body["role"]["activations"][0]["on"], "presence.arrive");
+    assert_eq!(body["role"]["hooks"]["after"][0], "notify_owner");
+    assert_eq!(
+        body["role"]["preamble_chars"],
+        "Greets whoever comes home.".len()
+    );
+    assert!(body["errors"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn recipe_validate_checks_hand_offs_against_the_saved_agents() {
+    let (app, _tmp) = make_app().await;
+    let budgeter = "instructions: Costs a plan.\n\
+                    giap_role:\n  tool_groups: []\n  activations:\n    - agent: [planner]\n";
+    let validate = |app: axum::Router| async move {
+        let resp = app
+            .oneshot(post(
+                "/api/v1/recipes/validate",
+                serde_json::json!({"name": "budgeter", "yaml": budgeter}),
+            ))
+            .await
+            .unwrap();
+        body_json(resp).await
+    };
+    let before = validate(app.clone()).await;
+    assert_eq!(before["ok"], false);
+    assert_eq!(
+        before["errors"][0]["path"],
+        "giap_role.activations[0].agent[0]"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(post(
+            "/api/v1/recipes",
+            serde_json::json!({
+                "name": "planner",
+                "yaml": "instructions: Plans.\ngiap_role:\n  tool_groups: []\n",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    assert!(
+        created["owner_profile_id"].is_null(),
+        "a recipe saved from no paired device has no owner"
+    );
+
+    let after = validate(app).await;
+    assert_eq!(after["ok"], true, "{after}");
+}
+
+#[tokio::test]
+async fn recipe_validate_refuses_a_body_without_yaml() {
+    let (app, _tmp) = make_app().await;
+    let resp = app
+        .oneshot(post(
+            "/api/v1/recipes/validate",
+            serde_json::json!({"name": "x"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
 // ── Recipe run tests ──────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -1237,6 +1368,7 @@ async fn returns_501_when_repos_not_configured() {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        pond_admin: None,
     });
     let app = build_router(state, std::path::PathBuf::from("pond-desktop/dist"));
 
@@ -1640,6 +1772,74 @@ async fn deleting_someone_else_does_not_touch_the_primary_setting() {
 
     let settings = body_json(app.oneshot(get("/api/v1/settings")).await.unwrap()).await;
     assert_eq!(settings["primary_profile_id"], jerry);
+}
+
+/// A household on 2026-10-27 typed its owner's display name into a free-text "Household profile"
+/// box; the pond stored it, and every reader that looks the id up found nobody, silently.
+#[tokio::test]
+async fn a_primary_profile_that_names_no_member_is_refused_and_nothing_is_saved() {
+    let (app, _storage, _tmp) = make_app_with_sessions().await;
+    let jerry = seed_profile(&app, "Jerry").await;
+    app.clone()
+        .oneshot(put(
+            "/api/v1/settings",
+            serde_json::json!({ "primary_profile_id": jerry }),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(put(
+            "/api/v1/settings",
+            serde_json::json!({ "primary_profile_id": "Jerry", "home_name": "Exile" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = body_json(resp).await;
+    assert_eq!(
+        body["fields"][0]["field"], "primary_profile_id",
+        "a form marks the box from `fields`; body: {body}"
+    );
+
+    let settings = body_json(app.oneshot(get("/api/v1/settings")).await.unwrap()).await;
+    assert_eq!(
+        settings["primary_profile_id"], jerry,
+        "a refused patch must not replace the member already named"
+    );
+    assert_ne!(
+        settings["home_name"], "Exile",
+        "a refused patch saves none of its keys"
+    );
+}
+
+#[tokio::test]
+async fn the_primary_profile_takes_a_member_and_can_be_cleared() {
+    let (app, _storage, _tmp) = make_app_with_sessions().await;
+    let liz = seed_profile(&app, "Liz").await;
+
+    for (value, expected) in [
+        (serde_json::json!(liz), serde_json::json!(liz)),
+        (serde_json::json!(""), serde_json::Value::Null),
+        (serde_json::json!(liz), serde_json::json!(liz)),
+        (serde_json::Value::Null, serde_json::Value::Null),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(put(
+                "/api/v1/settings",
+                serde_json::json!({ "primary_profile_id": value }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "writing {value}");
+        let settings = body_json(app.clone().oneshot(get("/api/v1/settings")).await.unwrap()).await;
+        assert_eq!(
+            settings["primary_profile_id"], expected,
+            "after writing {value}"
+        );
+    }
 }
 
 // ── Profile context follows the speaker ──────────────────────────────────────

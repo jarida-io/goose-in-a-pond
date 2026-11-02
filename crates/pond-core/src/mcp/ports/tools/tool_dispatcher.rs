@@ -7,6 +7,8 @@ pub struct ToolCallResult {
     /// The text content returned by the tool (may include UI hints).
     pub content: String,
     pub success: bool,
+    /// What history keeps in place of `content` once the turn is over; `None` keeps it whole.
+    pub keep: Option<String>,
 }
 
 /// Driven port: routes tool calls, by tool-name prefix, to the owning MCP server.

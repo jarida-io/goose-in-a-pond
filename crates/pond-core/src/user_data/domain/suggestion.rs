@@ -32,7 +32,10 @@ impl SuggestionContext {
     /// Render into XML-like envelope suitable for `<system-context>`.
     pub fn render_envelope(&self) -> String {
         match self {
-            Self::Environmental { device_ids, summary } => {
+            Self::Environmental {
+                device_ids,
+                summary,
+            } => {
                 let devices = device_ids.join(", ");
                 format!(
                     "<suggestion-context origin=\"environmental\">\n\
@@ -103,7 +106,9 @@ mod tests {
             summary: "compared two airlines".to_string(),
         };
         let env = ctx.render_envelope();
-        assert!(env.starts_with("<suggestion-context origin=\"session_continuity\" prior_session=\"s123\">"));
+        assert!(env.starts_with(
+            "<suggestion-context origin=\"session_continuity\" prior_session=\"s123\">"
+        ));
         assert!(env.contains("Topic: flight booking"));
         assert!(env.contains("Prior state: compared two airlines"));
         assert!(env.ends_with("</suggestion-context>"));

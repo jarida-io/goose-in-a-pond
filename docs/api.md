@@ -39,6 +39,7 @@ Paths below are relative to `/api/v1` unless they start with `/api/v1` or are li
 - [Agent, tools, prompts, skills and recipes](#agent-tools-prompts-skills-and-recipes)
 - [Music player](#music-player)
 - [Rides and Uber accounts](#rides-and-uber-accounts)
+- [My Pond (administration)](#my-pond-administration)
 - [Faces](#faces)
 - [Mesh](#mesh)
 - [Remote access](#remote-access)
@@ -137,6 +138,7 @@ The route summary's "Also" column names these.
 | cred if tokenless | A caller admitted without a token must present the host credential (`bearer_or_host_credential`) | as above |
 | own device | The device named in the path or query is the caller's own (`require_own_device`) | `403` |
 | member | The caller's paired device is attributed to a household member | `403`; another member's record reads as `404` |
+| unlocked | A member's device that unlocked My Pond with the admin card in the last 15 minutes ([pond administrator](architecture/pond-administrator.md)) | `403 admin_members_only`, `403 admin_locked` |
 | changer | The host credential, the device that claimed the pond, or a member's device (`connection_changes`) | `403 not_allowed` |
 | run owner | Only the device that started the run; unknown and not-yours are the same `404` | `404 unknown run` |
 | internal | The internal extension token as the bearer | `401` |
@@ -316,6 +318,12 @@ The route summary's "Also" column names these.
 | GET | /profiles | token +onb | | All members |
 | GET | /profiles/{id} | token +onb | | One member |
 | DELETE | /profiles/{id} | token +onb | | Remove a member, report what went with them |
+| GET | /profiles/{id}/notes | token +onb | member | The member's own notes |
+| PUT | /profiles/{id}/notes/{key} | token +onb | member | Create or replace one of the member's notes |
+| DELETE | /profiles/{id}/notes/{key} | token +onb | member | Delete one of the member's notes |
+| GET | /profiles/{id}/interview | token +onb | member | Where the member's setup interview stands |
+| POST | /profiles/{id}/interview | token +onb | member | Start the setup interview, or take it up again |
+| POST | /profiles/{id}/interview/approve | token +onb | member | Save the interview's drafted notes |
 | GET | /sessions/{session_id}/user | token +onb | | Who a session belongs to, and on what evidence |
 | PUT | /sessions/{session_id}/user | token +onb | policy | Identify the session as a member |
 | DELETE | /sessions/{session_id}/user | token +onb | | Release the binding |
@@ -508,6 +516,28 @@ The route summary's "Also" column names these.
 | POST | /uber/accounts/connect | token +onb | loopback, cred | Start a member's Uber sign-in |
 | DELETE | /uber/accounts/{profile_id} | token +onb | loopback, cred | Forget a member's Uber sign-in |
 
+### My Pond (administration)
+
+Contract and refusals: [pond administrator](architecture/pond-administrator.md#wire-contract).
+
+| Method | Path | Auth | Also | Summary |
+|---|---|---|---|---|
+| GET | /admin/status | token +onb | member | Whether the pond has an admin card and this device is unlocked |
+| POST | /admin/unlock | token +onb | member | Unlock this device with the admin card; wrong cards are slowed |
+| POST | /admin/lock | token +onb | member | End this device's unlock |
+| GET | /admin/overview | token +onb | unlocked | Disk, storage per area, databases and record counts |
+| GET | /admin/files | token +onb | unlocked | One data-directory folder, largest first; credentials never listed |
+| DELETE | /admin/files | token +onb | unlocked | Delete a file or folder the pond does not need |
+| GET | /admin/caches | token +onb | unlocked | KV snapshots, download leftovers and accelerator caches |
+| POST | /admin/caches/{id}/clear | token +onb | unlocked | Clear one cache |
+| GET | /admin/tasks | token +onb | unlocked | Long tasks and their artifacts; another member's words withheld |
+| DELETE | /admin/tasks/{id} | token +onb | unlocked | Delete a finished task with its report |
+| DELETE | /admin/tasks/{id}/artifacts/{artifact_id} | token +onb | unlocked | Delete one artifact of a finished task |
+| GET | /admin/health | token +onb | unlocked | Host, memory, disk, temperatures and checks |
+| GET | /admin/power | token +onb | unlocked | Power mode, modes, supply and battery |
+| PUT | /admin/power/mode | token +onb | unlocked | Switch power mode |
+| POST | /admin/power/restart | token +onb | unlocked | Restart the computer; waits for `force` while a long task runs |
+
 ### Faces
 
 | Method | Path | Auth | Also | Summary |
@@ -636,8 +666,9 @@ only and is refused here. `init` answers `PakeChallenge {challenge_id, challenge
 
 `verify` takes `PakeVerifyRequest {challenge_id, share, confirm, device_name?}` and answers
 `HandshakeResponse`: `accepted`, `session_token`, `refresh_token`, `expires_at`, `hostname`,
-`server_version`, `capabilities`, `rejection_reason`, and `server_proof` (T_server in hex), which
-the phone must verify before keeping the tokens. A refusal is a `200` with `accepted: false` and the
+`server_version`, `capabilities` (`chat`, `devices`, `settings`, and `routines` for device-action
+routines and asking before a missed run), `rejection_reason`, and `server_proof` (T_server in hex),
+which the phone must verify before keeping the tokens. A refusal is a `200` with `accepted: false` and the
 same code in both `rejection_reason` and `error`.
 
 | Route | Status | `error` | Meaning |
@@ -692,8 +723,16 @@ but loopback: `403 pairing_requires_lan` for a tailnet or unclassifiable peer, e
 `GET /handshake/pairing-code` answers `{code, expires_at, profile_id, pairing}` (`code: null` when
 none is live). `POST /handshake/pairing-code` issues a fresh single-use code; its optional body
 `{profile_id?, unattributed?}` (unknown fields refused) binds the device that pairs with it to a
-member. With no body, a household with exactly one member binds to that member. `pairing` is the
-pairing material: `hostname`, `lan_address`, `tailnet_address`, `https_port`, `tls_spki_sha256`.
+member. With no body, a household with exactly one member binds to that member, and any other
+household binds to nobody. `pairing` is the pairing material: `hostname`, `lan_address`,
+`tailnet_address`, `https_port`, `tls_spki_sha256`.
+
+The binding is the only way a device becomes a member's after the pond has members: nothing
+re-attributes a device later, and `PUT /devices/{id}` does not take a member. A phone already paired
+to nobody is linked by pairing it again with a code issued for its member; the app keeps its install
+id as `client_id`, so the same `devices` row takes the new owner. The dashboard's Pairing page asks
+whose the device will be and issues the code for that choice, and `pond-server pairing --member
+<PROFILE_ID>` does the same from a shell on the pond.
 
 ### `POST /handshake/spoken-code`
 
@@ -719,7 +758,7 @@ Steps, in order: `Welcome`, `Basics`, `Location`, `Accessibility`, `Personality`
 | `GET /onboard/status` | | `{onboarded, current_step, steps_completed, total_steps}`; `current_step` is `not_started` before the first step |
 | `POST /onboard` | | `{status: "started", ...}`, `{status: "in_progress", current_step, ...}` or `{status: "already_complete"}` |
 | `POST /onboard/step/{name}` | | The status body. Progress only moves forward; an unknown name is `400` with `valid_steps`, and `Completed` is refused in favour of `/onboard/complete` |
-| `POST /onboard/complete` | | `{status: "completed"}`; `400` with `missing_fields` while any of `user_name`, `assistant_name`, `timezone`, `chat_model` is empty |
+| `POST /onboard/complete` | | `{status: "completed", interview}`, where `interview` is `{profile_id, status, start}` for the primary member's setup interview, or `null` with no primary member; `400` with `missing_fields` while any of `user_name`, `assistant_name`, `timezone`, `chat_model` is empty |
 | `POST /onboard/reset` | | The status body at `Welcome` |
 
 After completion, if the setup record's `claimed_by` device is still unattributed and
@@ -800,6 +839,8 @@ Matter controller, and the warmed prompt prefix is re-warmed in the background.
 | 422 | `{"error": "...", "fields": [{"field", "message"}]}` from `settings_validation::validate_patch` |
 | 422 | `agent_backend: "pond"`: the pond agent is quarantined |
 | 422 | `{"error": "...", "field": "matter_ws_url"}` for an unusable Matter URL |
+| 422 | `{"error": "...", "fields": [{"field": "primary_profile_id", ...}]}` when `primary_profile_id` is neither `null`, `""`, nor a member's `id` from `GET /profiles`. Nothing in the patch is saved |
+| 500 | The household members could not be read to check `primary_profile_id`; nothing is saved |
 
 ## Chat and runs
 
@@ -821,7 +862,7 @@ The same `ChatRequest`, answered as Server-Sent Events. Every frame is an unname
 | `thinking` | `content` | Reasoning text |
 | `text` | `content`, `token` (same value) | Answer text |
 | `tool_call` | `tool, id, input` | A tool call |
-| `tool_result` | `tool, id, content, ui?` | Its result; `ui` drives the MCP-UI renderer |
+| `tool_result` | `tool, id, content, ui?, transient?` | Its result; `ui` drives the MCP-UI renderer. `transient: true` (web search): show it in the conversation in view, never store it; history keeps only a stub |
 | `subagent_progress` | | A sub-agent's progress |
 | `review_status` | `content` | Answer review in progress |
 | `review_revision` | `content, score, rounds` | A revised answer replaces the streamed text |
@@ -967,9 +1008,44 @@ A profile is a household member: `Profile {id, display_name, avatar_emoji, prefe
 | `GET /profiles/{id}` | | the profile, or `404` |
 | `DELETE /profiles/{id}` | | `{profile_id, display_name, deleted: {memories, face_embeddings, uber_accounts}, released: {sessions}, cleared_primary_profile}` |
 
-Deleting a member removes their memories, face embeddings and Uber sign-in, and releases their
-sessions (the conversation stays, unattributed). Household-scoped memories are untouched. If the
-member was `primary_profile_id`, it is cleared first.
+Deleting a member removes their memories, face embeddings, Uber sign-in, notes and setup
+interview, and releases their sessions (the conversation stays, unattributed). Household-scoped
+memories are untouched. If the member was `primary_profile_id`, it is cleared first.
+
+### A member's notes and setup interview
+
+`member` routes answer only the member's own device: a token whose device is attributed to `{id}`,
+or, in a household of one member, a caller attributed to nobody. Anyone else gets `403`, and an
+unknown member `404`.
+
+A member's notes are prompt extras owned by that member: their turns carry them, in the turn's
+`<system-context>`, and nobody else's do. The household's notes and the speaker's share the limits
+of `/agent/extras`, so a write on either side that would take a member's turns past them is
+`400` with the same `code`.
+
+| Route | Request | Response |
+|---|---|---|
+| `GET /profiles/{id}/notes` | | `{notes: [{key, instruction, active, sort_order}], limits: {max_notes, max_total_chars, used_chars}}`; `used_chars` counts the household's active notes and the member's |
+| `PUT /profiles/{id}/notes/{key}` | `{instruction, active?, sort_order?}` | `{key, status: "ok"}`; `400` with `code` as for `/agent/extras` |
+| `DELETE /profiles/{id}/notes/{key}` | | `{key, status: "deleted"}` |
+| `GET /profiles/{id}/interview` | | The interview (below), or `{profile_id, status: "not_started"}` |
+| `POST /profiles/{id}/interview` | | The interview. A fresh one opens a chat session with the pond's first question already in it; an open or stopped one is taken up in its session, with a welcome back when no question is waiting; a finished one starts a new round in a new session |
+| `POST /profiles/{id}/interview/approve` | | `{saved: [key]}`; `409` with `code: "no_draft"` when no draft waits |
+
+The interview is `{profile_id, status, session_id, topics: [{id, label, status}], draft: [{key,
+topic, instruction}]}`. `status` is `in_progress`, `awaiting_approval`, `done` or `stopped`, and a
+topic's is `pending`, `answered` or `skipped`. The answers themselves are never returned, and are
+forgotten when the interview ends.
+
+The member answers in `POST /chat/stream` on `session_id`. While the interview is open and the
+member is the speaker, that turn carries the interview's state and is offered only the
+`giap-interview` tools: record an answer, skip a topic, stop, draft notes, save them. The answer or
+skip that settles the last topic drafts the notes in that turn, so `status` becomes
+`awaiting_approval` without the model asking. A save from
+the conversation is refused until the member has replied after the draft was shown; the approve
+route is the tap on their own phone. Notes from the interview use one key per topic (`me_address`,
+`me_identity`, `me_language`, `me_household`, `me_routine`, `me_food`, `me_access`, `me_style`,
+`me_avoid`, `me_other`), so a second interview replaces them and leaves other notes alone.
 
 Session identity records who a session belongs to and on what evidence. `identification_source`
 is `paired_device`, `explicit`, `face` or `unknown`, strongest first; a weaker source never takes
@@ -1079,7 +1155,16 @@ exist. At most 500 ids per request (`400` beyond); `403`, `500` and `503` as abo
 `CameraEvent` is `{id, camera_id, event_type, confidence, snapshot_path, snapshot_url, metadata,
 acknowledged, created_at}`. `snapshot_url` is `/api/v1/camera/events/{id}/snapshot`, or null when
 the event has no snapshot. `metadata` is an object or null; pond vision events carry
-`{changed_fraction, source, face_detected, face_unknown, identified_profile?, face_confidence?}`.
+`{changed_fraction?, source, face_detected, face_unknown, track_id?, identified_profile?,
+identified_name?, face_confidence?, face_bbox?, face_landmarks?}`. With the YOLOX detector the pond
+follows people instead of sampling motion: it looks five times a second while anyone is in view or
+for 5 s after any change of 2% of the picture (or `vision_motion_threshold`, if lower), and each
+person seen on two looks running becomes a track. A track raises one
+`person` event when it starts and one more when its face is first recognised (faces are tried once
+a second, five times at most); both carry its `track_id`, and `changed_fraction` only when the
+frame also moved. A person unseen for 3 s is gone, so coming back is a new track. While anyone is
+followed no other motion event is raised; otherwise motion is named by the same look (`pet`,
+`package`, else `motion`) under the cooldown.
 
 With `cameras_enabled` off, the snapshot, stream, event-snapshot and SSE routes and
 `POST /faces/register-from-camera` answer `403 {"error", "reason": "cameras_disabled"}`, read from
@@ -1139,27 +1224,31 @@ See [architecture/scheduling.md](architecture/scheduling.md).
 ## Schedules
 
 Every schedule route answers `503 {"error":"scheduler not configured"}` when the scheduler did not
-start. A task is `Schedule {id, label, cron, fire_at, timezone, kind, paused, currently_running, last_run, next_run, created_at}`;
-`kind` is tagged by `type`: `agent_prompt {prompt}`, `webhook {webhook_url}` or `sensor_trigger`.
+start. A task is `Schedule {id, label, cron, fire_at, timezone, kind, paused, currently_running, last_run, next_run, created_at, ask_if_missed, missed_run}`, where `missed_run` is `{due_at}` while a missed run waits for an answer and `null` otherwise;
+`kind` is tagged by `type`: `agent_prompt {prompt}`, `webhook {webhook_url}`, `sensor_trigger` or
+`routine {actions}`, where each action is a rule action (`device_power`, `notify`).
 `cron` is six fields with a leading seconds field.
 
 | Route | Request | Response |
 |---|---|---|
 | `GET /schedules` | | `[Schedule]` |
-| `POST /schedules` | `ApiCreateScheduleRequest {id?, name (alias label), cron, prompt?, timezone?, kind?, payload?, fire_at?, once?}` | `201` with the task |
+| `POST /schedules` | `ApiCreateScheduleRequest {id?, name (alias label), cron, prompt?, timezone?, kind?, payload?, fire_at?, once?, ask_if_missed?}` | `201` with the task |
 | `GET /schedules/upcoming` | `?limit=` | active tasks by next fire |
-| `PUT /schedules/{id}` | `ApiUpdateScheduleRequest {name?, cron?, timezone?, prompt?, fire_at?, once?}` | the task |
+| `PUT /schedules/{id}` | `ApiUpdateScheduleRequest {name?, cron?, timezone?, prompt?, kind?, fire_at?, once?, ask_if_missed?}`; `kind` wins over `prompt` | the task |
 | `DELETE /schedules/{id}` | | `{deleted}` |
 | `POST /schedules/{id}/pause` | | `{paused}` |
 | `POST /schedules/{id}/resume` | | `{resumed}`; `409 code: "one_shot_time_passed"` for a one-off whose time passed while paused |
 | `POST /schedules/{id}/run-now` | | `202 {fired}` |
-| `GET /schedules/{id}/runs` | `?limit=` | `[ScheduleRun {id, schedule_id, status, result, error, started_at, finished_at, duration_ms}]` |
+| `POST /schedules/{id}/missed/run` | | `202 {fired}`: runs the waiting missed run now; its run carries `caught_up_from`. `409 code: "no_missed_run"` when nothing is waiting, including when another answer came first |
+| `POST /schedules/{id}/missed/skip` | | `200 {skipped}`: records it `skipped`, "Skipped by a household member". `409 code: "no_missed_run"` as above |
+| `GET /schedules/{id}/runs` | `?limit=` | `[ScheduleRun {id, schedule_id, status, result, error, started_at, finished_at, duration_ms, caught_up_from?}]`; `status` is `running`, `completed`, `failed` or `skipped` |
 | `GET /schedules/events` | | SSE; each `data` is `ScheduleResultEvent {schedule_id, schedule_label, run_id, status, result, error, duration_ms}` |
 
 The task kind comes from `kind`, else `payload.webhook_url`, else `prompt` (or `payload.prompt`). A
 one-off is `fire_at` (an RFC 3339 instant, stored with cron `@once`), or `once: true` with a `cron`
 whose next occurrence is the instant; `fire_at` already past is `400 code: "fire_at_in_past"`. A
-`sensor_trigger` kind is validated as `/rules` validates it.
+`sensor_trigger` kind is validated as `/rules` validates it. A `routine` with no actions, or with an
+`agent_prompt` action, is `400`, on create and on update.
 
 ## Memory, reminders, suggestions and proposals
 
@@ -1231,7 +1320,7 @@ writes are scoped to the member the caller resolves to; a guest cannot create a 
 | `PUT /secrets/{key}` | `{value}` | `{key, stored, restarted, restart_errors}` |
 | `DELETE /secrets/{key}` | | `204` |
 | `GET /secrets/{key}/exists` | | `{key, exists}` |
-| `GET /web-search` | | `{provider, configured, status}` |
+| `GET /web-search` | | `{provider, configured, status, local_results: {enabled, town}}`; `town` is what a search would send with local places on, `null` without a place name ([small-model-tools.md §8.10.5](architecture/small-model-tools.md)) |
 | `PUT /web-search/key` | `{key}` | `{configured, status}`; one Brave request first, `422` if Brave refused the key |
 | `DELETE /web-search/key` | | `204` |
 | `GET /oauth/providers` | | `{providers: [{id, display_name, scopes}]}` |

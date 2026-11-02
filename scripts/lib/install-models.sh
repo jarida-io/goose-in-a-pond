@@ -85,6 +85,7 @@ run_pond_setup() {
 }
 
 # ── LLM model download ──────────────────────────────────────────────────────
+# The pond runs its conversation model in process; Ollama and llamafile are opt-in flags only.
 download_llm() {
   step "6" "LLM model"
 
@@ -94,28 +95,79 @@ download_llm() {
     return
   fi
 
-  # Auto-detect provider if not specified
-  if [ -z "$LLM_PROVIDER" ]; then
-    if command -v ollama &>/dev/null; then
-      LLM_PROVIDER="ollama"
-    elif [ "$MODE" = "production" ] || [ "$MODE" = "jetson" ]; then
-      # On headless/production Linux, default to Ollama (will auto-install)
-      LLM_PROVIDER="ollama"
-    else
-      LLM_PROVIDER="none"
-    fi
-  fi
-
   case "$LLM_PROVIDER" in
     ollama)    _download_llm_ollama ;;
     llamafile) _download_llm_llamafile ;;
-    none|"")
-      warn "No LLM model installed."
-      log "Install Ollama (https://ollama.com) and run: ollama pull gemma4:e2b"
-      log "Or re-run: bash scripts/install.sh --ollama"
-      S_LLM="not installed"
-      ;;
+    *)         _choose_local_llm "$(_pond_server_bin)" ;;
   esac
+}
+
+_pond_server_bin() {
+  local bin="${REPO_DIR}/target/release/pond-server"
+  [ "$MODE" = "dev" ] && bin="${REPO_DIR}/target/debug/pond-server"
+  if [ -x "$bin" ]; then printf '%s' "$bin"; fi
+}
+
+# GIAP's picks as name|title|size, the same files crates/pond-core/src/models/domain/curated.rs
+# pins; install-models.test.sh fails when the two disagree.
+LLM_PICKS="gemma-4-E4B-it-qat-UD-Q4_K_XL|Gemma 4 E4B, GIAP's main pick|4.2 GB
+gemma-4-E2B-it-qat-UD-Q4_K_XL|Gemma 4 E2B, lighter and faster|2.6 GB"
+
+_llm_interactive() { [ -t 0 ]; }
+
+# Nothing downloads unless someone picks it here: with no conversation model the app shows the
+# same picks and waits, so a non-interactive install leaves the choice to it.
+_choose_local_llm() {
+  local bin="$1" l4t="" choice="" default=1 i=0 name title size
+  if [ -z "$bin" ]; then
+    log "No conversation model yet: pick one in the app's Models page once the pond runs"
+    S_LLM="pick in the app"
+    return
+  fi
+  if [ "$IS_JETSON" = true ] && [ -r /etc/nv_tegra_release ]; then
+    l4t="$(sed -n 's/.*# R\([0-9]*\).*REVISION: \([0-9.]*\).*/\1.\2/p' /etc/nv_tegra_release | head -1)"
+    jetson_nvmap_state "$l4t"
+    if [ "$NVMAP_STATE" = capped ]; then
+      warn "L4T $l4t's stock nvmap refuses E4B's GPU weight buffer: it will not load until JetPack 6.2.2 (L4T r36.5)"
+      log "bash scripts/giap.sh doctor explains the fix"
+      default=3
+    fi
+  fi
+  if ! _llm_interactive; then
+    log "No conversation model yet: the app's Models page shows GIAP's picks and waits for one"
+    S_LLM="pick in the app"
+    return
+  fi
+  log "Conversation model, run on this machine (the app can change it later):"
+  while IFS='|' read -r name title size; do
+    i=$((i + 1)); printf '       %s) %s (%s)\n' "$i" "$title" "$size"
+  done <<EOF
+$LLM_PICKS
+EOF
+  printf '       %s) None now: pick one in the app\n' "$((i + 1))"
+  read -r -p "     choose [$default]: " choice || choice=""
+  name="$(printf '%s\n' "$LLM_PICKS" | awk -F'|' -v n="${choice:-$default}" 'NR == n { print $1 }')"
+  if [ -z "$name" ]; then
+    log "No conversation model yet: the app's Models page shows GIAP's picks and waits for one"
+    S_LLM="pick in the app"
+    return
+  fi
+  _install_local_llm "$bin" "$name"
+}
+
+# _install_local_llm <pond-server> <name>: download a pick and make it the conversation model.
+_install_local_llm() {
+  local bin="$1" name="$2"
+  log "Downloading $name (an interrupted download resumes)..."
+  if POND_DATA_DIR="$DATA_DIR" "$bin" models download gguf "$name" \
+    && POND_DATA_DIR="$DATA_DIR" "$bin" models activate gguf "$name" --role chat; then
+    success "LLM model: $name, in process"
+    S_LLM="ok ($name)"
+    if [ "$IS_JETSON" = true ]; then log "Its speculative-decoding drafter (about 57 MB) follows when it first loads"; fi
+  else
+    warn "$name did not download; pick it again in the app's Models page"
+    S_LLM="failed"
+  fi
 }
 
 # ── Ollama provider ──────────────────────────────────────────────────────────

@@ -1,0 +1,361 @@
+/* A report's reading sheet and its save menu: chrome around content, so hairlines and no ink offset (DESIGN.md rule 3).
+   Secondary text, light and dark: 6.22:1 and 5.45:1 on --color-surface, as longTasks.css measured. */
+
+.rexp {
+  position: relative;
+  display: inline-flex;
+}
+
+.rexp__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--lt-control-h, var(--tap-min));
+  padding: 0 var(--space-3);
+  font-size: var(--text-base);
+}
+
+.rexp__panel {
+  position: absolute;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  box-sizing: border-box;
+  min-width: 280px;
+  max-width: min(340px, calc(100vw - var(--space-8)));
+  padding: var(--space-1);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  animation: fadeIn 0.12s ease;
+}
+
+.rexp__panel--popover {
+  top: calc(100% + var(--space-2));
+  right: 0;
+}
+
+/* Out of its button's wrapper and into the row of actions, as a line of its own. */
+.rexp--inline {
+  display: contents;
+}
+
+.rexp__panel--inline {
+  position: static;
+  flex: 1 0 100%;
+  max-width: none;
+  box-shadow: none;
+  animation: none;
+}
+
+.rexp__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-height: var(--tap-min);
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.rexp--hub .rexp__item {
+  font-size: var(--text-md);
+}
+
+.rexp__item:hover:not([data-inert]),
+.rexp__item:focus-visible {
+  background: var(--color-accent-subtle);
+}
+
+.rexp__item[data-inert] {
+  cursor: default;
+}
+
+.rexp__item[data-inert] .rexp__label,
+.rexp__icon {
+  color: var(--color-text-secondary);
+}
+
+.rexp__icon {
+  flex: none;
+}
+
+.rexp__text {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rexp__label {
+  font-weight: var(--weight-semibold);
+}
+
+.rexp__sub {
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  color: var(--color-text-secondary);
+}
+
+.rexp__note,
+.rexp__problem {
+  flex: 1 0 100%;
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.rexp__note {
+  color: var(--color-text-secondary);
+}
+
+.rexp__problem {
+  color: var(--color-destructive-fg);
+}
+
+.rsheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: var(--space-6);
+  background: rgba(23, 22, 22, 0.45);
+  animation: fadeIn var(--dur-fast) ease;
+}
+
+.rsheet {
+  --lt-control-h: 36px;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: min(1040px, 100%);
+  height: min(860px, 100%);
+  overflow: hidden;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-canvas);
+  color: var(--color-text);
+  font-family: var(--font-body);
+}
+
+.rsheet--hub {
+  --lt-control-h: var(--tap-min);
+}
+
+@media (pointer: coarse) {
+  .rsheet {
+    --lt-control-h: var(--tap-min);
+  }
+}
+
+.rsheet__head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.rsheet__titles {
+  flex: 1;
+  min-width: 0;
+}
+
+.rsheet__title {
+  margin: 0;
+  font-family: var(--font-heading);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-bold);
+  line-height: var(--leading-snug);
+  overflow-wrap: anywhere;
+}
+
+.rsheet__counts {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.rsheet__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  max-width: 50%;
+}
+
+.rsheet__actions .rexp__note,
+.rsheet__actions .rexp__problem {
+  text-align: right;
+}
+
+.rsheet__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--lt-control-h);
+  padding: 0 var(--space-3);
+  font-size: var(--text-base);
+}
+
+.rsheet__body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.rsheet__nav {
+  flex: 0 0 240px;
+  overflow-y: auto;
+  padding: var(--space-4) var(--space-3) var(--space-4) var(--space-5);
+  border-right: 1px solid var(--color-border);
+}
+
+.rsheet__navlabel {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-secondary);
+}
+
+.rsheet__navlist {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rsheet__navbtn {
+  display: block;
+  width: 100%;
+  min-height: var(--lt-control-h);
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.rsheet__navbtn:hover {
+  background: var(--color-hover);
+}
+
+.rsheet__navbtn[data-depth="1"],
+.rsheet__navbtn[data-depth="2"] {
+  padding-left: var(--space-5);
+  color: var(--color-text-secondary);
+}
+
+.rsheet__scroll {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-5) var(--space-6) var(--space-8);
+}
+
+.rsheet__scroll:focus-visible {
+  outline-offset: -2px;
+}
+
+/* A line of about 72 characters reads at length; the sheet is wider than that so the nav and the margins have room. */
+.rsheet__read {
+  max-width: 72ch;
+  margin-inline: auto;
+  font-size: var(--text-md);
+  line-height: var(--leading-loose);
+}
+
+.rsheet__read .md__h {
+  scroll-margin-top: var(--space-4);
+}
+
+.rsheet__read .md__h1,
+.rsheet__read .md__h2 {
+  margin: var(--space-6) 0 var(--space-2);
+  font-size: var(--text-lg);
+}
+
+.rsheet__read .md__h3 {
+  margin: var(--space-5) 0 var(--space-1);
+  font-size: var(--text-md);
+}
+
+.rsheet__read .md__p,
+.rsheet__read .md__list {
+  margin-bottom: var(--space-3);
+}
+
+.rsheet__sources {
+  margin-top: var(--space-4);
+}
+
+@media (max-width: 820px), (max-height: 600px) {
+  .rsheet-backdrop {
+    padding: 0;
+  }
+
+  .rsheet {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .rsheet__head {
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .rsheet__actions {
+    max-width: none;
+  }
+
+  .rsheet__body {
+    flex-direction: column;
+  }
+
+  .rsheet__nav {
+    flex: none;
+    padding: var(--space-2) var(--space-4);
+    border-right: 0;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .rsheet__navlabel {
+    display: none;
+  }
+
+  .rsheet__navlist {
+    flex-direction: row;
+    overflow-x: auto;
+  }
+
+  .rsheet__navbtn {
+    width: auto;
+    white-space: nowrap;
+  }
+
+  .rsheet__scroll {
+    padding: var(--space-4) var(--space-4) var(--space-8);
+  }
+}

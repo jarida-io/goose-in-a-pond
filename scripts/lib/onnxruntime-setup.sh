@@ -38,6 +38,7 @@ ORTGPU_LIBS="libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so
 # The C API the install carries, which its own provider check compiles against.
 ORTGPU_HEADERS="onnxruntime_c_api.h onnxruntime_ep_c_api.h"
 ORTGPU_SERVICE="goose-in-a-pond.service"
+ORTGPU_SYSTEM_UNIT="${ORTGPU_SYSTEM_UNIT:-/etc/systemd/system/goose-in-a-pond.service}"
 # One compile job per this much memory. ORT's C++ units take about 1 GB each and some CUDA units
 # twice that, which a quarter of the free swap absorbs.
 ORTGPU_JOB_MB=1536
@@ -72,11 +73,24 @@ ortgpu_stopped_file() { printf '%s/stopped-%s' "$(ortgpu_home)" "$ORTGPU_SERVICE
 ortgpu_out_dir()     { printf '%s/build/Linux/Release' "$(ortgpu_src_dir)"; }
 # Written when build.sh finishes, naming what it built: libraries alone may be from a build cut short.
 ortgpu_built_file()  { printf '%s/built' "$(ortgpu_home)"; }
-# The pond's data directory, resolved as the server resolves it (dirs::data_dir on Linux).
+# The pond's data directory, resolved as the server resolves it (dirs::data_dir on Linux), or as a
+# system unit names it.
 ortgpu_data_dir() {
+  local unit_dir=""
+  [ -f "$ORTGPU_SYSTEM_UNIT" ] && unit_dir="$(sed -n 's/^Environment="\{0,1\}POND_DATA_DIR=\([^"]*\)"\{0,1\}$/\1/p' "$ORTGPU_SYSTEM_UNIT" | head -1)"
   if [ -n "${POND_DATA_DIR:-}" ]; then printf '%s' "$POND_DATA_DIR"
   elif [ "$(uname -s)" = Darwin ]; then printf '%s/Library/Application Support/goose-in-a-pond' "$HOME"
+  elif [ -n "$unit_dir" ]; then printf '%s' "$unit_dir"
   else printf '%s/goose-in-a-pond' "${XDG_DATA_HOME:-$HOME/.local/share}"; fi
+}
+
+# A pond run by agamemnon owns its data; the login writes there through the sudo rule
+# `giap.sh service-account` gave it.
+_ortgpu_agamemnon() { grep -qs '^User=agamemnon$' "$ORTGPU_SYSTEM_UNIT"; }
+_ortgpu_as_pond() { if _ortgpu_agamemnon; then sudo -n -H -u agamemnon "$@"; else "$@"; fi; }
+_ortgpu_svc() { # <systemctl verb and args, ending in the unit>
+  if [ ! -f "$ORTGPU_SYSTEM_UNIT" ]; then systemctl --user "$@"; return; fi
+  case "$1" in is-active|show) systemctl "$@" ;; *) sudo -n systemctl "$@" ;; esac
 }
 ortgpu_install_dir() { printf '%s/lib/onnxruntime-gpu/%s' "${1:-$(ortgpu_data_dir)}" "$ORTGPU_VERSION"; }
 
@@ -303,18 +317,18 @@ ortgpu_prepare_venv() {
 
 _ortgpu_service_active() {
   command -v systemctl >/dev/null 2>&1 || return 1
-  [ "$(systemctl --user is-active "$ORTGPU_SERVICE" 2>/dev/null)" = active ]
+  [ "$(_ortgpu_svc is-active "$ORTGPU_SERVICE" 2>/dev/null)" = active ]
 }
 _ortgpu_pond_rss_mb() {
   local pid
-  pid="$(systemctl --user show -p MainPID --value "$ORTGPU_SERVICE" 2>/dev/null)"
+  pid="$(_ortgpu_svc show -p MainPID --value "$ORTGPU_SERVICE" 2>/dev/null)"
   case "$pid" in ''|0|*[!0-9]*) echo 0; return 0 ;; esac
   awk '/^VmRSS:/ { print int($2 / 1024); found = 1 } END { if (!found) print 0 }' "/proc/$pid/status" 2>/dev/null || echo 0
 }
 _ortgpu_service_start_if_we_stopped() {
   [ -f "$(ortgpu_stopped_file)" ] || return 0
   _ortgpu_out info "starting $ORTGPU_SERVICE again, which the build stopped"
-  systemctl --user start "$ORTGPU_SERVICE" 2>/dev/null || _ortgpu_out warn "could not start $ORTGPU_SERVICE"
+  _ortgpu_svc start "$ORTGPU_SERVICE" 2>/dev/null || _ortgpu_out warn "could not start $ORTGPU_SERVICE"
   rm -f "$(ortgpu_stopped_file)"
 }
 
@@ -358,7 +372,7 @@ _ortgpu_plan_jobs() {
   if [ "$jobs" -lt "$ORTGPU_MIN_JOBS" ] && _ortgpu_service_active; then
     _ortgpu_out info "${avail:-?} MB available, and the pond may take ${grow} MB more: $jobs job(s). Stopping $ORTGPU_SERVICE for the build"
     : > "$(ortgpu_stopped_file)"
-    systemctl --user stop "$ORTGPU_SERVICE" 2>/dev/null || _ortgpu_out warn "could not stop $ORTGPU_SERVICE"
+    _ortgpu_svc stop "$ORTGPU_SERVICE" 2>/dev/null || _ortgpu_out warn "could not stop $ORTGPU_SERVICE"
     sleep 10
     avail="$(_ortgpu_meminfo_mb MemAvailable)"; swap="$(_ortgpu_meminfo_mb SwapFree)"
     jobs="$(ortgpu_jobs "${avail:-0}" "${swap:-0}" "$cores")"
@@ -530,17 +544,24 @@ EOF
 # Move a finished install into place. A pond running from the old copy keeps its mapped files.
 _ortgpu_install() { # <stage> <dest>
   local stage="$1" dest="$2" old=""
-  mkdir -p "$(dirname "$dest")" || return 1
-  if [ -e "$dest" ]; then
-    old="$dest.old.$$"
-    rm -rf "$old"
-    mv "$dest" "$old" || return 1
+  if _ortgpu_agamemnon; then
+    # The stage is the login's; agamemnon copies it in, so the install is agamemnon's like the rest.
+    _ortgpu_as_pond mkdir -p "$(dirname "$dest")" || return 1
+    _ortgpu_as_pond cp -R "$stage" "$dest.new.$$" || { _ortgpu_as_pond rm -rf "$dest.new.$$"; return 1; }
+    rm -rf "$stage"
+    stage="$dest.new.$$"
   fi
-  if ! mv "$stage" "$dest"; then
-    if [ -n "$old" ]; then mv "$old" "$dest"; fi
+  _ortgpu_as_pond mkdir -p "$(dirname "$dest")" || return 1
+  if _ortgpu_as_pond test -e "$dest"; then
+    old="$dest.old.$$"
+    _ortgpu_as_pond rm -rf "$old"
+    _ortgpu_as_pond mv "$dest" "$old" || return 1
+  fi
+  if ! _ortgpu_as_pond mv "$stage" "$dest"; then
+    if [ -n "$old" ]; then _ortgpu_as_pond mv "$old" "$dest"; fi
     return 1
   fi
-  if [ -n "$old" ]; then rm -rf "$old"; fi
+  if [ -n "$old" ]; then _ortgpu_as_pond rm -rf "$old"; fi
   return 0
 }
 
@@ -555,7 +576,7 @@ _ortgpu_pond_binary() {
 # ortgpu_build_run: the worker. Every step is skipped when its result is already there, so running
 # it again after an interruption resumes. The pond is started again however it ends.
 ortgpu_build_run() {
-  local arch cuda trt cudnn src out stage dest header free started rc pond flags
+  local arch cuda trt cudnn src out stage staging dest header free started rc pond flags
   started="$(date +%s)"
   ORTGPU_BUILD_PGID=""
   trap '_ortgpu_service_start_if_we_stopped' EXIT
@@ -618,9 +639,13 @@ ortgpu_build_run() {
       _ortgpu_out ok "ONNX Runtime $ORTGPU_VERSION with TensorRT and CUDA is installed from this build: $ORTGPU_VERIFY_FILES files verified in $dest"
     else
       header="$(ortgpu_manifest_header "$arch" "$cuda" "$trt" "$cudnn")"
-      mkdir -p "$(dirname "$dest")" || return 1
-      rm -rf "$(dirname "$dest")"/.stage.*
-      stage="$(mktemp -d "$(dirname "$dest")/.stage.XXXXXX")" || return 1
+      # Staged beside the install so it moves in with one rename; in the login's own tree when
+      # agamemnon owns the data directory.
+      staging="$(dirname "$dest")"
+      if _ortgpu_agamemnon; then staging="$(ortgpu_home)/stage"; fi
+      mkdir -p "$staging" || return 1
+      rm -rf "$staging"/.stage.*
+      stage="$(mktemp -d "$staging/.stage.XXXXXX")" || return 1
       chmod 755 "$stage"
       if ! ortgpu_package "$out" "$src" "$stage" "$header"; then
         rm -rf "$stage"; _ortgpu_phase failed package; return 1
@@ -644,9 +669,9 @@ ortgpu_build_run() {
     if _ortgpu_service_active; then
       _ortgpu_out info "stopping $ORTGPU_SERVICE while the TensorRT engines are built"
       : > "$(ortgpu_stopped_file)"
-      systemctl --user stop "$ORTGPU_SERVICE" 2>/dev/null || _ortgpu_out warn "could not stop $ORTGPU_SERVICE"
+      _ortgpu_svc stop "$ORTGPU_SERVICE" 2>/dev/null || _ortgpu_out warn "could not stop $ORTGPU_SERVICE"
     fi
-    "$pond" onnx-engines || _ortgpu_out warn "some TensorRT engines were not built; those models stay on the CPU until the pond has the memory to build them"
+    _ortgpu_as_pond env POND_DATA_DIR="$(ortgpu_data_dir)" "$pond" onnx-engines || _ortgpu_out warn "some TensorRT engines were not built; those models stay on the CPU until the pond has the memory to build them"
   fi
   _ortgpu_phase "done" "$(( ($(date +%s) - started) / 60 )) min"
   return 0
@@ -792,7 +817,8 @@ ortgpu_report_build() {
   esac
   if [ -f "$(ortgpu_stopped_file)" ]; then
     _ortgpu_out warn "the pond was stopped for that build and is still marked stopped"
-    _ortgpu_out note "fix: systemctl --user start $ORTGPU_SERVICE"
+    if [ -f "$ORTGPU_SYSTEM_UNIT" ]; then _ortgpu_out note "fix: sudo systemctl start $ORTGPU_SERVICE"
+    else _ortgpu_out note "fix: systemctl --user start $ORTGPU_SERVICE"; fi
   fi
   return 0
 }

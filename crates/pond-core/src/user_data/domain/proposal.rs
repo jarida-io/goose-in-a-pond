@@ -2,7 +2,7 @@
 //! Policy only; stored as `drafts` rows. Shape enforces rationale, single audience and expiry.
 
 use crate::user_data::domain::draft::DraftStatus;
-use crate::user_data::domain::schedule::TaskKind;
+use crate::user_data::domain::schedule::{routine_summary, TaskKind};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -321,6 +321,7 @@ impl Proposal {
                 spec.source.device_id.as_deref().unwrap_or("any device"),
                 spec.source.signal.as_deref().unwrap_or("any signal")
             ),
+            TaskKind::Routine { actions } => truncate(&routine_summary(actions), 120),
         }
     }
 }

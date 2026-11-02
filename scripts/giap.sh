@@ -7,6 +7,7 @@
 #   bash scripts/giap.sh install -y   # ... without the confirmation prompts
 #   bash scripts/giap.sh doctor       # non-interactive: health report, exit 1 on FAIL
 #   bash scripts/giap.sh status       # non-interactive: detection banner only
+#   bash scripts/giap.sh console [HOST] # live stats, charts and logs for this machine, the Jetson (nano) and HOST
 #   bash scripts/giap.sh build        # non-interactive: build UI + server for THIS host
 #   bash scripts/giap.sh update       # bring this pond to its branch's newest code: pull, Node, build, restart, grants, doctor
 #   bash scripts/giap.sh update -y    # ... answering yes to each step (downloads, a service stop for the build)
@@ -21,6 +22,8 @@
 #   bash scripts/giap.sh models pairings         # regenerate the vision pairing table from Hugging Face
 #   bash scripts/giap.sh models pairings --check # only compare it (exit 1 if the committed table is stale)
 #   bash scripts/giap.sh wifi-grant [remove|status]  # Linux: let the pond's user join Wi-Fi from the BLE setup channel (sudo)
+#   bash scripts/giap.sh admin-card [show|rotate]  # My Pond's admin card: make it and seal a recovery copy (sudo), print it again, or replace it
+#   bash scripts/giap.sh service-account [undo|status]  # Linux: run the pond as its own locked account, agamemnon (sudo); undo moves it back
 #   bash scripts/giap.sh provision --host HOST --key FILE  # save a Pond's setup card, give it a device certificate (operator; must come first)
 #   bash scripts/giap.sh check [AREA…] [--all|--e2e|--full|--base REF|--dry-run]  # the checks CI runs, for what this branch changes (must come first)
 #   bash scripts/giap.sh --dry-run …  # print every command instead of running it
@@ -58,14 +61,25 @@ fi
 source "$HERE/lib/macos-sdk.sh"
 # shellcheck source=lib/litert-setup.sh
 source "$HERE/lib/litert-setup.sh"
+# shellcheck source=lib/pond-health.sh
+source "$HERE/lib/pond-health.sh"
+# shellcheck source=lib/console-collect.sh
+source "$HERE/lib/console-collect.sh"
+# shellcheck source=lib/console.sh
+source "$HERE/lib/console.sh"
 # shellcheck source=lib/onnxruntime-setup.sh
 source "$HERE/lib/onnxruntime-setup.sh"
 # shellcheck source=lib/model-pairings.sh
 source "$HERE/lib/model-pairings.sh"
 # shellcheck source=lib/setup-code.sh
 source "$HERE/lib/setup-code.sh"
+# shellcheck source=lib/admin-card.sh
+source "$HERE/lib/admin-card.sh"
 # shellcheck source=lib/connect-setup.sh
 source "$HERE/lib/connect-setup.sh"
+# The agamemnon_* functions: the pond's own locked account.
+# shellcheck source=lib/install-systemd.sh
+source "$HERE/lib/install-systemd.sh"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 # Which Node the repo runs on, finding one, and downloading one. REPO_ROOT has to be set first: the
@@ -149,7 +163,7 @@ D_SVC_SCOPE=""; D_SVC_ACTIVE=""; D_SVC_ENABLED=""; D_LINGER=""; D_SVC_SYS_STATE=
 D_DATA_DIR=""; D_PORT=""; D_HEALTH=""; D_PROCS=0
 D_RAM_TOTAL=""; D_RAM_AVAIL=""; D_DISK_FREE=""; D_TGT_DBG=""; D_TGT_REL=""
 D_PWR=""; D_OC=""; D_DISPLAY=""; D_SUDO=""
-D_ENGINE=""
+D_ENGINE=""; D_ENGINE_FAILED=""; D_NVMAP=""
 D_LITERT_MAC=""; D_LITERT_MAC_TAG=""; D_LITERT_MAC_DIR=""; D_LITERT_LNX=""; D_LITERT_LNX_TAG=""; D_LITERT_LNX_DIR=""
 D_LITERT_DEV=""; D_LITERT_DEV_TAG=""; D_LITERT_DEV_DIR=""
 D_ORTGPU=""; D_ORTGPU_TAG=""; D_ORTGPU_DIR=""; D_ORTGPU_BUILD=""
@@ -309,6 +323,7 @@ detect_service() {
 resolve_data_dir() {
   if [ -n "${POND_DATA_DIR:-}" ]; then D_DATA_DIR="$POND_DATA_DIR"
   elif [ "$D_OS" = "macos" ]; then D_DATA_DIR="$HOME/Library/Application Support/goose-in-a-pond"
+  elif [ -n "$(agamemnon_unit_data_dir)" ]; then D_DATA_DIR="$(agamemnon_unit_data_dir)"
   else D_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/goose-in-a-pond"; fi
 }
 
@@ -372,23 +387,22 @@ detect_capabilities() {
   else D_SUDO="password required"; fi
 }
 
-log_file_today() { printf '%s/logs/pond.log.%s' "$D_DATA_DIR" "$(date +%F)"; }
+log_file_today() { pond_log_today "$D_DATA_DIR"; }
 
 detect_engine() {
-  D_ENGINE="unknown"
-  local lf; lf="$(log_file_today)"
-  [ -f "$lf" ] || return 0
-  local last
-  last="$(grep -hE 'Applied Jetson Orin Nano CUDA|Applied Metal/platform' "$lf" 2>/dev/null | tail -1)"
-  case "$last" in
-    *"Jetson Orin Nano CUDA"*) D_ENGINE="CUDA" ;;
-    *"Metal/platform"*)
-      if [ "$D_OS" = "linux" ]; then D_ENGINE="CPU-ONLY (non-cuda build)"; else D_ENGINE="Metal"; fi ;;
-  esac
+  pond_engine_state "$(log_file_today)" "$D_OS"
+  D_ENGINE="$POND_ENGINE"; D_ENGINE_FAILED="$POND_ENGINE_FAILED"
 }
 
-# The recorded LiteRT-LM packages, and on Linux the one deployed under the data dir. Reads each
-# manifest's first line and hashes nothing: doctor and `litert status` do the verifying.
+detect_nvmap() {
+  D_NVMAP=""
+  [ "$D_IS_JETSON" = true ] || return 0
+  jetson_nvmap_state "$D_L4T"
+  D_NVMAP="$NVMAP_STATE"
+}
+
+# The recorded LiteRT-LM packages, and on Linux the one the server loads from the data dir. Reads
+# each manifest's first line and hashes nothing: doctor and `litert status` do the verifying.
 detect_litert() {
   litert_state macos-arm64
   D_LITERT_MAC="$LITERT_STATE"; D_LITERT_MAC_TAG="$LITERT_STATE_TAG"; D_LITERT_MAC_DIR="$LITERT_STATE_DIR"
@@ -396,7 +410,8 @@ detect_litert() {
   D_LITERT_LNX="$LITERT_STATE"; D_LITERT_LNX_TAG="$LITERT_STATE_TAG"; D_LITERT_LNX_DIR="$LITERT_STATE_DIR"
   D_LITERT_DEV=""; D_LITERT_DEV_TAG=""; D_LITERT_DEV_DIR=""
   if [ "$D_OS" = "linux" ]; then
-    D_LITERT_DEV_DIR="$D_DATA_DIR/$(litert_device_subdir)"
+    D_LITERT_DEV_DIR="$(litert_device_in_use "$D_DATA_DIR")"
+    [ -n "$D_LITERT_DEV_DIR" ] || D_LITERT_DEV_DIR="$D_DATA_DIR/$(litert_device_subdir)"
     _litert_dir_state "$D_LITERT_DEV_DIR"
     D_LITERT_DEV="$LITERT_STATE"; D_LITERT_DEV_TAG="$LITERT_STATE_TAG"
   fi
@@ -440,7 +455,7 @@ sqlite_setting() { # $1 = key
 detect_all() {
   detect_host; detect_accel; detect_toolchain; detect_repo; detect_ui
   detect_binaries; detect_service; detect_runtime; detect_resources
-  detect_jetson_power; detect_capabilities; detect_engine; detect_litert; detect_onnxruntime
+  detect_jetson_power; detect_capabilities; detect_engine; detect_nvmap; detect_litert; detect_onnxruntime
 }
 
 # ── banner ───────────────────────────────────────────────────────────────────
@@ -450,7 +465,7 @@ banner() {
   [ "$DRY_RUN" = true ] && warn "DRY RUN — commands are printed, not executed"
 
   printf '  %-9s %s / %s — %s%s\n' "Host"   "$D_OS" "$D_ARCH" "${D_BOARD:-unknown}" "$jet"
-  [ -n "$D_L4T" ] && printf '  %-9s L4T %s (kernel %s)\n' "L4T" "$D_L4T" "$D_KERNEL"
+  [ -n "$D_L4T" ] && printf '  %-9s L4T %s (kernel %s) · nvmap %s\n' "L4T" "$D_L4T" "$D_KERNEL" "${D_NVMAP:-unknown}"
   printf '  %-9s %s\n' "Accel" "$D_ACCEL"
   printf '  %-9s rust %s · cmake %s · node %s%s\n' "Tools" \
     "${D_RUST:-MISSING}" "${D_CMAKE:-none}" "${D_NODE:-none}" \
@@ -472,7 +487,8 @@ banner() {
   printf '  %-9s %s%s\n' "Service" "$D_SVC_SCOPE" \
     "$( [ -n "$D_SVC_ACTIVE" ] && echo " · $D_SVC_ACTIVE · $D_SVC_ENABLED${D_LINGER:+ · linger=$D_LINGER}" )"
   printf '  %-9s %s process(es)%s · health %s · engine %s\n' "Runtime" "$D_PROCS" \
-    "$( [ -n "$D_PORT" ] && echo " · port $D_PORT" )" "$D_HEALTH" "$D_ENGINE"
+    "$( [ -n "$D_PORT" ] && echo " · port $D_PORT" )" "$D_HEALTH" \
+    "$D_ENGINE$( [ -n "$D_ENGINE_FAILED" ] && echo ", last model load FAILED: $D_ENGINE_FAILED" )"
   printf '  %-9s RAM %s%s · disk %s GiB free · target debug %s GiB / release %s GiB\n' "Resources" \
     "$(human_mb "${D_RAM_TOTAL:-0}")" \
     "$( [ -n "$D_RAM_AVAIL" ] && echo " ($(human_mb "$D_RAM_AVAIL") avail)" )" \
@@ -604,12 +620,19 @@ doctor() {
       fi
     fi
     case "$D_ENGINE" in
-      CUDA)   ok "last run used the CUDA path" ;;
-      CPU-ONLY*) bad "last run logged 'Applied Metal/platform settings' — that is the NON-cuda branch"
-                 note "its n_gpu_layers=99 is misleading; rebuild with the cuda features (menu 12)"
-                 DOC_FAIL=$((DOC_FAIL+1)) ;;
-      *)      unk "no engine line in today's log yet"; DOC_UNK=$((DOC_UNK+1)) ;;
+      CUDA)       [ -n "$D_ENGINE_FAILED" ] || ok "the last model load used the CUDA path" ;;
+      CPU-ONLY)   bad "the last model load ran the CPU-only settings: this server was built without the cuda feature"
+                  note "rebuild with the cuda features (menu 12)"
+                  DOC_FAIL=$((DOC_FAIL+1)) ;;
+      LiteRT-LM*) [ -n "$D_ENGINE_FAILED" ] || ok "the last model load used $D_ENGINE" ;;
+      *)          unk "no model load in today's log yet"; DOC_UNK=$((DOC_UNK+1)) ;;
     esac
+    if [ -n "$D_ENGINE_FAILED" ]; then
+      bad "the last model load ($D_ENGINE) failed: $D_ENGINE_FAILED"
+      note "the service still answers health checks, but every chat turn fails until a model loads"
+      [ "$D_NVMAP" = capped ] && note "cause: this L4T release's nvmap refuses large GPU allocations (the nvmap check below)"
+      DOC_FAIL=$((DOC_FAIL+1))
+    fi
   fi
 
   # 5. service scope collision
@@ -630,6 +653,10 @@ doctor() {
     none)              warn "no service unit installed"; DOC_WARN=$((DOC_WARN+1)) ;;
     *)                 unk "service: $D_SVC_SCOPE"; DOC_UNK=$((DOC_UNK+1)) ;;
   esac
+  if [ "$D_OS" = "linux" ]; then
+    agamemnon_doctor "$D_SVC_SCOPE" "$(connect_pond_user 2>/dev/null)"
+    [ "$AGAMEMNON_LEVEL" = warn ] && DOC_WARN=$((DOC_WARN+1))
+  fi
 
   # 6. duplicate servers
   if [ "${D_PROCS:-0}" -gt 1 ] 2>/dev/null; then
@@ -783,8 +810,10 @@ doctor() {
   fi
 
   # The printed setup card: claimed is a pond in use, unclaimed one waiting for its first phone.
-  setup_code_doctor "$(setup_code_bin "$REPO_ROOT")" "$D_DATA_DIR"
+  setup_code_doctor "$(setup_code_bin "$REPO_ROOT")" "$D_DATA_DIR" "$(connect_pond_user 2>/dev/null)"
   [ "$SETUP_CODE_LEVEL" = warn ] && DOC_WARN=$((DOC_WARN+1))
+  admin_card_doctor "$(setup_code_bin "$REPO_ROOT")" "$D_DATA_DIR" "$(connect_pond_user 2>/dev/null)"
+  [ "$ADMIN_CARD_LEVEL" = warn ] && DOC_WARN=$((DOC_WARN+1))
 
   # The BLE setup channel's radios and the Wi-Fi grant. A pond without them still runs, so these
   # warn rather than fail. macOS asks for its own permissions.
@@ -829,6 +858,15 @@ doctor() {
   # 16. The Jetson's GPU ONNX Runtime. None is a suggestion; one that fails its manifest is a FAIL.
   doctor_onnxruntime
 
+  # 17. The Jetson's nvmap: some L4T releases cap the single GPU allocation a model's weights need.
+  doctor_nvmap
+
+  # 18. Speculative decoding (MTP) since the chat model last loaded, from the turns' own reports.
+  doctor_mtp
+
+  # 19. KV snapshots: what a cold turn after a restart can reuse. Information only.
+  doctor_kv
+
   printf '\n  %sVerdict: %s FAIL · %s WARN · %s UNKNOWN%s\n' \
     "$C_B" "$DOC_FAIL" "$DOC_WARN" "$DOC_UNK" "$C_RST"
   [ "$DOC_UNK" -gt 0 ] && note "UNKNOWN is never counted as OK — absence of evidence is not health"
@@ -849,7 +887,9 @@ doctor_litert() {
           DOC_FAIL=$((DOC_FAIL+1))
         fi
         if [ "$D_LITERT_DEV" = "other-pin" ]; then
-          warn "the installed LiteRT-LM is $D_LITERT_DEV_TAG; this checkout pins $(litert_tag)"
+          warn "the pond loads LiteRT-LM $D_LITERT_DEV_TAG; this checkout pins $(litert_tag)"
+          note "a package off the pin lacks GIAP's fixes, among them fp32 GPU activations: without them tool calls come out garbled"
+          note "fix: bash scripts/giap.sh litert build linux-arm64 on the Mac, then scripts/jetson.sh deploy; or bash scripts/giap.sh litert import DIR here"
           DOC_WARN=$((DOC_WARN+1))
         fi ;;
     esac
@@ -901,8 +941,101 @@ doctor_onnxruntime() {
   esac
   if [ -z "$(ortgpu_running_pid)" ] && [ -f "$(ortgpu_stopped_file)" ]; then
     warn "a GPU ONNX Runtime build stopped the pond and did not start it again"
-    note "fix: systemctl --user start $ORTGPU_SERVICE"
+    if [ "$D_SVC_SCOPE" = system ]; then note "fix: sudo systemctl start $ORTGPU_SERVICE"
+    else note "fix: systemctl --user start $ORTGPU_SERVICE"; fi
     DOC_WARN=$((DOC_WARN+1))
+  fi
+  return 0
+}
+
+doctor_nvmap() {
+  [ "$D_IS_JETSON" = true ] || return 0
+  local unheld
+  case "$D_NVMAP" in
+    capped)
+      # A refused allocation in today's log turns the risk into the failure it causes.
+      if [ -n "$D_ENGINE_FAILED" ]; then bad "L4T $D_L4T's stock nvmap refuses large single GPU allocations"; DOC_FAIL=$((DOC_FAIL+1))
+      else warn "L4T $D_L4T's stock nvmap refuses large single GPU allocations"; DOC_WARN=$((DOC_WARN+1)); fi
+      note "NVIDIA's CVE-2025-33182/33177 hardening: E4B's 2.5 GB weight buffer fails with 'cudaMalloc failed: out of memory' however much memory is free"
+      note "fix: JetPack 6.2.2 (L4T r36.5), which carries NVIDIA's own fix"
+      note "or a pre-cap nvmap.ko built on this board, which reverts that hardening: docs/developer/jetson-device-tuning.md section 4" ;;
+    local)
+      ok "nvmap is a module built on this board (the pre-cap fix), not NVIDIA's signed one"
+      unheld="$(jetson_unheld_kernel_packages | tr '\n' ' ')"
+      if [ -n "$unheld" ]; then
+        warn "an L4T kernel update would put the capped nvmap back; not held: $unheld"
+        note "fix: sudo apt-mark hold $unheld"
+        DOC_WARN=$((DOC_WARN+1))
+      fi ;;
+    stock)
+      ok "nvmap is NVIDIA's own, on a release without the large-allocation cap" ;;
+    *)
+      unk "could not read the nvmap module (modinfo nvmap)"; DOC_UNK=$((DOC_UNK+1)) ;;
+  esac
+  return 0
+}
+
+# The drafter the engine pairs with a chat model, as pond-core's drafter_for matches it.
+mtp_drafter_for() {
+  local m; m="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  case "$m" in *gemma-4*|*gemma4*) ;; *) return 0 ;; esac
+  case "$m" in
+    *e2b*) printf 'mtp-gemma-4-E2B-it.gguf' ;;
+    *e4b*) printf 'mtp-gemma-4-E4B-it.gguf' ;;
+  esac
+}
+
+doctor_mtp() {
+  [ "$D_IS_JETSON" = true ] || return 0
+  local provider model drafter path
+  provider="$(sqlite_setting chat_provider)"; model="$(sqlite_setting chat_model)"
+  case "$provider" in local|gguf) ;; *) return 0 ;; esac
+  case "$model" in ""|*.litertlm) return 0 ;; esac
+  drafter="$(mtp_drafter_for "$model")"
+  if [ -z "$drafter" ]; then
+    info "speculative decoding: no MTP drafter pairs with $model"
+    return 0
+  fi
+  path="$D_DATA_DIR/models/gguf/$drafter"
+  if [ ! -e "$path" ]; then
+    info "MTP drafter $drafter is not on disk yet: the pond fetches it (about 57 MB) when $model next loads"
+    return 0
+  fi
+  if ! head -c 4096 "$path" 2>/dev/null | grep -aq 'gemma4-assistant'; then
+    warn "$path is not a gemma4-assistant drafter, so the engine will not attach it"
+    note "fix: delete it; the pond fetches the pinned drafter when $model next loads"
+    DOC_WARN=$((DOC_WARN+1))
+    return 0
+  fi
+  pond_mtp_state "$(log_file_today)"
+  if [ -n "$POND_MTP_FAILED" ] && [ "$POND_MTP_TURNS" -eq 0 ]; then
+    warn "speculative decoding is off: $POND_MTP_FAILED"
+    note "decoding still works, without the 2x; free GPU memory (headless, the nvmap check) and restart the pond"
+    DOC_WARN=$((DOC_WARN+1))
+  elif [ "$POND_MTP_TURNS" -gt 0 ]; then
+    ok "speculative decoding active: $POND_MTP_TURNS turn(s) since $model loaded, ${POND_MTP_RATE}% of drafts accepted${POND_MTP_TPS:+, decode $POND_MTP_TPS tok/s}"
+  elif [ "$POND_MTP_LOGGED" = true ]; then
+    warn "no turn since $model loaded used the MTP drafter, though $drafter is on disk"
+    note "the engine attaches it on CUDA builds; look for 'draft' in $(log_file_today)"
+    DOC_WARN=$((DOC_WARN+1))
+  else
+    unk "speculative decoding: no turn since $model loaded reports it (a server built before the drafter= field never does)"
+    DOC_UNK=$((DOC_UNK+1))
+  fi
+  return 0
+}
+
+doctor_kv() {
+  case "$(sqlite_setting chat_provider)" in local|gguf) ;; *) return 0 ;; esac
+  pond_kv_state "$(log_file_today)"
+  if [ "$POND_KV_SEEN" != true ]; then
+    info "KV snapshots: none saved or loaded in today's log yet"
+    return 0
+  fi
+  info "KV snapshots today: $POND_KV_SAVED saved, $POND_KV_LOADED loaded for a cold turn, $POND_KV_NOT_WRITTEN not written"
+  [ -z "$POND_KV_REASON" ] || note "most often not written because: $POND_KV_REASON"
+  if [ "$POND_KV_SAVED" -gt 0 ] && [ "$POND_KV_LOADED" -eq 0 ]; then
+    note "none loaded yet: one pays off on the first turn after a restart that keeps the same model and prompt"
   fi
   return 0
 }
@@ -944,6 +1077,12 @@ action_install() {
   info "Host:  $D_OS/$D_ARCH${D_IS_JETSON:+ }$( [ "$D_IS_JETSON" = true ] && echo '(Jetson)' )"
   info "Accel: $D_ACCEL"
 
+  if [ "$(agamemnon_unit_user)" = "$AGAMEMNON" ]; then
+    bad "this pond runs as $AGAMEMNON, which alone writes $AGAMEMNON_DATA; the installer's steps run as $(id -un)"
+    note "update it: bash scripts/giap.sh update; to run the installer again, first: bash scripts/giap.sh service-account undo"
+    return 1
+  fi
+
   # Guardrail 1: never let install.sh add a SECOND service unit.
   #
   # setup_systemd in scripts/lib/install-systemd.sh writes a root-owned unit to
@@ -972,8 +1111,7 @@ action_install() {
   if [ "$D_IS_JETSON" = true ] && [ "$D_SVC_ACTIVE" = "active" ]; then
     warn "the service is running and holding a model; the release link may be OOM-killed."
     if confirm "Stop it for the install and restart afterwards?"; then
-      run systemctl --user stop "$SERVICE_NAME"
-      RESTART_SVC_AFTER=true
+      svc_ctl stop && RESTART_SVC_AFTER=true
     fi
   fi
 
@@ -994,7 +1132,7 @@ action_install() {
   [ -n "$why_no_service" ] && info "Passing --no-service because $why_no_service."
   info "install.sh auto-detects its own mode (dev / production / jetson)."
   if ! confirm "Run: bash scripts/install.sh$args ?"; then
-    [ "${RESTART_SVC_AFTER:-false}" = true ] && { run systemctl --user start "$SERVICE_NAME"; RESTART_SVC_AFTER=false; }
+    [ "${RESTART_SVC_AFTER:-false}" = true ] && { svc_ctl start; RESTART_SVC_AFTER=false; }
     return 1
   fi
 
@@ -1004,7 +1142,7 @@ action_install() {
 
   BUILD_STARTED_SVC=false
   if [ "${RESTART_SVC_AFTER:-false}" = true ]; then
-    run systemctl --user start "$SERVICE_NAME"; RESTART_SVC_AFTER=false; BUILD_STARTED_SVC=true
+    svc_ctl start; RESTART_SVC_AFTER=false; BUILD_STARTED_SVC=true
   fi
   detect_all
   if [ $rc -eq 0 ]; then
@@ -1097,8 +1235,7 @@ action_build_server() {
     detect_resources
     if [ "$D_SVC_ACTIVE" = "active" ]; then
       info "stopping the pond for the build to free memory and CPU cores; it starts again after"
-      run systemctl --user stop "$SERVICE_NAME"
-      RESTART_SVC_AFTER=true
+      svc_ctl stop && RESTART_SVC_AFTER=true
     fi
     info "This is the slow one — roughly 35 minutes from clean on an Orin Nano."
   fi
@@ -1122,7 +1259,7 @@ action_build_server() {
   fi
   if [ $rc -eq 0 ]; then write_build_stamp; ok "pond-server built"; else bad "build failed (exit $rc)"; fi
   if [ "${RESTART_SVC_AFTER:-false}" = true ]; then
-    run systemctl --user start "$SERVICE_NAME"; RESTART_SVC_AFTER=false
+    svc_ctl start; RESTART_SVC_AFTER=false
   fi
   detect_binaries
   return $rc
@@ -1236,7 +1373,8 @@ action_litert_menu() {
 svc_ctl() { # $1 = start|stop|restart|status
   case "$D_SVC_SCOPE" in
     user)   run systemctl --user "$1" "$SERVICE_NAME" ;;
-    system) run sudo systemctl "$1" "$SERVICE_NAME" ;;
+    system) if [ "$1" = status ]; then run systemctl --no-pager status "$SERVICE_NAME"
+            else run sudo systemctl "$1" "$SERVICE_NAME"; fi ;;
     "BOTH") bad "two units named $SERVICE_NAME exist — resolve that first (menu 24)"; return 1 ;;
     *) bad "no service unit installed on this host"; return 1 ;;
   esac
@@ -1259,20 +1397,7 @@ action_service_install() {
   confirm "Proceed?" || return 1
   if [ "$DRY_RUN" != true ]; then
     mkdir -p "$(dirname "$unit")"
-    cat > "$unit" <<UNIT
-[Unit]
-Description=Goose In A Pond — local AI home hub (user service)
-After=network-online.target
-
-[Service]
-WorkingDirectory=$REPO_ROOT
-ExecStart=$REPO_ROOT/target/release/pond-server serve --port $port
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-UNIT
+    agamemnon_user_unit_text "$REPO_ROOT/target/release/pond-server serve --port $port" "$REPO_ROOT" > "$unit"
   fi
   run systemctl --user daemon-reload
   run systemctl --user enable --now "$SERVICE_NAME"
@@ -1390,9 +1515,9 @@ action_logs() {
   local c=""; [ -t 0 ] && { printf '  > '; read -r c; }
   case "$c" in
     1) run tail -f "$lf" ;;
-    2) run_sh "grep -iE 'error|warn|panic' '$lf' | grep -viE 'ort::logging|BFCArena' | tail -40" ;;
-    3) run_sh "grep 'turn_end' '$lf' | tail -10" ;;
-    4) run_sh "grep -E 'Applied Jetson Orin Nano CUDA|Applied Metal/platform|Applied Goose context' '$lf' | tail -6" ;;
+    2) run_sh "grep -aiE 'error|warn|panic' '$lf' | grep -aviE 'ort::logging|BFCArena' | tail -40" ;;
+    3) run_sh "grep -a 'turn_end' '$lf' | tail -10" ;;
+    4) run_sh "grep -aE '$POND_SETTINGS_LINES|cudaMalloc failed|failed to load model|draft context|Applied Goose context' '$lf' | tail -8" ;;
     *) run_sh "tail -40 '$lf'" ;;
   esac
 }
@@ -1451,13 +1576,7 @@ action_update() {
       if [ "$D_SVC_ACTIVE" != "active" ] || { [ "$rebuilt" = true ] && [ "$BUILD_STARTED_SVC" != true ]; }; then
         svc_ctl restart || return 1
       fi
-      local tries=0
-      detect_runtime
-      while [ "$DRY_RUN" != true ] && [ "$D_HEALTH" != "200" ] && [ $tries -lt 30 ]; do
-        sleep 2; tries=$((tries+1)); detect_runtime
-      done
-      if [ "$DRY_RUN" = true ] || [ "$D_HEALTH" = "200" ]; then ok "the pond is up (health 200)"
-      else bad "the pond did not answer its health check after the restart"; note "see: bash scripts/giap.sh logs"; fi
+      await_health
       ;;
     *) info "no service unit here; run the pond as you usually do (menu 20 installs one)" ;;
   esac
@@ -1498,6 +1617,88 @@ action_deploy() {
   info "Expect roughly 35 minutes for a full CUDA build."
   confirm "Run scripts/jetson.sh deploy?" || return 1
   run bash scripts/jetson.sh deploy
+}
+
+# My Pond's admin card, made as the account that runs the pond (docs/architecture/pond-administrator.md).
+action_admin_card() {
+  head1 "Admin card (My Pond)"
+  local user
+  user="$(connect_pond_user)" || { bad "could not tell which user runs the pond"; return 1; }
+  admin_card_run "${1:-}" "$(setup_code_bin "$REPO_ROOT")" "$D_DATA_DIR" "$user"
+}
+
+# `giap.sh service-account [undo|status]`: the pond's own locked account, agamemnon
+# (docs/architecture/pond-administrator.md). A new install offers it; an existing pond moves here.
+action_service_account() { # $1 = "" | undo | status
+  head1 "The pond's own account ($AGAMEMNON)"
+  if [ "$D_OS" != "linux" ] || ! command -v systemctl >/dev/null 2>&1; then
+    bad "a service account is for Linux ponds that systemd runs"; return 1
+  fi
+  local me unit_user
+  me="$(id -un)"; unit_user="$(agamemnon_unit_user)"
+  case "${1:-}" in
+    status)
+      agamemnon_doctor "$D_SVC_SCOPE" "$(connect_pond_user 2>/dev/null)"
+      info "data: $D_DATA_DIR"
+      return 0 ;;
+    ""|undo) ;;
+    *) bad "service-account takes undo or status, not: $1"; return 2 ;;
+  esac
+  if [ "$me" = root ]; then bad "run this as the login the pond belongs to; it asks for sudo itself"; return 1; fi
+
+  if [ "${1:-}" = undo ]; then
+    if [ "$unit_user" != "$AGAMEMNON" ]; then ok "the pond does not run as $AGAMEMNON; nothing to undo"; return 0; fi
+    info "This stops the pond, moves $AGAMEMNON_DATA back to your login, and runs the pond as $me again."
+    confirm "Move the pond back to $me?" || return 1
+    [ "$DRY_RUN" = true ] && { info "dry run: nothing changed"; return 0; }
+    agamemnon_undo "$me" "$REPO_ROOT" || { bad "the pond did not move back"; return 1; }
+  else
+    local old_unit from busy rc=0
+    case "$D_SVC_SCOPE" in
+      user)   old_unit="$(systemctl --user show -p FragmentPath --value "$SERVICE_NAME" 2>/dev/null)" ;;
+      system)
+        if [ "$unit_user" = "$AGAMEMNON" ]; then ok "the pond already runs as $AGAMEMNON"; agamemnon_doctor system "$AGAMEMNON"; return 0; fi
+        [ "$unit_user" = "$me" ] || { bad "the service runs as ${unit_user:-root}; run this as that login"; return 1; }
+        old_unit="/etc/systemd/system/$SERVICE_NAME" ;;
+      BOTH)   bad "two units named $SERVICE_NAME exist; remove one first (menu 24)"; return 1 ;;
+      *)      bad "no service runs this pond yet; bash scripts/giap.sh install offers the account"; return 1 ;;
+    esac
+    from="$D_DATA_DIR"
+    busy="$(sqlite3 "$from/pond_system.db" "SELECT count(*) FROM long_tasks WHERE state IN ('planning','running');" 2>/dev/null)"
+    if [ "${busy:-0}" -gt 0 ] 2>/dev/null; then
+      warn "$busy long task(s) are running; the move restarts the pond, which redoes the step in flight"
+    fi
+    if systemctl --user cat giap-kiosk.service >/dev/null 2>&1; then
+      warn "this board's kiosk runs its voice loop and dashboard sign-in as $me; after the move it can do"
+      note "neither, because the pond's data and host credential belong to $AGAMEMNON. A phone's voice still works."
+    fi
+    info "This stops the pond, makes the locked account $AGAMEMNON (no password, no shell), moves"
+    info "$from to $AGAMEMNON_DATA (a link stays behind), and starts the pond as $AGAMEMNON."
+    info "Your login keeps reading the pond's data. Undo: bash scripts/giap.sh service-account undo"
+    confirm "Move the pond to $AGAMEMNON?" || return 1
+    [ "$DRY_RUN" = true ] && { info "dry run: nothing changed"; return 0; }
+    agamemnon_move "$D_SVC_SCOPE" "$old_unit" "$from" "$me" "$REPO_ROOT" || rc=$?
+    case "$rc" in
+      0) ;;
+      1) bad "nothing was moved; the pond runs as $me as before"; return 1 ;;
+      *) bad "the move stopped part way"; note "put it back: bash scripts/giap.sh service-account undo"; return 1 ;;
+    esac
+  fi
+  detect_all
+  await_health
+  agamemnon_doctor "$D_SVC_SCOPE" "$(connect_pond_user 2>/dev/null)"
+}
+
+# Waits up to a minute for the restarted pond to answer.
+await_health() {
+  local tries=0
+  detect_runtime
+  while [ "$DRY_RUN" != true ] && [ "$D_HEALTH" != "200" ] && [ $tries -lt 30 ]; do
+    sleep 2; tries=$((tries+1)); detect_runtime
+  done
+  if [ "$DRY_RUN" = true ] || [ "$D_HEALTH" = "200" ]; then ok "the pond is up (health 200)"; return 0; fi
+  bad "the pond did not answer its health check after the restart"; note "see: bash scripts/giap.sh logs"
+  return 1
 }
 
 action_jetson_power() {
@@ -1541,6 +1742,7 @@ show_menu() {
   say "  21) Start / 22) Stop / 23) Restart"
   say "  24) Remove the service"
   say "  25) Run the server in the foreground"
+  [ "$D_OS" = "linux" ] && say "  26) Run the pond as its own locked account ($AGAMEMNON), or move it back"
   say ""
   say "  ${C_B}Desktop${C_RST}"
   say "  31) Build the desktop app (macOS only)"
@@ -1548,6 +1750,7 @@ show_menu() {
   say ""
   say "  ${C_B}Observe${C_RST}"
   say "  40) Logs"
+  say "  41) Live console: stats, charts and logs for this machine and the Jetson"
   [ "$D_IS_JETSON" = true ] && say "  50) Jetson power, thermals and over-current"
   say ""
   say "   r) Re-run detection    d) Toggle dry-run (now: $DRY_RUN)    0) Quit"
@@ -1581,9 +1784,11 @@ menu_loop() {
       23) svc_ctl restart; detect_service; detect_runtime; pause ;;
       24) action_service_remove; pause ;;
       25) action_serve_foreground; pause ;;
+      26) if [ "$(agamemnon_unit_user)" = "$AGAMEMNON" ]; then action_service_account undo; else action_service_account; fi; pause ;;
       31) action_build_desktop; pause ;;
       32) action_launch_gui; pause ;;
       40) action_logs; pause ;;
+      41) console_main "" "" ;;
       50) action_jetson_power; pause ;;
       r|R) detect_all; ok "detection refreshed" ;;
       d|D) [ "$DRY_RUN" = true ] && DRY_RUN=false || DRY_RUN=true ;;
@@ -1602,8 +1807,9 @@ usage() {
 
 # ── entry ────────────────────────────────────────────────────────────────────
 # The first word is the command; only `litert` (a subcommand and a platform), `models`,
-# `onnxruntime` and `wifi-grant` (a subcommand) take more.
-CMD=""; CMD_SUB=""; CMD_ARG=""
+# `onnxruntime`, `wifi-grant`, `admin-card`, `service-account` (a subcommand) and `console` (a host)
+# take more.
+CMD=""; CMD_SUB=""; CMD_ARG=""; CONSOLE_ONCE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=true; shift ;;
@@ -1613,6 +1819,7 @@ while [ $# -gt 0 ]; do
     --install-deps) NODE_DEPS=true; shift ;;
     --method)  [ $# -ge 2 ] || { bad "--method needs a value"; exit 2; }; NODE_METHOD="$2"; shift 2 ;;
     --major)   [ $# -ge 2 ] || { bad "--major needs a value"; exit 2; }; NODE_MAJOR="$2"; shift 2 ;;
+    --once)    CONSOLE_ONCE=once; shift ;;
     -h|--help|help) usage; exit 0 ;;
     -*)        bad "unknown option: $1"; usage; exit 2 ;;
     provision) bad "provision takes only its own options and must come first: bash scripts/giap.sh provision --host HOST --key FILE"; exit 2 ;;
@@ -1626,7 +1833,7 @@ while [ $# -gt 0 ]; do
 done
 case "$CMD" in
   litert) ;;
-  models|wifi-grant|onnxruntime) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
+  models|wifi-grant|onnxruntime|console|admin-card|service-account) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
   *)      if [ -n "$CMD_SUB" ]; then bad "'$CMD' takes no arguments (got: $CMD_SUB)"; exit 2; fi ;;
 esac
 
@@ -1634,6 +1841,8 @@ esac
 # command runs on the right Node: if the shell's is outside the range, a recorded or already-installed
 # one is put first on PATH for this run, so the UI build and the tests use it whatever the shell says.
 if [ "$CMD" = node ]; then action_node; exit $?; fi
+# The console samples on its own, so it skips the full detection pass and opens at once.
+if [ "$CMD" = console ]; then console_main "$CMD_SUB" "$CONSOLE_ONCE"; exit $?; fi
 node_use_repo >/dev/null 2>&1
 D_NODE_NOTE="$NODE_USE_NOTE"; D_NODE_FROM="$NODE_USE_FROM"
 
@@ -1655,5 +1864,7 @@ case "$CMD" in
   onnxruntime) action_onnxruntime "$CMD_SUB" ;;
   models)    action_models "$CMD_SUB" ;;
   wifi-grant) action_wifi_grant "$CMD_SUB" ;;
+  admin-card) action_admin_card "$CMD_SUB" ;;
+  service-account) action_service_account "$CMD_SUB" ;;
   *)         bad "unknown command: $CMD"; usage; exit 1 ;;
 esac

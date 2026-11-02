@@ -5,6 +5,9 @@ import { Fragment, useState, type ReactElement, type ReactNode } from "react";
 import { InkBudget, InkButton, InkSegmented, InkSheet, InkStack, InkText } from "@jarida/ink/react";
 import { HubIco } from "../primitives/HubIco";
 import { HP_PATHS, micEl } from "../primitives/icons";
+import { AgentPrefillLine } from "../../agents/AgentPrefill";
+import { AgentSuggestions } from "../../agents/AgentSuggestions";
+import { requestOpenAgent } from "../../agents/openAgent";
 import { SuggestionChips } from "../primitives/SuggestionChips";
 import { SuggestionQueue } from "../primitives/SuggestionQueue";
 import { WeatherWidget } from "../primitives/WeatherWidget";
@@ -160,6 +163,8 @@ export function DashboardGrid({ onNavigate, onTalk, sessionId, onAsk }: Dashboar
         subtitle={quietLine}
       />
 
+      <AgentPrefillLine />
+
       {/* A plain stacking wrapper below 1101px (matches the three standing alone before this
           existed); at >=1101px it becomes the row that puts alerts beside the composer
           instead of under it, in the empty top-right the composer alone left behind.
@@ -171,6 +176,16 @@ export function DashboardGrid({ onNavigate, onTalk, sessionId, onAsk }: Dashboar
         <div className="dash__top-left">
           <HomeComposer onAsk={onAsk} onTalk={onTalk} />
           <SuggestionChips sessionId={sessionId} onAsk={onAsk} />
+          {/* Nothing until the pond has a template it can run; then one card, and the rest on Recipes.
+              Turning one on opens the builder on the new copy, so it hands that copy to Recipes first. */}
+          <AgentSuggestions
+            variant="home"
+            onEnabled={(recipe) => {
+              requestOpenAgent(recipe);
+              onNavigate("recipes");
+            }}
+            onSeeAll={() => onNavigate("recipes")}
+          />
         </div>
         <HomeAlerts onNavigate={onNavigate} />
       </div>
@@ -253,7 +268,7 @@ function ArrangeSheet({
   const addTo = 0;
 
   return (
-    <InkSheet open={open} onClose={onClose} title="Arrange Home" side="right">
+    <InkSheet open={open} onClose={onClose} title="Arrange Home" side="right" className="dash__sheet">
       <InkStack gap={4}>
         {layout.pages.map((cards, pageIndex) => (
           <section key={pageIndex}>
@@ -282,13 +297,7 @@ function ArrangeSheet({
                         disabled={i === 0}
                         aria-label={`Move ${c.title} up`}
                       >
-                        <HubIco
-                          d={HP_PATHS.chevD}
-                          size={18}
-                          color="var(--color-text)"
-                          sw={2.4}
-                          className="dash__up"
-                        />
+                        <HubIco d={HP_PATHS.chevD} size={18} sw={2.4} className="dash__up" />
                       </button>
                       <button
                         type="button"
@@ -297,7 +306,7 @@ function ArrangeSheet({
                         disabled={i === cards.length - 1}
                         aria-label={`Move ${c.title} down`}
                       >
-                        <HubIco d={HP_PATHS.chevD} size={18} color="var(--color-text)" sw={2.4} />
+                        <HubIco d={HP_PATHS.chevD} size={18} sw={2.4} />
                       </button>
                       <button
                         type="button"
@@ -306,7 +315,7 @@ function ArrangeSheet({
                         disabled={placed.length === 1}
                         aria-label={`Remove ${c.title} from Home`}
                       >
-                        <HubIco d={HP_PATHS.x} size={16} color="var(--color-text)" sw={2.4} />
+                        <HubIco d={HP_PATHS.x} size={16} sw={2.4} />
                       </button>
                     </div>
 

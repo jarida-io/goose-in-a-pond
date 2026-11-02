@@ -700,7 +700,7 @@ impl SetupSession {
                 "device resumed"
             ),
             (false, false) => tracing::warn!(
-                device,
+                named = device_name.is_some(),
                 method,
                 transport = TRANSPORT,
                 reason = reason_text,

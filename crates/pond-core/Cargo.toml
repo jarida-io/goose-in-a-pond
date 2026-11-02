@@ -19,6 +19,9 @@ async-stream = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
+# A parser, not a framework: an agent's schedule is refused at parse time, with the scheduler's
+# own settings, so a cron the scheduler would read differently never saves.
+croner = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

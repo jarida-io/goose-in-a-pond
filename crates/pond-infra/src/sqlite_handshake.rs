@@ -63,6 +63,10 @@ const MAX_PENDING_PAKE: usize = 256;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// What a paired client may rely on. `routines`: device-action routines and asking before a
+/// missed run, so the app shows those controls only to a pond that has them.
+pub const POND_CAPABILITIES: &[&str] = &["chat", "devices", "settings", "routines"];
+
 /// Process-local plaintext codes (only hashes persist), so a restart invalidates unused ones.
 static ISSUED_CODE_CACHE: Lazy<RwLock<HashMap<String, String>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
@@ -159,11 +163,7 @@ impl SqliteHandshakeAdapter {
             pake: Mutex::new(PakeState::default()),
             setup_claims: None,
             server_version: env!("CARGO_PKG_VERSION").to_string(),
-            capabilities: vec![
-                "chat".to_string(),
-                "devices".to_string(),
-                "settings".to_string(),
-            ],
+            capabilities: POND_CAPABILITIES.iter().map(|c| c.to_string()).collect(),
         }
     }
 
@@ -1537,6 +1537,7 @@ mod tests {
             .unwrap();
 
         assert!(resp.accepted);
+        assert!(resp.capabilities.iter().any(|c| c == "routines"));
         // A 'gotg' client still persists device_type='gotg' end to end.
         let (dtype,): (String,) = sqlx::query_as("SELECT device_type FROM devices WHERE id = ?")
             .bind("device-A")

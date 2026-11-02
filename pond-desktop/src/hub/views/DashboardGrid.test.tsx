@@ -175,7 +175,11 @@ describe("the arrange chrome", () => {
 
   /** `.wframe` is border-box, so min-heights belong on the body or the arrange padding eats them. */
   it("adds the toolbar lane above the card rather than out of it", () => {
-    expect(bodyOf(FRAME_CSS, ".wframe[data-arranging]")).toMatch(/padding:\s*48px/);
+    // In flow, so a toolbar that wraps to two rows pushes the card down instead of covering it.
+    expect(bodyOf(FRAME_CSS, ".wframe")).toMatch(/flex-direction:\s*column/);
+    expect(bodyOf(FRAME_CSS, ".wframe__bar")).not.toMatch(/position:\s*absolute/);
+    // Nothing lets a card shrink below its content while that content stays painted.
+    expect(bodyOf(FRAME_CSS, ".wframe__body > *")).not.toMatch(/min-height:\s*0/);
 
     const sized = rules(FRAME_CSS).filter((r) => /(^|;)\s*min-height\s*:/.test(r.body));
     expect(sized.length).toBeGreaterThan(0);

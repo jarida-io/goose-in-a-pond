@@ -51,6 +51,25 @@ pub struct AgentRequest {
     /// Grounding context when this turn was initiated from a suggestion card.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggestion_context: Option<crate::user_data::domain::suggestion::SuggestionContext>,
+    /// The research task the pond started for this turn because the member asked for deep
+    /// research, so the reply acknowledges it rather than answering the question itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deep_research_task: Option<DeepResearchTurn>,
+    /// This turn runs the speaker's setup interview: where it stands, for the turn's context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interview: Option<String>,
+}
+
+/// A research task started for this turn, and where it waits when others are ahead of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeepResearchTurn {
+    pub task_id: String,
+    /// What the prime tells the person about the line; `None` when the task runs at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<String>,
+    /// How long the answer is meant to be, so the prime promises what will come.
+    #[serde(default)]
+    pub answer: crate::shared::domain::long_task::AnswerShape,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +101,10 @@ pub enum AgentStreamEvent {
         /// block may become a card, so text a tool quotes from a web page can never forge one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         card: Option<String>,
+        /// What history keeps in place of `content` and `card` once the turn is over; `None`
+        /// keeps the result whole. Set from the tool's transient marker.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keep: Option<String>,
     },
     Text {
         content: String,
@@ -491,6 +514,8 @@ mod agent_request_scope_tests {
             tool_group_allowlist: None,
             warmup: false,
             suggestion_context: None,
+            deep_research_task: None,
+            interview: None,
         }
     }
 

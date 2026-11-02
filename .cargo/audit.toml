@@ -14,6 +14,13 @@ ignore = [
     # GIAP crypto is HMAC-SHA256 and sha256 hashes. Remove when rsa ships a fixed version.
     "RUSTSEC-2023-0071",
 
+    # crypto-bigint 0.5.5: timing variability in operations meant to be constant-time. Fixed
+    # only in 0.7.6, a new major. Reached only through pond-adapters-lightning (pond-server's
+    # optional `lightning` feature, off by default) via breez-sdk-spark's k256/elliptic-curve
+    # 0.13; breez-sdk-spark 0.27.2, its latest release, still locks 0.5.5. Remove when it moves
+    # to elliptic-curve 0.14. Review by 2027-01-31 (same date as osv-scanner.toml).
+    "RUSTSEC-2026-0387",
+
     # zip 8.6.0: three extraction-to-disk defects, all patched only in zip 9.0.0 (a new major)
     #   RUSTSEC-2026-0367  SUID/SGID bits preserved by extract()
     #   RUSTSEC-2026-0368  extract() creates symlinks whose targets leave the destination

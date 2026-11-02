@@ -1,6 +1,9 @@
-// What the web search setting says to a person: the wording of small-model-tools.md section 8.5.
+// What the web search setting says to a person: the wording of small-model-tools.md sections 8.5 and 8.10.5.
 
 import { ApiError, type WebSearchState, type WebSearchStatus } from "../api/types";
+
+/** What the pond reports about nearby places: the switch, and the town a search would send. */
+export type LocalResults = NonNullable<WebSearchState["local_results"]>;
 
 export const BRAVE_DASHBOARD_HOST = "api-dashboard.search.brave.com";
 export const BRAVE_DASHBOARD_URL = `https://${BRAVE_DASHBOARD_HOST}`;
@@ -17,6 +20,31 @@ export const STATUS_LINES: Record<WebSearchStatus, { label: string; tone: Status
   quota: { label: "This month's free searches are used up", tone: "warn" },
   unverified: { label: "Saved, not yet checked", tone: "muted" },
 };
+
+export const NEARBY_LABEL = "Nearby places";
+
+export const NEARBY_OLD_POND =
+  "This pond cannot look for nearby places yet. Update the pond, then open this screen again.";
+
+export const NEARBY_FAILED = "Could not save this setting. Try again in a moment.";
+
+export const NEARBY_SET_LOCATION = "Set your location";
+
+/** What leaves the house when the switch is on, said before it is turned: the town, and no more. */
+export function nearbyDescription(town: string | null, enabled: boolean): string {
+  if (town) {
+    return `Sends your town (${town}) to Brave with each search, so it can find places near you. Your exact location is never sent.`;
+  }
+  return enabled
+    ? "Your location is not set, so no town is sent. Set it in Settings, under Account and Home, then Location."
+    : "Needs your location first. Set it in Settings, under Account and Home, then Location, and come back to turn this on.";
+}
+
+/** The privacy line's second sentence, only while a search would carry the town. */
+export function townSentence(local: LocalResults | null): string | null {
+  if (!local?.enabled || !local.town) return null;
+  return `Each web search sends ${local.town} to Brave, so the results can include places near you.`;
+}
 
 export const KEY_REFUSED = "Brave did not accept this key.";
 
@@ -37,17 +65,32 @@ export function isWebSearchStatus(value: unknown): value is WebSearchStatus {
   return typeof value === "string" && STATUSES.includes(value);
 }
 
+/** The nearby-places report, or undefined from a pond that predates it. A blank town is no town. */
+function readLocalResults(raw: unknown): LocalResults | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const { enabled, town } = raw as { enabled?: unknown; town?: unknown };
+  if (typeof enabled !== "boolean") return undefined;
+  const name = typeof town === "string" ? town.trim() : "";
+  return { enabled, town: name === "" ? null : name };
+}
+
 /**
  * The setting from a reply, or null when it is not one (`request` returns undefined for an empty
  * body and for an older pond's web page). An unknown status is read from `configured`.
  */
 export function readWebSearchState(raw: unknown): WebSearchState | null {
   if (typeof raw !== "object" || raw === null) return null;
-  const { configured, status } = raw as { configured?: unknown; status?: unknown };
+  const { configured, status, local_results } = raw as {
+    configured?: unknown;
+    status?: unknown;
+    local_results?: unknown;
+  };
   if (typeof configured !== "boolean") return null;
-  if (!configured) return { provider: "brave", configured, status: "not_configured" };
+  const local = readLocalResults(local_results);
+  const withLocal = local ? { local_results: local } : {};
+  if (!configured) return { provider: "brave", configured, status: "not_configured", ...withLocal };
   const known = isWebSearchStatus(status) && status !== "not_configured" ? status : "unverified";
-  return { provider: "brave", configured, status: known };
+  return { provider: "brave", configured, status: known, ...withLocal };
 }
 
 /** What went wrong and what to do about it, never a server code. */

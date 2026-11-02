@@ -228,8 +228,7 @@ impl SqliteFaceRecognition {
             None => Err(anyhow!("no face detected in image")),
             Some(face) => {
                 let min_face_px = min_detected_face_px();
-                if face.bbox.width < min_face_px || face.bbox.height < min_face_px
-                {
+                if face.bbox.width < min_face_px || face.bbox.height < min_face_px {
                     return Err(anyhow!(
                         "detected face too small ({}×{} px); move closer to the camera",
                         face.bbox.width,

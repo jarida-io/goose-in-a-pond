@@ -25,7 +25,12 @@ function withState(ui: ReactNode) {
 }
 
 function pondAnswers() {
-  m.getWebSearch.mockResolvedValue({ provider: "brave", configured: false, status: "not_configured" });
+  m.getWebSearch.mockResolvedValue({
+    provider: "brave",
+    configured: false,
+    status: "not_configured",
+    local_results: { enabled: false, town: "Nairobi" },
+  });
   m.listContextSources.mockResolvedValue({ sources: [] });
   m.listProfiles.mockResolvedValue({ profiles: [] });
   m.uberAccounts.mockResolvedValue({ connected: [] });
@@ -48,6 +53,7 @@ describe("web search is on both surfaces", () => {
     expect(screen.getByRole("heading", { name: "Your accounts" })).toBeTruthy();
     expect(await screen.findByText("Off")).toBeTruthy();
     expect(screen.getByLabelText("Brave Search key")).toBeTruthy();
+    expect(screen.getByRole("switch", { name: "Nearby places" }).getAttribute("aria-checked")).toBe("false");
   });
 
   it("hub: on the Accounts screen, whose subtitle says so", async () => {
@@ -61,5 +67,6 @@ describe("web search is on both surfaces", () => {
     ).toBeTruthy();
     expect(await screen.findByText("Off")).toBeTruthy();
     expect(screen.getByLabelText("Brave Search key")).toBeTruthy();
+    expect(screen.getByRole("switch", { name: "Nearby places" }).getAttribute("aria-checked")).toBe("false");
   });
 });

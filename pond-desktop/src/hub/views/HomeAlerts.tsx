@@ -6,7 +6,7 @@
 import { useEffect, useState } from "react";
 import { InkButton, InkCard } from "@jarida/ink/react";
 import { api } from "../../api/PondApiClient";
-import { timeSince } from "../../sections/Devices";
+import { timeSince } from "../../sections/timeSince";
 import { useHomeData } from "../state/hubDataStore";
 import { nextDueTonight } from "../state/routines";
 import type { Device, Schedule } from "../../api/types";

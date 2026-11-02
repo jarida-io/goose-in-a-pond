@@ -12,6 +12,7 @@ use pond_api::build_router;
 use pond_api::web_search::WebSearchBackend;
 use pond_core::mcp::services::web_search_status::WebSearchStatusBoard;
 use pond_core::security::ports::secret::SecretRepository;
+use pond_core::user_data::ports::settings::SettingsRepository;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 use wiremock::matchers::{header, method, path, query_param};
@@ -22,6 +23,7 @@ const KEY_NAME: &str = "BRAVE_SEARCH_API_KEY";
 struct Pond {
     router: axum::Router,
     secrets: Arc<pond_infra::file_secret_repository::FileSecretRepository>,
+    settings: Arc<pond_infra::sqlite_settings::SqliteSettingsRepository>,
     _dir: tempfile::TempDir,
 }
 
@@ -36,8 +38,12 @@ async fn pond(brave_base: &str) -> Pond {
     );
     let handshake = Arc::new(pond_infra::mock_handshake::MockHandshake::new());
     handshake.add_valid_token("desktop-token".to_string()).await;
+    let settings = Arc::new(pond_infra::sqlite_settings::SqliteSettingsRepository::new(
+        state.db.system.clone(),
+    ));
     let state = Arc::new(pond_api::AppState {
         secret_repo: Some(secrets.clone()),
+        settings_repo: settings.clone(),
         handshake,
         ..state
     });
@@ -51,6 +57,7 @@ async fn pond(brave_base: &str) -> Pond {
     Pond {
         router,
         secrets,
+        settings,
         _dir: dir,
     }
 }
@@ -119,7 +126,12 @@ async fn with_no_key_web_search_is_off() {
     let pond = pond("http://127.0.0.1:1").await;
     assert_eq!(
         state_of(&pond).await,
-        json!({"provider": "brave", "configured": false, "status": "not_configured"})
+        json!({
+            "provider": "brave",
+            "configured": false,
+            "status": "not_configured",
+            "local_results": {"enabled": false, "town": null},
+        })
     );
 }
 
@@ -144,7 +156,12 @@ async fn a_key_brave_accepts_is_stored_and_reported_ok_but_never_returned() {
     let shown = state_of(&pond).await;
     assert_eq!(
         shown,
-        json!({"provider": "brave", "configured": true, "status": "ok"})
+        json!({
+            "provider": "brave",
+            "configured": true,
+            "status": "ok",
+            "local_results": {"enabled": false, "town": null},
+        })
     );
     assert!(!shown.to_string().contains("good-key-123"));
 }
@@ -270,7 +287,12 @@ async fn removing_the_key_turns_web_search_off() {
     assert_eq!(pond.secrets.get(KEY_NAME).await.unwrap(), None);
     assert_eq!(
         state_of(&pond).await,
-        json!({"provider": "brave", "configured": false, "status": "not_configured"})
+        json!({
+            "provider": "brave",
+            "configured": false,
+            "status": "not_configured",
+            "local_results": {"enabled": false, "town": null},
+        })
     );
 }
 
@@ -339,5 +361,49 @@ async fn the_key_check_never_follows_a_redirect() {
     assert_eq!(
         serde_json::from_str::<Value>(&body).unwrap(),
         json!({"configured": true, "status": "unverified"})
+    );
+}
+
+/// Local places are off until switched on through the settings route, and the town the status
+/// reports is the stored place name's first part, whether or not it is being sent.
+#[tokio::test]
+async fn local_places_are_reported_off_by_default_and_follow_the_settings_switch() {
+    let pond = pond("http://127.0.0.1:1").await;
+    pond.settings
+        .set_key("weather_location_name", "Nairobi, Kenya".to_string())
+        .await
+        .unwrap();
+    assert_eq!(
+        state_of(&pond).await["local_results"],
+        json!({"enabled": false, "town": "Nairobi"})
+    );
+
+    let (status, body) = call(
+        &pond.router,
+        Method::PUT,
+        "/api/v1/settings",
+        Some(json!({"web_search_local_results": true})),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        state_of(&pond).await["local_results"],
+        json!({"enabled": true, "town": "Nairobi"})
+    );
+    assert!(pond.settings.get().await.unwrap().web_search_local_results);
+
+    let (status, body) = call(
+        &pond.router,
+        Method::PUT,
+        "/api/v1/settings",
+        Some(json!({"web_search_local_results": false})),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        state_of(&pond).await["local_results"],
+        json!({"enabled": false, "town": "Nairobi"})
     );
 }

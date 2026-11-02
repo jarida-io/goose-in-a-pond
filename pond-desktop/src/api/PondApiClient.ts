@@ -3,15 +3,18 @@ import {
   ApiError,
   type AddExtensionRequest,
   type AgentRecipe,
+  type AgentSuggestion,
   type AgentTool,
   type CalibrateResponse,
   type ChallengeResponse,
   type ChatEvent,
   type ChatStreamRequest,
+  type ResearchAnswer,
   type CleanupResponse,
   type CompactionReport,
   type ContextIndexHealth,
   type ContextIndexRebuild,
+  type DeepResearchAvailability,
   type LaneRunResult,
   type LaneStatus,
   type AccountSyncSummary,
@@ -39,13 +42,21 @@ import {
   type MeshPeerCapabilities,
   type MeshSettlementStatus,
   type MeshSelf,
+  type LongTask,
+  type LongTaskArtifactBody,
+  type LongTaskExportFormat,
+  type LongTaskReport,
+  type LongTaskSource,
   type ModelActiveRoles,
   type ModelEntry,
   type ModelEngine,
   type ModelMemoryStatus,
   type OllamaModel,
+  type PairingCodeBinding,
   type PairingCodeResponse,
+  type PrefillReport,
   type PromptTemplate,
+  type RecipeValidation,
   type RetitleOneResult,
   type RetitleResult,
   type Schedule,
@@ -76,6 +87,7 @@ import {
   type ZoneChoice,
   type DetectedPlace,
 } from "./types";
+import { filenameFromDisposition } from "../lib/saveFile";
 import { voiceTitle } from "../voice/voiceCatalogue";
 import { parseSse, type SseFrame } from "../player/sse";
 import type { PlayerReply, PlayerState } from "../player/types";
@@ -125,6 +137,33 @@ const COMMISSION_TIMEOUT_MS = 190_000;
 /** A scan answers within 15s and a join within 45s; the margin lets the server's refusal arrive first. */
 const WIFI_SCAN_TIMEOUT_MS = 20_000;
 const WIFI_JOIN_TIMEOUT_MS = 60_000;
+
+/** Whether an error body carries the pond's own `error` sentence, which an unknown route's 404 does not. */
+function hasErrorSentence(body: unknown): boolean {
+  return typeof body === "object" && body !== null && typeof (body as { error?: unknown }).error === "string";
+}
+
+function isSource(value: unknown): value is LongTaskSource {
+  const v = value as Partial<LongTaskSource> | null;
+  return typeof v === "object" && v !== null && typeof v.url === "string" && typeof v.title === "string";
+}
+
+/** What the pond answered, in the report's shape, or `null` for an answer that is not a report. */
+function readReport(answer: unknown, id: string): LongTaskReport | null {
+  if (typeof answer !== "object" || answer === null) return null;
+  const r = answer as Record<string, unknown>;
+  if (typeof r.markdown !== "string") return null;
+  return {
+    id: typeof r.id === "string" ? r.id : id,
+    title: typeof r.title === "string" && r.title.trim() !== "" ? r.title : "Report",
+    state: r.state as LongTaskReport["state"],
+    kind: r.kind === "research" ? "research" : "general",
+    markdown: r.markdown,
+    sections: typeof r.sections === "number" ? r.sections : 0,
+    sources: Array.isArray(r.sources) ? r.sources.filter(isSource) : [],
+    calendar_events: typeof r.calendar_events === "number" ? r.calendar_events : 0,
+  };
+}
 
 export class PondApiClient {
   /** Mutable: the shell can correct this when the sidecar binds a fallback port. */
@@ -1340,12 +1379,17 @@ export class PondApiClient {
     );
   }
 
-  /** Issue a fresh pairing code, replacing any existing one. Host-only. */
-  issuePairingCode(): Promise<PairingCodeResponse> {
+  /**
+   * Issue a fresh pairing code, replacing any existing one. Host-only.
+   *
+   * `binding` decides whose the device that pairs with it becomes. Omitted, the Pond decides: a
+   * household of one binds to that member, any other binds to nobody.
+   */
+  issuePairingCode(binding?: PairingCodeBinding): Promise<PairingCodeResponse> {
     return this.handshakeFetch<PairingCodeResponse>(
       "POST",
       "/api/v1/handshake/pairing-code",
-      undefined,
+      binding,
       true,
     );
   }
@@ -1557,6 +1601,7 @@ export class PondApiClient {
               images: m.images as SessionMessage["images"],
               // As sent: absent and `[]` mean different things.
               thinking: m.thinking as SessionMessage["thinking"],
+              transient: m.transient === true ? true : undefined,
               liked: m.liked as boolean | null | undefined,
             }) satisfies Record<keyof SessionMessage, unknown>,
         );
@@ -1663,6 +1708,116 @@ export class PondApiClient {
     return this.del(`/api/v1/recipes/${encodeURIComponent(id)}`);
   }
 
+  /** This conversation's long tasks, newest first; without a session, every task the caller reaches. 404 on an older pond. */
+  async listLongTasks(sessionId?: string | null): Promise<LongTask[]> {
+    const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
+    const r = await this.get<LongTask[] | undefined>(`/api/v1/long-tasks${query}`);
+    return Array.isArray(r) ? r : [];
+  }
+
+  /**
+   * Whether the pond can run deep research for this caller. `null` from an older pond, which has no
+   * such route (or answers a page that is not JSON), so the caller hides the item rather than guess.
+   */
+  async getDeepResearchAvailability(): Promise<DeepResearchAvailability | null> {
+    let answer: unknown;
+    try {
+      answer = await this.get<unknown>("/api/v1/long-tasks/deep-research");
+    } catch (e) {
+      if (e instanceof ApiError && (e.status === 404 || e.status === 405 || e.status === 501)) return null;
+      throw e;
+    }
+    if (typeof answer !== "object" || answer === null) return null;
+    const { available, reason } = answer as { available?: unknown; reason?: unknown };
+    if (available === true) return { available: true };
+    // Any reason but "unidentified", including one a newer pond adds, hides the item.
+    if (available === false) return { available: false, reason: reason === "unidentified" ? "unidentified" : "off" };
+    return null;
+  }
+
+  /** One task, its steps and its artifacts. 404 for a task the caller does not reach. */
+  getLongTask(id: string): Promise<LongTask> {
+    return this.get(`/api/v1/long-tasks/${encodeURIComponent(id)}`);
+  }
+
+  /**
+   * A task's whole report, joined from its sections. `null` from an older pond, which has no such
+   * route (a 404 that says nothing in JSON, or a 405) or answers something that is not a report.
+   * A 403 or a 404 with the pond's own sentence is a refusal, and throws.
+   */
+  async getLongTaskReport(id: string): Promise<LongTaskReport | null> {
+    let answer: unknown;
+    try {
+      answer = await this.get<unknown>(`/api/v1/long-tasks/${encodeURIComponent(id)}/report`);
+    } catch (e) {
+      if (e instanceof ApiError && (e.status === 405 || (e.status === 404 && !hasErrorSentence(e.body)))) return null;
+      throw e;
+    }
+    return readReport(answer, id);
+  }
+
+  /**
+   * The report as a file. Fetched here because the route needs the bearer token, which a plain
+   * link can't send. `filename` is the pond's, when the browser lets the page read its header.
+   */
+  async getLongTaskExport(id: string, format: LongTaskExportFormat): Promise<{ blob: Blob; filename: string | null }> {
+    const res = await this.send("GET", `/api/v1/long-tasks/${encodeURIComponent(id)}/export?format=${format}`, undefined, 60_000);
+    return { blob: await res.blob(), filename: filenameFromDisposition(res.headers.get("content-disposition")) };
+  }
+
+  /** An artifact's whole body, for "Read the result". */
+  getLongTaskArtifact(id: string, artifactId: string): Promise<LongTaskArtifactBody> {
+    return this.get(`/api/v1/long-tasks/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(artifactId)}`);
+  }
+
+  /** Stops a task; a step already under way finishes first. 409 if it has already ended. */
+  async cancelLongTask(id: string): Promise<void> {
+    await this.post(`/api/v1/long-tasks/${encodeURIComponent(id)}/cancel`);
+  }
+
+  /** Whether the pond is building agents' start-up copies now, and where each stands. 404 on an older pond. */
+  getAgentPrefills(): Promise<PrefillReport> {
+    return this.get("/api/v1/agents/prefills");
+  }
+
+  /** Throws the old copy away; the pond rebuilds it at its next quiet moment. 404 for an unknown agent. */
+  async rebuildAgentPrefill(name: string): Promise<void> {
+    await this.post(`/api/v1/agents/${encodeURIComponent(name)}/prefill/rebuild`);
+  }
+
+  /** The same for every agent. */
+  async rebuildAllPrefills(): Promise<void> {
+    await this.post("/api/v1/agents/prefills/rebuild");
+  }
+
+  /** Agent templates this pond could run, none switched on. A dismissed one is not listed again. */
+  async listAgentSuggestions(): Promise<AgentSuggestion[]> {
+    const r = await this.get<AgentSuggestion[] | { suggestions?: AgentSuggestion[] }>("/api/v1/agents/suggestions");
+    return Array.isArray(r) ? r : (r?.suggestions ?? []);
+  }
+
+  /** Copies the template into the household's recipes, owned by the member who asked. 409 if it already is. */
+  async enableAgentSuggestion(template: string): Promise<{ recipe: AgentRecipe }> {
+    const r = await this.post<AgentRecipe | { recipe: AgentRecipe }>(
+      `/api/v1/agents/suggestions/${encodeURIComponent(template)}/enable`,
+    );
+    // The route answers with the recipe itself; a wrapped one is read the same.
+    return r && typeof r === "object" && "recipe" in r ? { recipe: r.recipe } : { recipe: r as AgentRecipe };
+  }
+
+  /** The card stays hidden for good. */
+  dismissAgentSuggestion(template: string): Promise<void> {
+    return this.post(`/api/v1/agents/suggestions/${encodeURIComponent(template)}/dismiss`);
+  }
+
+  /** Checks an agent's `giap_role` block without saving; a refused block is an answer, not an error. */
+  validateRecipe(yaml: string, name?: string): Promise<RecipeValidation> {
+    return this.post("/api/v1/recipes/validate", {
+      yaml,
+      ...(name ? { name } : {}),
+    });
+  }
+
   // ── Chat streaming ────────────────────────────────────────
 
   async *chatStream(
@@ -1672,6 +1827,8 @@ export class PondApiClient {
     canvasMode?: boolean,
     images?: ImageAttachment[],
     resumable?: boolean,
+    deepResearch?: boolean,
+    deepResearchAnswer?: ResearchAnswer,
   ): AsyncGenerator<ChatEvent> {
     const reqBody: ChatStreamRequest = {
       message,
@@ -1681,6 +1838,10 @@ export class PondApiClient {
       ...(images && images.length > 0 ? { images } : {}),
       // Only when asked, so other bodies stay unchanged.
       ...(resumable ? { resumable: true } : {}),
+      ...(deepResearch ? { deep_research: true } : {}),
+      ...(deepResearch && deepResearchAnswer && deepResearchAnswer !== "auto"
+        ? { deep_research_answer: deepResearchAnswer }
+        : {}),
     };
     yield* this.streamSse("/api/v1/chat/stream", reqBody, token);
   }

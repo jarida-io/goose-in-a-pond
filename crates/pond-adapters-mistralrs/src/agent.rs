@@ -454,10 +454,10 @@ impl Agent for MistralRsAgent {
                     });
 
                     pond_core::shared::services::egress::set_current_tool(&call.name);
-                    let content = match disp.dispatch(&call.name, args).await {
-                        Ok(r) => r.content,
+                    let (content, keep) = match disp.dispatch(&call.name, args).await {
+                        Ok(r) => (r.content, r.keep),
                         // A failed tool is a result the model can react to, not a dead turn.
-                        Err(e) => format!("Tool '{}' failed: {}", call.name, e),
+                        Err(e) => (format!("Tool '{}' failed: {}", call.name, e), None),
                     };
                     pond_core::shared::services::egress::set_current_tool("");
 
@@ -466,6 +466,7 @@ impl Agent for MistralRsAgent {
                         tool: call.name.clone(),
                         content: content.clone(),
                         card: None,
+                        keep,
                     });
                     messages.push(ChatMessage::tool_result(content, call.id.clone()));
                 }

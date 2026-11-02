@@ -83,8 +83,10 @@ pub fn split_speech_units(text: &str, allow_clauses: bool) -> (Vec<String>, Stri
             if is_terminal || is_clause {
                 let prefix = &remainder[..i];
                 if ch == ',' {
-                    let prev_is_digit =
-                        prefix.chars().next_back().is_some_and(|c| c.is_ascii_digit());
+                    let prev_is_digit = prefix
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c.is_ascii_digit());
                     let next_is_digit = remainder[i + 1..]
                         .chars()
                         .next()
@@ -95,8 +97,10 @@ pub fn split_speech_units(text: &str, allow_clauses: bool) -> (Vec<String>, Stri
                 }
 
                 if ch == ':' {
-                    let prev_is_digit =
-                        prefix.chars().next_back().is_some_and(|c| c.is_ascii_digit());
+                    let prev_is_digit = prefix
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c.is_ascii_digit());
                     let next_is_digit = remainder[i + 1..]
                         .chars()
                         .next()
@@ -107,8 +111,10 @@ pub fn split_speech_units(text: &str, allow_clauses: bool) -> (Vec<String>, Stri
                 }
 
                 if ch == '.' {
-                    let prev_is_digit =
-                        prefix.chars().next_back().is_some_and(|c| c.is_ascii_digit());
+                    let prev_is_digit = prefix
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c.is_ascii_digit());
                     let next_is_digit = remainder[i + 1..]
                         .chars()
                         .next()
@@ -742,7 +748,11 @@ pub fn normalize_for_speech(text: &str) -> String {
                     continue;
                 } else if after >= len || !chars[after].is_alphabetic() {
                     out.push_str("Kenyan shillings");
-                    i = if after < len && chars[after] == '.' { after + 1 } else { after };
+                    i = if after < len && chars[after] == '.' {
+                        after + 1
+                    } else {
+                        after
+                    };
                     continue;
                 }
             }
@@ -931,7 +941,10 @@ pub fn read_number(chars: &[char], start: usize) -> (String, usize) {
             && chars.get(j + 1).map_or(false, |c| c.is_ascii_digit())
             && chars.get(j + 2).map_or(false, |c| c.is_ascii_digit())
             && chars.get(j + 3).map_or(false, |c| c.is_ascii_digit())
-            && (j + 4 >= chars.len() || !chars[j + 4].is_ascii_digit() || chars[j + 4] == '.' || chars[j + 4] == ',')
+            && (j + 4 >= chars.len()
+                || !chars[j + 4].is_ascii_digit()
+                || chars[j + 4] == '.'
+                || chars[j + 4] == ',')
         {
             // Thousands separator comma between digits: e.g. 1,000 or 1,250,000
             j += 1;

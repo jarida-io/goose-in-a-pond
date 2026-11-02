@@ -422,6 +422,8 @@ pub struct GooseAdapter {
     group_embeddings: tokio::sync::OnceCell<Vec<(String, Vec<f32>)>>,
     /// In-process picture support: the one state every vision path shares.
     pictures: Arc<crate::vision_encoder::PictureSupport>,
+    /// Keeps transient tool results out of goose's store once their turn is over.
+    transient_sweeps: crate::transient_history::TransientSweeps,
 }
 
 /// Byte cap on a buffered reasoning passage (memory bound); crossing it splits, never drops.
@@ -539,6 +541,7 @@ impl GooseAdapter {
             session_permitted_groups: tokio::sync::RwLock::new(HashMap::new()),
             group_embeddings: tokio::sync::OnceCell::new(),
             pictures: Arc::new(crate::vision_encoder::PictureSupport::new()),
+            transient_sweeps: crate::transient_history::TransientSweeps::default(),
         })
     }
 
@@ -2197,25 +2200,35 @@ impl GooseAdapter {
             .collect()
     }
 
-    /// Caps history images that keep pixels; the pending turn's image isn't in history yet.
-    /// Writes nothing when within the cap: `replace_conversation` rewrites every row to eMMC.
-    async fn cap_history_images(&self, goose_sid: &str) {
+    /// Before the turn's first reply: reduces any transient tool result an earlier turn left
+    /// (a crash, a cancel the sweep missed) to its stub, and caps history images that keep
+    /// pixels; the pending turn's image isn't in history yet. One write for both, and none when
+    /// nothing changes: `replace_conversation` rewrites every row to eMMC.
+    async fn rewrite_history_at_turn_start(
+        &self,
+        goose_sid: &str,
+        sweep: &crate::transient_history::TurnSweep,
+    ) {
         use pond_core::models::services::context::image_history::history_image_placeholder;
 
+        let _held = sweep.lock().await;
         let Ok(session) = self.session_manager.get_session(goose_sid, true).await else {
             return;
         };
         let Some(conversation) = session.conversation else {
             return;
         };
-        let source: Vec<Message> = conversation.messages().clone();
+        let (source, redacted) = match crate::transient_history::redact(conversation.messages()) {
+            Some((messages, redacted)) => (messages, redacted),
+            None => (conversation.messages().clone(), 0),
+        };
         if source.is_empty() {
             return;
         }
 
         // Tool-part messages are never rewritten: providers reject re-keyed tool responses.
         let (had, keep, dropped) = plan_image_cap(&source);
-        if dropped == 0 {
+        if dropped == 0 && redacted == 0 {
             return;
         }
 
@@ -2237,17 +2250,23 @@ impl GooseAdapter {
             .replace_conversation(goose_sid, &capped)
             .await
         {
-            // Non-fatal: a failed cap costs encoder time, never the turn.
-            tracing::warn!("image cap: replacing the conversation failed: {e}");
+            // Non-fatal: a failed cap costs encoder time, and a missed stub is retried at the
+            // next turn's start; neither costs this turn.
+            tracing::warn!("history rewrite: replacing the conversation failed: {e}");
             return;
         }
-        tracing::info!(
-            target: "giap::trace",
-            kind = "image_cap",
-            goose_sid = %goose_sid,
-            dropped,
-            "capped historical images"
-        );
+        if redacted > 0 {
+            crate::transient_history::note_redacted(goose_sid, "turn_start", redacted);
+        }
+        if dropped > 0 {
+            tracing::info!(
+                target: "giap::trace",
+                kind = "image_cap",
+                goose_sid = %goose_sid,
+                dropped,
+                "capped historical images"
+            );
+        }
     }
 
     /// Engine → GIAP session id: goose's `agent-session-id` is all an MCP tool can trust.
@@ -2666,9 +2685,27 @@ impl GooseAdapter {
 
         // Outside prefix_hash by design; <extension-notes> sets it apart from core prompt sections.
         // Checked and escaped again here: rows saved before the write rules may break them.
-        if let Ok(extras) = extras_result {
-            shim_appendix.extend(render_extension_notes(&extras));
+        let household_extras = extras_result.unwrap_or_default();
+        shim_appendix.extend(render_extension_notes(&household_extras));
+        // Every turn of an interview's session is one, so its standing rules prefill once there.
+        if request.interview.is_some() {
+            shim_appendix
+                .push(pond_core::user_data::domain::profile_interview::INTERVIEW_RULES.to_string());
         }
+
+        // The speaker's own notes ride their turn once per conversation, never the shared prefix.
+        let member_notes_for_user_msg = match request.profile_context.as_ref() {
+            Some(profile) if !profile.member_notes.is_empty() => {
+                let earlier = self.earlier_user_texts(&goose_sid).await;
+                pond_core::user_data::domain::prompt_extra::member_notes_block(
+                    &household_extras,
+                    &profile.member_notes,
+                    &earlier,
+                )
+                .unwrap_or_default()
+            }
+            _ => String::new(),
+        };
 
         // Only name + description per turn; `giap-device__load_skill` fetches the rest on demand.
         // The same text feeds tool selection (6c), so a skill can pull in the groups it needs.
@@ -2917,7 +2954,8 @@ impl GooseAdapter {
         let mut dormant_groups_note = String::new();
         // Entitlement (all it could widen to; bounds delegation). `None` in "all" mode.
         let mut entitled_tools: Option<HashSet<String>> = None;
-        let allowed_tools = if settings.tool_selection_narrows() {
+        // An interview turn is narrowed to the interview's own group below, which no selection loads.
+        let allowed_tools = if settings.tool_selection_narrows() && request.interview.is_none() {
             let groups = self
                 .resolve_session_tool_groups(
                     &session_id,
@@ -2987,8 +3025,10 @@ impl GooseAdapter {
         ));
         // Standing too: the CURRENT CONTEXT line is news each turn, the rule for reading it is not.
         shim_appendix.push(pond_core::models::services::prompt_builder::TEMPORAL_RULE.to_string());
-        shim_appendix.push(
-            "VISION, CAMERAS, SCHEDULES & REMINDERS:\n\
+        // An interview turn holds none of these tools.
+        if request.interview.is_none() {
+            shim_appendix.push(
+                "VISION, CAMERAS, SCHEDULES & REMINDERS:\n\
              - Camera feed & face annotations (`giap-vision`, TEXT-FIRST): \
                1) Call `get_recent_camera_events` FIRST for who is in the room, recent activity, \
                or historical face sightings — it returns live face/motion/person detections as \
@@ -3009,8 +3049,9 @@ impl GooseAdapter {
                `update_schedule` / `schedule_action` (`delete` | `pause` | `resume` | `run_now`) \
                to inspect or control them. If a group is listed under ADDITIONAL CAPABILITIES, \
                enable it first with `giap-device__enable_capability_group`."
-                .to_string(),
-        );
+                    .to_string(),
+            );
+        }
         // Appendix, not envelope: it only changes with the tools block, so it's prefilled once.
         if !dormant_groups_note.is_empty() {
             shim_appendix.push(dormant_groups_note.clone());
@@ -3050,7 +3091,8 @@ impl GooseAdapter {
         };
 
         // Same subtraction for the entitlement: the delegation authority is built from it.
-        let entitled_tools = entitled_tools.map(|tools| {
+        // Named, not inferred from later use: on macOS that inference overflows through objc2's impls.
+        let entitled_tools: Option<HashSet<String>> = entitled_tools.map(|tools| {
             if turn_scope.excludes_everything() {
                 pond_core::mcp::services::tool_selection::subtract_guest_denied_tools(tools.iter())
                     .into_iter()
@@ -3059,6 +3101,31 @@ impl GooseAdapter {
                 tools
             }
         });
+
+        // A long task's work tools belong to its helpers alone: a turn has no step to work on.
+        let allowed_tools: HashSet<String> =
+            pond_core::mcp::services::tool_selection::subtract_helper_only_tools(
+                allowed_tools.iter(),
+            )
+            .into_iter()
+            .collect();
+        let entitled_tools: Option<HashSet<String>> = entitled_tools.map(|tools| {
+            pond_core::mcp::services::tool_selection::subtract_helper_only_tools(tools.iter())
+                .into_iter()
+                .collect()
+        });
+        // The interview's tools belong to its own turns; anywhere else they could reach notes.
+        let (allowed_tools, entitled_tools) = if request.interview.is_some() {
+            (allowed_tools, entitled_tools)
+        } else {
+            use pond_core::mcp::services::tool_selection::without_interview_tools;
+            (
+                without_interview_tools(allowed_tools.iter())
+                    .into_iter()
+                    .collect(),
+                entitled_tools.map(|t| without_interview_tools(t.iter()).into_iter().collect()),
+            )
+        };
 
         // A recipe's YAML `extensions:` narrow this turn to those groups, in every mode.
         let allowed_tools = if let Some(allowlist) = &request.tool_group_allowlist {
@@ -3164,8 +3231,22 @@ impl GooseAdapter {
                 msg.push_str(&sc.render_envelope());
                 msg.push('\n');
             }
+            if let Some(ref research) = request.deep_research_task {
+                msg.push_str(&pond_core::shared::services::deep_research::turn_note(
+                    research,
+                ));
+                msg.push('\n');
+            }
             if !dynamic_suffix_for_user_msg.is_empty() {
                 msg.push_str(&dynamic_suffix_for_user_msg);
+                msg.push('\n');
+            }
+            if let Some(ref interview) = request.interview {
+                msg.push_str(interview);
+                msg.push('\n');
+            }
+            if !member_notes_for_user_msg.is_empty() {
+                msg.push_str(&member_notes_for_user_msg);
                 msg.push('\n');
             }
             if !memory_block_for_user_msg.is_empty() {
@@ -3199,10 +3280,15 @@ impl GooseAdapter {
         // Live handle for the tool-call guard inside the 'static stream closure.
         let guard_controls = session_controls.clone();
 
-        // ── History image cap ────────────────────────────────────────────
+        // ── History rewrite ──────────────────────────────────────────────
         // Goose owns compaction; the image cap stays because each replayed image re-runs the
-        // mmproj encoder (0.7-2.7 s), a cost goose can't see.
-        self.cap_history_images(&goose_sid).await;
+        // mmproj encoder (0.7-2.7 s), a cost goose can't see. The sweep travels with the stream
+        // and clears this turn's transient results however the turn ends.
+        let turn_sweep = self
+            .transient_sweeps
+            .begin(&goose_sid, self.session_manager.clone());
+        self.rewrite_history_at_turn_start(&goose_sid, &turn_sweep)
+            .await;
 
         let user_msg_len = request.message.len();
         let turn_start = std::time::Instant::now();
@@ -3265,6 +3351,7 @@ impl GooseAdapter {
         let stream = async_stream::stream! {
             // Hold the guard — dropped when the stream is dropped → cancels token.
             let _guard = cancel_guard;
+            let mut turn_sweep = turn_sweep;
             // Dropped with the stream, revoking this turn's authority to delegate.
             let _authority_lease = authority_lease;
 
@@ -3562,6 +3649,16 @@ impl GooseAdapter {
                                             }
                                         }
                                         goose::conversation::message::MessageContent::ToolResponse(tr) => {
+                                            // Before the suppression below: goose stored the result either way.
+                                            if tr
+                                                .tool_result
+                                                .as_ref()
+                                                .ok()
+                                                .and_then(crate::transient_history::keep_of)
+                                                .is_some()
+                                            {
+                                                turn_sweep.note_transient();
+                                            }
                                             // A suppressed call's result must never be streamed.
                                             if suppressed_tool_ids.remove(&tr.id) {
                                                 tracing::warn!(
@@ -3575,14 +3672,19 @@ impl GooseAdapter {
                                                 continue;
                                             }
                                             // Surface errors too: the model sees them anyway.
-                                            let (content_text, card, failed) = match &tr.tool_result {
+                                            let (content_text, card, failed, keep) = match &tr.tool_result {
                                                 Ok(tool_result) => {
                                                     let (text, card) = split_tool_result(&tool_result.content);
                                                     // RMCP 2.1 reports a tool's own failures, bad
                                                     // arguments included, as a result marked is_error.
-                                                    (text, card, tool_result.is_error == Some(true))
+                                                    (
+                                                        text,
+                                                        card,
+                                                        tool_result.is_error == Some(true),
+                                                        crate::transient_history::keep_of(tool_result),
+                                                    )
                                                 }
-                                                Err(e) => (format!("Error: {e}"), None, true),
+                                                Err(e) => (format!("Error: {e}"), None, true, None),
                                             };
 
                                             let tool_name = tool_id_to_name
@@ -3607,7 +3709,9 @@ impl GooseAdapter {
                                                 tracing::warn!(
                                                     tool = %tool_name,
                                                     tool_id = %tr.id,
-                                                    error = %content_text,
+                                                    // Can echo what it was asked: the log drain
+                                                    // hides it unless a developer may see it.
+                                                    tool_error = %content_text,
                                                     "tool call failed",
                                                 );
                                             }
@@ -3616,6 +3720,7 @@ impl GooseAdapter {
                                                 tool: tool_name,
                                                 content: content_text,
                                                 card,
+                                                keep,
                                             });
                                         }
                                         _ => {}
@@ -3650,7 +3755,7 @@ impl GooseAdapter {
                                     // Echoed prompt scaffolding gets the empty-turn recovery.
                                     tracing::warn!(
                                         session_id = %session_id,
-                                        leaked = %raw_text,
+                                        leaked_chars = raw_text.chars().count(),
                                         "model echoed internal scaffolding instead of answering",
                                     );
                                 } else if !raw_text.is_empty() {
@@ -3835,7 +3940,7 @@ impl GooseAdapter {
                                     Some(reply) if looks_like_leaked_scaffold(&reply) => {
                                         tracing::warn!(
                                             session_id = %session_id,
-                                            leaked = %reply,
+                                            leaked_chars = reply.chars().count(),
                                             "the completeness check's hidden reply echoes \
                                              internal scaffolding; not showing it",
                                         );
@@ -3901,6 +4006,11 @@ impl GooseAdapter {
                         continue 'attempts;
                     }
                     if produced_visible {
+                        break 'attempts;
+                    }
+                    // A warm-up's reply is never read, and a compile's one token often reads as empty;
+                    // re-engaging would only prefill longer prompts nobody asked for.
+                    if request.warmup {
                         break 'attempts;
                     }
                     // The final reply is the last attempt: one that wrote nothing is not re-asked.
@@ -3980,8 +4090,13 @@ impl GooseAdapter {
                 context_used_tokens = turn_stats.context_used_tokens,
                 context_limit_tokens = turn_stats.context_limit_tokens,
                 inference_count = turn_stats.inference_count,
+                // Always written, so `giap.sh doctor` can tell "no drafter ran" from an older server.
+                drafter = turn_stats.draft_accept_rate.is_some(),
+                draft_accept_rate = turn_stats.draft_accept_rate,
             );
             let stats = saw_usage.then_some(turn_stats);
+            // Before Done: a client that stops reading at Done drops this stream.
+            turn_sweep.finish().await;
             yield Ok(AgentStreamEvent::Done { session_id, model_role, usage: Some(usage), stats });
         };
 
@@ -4032,9 +4147,11 @@ impl AgentPort for GooseAdapter {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or_default();
-        let request = AgentRequest {
-            message: "Warm-up ping. Reply with only: ok".to_string(),
-            session_id: format!("prewarm-{stamp}"),
+        // Two compile calls whose messages differ from their first word: the engine learns the
+        // preamble from the pair and keeps its snapshot, or rebuilds one that is missing or bad.
+        let warm_up = |turn: usize, message: &str| AgentRequest {
+            message: message.to_string(),
+            session_id: format!("prewarm-{stamp}-{turn}"),
             model_role: "chat".to_string(),
             images: Vec::new(),
             voice_mode,
@@ -4047,19 +4164,41 @@ impl AgentPort for GooseAdapter {
             // No completeness check: a whole extra round-trip for a ping nobody reads.
             warmup: true,
             suggestion_context: None,
+            deep_research_task: None,
+            interview: None,
         };
 
+        let shape = if voice_mode {
+            "prime-voice"
+        } else {
+            "prime-typed"
+        };
+        // Home shows that the pond is building caches while this runs, under the name a person
+        // knows rather than the shape's.
+        let building = pond_core::shared::services::prefill_progress::process_prefill_progress();
+        building.begin(1);
+        building.working_on("assistant");
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(300), async {
-            let mut stream = self.chat_stream(request).await?;
             use futures::StreamExt;
-            while let Some(event) = stream.next().await {
-                // Only the prefill matters; the reply is discarded.
-                event?;
+            for (turn, message) in ["Alpha. Warm-up ping.", "Begin. Warm-up ping."]
+                .into_iter()
+                .enumerate()
+            {
+                goose_providers::request_context::compiling_prefill(shape, async {
+                    let mut stream = self.chat_stream(warm_up(turn, message)).await?;
+                    while let Some(event) = stream.next().await {
+                        // Only the prefill matters; the reply is discarded.
+                        event?;
+                    }
+                    Ok::<(), anyhow::Error>(())
+                })
+                .await?;
             }
             Ok::<(), anyhow::Error>(())
         })
         .await;
 
+        building.finished("assistant", matches!(outcome, Ok(Ok(()))));
         let elapsed_ms = started.elapsed().as_millis() as u64;
         match outcome {
             Ok(Ok(())) => {
@@ -4573,38 +4712,51 @@ impl GooseAdapter {
 
         // A `Message` event is a fragment, not a turn; `ChildTurns` owns the assembly rule.
         let mut turns = crate::orchestrator::ChildTurns::default();
-        while let Some(event) = stream.next().await {
-            match event {
-                Ok(goose::agents::AgentEvent::Message(msg)) => {
-                    // `as_concat_text()` drops `Thinking`: the child path's only reasoning gate.
-                    crate::orchestrator::child_stream_step(
-                        &mut turns,
-                        msg.role == rmcp::model::Role::Assistant,
-                        &msg.as_concat_text(),
-                    );
-                    // Never read `msg.content` here; it bypasses the reasoning gate.
-                    for tool in crate::orchestrator::child_tool_names(&msg) {
-                        crate::orchestrator::report_child_progress(
-                            &plan.parent_session_id,
-                            &plan.task_id,
-                            &plan.role,
-                            pond_core::shared::domain::agent::SubagentStatus::Tool,
-                            Some(tool),
-                        );
-                    }
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        role = %plan.role,
-                        "subagent stream error, ending the run: {e}"
-                    );
-                    break;
-                }
+        drain_child_stream(&mut stream, &mut turns, &plan).await;
+        drop(stream);
+
+        let mut drafted = None;
+        if crate::orchestrator::should_nudge(&plan, turns.turns(), cancel.is_cancelled()) {
+            let text = plan
+                .nudge
+                .as_ref()
+                .map(|n| n.text.clone())
+                .unwrap_or_default();
+            tracing::info!(
+                target: "giap::trace",
+                kind = "subagent_nudged",
+                role = %plan.role,
+                turns = turns.turns(),
+                "a helper stopped without reporting; asking it once to report"
+            );
+            turns.other_role_message();
+            drafted = turns.last_completed().map(str::to_string);
+            let nudge_config = goose::agents::SessionConfig {
+                id: plan.child_session_id.clone(),
+                schedule_id: None,
+                max_turns: Some(crate::orchestrator::NUDGE_TURNS),
+                retry_config: None,
+            };
+            let again = goose::session_context::with_session_id(
+                Some(plan.child_session_id.clone()),
+                async {
+                    child
+                        .reply(
+                            Message::user().with_text(&text),
+                            nudge_config,
+                            Some(cancel.clone()),
+                        )
+                        .await
+                },
+            )
+            .await;
+            match again {
+                Ok(mut stream) => drain_child_stream(&mut stream, &mut turns, &plan).await,
+                Err(e) => tracing::warn!(role = %plan.role, "the nudge could not start: {e}"),
             }
         }
-        drop(stream);
         let (last_text, assistant_turns) = turns.finish();
+        let last_text = crate::orchestrator::after_nudge(drafted, last_text);
 
         // Post-run read: an extension can arrive without `add_extension` (e.g. `default_enabled`).
         loaded_extensions.extend(
@@ -4620,6 +4772,47 @@ impl GooseAdapter {
             assistant_turns,
             loaded_extensions,
         })
+    }
+}
+
+/// Reads one child reply to its end, counting its turns and reporting its tool calls.
+async fn drain_child_stream<S, E>(
+    stream: &mut S,
+    turns: &mut crate::orchestrator::ChildTurns,
+    plan: &crate::orchestrator::ChildPlan,
+) where
+    S: futures::Stream<Item = Result<goose::agents::AgentEvent, E>> + Unpin,
+    E: std::fmt::Display,
+{
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(goose::agents::AgentEvent::Message(msg)) => {
+                // `as_concat_text()` drops `Thinking`: the child path's only reasoning gate.
+                crate::orchestrator::child_stream_step(
+                    turns,
+                    msg.role == rmcp::model::Role::Assistant,
+                    &msg.as_concat_text(),
+                );
+                // Never read `msg.content` here; it bypasses the reasoning gate.
+                for tool in crate::orchestrator::child_tool_names(&msg) {
+                    crate::orchestrator::report_child_progress(
+                        &plan.parent_session_id,
+                        &plan.task_id,
+                        &plan.role,
+                        pond_core::shared::domain::agent::SubagentStatus::Tool,
+                        Some(tool),
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    role = %plan.role,
+                    "subagent stream error, ending the run: {e}"
+                );
+                break;
+            }
+        }
     }
 }
 
@@ -7917,6 +8110,8 @@ mod tests {
             tool_group_allowlist: None,
             warmup: false,
             suggestion_context: None,
+            deep_research_task: None,
+            interview: None,
         };
 
         let mut stream = adapter.chat_stream(request).await.unwrap();

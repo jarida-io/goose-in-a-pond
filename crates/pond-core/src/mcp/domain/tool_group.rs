@@ -26,6 +26,16 @@ pub const ORCHESTRATOR_EXTENSION: &str = "giap-orchestrator";
 /// Extension carrying the directions and ride-link tools; a const for the same reason.
 pub const TRAVEL_EXTENSION: &str = "giap-travel";
 
+/// Extension carrying `task_start`, `task_status` and `task_cancel`: the household's side of
+/// long tasks.
+pub const TASKS_EXTENSION: &str = "giap-tasks";
+
+/// Extension a long task's helpers work through; only the step runner's authority grants it.
+pub const TASK_WORK_EXTENSION: &str = "giap-task-work";
+
+/// Extension carrying the setup interview's tools; only an interview turn is offered it.
+pub const INTERVIEW_EXTENSION: &str = "giap-interview";
+
 /// Separator in a prefixed tool name (`giap-weather__get_forecast`); Goose's convention.
 pub const TOOL_NAME_SEPARATOR: &str = "__";
 
@@ -139,23 +149,44 @@ pub const TOOL_GROUPS: &[ToolGroup] = &[
                       conversation carries on.",
         core: false,
     },
+    ToolGroup {
+        extension: TASKS_EXTENSION,
+        description: "A big piece of work that takes more than one sitting, such as researching \
+                      and comparing options or going through a long document: start it so the \
+                      pond works on it while the house is quiet, ask how far it has got, or \
+                      stop it.",
+        core: false,
+    },
+    ToolGroup {
+        extension: INTERVIEW_EXTENSION,
+        description: "Running a member's setup interview: note each answer or skipped question, \
+                      draft their standing notes, and save the notes once they approve them.",
+        core: false,
+    },
+    ToolGroup {
+        extension: TASK_WORK_EXTENSION,
+        description: "Working on one step of a long task: read what earlier steps saved, save \
+                      what this step found, write the task's plan, and report how the step went.",
+        core: false,
+    },
 ];
 
 /// giap-knowledge's line with both its keyed tools on offer: the line E8 measured.
 const KNOWLEDGE_WITH_WEB_AND_COMPUTE: &str =
     "Looking things up, working things out and searching the web: encyclopedia articles about \
-     people, places and events, exact arithmetic, unit conversions and dates, and the web for \
-     anything current, local or specific, such as news, opening hours, prices and products.";
+     people, places and events, exact arithmetic, unit conversions and dates, the web for \
+     anything current, local or specific, such as news, opening hours, prices and products, and \
+     reading a web page from its link.";
 /// The same line without the Wolfram tool, keeping E8's words for the web.
 const KNOWLEDGE_WITH_WEB: &str =
     "Looking things up and searching the web: encyclopedia articles about people, places and \
-     events, and the web for anything current, local or specific, such as news, opening hours, \
-     prices and products.";
+     events, the web for anything current, local or specific, such as news, opening hours, \
+     prices and products, and reading a web page from its link.";
 const KNOWLEDGE_WITH_COMPUTE: &str =
     "Looking things up and working things out: encyclopedia articles about people, places and \
-     events, and exact arithmetic, unit conversions and dates.";
-const KNOWLEDGE_ALONE: &str =
-    "Looking things up: encyclopedia articles about people, places and events.";
+     events, exact arithmetic, unit conversions and dates, and reading a web page from its link.";
+const KNOWLEDGE_ALONE: &str = "Looking things up: encyclopedia articles about people, places and \
+     events, and reading a web page from its link.";
 
 /// `group`'s line as a turn shows it to the model: giap-knowledge's names only the keyed tools
 /// `is_withheld` lets the turn offer, so it never promises one the turn holds back.
@@ -260,8 +291,23 @@ pub fn groups_denied_to_guests() -> &'static [&'static str] {
         ORCHESTRATOR_EXTENSION,
         // Rides on a member's own Uber account, and every place lookup leaves the pond.
         TRAVEL_EXTENSION,
+        // Like `delegate`, it starts unattended work on the household's one GPU.
+        TASKS_EXTENSION,
+        // A helper's ledger tools; no guest owns a task for a helper to work on.
+        TASK_WORK_EXTENSION,
+        // Writes one member's own notes; a guest has none.
+        INTERVIEW_EXTENSION,
     ]
 }
+
+/// Tools a long task's helper may hold from groups no subagent holds whole. Each reads the house
+/// and changes nothing: it shows no camera picture, sends nothing, and schedules or switches nothing.
+pub const HOUSEHOLD_READ_TOOLS: &[&str] = &[
+    "giap-vision__get_recent_camera_events",
+    "giap-vision__list_vision_automations",
+    "giap-schedule__list_schedules",
+    "giap-device__list_registered_devices",
+];
 
 /// Groups a subagent must never be given, however wide its parent. It has no identity or approval
 /// path, so the tool set is the only boundary; subtract from the DERIVED set or core groups return.
@@ -281,6 +327,10 @@ pub fn groups_denied_to_subagents() -> &'static [&'static str] {
         TRAVEL_EXTENSION,
         // Raw home camera feeds and live frame snapshots.
         "giap-vision",
+        // A helper that starts a task gets more helpers through the runner, past the depth cap.
+        TASKS_EXTENSION,
+        // Saves a member's notes, which only the member approves in their own conversation.
+        INTERVIEW_EXTENSION,
     ]
 }
 
@@ -437,7 +487,11 @@ mod requirement_tests {
             (compute_only, false, true),
             (neither, false, false),
         ] {
-            assert_eq!(shown.contains("web"), promises_web, "{shown}");
+            assert_eq!(shown.contains("searching the web"), promises_web, "{shown}");
+            assert!(
+                shown.contains("reading a web page from its link"),
+                "a page read needs no key: {shown}"
+            );
             assert_eq!(
                 shown.contains("working things out") || shown.contains("arithmetic"),
                 promises_compute,
@@ -639,6 +693,40 @@ mod guest_denylist_tests {
             "{TRAVEL_EXTENSION} must be withheld from guests: its rides go on a member's own Uber \
              account, and its place lookups leave the pond"
         );
+    }
+
+    /// Neither list backstops the other; the helpers' group is the control that must stay open.
+    #[test]
+    fn long_tasks_are_started_only_by_an_identified_top_level_turn() {
+        assert!(
+            groups_denied_to_guests().contains(&TASKS_EXTENSION),
+            "{TASKS_EXTENSION} must be withheld from guests: a task runs unattended for hours on \
+             the household's GPU at the starter's scope"
+        );
+        assert!(
+            groups_denied_to_subagents().contains(&TASKS_EXTENSION),
+            "{TASKS_EXTENSION} must be withheld from subagents: a helper that starts a task gets \
+             more helpers through the runner, which no depth cap counts"
+        );
+        assert!(
+            groups_denied_to_guests().contains(&TASK_WORK_EXTENSION),
+            "{TASK_WORK_EXTENSION} must be withheld from guests"
+        );
+        assert!(
+            !groups_denied_to_subagents().contains(&TASK_WORK_EXTENSION),
+            "{TASK_WORK_EXTENSION} is how a helper reads and reports on its step; denying it to \
+             subagents leaves every long task unable to run"
+        );
+        for extension in [TASKS_EXTENSION, TASK_WORK_EXTENSION] {
+            assert!(
+                is_catalog_extension(extension),
+                "{extension} is not catalogued"
+            );
+            assert!(
+                !find_group(extension).unwrap().core,
+                "{extension} must never be core"
+            );
+        }
     }
 
     /// Vacuity control: a denylist covering everything would amount to "no subagents".

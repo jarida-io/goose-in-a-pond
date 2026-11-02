@@ -177,7 +177,6 @@ async fn sync_device(
                         target: "giap::trace",
                         kind = "matter_node_added",
                         device = %device.id,
-                        name = %device.name,
                         device_type = %device.device_type,
                         "matter: device registered"
                     );

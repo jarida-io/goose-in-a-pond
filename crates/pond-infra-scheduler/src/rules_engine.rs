@@ -136,6 +136,8 @@ mod tests {
 
     fn rule(id: &str, device: Option<&str>, cooldown_secs: u64, paused: bool) -> Schedule {
         Schedule {
+            ask_if_missed: false,
+            missed_run: None,
             fire_at: None,
             id: id.into(),
             label: format!("rule {id}"),
@@ -409,6 +411,7 @@ mod tests {
             };
             scheduler
                 .create_task(CreateScheduleRequest {
+                    ask_if_missed: false,
                     fire_at: None,
                     once: false,
                     id: "rule-e2e".into(),
@@ -487,6 +490,7 @@ mod tests {
                 let scheduler: Arc<dyn SchedulerPort> = Arc::new(new_adapter().await.unwrap());
                 scheduler
                     .create_task(CreateScheduleRequest {
+                        ask_if_missed: false,
                         fire_at: None,
                         once: false,
                         id: "hourly-rule".into(),
@@ -550,6 +554,7 @@ mod tests {
             // Control: a no-cooldown rule created after the restart proves the engine is live.
             scheduler
                 .create_task(CreateScheduleRequest {
+                    ask_if_missed: false,
                     fire_at: None,
                     once: false,
                     id: "control-rule".into(),

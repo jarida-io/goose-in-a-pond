@@ -150,6 +150,7 @@ async fn make_app_with_mesh_provider_and_capabilities(
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        pond_admin: None,
     });
 
     (
@@ -274,6 +275,7 @@ async fn make_app_with_settlement_deps() -> (
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        pond_admin: None,
     });
 
     (

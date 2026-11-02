@@ -1,13 +1,14 @@
 // Web search: the household's own Brave key. Shared by the sections UI and the settings hub.
 // The key leaves only in the save request and is never read back; the field clears once stored.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import {
   CircleAlert,
   CircleCheck,
   Clock,
   Globe,
   LoaderCircle,
+  MapPin,
   RefreshCw,
   Trash2,
   TriangleAlert,
@@ -15,14 +16,22 @@ import {
 } from "lucide-react";
 import { api } from "../api/PondApiClient";
 import type { WebSearchState, WebSearchStatus } from "../api/types";
+import { DispatchCtx } from "../state/useAppContext";
 import {
   BRAVE_DASHBOARD_HOST,
   BRAVE_DASHBOARD_URL,
+  NEARBY_FAILED,
+  NEARBY_LABEL,
+  NEARBY_OLD_POND,
+  NEARBY_SET_LOCATION,
   OLD_POND,
   PRIVACY_LINE,
   STATUS_LINES,
   describeProblem,
+  nearbyDescription,
   readWebSearchState,
+  townSentence,
+  type LocalResults,
 } from "./webSearch";
 import "../styles/connections.css";
 
@@ -45,6 +54,12 @@ export function WebSearchPanel() {
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [focusOn, setFocusOn] = useState<{ to: "status" | "remove"; n: number } | null>(null);
+  /** `null` while unread and from a pond that predates nearby places. */
+  const [local, setLocal] = useState<LocalResults | null>(null);
+  const [placesSaving, setPlacesSaving] = useState(false);
+  const [placesError, setPlacesError] = useState<string | null>(null);
+  // Absent in a bare mount; the only place a location is set is the classic Settings screen.
+  const dispatch = useContext(DispatchCtx);
   const statusRef = useRef<HTMLDivElement>(null);
   const removeRef = useRef<HTMLButtonElement>(null);
   const keepRef = useRef<HTMLButtonElement>(null);
@@ -54,9 +69,11 @@ export function WebSearchPanel() {
     try {
       const next = readWebSearchState(await api.getWebSearch());
       setState(next);
+      setLocal(next?.local_results ?? null);
       setReadProblem(next ? null : OLD_POND);
     } catch (e) {
       setState(null);
+      setLocal(null);
       setReadProblem(describeProblem(e, "read"));
     } finally {
       setLoading(false);
@@ -128,6 +145,28 @@ export function WebSearchPanel() {
     moveFocus("remove");
   }
 
+  async function toggleNearby() {
+    if (!local || placesSaving) return;
+    const next = !local.enabled;
+    // Turning it on with no town would send nothing, so it is refused rather than saved as a promise.
+    if (next && !local.town) return;
+    setPlacesSaving(true);
+    setPlacesError(null);
+    setLocal({ ...local, enabled: next });
+    try {
+      const saved = await api.updateSettings({ web_search_local_results: next });
+      const stored = saved?.web_search_local_results;
+      if (typeof stored === "boolean" && stored !== next) {
+        setLocal((now) => (now ? { ...now, enabled: stored } : now));
+      }
+    } catch {
+      setLocal((now) => (now ? { ...now, enabled: !next } : now));
+      setPlacesError(NEARBY_FAILED);
+    } finally {
+      setPlacesSaving(false);
+    }
+  }
+
   async function tryAgain() {
     await refresh();
     moveFocus("status");
@@ -136,12 +175,18 @@ export function WebSearchPanel() {
   const line = state ? STATUS_LINES[state.status] : null;
   const StatusIcon = state ? STATUS_ICONS[state.status] : LoaderCircle;
   const tone = line?.tone ?? "muted";
+  const nearbyOn = local?.enabled ?? false;
+  const nearbyBlocked = !local || (!nearbyOn && !local.town);
+  const townLine = townSentence(local);
 
   return (
     <section className="connections websearch" aria-labelledby="web-search-title">
       <div className="connections-intro">
         <h3 id="web-search-title">Web search</h3>
-        <p>{PRIVACY_LINE}</p>
+        <p>
+          {PRIVACY_LINE}
+          {townLine ? ` ${townLine}` : null}
+        </p>
       </div>
 
       {!loading && !known ? (
@@ -197,6 +242,55 @@ export function WebSearchPanel() {
                 <span>Remove</span>
               </button>
             ))}
+        </div>
+      )}
+
+      {known && (
+        <div className="connections-item websearch-places">
+          <span className="connections-icon" aria-hidden="true">
+            <MapPin size={18} />
+          </span>
+          <div className="websearch-places__text">
+            <div id="web-search-nearby-label" className="websearch-places__label">
+              {NEARBY_LABEL}
+            </div>
+            <p id="web-search-nearby-hint" className="websearch-places__hint">
+              {local ? nearbyDescription(local.town, local.enabled) : NEARBY_OLD_POND}
+            </p>
+            {local && !local.town && dispatch && (
+              <button
+                type="button"
+                className="connections-sync"
+                onClick={() => dispatch({ type: "SET_SECTION", payload: "settings" })}
+              >
+                {NEARBY_SET_LOCATION}
+              </button>
+            )}
+            {placesError && (
+              <p className="connections-error" id="web-search-nearby-error" role="alert">
+                {placesError}
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            role="switch"
+            className="websearch-switch"
+            aria-checked={nearbyOn}
+            aria-labelledby="web-search-nearby-label"
+            aria-describedby={
+              placesError
+                ? "web-search-nearby-hint web-search-nearby-error"
+                : "web-search-nearby-hint"
+            }
+            aria-disabled={nearbyBlocked || undefined}
+            aria-busy={placesSaving || undefined}
+            onClick={() => void toggleNearby()}
+          >
+            <span className="websearch-switch__track" aria-hidden="true">
+              <span className="websearch-switch__thumb" />
+            </span>
+          </button>
         </div>
       )}
 
