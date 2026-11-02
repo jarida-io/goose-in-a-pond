@@ -125,8 +125,9 @@ which city. Never guess weather or shell out for it.")]
     }
 
     #[tool(description = "\
-Forecast for the days asked, 1-7 (a week is 7): highs/lows, rain chance, UV, sun \
-times. Omit location for the configured home. Never guess data.")]
+Forecast for the days asked, 1-7 (a week is 7; for a date, count from today as 1): \
+highs/lows, rain chance, UV, sun times. One call per place. Omit location for the \
+configured home. Never guess data.")]
     async fn get_weather_forecast(
         &self,
         _ctx: RequestContext<RoleServer>,
