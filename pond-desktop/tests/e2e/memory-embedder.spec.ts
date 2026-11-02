@@ -532,6 +532,15 @@ for (const scheme of ["Light", "Dark"] as const) {
       await expect(hubSwitch).toHaveAttribute("aria-pressed", "false");
       await page.mouse.move(0, 0);
       await expect.poll(() => fillContrastOf(hubSwitch), { message: "the hub switch, off" }).toBeGreaterThanOrEqual(3);
+      // The knob rests at the track's ends, inside it: left when off, right when on.
+      const knobAt = async () => {
+        const [track, knob] = await Promise.all([hubSwitch.boundingBox(), hubSwitch.locator(".htoggle__knob").boundingBox()]);
+        return { left: (knob?.x ?? 0) - (track?.x ?? 0), right: (track?.x ?? 0) + (track?.width ?? 0) - (knob?.x ?? 0) - (knob?.width ?? 0) };
+      };
+      await expect.poll(async () => (await knobAt()).left).toBeLessThanOrEqual(4);
+      await hubSwitch.click();
+      await expect.poll(async () => (await knobAt()).right).toBeGreaterThanOrEqual(0);
+      await expect.poll(async () => (await knobAt()).right).toBeLessThanOrEqual(4);
     });
 
     test("the settings switch row", async ({ page }) => {
