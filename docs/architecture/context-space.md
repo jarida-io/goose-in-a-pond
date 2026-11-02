@@ -294,9 +294,9 @@ What follows:
      Memory role (`active_embedding_model`) chooses it. The GGUF provider has no download of its
      own. Its vision and audio encoders are not yet the entry's companions.
   7. `recommended.rs` suggests it for the Memory role with P0's Orin numbers; nothing switches to
-     it, and MiniLM stays the default. Tool selection's 0.28 and memory dedup's cosine bands are
-     set on MiniLM's scale, so under EmbeddingGemma 2 tool selection keeps every group and dedup
-     is lexical until its floors are measured on the Orin.
+     it, and MiniLM stays the default. Its similarity floors are its own, measured on the Orin
+     (`fixtures/embedding-floors`): tool relevance 0.71 against MiniLM's 0.28, and dedup bands of
+     0.97 and 0.92 against the dials MiniLM's scale uses.
 - **Not measured:** the cost inside `pond-server`, recall on the household's real store, audio
   retrieval and video.
 
