@@ -378,6 +378,23 @@ test.describe("Memory, hub", () => {
     await expect(card.getByRole("listitem").first()).toContainText("Loading");
   });
 
+  test("the Memory tile takes a press to the Memory card, and the keyboard with it", async ({ page }) => {
+    await setup(page, {
+      section: "hub", size: [800, 480], roles: ROLES(ON_EG2),
+      health: memoryHealth({ state: "failed", reason: "loading x.gguf on the Gpu: out of memory" }, { matching: 0 }),
+    });
+    const card = await openHubModels(page);
+    await expect(card).not.toBeInViewport();
+    const tile = page.getByRole("button", { name: "Memory: EmbeddingGemma 2, Chosen, not loaded. Change" });
+    expect((await tile.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
+    await tile.click();
+    await expect(card).toBeInViewport();
+    await expect(card).toBeFocused();
+    // Listening and the voice are both chosen on the Speech card.
+    await page.getByRole("button", { name: /^Speaking: / }).click();
+    await expect(page.locator("#hm-card-speech")).toBeFocused();
+  });
+
   test("Use assigns the Memory role from the hub", async ({ page }) => {
     const seen = await setup(page, { section: "hub" });
     const card = await openHubModels(page);

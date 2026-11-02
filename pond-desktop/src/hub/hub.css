@@ -705,6 +705,12 @@
    and its offset are spent on the model in use, or on the pick GIAP puts first, and on the one
    button the screen asks its question with; everything else is a hairline. Targets are 44px. */
 .hm-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+.hm-tiles__cell { display: flex; min-width: 0; }
+.hm-tiles__cell > .hm-tile { flex: 1; }
+/* A tile is navigation to the card that changes its job, so it stays on a hairline and only tints. */
+button.hm-tile { position: relative; justify-content: flex-start; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+button.hm-tile:hover { background: var(--hub-bg); }
+.hm-tile__go { position: absolute; top: 12px; right: 12px; color: var(--mut); }
 .hm-tile { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
 .hm-tile[data-empty="true"] { border-style: dashed; }
 .hm-tile__icon { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; margin-bottom: 4px; border-radius: 9px; background: var(--hub-bg); color: var(--mut); }
