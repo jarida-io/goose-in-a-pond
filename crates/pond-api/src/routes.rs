@@ -493,7 +493,12 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // ── MCP App Resources ────────────────────────────────────────────────
         .route("/mcp/resources", get(mcp_read_resource))
         .route("/mcp/tools/call", post(mcp_call_tool))
-        .route("/tools/invoke", post(invoke_tool))
+        .route(
+            "/tools/invoke",
+            post(invoke_tool).layer(axum::Extension(Arc::new(
+                crate::idempotency::IdempotentReplies::default(),
+            ))),
+        )
         // ── System Prompt Extras ───────────────────────────────────────────────
         .route(
             "/agent/extras",
@@ -11741,6 +11746,9 @@ async fn dispatch_tool_direct(
 /// `POST /api/v1/tools/invoke` — run an MCP tool directly, bypassing the LLM.
 async fn invoke_tool(
     State(state): State<Arc<AppState>>,
+    axum::Extension(replies): axum::Extension<Arc<crate::idempotency::IdempotentReplies>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    headers: axum::http::HeaderMap,
     body: Result<Json<InvokeToolRequest>, JsonRejection>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let Json(req) = body.map_err(|e| {
@@ -11756,7 +11764,40 @@ async fn invoke_tool(
         ));
     }
     let qualified = qualify_tool_name(&req.server, &req.tool);
-    dispatch_tool_direct(&state, &qualified, req.args).await
+    let Some(key) = headers.get(crate::idempotency::HEADER) else {
+        return dispatch_tool_direct(&state, &qualified, req.args).await;
+    };
+    let key = key
+        .to_str()
+        .ok()
+        .filter(|key| crate::idempotency::valid_key(key))
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid_idempotency_key" })),
+            )
+        })?;
+    let caller = proven_device(principal.as_ref());
+    let slot = replies.slot(caller.id().unwrap_or_default(), key);
+    let mut outcome = slot.lock().await;
+    let request = json!({ "tool": qualified, "args": req.args });
+    if let Some(first) = &outcome.request {
+        if *first != request {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "idempotency_key_reused" })),
+            ));
+        }
+    }
+    if let Some(reply) = &outcome.reply {
+        return Ok(Json(reply.clone()));
+    }
+    outcome.request = Some(request);
+    // A failure is not kept: nothing ran, or the tool failed and a resend may try it again.
+    let Json(mut reply) = dispatch_tool_direct(&state, &qualified, req.args).await?;
+    reply["idempotency_key"] = json!(key);
+    outcome.reply = Some(reply.clone());
+    Ok(Json(reply))
 }
 
 /// `POST /api/v1/mcp/tools/call` — MCP Apps' `callServerTool()`, by qualified name.
