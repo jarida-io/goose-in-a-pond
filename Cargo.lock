@@ -11457,6 +11457,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pond-adapters-ear"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "pond-audio",
+ "pond-core",
+ "pond-ear",
+ "pond-voice",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "pond-adapters-face-onnx"
 version = "0.1.0"
 dependencies = [
