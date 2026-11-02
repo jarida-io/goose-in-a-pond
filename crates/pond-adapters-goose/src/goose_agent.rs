@@ -126,21 +126,6 @@ fn canonical_args_fingerprint(args: Option<&serde_json::Map<String, serde_json::
     hasher.finish()
 }
 
-/// GIAP's prompt tag names; any in visible output means the model echoed scaffolding.
-const SCAFFOLD_TAGS: &[&str] = &[
-    "<system-context>",
-    "<user-message>",
-    "<answer-contract>",
-    "<memories>",
-    "<turn-context>",
-];
-
-/// Whether visible output is GIAP's prompt scaffolding echoed back; handled like an empty turn.
-fn looks_like_leaked_scaffold(text: &str) -> bool {
-    let trimmed = text.trim();
-    SCAFFOLD_TAGS.iter().any(|tag| trimmed.contains(tag))
-}
-
 /// The model's reply to goose's completeness check, read back from the engine's history.
 ///
 /// Goose appends the check as an invisible user message and hides the model's prose reply to
@@ -276,6 +261,10 @@ fn fail_on_engine_error(
 /// Appended when re-engaging after an empty turn: an unchanged prompt gets the same reply.
 const EMPTY_TURN_STEER: &str = "(Your previous attempt produced only internal reasoning and no reply. \
 Do not reason further — either call the tool you already decided on, or write the answer directly.)";
+
+/// Appended after an attempt wrote a tool call as text, which the engine cannot run.
+const TEXT_CALL_STEER: &str = "(Your previous attempt wrote a tool call as plain text, so it did \
+not run. Call the tool through the tool-call format, or write the answer directly.)";
 
 /// The final reply's request: the answer from what the turn already has, not the question again.
 /// Asked with reasoning off, so "do not reason" is the engine's setting as well as the words.
@@ -3435,13 +3424,20 @@ impl GooseAdapter {
                 let mut final_reply = FinalReply::default();
                 // Set when the next attempt is the final reply rather than the question again.
                 let mut final_reply_next = false;
+                // Set when an attempt wrote a tool call as text, so the next is told how to call.
+                let mut wrote_text_call = false;
                 'attempts: loop {
                     let final_attempt = std::mem::take(&mut final_reply_next);
                     let attempt_text = if attempt == 0 {
                         turn_text.clone()
+                    } else if std::mem::take(&mut wrote_text_call) {
+                        format!("{turn_text}\n\n{TEXT_CALL_STEER}")
                     } else {
                         format!("{turn_text}\n\n{EMPTY_TURN_STEER}")
                     };
+                    // Echoed prompt blocks out, and a call written as text held back from the user.
+                    let mut reply_filter =
+                        pond_core::models::services::reply_filter::ReplyFilter::new();
                     let attempt_msg =
                         attach_images(Message::user().with_text(&attempt_text), &turn_images);
                     // Arms Goose's completeness check; session-keyed, as streams run concurrently.
@@ -3768,18 +3764,19 @@ impl GooseAdapter {
                                     }
                                     _ => raw_text,
                                 };
+                                // Goose's own notices, not the model's words, so never filtered.
+                                let goose_notice = raw_text.trim() == GOOSE_EMPTY_TURN_MESSAGE
+                                    || raw_text.trim() == GOOSE_MAX_TURNS_MESSAGE;
+                                let raw_text = if goose_notice {
+                                    raw_text
+                                } else {
+                                    reply_filter.push(&raw_text)
+                                };
                                 if !raw_text.is_empty() && raw_text.trim() == GOOSE_EMPTY_TURN_MESSAGE {
                                     // Swallowed so the recovery loop below re-engages.
                                     tracing::warn!(
                                         session_id = %session_id,
                                         "goose reported an empty turn",
-                                    );
-                                } else if !raw_text.is_empty() && looks_like_leaked_scaffold(&raw_text) {
-                                    // Echoed prompt scaffolding gets the empty-turn recovery.
-                                    tracing::warn!(
-                                        session_id = %session_id,
-                                        leaked_chars = raw_text.chars().count(),
-                                        "model echoed internal scaffolding instead of answering",
                                     );
                                 } else if !raw_text.is_empty() {
                                     // Goose streams its turn-cap notice as text; also re-emit it
@@ -3911,6 +3908,29 @@ impl GooseAdapter {
                     if let Some(content) = reasoning.flush() {
                         yield Ok(AgentStreamEvent::Thinking { content });
                     }
+                    let tail = reply_filter.finish();
+                    if !tail.is_empty() {
+                        produced_visible = true;
+                        emitted_text = true;
+                        total_output_chars += tail.len();
+                        yield Ok(AgentStreamEvent::Text { content: tail });
+                    }
+                    if reply_filter.scaffold_blocks() > 0 {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            blocks = reply_filter.scaffold_blocks(),
+                            "model echoed internal scaffolding; dropped it from the reply",
+                        );
+                    }
+                    if let Some(call) = reply_filter.text_call() {
+                        // Shown as nothing, so the empty-turn recovery re-asks with the steer.
+                        tracing::warn!(
+                            session_id = %session_id,
+                            written_chars = call.chars().count(),
+                            "model wrote a tool call as text instead of calling it",
+                        );
+                        wrote_text_call = true;
+                    }
                     // Reasoning back on before anything else runs, this turn's or the next. A turn
                     // that re-stamped the flag meanwhile (the record is no longer `None`) wins.
                     if reasoning_lifted {
@@ -3959,16 +3979,24 @@ impl GooseAdapter {
                                     .conversation
                                     .map(|c| c.messages().clone())
                                     .unwrap_or_default();
-                                match hidden_completeness_reply(&messages, goal) {
-                                    Some(reply) if looks_like_leaked_scaffold(&reply) => {
+                                let hidden = hidden_completeness_reply(&messages, goal);
+                                let shown = hidden.as_deref().map(|reply| {
+                                    let mut filter =
+                                        pond_core::models::services::reply_filter::ReplyFilter::new();
+                                    let mut shown = filter.push(reply);
+                                    shown.push_str(&filter.finish());
+                                    shown
+                                });
+                                match (hidden, shown) {
+                                    (Some(hidden), Some(shown)) if shown.trim().is_empty() => {
                                         tracing::warn!(
                                             session_id = %session_id,
-                                            leaked_chars = reply.chars().count(),
-                                            "the completeness check's hidden reply echoes \
-                                             internal scaffolding; not showing it",
+                                            leaked_chars = hidden.chars().count(),
+                                            "the completeness check's hidden reply is only echoed \
+                                             scaffolding or a written call; not showing it",
                                         );
                                     }
-                                    Some(reply) => {
+                                    (Some(_), Some(reply)) => {
                                         tracing::info!(
                                             target: "giap::trace",
                                             kind = "completeness_reply_shown",
@@ -3982,7 +4010,7 @@ impl GooseAdapter {
                                         total_output_chars += reply.len();
                                         yield Ok(AgentStreamEvent::Text { content: reply });
                                     }
-                                    None => {}
+                                    _ => {}
                                 }
                             }
                             Err(e) => {
@@ -7824,31 +7852,17 @@ mod tests {
         assert_ne!(GOOSE_EMPTY_TURN_MESSAGE, EMPTY_TURN_EXHAUSTED_MESSAGE);
     }
 
-    /// Verbatim from a mesh-borrowed model that echoed the wrapper tag instead of answering.
+    /// An echo of any tag the envelope wraps a turn in is dropped, and the answer after it kept.
     #[test]
-    fn a_leaked_answer_contract_tag_is_recognised() {
-        assert!(looks_like_leaked_scaffold(
-            "<answer-contract> When is today? </answer-contract>"
-        ));
-    }
-
-    #[test]
-    fn every_injected_scaffold_tag_is_recognised() {
+    fn every_envelope_tag_is_one_the_reply_filter_drops() {
+        use pond_core::models::services::reply_filter::{ReplyFilter, SCAFFOLD_TAGS};
         for tag in SCAFFOLD_TAGS {
-            let leaked = format!("some preamble {tag} and more");
-            assert!(looks_like_leaked_scaffold(&leaked), "tag: {tag}");
+            let mut filter = ReplyFilter::new();
+            let echoed = format!("<{tag}>\necho\n</{tag}>\nThe answer.");
+            let mut shown = filter.push(&echoed);
+            shown.push_str(&filter.finish());
+            assert_eq!(shown.trim(), "The answer.", "tag: {tag}");
         }
-    }
-
-    /// Only GIAP's bracketed tag names trip this, not the same words in prose.
-    #[test]
-    fn an_ordinary_answer_is_not_mistaken_for_leaked_scaffolding() {
-        assert!(!looks_like_leaked_scaffold(
-            "The sky is blue on a clear day."
-        ));
-        assert!(!looks_like_leaked_scaffold(
-            "Today's context and your message history look fine."
-        ));
     }
 
     /// The knob set doubles as the change signature that gates `set_var`.
