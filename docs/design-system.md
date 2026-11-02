@@ -34,15 +34,21 @@ All tokens are CSS custom properties on `:root`. HeroUI's stylesheet is imported
 
 ### Brand Colors
 
+Light values. The accent rows follow the household's accent, which `hub/state/themeStore.ts` sets
+at runtime from `@jarida/ink`; the hex shown is Purple, the default. Dark values are in
+`:root[data-theme="dark"]`, and [`DESIGN.md` §2](../DESIGN.md#2-the-material) measures both schemes.
+
 | Token | Value | Usage |
 |---|---|---|
-| `--color-accent` | `#8C4BFF` | Jarida Purple — primary CTA, active states |
-| `--color-accent-hover` | `#7636E6` | Hover on accent elements |
-| `--color-accent-soft` | `rgba(140,75,255,0.11)` | Selected backgrounds |
+| `--color-accent` | `#7C3AED` | The accent — primary CTA, active states. Not the mark's `#8C4BFF` |
+| `--color-accent-hover` | `#6D28D9` | Hover on accent elements |
+| `--color-accent-soft` | `rgba(124,58,237,0.11)` | Selected backgrounds |
+| `--border-ink` | `#7C3AED` | The ink line and hard offset shadow; follows the accent |
+| `--bg-brand-soft` | `#F5F3FF` | Quiet fill |
 | `--color-text` | `#171616` | Jarida Charcoal — all body text |
-| `--color-text-secondary` | `rgba(23,22,22,0.55)` | Hints, labels |
-| `--color-text-tertiary` | `rgba(23,22,22,0.38)` | Placeholders, disabled |
-| `--color-bg` | `#FFF9F9` | Main window background |
+| `--color-text-secondary` | `#566178` | Slate — hints, labels |
+| `--color-text-tertiary` | `#566178` | Placeholders, disabled |
+| `--color-bg` | `#FAF3E1` | Jarida Warm White — main window background |
 | `--color-surface` | `#ffffff` | Cards, inputs, dropdowns |
 
 ### Semantic Colors
@@ -217,7 +223,7 @@ All variant overrides are defined in `sections.css` (unlayered, loads last) to r
 
 | `variant` prop | Appearance | Use for |
 |---|---|---|
-| `"primary"` | Jarida Purple fill | Primary CTA (Add, Save, Confirm) |
+| `"primary"` | Accent fill (`--color-accent`) | Primary CTA (Add, Save, Confirm) |
 | `"secondary"` | Grey fill, grey border | Secondary actions (Refresh, Cancel) |
 | `"danger-soft"` | Red soft fill, red border | Destructive (Delete) |
 | `"outline"` | Transparent, grey border | Tertiary / toolbar buttons |
@@ -305,7 +311,7 @@ Four rules, each written after a control shipped unreadable or overlapping (2026
   badge) inherits that box's height and position and paints over the label. Draw such marks with
   `::before` or a `box-shadow`. `styles/touch.test.ts` fails the build on a new collision.
 - **An accent is not a text colour.** Accents are picked to read as fills and edges: as text, Coral
-  measures 2.53:1 on Jarida White and Purple 3.28:1 on the dark background. Selected and hovered
+  measures 2.53:1 on the light ground and Purple 3.28:1 on the dark background. Selected and hovered
   labels stay `--color-text`; the accent goes on the underline (`--border-ink`, floored at 3:1 by
   `hub/state/themeStore.ts`) or a tint behind the label. Text on an accent fill uses
   `--color-text-on-accent`, never a literal `#fff`.
