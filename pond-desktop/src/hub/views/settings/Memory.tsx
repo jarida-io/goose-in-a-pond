@@ -230,7 +230,8 @@ export function MemoryDetail({ go }: MemoryDetailProps) {
   const [showComposer, setShowComposer] = useState(false);
   const [compactionEnabled, setCompactionEnabled] = useState(false);
   // Mirrors the Settings catalogue: both UIs ship, so the switch must exist in both. Any value but "none" is on.
-  const [semanticOn, setSemanticOn] = useState(true);
+  // Null until the pond's settings arrive: the switch claims neither position before then.
+  const [semanticOn, setSemanticOn] = useState<boolean | null>(null);
   /** The switch keeps its own state, so a refused save has to remount it to put it back. */
   const [switchKey, setSwitchKey] = useState(0);
   const embedder = useEmbedderHealth();
@@ -246,24 +247,21 @@ export function MemoryDetail({ go }: MemoryDetailProps) {
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
+    // Read apart from the list, so a list that fails to load cannot leave the switches on their defaults.
+    void api
+      .getSettings()
+      .then((settings) => {
+        setCompactionEnabled(settings.memory_consolidation_enabled === true);
+        setSemanticOn(settings.embedding_provider !== "none");
+      })
+      .catch(() => undefined);
     try {
-      const [fragments, settings] = await Promise.all([
-        api.listMemories(100),
-        api.getSettings().catch(() => null),
-      ]);
+      const fragments = await api.listMemories(100);
       // Only show active lifecycle memories; fall back for old API (no lifecycle field)
       const active = fragments.filter(
         (m) => !m.lifecycle || m.lifecycle === "active",
       );
       setMems(active);
-      if (settings != null) {
-        setCompactionEnabled(
-          settings.memory_consolidation_enabled === true,
-        );
-        if (settings.embedding_provider) {
-          setSemanticOn(settings.embedding_provider !== "none");
-        }
-      }
     } catch (e) {
       console.warn("[MemoryDetail] API offline — using mock fallback:", e);
       setMems(MOCK_MEMS);
@@ -440,12 +438,11 @@ export function MemoryDetail({ go }: MemoryDetailProps) {
           label="Search by meaning"
           sub="Find a memory by what it means, not only the words in it. Off, Memory searches by keyword."
           control={
-            <Toggle
-              key={`${loading ? "loading" : "loaded"}-${switchKey}`}
-              on={semanticOn}
-              onChange={handleToggleSemantic}
-              label="Search by meaning"
-            />
+            semanticOn === null ? (
+              <span className="hm-skel hm-skel--toggle" aria-hidden="true" />
+            ) : (
+              <Toggle key={switchKey} on={semanticOn} onChange={handleToggleSemantic} label="Search by meaning" />
+            )
           }
         />
         <Row
