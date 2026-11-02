@@ -11,7 +11,7 @@ use crate::score::{identify, Cohort, Policy, Print};
 use crate::Error;
 
 use super::aec::{Aec, AecConfig};
-use super::endpoint::{Endpoint, Endpointer, Outcome};
+use super::endpoint::{Endpoint, Endpointer, Outcome, Segmenter};
 use super::event::Event;
 use super::front::{Front, RATE};
 use super::parts::{SpeakerNet, VadSilero, WakeCnn};
@@ -72,8 +72,9 @@ pub struct SpeakerConfig {
     pub max_seconds: f32,
 }
 
-/// Audio and frames the ear keeps.
-pub const RING_SECONDS: f32 = 15.0;
+/// Audio and frames the ear keeps: past the endpointer's 30 s longest utterance, so `audio` still
+/// holds an utterance's start when it ends.
+pub const RING_SECONDS: f32 = 32.0;
 /// The newest 3 s of a span is all Voice Match reads.
 pub const SPEAKER_MAX_SECONDS: f32 = 3.0;
 /// Speech over the reply for this long is a barge-in.
@@ -98,6 +99,9 @@ pub struct Config {
     pub barge_in_ms: u32,
     /// The echo canceller; `None` feeds the microphone straight to the front end.
     pub aec: Option<AecConfig>,
+    /// Report each speech segment outside Listen (`Event::Segment`) for a wake detector on the
+    /// host, in place of the wake CNN, which then never runs.
+    pub segments: bool,
 }
 
 impl Config {
@@ -111,6 +115,7 @@ impl Config {
             endpoint: Endpoint::default(),
             barge_in_ms: BARGE_IN_MS,
             aec: Some(AecConfig::default()),
+            segments: false,
         }
     }
 }
@@ -132,6 +137,7 @@ pub struct Ear {
     speaker: Option<SpeakerNet>,
     vad: VadSilero,
     endpointer: Endpointer,
+    segmenter: Option<Segmenter>,
     household: Household,
     state: State,
     barge_in_ms: u32,
@@ -162,6 +168,7 @@ impl Ear {
             speaker,
             vad,
             endpointer: Endpointer::new(cfg.endpoint),
+            segmenter: cfg.segments.then(Segmenter::default),
             household,
             state: State::Wait,
             barge_in_ms: cfg.barge_in_ms,
@@ -207,6 +214,9 @@ impl Ear {
         }
         self.vad.reset();
         self.endpointer.reset();
+        if let Some(s) = self.segmenter.as_mut() {
+            s.reset();
+        }
         self.state = State::Wait;
         self.barge = Barge::default();
         self.scores.clear();
@@ -244,6 +254,11 @@ impl Ear {
 
     pub fn state(&self) -> State {
         self.state
+    }
+
+    /// Whether the ear reports segments for a host-side wake detector instead of running its CNN.
+    pub fn segments(&self) -> bool {
+        self.segmenter.is_some()
     }
 
     pub fn front(&self) -> &Front {
@@ -319,6 +334,9 @@ impl Ear {
     pub fn listen(&mut self, start: usize) -> Option<Event> {
         self.endpointer
             .listen(start.max(self.front.oldest_sample()));
+        if let Some(s) = self.segmenter.as_mut() {
+            s.cancel();
+        }
         self.barge = Barge::default();
         let t = self.now();
         self.change(State::Listen, t)
@@ -377,6 +395,9 @@ impl Ear {
     }
 
     fn on_wake_frame(&mut self, n: usize, out: &mut Vec<Event>) {
+        if self.segmenter.is_some() {
+            return;
+        }
         let Some(hop) = self.wake.on_frame(&self.front, n, self.rung) else {
             return;
         };
@@ -401,6 +422,7 @@ impl Ear {
     fn on_vad(&mut self, end: usize, p: f32, out: &mut Vec<Event>) {
         let t = end as f64 / RATE as f64;
         self.vad_scores.push((t, p));
+        let listening = self.endpointer.listening();
         let step = self.endpointer.vad(end, p);
         if let Some(on) = step.speech {
             if self.state != State::Wait {
@@ -409,6 +431,14 @@ impl Ear {
         }
         if self.state == State::Speak {
             self.barge_in(end, t, out);
+        }
+        let (speaking, cfg) = (self.endpointer.speaking(), self.endpointer.cfg);
+        if let Some(s) = self.segmenter.as_mut() {
+            if listening {
+                s.skip(end);
+            } else if let Some((start, end)) = s.step(&cfg, end, speaking) {
+                out.push(Event::Segment { t, start, end });
+            }
         }
         match step.outcome {
             Some(Outcome::Utterance { start, end }) => {

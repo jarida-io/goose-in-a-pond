@@ -13,7 +13,7 @@ fast crates. The voice loop's wake word is Whisper transcription matching
 ear in is [at the end](#wiring-it-into-the-voice-child-plan).
 
 ```
-mic 16 kHz -> echo canceller -> 15 s ring + 80-dim fbank every 10 ms -> wake CNN (every 80 ms)
+mic 16 kHz -> echo canceller -> 32 s ring + 80-dim fbank every 10 ms -> wake CNN (every 80 ms)
      ^ play(at, pcm)                       |                         -> Silero (every 32 ms) -> endpoint rule
      the PCM being played                  +-------------------------> ResNet34 on a span   -> Voice Match
 ```
@@ -43,14 +43,17 @@ file holding only that rung's tensors would cost.
 | part | weights | arena | state | scalar / NEON f32 (rung file) | int8 SDOT (rung file) |
 |---|---|---|---|---|---|
 | echo canceller (160 ms tail, 500 ms delay search) | - | - | 0.54 MB | 0.54 MB | 0.54 MB |
-| front end (15 s ring + fbank stream) | - | - | 1.44 MB | 1.44 MB | 1.44 MB |
+| front end (32 s ring + fbank stream) | - | - | 3.07 MB | 3.07 MB | 3.07 MB |
 | wake CNN (hey goose) | 0.37 MB | 1.29 MB | 0.12 MB | 1.71 MB | 1.51 MB |
 | Silero v5 | 1.24 MB | 0.02 MB | 0.00 MB | 1.26 MB | 1.26 MB |
 | Voice Match (ResNet34-LM, 3 s span) | 31.87 MB | 8.79 MB | 0.10 MB | 35.41 MB | 19.50 MB |
 | **ear** (as loaded: 45.77 MB) | | | | **40.35 MB** | **24.25 MB** |
 | the OS: footprint grew by | | | | 45.50 MB (99%) | 46.43 MB (101%) |
 
-The ear without Voice Match holds 5.0 MB. CPU on a 30 s synthetic replay with 16 s of far end
+The front end row is computed, not measured: the ring grew from 15 s to 32 s, so that the
+endpointer's 30 s longest utterance still has its start in the ring when it ends; the rest of the
+table is the 2026-10-16 measurement, when the ring was 15 s and the ear held 1.63 MB less. The ear
+without Voice Match holds 6.6 MB. CPU on a 30 s synthetic replay with 16 s of far end
 was measured on a heavily loaded M4 (load average 26), so these figures are high. On the int8
 rung the wake CNN took 2.3% of one core, Silero 0.6%, the echo canceller 0.9% (about 1.7% while
 audio plays) and the front end 0.1%. On the scalar rung, the only one on x86, the wake CNN took
@@ -90,6 +93,16 @@ audio stays with the owners of the original videos. Whatever ships it must carry
 > dataset", Interspeech 2017; J. S. Chung, A. Nagrani, A. Zisserman, "VoxCeleb2: Deep Speaker
 > Recognition", Interspeech 2018). Licensed under CC BY 4.0,
 > https://creativecommons.org/licenses/by/4.0/.
+
+## Segments for a host-side wake detector
+
+With `Config.segments` on, the wake CNN never runs. Outside Listen the ear instead reports each
+stretch of speech on the echo-cancelled signal as `Event::Segment { start, end }`, for the host to
+transcribe and match against a custom phrase. A segment uses the endpointer's rule (Silero's
+hysteresis, 800 ms of quiet, at most 30 s), reaches 200 ms back before Silero's onset and is
+dropped under 250 ms of voiced time. Listening cancels the segment in progress, since its audio
+belongs to the turn. `tests/replay.rs` checks segments come out bit for bit the same for any
+chunking and never while listening.
 
 ## Echo canceller
 
