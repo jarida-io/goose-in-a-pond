@@ -579,3 +579,200 @@ async fn the_sentences_that_came_back_empty_are_spoken() {
         );
     }
 }
+
+/// Resident and anonymous memory of this process in MB: Linux reads `smaps_rollup`, so the
+/// weights in a mapped file show as the difference; elsewhere only resident memory is known.
+fn memory_mb() -> (f64, Option<f64>) {
+    let rss = rss_mb();
+    let anon = std::fs::read_to_string("/proc/self/smaps_rollup")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("Anonymous:"))
+                .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<f64>().ok())
+        })
+        .map(|kb| kb / 1024.0);
+    (rss, anon)
+}
+
+/// MemAvailable in MB: on the Orin, CUDA's memory comes out of it without showing in RSS.
+fn mem_available_mb() -> Option<f64> {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()?
+        .lines()
+        .find_map(|l| l.strip_prefix("MemAvailable:"))?
+        .trim()
+        .trim_end_matches("kB")
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .map(|kb| (kb / 1024.0).round())
+}
+
+/// The units a bench condition speaks: `KOKORO_CORPUS` (one text per line) or [`UNITS`], split as
+/// the reply splitter cuts them, packed to the token budget as the room loop does under
+/// `KOKORO_PACK=1`, and narrowed to the indices in `KOKORO_PICK` to rerun one run's failures.
+fn bench_units() -> Vec<String> {
+    let texts: Vec<String> = match std::env::var("KOKORO_CORPUS") {
+        Ok(path) => std::fs::read_to_string(path)
+            .expect("KOKORO_CORPUS")
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(str::to_owned)
+            .collect(),
+        Err(_) => vec![UNITS.join(" ")],
+    };
+    let pack = std::env::var("KOKORO_PACK").is_ok_and(|v| v == "1");
+    let mut units = Vec::new();
+    for text in texts {
+        let mut queue: std::collections::VecDeque<_> = pond_voice::text::split_text(&text).into();
+        while let Some(unit) = if pack {
+            pond_voice::text::pack_units(&mut queue, pond_voice::text::Pace::UNHURRIED)
+        } else {
+            queue.pop_front()
+        } {
+            units.push(unit.text);
+        }
+    }
+    match std::env::var("KOKORO_PICK") {
+        Ok(pick) => pick
+            .split(',')
+            .filter_map(|i| units.get(i.trim().parse::<usize>().ok()?).cloned())
+            .collect(),
+        Err(_) => units,
+    }
+}
+
+/// One condition per process: `KOKORO_DEVICE` (cpu, cuda), `KOKORO_MODEL`, `KOKORO_LEVERS` (as
+/// `POND_KOKORO_TRIAL` names them) over `KOKORO_UNITS` units (default 50). It reports load time,
+/// memory, failed passes per 100, and RTF of first passes and with the pipeline's halves retry.
+/// One per process, so one run's memory does not colour the next.
+#[test]
+#[ignore = "needs Kokoro weights; set KOKORO_DIR"]
+fn one_condition_over_many_units() {
+    use pond_adapters_kokoro::{unusable, Device, EngineOptions};
+    let dir = model_dir().expect("set KOKORO_DIR");
+    let levers = std::env::var("KOKORO_LEVERS").unwrap_or_default();
+    let device = match std::env::var("KOKORO_DEVICE").as_deref() {
+        Ok("cuda" | "gpu") => Device::Cuda,
+        _ => Device::Cpu,
+    };
+    let count: usize = std::env::var("KOKORO_UNITS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50);
+    let vocab = Vocab::load(&dir.join("tokenizer.json")).unwrap();
+    let style = StyleTable::load(&dir.join("voices"), "af_heart").unwrap();
+    let units = bench_units();
+    let options = EngineOptions::on(device, intra_threads()).with_trial(Some(&levers));
+    let before = memory_mb();
+    let available_before = mem_available_mb();
+    let t0 = Instant::now();
+    let mut engine = Engine::load_with(&dir.join(model_file()), options).unwrap();
+    let load_ms = t0.elapsed().as_millis();
+    let loaded = memory_mb();
+    let available_loaded = mem_available_mb();
+    let mut available_low = available_loaded;
+
+    // Token-count buckets for where passes fail: [0,32), [32,64), [64,128), [128,..).
+    let bucket = |n: usize| (n.max(1).ilog2() as usize).saturating_sub(4).min(3);
+    let (mut passes, mut failed) = ([0u32; 4], [0u32; 4]);
+    let (mut non_finite, mut no_speech, mut rescued, mut lost_halves, mut lost_whole) =
+        (0u32, 0u32, 0u32, 0u32, 0u32);
+    let (mut first_secs, mut first_audio, mut all_secs, mut usable_audio) =
+        (0f32, 0f32, 0f32, 0f32);
+    let mut failing_units = std::collections::BTreeMap::<usize, (u32, u32)>::new();
+    let mut peak = loaded.0;
+    let pass = |engine: &mut Engine, c: &tokenizer::Chunk| {
+        let t = Instant::now();
+        let audio = engine
+            .synthesize(c, style.style_for(c.tokens.len()), 1.0)
+            .unwrap();
+        (audio, t.elapsed().as_secs_f32())
+    };
+    for n in 0..count {
+        let index = n % units.len();
+        let (chunks, _) = tokenizer::chunk(&units[index], &vocab).unwrap();
+        for c in &chunks {
+            let b = bucket(c.tokens.len());
+            passes[b] += 1;
+            let (audio, secs) = pass(&mut engine, c);
+            all_secs += secs;
+            let seen = failing_units.entry(index).or_default();
+            seen.0 += 1;
+            let Some(why) = unusable(&audio) else {
+                first_secs += secs;
+                first_audio += duration_secs(&audio);
+                usable_audio += duration_secs(&audio);
+                continue;
+            };
+            seen.1 += 1;
+            failed[b] += 1;
+            match why {
+                "non-finite samples" => non_finite += 1,
+                _ => no_speech += 1,
+            }
+            let Some((first, second)) = tokenizer::halves(c) else {
+                lost_whole += 1;
+                continue;
+            };
+            let mut whole = true;
+            for part in [first, second] {
+                let (audio, secs) = pass(&mut engine, &part);
+                all_secs += secs;
+                match unusable(&audio) {
+                    None => usable_audio += duration_secs(&audio),
+                    Some(_) => {
+                        lost_halves += 1;
+                        whole = false;
+                    }
+                }
+            }
+            rescued += u32::from(whole);
+        }
+        peak = peak.max(rss_mb());
+        available_low = match (available_low, mem_available_mb()) {
+            (Some(low), Some(now)) => Some(low.min(now)),
+            (low, now) => low.or(now),
+        };
+    }
+    let after = memory_mb();
+    let total: u32 = passes.iter().sum();
+    let per_100 = |k: u32| 100.0 * k as f32 / total.max(1) as f32;
+    // A unit that fails on some repeats and not others is the runtime's, not the input's.
+    let flaky = failing_units
+        .values()
+        .filter(|(seen, bad)| *bad > 0 && bad < seen)
+        .count();
+    let always = failing_units
+        .values()
+        .filter(|(seen, bad)| *bad > 0 && bad == seen)
+        .count();
+    let result = serde_json::json!({
+        "device": device.as_str(),
+        "model": model_file(),
+        "levers": levers,
+        "threads": intra_threads(),
+        "units": count,
+        "distinct_units": units.len(),
+        "passes": total,
+        "load_ms": load_ms,
+        "rss_mb": {"before": before.0.round(), "loaded": loaded.0.round(), "peak": peak.round(), "after": after.0.round()},
+        "anonymous_mb": {"loaded": loaded.1.map(f64::round), "after": after.1.map(f64::round)},
+        "available_mb": {"before": available_before, "loaded": available_loaded, "lowest": available_low, "after": mem_available_mb()},
+        "non_finite_per_100": per_100(non_finite),
+        "no_speech_per_100": per_100(no_speech),
+        "failed_by_tokens": {"0-31": [failed[0], passes[0]], "32-63": [failed[1], passes[1]], "64-127": [failed[2], passes[2]], "128+": [failed[3], passes[3]]},
+        "rescued": rescued,
+        "lost_halves": lost_halves,
+        "lost_whole": lost_whole,
+        "failing_units": {
+            "on_every_repeat": always,
+            "on_some_repeats": flaky,
+            "indices": failing_units.iter().filter(|(_, (_, bad))| *bad > 0).map(|(i, _)| *i).collect::<Vec<_>>(),
+        },
+        "rtf_first_pass": first_secs / first_audio.max(f32::EPSILON),
+        "rtf_effective": all_secs / usable_audio.max(f32::EPSILON),
+    });
+    println!("RESULT {result}");
+}
