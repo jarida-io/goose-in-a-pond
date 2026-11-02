@@ -55,6 +55,7 @@ impl ServerEmbedderFactory {
     #[cfg(feature = "local-inference")]
     async fn gguf(&self, model: &EmbeddingModel) -> Result<Arc<dyn EmbeddingProvider>> {
         use pond_core::models::domain::device_budget::embedder_on_gpu;
+        use pond_core::models::domain::gpu_gate::gpu_gate;
         use pond_inference::{EmbeddingModelSpec, Placement};
 
         let file = model
@@ -68,45 +69,76 @@ impl ServerEmbedderFactory {
             ));
         }
         let spec = EmbeddingModelSpec::resolve(model.name)?;
-        let available = mem_available_mb();
-        if !embedder_on_gpu(
-            pond_adapters_local_inference::CUDA_ENABLED,
-            model.model_id,
-            available,
-        ) {
-            return self.warmed(spec, file.filename).await;
-        }
-        match self
-            .warmed(spec.clone().with_placement(Placement::Gpu), file.filename)
-            .await
-        {
-            Ok(provider) => Ok(provider),
-            // NvMap can refuse a load that MemAvailable said would fit; the CPU still serves.
-            Err(e) => {
-                tracing::warn!(
+        // Read and loaded with no generation running: a chore making its context beside them would
+        // leave the reading stale and stack the two allocations.
+        let on_gpu = {
+            let _setup = gpu_gate().setup().await;
+            let available = mem_available_mb();
+            if embedder_on_gpu(
+                pond_adapters_local_inference::CUDA_ENABLED,
+                model.model_id,
+                available,
+            ) {
+                let gpu = spec.clone().with_placement(Placement::Gpu);
+                Some((available, self.loaded(gpu, file.filename).await))
+            } else {
+                None
+            }
+        };
+        if let Some((available, gpu)) = on_gpu {
+            let warmed = match gpu {
+                Ok(provider) => Self::warmed(provider, file.filename).await,
+                Err(e) => Err(e),
+            };
+            match warmed {
+                Ok(provider) => return Ok(provider),
+                // NvMap can refuse a load that MemAvailable said would fit; the CPU still serves.
+                Err(e) => tracing::warn!(
                     model = model.name,
                     available_mb = ?available,
                     "the embedder did not load on the GPU, so it runs on the CPU: {e:#}"
-                );
-                self.warmed(spec, file.filename).await
+                ),
             }
         }
+        let provider = {
+            let _setup = gpu_gate().setup().await;
+            self.loaded(spec, file.filename).await?
+        };
+        Self::warmed(provider, file.filename).await
     }
 
-    /// The provider loads on its first embed; doing that here keeps the load out of a turn.
+    /// Loads the model; the caller holds the GPU gate's setup side around it.
     #[cfg(feature = "local-inference")]
-    async fn warmed(
+    async fn loaded(
         &self,
         spec: pond_inference::EmbeddingModelSpec,
         filename: &str,
-    ) -> Result<Arc<dyn EmbeddingProvider>> {
+    ) -> Result<pond_inference::GgufEmbeddingProvider> {
         use anyhow::Context as _;
 
         let provider = pond_inference::GgufEmbeddingProvider::new(spec, &self.dir);
         provider
-            .embed("warm up")
+            .load()
             .await
             .with_context(|| format!("loading {filename} on the {:?}", provider.placement()))?;
+        Ok(provider)
+    }
+
+    /// One embed after the gate reopens, since a decode waits while it is shut: a placement that
+    /// loads but cannot decode fails here, before the embedder is ready.
+    #[cfg(feature = "local-inference")]
+    async fn warmed(
+        provider: pond_inference::GgufEmbeddingProvider,
+        filename: &str,
+    ) -> Result<Arc<dyn EmbeddingProvider>> {
+        use anyhow::Context as _;
+
+        provider.embed("warm up").await.with_context(|| {
+            format!(
+                "embedding with {filename} on the {:?}",
+                provider.placement()
+            )
+        })?;
         tracing::info!(
             model_id = provider.model_id(),
             placement = ?provider.placement(),

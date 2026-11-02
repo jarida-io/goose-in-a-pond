@@ -474,7 +474,32 @@ fn l2_normalize(v: &[f32]) -> Vec<f32> {
     }
 }
 
+/// The model in `slot`, loaded first if nothing has used it yet. Blocking.
+fn loaded_or_load<'a>(
+    slot: &'a mut Option<Loaded>,
+    spec: &EmbeddingModelSpec,
+    model_path: &Path,
+) -> Result<&'a mut Loaded> {
+    if slot.is_none() {
+        *slot = Some(load_sync(spec, model_path)?);
+    }
+    Ok(slot.as_mut().expect("just loaded"))
+}
+
 impl GgufEmbeddingProvider {
+    /// Loads the model now rather than on the first embed, so a caller can gate the load alone.
+    pub async fn load(&self) -> Result<()> {
+        let loaded = Arc::clone(&self.loaded);
+        let spec = self.spec.clone();
+        let model_path = self.model_path.clone();
+
+        tokio::task::spawn_blocking(move || {
+            loaded_or_load(&mut loaded.blocking_lock(), &spec, &model_path).map(|_| ())
+        })
+        .await
+        .map_err(|e| anyhow!("embedding load join error: {e}"))?
+    }
+
     /// Shared body of every embed, which differ only in the task prefix.
     async fn embed_texts(&self, texts: Vec<String>, prefix: &'static str) -> Result<Vec<Vec<f32>>> {
         let loaded = Arc::clone(&self.loaded);
@@ -484,10 +509,7 @@ impl GgufEmbeddingProvider {
         tokio::task::spawn_blocking(move || {
             // Held across load and embed: the load must not race itself, nor a context be shared.
             let mut guard = loaded.blocking_lock();
-            if guard.is_none() {
-                *guard = Some(load_sync(&spec, &model_path)?);
-            }
-            let loaded = guard.as_mut().expect("just loaded");
+            let loaded = loaded_or_load(&mut guard, &spec, &model_path)?;
             embed_sync(loaded, &spec, &texts, prefix)
         })
         .await
