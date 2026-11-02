@@ -121,7 +121,7 @@ gives it a control, and the server-side rule if any.
 | `context_window_override` | `0` |  |
 | `agent_backend` | `"goose"` | rule: only `goose`; `pond` is refused as quarantined |
 | `picture_support_download_enabled` | `false` |  |
-| `embedding_provider` | `"fastembed"` | rule: one of `fastembed`, `gguf`, `none` |
+| `embedding_provider` | `"fastembed"` | rule: one of `auto`, `fastembed`, `gguf`, `none` |
 | `active_embedding_model` | `""` | mirror of `model_role_assignments`; the catalogue links to Models |
 
 ### Memory (`memory`, Household, 17)

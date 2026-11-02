@@ -1180,6 +1180,29 @@ def _embedder_dims(label):
     return health.get("dims")
 
 
+def _wait_for_embedder(seconds):
+    """Waits until the embedder has loaded and the index holds every row.
+
+    It loads in the background after boot, never inside a request, so a memory saved before
+    then is embedded later. The write-path checks need it loaded, and a catch-up still running
+    would embed the redacted credential they expect to have no vector yet.
+    """
+    import time as _time
+
+    deadline = _time.monotonic() + seconds
+    health = None
+    while _time.monotonic() < deadline:
+        code, health = call("GET", "/api/v1/context/index/health")
+        if code == 200 and isinstance(health, dict):
+            state = (health.get("embedder") or {}).get("state")
+            if state in ("off", "failed"):
+                return
+            if state == "ready" and not health.get("missing") and not health.get("mismatched"):
+                return
+        _time.sleep(0.5)
+    print("NOTE  the embedder was not ready and current after %ds: %s" % (seconds, health))
+
+
 def section_memory_vectors():
     """A memory written through the API is stored with its vector, not left for the sweep.
 
@@ -2095,6 +2118,7 @@ def main():
         section_deletion(jerry, liz)
         section_legacy_rows(jerry)
         section_secret_store()
+        _wait_for_embedder(60)
         section_redaction()
         section_memory_vectors()
         section_network_mode()

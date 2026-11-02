@@ -7,6 +7,7 @@ use axum::http::{Method, Request, StatusCode};
 use pond_api::{build_router, AppState};
 use pond_core::context::vector_index::{Corpus, VectorEntry, VectorIndex};
 use pond_core::models::ports::embedding::EmbeddingProvider;
+use pond_core::models::services::active_embedder::{ActiveEmbedder, EmbedderState};
 use pond_core::shared::mocks::mock_agent::MockAgent;
 use pond_core::user_data::domain::onboarding::OnboardingStep;
 use pond_core::user_data::domain::profile::CreateProfileRequest;
@@ -95,6 +96,16 @@ struct Harness {
 
 /// Pond shapes: no index (CLI), index but no embedder (`embedding_provider = "none"`), or live.
 async fn make_app(wire_index: bool, wire_embedder: bool) -> Harness {
+    let embedder = if wire_embedder {
+        ActiveEmbedder::loaded(Arc::new(StubEmbedder))
+    } else {
+        ActiveEmbedder::off()
+    };
+    make_app_with(wire_index, embedder).await
+}
+
+async fn make_app_with(wire_index: bool, embedder: ActiveEmbedder) -> Harness {
+    let wire_embedder = embedder.state() != EmbedderState::Off;
     let tmp = tempfile::tempdir().unwrap();
     let db = pond_infra::db::Database::init(tmp.path()).await.unwrap();
     let system = db.system.clone();
@@ -131,8 +142,7 @@ async fn make_app(wire_index: bool, wire_embedder: bool) -> Harness {
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
-        embedding_provider: wire_embedder
-            .then(|| Arc::new(StubEmbedder) as Arc<dyn EmbeddingProvider + Send + Sync>),
+        embedder: Arc::new(embedder),
         vector_index: wire_index.then(|| index.clone() as Arc<dyn VectorIndex>),
         // Only with an embedder, as in `main.rs`, which spawns the sweep only when one exists.
         index_reindex: (wire_index && wire_embedder).then(|| reindex.clone()),
@@ -359,6 +369,33 @@ async fn an_index_with_no_embedder_reports_that_nothing_can_be_indexed() {
          a wiped index and a deliberately-disabled one identically: {body}"
     );
     assert_eq!(body["model_id"], Value::Null);
+}
+
+/// A switch in progress reads as the new model loading, never as an index that lost its vectors.
+#[tokio::test]
+async fn the_route_says_what_the_embedder_is_doing() {
+    use pond_core::models::domain::embedding_models::{EmbedderChoice, NOMIC_EMBED_TEXT_V1_5};
+
+    let embedder = ActiveEmbedder::off();
+    embedder
+        .choose(EmbedderChoice::Model(&NOMIC_EMBED_TEXT_V1_5))
+        .await;
+    let h = make_app_with(true, embedder).await;
+    let (status, body) = health(&h).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["embedder"]["state"], "chosen", "{body}");
+    assert_eq!(body["embedder"]["model_id"], "nomic-embed-text-v1.5");
+    assert_eq!(body["model_id"], "nomic-embed-text-v1.5");
+    assert_eq!(body["dims"], 768);
+
+    let h = make_app(true, true).await;
+    let (_, body) = health(&h).await;
+    assert_eq!(body["embedder"]["state"], "ready", "{body}");
+    assert_eq!(body["embedder"]["model_id"], STUB_MODEL);
+
+    let h = make_app(true, false).await;
+    let (_, body) = health(&h).await;
+    assert_eq!(body["embedder"]["state"], "off", "{body}");
 }
 
 // ── Every corpus is its own row ────────────────────────────────────────────

@@ -82,6 +82,11 @@ pub async fn run_index_maintenance(
     budget: IndexBudget,
 ) -> MaintenanceReport {
     let mut report = MaintenanceReport::default();
+    // Nothing to stamp a vector with while the embedder is off or still loading.
+    if !embedder.available() {
+        return report;
+    }
+    let generation = embedder.generation();
     let model_id = embedder.model_id();
     let dims = embedder.dimensions();
 
@@ -150,6 +155,11 @@ pub async fn run_index_maintenance(
                     continue;
                 };
                 match embedder.embed(passage).await {
+                    // A switch since the pass began: this vector is not `model_id`'s.
+                    Ok(_) if embedder.generation() != generation => {
+                        tracing::info!("[context-index] the embedding model changed; pass ended");
+                        return report;
+                    }
                     Ok(vector) => {
                         let entry = crate::context::vector_index::VectorEntry {
                             corpus: Corpus::Context,

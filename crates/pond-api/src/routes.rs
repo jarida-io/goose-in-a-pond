@@ -19,6 +19,7 @@ use pond_core::mesh::domain::peer_id::PeerId as MeshPeerId;
 use pond_core::mesh::domain::trust_scope::TrustScope;
 use pond_core::models::domain::message::ChatMessage;
 use pond_core::models::ports::provider::LlmProvider;
+use pond_core::models::services::active_embedder::EmbedderState;
 use pond_core::models::services::context::context_governor::{
     ContextGovernor, ContextInputs, EngineWindow,
 };
@@ -6099,6 +6100,9 @@ async fn update_settings(
         }
     }
 
+    // Idempotent, so every save may call it: only a changed choice drops and reloads the model.
+    crate::apply_embedding_choice(&state, &merged).await;
+
     // The warmed prefix is now stale; re-warm in the background so the save doesn't wait.
     if save_needs_prewarm(&current, &merged) {
         crate::spawn_prefix_prewarm(state.clone(), false);
@@ -7487,7 +7491,10 @@ async fn activate_model(
             let _ = settings_repo
                 .set_key("active_embedding_model", name.clone())
                 .await;
-            // Leaves `embedding_provider` alone: the engine is a separate choice from the model.
+            // The model brings its own engine; `embedding_provider` stays the on/off switch.
+            if let Ok(settings) = settings_repo.get().await {
+                crate::apply_embedding_choice(&state, &settings).await;
+            }
         }
         _ => {}
     }
@@ -14340,8 +14347,11 @@ fn default_source() -> String {
 
 /// The text's document vector, or `None` to leave the row for the index sweep; never fails a save.
 async fn embed_memory_text(state: &AppState, text: &str) -> Option<Vec<f32>> {
-    let embedder = state.embedding_provider.as_ref()?;
-    match embedder.embed(text).await {
+    use pond_core::models::ports::embedding::EmbeddingProvider as _;
+    if !state.embedder.available() {
+        return None;
+    }
+    match state.embedder.embed(text).await {
         Ok(vector) => Some(vector),
         Err(e) => {
             tracing::warn!("could not embed a memory; the index sweep will embed it later: {e:#}");
@@ -19116,9 +19126,24 @@ async fn detect_location(
     }))
 }
 
+/// The embedder's lifecycle, so a switch reads as loading or failed rather than as lost vectors.
+fn embedder_status(state: &EmbedderState) -> Value {
+    json!({
+        "state": state.as_str(),
+        "model_id": state.model_id(),
+        "reason": match state {
+            EmbedderState::Failed { reason, .. } => Some(reason.as_str()),
+            _ => None,
+        },
+    })
+}
+
 async fn context_index_health(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use pond_core::models::ports::embedding::EmbeddingProvider as _;
+
+    let embedder_state = state.embedder.state();
     let no_index = |reason: &str| {
         Json(json!({
             "indexed": false,
@@ -19127,6 +19152,7 @@ async fn context_index_health(
             "dims": Value::Null,
             "coverage": Value::Null,
             "corpora": [],
+            "embedder": embedder_status(&embedder_state),
         }))
     };
 
@@ -19134,10 +19160,12 @@ async fn context_index_health(
         return Ok(no_index(NO_VECTOR_INDEX));
     };
     // No embedder, no model to ask about; "all missing" would look like a wiped index instead.
-    let Some(embedder) = state.embedding_provider.as_ref() else {
+    if embedder_state == EmbedderState::Off {
         return Ok(no_index(NO_EMBEDDING_MODEL));
-    };
+    }
+    let embedder = &state.embedder;
 
+    // While a model loads, coverage is counted for it: the rows it will have to embed.
     let model_id = embedder.model_id();
     let health = index.health(&model_id).await.map_err(|e| {
         tracing::warn!(error = %e, "could not read personal-context index health");
@@ -19152,6 +19180,7 @@ async fn context_index_health(
 
     Ok(Json(json!({
         "indexed": true,
+        "embedder": embedder_status(&embedder_state),
         "model_id": model_id,
         "dims": embedder.dimensions(),
         "rows": rows,

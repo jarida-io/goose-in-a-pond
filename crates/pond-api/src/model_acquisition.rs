@@ -393,6 +393,10 @@ pub(crate) async fn arrival(
     if matches!(record.category, ModelCategory::Gguf | ModelCategory::Litert) {
         state.agent.prepare_model(&record.name);
     }
+    // The chosen embedder may have failed for want of this file; it loads now in the background.
+    if record.category == ModelCategory::Embedding && part == Some(PART_MODEL) {
+        state.embedder.request_load();
+    }
     Ok(())
 }
 
@@ -659,7 +663,7 @@ pub async fn restore_assigned_models(state: Arc<AppState>) -> usize {
 }
 
 /// Brings back one model's missing file the same way, for a model the pond runs that no role
-/// assignment names, such as the GGUF embedder `embedding_provider` picks. Returns whether a
+/// assignment names, such as a GGUF embedder chosen before any assignment. Returns whether a
 /// download started.
 pub async fn restore_model(state: Arc<AppState>, model_id: &str) -> bool {
     let (Some(repo), Some(data_dir)) = (state.model_repo.clone(), state.data_dir.clone()) else {

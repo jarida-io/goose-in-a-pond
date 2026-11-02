@@ -130,7 +130,10 @@ async fn router_over(
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
         matter: None,
         memory_repo,
-        embedding_provider,
+        embedder: Arc::new(embedding_provider.map_or_else(
+            pond_core::models::services::active_embedder::ActiveEmbedder::off,
+            |p| pond_core::models::services::active_embedder::ActiveEmbedder::loaded(p),
+        )),
         vector_index,
         index_reindex: None,
         lane: None,
@@ -228,8 +231,10 @@ async fn make_app_with_semantic_memory(
     let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
     let repo: Arc<dyn MemoryRepository + Send + Sync> = Arc::new(RedactingMemoryRepository::new(
         Arc::new(
-            SqliteMemoryRepository::new(db.system.clone())
-                .with_vector_index(index.clone(), Some(embedder.model_id())),
+            SqliteMemoryRepository::new(db.system.clone()).with_vector_index(
+                index.clone(),
+                Some(embedder.clone() as Arc<dyn EmbeddingProvider>),
+            ),
         ),
         Arc::new(RuleRedactor::new()),
     ));

@@ -6,6 +6,7 @@ mod asset_root;
 mod audio_devices;
 mod composite_model_catalog_provider;
 mod conversation_extractor;
+mod embedder_factory;
 mod filesystem_model_storage;
 mod http_model_downloader;
 mod inference_lane_runner;
@@ -1568,124 +1569,32 @@ async fn run_server(
     // Deterministic, rule-based redactor (no model in the loop), shared by both chokepoints below.
     let redactor: Arc<dyn pond_core::security::ports::redactor::Redactor> =
         Arc::new(pond_infra::rule_redactor::RuleRedactor::new());
-    // ── Embedding provider (gguf / fastembed / none) ─────────────────────────
-    // Before the memory/context repos (they need its model id) and the agent (semantic recall).
-    // "gguf" suits the Jetson (fastembed's ORT won't init there); it loads lazily on first embed.
-    // A missing GGUF is fetched by the models pipeline once AppState exists, so it shows there.
-    #[cfg_attr(not(feature = "local-inference"), allow(unused_mut))]
-    let mut missing_embedding_model: Option<String> = None;
+    // ── Embedder (the Memory-role model) ─────────────────────────────────────
+    // Chosen before the memory/context repos and the agent, which read its model as they work;
+    // loaded in the background once AppState exists, so a missing GGUF can be fetched.
+    let embedder = Arc::new(pond_core::models::services::active_embedder::ActiveEmbedder::off());
+    embedder
+        .choose(pond_core::models::domain::embedding_models::EmbedderChoice::resolve(&settings))
+        .await;
+    let embedder_factory = Arc::new(embedder_factory::ServerEmbedderFactory::new(
+        data_dir.join("models").join("embedding"),
+    ));
+    // Always wired: whether semantic search is on is the embedder's `available()`, which a
+    // settings save can change without a restart.
     let embedding_provider: Option<
         Arc<dyn pond_core::models::ports::embedding::EmbeddingProvider + Send + Sync>,
-    > = {
-        use pond_core::models::ports::embedding::EmbeddingProvider as _;
-        match settings.embedding_provider.as_str() {
-            "none" => {
-                tracing::info!("embedding provider: disabled (embedding_provider = \"none\")");
-                None
-            }
-            #[cfg(feature = "local-inference")]
-            "gguf" => {
-                let embedding_dir = data_dir.join("models").join("embedding");
-                // Shared with fastembed: a stale name or typo means the gguf default, never None.
-                let spec =
-                    pond_inference::EmbeddingModelSpec::resolve(&settings.active_embedding_model)
-                        .unwrap_or_else(|e| {
-                            tracing::warn!(
-                                "'{}' is not a GGUF embedding model ({e}); using the default",
-                                settings.active_embedding_model
-                            );
-                            pond_inference::EmbeddingModelSpec::nomic_embed_text_v1_5()
-                        });
-                if !embedding_dir.join(&spec.filename).exists() {
-                    tracing::info!(
-                        model_id = %spec.model_id,
-                        "GGUF embedding model not on disk; retrieval falls back to keyword until \
-                         its download arrives"
-                    );
-                    missing_embedding_model = Some(
-                        pond_core::models::domain::model_record::ModelRecord::id_for(
-                            &pond_core::models::domain::model_record::ModelCategory::Embedding,
-                            spec.name,
-                        ),
-                    );
-                }
-                let provider = pond_inference::GgufEmbeddingProvider::new(spec, &embedding_dir);
-                tracing::info!(
-                    model_id = provider.model_id(),
-                    dims = provider.dimensions(),
-                    "GGUF embedding provider ready (loads lazily on first embed)"
-                );
-                Some(Arc::new(provider)
-                    as Arc<
-                        dyn pond_core::models::ports::embedding::EmbeddingProvider + Send + Sync,
-                    >)
-            }
-            #[cfg(not(feature = "local-inference"))]
-            "gguf" => {
-                tracing::warn!(
-                    "embedding_provider = \"gguf\" needs the local-inference feature; \
-                     embeddings disabled"
-                );
-                None
-            }
-            _ => {
-                let emb_model = if settings.active_embedding_model.is_empty() {
-                    "all-MiniLM-L6-v2"
-                } else {
-                    &settings.active_embedding_model
-                };
-                let cache_dir = data_dir.join("models").join("embedding");
-                let emb_model_owned = emb_model.to_string();
-                let emb_result = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    tokio::task::spawn_blocking(move || {
-                        pond_infra::fastembed_embedding::FastembedEmbeddingProvider::new(
-                            &emb_model_owned,
-                            Some(cache_dir),
-                        )
-                    }),
-                )
-                .await;
-                let init_result = match emb_result {
-                    Ok(Ok(r)) => r,
-                    Ok(Err(e)) => Err(anyhow::anyhow!("embedding spawn_blocking failed: {e}")),
-                    Err(_) => Err(anyhow::anyhow!(
-                        "embedding provider init timed out after 30 s — ONNX Runtime may be \
-                         version-incompatible (need ORT 1.24.2)"
-                    )),
-                };
-                match init_result {
-                    Ok(provider) => {
-                        tracing::info!(
-                            model = provider.model_name(),
-                            dims = provider.dimensions(),
-                            "embedding provider ready"
-                        );
-                        Some(Arc::new(provider)
-                            as Arc<
-                                dyn pond_core::models::ports::embedding::EmbeddingProvider
-                                    + Send
-                                    + Sync,
-                            >)
-                    }
-                    Err(e) => {
-                        tracing::warn!("embedding provider failed to init: {e:#}");
-                        None
-                    }
-                }
-            }
-        }
-    };
+    > = Some(embedder.clone());
 
-    // Shared personal-context index; the model id below is `None` when embeddings are off.
+    // Shared personal-context index; writes are stamped with the embedder's model when it is ready.
     let vector_index: Arc<dyn pond_core::context::vector_index::VectorIndex> = Arc::new(
         pond_infra::sqlite_vector_index::SqliteVectorIndex::new(db.vectors.clone()),
     );
     // A member's first turn must not queue behind the pond indexing itself.
     let index_maintenance_cancel = tokio_util::sync::CancellationToken::new();
-    // Held here so the reindex route can trigger a refill; `Some` once the sweep spawns.
-    let mut index_reindex_handle: Option<Arc<tokio::sync::Notify>> = None;
-    let vector_model_id = embedding_provider.as_ref().map(|p| p.model_id());
+    // Held here so the reindex route can trigger a refill; set where the sweep spawns.
+    let index_reindex_handle: Option<Arc<tokio::sync::Notify>>;
+    let vector_stamp: Option<Arc<dyn pond_core::models::ports::embedding::EmbeddingProvider>> =
+        Some(embedder.clone());
 
     // Chokepoint 1: this one construction redacts every memory write, whoever the writer.
     let memory_repo: Arc<
@@ -1695,7 +1604,7 @@ async fn run_server(
             // Inside the redactor, which drops a secret's vector: the index must mirror the store.
             Arc::new(
                 SqliteMemoryRepository::new(db.system.clone())
-                    .with_vector_index(vector_index.clone(), vector_model_id.clone()),
+                    .with_vector_index(vector_index.clone(), vector_stamp.clone()),
             ),
             redactor.clone(),
         ),
@@ -2652,36 +2561,17 @@ async fn run_server(
         Arc<dyn pond_core::mcp::ports::mcp_knowledge::McpKnowledgePort + Send + Sync>,
     > = None;
 
-    // ── Embedding backfill ───────────────────────────────────────────────────
-    // `search_similar` skips unembedded rows; batched with pauses as it competes with inference.
-    if let Some(provider) = embedding_provider.clone() {
-        let backfill_repo = memory_repo.clone();
-        tokio::spawn(async move {
-            use pond_core::user_data::services::memory_relevance as relevance;
-            relevance::run_backfill(
-                backfill_repo.as_ref(),
-                provider.as_ref(),
-                relevance::BACKFILL_BATCH_SIZE,
-                relevance::BACKFILL_BATCH_PAUSE_MS,
-            )
-            .await;
-            // Then re-embed rows from another model: search excludes them and the backfill can't
-            // see them. Second, because a row with no vector at all is the worse miss.
-            relevance::run_dimension_repair(
-                backfill_repo.as_ref(),
-                provider.as_ref(),
-                relevance::BACKFILL_BATCH_SIZE,
-                relevance::BACKFILL_BATCH_PAUSE_MS,
-            )
-            .await;
-        });
-    }
+    // Embedded once the first model loads (the loader below AppState); `search_similar` skips
+    // unembedded rows.
+    let backfill_memories = memory_repo.clone();
 
     // ── Personal-context index maintenance ───────────────────────────────────
     // `index_reindex_handle` is set only inside this block, so it can't disagree with the sweep.
-    if let (Some(provider), Some(_)) = (embedding_provider.clone(), vector_model_id.clone()) {
+    {
+        use pond_core::models::ports::embedding::EmbeddingProvider as _;
         use pond_core::user_data::services::inference_lane::LaneJob;
 
+        let provider = embedder.clone();
         let index = vector_index.clone();
         let storage = session_storage.clone();
         // Backfill runs once at startup; this repairs rows left unembedded after it.
@@ -2747,8 +2637,9 @@ async fn run_server(
                 let Some(_slot) = sweep_lane
                     .acquire(
                         LaneJob::IndexMaintenance,
-                        // No toggle of its own: an unmaintained index silently goes stale.
-                        true,
+                        // No toggle of its own: an unmaintained index silently goes stale. Waits
+                        // for a loaded model, since it has nothing to stamp a vector with before.
+                        provider.available(),
                         // `floor` and `idle_threshold` are zeroed above when `asked`; the
                         // exemption comes from `plan_sweep`, not the lane's hand waiver.
                         crate::inference_lane_runner::Cadence::new(
@@ -2820,8 +2711,8 @@ async fn run_server(
     }
 
     // ── Batch memory extraction ──────────────────────────────────────────────
-    // The only writer of extracted memories. Without an embedder there's no cosine dedup, so it
-    // reads nothing and says so via `blocked_on`.
+    // The only writer of extracted memories. Without a loaded embedder there's no cosine dedup,
+    // so it reads nothing and says so via `blocked_on`.
     let extraction_status = Arc::new(tokio::sync::RwLock::new(
         pond_core::user_data::services::memory_extraction::ExtractionEngineStatus {
             mode: pond_core::user_data::services::memory_extraction::ExtractionMode::parse(
@@ -2836,7 +2727,8 @@ async fn run_server(
     // once it exists further down.
     let (proposal_notice_tx, proposal_notice_rx) =
         tokio::sync::mpsc::channel::<pond_core::user_data::domain::proposal::Proposal>(64);
-    if let Some(provider) = embedding_provider.clone() {
+    {
+        use pond_core::models::ports::embedding::EmbeddingProvider as _;
         use pond_core::user_data::services::consolidation_schedule as sched;
         use pond_core::user_data::services::inference_lane::LaneJob;
         use pond_core::user_data::services::memory_extraction::{
@@ -2861,9 +2753,10 @@ async fn run_server(
         );
         let promotion_notices = proposal_notice_tx;
 
+        let extraction_embedder = embedder.clone();
         let service = Arc::new(
             BatchExtractionService::new()
-                .with_embedding_provider(provider)
+                .with_embedding_provider(embedder.clone())
                 .with_reminder_repository(reminder_repo),
         );
         let extraction_storage = session_storage.clone();
@@ -2952,6 +2845,10 @@ async fn run_server(
                     )
                     .await
                 else {
+                    // Otherwise an off or loading embedder looks like nothing left to extract.
+                    if !extraction_embedder.available() {
+                        status.write().await.blocked_on = Some("no_embedder".to_string());
+                    }
                     continue;
                 };
 
@@ -3085,17 +2982,9 @@ async fn run_server(
         });
         tracing::info!(
             "batch memory extraction active (mode={}) — reads one window per pass after {} min \
-             of household quiet",
+             of household quiet, once an embedding model is loaded",
             settings.memory_extraction_mode,
             settings.memory_extraction_idle_secs / 60,
-        );
-    } else {
-        // In the status too: otherwise a missing embedder looks like nothing left to extract.
-        extraction_status.write().await.blocked_on = Some("no_embedder".to_string());
-        tracing::info!(
-            "batch memory extraction inactive — no embedding provider, so nothing could be \
-             deduplicated and the pond would store a restatement of everything it already \
-             knows. NOTHING else extracts memories now, so this pond is not learning."
         );
     }
 
@@ -4104,15 +3993,15 @@ async fn run_server(
                 redactor.clone(),
             )
             // Mirroring is safe: a ContextItem can only be constructed redacted.
-            .with_vector_index(vector_index.clone(), vector_model_id.clone()),
+            .with_vector_index(vector_index.clone(), vector_stamp.clone()),
         );
         let pipeline = Arc::new(
             pond_core::context::ingest::IngestPipeline::new(context_repo.clone(), redactor.clone())
                 .with_embedder(embedding_provider.clone()),
         );
 
-        // Installed unconditionally: the toggle gates registration. No embedder, no unified
-        // retrieval: `recall` then answers nothing rather than degrading to context-only.
+        // Installed unconditionally: the toggle gates registration. With no model loaded,
+        // `recall` answers nothing rather than degrading to context-only.
         let unified_retrieval = embedding_provider.clone().map(|emb| {
             Arc::new(
                 pond_core::context::retrieval_service::PersonalContextRetrieval::new(
@@ -4402,7 +4291,7 @@ async fn run_server(
         device_registry,
         room_registry,
         memory_repo,
-        embedding_provider,
+        embedder: embedder.clone(),
         // Same handle the repos write through and the sweep repairs; never construct a second one.
         vector_index: Some(vector_index.clone()),
         // Some only if the sweep spawned, or the route would report `refilling: true` forever.
@@ -4694,13 +4583,45 @@ async fn run_server(
     {
         let state = state.clone();
         tokio::spawn(async move {
-            let n = pond_api::model_acquisition::restore_assigned_models(state.clone()).await;
+            let n = pond_api::model_acquisition::restore_assigned_models(state).await;
             if n > 0 {
                 tracing::info!("restore: started {n} download(s) for role-assigned models");
             }
-            // After the assigned ones: a Memory-role assignment of this model shares its transfer.
-            if let Some(model_id) = missing_embedding_model {
-                pond_api::model_acquisition::restore_model(state, &model_id).await;
+        });
+    }
+
+    // Loads the embedder when a choice or an arrived file asks; the embedding slot will take this
+    // over. After AppState, through which the factory fetches a missing GGUF.
+    embedder_factory.attach(&state);
+    {
+        let (embedder, factory) = (embedder.clone(), embedder_factory.clone());
+        tokio::spawn(async move {
+            use pond_core::models::services::active_embedder::EmbedderState;
+            use pond_core::user_data::services::memory_relevance as relevance;
+
+            let mut backfilled = false;
+            loop {
+                embedder.load_requested().await;
+                let state = embedder.ensure_loaded(factory.as_ref()).await;
+                if backfilled || !matches!(state, EmbedderState::Ready { .. }) {
+                    continue;
+                }
+                backfilled = true;
+                relevance::run_backfill(
+                    backfill_memories.as_ref(),
+                    embedder.as_ref(),
+                    relevance::BACKFILL_BATCH_SIZE,
+                    relevance::BACKFILL_BATCH_PAUSE_MS,
+                )
+                .await;
+                // Then rows of another width: search skips them and the backfill can't see them.
+                relevance::run_dimension_repair(
+                    backfill_memories.as_ref(),
+                    embedder.as_ref(),
+                    relevance::BACKFILL_BATCH_SIZE,
+                    relevance::BACKFILL_BATCH_PAUSE_MS,
+                )
+                .await;
             }
         });
     }

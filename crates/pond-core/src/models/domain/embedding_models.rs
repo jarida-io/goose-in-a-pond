@@ -3,6 +3,7 @@
 
 use super::curated::FilePin;
 use super::model_record::{ModelCategory, ModelRecord};
+use crate::user_data::domain::settings::Settings;
 
 const MIB: u64 = 1024 * 1024;
 
@@ -213,6 +214,57 @@ pub fn pinned(repo: &str, revision: &str, filename: &str) -> Option<&'static Ggu
         .find(|f| f.repo == repo && f.revision == revision && f.filename == filename)
 }
 
+/// The embedder the household asked for: the Memory-role model decides the engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbedderChoice {
+    Off,
+    Model(&'static EmbeddingModel),
+}
+
+impl EmbedderChoice {
+    /// `embedding_provider` is only on or off ("none"); `active_embedding_model` names the model.
+    pub fn resolve(settings: &Settings) -> Self {
+        Self::from_parts(
+            &settings.embedding_provider,
+            &settings.active_embedding_model,
+        )
+    }
+
+    pub fn from_parts(provider: &str, model: &str) -> Self {
+        if provider == "none" {
+            return Self::Off;
+        }
+        // A pond that stored `gguf` with no model ran nomic, so it keeps that vector space.
+        let legacy = if provider == "gguf" {
+            &NOMIC_EMBED_TEXT_V1_5
+        } else {
+            &ALL_MINILM_L6_V2
+        };
+        let name = model.trim();
+        if name.is_empty() {
+            return Self::Model(legacy);
+        }
+        match find(name) {
+            Some(found) => Self::Model(found),
+            None => {
+                tracing::warn!(
+                    model = name,
+                    using = legacy.name,
+                    "the Memory-role model is not an embedding model the pond offers"
+                );
+                Self::Model(legacy)
+            }
+        }
+    }
+
+    pub fn model(&self) -> Option<&'static EmbeddingModel> {
+        match self {
+            Self::Off => None,
+            Self::Model(model) => Some(model),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,6 +356,65 @@ mod tests {
             }
         }
         assert_eq!(find("nomic-embed-text-v1.5").unwrap().size_mb(), 139);
+    }
+
+    fn chosen(provider: &str, model: &str) -> Option<&'static str> {
+        EmbedderChoice::from_parts(provider, model)
+            .model()
+            .map(|m| m.name)
+    }
+
+    #[test]
+    fn none_turns_embedding_off_whatever_the_model() {
+        assert_eq!(chosen("none", ""), None);
+        assert_eq!(chosen("none", "nomic-embed-text-v1.5"), None);
+    }
+
+    /// A pond upgraded with only the old engine setting stored keeps the space its vectors are in.
+    #[test]
+    fn an_empty_model_resolves_to_what_the_legacy_engine_ran() {
+        assert_eq!(chosen("gguf", ""), Some("nomic-embed-text-v1.5"));
+        assert_eq!(chosen("fastembed", ""), Some("all-MiniLM-L6-v2"));
+        assert_eq!(chosen("auto", ""), Some("all-MiniLM-L6-v2"));
+        assert_eq!(chosen("fastembed", "  "), Some("all-MiniLM-L6-v2"));
+    }
+
+    #[test]
+    fn a_named_model_brings_its_own_engine() {
+        assert_eq!(
+            chosen("fastembed", "bge-base-en-v1.5"),
+            Some("bge-base-en-v1.5")
+        );
+        assert_eq!(
+            chosen("gguf", "bge-small-en-v1.5"),
+            Some("bge-small-en-v1.5")
+        );
+        assert_eq!(
+            chosen("auto", "nomic-embed-text-v1.5"),
+            Some("nomic-embed-text-v1.5")
+        );
+    }
+
+    #[test]
+    fn an_unknown_model_falls_back_to_the_legacy_default() {
+        assert_eq!(chosen("fastembed", "gone-model"), Some("all-MiniLM-L6-v2"));
+        assert_eq!(chosen("auto", "gguf"), Some("all-MiniLM-L6-v2"));
+        assert_eq!(chosen("gguf", "gguf"), Some("nomic-embed-text-v1.5"));
+    }
+
+    #[test]
+    fn resolve_reads_the_two_settings() {
+        let mut settings = Settings {
+            embedding_provider: "gguf".into(),
+            active_embedding_model: String::new(),
+            ..Settings::default()
+        };
+        assert_eq!(
+            EmbedderChoice::resolve(&settings),
+            EmbedderChoice::Model(&NOMIC_EMBED_TEXT_V1_5)
+        );
+        settings.embedding_provider = "none".into();
+        assert_eq!(EmbedderChoice::resolve(&settings), EmbedderChoice::Off);
     }
 
     /// Settings and role assignments already store these names.

@@ -343,6 +343,9 @@ struct SessionGroups {
     permitted: Vec<String>,
 }
 
+/// Each scorable tool group's description vector.
+type GroupVectors = Arc<Vec<(String, Vec<f32>)>>;
+
 /// Adapter: the `Agent` port on the Goose framework.
 pub struct GooseAdapter {
     agent: Arc<GooseAgent>,
@@ -418,8 +421,9 @@ pub struct GooseAdapter {
     /// Session id -> groups it may EVER hold; the enable hatch widens only within this.
     /// Not persisted: recomputed from scope on restore, as a stored boundary can go stale.
     session_permitted_groups: tokio::sync::RwLock<HashMap<String, Vec<String>>>,
-    /// Group-description embeddings. No `Option` inside: a failed first try must not stick.
-    group_embeddings: tokio::sync::OnceCell<Vec<(String, Vec<f32>)>>,
+    /// Group-description vectors with the embedder generation that made them; a switched model
+    /// recomputes them, since its queries live in another space.
+    group_embeddings: tokio::sync::RwLock<Option<(u64, GroupVectors)>>,
     /// In-process picture support: the one state every vision path shares.
     pictures: Arc<crate::vision_encoder::PictureSupport>,
     /// Keeps transient tool results out of goose's store once their turn is over.
@@ -539,7 +543,7 @@ impl GooseAdapter {
             defaults_stripped: Mutex::new(HashSet::new()),
             session_tool_groups: tokio::sync::RwLock::new(HashMap::new()),
             session_permitted_groups: tokio::sync::RwLock::new(HashMap::new()),
-            group_embeddings: tokio::sync::OnceCell::new(),
+            group_embeddings: tokio::sync::RwLock::new(None),
             pictures: Arc::new(crate::vision_encoder::PictureSupport::new()),
             transient_sweeps: crate::transient_history::TransientSweeps::default(),
         })
@@ -1901,7 +1905,7 @@ impl GooseAdapter {
         if scope.excludes_everything() {
             return Vec::new();
         }
-        if let Some(provider) = &self.embedding_provider {
+        if let Some(provider) = self.embedding_provider.as_ref().filter(|p| p.available()) {
             // Query prefix, not document: asymmetric retrievers (nomic) embed them differently.
             match provider.embed_query(message).await {
                 Ok(query_vector) => {
@@ -1950,33 +1954,33 @@ impl GooseAdapter {
     }
 
     // ── Per-session tool selection ──────────────────────────────────────────
-    /// Group-description vectors, cached on first success; `None` means "don't narrow".
-    /// Failures aren't cached (the embedder may still be downloading), so a later session retries.
-    async fn group_description_embeddings(&self) -> Option<&Vec<(String, Vec<f32>)>> {
-        self.group_embeddings
-            .get_or_try_init(|| async {
-                let provider = self.embedding_provider.as_ref().ok_or(())?;
-                let available: Vec<String> = registered_extensions().to_vec();
-                let scorable =
-                    pond_core::mcp::services::tool_selection::scorable_groups(&available);
-                let mut out = Vec::with_capacity(scorable.len());
-                for (extension, description) in scorable {
-                    match provider.embed(description).await {
-                        Ok(v) => out.push((extension.to_string(), v)),
-                        // Unscored groups stay dormant until the escape hatch pulls them in.
-                        Err(e) => {
-                            tracing::warn!("tool selection: embedding '{extension}' failed: {e}")
-                        }
-                    }
-                }
-                // Empty is a failure: `Err` leaves the cell unset so a later session retries.
-                if out.is_empty() {
-                    return Err(());
-                }
-                Ok(out)
-            })
-            .await
-            .ok()
+    /// Group-description vectors for the current model, cached per embedder generation; `None`
+    /// means "don't narrow". Failures aren't cached (the model may still be loading).
+    async fn group_description_embeddings(&self) -> Option<(u64, GroupVectors)> {
+        let provider = self.embedding_provider.as_ref().filter(|p| p.available())?;
+        let generation = provider.generation();
+        if let Some((cached, vectors)) = self.group_embeddings.read().await.as_ref() {
+            if *cached == generation {
+                return Some((generation, vectors.clone()));
+            }
+        }
+        let available: Vec<String> = registered_extensions().to_vec();
+        let scorable = pond_core::mcp::services::tool_selection::scorable_groups(&available);
+        let mut out = Vec::with_capacity(scorable.len());
+        for (extension, description) in scorable {
+            match provider.embed(description).await {
+                Ok(v) => out.push((extension.to_string(), v)),
+                // Unscored groups stay dormant until the escape hatch pulls them in.
+                Err(e) => tracing::warn!("tool selection: embedding '{extension}' failed: {e}"),
+            }
+        }
+        // Empty is a failure, and a switch mid-way mixed two models: neither is cached.
+        if out.is_empty() || provider.generation() != generation {
+            return None;
+        }
+        let vectors: GroupVectors = Arc::new(out);
+        *self.group_embeddings.write().await = Some((generation, vectors.clone()));
+        Some((generation, vectors))
     }
 
     /// This session's tool groups, sticky: per-turn re-scoring would break KV prefix reuse.
@@ -2070,7 +2074,7 @@ impl GooseAdapter {
             self.group_description_embeddings().await,
             self.embedding_provider.as_ref(),
         ) {
-            (Some(group_vectors), Some(provider)) => {
+            (Some((generation, group_vectors)), Some(provider)) => {
                 let mut per_signal: Vec<Vec<sel::GroupScore>> = Vec::with_capacity(signals.len());
                 let mut failed = None;
                 for signal in &signals {
@@ -2088,6 +2092,8 @@ impl GooseAdapter {
                     }
                 }
                 match (per_signal.is_empty(), failed) {
+                    // The model changed under the scoring: its signals and groups are two spaces.
+                    _ if provider.generation() != generation => None,
                     // Every signal failed to embed: widen.
                     (true, Some(e)) => {
                         tracing::warn!("tool selection: embedding the opening message failed: {e}");
@@ -2113,7 +2119,7 @@ impl GooseAdapter {
                 target: "giap::trace",
                 kind = "tool_selection_widened",
                 session_id = %giap_session_id,
-                reason = if self.embedding_provider.is_none() {
+                reason = if !self.embedding_provider.as_ref().is_some_and(|p| p.available()) {
                     "no_embedder"
                 } else {
                     "embed_failed"
@@ -2781,7 +2787,10 @@ impl GooseAdapter {
                     fragments_available = memory_candidates.len(),
                     tokens_used,
                     token_budget,
-                    semantic = self.embedding_provider.is_some(),
+                    semantic = self
+                        .embedding_provider
+                        .as_ref()
+                        .is_some_and(|p| p.available()),
                     "Memory injection (budget from CompactionProfile ctx={})",
                     effective_ctx,
                 );

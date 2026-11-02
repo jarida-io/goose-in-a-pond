@@ -613,7 +613,10 @@ impl BatchExtractionService {
 
     /// The lane's enable predicate, asked before it takes the slot: is there a working embedder?
     pub fn embedder_is_usable(&self) -> bool {
-        self.embedding_provider.is_some() && self.health.is_stale()
+        self.embedding_provider
+            .as_ref()
+            .is_some_and(|p| p.available())
+            && self.health.is_stale()
     }
 
     /// Run one pass: up to `sessions_per_pass` windows, one per conversation.

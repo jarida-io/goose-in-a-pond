@@ -398,6 +398,11 @@ async fn embed_in_batches(
     max_batches: usize,
 ) -> usize {
     let cancelled = || cancel.is_some_and(|c| c.is_cancelled());
+    if !embedder.available() {
+        return 0;
+    }
+    // The repository stamps a vector with the model current when it stores it.
+    let generation = embedder.generation();
     let mut embedded = 0usize;
     let mut batches = 0usize;
     loop {
@@ -424,6 +429,10 @@ async fn embed_in_batches(
                 break;
             }
             match embedder.embed(&fragment.content).await {
+                Ok(_) if embedder.generation() != generation => {
+                    tracing::info!("[{label}] the embedding model changed; stopping");
+                    return embedded;
+                }
                 Ok(vector) => match repo.update_embedding(&fragment.id, &vector).await {
                     Ok(()) => {
                         embedded += 1;
@@ -761,6 +770,36 @@ mod tests {
 
         let embedded = run_backfill(&repo, &FixedEmbedder(vec![1.0, 0.0]), 8, 0).await;
         assert_eq!(embedded, 1);
+    }
+
+    /// The model changes after its first vector, as a settings save would switch it.
+    struct SwitchedMidway(std::sync::atomic::AtomicU64);
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for SwitchedMidway {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(vec![1.0, 0.0])
+        }
+        fn dimensions(&self) -> usize {
+            2
+        }
+        fn generation(&self) -> u64 {
+            self.0.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// The store stamps a vector with the model current when it writes, so one made before a
+    /// switch must not be written after it.
+    #[tokio::test]
+    async fn backfill_stops_when_the_model_changes_under_it() {
+        let repo = MockMemoryRepository::new();
+        for i in 0..3 {
+            repo.add(fragment(&format!("m{i}"), 0.5, 0)).await.unwrap();
+        }
+        let embedder = SwitchedMidway(std::sync::atomic::AtomicU64::new(0));
+        assert_eq!(run_backfill(&repo, &embedder, 8, 0).await, 0);
+        assert_eq!(repo.search_unembedded(10).await.unwrap().len(), 3);
     }
 
     #[tokio::test]
