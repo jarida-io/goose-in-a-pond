@@ -32,6 +32,8 @@ impl Hearing for FakeEar {
         self.voice.lock().unwrap().clone()
     }
 
+    fn set_speaker(&mut self, _speaker: pond_ear::ear::parts::SpeakerNet) {}
+
     fn push_into(&mut self, mic: &[f32], out: &mut Vec<Event>) {
         self.audio.extend_from_slice(mic);
         self.pushed.fetch_add(mic.len(), Ordering::SeqCst);
@@ -538,6 +540,47 @@ async fn follow_up_after(waker: Option<&str>, voice: Option<&str>) -> (Option<St
     ctl.emit(utterance(ctl.at() - S, ctl.at()));
     let heard = bounded("the follow-up", listening).await.unwrap().unwrap();
     (heard, says.calls())
+}
+
+/// While a member teaches the pond their voice, every sentence starts with the wake phrase.
+#[tokio::test]
+async fn a_paused_ear_hears_no_wake_and_ends_a_waiting_follow_up() {
+    let says = Says::new(&["Goose, what's the weather?"]);
+    let (rig, ctl) = rig_for(WakeMode::Segments, says.clone(), "goose").await;
+    let listening = tokio::spawn({
+        let rig = rig.clone();
+        async move { rig.listen().await }
+    });
+    ctl.until("the follow-up listen", |l, _| l.listens.len() == 1)
+        .await;
+    rig.pause_until(Some(Instant::now() + Duration::from_secs(60)));
+    let heard = bounded("the paused follow-up", listening)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(heard.as_deref(), Some(""), "the waiting follow-up ended");
+
+    let mut waiting = tokio::spawn({
+        let rig = rig.clone();
+        async move { rig.wait_for_activation_with_audio().await }
+    });
+    let at = ctl.at();
+    ctl.emit(segment(at - S, at));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut waiting)
+            .await
+            .is_err(),
+        "a paused ear woke"
+    );
+    assert_eq!(says.calls(), 0, "a paused ear transcribed a segment");
+
+    rig.pause_until(None);
+    let at = ctl.at();
+    ctl.emit(segment(at - S, at));
+    bounded("the wake after the pause", waiting)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]

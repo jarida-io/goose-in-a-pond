@@ -32,6 +32,13 @@ from five prints; `consistency` is the mean cosine between their prints.
 | `POST /api/v1/voice/prints/model` | Fetches the speaker model again (202) |
 | `DELETE /api/v1/faces/profile/{profile_id}` | Forgets the face only (`faces_deleted`) |
 | `DELETE /api/v1/users/{id}/biometrics` | Forgets everything: face, voice prints and wake takes (`voice_prints_deleted`) |
+| `POST /api/v1/voice/room/pause {seconds}` | The room hears no wake word and starts no turn for 1 to 300 s, then resumes on its own; never saved (204) |
+| `POST /api/v1/voice/room/resume` | Ends a pause now (204) |
+
+Every taught sentence starts with the wake phrase, so the phone pauses the room for the run.
+As a backstop for phones that do not, each `POST /voice/takes` pauses it for 20 s. While paused,
+`GET /voice/room` reads `state: "paused"` with `paused_until`; the ear still cancels echo but
+takes no wake, segment, request or barge-in, and a follow-up it was waiting for ends.
 
 ## The wake detector
 
@@ -45,7 +52,8 @@ results, because both belong to the phrase; a second member's run adds to them.
 
 The room's ear loads the speaker model once someone is enrolled, and gets the household's prints
 at start and on every change (`RoomVoiceControl::household_changed`, called by the take and forget
-routes). No cohort is built: Voice Match uses its default threshold with the single-profile
+routes). A first enrolment loads the model into the running ear (`EarRig::load_speaker`), so no
+turn is ever cut by a restart. No cohort is built: Voice Match uses its default threshold with the single-profile
 margin.
 
 - A wake the ear recognises names its speaker (`WorkflowEvent::Wake { who }`, `last_heard` in

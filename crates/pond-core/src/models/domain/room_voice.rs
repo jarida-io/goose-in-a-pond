@@ -27,6 +27,8 @@ pub enum RoomState {
     Listen,
     Thinking,
     Speak,
+    /// Hears no wake word for a while, as while a member teaches it their voice.
+    Paused,
 }
 
 impl From<WorkflowState> for RoomState {
@@ -77,7 +79,15 @@ pub struct RoomStatus {
     pub interrupts: RoomInterrupts,
     pub last_heard: Option<LastHeard>,
     pub session_id: Option<String>,
+    /// RFC 3339, while `state` is `paused`.
+    #[serde(default)]
+    pub paused_until: Option<String>,
 }
+
+/// The longest pause `POST /voice/room/pause` takes.
+pub const MAX_ROOM_PAUSE_SECONDS: u64 = 300;
+/// How long the room stays deaf after an enrolment take, for phones that do not pause it.
+pub const PAUSE_AFTER_TAKE_SECONDS: u64 = 20;
 
 #[cfg(test)]
 mod tests {
@@ -98,6 +108,7 @@ mod tests {
             interrupts: RoomInterrupts::WakeOnly,
             last_heard: None,
             session_id: None,
+            paused_until: None,
         };
         assert_eq!(
             serde_json::to_value(&status).unwrap(),
@@ -109,7 +120,8 @@ mod tests {
                 "wake": {"phrase": "hey goose", "detector": "whisper", "reason": "not_calibrated"},
                 "interrupts": "wake_only",
                 "last_heard": null,
-                "session_id": null
+                "session_id": null,
+                "paused_until": null
             })
         );
         assert_eq!(

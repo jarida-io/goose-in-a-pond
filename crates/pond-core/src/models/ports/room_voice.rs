@@ -19,4 +19,11 @@ pub trait RoomVoiceControl: Send + Sync {
 
     /// Voice prints or wake calibration changed: the ear learns the household again.
     fn household_changed(&self) {}
+
+    /// Hear no wake word and start no turn for `span`, resuming on its own; never persisted. A
+    /// longer pause already running is kept.
+    fn pause(&self, _span: std::time::Duration) {}
+
+    /// End a pause now.
+    fn resume(&self) {}
 }

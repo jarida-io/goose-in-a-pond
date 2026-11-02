@@ -35,6 +35,7 @@ impl Default for MockRoomVoice {
                 interrupts: RoomInterrupts::WakeOnly,
                 last_heard: None,
                 session_id: Some("room-session".into()),
+                paused_until: None,
             }),
             events: broadcast::channel(64).0,
             interrupts: AtomicUsize::new(0),
@@ -95,5 +96,20 @@ impl RoomVoiceControl for MockRoomVoice {
 
     fn subscribe(&self) -> broadcast::Receiver<WorkflowEvent> {
         self.events.subscribe()
+    }
+
+    fn pause(&self, span: std::time::Duration) {
+        let until = chrono::Utc::now() + chrono::Duration::from_std(span).unwrap_or_default();
+        let mut s = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        s.state = RoomState::Paused;
+        s.paused_until = Some(until.to_rfc3339());
+    }
+
+    fn resume(&self) {
+        let mut s = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        if s.state == RoomState::Paused {
+            s.state = RoomState::Wait;
+        }
+        s.paused_until = None;
     }
 }

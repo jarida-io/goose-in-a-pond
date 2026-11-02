@@ -95,6 +95,8 @@ const ROUTES: &[(&str, &str)] = &[
     ("PUT", "/api/v1/voice/room"),
     ("GET", "/api/v1/voice/room/events"),
     ("POST", "/api/v1/voice/room/interrupt"),
+    ("POST", "/api/v1/voice/room/pause"),
+    ("POST", "/api/v1/voice/room/resume"),
 ];
 
 #[tokio::test]
@@ -186,6 +188,86 @@ async fn an_interrupt_reaches_the_room() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(room.interrupts(), 1);
+}
+
+/// While a member teaches the pond their voice, every sentence starts with the wake phrase.
+#[tokio::test]
+async fn a_pause_deafens_the_room_for_a_while_and_a_resume_ends_it() {
+    let room = Arc::new(MockRoomVoice::default());
+    let p = pond(Some(room.clone())).await;
+    let (status, _) = call(
+        &p.router,
+        Method::POST,
+        "/api/v1/voice/room/pause",
+        Some(&p.token),
+        Some(json!({"seconds": 120})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, body) = call(
+        &p.router,
+        Method::GET,
+        "/api/v1/voice/room",
+        Some(&p.token),
+        None,
+    )
+    .await;
+    assert_eq!(body["state"], "paused", "{body}");
+    let until = chrono::DateTime::parse_from_rfc3339(body["paused_until"].as_str().unwrap())
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let left = until - chrono::Utc::now();
+    assert!(left > chrono::Duration::seconds(100) && left <= chrono::Duration::seconds(120));
+
+    let (status, _) = call(
+        &p.router,
+        Method::POST,
+        "/api/v1/voice/room/resume",
+        Some(&p.token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, body) = call(
+        &p.router,
+        Method::GET,
+        "/api/v1/voice/room",
+        Some(&p.token),
+        None,
+    )
+    .await;
+    assert_eq!(body["state"], "wait");
+    assert_eq!(body["paused_until"], Value::Null);
+}
+
+#[tokio::test]
+async fn a_pause_is_one_to_three_hundred_seconds() {
+    let p = pond(Some(Arc::new(MockRoomVoice::default()))).await;
+    for body in [
+        json!({"seconds": 0}),
+        json!({"seconds": 301}),
+        json!({}),
+        json!({"seconds": "ten"}),
+    ] {
+        let (status, _) = call(
+            &p.router,
+            Method::POST,
+            "/api/v1/voice/room/pause",
+            Some(&p.token),
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    }
+    let (status, _) = call(
+        &p.router,
+        Method::POST,
+        "/api/v1/voice/room/pause",
+        Some(&p.token),
+        Some(json!({"seconds": 300})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
 }
 
 #[tokio::test]

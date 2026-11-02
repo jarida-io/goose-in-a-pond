@@ -104,6 +104,8 @@ struct Inner {
     memory_at_start: Mutex<Option<pond_adapters_ear::ProcessMemory>>,
     /// The running ear, so a new print reaches it without a restart.
     ear: Mutex<Option<Arc<pond_adapters_ear::EarRig>>>,
+    /// Deaf until then, as the ear and the status show it; never persisted.
+    paused: Mutex<Option<(std::time::Instant, chrono::DateTime<chrono::Utc>)>>,
 }
 
 pub struct RoomVoice {
@@ -141,6 +143,7 @@ impl RoomVoice {
             turn: Mutex::new(None),
             memory_at_start: Mutex::new(None),
             ear: Mutex::new(None),
+            paused: Mutex::new(None),
         });
         let task = tokio::spawn(supervise(inner.clone()));
         Arc::new(RoomVoice {
@@ -162,12 +165,16 @@ impl RoomVoice {
 #[async_trait]
 impl RoomVoiceControl for RoomVoice {
     fn status(&self) -> RoomStatus {
+        let paused_until = self.inner.paused_until();
         let view = lock(&self.inner.view);
         RoomStatus {
             enabled: *self.inner.enabled.borrow(),
             available: view.available,
             unavailable_reason: view.unavailable_reason,
-            state: view.state,
+            state: match paused_until {
+                Some(_) => RoomState::Paused,
+                None => view.state,
+            },
             wake: view.wake.clone(),
             interrupts: if view.recognises {
                 RoomInterrupts::EnrolledOrWake
@@ -176,6 +183,7 @@ impl RoomVoiceControl for RoomVoice {
             },
             last_heard: view.last_heard.clone(),
             session_id: view.session_id.clone(),
+            paused_until: paused_until.map(|(_, at)| at.to_rfc3339()),
         }
     }
 
@@ -210,19 +218,67 @@ impl RoomVoiceControl for RoomVoice {
             };
             let recognises = lock(&inner.view).recognises;
             if !voices.prints.is_empty() && !recognises {
-                // The running ear has no speaker model: the loop starts again with one.
-                tracing::info!(
-                    "room voice: someone enrolled; the ear starts again to recognise them"
-                );
-                if let Some(control) = lock(&inner.control).as_ref() {
-                    control.stop(StopReason::Requested);
+                // Loaded into the running ear: a restart here would cut a turn in flight.
+                let Some(engine) = inner.deps.voice_match.clone() else {
+                    return;
+                };
+                let loaded = tokio::task::spawn_blocking({
+                    let ear = ear.clone();
+                    move || match engine.speaker_model() {
+                        Some(model) => ear.load_speaker(model).map(|()| true),
+                        None => Ok(false),
+                    }
+                })
+                .await;
+                match loaded {
+                    Ok(Ok(true)) => tracing::info!(
+                        "room voice: someone enrolled; the running ear now recognises voices"
+                    ),
+                    Ok(Ok(false)) => return,
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            error = format!("{e:#}"),
+                            "room voice: the speaker model did not load into the ear"
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "room voice: loading the speaker model panicked");
+                        return;
+                    }
                 }
-                return;
             }
             let enrolled = voices.prints.len();
             ear.set_household(voices);
             inner.set_view(|v| v.recognises = enrolled > 0);
         });
+    }
+
+    fn pause(&self, span: Duration) {
+        let until = std::time::Instant::now() + span;
+        let at = chrono::Utc::now() + chrono::Duration::from_std(span).unwrap_or_default();
+        {
+            let mut paused = lock(&self.inner.paused);
+            if paused.is_some_and(|(held, _)| held >= until) {
+                return;
+            }
+            *paused = Some((until, at));
+        }
+        tracing::info!(
+            seconds = span.as_secs(),
+            "room voice: paused; it hears no wake word"
+        );
+        if let Some(ear) = lock(&self.inner.ear).as_ref() {
+            ear.pause_until(Some(until));
+        }
+    }
+
+    fn resume(&self) {
+        *lock(&self.inner.paused) = None;
+        tracing::info!("room voice: resumed");
+        if let Some(ear) = lock(&self.inner.ear).as_ref() {
+            ear.pause_until(None);
+        }
     }
 }
 
@@ -308,6 +364,15 @@ fn speaker_context(deps: &RoomDeps) -> pond_core::shared::services::chat::Speake
 }
 
 impl Inner {
+    /// The pause in force, if it has not run out.
+    fn paused_until(&self) -> Option<(std::time::Instant, chrono::DateTime<chrono::Utc>)> {
+        let mut paused = lock(&self.paused);
+        if paused.is_some_and(|(until, _)| std::time::Instant::now() >= until) {
+            *paused = None;
+        }
+        *paused
+    }
+
     fn set_view(&self, change: impl FnOnce(&mut View)) {
         change(&mut lock(&self.view));
     }
@@ -533,6 +598,10 @@ async fn run_once(
     let recognises = recognises && listening.ear.is_some();
     if let Some(ear) = &listening.ear {
         ear.set_household(voices);
+        // A pause asked for while the room was starting still holds.
+        if let Some((until, _)) = inner.paused_until() {
+            ear.pause_until(Some(until));
+        }
     }
     *lock(&inner.ear) = listening.ear.clone();
     let (detector, reason) = listening.wake();
@@ -730,6 +799,34 @@ mod tests {
             events.recv().await.unwrap(),
             WorkflowEvent::Wake { .. }
         ));
+        room.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_pause_shows_and_runs_out_and_a_longer_one_is_kept() {
+        let room = RoomVoice::start(deps(Arc::new(RunSupervisor::default())), false, wake());
+        room.pause(Duration::from_secs(60));
+        room.pause(Duration::from_secs(5));
+        let status = room.status();
+        assert_eq!(status.state, RoomState::Paused);
+        let until = chrono::DateTime::parse_from_rfc3339(status.paused_until.as_deref().unwrap())
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert!(
+            until - chrono::Utc::now() > chrono::Duration::seconds(50),
+            "the longer pause held"
+        );
+        room.resume();
+        assert_eq!(room.status().paused_until, None);
+        assert_ne!(room.status().state, RoomState::Paused);
+
+        room.pause(Duration::from_millis(30));
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(
+            room.status().paused_until,
+            None,
+            "a pause runs out on its own"
+        );
         room.shutdown().await;
     }
 

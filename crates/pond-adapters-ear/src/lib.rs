@@ -264,6 +264,26 @@ impl EarRig {
         let _ = self.cmds.send(Cmd::Household(household));
     }
 
+    /// Hear no wake word and start no request until `until`; `None` resumes now.
+    pub fn pause_until(&self, until: Option<Instant>) {
+        let _ = self.cmds.send(Cmd::Pause(until));
+    }
+
+    /// Start recognising voices without a restart: the network is built and warmed here, on the
+    /// caller's thread, so the ear thread only swaps it in. Blocking.
+    pub fn load_speaker(&self, model: ModelFile) -> Result<()> {
+        let mut net = pond_ear::ear::parts::SpeakerNet::new(
+            model,
+            VOICE_MATCH_LABEL,
+            pond_ear::ear::machine::SPEAKER_MAX_SECONDS,
+        )
+        .context("loading the speaker model")?;
+        net.warm_up(pond_ear::Rung::fastest());
+        self.cmds
+            .send(Cmd::Speaker(Box::new(net)))
+            .map_err(|_| anyhow!("the ear has stopped"))
+    }
+
     fn command(&self, raw: &str) -> String {
         pond_voice::text::strip_leading_wake_word(raw, &self.triggers)
     }
