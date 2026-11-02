@@ -4,9 +4,14 @@ use async_trait::async_trait;
 // ── StreamingWakeWordDetector (primary interface) ─────────────────────────────
 
 /// Audio caught with the wake word; Listen transcribes it instead of recording afresh.
+#[derive(Debug, Default)]
 pub struct WakeWordActivation {
     /// WAV, 16-bit mono 16 kHz; `None` if the detector has no audio hand-off.
     pub captured_audio: Option<Vec<u8>>,
+    /// Who Voice Match recognised on the wake; `None` when nobody was, or nobody is enrolled.
+    pub speaker: Option<crate::shared::domain::agent::VoiceSpeaker>,
+    /// `captured_audio` is the whole request, endpointed: the listen that follows records nothing.
+    pub endpointed: bool,
 }
 
 /// Primary wake-word port (a blanket impl provides the deprecated `WakeWordDetector`).
@@ -69,6 +74,7 @@ mod tests {
     fn wakeword_activation_no_audio_field_is_none() {
         let a = WakeWordActivation {
             captured_audio: None,
+            ..Default::default()
         };
         assert!(a.captured_audio.is_none());
     }
@@ -78,6 +84,7 @@ mod tests {
         let wav = vec![b'R', b'I', b'F', b'F'];
         let a = WakeWordActivation {
             captured_audio: Some(wav.clone()),
+            ..Default::default()
         };
         assert_eq!(a.captured_audio.unwrap(), wav);
     }

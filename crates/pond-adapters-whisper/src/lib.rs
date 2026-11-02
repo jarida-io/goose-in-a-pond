@@ -680,6 +680,7 @@ fn detection_loop(
 
             return Ok(WakeWordActivation {
                 captured_audio: Some(cmd_wav),
+                ..Default::default()
             });
         }
     }

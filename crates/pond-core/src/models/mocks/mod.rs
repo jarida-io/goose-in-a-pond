@@ -1,3 +1,4 @@
+pub mod mock_interrupt_watch;
 pub mod mock_model_catalog_provider;
 pub mod mock_model_downloader;
 pub mod mock_model_repository;

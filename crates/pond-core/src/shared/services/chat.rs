@@ -1,5 +1,6 @@
 use crate::models::domain::message::{ChatMessage, Role, ToolCallRecord};
 use crate::models::ports::agent::Agent;
+use crate::models::ports::interrupt::InterruptWatch;
 use crate::models::ports::provider::LlmProvider;
 use crate::models::ports::speech_energy::{MicHold, SpeechEnergy};
 use crate::models::ports::voice_input::{SpeculativeSignal, VoiceInput};
@@ -9,7 +10,9 @@ use crate::models::services::instant_activation::InstantActivation;
 use crate::prompts::SYSTEM_PROMPT;
 use crate::security::domain::event::{Event, EventCategory, PrivacySensitivity};
 use crate::security::ports::event_log::EventLog;
-use crate::shared::domain::agent::{AgentRequest, AgentStreamEvent, WorkflowEvent, WorkflowState};
+use crate::shared::domain::agent::{
+    AgentRequest, AgentStreamEvent, InterruptReason, WorkflowEvent, WorkflowState,
+};
 use crate::shared::services::print_output::PrintOutput;
 use crate::shared::services::stdin_input::StdinInput;
 use crate::shared::services::voice_control::{StopReason, VoiceControl};
@@ -305,7 +308,7 @@ impl Drop for WorkingTone {
 }
 
 // TTS text handling is in `pond-voice` so the desktop shell (separate workspace) shares it.
-use pond_voice::text::split_speech_units;
+use pond_voice::text::split_reply_units;
 
 /// Re-exported to keep pond-core's public API path.
 pub use pond_voice::text::filter_thinking;
@@ -370,7 +373,14 @@ pub struct ChatService {
     control: Option<VoiceControl>,
     /// The last state announced was Speak, which a reused speculative reply may already be in.
     speaking: Arc<std::sync::atomic::AtomicBool>,
+    /// Raced by each turn in place of the energy barge-in; also turns on `wake`/`interrupt` events.
+    interrupt_watch: Option<Arc<dyn InterruptWatch>>,
+    /// Told every state the loop announces, so a front end can follow the loop.
+    state_observer: Option<StateObserver>,
 }
+
+/// Hears each `WorkflowState` the loop enters, synchronously, from `emit_event`.
+pub type StateObserver = Arc<dyn Fn(WorkflowState) + Send + Sync>;
 
 /// Result of one non-persisting agent stream, with the stats from its `Done` event.
 #[derive(Debug)]
@@ -390,6 +400,8 @@ struct BargedIn {
     onset: std::time::Instant,
     /// Keeps the mic open until the follow-up capture claims it, so nothing said is lost between.
     hold: MicHold,
+    /// Set by an interrupt watch; the energy barge-in leaves it `None` and emits no event.
+    why: Option<InterruptReason>,
 }
 
 struct BargeInWatch {
@@ -456,6 +468,8 @@ impl ChatService {
             thinking_blocks: Arc::new(std::sync::Mutex::new(Vec::new())),
             control: None,
             speaking: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            interrupt_watch: None,
+            state_observer: None,
         }
     }
 
@@ -623,7 +637,11 @@ impl ChatService {
                         .take()
                         .unwrap_or_else(MicHold::none);
                     // Before silencing, so the turn ends before it can start another sentence.
-                    let _ = barged.send(BargedIn { onset, hold });
+                    let _ = barged.send(BargedIn {
+                        onset,
+                        hold,
+                        why: None,
+                    });
                     voice_output.stop_speaking();
                     return;
                 }
@@ -631,6 +649,19 @@ impl ChatService {
         });
 
         Some(BargeInWatch { handle, hold })
+    }
+
+    /// Race each turn against `watch` instead of the energy barge-in, and announce wakes and
+    /// interrupts as NDJSON `wake`/`interrupt` events.
+    pub fn with_interrupt_watch(mut self, watch: Arc<dyn InterruptWatch>) -> Self {
+        self.interrupt_watch = Some(watch);
+        self
+    }
+
+    /// Tell `observer` each state the loop announces, e.g. to move the ear through Think and Speak.
+    pub fn with_state_observer(mut self, observer: StateObserver) -> Self {
+        self.state_observer = Some(observer);
+        self
     }
 
     /// Set the wake-word detector; defaults to `InstantActivation` (no wait).
@@ -1129,10 +1160,20 @@ impl ChatService {
         let mut turn_stats: Option<crate::shared::domain::turn_stats::TurnStats> = None;
         let mut full_text = String::new();
         let mut sentence_buf = String::new();
+        let mut split_a_unit = false;
         let mut spoken_first = false;
         let mut barge_in: Option<BargeInWatch> = None;
         let (barge_tx, mut barge_rx) = tokio::sync::oneshot::channel::<BargedIn>();
         let mut barge_tx = Some(barge_tx);
+        // Raced against the whole stream, so the wake word also cuts a reply still being thought.
+        let energy_barge_in = self.interrupt_watch.is_none();
+        let watch = self.interrupt_watch.clone();
+        let interrupted = async move {
+            match watch {
+                Some(watch) => watch.wait_for_interrupt().await,
+                None => std::future::pending().await,
+            }
+        };
         let mut thought_filter = crate::models::services::thought_filter::ThoughtFilter::new();
 
         enum AudioItem {
@@ -1229,11 +1270,13 @@ impl ChatService {
                     full_text.push_str(&content);
                     sentence_buf.push_str(&content);
 
-                    let (units, remainder) = split_speech_units(&sentence_buf, true);
+                    let (units, remainder) =
+                        split_reply_units(&sentence_buf, true, !split_a_unit);
                     sentence_buf = remainder;
+                    split_a_unit |= !units.is_empty();
                     for unit in units {
                         tone.stop();
-                        if let Some(tx) = barge_tx.take() {
+                        if let Some(tx) = barge_tx.take().filter(|_| energy_barge_in) {
                             barge_in = self.watch_for_barge_in(tx);
                         }
                         if speech_tx.send(unit).await.is_err() {
@@ -1263,7 +1306,7 @@ impl ChatService {
                     let remainder = sentence_buf.trim().to_string();
                     if !remainder.is_empty() {
                         tone.stop();
-                        if let Some(tx) = barge_tx.take() {
+                        if let Some(tx) = barge_tx.take().filter(|_| energy_barge_in) {
                             barge_in = self.watch_for_barge_in(tx);
                         }
                         let _ = speech_tx.send(remainder).await;
@@ -1311,7 +1354,7 @@ impl ChatService {
             let remainder = sentence_buf.trim().to_string();
             if !remainder.is_empty() {
                 tone.stop();
-                if let Some(tx) = barge_tx.take() {
+                if let Some(tx) = barge_tx.take().filter(|_| energy_barge_in) {
                     barge_in = self.watch_for_barge_in(tx);
                 }
                 let _ = speech_tx.send(remainder).await;
@@ -1337,6 +1380,12 @@ impl ChatService {
         let barged_in = tokio::select! {
             biased;
             Ok(barged) = &mut barge_rx => Some(barged),
+            interrupt = interrupted => Some(BargedIn {
+                onset: interrupt.onset,
+                // The watch's front end holds the mic for the whole session.
+                hold: MicHold::none(),
+                why: Some(interrupt.why),
+            }),
             finished = speaking => {
                 finished?;
                 None
@@ -1696,6 +1745,11 @@ impl ChatService {
                         return Err(e);
                     }
                 };
+                if self.interrupt_watch.is_some() {
+                    self.emit_event(WorkflowEvent::Wake {
+                        who: activation.speaker.clone(),
+                    });
+                }
 
                 // ── Listen (one-breath or fresh recording) ──
                 self.emit_event(WorkflowEvent::StateChanged {
@@ -1890,6 +1944,9 @@ impl ChatService {
                 }))) => {
                     diag!("\n  interrupted");
                     self.voice_output.stop_thinking_tone();
+                    if let Some(why) = barged.why {
+                        self.emit_event(WorkflowEvent::Interrupt { why });
+                    }
                     self.emit_event(WorkflowEvent::StateChanged {
                         state: WorkflowState::Listen,
                     });
@@ -1924,6 +1981,11 @@ impl ChatService {
                 Raced::Interrupted => {
                     diag!("\n  interrupted");
                     self.abandon_turn(&chat_handle);
+                    if self.interrupt_watch.is_some() {
+                        self.emit_event(WorkflowEvent::Interrupt {
+                            why: InterruptReason::Button,
+                        });
+                    }
                     // Back to the wake word: an interrupt asks for quiet, not a new recording.
                     first_turn = true;
                 }
@@ -2021,6 +2083,9 @@ impl ChatService {
                     *state == WorkflowState::Speak,
                     std::sync::atomic::Ordering::SeqCst,
                 );
+                if let Some(observer) = &self.state_observer {
+                    observer(*state);
+                }
             }
             WorkflowEvent::UserInput(text) => {
                 tracing::debug!("User input: {}", text);
@@ -2057,6 +2122,15 @@ impl ChatService {
             }
             WorkflowEvent::AudioLevel { .. } => {
                 // High-frequency — do not trace per-level (same as Token).
+            }
+            WorkflowEvent::Wake { who } => {
+                tracing::debug!(
+                    who = who.as_ref().map(|w| w.profile_id.as_str()),
+                    "Wake word heard"
+                );
+            }
+            WorkflowEvent::Interrupt { why } => {
+                tracing::debug!(why = ?why, "Turn interrupted");
             }
         }
 
@@ -3192,6 +3266,7 @@ mod tests {
                 }
                 Ok(WakeWordActivation {
                     captured_audio: None,
+                    ..Default::default()
                 })
             }
             fn supports_interruption(&self) -> bool {
@@ -3576,6 +3651,7 @@ mod tests {
         ) -> Result<crate::models::ports::wake_word::WakeWordActivation> {
             Ok(crate::models::ports::wake_word::WakeWordActivation {
                 captured_audio: None,
+                ..Default::default()
             })
         }
         fn supports_interruption(&self) -> bool {
@@ -3768,6 +3844,7 @@ mod tests {
             }
             Ok(WakeWordActivation {
                 captured_audio: None,
+                ..Default::default()
             })
         }
     }
@@ -3906,6 +3983,333 @@ mod tests {
         // 4: back to Wait once the script runs out, so the loop reaches end of input.
         let run = talk_over_the_reply(Arc::new(ActivatesOn(AtomicUsize::new(0), &[1, 4]))).await;
         assert_the_barge_in_ended_the_turn(&run);
+    }
+
+    // ── Interrupt watch: the ear's interrupts in place of the energy barge-in ──
+
+    use crate::models::mocks::mock_interrupt_watch::MockInterruptWatch;
+    use crate::models::ports::interrupt::Interrupt;
+    use crate::shared::domain::agent::VoiceSpeaker;
+
+    fn interrupts_of(events: &[WorkflowEvent]) -> Vec<InterruptReason> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                WorkflowEvent::Interrupt { why } => Some(*why),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn scripted_input(
+        lines: &[Option<&str>],
+        mic: &Arc<MicLog>,
+        dropped: &Arc<AtomicBool>,
+    ) -> Arc<RecordingInput> {
+        Arc::new(RecordingInput {
+            script: std::sync::Mutex::new(lines.iter().map(|l| l.map(str::to_string)).collect()),
+            onset: std::sync::Mutex::new(None),
+            captures: std::sync::Mutex::new(Vec::new()),
+            mic: mic.clone(),
+            first_reply_dropped: dropped.clone(),
+        })
+    }
+
+    #[tokio::test]
+    async fn an_interrupt_watch_ends_the_turn_as_a_barge_in_does_and_says_why() {
+        let storage = Arc::new(InMemorySessionStorage::new());
+        let session_id = "watched".to_string();
+        storage.create_session(session_id.clone()).await.unwrap();
+        let mic = Arc::new(MicLog::default());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let input = scripted_input(
+            &[
+                Some("what is the weather this week"),
+                Some("what about saturday"),
+                None,
+            ],
+            &mic,
+            &dropped,
+        );
+        let output = Arc::new(CapturingSpeak::default());
+        let collector = EventCollector::default();
+        let watch = Arc::new(MockInterruptWatch::default());
+        let fired_onset = Arc::new(std::sync::Mutex::new(None::<Instant>));
+        let steer = {
+            let (watch, fired_onset) = (watch.clone(), fired_onset.clone());
+            move |e: &WorkflowEvent| {
+                let mut slot = fired_onset.lock().unwrap();
+                if is_state(e, WorkflowState::Speak) && slot.is_none() {
+                    let onset = Instant::now() - Duration::from_millis(250);
+                    *slot = Some(onset);
+                    watch.fire(Interrupt {
+                        onset,
+                        why: InterruptReason::WakeWord,
+                    });
+                }
+            }
+        };
+        let svc = ChatService::new(
+            Arc::new(LongFirstReply {
+                calls: AtomicUsize::new(0),
+                first_stream_dropped: dropped.clone(),
+            }),
+            session_id.clone(),
+            storage.clone(),
+        )
+        .with_voice_input(input.clone())
+        .with_voice_output(output.clone())
+        // Loud from the first poll: it would barge in if the energy watch ran at all.
+        .with_speech_energy(Arc::new(TalkOverFirstReply(mic.clone())))
+        .with_interrupt_watch(watch.clone())
+        .with_event_sink(steering_sink(&collector, steer));
+
+        run_bounded(&svc).await.unwrap();
+
+        let persisted: Vec<String> = storage
+            .get_messages(&session_id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|m| m.message.content.clone())
+            .collect();
+        assert_eq!(
+            persisted,
+            vec!["what about saturday", "Echo: what about saturday"],
+            "the interrupted reply must not be persisted"
+        );
+        let events = collector.events.lock().unwrap().clone();
+        assert_eq!(interrupts_of(&events), vec![InterruptReason::WakeWord]);
+        assert_eq!(turn_completes(&events), 1);
+        let interrupt = events
+            .iter()
+            .position(|e| matches!(e, WorkflowEvent::Interrupt { .. }))
+            .unwrap();
+        assert!(
+            is_state(&events[interrupt + 1], WorkflowState::Listen),
+            "the follow-up listens straight after the interrupt: {:?}",
+            &events[interrupt..]
+        );
+        assert!(!output
+            .spoken
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.contains("Tuesday")));
+
+        let captures = input.captures.lock().unwrap();
+        assert_eq!(
+            captures[1].onset,
+            *fired_onset.lock().unwrap(),
+            "the follow-up capture starts at the interrupt's own onset"
+        );
+        assert!(captures[1].first_reply_dropped);
+        assert_eq!(
+            mic.holds.load(Ordering::SeqCst),
+            0,
+            "with a watch, the energy barge-in must never open the mic"
+        );
+        assert_eq!(watch.waiting(), 0, "every turn's watch was dropped with it");
+    }
+
+    /// Thinks without end on the first call; echoes afterwards.
+    struct ThinksForeverFirst(AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl crate::models::ports::agent::Agent for ThinksForeverFirst {
+        async fn chat(
+            &self,
+            _request: AgentRequest,
+        ) -> Result<crate::shared::domain::agent::AgentResponse> {
+            anyhow::bail!("voice uses chat_stream")
+        }
+
+        async fn chat_stream(
+            &self,
+            request: AgentRequest,
+        ) -> Result<futures::stream::BoxStream<'static, Result<AgentStreamEvent>>> {
+            let first = self.0.fetch_add(1, Ordering::SeqCst) == 0;
+            let (session_id, model_role) = (request.session_id.clone(), request.model_role.clone());
+            let reply = format!("Echo: {}", request.message);
+            let stream = async_stream::stream! {
+                if first {
+                    std::future::pending::<()>().await;
+                }
+                yield Ok(AgentStreamEvent::Text { content: reply });
+                yield Ok(AgentStreamEvent::Done { session_id, model_role, usage: None, stats: None });
+            };
+            Ok(stream.boxed())
+        }
+    }
+
+    #[tokio::test]
+    async fn the_wake_word_interrupts_a_turn_that_is_still_thinking() {
+        let storage = Arc::new(InMemorySessionStorage::new());
+        let session_id = "watched-thinking".to_string();
+        storage.create_session(session_id.clone()).await.unwrap();
+        let mic = Arc::new(MicLog::default());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let input = scripted_input(
+            &[Some("plan my week"), Some("what about tomorrow"), None],
+            &mic,
+            &dropped,
+        );
+        let collector = EventCollector::default();
+        let watch = Arc::new(MockInterruptWatch::default());
+        let firing = {
+            let watch = watch.clone();
+            tokio::spawn(async move {
+                while watch.waiting() == 0 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                watch.fire(Interrupt {
+                    onset: Instant::now(),
+                    why: InterruptReason::WakeWord,
+                });
+            })
+        };
+        let svc = ChatService::new(
+            Arc::new(ThinksForeverFirst(AtomicUsize::new(0))),
+            session_id.clone(),
+            storage.clone(),
+        )
+        .with_voice_input(input.clone())
+        .with_voice_output(Arc::new(CapturingSpeak::default()))
+        .with_interrupt_watch(watch)
+        .with_event_sink(collector.sink());
+
+        run_bounded(&svc).await.unwrap();
+        firing.await.unwrap();
+
+        let events = collector.events.lock().unwrap().clone();
+        assert_eq!(interrupts_of(&events), vec![InterruptReason::WakeWord]);
+        let states = states_of(&events);
+        assert!(
+            !states[..states
+                .iter()
+                .position(|s| *s == WorkflowState::Thinking)
+                .unwrap()
+                + 2]
+                .contains(&WorkflowState::Speak),
+            "interrupted before it spoke: {states:?}"
+        );
+        let persisted = storage.get_messages(&session_id).await.unwrap();
+        assert_eq!(persisted.len(), 2, "only the follow-up turn");
+        assert!(input.captures.lock().unwrap()[1].onset.is_some());
+    }
+
+    #[tokio::test]
+    async fn the_state_observer_hears_every_state_the_loop_announces() {
+        let storage = Arc::new(InMemorySessionStorage::new());
+        let session_id = "observed".to_string();
+        storage.create_session(session_id.clone()).await.unwrap();
+        let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collector = EventCollector::default();
+        let svc = ChatService::new(Arc::new(MockAgent::new()), session_id, storage)
+            .with_voice_input(Arc::new(ScriptedListenInput::new(["hello", "and again"])))
+            .with_voice_output(Arc::new(CapturingSpeak::default()))
+            .with_event_sink(collector.sink())
+            .with_state_observer({
+                let heard = heard.clone();
+                Arc::new(move |state| heard.lock().unwrap().push(state))
+            });
+
+        run_bounded(&svc).await.unwrap();
+
+        let events = collector.events.lock().unwrap().clone();
+        let heard = heard.lock().unwrap().clone();
+        assert_eq!(heard, states_of(&events));
+        assert!(heard.contains(&WorkflowState::Thinking) && heard.contains(&WorkflowState::Speak));
+    }
+
+    /// Wakes once, recognising `who`, then never again.
+    struct WakesAs(std::sync::Mutex<Option<Option<VoiceSpeaker>>>);
+
+    #[async_trait::async_trait]
+    impl StreamingWakeWordDetector for WakesAs {
+        async fn wait_for_activation_with_audio(&self) -> Result<WakeWordActivation> {
+            let Some(speaker) = self.0.lock().unwrap().take() else {
+                return std::future::pending().await;
+            };
+            Ok(WakeWordActivation {
+                speaker,
+                endpointed: true,
+                ..Default::default()
+            })
+        }
+        fn supports_interruption(&self) -> bool {
+            false
+        }
+    }
+
+    async fn wake_events(who: Option<VoiceSpeaker>, watched: bool) -> Vec<WorkflowEvent> {
+        let storage = Arc::new(InMemorySessionStorage::new());
+        storage.create_session("woken".to_string()).await.unwrap();
+        let collector = EventCollector::default();
+        let mut svc = ChatService::new(Arc::new(MockAgent::new()), "woken".to_string(), storage)
+            .with_voice_input(Arc::new(ScriptedListenInput::new([])))
+            .with_wake_word_detector(Arc::new(WakesAs(std::sync::Mutex::new(Some(who)))))
+            .with_event_sink(collector.sink());
+        if watched {
+            svc = svc.with_interrupt_watch(Arc::new(MockInterruptWatch::default()));
+        }
+        run_bounded(&svc).await.unwrap();
+        let events = collector.events.lock().unwrap().clone();
+        events
+    }
+
+    #[tokio::test]
+    async fn a_wake_is_announced_with_who_was_heard_only_where_a_watch_runs() {
+        let ana = VoiceSpeaker {
+            profile_id: "p-ana".to_string(),
+            name: "Ana".to_string(),
+        };
+        let events = wake_events(Some(ana.clone()), true).await;
+        let wake = events
+            .iter()
+            .position(|e| matches!(e, WorkflowEvent::Wake { .. }))
+            .expect("a wake event");
+        assert!(matches!(&events[wake], WorkflowEvent::Wake { who: Some(w) } if *w == ana));
+        assert!(is_state(&events[wake - 1], WorkflowState::Wait));
+        assert!(is_state(&events[wake + 1], WorkflowState::Listen));
+
+        let unwatched = wake_events(Some(ana), false).await;
+        assert!(
+            !unwatched.iter().any(|e| matches!(
+                e,
+                WorkflowEvent::Wake { .. } | WorkflowEvent::Interrupt { .. }
+            )),
+            "without a watch the event stream is the older contract: {unwatched:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_shells_interrupt_button_is_announced_where_a_watch_runs() {
+        let storage = Arc::new(InMemorySessionStorage::new());
+        let session_id = "watched-button".to_string();
+        storage.create_session(session_id.clone()).await.unwrap();
+        let control = VoiceControl::new();
+        let collector = EventCollector::default();
+        let svc = ChatService::new(
+            Arc::new(EndlessReplyAgent),
+            session_id.clone(),
+            storage.clone(),
+        )
+        .with_voice_input(Arc::new(ScriptedListenInput::new(["tell me a long story"])))
+        .with_voice_output(Arc::new(StopCountingSpeak::default()))
+        .with_control(control.clone())
+        .with_interrupt_watch(Arc::new(MockInterruptWatch::default()))
+        .with_event_sink(steering_sink(&collector, move |event| {
+            if is_state(event, WorkflowState::Speak) {
+                control.interrupt();
+            }
+        }));
+
+        run_bounded(&svc).await.unwrap();
+
+        let events = collector.events.lock().unwrap().clone();
+        assert_eq!(interrupts_of(&events), vec![InterruptReason::Button]);
+        assert!(storage.get_messages(&session_id).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -4123,6 +4527,7 @@ mod tests {
             }
             Ok(WakeWordActivation {
                 captured_audio: None,
+                ..Default::default()
             })
         }
         fn supports_interruption(&self) -> bool {

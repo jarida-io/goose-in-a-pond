@@ -5,7 +5,7 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use pond_core::models::ports::voice_output::VoiceOutput;
 use pond_core::shared::domain::agent::AgentStreamEvent;
-use pond_voice::text::split_speech_units;
+use pond_voice::text::{split_reply_units, split_speech_units};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -179,6 +179,7 @@ impl AudioBus {
 
         let mut full_text = String::new();
         let mut sentence_buf = String::new();
+        let mut split_a_unit = false;
 
         while let Some(event_result) = stream.next().await {
             match event_result? {
@@ -186,8 +187,9 @@ impl AudioBus {
                     full_text.push_str(&content);
                     sentence_buf.push_str(&content);
 
-                    let (units, remainder) = split_speech_units(&sentence_buf, true);
+                    let (units, remainder) = split_reply_units(&sentence_buf, true, !split_a_unit);
                     sentence_buf = remainder;
+                    split_a_unit |= !units.is_empty();
                     for unit in units {
                         let clean = unit.trim().to_string();
                         if !clean.is_empty() && speech_tx.send(clean).await.is_err() {

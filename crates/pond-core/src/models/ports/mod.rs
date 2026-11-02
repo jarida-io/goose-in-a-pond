@@ -5,6 +5,7 @@ pub mod audio_focus;
 pub mod embedding;
 pub mod inference;
 pub mod inference_pool;
+pub mod interrupt;
 pub mod model_catalog_provider;
 pub mod model_downloader;
 pub mod model_repository;
