@@ -17,5 +17,6 @@ pub mod speech_energy;
 pub mod token_counter;
 pub mod tts_control;
 pub mod voice_input;
+pub mod voice_match;
 pub mod voice_output;
 pub mod wake_word;

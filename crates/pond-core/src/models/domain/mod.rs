@@ -23,4 +23,5 @@ pub mod room_voice;
 pub mod taxonomy;
 pub mod vision_encoder;
 pub mod vision_pairing;
+pub mod voice_match_model;
 pub mod wake_detector;

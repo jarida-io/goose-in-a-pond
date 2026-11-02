@@ -16,4 +16,7 @@ pub trait RoomVoiceControl: Send + Sync {
 
     /// Every workflow event the room's loop emits from now on, `audio_level` included.
     fn subscribe(&self) -> tokio::sync::broadcast::Receiver<WorkflowEvent>;
+
+    /// Voice prints or wake calibration changed: the ear learns the household again.
+    fn household_changed(&self) {}
 }

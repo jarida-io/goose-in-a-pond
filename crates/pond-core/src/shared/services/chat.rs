@@ -11,7 +11,7 @@ use crate::prompts::SYSTEM_PROMPT;
 use crate::security::domain::event::{Event, EventCategory, PrivacySensitivity};
 use crate::security::ports::event_log::EventLog;
 use crate::shared::domain::agent::{
-    AgentRequest, AgentStreamEvent, InterruptReason, WorkflowEvent, WorkflowState,
+    AgentRequest, AgentStreamEvent, InterruptReason, VoiceSpeaker, WorkflowEvent, WorkflowState,
 };
 use crate::shared::services::print_output::PrintOutput;
 use crate::shared::services::stdin_input::StdinInput;
@@ -345,7 +345,8 @@ pub struct ChatService {
     speech_energy: Arc<dyn SpeechEnergy>,
     /// Defaults to `InstantActivation` (keyboard/stdin mode).
     wake_word_detector: Arc<dyn StreamingWakeWordDetector>,
-    session_id: String,
+    /// Moves only when a different voice wakes the loop (`with_voice_identity`).
+    session_id: Arc<std::sync::RwLock<String>>,
     session_storage: Arc<dyn SessionStorage>,
     /// Sent on every completion; defaults to `SYSTEM_PROMPT`.
     system_prompt: String,
@@ -382,7 +383,18 @@ pub struct ChatService {
     /// The session row is made at the first turn, so a loop nobody talks to leaves none.
     session_on_first_turn: bool,
     session_made: Arc<std::sync::atomic::AtomicBool>,
+    /// Voice Match names the speaker: their context, and their own session.
+    voice_identity: Option<SpeakerContext>,
+    /// Who woke the loop for the turn under way; `None` when nobody was recognised.
+    waker: Arc<std::sync::Mutex<Option<VoiceSpeaker>>>,
 }
+
+/// A member's context for a turn they spoke, as the routes build it for a typed one.
+pub type SpeakerContext = Arc<
+    dyn Fn(String) -> futures::future::BoxFuture<'static, Option<crate::prompts::ProfileContext>>
+        + Send
+        + Sync,
+>;
 
 /// Hears each `WorkflowState` the loop enters, synchronously, from `emit_event`.
 pub type StateObserver = Arc<dyn Fn(WorkflowState) + Send + Sync>;
@@ -462,7 +474,7 @@ impl ChatService {
             voice_output: Arc::new(PrintOutput),
             speech_energy: Arc::new(crate::models::ports::speech_energy::NoEnergy),
             wake_word_detector: Arc::new(InstantActivation),
-            session_id,
+            session_id: Arc::new(std::sync::RwLock::new(session_id)),
             session_storage,
             system_prompt: SYSTEM_PROMPT.to_string(),
             answer_reviewer: None,
@@ -482,6 +494,8 @@ impl ChatService {
             spoken_observer: None,
             session_on_first_turn: false,
             session_made: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            voice_identity: None,
+            waker: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -683,6 +697,87 @@ impl ChatService {
         self
     }
 
+    /// The session the loop writes to now.
+    pub fn session_id(&self) -> String {
+        self.session_id
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// A recognised voice makes the turn its speaker's: their scope and `context`, the session
+    /// marked as theirs (source `Voice`), and a session of its own when another voice held this one.
+    pub fn with_voice_identity(mut self, context: SpeakerContext) -> Self {
+        self.voice_identity = Some(context);
+        self
+    }
+
+    /// The wake's speaker becomes the turn's; a session another speaker held is left for a new one.
+    async fn note_waker(&self, who: Option<VoiceSpeaker>) {
+        if self.voice_identity.is_none() {
+            return;
+        }
+        *self.waker.lock().unwrap_or_else(|e| e.into_inner()) = who.clone();
+        let session = self.session_id();
+        let held = match self.session_storage.get_session_identity(&session).await {
+            Ok(identity) => identity.profile_id,
+            // No row yet: the first turn makes it, for this speaker.
+            Err(_) => return,
+        };
+        let speaker = who.as_ref().map(|w| w.profile_id.as_str());
+        let has_turns = self
+            .session_storage
+            .count_messages(&session)
+            .await
+            .unwrap_or(0)
+            > 0;
+        // An unrecognised voice after a member's turns must not write into that member's session.
+        let another = match (held.as_deref(), speaker) {
+            (Some(held), Some(speaker)) => held != speaker,
+            (Some(_), None) => true,
+            (None, Some(_)) => has_turns,
+            (None, None) => false,
+        };
+        if !another {
+            return;
+        }
+        let fresh = Uuid::new_v4().to_string();
+        tracing::info!(
+            from = %session,
+            to = %fresh,
+            "voice: another voice woke the loop; it gets a session of its own"
+        );
+        *self.session_id.write().unwrap_or_else(|e| e.into_inner()) = fresh.clone();
+        self.session_made
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.emit_event(WorkflowEvent::Ready { session_id: fresh });
+    }
+
+    /// The turn's scope and context: the recognised speaker's, else the loop's own.
+    async fn turn_speaker(&self) -> (ProfileScope, Option<crate::prompts::ProfileContext>) {
+        let Some(context) = &self.voice_identity else {
+            return (self.profile_scope.clone(), None);
+        };
+        let who = self.waker.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let Some(who) = who else {
+            return (self.profile_scope.clone(), None);
+        };
+        let identity = crate::user_data::domain::session::SessionIdentity {
+            profile_id: Some(who.profile_id.clone()),
+            source: crate::user_data::domain::session::IdentificationSource::Voice,
+            confidence: None,
+        };
+        if let Err(e) = self
+            .session_storage
+            .set_session_identity_if_stronger(&self.session_id(), &identity)
+            .await
+        {
+            tracing::warn!(error = %e, "voice: could not mark the session as the speaker's");
+        }
+        let context = context(who.profile_id.clone()).await;
+        (ProfileScope::Owner(who.profile_id), context)
+    }
+
     /// Make the session row at the first turn instead of expecting it to exist.
     pub fn with_session_on_first_turn(mut self) -> Self {
         self.session_on_first_turn = true;
@@ -695,17 +790,13 @@ impl ChatService {
         if !self.session_on_first_turn || self.session_made.load(Ordering::Acquire) {
             return;
         }
-        let made = match self.session_storage.get_session(&self.session_id).await {
+        let made = match self.session_storage.get_session(&self.session_id()).await {
             Ok(_) => true,
-            Err(_) => match self
-                .session_storage
-                .create_session(self.session_id.clone())
-                .await
-            {
+            Err(_) => match self.session_storage.create_session(self.session_id()).await {
                 Ok(_) => true,
                 Err(e) => {
                     tracing::warn!(
-                        session_id = %self.session_id,
+                        session_id = %self.session_id(),
                         error = %e,
                         "could not make the voice session at its first turn"
                     );
@@ -798,18 +889,15 @@ impl ChatService {
     /// Single-shot chat; Goose keeps its own history, so `SessionStorage` only feeds the REST API.
     pub async fn chat_once(&self, message: String) -> Result<String> {
         let user_msg = ChatMessage::user(message.clone());
-        let session_msg = SessionMessage::new(
-            Uuid::new_v4().to_string(),
-            self.session_id.clone(),
-            user_msg,
-        );
+        let session_msg =
+            SessionMessage::new(Uuid::new_v4().to_string(), self.session_id(), user_msg);
         self.session_storage
-            .add_message(self.session_id.clone(), session_msg)
+            .add_message(self.session_id(), session_msg)
             .await?;
 
         let request = AgentRequest {
             message: message.clone(),
-            session_id: self.session_id.clone(),
+            session_id: self.session_id(),
             model_role: resolve_voice_role(&message),
             images: Vec::new(),
             voice_mode: false,
@@ -827,13 +915,10 @@ impl ChatService {
         let response_text = self.agent.chat(request).await?.text;
 
         let assistant_msg = ChatMessage::assistant(response_text.clone());
-        let session_msg = SessionMessage::new(
-            Uuid::new_v4().to_string(),
-            self.session_id.clone(),
-            assistant_msg,
-        );
+        let session_msg =
+            SessionMessage::new(Uuid::new_v4().to_string(), self.session_id(), assistant_msg);
         self.session_storage
-            .add_message(self.session_id.clone(), session_msg)
+            .add_message(self.session_id(), session_msg)
             .await?;
 
         self.maybe_generate_title(&message, &response_text).await;
@@ -850,7 +935,7 @@ impl ChatService {
             None => return,
         };
 
-        if let Ok(session) = self.session_storage.get_session(&self.session_id).await {
+        if let Ok(session) = self.session_storage.get_session(&self.session_id()).await {
             if session.title.is_some() {
                 return;
             }
@@ -860,7 +945,7 @@ impl ChatService {
         // title reaches, which the idle pass needs to tell if the chat outgrew it.
         let through_message_id = match self
             .session_storage
-            .get_messages_paginated(&self.session_id, 3, 0)
+            .get_messages_paginated(&self.session_id(), 3, 0)
             .await
         {
             Ok(msgs) if msgs.len() == 2 => msgs[1].id.clone(),
@@ -875,7 +960,7 @@ impl ChatService {
                 // Shared normaliser, so this path can't emit titles the re-titler would reject.
                 let Some(title) = normalise_title(&response.content) else {
                     tracing::debug!(
-                        session_id = %self.session_id,
+                        session_id = %self.session_id(),
                         "title generation returned nothing usable — leaving it to the fallback"
                     );
                     return;
@@ -884,17 +969,17 @@ impl ChatService {
                 // Not `update_title`: that marks a human rename, which the idle pass won't touch.
                 if let Err(e) = self
                     .session_storage
-                    .set_generated_title(&self.session_id, &title, &through_message_id)
+                    .set_generated_title(&self.session_id(), &title, &through_message_id)
                     .await
                 {
                     tracing::warn!(
-                        session_id = %self.session_id,
+                        session_id = %self.session_id(),
                         error = %e,
                         "Failed to save LLM-generated session title"
                     );
                 } else {
                     tracing::info!(
-                        session_id = %self.session_id,
+                        session_id = %self.session_id(),
                         title = %title,
                         "Auto-generated session title (LLM)"
                     );
@@ -902,7 +987,7 @@ impl ChatService {
             }
             Err(e) => {
                 tracing::warn!(
-                    session_id = %self.session_id,
+                    session_id = %self.session_id(),
                     error = %e,
                     "LLM title generation failed (non-fatal)"
                 );
@@ -927,11 +1012,11 @@ impl ChatService {
         let id = Uuid::new_v4().to_string();
         let sm = SessionMessage::new(
             id.clone(),
-            self.session_id.clone(),
+            self.session_id(),
             ChatMessage::user_with_images(message, images),
         );
         self.session_storage
-            .add_message(self.session_id.clone(), sm)
+            .add_message(self.session_id(), sm)
             .await?;
         Ok(id)
     }
@@ -983,22 +1068,22 @@ impl ChatService {
             };
             let sm = SessionMessage::new(
                 Uuid::new_v4().to_string(),
-                self.session_id.clone(),
+                self.session_id(),
                 ChatMessage::tool_result(content, field(v, "tool_call_id").unwrap_or_default()),
             );
             self.session_storage
-                .add_message(self.session_id.clone(), sm)
+                .add_message(self.session_id(), sm)
                 .await?;
         }
         let assistant_id = Uuid::new_v4().to_string();
         let sm = SessionMessage::new(
             assistant_id.clone(),
-            self.session_id.clone(),
+            self.session_id(),
             ChatMessage::assistant_with_tool_calls(assistant_text, tool_calls),
         )
         .with_token_counts(usage.map(|(p, _)| p), usage.map(|(_, c)| c));
         self.session_storage
-            .add_message(self.session_id.clone(), sm)
+            .add_message(self.session_id(), sm)
             .await?;
 
         // After the assistant row commits: `session_thinking` has a foreign key onto it.
@@ -1009,7 +1094,7 @@ impl ChatService {
             if prompt > 0 || completion > 0 {
                 let _ = self
                     .session_storage
-                    .increment_usage(&self.session_id, prompt, completion, model_name)
+                    .increment_usage(&self.session_id(), prompt, completion, model_name)
                     .await;
             }
         }
@@ -1039,11 +1124,11 @@ impl ChatService {
         }
         if let Err(e) = self
             .session_storage
-            .add_thinking(&self.session_id, assistant_message_id, &blocks)
+            .add_thinking(&self.session_id(), assistant_message_id, &blocks)
             .await
         {
             tracing::warn!(
-                session_id = %self.session_id,
+                session_id = %self.session_id(),
                 "failed to persist reasoning text (turn itself is saved): {e}"
             );
         }
@@ -1066,7 +1151,7 @@ impl ChatService {
         events.push(
             Event::new(EventCategory::Agent, "agent.turn")
                 .attr("tool_count", tool_names.len() as i64)
-                .session(&self.session_id)
+                .session(self.session_id())
                 .sensitivity(PrivacySensitivity::Internal),
         );
 
@@ -1075,7 +1160,7 @@ impl ChatService {
             let mut ev = Event::new(EventCategory::Inference, "inference.completion")
                 .attr("prompt_tokens", prompt as i64)
                 .attr("completion_tokens", completion as i64)
-                .session(&self.session_id)
+                .session(self.session_id())
                 .sensitivity(PrivacySensitivity::Internal);
             if let Some(model) = model_name {
                 ev = ev.attr("model", model);
@@ -1087,7 +1172,7 @@ impl ChatService {
             events.push(
                 Event::new(EventCategory::Tool, "tool.call")
                     .attr("tool", tool.as_str())
-                    .session(&self.session_id)
+                    .session(self.session_id())
                     .sensitivity(PrivacySensitivity::Internal),
             );
         }
@@ -1102,7 +1187,7 @@ impl ChatService {
     /// Best-effort: title an untitled session from its first user message, without an LLM.
     async fn ensure_session_title(&self) {
         // A missing session counts as untitled; the update is a no-op for it.
-        if let Ok(session) = self.session_storage.get_session(&self.session_id).await {
+        if let Ok(session) = self.session_storage.get_session(&self.session_id()).await {
             if session.title.is_some() {
                 return;
             }
@@ -1110,7 +1195,7 @@ impl ChatService {
 
         let first_user_text = match self
             .session_storage
-            .get_messages_paginated(&self.session_id, 20, 0)
+            .get_messages_paginated(&self.session_id(), 20, 0)
             .await
         {
             Ok(msgs) => msgs
@@ -1132,17 +1217,17 @@ impl ChatService {
         // Not `update_title`: that marks a human rename, which the idle re-titler won't touch.
         if let Err(e) = self
             .session_storage
-            .set_derived_title(&self.session_id, &title)
+            .set_derived_title(&self.session_id(), &title)
             .await
         {
             tracing::warn!(
-                session_id = %self.session_id,
+                session_id = %self.session_id(),
                 error = %e,
                 "Failed to save derived session title"
             );
         } else {
             tracing::info!(
-                session_id = %self.session_id,
+                session_id = %self.session_id(),
                 title = %title,
                 "Derived session title (deterministic fallback)"
             );
@@ -1155,13 +1240,10 @@ impl ChatService {
         let fired_at = std::time::Instant::now();
         self.ensure_session().await;
         let user_msg = ChatMessage::user(message.clone());
-        let session_msg = SessionMessage::new(
-            Uuid::new_v4().to_string(),
-            self.session_id.clone(),
-            user_msg,
-        );
+        let session_msg =
+            SessionMessage::new(Uuid::new_v4().to_string(), self.session_id(), user_msg);
         self.session_storage
-            .add_message(self.session_id.clone(), session_msg)
+            .add_message(self.session_id(), session_msg)
             .await?;
 
         // Stream + speak (no persistence inside).
@@ -1188,18 +1270,18 @@ impl ChatService {
         fired_at: std::time::Instant,
     ) -> Result<TurnOutcome> {
         self.ensure_session().await;
+        let (profile_scope, profile_context) = self.turn_speaker().await;
         // Only the voice loop reaches this, hence `voice_mode: true` (TTS-friendly prompt).
         let request = AgentRequest {
             message: message.clone(),
-            session_id: self.session_id.clone(),
+            session_id: self.session_id(),
             model_role: "chat".to_string(),
             images: Vec::new(),
             voice_mode: true,
             canvas_mode: false,
-            // From the builder; voice leaves it at `Household`.
-            profile_scope: self.profile_scope.clone(),
-            // Voice has no speaker identification, so no member's preferences apply.
-            profile_context: None,
+            // The recognised speaker's, else the builder's (`Household` for voice).
+            profile_scope,
+            profile_context,
             tool_group_allowlist: None,
             warmup: false,
             suggestion_context: None,
@@ -1474,7 +1556,7 @@ impl ChatService {
             if let Err(e) = self
                 .session_storage
                 .increment_usage(
-                    &self.session_id,
+                    &self.session_id(),
                     usage.prompt_tokens,
                     usage.completion_tokens,
                     self.model_name.as_deref(),
@@ -1486,13 +1568,13 @@ impl ChatService {
         }
         if let (Some(telemetry), Some(stats)) = (&self.telemetry, &outcome.stats) {
             let turn_number = telemetry
-                .get_turns(&self.session_id)
+                .get_turns(&self.session_id())
                 .await
                 .map(|v| v.len() as u32)
                 .unwrap_or(0)
                 + 1;
             let metrics = crate::security::domain::turn_metrics::TurnMetrics {
-                session_id: self.session_id.clone(),
+                session_id: self.session_id(),
                 turn_number,
                 prompt_tokens: stats.prompt_tokens,
                 completion_tokens: stats.completion_tokens,
@@ -1600,7 +1682,7 @@ impl ChatService {
         let assistant_msg = ChatMessage::assistant(full_text.to_string());
         let assistant_id = Uuid::new_v4().to_string();
         let session_msg =
-            SessionMessage::new(assistant_id.clone(), self.session_id.clone(), assistant_msg)
+            SessionMessage::new(assistant_id.clone(), self.session_id(), assistant_msg)
                 .with_token_counts(
                     usage.map(|u| u.prompt_tokens),
                     usage.map(|u| u.completion_tokens),
@@ -1608,7 +1690,7 @@ impl ChatService {
                 // `persist_assistant_turn`'s tuple can't carry this: its rows stay NULL, not zero.
                 .with_reasoning_tokens(usage.and_then(|u| u.reasoning_tokens));
         self.session_storage
-            .add_message(self.session_id.clone(), session_msg)
+            .add_message(self.session_id(), session_msg)
             .await?;
         // Must drain: the voice loop reuses one service, so leftovers would reach the next turn.
         self.persist_thinking_blocks(&assistant_id).await;
@@ -1624,13 +1706,10 @@ impl ChatService {
     ) -> Result<()> {
         self.ensure_session().await;
         let user_msg = ChatMessage::user(confirmed_message.to_string());
-        let session_msg = SessionMessage::new(
-            Uuid::new_v4().to_string(),
-            self.session_id.clone(),
-            user_msg,
-        );
+        let session_msg =
+            SessionMessage::new(Uuid::new_v4().to_string(), self.session_id(), user_msg);
         self.session_storage
-            .add_message(self.session_id.clone(), session_msg)
+            .add_message(self.session_id(), session_msg)
             .await?;
 
         self.persist_assistant_response(response_text, usage)
@@ -1810,6 +1889,7 @@ impl ChatService {
                         return Err(e);
                     }
                 };
+                self.note_waker(activation.speaker.clone()).await;
                 if self.interrupt_watch.is_some() {
                     self.emit_event(WorkflowEvent::Wake {
                         who: activation.speaker.clone(),
@@ -2120,7 +2200,7 @@ impl ChatService {
                 self.record_turn_outcome(&outcome).await;
                 self.emit_event(WorkflowEvent::AgentOutput(response_text));
                 self.emit_event(WorkflowEvent::TurnComplete {
-                    session_id: self.session_id.clone(),
+                    session_id: self.session_id(),
                 });
                 true
             }
@@ -4305,6 +4385,91 @@ mod tests {
             .with_session_on_first_turn();
         run_bounded(&spoken).await.unwrap();
         assert_eq!(storage.get_messages("spoken").await.unwrap().len(), 2);
+    }
+
+    /// Wakes once per scripted speaker, then as the last one again, so the script's end ends it.
+    struct WakesInTurn(std::sync::Mutex<std::collections::VecDeque<Option<VoiceSpeaker>>>);
+
+    #[async_trait::async_trait]
+    impl StreamingWakeWordDetector for WakesInTurn {
+        async fn wait_for_activation_with_audio(&self) -> Result<WakeWordActivation> {
+            let speaker = {
+                let mut queue = self.0.lock().unwrap();
+                if queue.len() > 1 {
+                    queue.pop_front().flatten()
+                } else {
+                    queue.front().cloned().flatten()
+                }
+            };
+            Ok(WakeWordActivation {
+                speaker,
+                endpointed: true,
+                ..Default::default()
+            })
+        }
+        fn supports_interruption(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn a_recognised_voice_makes_the_turn_its_own_and_another_voice_gets_a_new_session() {
+        use crate::user_data::domain::session::IdentificationSource;
+        let speaker = |id: &str| {
+            Some(VoiceSpeaker {
+                profile_id: id.into(),
+                name: id.into(),
+            })
+        };
+        let storage = Arc::new(InMemorySessionStorage::new());
+        let agent = Arc::new(MockAgent::new());
+        let collector = EventCollector::default();
+        let context: SpeakerContext = Arc::new(|id: String| {
+            Box::pin(async move {
+                Some(crate::prompts::ProfileContext {
+                    preferred_name: Some(format!("{id} herself")),
+                    birthday: None,
+                    language: None,
+                    atypical_speech: false,
+                    member_notes: Vec::new(),
+                })
+            })
+        });
+        let svc = ChatService::new(agent.clone(), "room".into(), storage.clone())
+            .with_voice_input(Arc::new(ScriptedListenInput::new(["hello", "", "hi"])))
+            .with_voice_output(Arc::new(CapturingSpeak::default()))
+            .with_wake_word_detector(Arc::new(WakesInTurn(std::sync::Mutex::new(
+                [speaker("amina"), speaker("zawadi")].into(),
+            ))))
+            .with_event_sink(collector.sink())
+            .with_session_on_first_turn()
+            .with_voice_identity(context);
+
+        run_bounded(&svc).await.unwrap();
+
+        let room = storage.get_session_identity("room").await.unwrap();
+        assert_eq!(room.profile_id.as_deref(), Some("amina"));
+        assert_eq!(room.source, IdentificationSource::Voice);
+        let moved = svc.session_id();
+        assert_ne!(
+            moved, "room",
+            "Zawadi's wake moved the loop to a session of her own"
+        );
+        let hers = storage.get_session_identity(&moved).await.unwrap();
+        assert_eq!(hers.profile_id.as_deref(), Some("zawadi"));
+        let last = agent.last_request().unwrap();
+        assert_eq!(last.session_id, moved);
+        assert_eq!(last.profile_scope, ProfileScope::Owner("zawadi".into()));
+        assert_eq!(
+            last.profile_context
+                .and_then(|c| c.preferred_name)
+                .as_deref(),
+            Some("zawadi herself")
+        );
+        let events = collector.events.lock().unwrap().clone();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, WorkflowEvent::Ready { session_id } if *session_id == moved)));
     }
 
     #[tokio::test]

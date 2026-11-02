@@ -48,6 +48,21 @@ pub fn choose_wake_detector(
     }
 }
 
+/// The detector the room listens with for these settings: no ear when `vad_backend` is `rms`.
+pub fn household_wake_detector(
+    settings: &crate::user_data::domain::settings::Settings,
+    cnn_hears_household: bool,
+) -> (WakeDetector, WakeDetectorReason) {
+    if settings.vad_backend.eq_ignore_ascii_case("rms") {
+        return (WakeDetector::Whisper, WakeDetectorReason::NoEar);
+    }
+    choose_wake_detector(
+        &settings.voice_wake_detector,
+        &settings.voice_wake_word,
+        cnn_hears_household,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

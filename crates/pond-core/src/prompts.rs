@@ -23,6 +23,25 @@ pub struct ProfileContext {
     pub member_notes: Vec<crate::user_data::domain::prompt_extra::PromptExtra>,
 }
 
+impl ProfileContext {
+    /// What the prompt may state on a turn that is the member's own; the keys are the contract
+    /// with `PATCH /api/v1/profiles/{id}`.
+    pub fn of_member(
+        prefs: &std::collections::HashMap<String, String>,
+        member_notes: Vec<crate::user_data::domain::prompt_extra::PromptExtra>,
+    ) -> Self {
+        Self {
+            preferred_name: prefs.get("preferred_name").cloned(),
+            birthday: prefs.get("birthday").cloned(),
+            language: prefs.get("language").cloned(),
+            atypical_speech: prefs
+                .get("accessibility_atypical_speech")
+                .is_some_and(|v| v == "true"),
+            member_notes,
+        }
+    }
+}
+
 // ── Runtime prompt state ──────────────────────────────────────────────────────
 
 /// Per-request runtime state for the Jinja2 template, filled by `GooseAdapter::chat_stream()`.

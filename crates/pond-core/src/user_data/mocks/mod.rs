@@ -15,3 +15,4 @@ pub mod mock_sensor;
 pub mod mock_session;
 pub mod mock_settings;
 pub mod mock_skill;
+pub mod mock_voice_print;
