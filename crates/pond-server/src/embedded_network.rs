@@ -1692,6 +1692,9 @@ async fn remote_configuration(
         "controlUrl": config.control_url,
         "state": runtime.status.read().unwrap_or_else(|p| p.into_inner()).state,
         "lapsesAt": lapses_at,
+        // Where the household can turn it on, as codes the app words: a phone away from home
+        // cannot ask once it is off.
+        "enableFrom": (!config.enabled).then_some(["dashboard"]),
     })))
 }
 async fn register_phone(
