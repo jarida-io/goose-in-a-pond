@@ -244,6 +244,7 @@ async fn make_app_with(scheduler: Arc<InMemoryScheduler>) -> (axum::Router, temp
     let scheduler: Option<Arc<dyn SchedulerPort>> = Some(scheduler);
 
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),

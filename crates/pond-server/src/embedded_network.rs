@@ -1182,6 +1182,13 @@ impl pond_core::security::ports::remote_access::RemoteRevocation for Runtime {
     async fn queue(&self, device_id: &str) -> Result<()> {
         self.queue_network(&network_device(device_id)?)
     }
+
+    async fn enrolled_devices(&self) -> Result<Vec<String>> {
+        Ok(revocation::load_enrolled(&self.directory)
+            .devices
+            .into_iter()
+            .collect())
+    }
 }
 
 impl Runtime {

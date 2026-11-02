@@ -38,6 +38,7 @@ async fn make_app_with_bus() -> (axum::Router, Arc<InProcessEventBus>, tempfile:
     let bus = Arc::new(InProcessEventBus::new());
 
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),

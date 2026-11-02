@@ -500,6 +500,31 @@ impl<N: NetworkManager> WifiStation for NetworkManagerStation<N> {
         tracing::info!(%ssid, profiles = profiles.len(), "forgot a saved Wi-Fi network");
         Ok(())
     }
+
+    /// Every saved profile goes, regardless of SSID — a factory reset's door back to setup.
+    async fn forget_all(&self) -> Result<(), WifiForgetError> {
+        let saved = self
+            .nm
+            .saved_connections()
+            .await
+            .map_err(|error| nm::forget_error(&error))?;
+        let count = saved.len();
+        for profile in &saved {
+            match self.nm.delete(&profile.path).await {
+                Ok(()) => {}
+                Err(NmError::Refused(name)) if nm::is_gone(&name) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        "NetworkManager refused to forget a saved network during a factory reset"
+                    );
+                    return Err(nm::forget_error(&error));
+                }
+            }
+        }
+        tracing::info!(profiles = count, "forgot every saved Wi-Fi network");
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1299,6 +1324,38 @@ mod tests {
             Err(WifiForgetError::NotFound),
             "an SSID is matched byte for byte"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn forgetting_all_deletes_every_saved_profile_regardless_of_ssid() {
+        let (station, nm) = new_station();
+        FakeNm::set(
+            &nm.saved,
+            vec![
+                saved("/Settings/1", "Home"),
+                saved("/Settings/2", "Cafe"),
+                saved("/Settings/3", "Home"),
+            ],
+        );
+        station.forget_all().await.unwrap();
+        nm.calls(|calls| {
+            assert_eq!(
+                calls.deleted,
+                vec![
+                    "/Settings/1".to_string(),
+                    "/Settings/2".to_string(),
+                    "/Settings/3".to_string(),
+                ]
+            )
+        });
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn forgetting_all_with_nothing_saved_deletes_nothing_and_still_succeeds() {
+        let (station, nm) = new_station();
+        FakeNm::set(&nm.saved, vec![]);
+        station.forget_all().await.unwrap();
+        nm.calls(|calls| assert!(calls.deleted.is_empty()));
     }
 
     #[tokio::test(start_paused = true)]

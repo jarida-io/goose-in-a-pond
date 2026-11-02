@@ -102,7 +102,9 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
     let session_storage = Arc::new(SqliteSessionStorage::new(pool.clone()));
 
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
+        pond_admin: None,
         suggestion_queue: Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),

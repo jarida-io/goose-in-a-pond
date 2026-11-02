@@ -130,6 +130,8 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/onboard/step/{name}", post(onboarding_step))
         // Reset onboarding back to the first step ("Start over" in Settings).
         .route("/onboard/reset", post(reset_onboarding))
+        // Wipe the Pond's household data and reopen onboarding ("Factory reset" in Settings).
+        .route("/factory-reset", post(factory_reset))
         // The write is the wizard's; the read needs a token in every state, so the wizard can
         // resume from what it saved without a PUT that answers with the whole record.
         .route("/settings", get(get_settings).put(update_settings))
@@ -1745,6 +1747,84 @@ async fn reset_onboarding(
     })?;
 
     Ok(Json(onboarding_status_json(Some(OnboardingStep::Welcome))))
+}
+
+#[derive(Deserialize)]
+struct FactoryResetRequest {
+    /// Must match `Settings.home_name` exactly, so a reset is never one accidental tap.
+    pond_name: String,
+}
+
+/// Wipes the Pond's household data and reopens onboarding — the whole journey is
+/// `pond_core::network::services::factory_reset::FactoryResetService::execute`; this assembles
+/// its ports from `state` and turns a refusal into the matching HTTP status.
+async fn factory_reset(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    remote: Option<
+        axum::Extension<Arc<dyn pond_core::security::ports::remote_access::RemoteRevocation>>,
+    >,
+    body: Result<Json<FactoryResetRequest>, JsonRejection>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use pond_core::network::services::factory_reset::{
+        FactoryResetPorts, FactoryResetRefusal, FactoryResetService,
+    };
+    use pond_core::user_data::services::household_permission::{may_reset_pond, PermissionDecision};
+
+    let role = resolve_role_from_principal(&state, principal.as_ref()).await;
+    if let PermissionDecision::Denied {
+        reason,
+        grantable_by,
+    } = may_reset_pond(role)
+    {
+        return Err(permission_denied(&state, reason, grantable_by).await);
+    }
+
+    let Json(request) = body.map_err(|_| bad_body())?;
+
+    let Some(data_wipe) = state.data_wipe.clone() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "factory_reset_unavailable"})),
+        ));
+    };
+
+    let settings = state.settings_repo.get().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("could not read settings: {e}")})),
+        )
+    })?;
+
+    let ports = FactoryResetPorts {
+        onboarding: state.onboarding_repo.clone(),
+        setup_claims: state.setup_claims.clone(),
+        scheduler: state.scheduler.clone(),
+        device_registry: state.device_registry.clone(),
+        handshake: state.handshake.clone(),
+        remote: remote.map(|axum::Extension(remote)| remote),
+        profile_repo: state.profile_repo.clone(),
+        notification_sender: state.notification_sender.clone(),
+        tts: state.tts.clone(),
+        credit_ledger: state.credit_ledger.clone(),
+        data_wipe,
+    };
+
+    match FactoryResetService::execute(&ports, &request.pond_name, &settings.home_name).await {
+        Ok(export) => Ok(Json(json!({ "routines": export.routines }))),
+        Err(FactoryResetRefusal::NoPondName) => Err((
+            StatusCode::CONFLICT,
+            Json(json!({"error": "pond_has_no_name"})),
+        )),
+        Err(FactoryResetRefusal::NameMismatch) => Err((
+            StatusCode::CONFLICT,
+            Json(json!({"error": "pond_name_mismatch"})),
+        )),
+        Err(FactoryResetRefusal::PaymentsHeld) => Err((
+            StatusCode::CONFLICT,
+            Json(json!({"error": "payments_held"})),
+        )),
+    }
 }
 
 #[derive(Deserialize)]

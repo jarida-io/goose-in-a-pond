@@ -51,6 +51,7 @@ async fn make_app() -> Harness {
             .unwrap();
     }
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
         db,
         onboarding_repo: Arc::new(pond_infra::onboarding::SqlxOnboardingRepository::new(
@@ -451,6 +452,9 @@ async fn revocation_waits_for_durable_queue_and_uses_authenticated_device() {
             *self.device.lock().unwrap() = Some(id.to_owned());
             Ok(())
         }
+        async fn enrolled_devices(&self) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
     }
     let h = make_app().await;
     let a = pair(&h, "phone000000000001").await;
@@ -507,6 +511,9 @@ async fn removing_a_device_queues_its_remote_revocation_first() {
             }
             self.devices.lock().unwrap().push(id.to_owned());
             Ok(())
+        }
+        async fn enrolled_devices(&self) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
         }
     }
     let h = make_app().await;

@@ -129,6 +129,13 @@ impl WifiStation for CoreWlanStation {
         tracing::info!(%ssid, "a saved Wi-Fi network cannot be forgotten without an administrator on macOS");
         Err(WifiForgetError::NotPermitted)
     }
+
+    async fn forget_all(&self) -> Result<(), WifiForgetError> {
+        tracing::info!(
+            "saved Wi-Fi networks cannot be forgotten without an administrator on macOS"
+        );
+        Err(WifiForgetError::NotPermitted)
+    }
 }
 
 /// Runs `work` on a blocking thread inside an autorelease pool; `None` if that thread panicked.
@@ -445,6 +452,15 @@ mod tests {
         let station = CoreWlanStation::default();
         assert_eq!(
             station.forget("Home").await,
+            Err(WifiForgetError::NotPermitted)
+        );
+    }
+
+    #[tokio::test]
+    async fn forgetting_all_is_refused_rather_than_faked() {
+        let station = CoreWlanStation::default();
+        assert_eq!(
+            station.forget_all().await,
             Err(WifiForgetError::NotPermitted)
         );
     }

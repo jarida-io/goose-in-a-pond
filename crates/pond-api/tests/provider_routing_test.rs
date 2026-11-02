@@ -199,6 +199,7 @@ async fn make_app_with_provider(
     mock_hs.add_valid_token("test-token".to_string()).await;
 
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
@@ -556,6 +557,7 @@ async fn no_provider_still_returns_agent_response_for_non_task_messages() {
     mock_hs.add_valid_token("test-token".to_string()).await;
 
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
@@ -687,6 +689,7 @@ async fn task_message_uses_agent_with_tool_call_events_without_provider() {
     mock_hs.add_valid_token("test-token".to_string()).await;
 
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),

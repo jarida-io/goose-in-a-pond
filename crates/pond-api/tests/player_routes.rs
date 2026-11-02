@@ -224,6 +224,7 @@ async fn pond(manager: Option<Arc<CapturingManager>>, installed: Arc<Installed>)
     let secrets = Arc::new(InMemorySecrets::default());
 
     let state = Arc::new(AppState {
+        data_wipe: None,
         suggestion_queue: Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),

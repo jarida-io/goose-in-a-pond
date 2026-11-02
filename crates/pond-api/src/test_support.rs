@@ -147,6 +147,7 @@ pub async fn app_state() -> TestState {
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
         pond_admin: None,
+        data_wipe: None,
     };
     TestState {
         state,

@@ -316,6 +316,8 @@ pub struct AppState {
     pub voice_samples: Arc<crate::voice_sample::VoiceSamples>,
     /// My Pond: the admin card's unlocks and the host it administers. `None` answers `503`.
     pub pond_admin: Option<Arc<crate::pond_admin::PondAdmin>>,
+    /// A factory reset's erase step; `None` where no reset route is wired (tests, CLI).
+    pub data_wipe: Option<Arc<dyn pond_core::network::ports::personal_data_wipe::PersonalDataWipe>>,
 }
 
 impl AppState {

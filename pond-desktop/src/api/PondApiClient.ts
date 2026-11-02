@@ -559,6 +559,15 @@ export class PondApiClient {
     return this.hostRequest("POST", "/api/v1/onboard/reset");
   }
 
+  /**
+   * Wipes this Pond's household data and reopens onboarding. `pondName` must match the Pond's
+   * real name exactly, or the server refuses with `ApiError.message === "pond_name_mismatch"`;
+   * a held mesh-credit balance refuses with `"payments_held"`.
+   */
+  factoryReset(pondName: string): Promise<{ routines: Schedule[] }> {
+    return this.hostRequest("POST", "/api/v1/factory-reset", { pond_name: pondName });
+  }
+
   /** WAV bytes for `text`; throws {@link ApiError} (e.g. 503) when no TTS backend runs. */
   async synthesizeSpeech(text: string): Promise<ArrayBuffer> {
     await this.ensureTokenFresh();

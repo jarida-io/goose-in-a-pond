@@ -50,6 +50,7 @@ async fn make_harness() -> Harness {
     let bus = Arc::new(InProcessEventBus::new());
 
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),

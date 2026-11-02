@@ -4419,6 +4419,22 @@ async fn run_server(
         ))
     };
 
+    // One station for the setup channel and the connections routes, so a join over Bluetooth and
+    // one over HTTPS never run at once. Built here, ahead of its other two uses below, so a
+    // factory reset's Wi-Fi forget goes through the same shared instance rather than a second
+    // one with its own exclusion lock.
+    let wifi_station = pond_connect::wifi::platform();
+    let data_wipe: Option<Arc<dyn pond_core::network::ports::personal_data_wipe::PersonalDataWipe>> =
+        Some(Arc::new(pond_infra::personal_data_wipe::SystemDataWipe::new(
+            db.clone(),
+            secret_repo.clone(),
+            Some(Arc::new(
+                pond_core::network::services::wifi_connections::WifiConnections::new(
+                    wifi_station.clone(),
+                ),
+            )),
+        )));
+
     let state = Arc::new(AppState {
         tts_control: tts_control.clone(),
         // Before `db`: fields evaluate in source order and `db` is moved below.
@@ -4530,6 +4546,7 @@ async fn run_server(
         spoken_codes,
         voice_samples: Default::default(),
         pond_admin: Some(pond_admin),
+        data_wipe,
     });
 
     // OAuth refresh updates secrets only; restarting extensions would break in-flight tool calls.
@@ -4744,9 +4761,8 @@ async fn run_server(
         });
     }
 
-    // One station for the setup channel and the connections routes, so a join over Bluetooth and
-    // one over HTTPS never run at once.
-    let wifi_station = pond_connect::wifi::platform();
+    // `wifi_station` was built earlier, alongside `data_wipe`, so this and the BLE setup
+    // channel below share the same instance a factory reset's Wi-Fi forget also uses.
     let connections = Arc::new(pond_api::connections::Connections::new(
         pond_core::network::services::wifi_connections::WifiConnections::new(wifi_station.clone()),
         pond_connect::wired::platform(),

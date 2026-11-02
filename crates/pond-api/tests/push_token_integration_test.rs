@@ -60,6 +60,7 @@ async fn make_app() -> (
     let mock_hs = DeviceHandshake(device_id.clone());
 
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),

@@ -145,6 +145,7 @@ async fn make_app(installed: Arc<Installed>) -> (axum::Router, tempfile::TempDir
     mock_hs.add_valid_token("test-token".to_string()).await;
 
     let state = Arc::new(AppState {
+        data_wipe: None,
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),

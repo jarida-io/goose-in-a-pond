@@ -28,6 +28,7 @@ import { modelLabel, rolesFor } from "../sections/models/modelsView";
 import { diffSettings, foldServerState } from "./state";
 import { parseText, summariseRetitle, textValue } from "./catalogueView";
 import { ErrorBanner, SkeletonList } from "../components/shared";
+import { FactoryResetModal } from "./FactoryResetModal";
 import {
   CATALOGUE,
   TIER_NOTE,
@@ -487,6 +488,7 @@ export function SettingsCatalogueView({
   const [armed, setArmed] = useState(false);
   const [onboarding, setOnboarding] = useState(false);
   const [onboardErr, setOnboardErr] = useState<string | null>(null);
+  const [resetModalOpen, setResetModalOpen] = useState(false);
 
   /** Reset on the server, then reload: `App.tsx` decides onboarding from the backend's status. */
   const startOnboarding = useCallback(async () => {
@@ -1352,7 +1354,30 @@ export function SettingsCatalogueView({
               </span>
             </div>
           </div>
+
+          <div className="scat__danger">
+            <div>
+              <b>Factory reset</b>
+              <span>
+                Erases every household member, conversation, memory, device, room, saved
+                Wi-Fi network and secret, and reopens setup. Cannot be undone.
+              </span>
+            </div>
+            <button
+              type="button"
+              className="danger-modal__btn danger-modal__btn--danger scat__dangerBtn"
+              onClick={() => setResetModalOpen(true)}
+            >
+              Factory reset…
+            </button>
+          </div>
         </>
+      )}
+      {resetModalOpen && (
+        <FactoryResetModal
+          pondName={settings.home_name ?? ""}
+          onClose={() => setResetModalOpen(false)}
+        />
       )}
     </div>
   );

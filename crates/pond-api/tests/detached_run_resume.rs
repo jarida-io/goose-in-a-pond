@@ -86,6 +86,7 @@ async fn make_app_with(
     mock_hs.add_valid_token("test-token".to_string()).await;
 
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
         account_sync: None,
         suggestion_queue: std::sync::Arc::new(
