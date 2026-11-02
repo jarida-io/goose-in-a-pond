@@ -9,7 +9,7 @@ this document is one that gets dropped at the next sync.
 | | |
 |---|---|
 | Submodule | `.gitmodules`: `https://github.com/jarida-io/Goose`, `branch = main` |
-| Pinned commit | `378cf76c7`, the tip of fork branch `fix/kv-q8-when-tight`: fork `main` (`b3864d12b`, with the written tool calls of `49099c641`) merged into the model-load memory fix (`fix/jetson-model-load-memory`, `818cb5e13`, `f7a9e3989`), the KV cache type chosen from memory, and the windowed KV estimate |
+| Pinned commit | `a91286f3a`, the tip of fork branch `fix/kv-q8-when-tight`, built on #666's pin `cd2747ac5`: fork `main` (`b3864d12b`, with the written tool calls of `49099c641`) merged into the model-load memory fix (`fix/jetson-model-load-memory`, `818cb5e13`, `f7a9e3989`), the KV cache type chosen from memory, and the windowed KV estimate |
 | How CI gets it | the recorded SHA: `git submodule update --init --recursive --depth=1` (rust job), `submodules: recursive` (live-test job) |
 | Shared pins | `rmcp = "=2.1.0"` and `llama-cpp-2 = "=0.1.156"` in both workspaces |
 
