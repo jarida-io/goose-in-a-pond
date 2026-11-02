@@ -1322,7 +1322,7 @@ Secret keys starting with `UBER_` are reserved for the Uber routes: the generic 
 | Route | Request | Response |
 |---|---|---|
 | `GET /agent/tools` | | `[{extension, name, description, ui?, _meta?}]`; `[]` without an agent |
-| `POST /tools/invoke` | `InvokeToolRequest {server?, tool, args?}` | the tool's result |
+| `POST /tools/invoke` | `InvokeToolRequest {server?, tool, args?}`; optional `Idempotency-Key` header (1 to 255 visible ASCII characters) | the tool's result. With a key, the result also carries `idempotency_key`, and a resend under the same key from the same device within 30 minutes gets the first result without running the tool again; a resend during the first run waits for it. A failed run is not kept. `400 invalid_idempotency_key`; `422 idempotency_key_reused` for the same key with another tool or arguments. Kept in memory, so a restart forgets them |
 | `POST /mcp/tools/call` | `McpToolCallRequest {name, arguments?}` | the tool's result |
 | `GET /mcp/resources` | `?uri=` | `{contents: [{uri, text, ...}]}` |
 | `GET /agent/extras` | | `[PromptExtra {key, instruction, active, sort_order}]` |
