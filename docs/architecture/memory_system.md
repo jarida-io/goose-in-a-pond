@@ -222,10 +222,12 @@ identical row is a different person's fact):
 | Same | lexical duplicate of one of the 50 most recent rows (`DEDUP_RECENT_WINDOW`, plus rows this window wrote), or cosine to the nearest of 5 neighbours at or above `memory_reinforce_threshold` (0.94) | dropped |
 | Related | cosine at or above `memory_relate_threshold` (0.78) | dropped |
 | New | cosine below 0.78 | written |
-| Unscored | the embed failed or no neighbour has a vector | written |
+| Unscored | the embed failed, no neighbour has a vector, or the embedding model has no measured floors | written |
 
 The settings source marks both thresholds as unmeasured defaults; `shadow` mode exists to measure
-them on real history.
+them on real history. Both are cosines on MiniLM's scale, so the cosine bands apply only under a
+model whose table row carries floors (`EmbeddingModel::floors`, MiniLM's alone today); under any
+other, EmbeddingGemma 2 included, the lexical test alone dedups.
 
 The lexical test is `is_duplicate_content()` in `memory_relevance.rs`, layered because a token
 measure alone is blind to meaning-bearing differences:

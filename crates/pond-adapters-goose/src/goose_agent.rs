@@ -1957,7 +1957,11 @@ impl GooseAdapter {
     /// Group-description vectors for the current model, cached per embedder generation; `None`
     /// means "don't narrow". Failures aren't cached (the model may still be loading).
     async fn group_description_embeddings(&self) -> Option<(u64, GroupVectors)> {
-        let provider = self.embedding_provider.as_ref().filter(|p| p.available())?;
+        // A model with no measured floor narrows nothing, so its embeds would be wasted.
+        let provider = self.embedding_provider.as_ref().filter(|p| {
+            p.available()
+                && pond_core::mcp::services::tool_selection::relevance_floor(p.as_ref()).is_some()
+        })?;
         let generation = provider.generation();
         if let Some((cached, vectors)) = self.group_embeddings.read().await.as_ref() {
             if *cached == generation {
@@ -2107,12 +2111,22 @@ impl GooseAdapter {
             _ => None,
         };
 
-        let selection = sel::select_groups(
-            &available,
-            scores.as_deref(),
-            sel::DEFAULT_RELEVANCE_THRESHOLD,
-        );
+        let floor = self
+            .embedding_provider
+            .as_ref()
+            .and_then(|p| sel::relevance_floor(p.as_ref()));
+        let selection = sel::select_groups(&available, scores.as_deref(), floor);
 
+        if matches!(selection.basis, sel::SelectionBasis::Unmeasured) {
+            tracing::info!(
+                target: "giap::trace",
+                kind = "tool_selection_widened",
+                session_id = %giap_session_id,
+                reason = "floor_unmeasured",
+                groups = permitted.len(),
+                "tool selection keeps every group: the embedding model's floor is unmeasured"
+            );
+        }
         // Make a failed narrowing visible; otherwise it looks like mode = "relevant" worked.
         if matches!(selection.basis, sel::SelectionBasis::NoEmbedder) {
             tracing::warn!(
@@ -2140,7 +2154,7 @@ impl GooseAdapter {
                     .collect();
                 tracing::debug!(
                     session_id = %giap_session_id,
-                    threshold = sel::DEFAULT_RELEVANCE_THRESHOLD,
+                    threshold = ?floor,
                     top_scores = %top.join(" "),
                     "tool selection: group scores"
                 );

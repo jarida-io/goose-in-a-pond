@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::models::domain::embedding_models::EmbeddingModel;
+use crate::models::domain::embedding_models::{self, EmbeddingModel, SimilarityFloors};
 
 /// Text embedding; all vectors from one provider must share one dimensionality.
 #[async_trait]
@@ -39,6 +39,11 @@ pub trait EmbeddingProvider: Send + Sync {
     /// Override the placeholder wherever vectors outlive the process.
     fn model_id(&self) -> String {
         "unspecified".to_string()
+    }
+
+    /// Cut-offs measured on this model's cosine scale; with `None`, no cosine cut-off is applied.
+    fn similarity_floors(&self) -> Option<SimilarityFloors> {
+        embedding_models::find_by_model_id(&self.model_id()).and_then(|m| m.floors)
     }
 
     /// Whether a model is loaded and embedding now; semantic search is on only while it is.

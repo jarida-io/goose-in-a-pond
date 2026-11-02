@@ -58,7 +58,14 @@ pub enum Weights {
     Gguf(GgufFile),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Cosine cut-offs set on one model's scores; another model's cosines sit on another scale.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SimilarityFloors {
+    /// Tool selection keeps a non-core group that scores at least this.
+    pub tool_relevance: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EmbeddingModel {
     /// The catalogue name: what the household picks and `active_embedding_model` stores.
     pub name: &'static str,
@@ -68,6 +75,9 @@ pub struct EmbeddingModel {
     pub dims: usize,
     pub summary: &'static str,
     pub weights: Weights,
+    /// `None` until measured on the Orin: tool selection then keeps every group, and memory dedup
+    /// skips its cosine bands (the `memory_*_threshold` dials, set on MiniLM) for its lexical check.
+    pub floors: Option<SimilarityFloors>,
 }
 
 impl EmbeddingModel {
@@ -153,6 +163,14 @@ pub const BGE_BASE_EN_V1_5_Q8_0: GgufFile = GgufFile {
     sha256: "ad1afe72cd6654a558667a3db10878b049a75bfd72912e1dabb91310d671173c",
 };
 
+pub const EMBEDDINGGEMMA_2_Q8_0: GgufFile = GgufFile {
+    repo: "ggml-org/embeddinggemma-2-GGUF",
+    revision: "6ea3e3a309d12a4779cfda98b8c19800d2d5da71",
+    filename: "embeddinggemma-2-Q8_0.gguf",
+    size_bytes: 309_855_456,
+    sha256: "2188ac1deca4b77dffefd603c2776a9d76d9d74ec01841392982ebb840b09135",
+};
+
 pub const ALL_MINILM_L6_V2: EmbeddingModel = EmbeddingModel {
     name: "all-MiniLM-L6-v2",
     model_id: "all-MiniLM-L6-v2",
@@ -163,6 +181,11 @@ pub const ALL_MINILM_L6_V2: EmbeddingModel = EmbeddingModel {
         download_mb: 23,
         ram_estimate_mb: 50,
     },
+    floors: Some(SimilarityFloors {
+        // Unrelated text scores ~0.00-0.15 and on-topic >0.40; low because a missing group costs a
+        // ~10 s round trip, a surplus one only prompt tokens.
+        tool_relevance: 0.28,
+    }),
 };
 
 pub const BGE_SMALL_EN_V1_5: EmbeddingModel = EmbeddingModel {
@@ -174,6 +197,7 @@ pub const BGE_SMALL_EN_V1_5: EmbeddingModel = EmbeddingModel {
         download_mb: 33,
         ram_estimate_mb: 70,
     },
+    floors: None,
 };
 
 pub const NOMIC_EMBED_TEXT_V1_5: EmbeddingModel = EmbeddingModel {
@@ -183,6 +207,7 @@ pub const NOMIC_EMBED_TEXT_V1_5: EmbeddingModel = EmbeddingModel {
     summary: "Nomic Embed Text v1.5 — 8-bit GGUF run by llama.cpp. 768 dimensions, tuned for \
               search.",
     weights: Weights::Gguf(NOMIC_EMBED_TEXT_V1_5_Q8_0),
+    floors: None,
 };
 
 pub const BGE_BASE_EN_V1_5: EmbeddingModel = EmbeddingModel {
@@ -191,6 +216,18 @@ pub const BGE_BASE_EN_V1_5: EmbeddingModel = EmbeddingModel {
     dims: 768,
     summary: "BGE Base EN v1.5 — 8-bit GGUF run by llama.cpp. 768 dimensions, English.",
     weights: Weights::Gguf(BGE_BASE_EN_V1_5_Q8_0),
+    floors: None,
+};
+
+pub const EMBEDDINGGEMMA_2: EmbeddingModel = EmbeddingModel {
+    name: "embeddinggemma-2",
+    // The 256-dimension cut is part of the space: 768 or 128 from the same model is another one.
+    model_id: "embeddinggemma-2-256",
+    dims: 256,
+    summary: "EmbeddingGemma 2 — 8-bit GGUF run by llama.cpp. Over 100 languages, so a fact said \
+              in Swahili is found by a question in English. 256 dimensions.",
+    weights: Weights::Gguf(EMBEDDINGGEMMA_2_Q8_0),
+    floors: None,
 };
 
 /// Every embedding model, in the order the catalogue lists them.
@@ -199,11 +236,17 @@ pub const EMBEDDING_MODELS: &[EmbeddingModel] = &[
     BGE_SMALL_EN_V1_5,
     NOMIC_EMBED_TEXT_V1_5,
     BGE_BASE_EN_V1_5,
+    EMBEDDINGGEMMA_2,
 ];
 
 /// The model named `name` in the catalogue.
 pub fn find(name: &str) -> Option<&'static EmbeddingModel> {
     EMBEDDING_MODELS.iter().find(|m| m.name == name)
+}
+
+/// The model that stamps its vectors `model_id`.
+pub fn find_by_model_id(model_id: &str) -> Option<&'static EmbeddingModel> {
+    EMBEDDING_MODELS.iter().find(|m| m.model_id == model_id)
 }
 
 /// The GGUF a Hugging Face file is, when it is one at its pinned revision.
@@ -215,7 +258,7 @@ pub fn pinned(repo: &str, revision: &str, filename: &str) -> Option<&'static Ggu
 }
 
 /// The embedder the household asked for: the Memory-role model decides the engine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EmbedderChoice {
     Off,
     Model(&'static EmbeddingModel),
@@ -289,7 +332,7 @@ mod tests {
     #[test]
     fn every_gguf_row_is_pinned_to_one_upload() {
         let ggufs: Vec<_> = EMBEDDING_MODELS.iter().filter_map(|m| m.gguf()).collect();
-        assert_eq!(ggufs.len(), 2, "nomic and bge-base");
+        assert_eq!(ggufs.len(), 3, "nomic, bge-base and EmbeddingGemma 2");
         for f in ggufs {
             assert!(hex(f.revision, 40), "{}: revision", f.filename);
             assert!(hex(f.sha256, 64), "{}: sha256", f.filename);
@@ -427,8 +470,49 @@ mod tests {
                 "all-MiniLM-L6-v2",
                 "bge-small-en-v1.5",
                 "nomic-embed-text-v1.5",
-                "bge-base-en-v1.5"
+                "bge-base-en-v1.5",
+                "embeddinggemma-2"
             ]
         );
+    }
+
+    #[test]
+    fn embeddinggemma_2_is_a_pinned_256_wide_space_of_its_own() {
+        let eg2 = find("embeddinggemma-2").unwrap();
+        assert_eq!(eg2.model_id, "embeddinggemma-2-256");
+        assert_eq!(eg2.dims, 256);
+        assert_eq!(eg2.engine(), EmbeddingEngine::LlamaCpp);
+        assert_eq!(find_by_model_id("embeddinggemma-2-256"), Some(eg2));
+        let file = eg2.gguf().unwrap();
+        assert_eq!(file.repo, "ggml-org/embeddinggemma-2-GGUF");
+        assert_eq!(file.revision, "6ea3e3a309d12a4779cfda98b8c19800d2d5da71");
+        assert_eq!(file.filename, "embeddinggemma-2-Q8_0.gguf");
+        assert_eq!(file.size_bytes, 309_855_456);
+        assert_eq!(
+            file.sha256,
+            "2188ac1deca4b77dffefd603c2776a9d76d9d74ec01841392982ebb840b09135"
+        );
+        let row = eg2.record();
+        assert_eq!(row.id, "embedding/embeddinggemma-2");
+        assert_eq!(row.size_mb, 295);
+        assert_eq!(Acquisition::of(&row, false), Acquisition::Download);
+        assert_eq!(chosen("auto", "embeddinggemma-2"), Some("embeddinggemma-2"));
+    }
+
+    /// Only MiniLM's cut-offs were measured; a model without them must not borrow its scale.
+    #[test]
+    fn only_minilm_carries_similarity_floors() {
+        assert_eq!(
+            ALL_MINILM_L6_V2.floors,
+            Some(SimilarityFloors {
+                tool_relevance: 0.28
+            })
+        );
+        for m in EMBEDDING_MODELS
+            .iter()
+            .filter(|m| m.name != ALL_MINILM_L6_V2.name)
+        {
+            assert_eq!(m.floors, None, "{}", m.name);
+        }
     }
 }

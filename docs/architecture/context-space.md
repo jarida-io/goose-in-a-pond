@@ -277,16 +277,26 @@ What follows:
      chat API, which the OpenAI-compatible surface goose calls is written against. The chat path
      shares the backported graph code, so it needs the Orin regression run: E4B, the drafter and
      KV snapshots.
-  2. Check the width against `n_embd_out` (768), not `n_embd` (512), which the GGUF provider
-     compares today and would refuse.
-  3. Keep one context: n_ctx 256-512, 16 sequences or fewer, unified KV.
-  4. Map the token table on CUDA rather than pinning it, which kept 136 MB out of NvMap.
-  5. Give it a `model_id` of its own, since nomic is also 768 wide.
-  6. Acquire it like any other model (decision 11): an entry in the catalog's Embedding category,
-     downloaded by the models pipeline into `<data_dir>/models/embedding/`, with its progress,
-     pause, resume and checksum, and chosen for the Memory role (`active_embedding_model`). Its
-     vision and audio encoders are that entry's companions, sized up front. The GGUF provider's
-     own download URL goes.
+  2. The GGUF provider (`pond-inference/src/embedding.rs`) checks the width against `n_embd_out`
+     (768), not `n_embd` (512), and stores the leading 256 dimensions, re-normalised.
+  3. It keeps one context: n_ctx 512, 16 sequences or fewer, unified KV. `embed_batch` packs up to
+     16 texts into one decode, each cut to 512 tokens.
+  4. On a CUDA build it runs every layer on the GPU with the token table mapped rather than pinned
+     (`no_host`), which kept 136 MB out of NvMap. It runs on the CPU when MemAvailable cannot cover
+     `EG2_TEXT_ENCODER_CUDA_MB` (P0's derived 300 MB) plus a 300 MB margin (a choice), or when the
+     GPU load fails.
+  5. Its `model_id` is `embeddinggemma-2-256`: nomic is also 768 wide, and the 256 cut is part of
+     the space.
+  6. It is acquired like any other model (decision 11): the catalog row `embeddinggemma-2` pins
+     `ggml-org/embeddinggemma-2-GGUF` at `6ea3e3a3` by size and sha256, its vectors matching P0's
+     own conversion at cosine 0.9997 or better (checked on a Mac). The models pipeline downloads
+     it into `<data_dir>/models/embedding/`, with its progress, pause, resume and checksum, and the
+     Memory role (`active_embedding_model`) chooses it. The GGUF provider has no download of its
+     own. Its vision and audio encoders are not yet the entry's companions.
+  7. `recommended.rs` suggests it for the Memory role with P0's Orin numbers; nothing switches to
+     it, and MiniLM stays the default. Tool selection's 0.28 and memory dedup's cosine bands are
+     set on MiniLM's scale, so under EmbeddingGemma 2 tool selection keeps every group and dedup
+     is lexical until its floors are measured on the Orin.
 - **Not measured:** the cost inside `pond-server`, recall on the household's real store, audio
   retrieval and video.
 
@@ -642,7 +652,7 @@ same release. Before any restart on the nano, check that no long task is running
 |---|---|---|---|
 | P0 Measure | EmbeddingGemma 2 on the Orin: RAM per encoder beside E4B and its drafter; query-embed latency against the warm TTFT; recall against MiniLM on the two corpora, a Swahili and mixed-language set, and image queries. Pick the runtime | Nothing | It fits the budget and beats MiniLM. **Measured 2026-10-31:** it passes for the text encoder in MiniLM's place, on llama.cpp; vision and audio run per batch (5.1) |
 | P1 Store and keys | The item header and links, with a header for every memory, summary, context item and suggestion, each table kept as that kind's details; the lifecycle per kind. The LUKS2 volume on the fTPM with the admin card as recovery; TLS and secrets keys sealed; per-blob keys | The `Corpus` split, the unwired code, and the old tables a release later | The nano's real store migrated, then re-run; the volume opens at boot and not from a disk copy |
-| P2 Embedding slot | The slot in the lane's order; the text encoder, wired as 5.1 lists and acquired like any other model; EmbeddingGemma 2 as the recommended Memory model; re-embedding when the household switches | Startup backfill, `IndexMaintenance`, the GGUF provider's own download. MiniLM stays selectable, but one embedder is loaded at a time, since the budget has no room for both | No turn or long-task step measurably slower while it runs |
+| P2 Embedding slot | The slot in the lane's order; the text encoder, wired as 5.1 lists and acquired like any other model; EmbeddingGemma 2 as the recommended Memory model; re-embedding when the household switches | Startup backfill, `IndexMaintenance`, the GGUF provider's own download. MiniLM stays selectable, but one embedder is loaded at a time, since the budget has no room for both | No turn or long-task step measurably slower while it runs. **Measured 2026-11-02 on the Orin:** turns that land mid-pass are as fast as idle ones; the slot holds off between back-to-back turns and re-embeds the store (219 rows) in 2.6 s once they stop. Long-task steps not measured |
 | P3 Recipe catalog and default agents | `context.ingest` and `session.quiet` activations; `context`, `save_items` and `propose` hooks; Conversation and Consolidation; the unified retriever and `search_context`; contextual extraction and adversarial consolidation (7.3) | Extraction, summary refresh, titling, consolidation, `topical_memories`, `giap-memory`, `giap-context` | pai-bench PAI-3 and PAI-8 on the Orin; one activation fired there (P16 has none yet); the two memory tests in 7.3 |
 | P4 Phone | The ingest route, the share target, the outbox, wakes and APNs. Then OCR, visits, notifications and albums, each behind its switch | The chat-only photo path, as an ingest case | A shared screenshot is found by a text search on the Orin |
 | P5 Suggested agents | Understanding, Profile and Proposal; long-task results as items; feedback | Suggestion generation, proactive review | A real suggestion reaches a phone and is decided there |
