@@ -4,6 +4,7 @@ pub mod audio_devices;
 mod camera;
 pub use pond_infra::hf_cleanup as cleanup;
 pub mod connections;
+pub mod device_events;
 pub mod download_failure;
 pub mod host_guard;
 pub(crate) mod image_normalize;
