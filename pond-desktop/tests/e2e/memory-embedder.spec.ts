@@ -216,6 +216,8 @@ test.describe("Memory, classic Models page", () => {
     const row = memory.getByRole("listitem").filter({ hasText: "EmbeddingGemma 2" });
     await expect(row).toContainText("Chosen, not loaded");
     await expect(memory.getByText("In use")).toHaveCount(0);
+    // The Jobs card names the model and, while it is not running, says so too.
+    await expect(page.locator(".mdl-role", { hasText: "Memory" })).toContainText("Chosen, not loaded");
     await alert.getByRole("button", { name: "Try again" }).click();
     await expect.poll(() => seen.activated.length).toBe(1);
     expect(seen.activated[0].body).toEqual({ role: "embedding" });
@@ -357,6 +359,7 @@ test.describe("Memory, hub", () => {
     const card = await openHubModels(page);
     await expect(card.getByRole("alert")).toContainText("not enough free memory");
     await expect(card.getByRole("listitem").first()).toContainText("Chosen, not loaded");
+    await expect(page.locator(".hm-tile", { hasText: "Memory" })).toContainText("Chosen, not loaded");
     await card.getByRole("button", { name: "Details" }).click();
     await expect(card.getByRole("alert")).toContainText("on the Gpu: out of memory");
     for (const button of await card.getByRole("button").all()) {
@@ -448,6 +451,9 @@ for (const scheme of ["Light", "Dark"] as const) {
       const alert = memory.getByRole("alert");
       expect(await contrastOf(alert.getByRole("button", { name: "Details" })), "Details").toBeGreaterThanOrEqual(4.5);
       expect(await contrastOf(memory.getByText("Chosen, not loaded")), "Chosen, not loaded").toBeGreaterThanOrEqual(4.5);
+      expect(
+        await contrastOf(page.locator(".mdl-role").getByText("Chosen, not loaded")), "the Jobs card's state",
+      ).toBeGreaterThanOrEqual(4.5);
       await alert.getByRole("button", { name: "Details" }).click();
       expect(await contrastOf(alert.getByText(/on the Gpu: out of memory/)), "the pond's reason").toBeGreaterThanOrEqual(4.5);
 
@@ -479,6 +485,9 @@ for (const scheme of ["Light", "Dark"] as const) {
       const card = await openHubModels(page);
       await expect(card.getByRole("alert")).toBeVisible();
       await scan(page, ".ghub__main", "hub Memory card");
+      expect(
+        await contrastOf(page.locator(".hm-tile").getByText("Chosen, not loaded")), "the Memory tile's state",
+      ).toBeGreaterThanOrEqual(4.5);
 
       await navigateTo(page, "Context");
       await expect(page.locator(".setcard__title", { hasText: /^Search by meaning$/ })).toBeVisible();

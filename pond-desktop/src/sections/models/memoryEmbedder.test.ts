@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ContextIndexHealth, EmbedderHealth } from "../../api/types";
 import {
-  embedderLine, embedderTitle, embedderWatching, holderBadge, holderText, holdsMemory, isOutOfMemory,
+  embedderLine, embedderTitle, embedderWatching, holderBadge, holderText, holdsMemory, isOutOfMemory, jobState,
   memoryChosenText, memoryCost, memoryHolder, memoryIsOff, memoryModels, memoryPress, NEEDS_CONNECTION,
   resolvedMemoryName,
 } from "./memoryEmbedder";
@@ -279,6 +279,14 @@ describe("what the model's row and line may claim", () => {
     expect(holderBadge(said({}, {}, { matching: 40 }))).toEqual({ label: "In use", tone: "ok" });
     // The pond answered with nothing to say: the household's choice stands.
     expect(holderBadge(null)).toEqual({ label: "In use", tone: "ok" });
+  });
+
+  it("adds a word to the Jobs card only while the model is not running", () => {
+    expect(jobState(said({}))).toBeNull();
+    expect(jobState(null)).toBeNull();
+    expect(jobState(said({ state: "failed", reason: "out of memory" }))).toEqual({ label: "Chosen, not loaded", tone: "stopped" });
+    expect(jobState(said({ state: "loading" }))).toEqual({ label: "Loading", tone: "busy" });
+    expect(jobState(null, { checking: true })).toEqual({ label: "Checking", tone: "busy" });
   });
 
   it("claims nothing before the pond's first answer", () => {

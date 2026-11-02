@@ -6,7 +6,8 @@ import { useModels } from "../../../hooks/useModels";
 import { useModelActions } from "../../../hooks/useModelActions";
 import { AddOnLine, EngineMark, FitCell, SourceChip, TransferView } from "../../../components/models/ModelMarks";
 import { PickCard } from "../../../sections/models/PickCard";
-import { MemoryModels } from "../../../components/models/MemoryModels";
+import { HolderBadge, MemoryModels } from "../../../components/models/MemoryModels";
+import { jobState } from "../../../sections/models/memoryEmbedder";
 import { useMemoryJob } from "../../../hooks/useMemoryJob";
 import { engineOf, groupByEngine } from "../../../lib/modelProvider";
 import {
@@ -205,6 +206,7 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
           const name = isMemory ? job.holder?.name ?? null : roleHolder(roles, role.key);
           const engine = entry ? engineOf(entry) : null;
           const empty = emptyJobText(roles, role.key);
+          const state = isMemory && job.holder ? jobState(job.line, { checking: job.checking }) : null;
           return (
             <div key={role.key} className="hm-tile" role="listitem" data-empty={name || empty ? undefined : "true"}>
               <span className="hm-tile__icon"><Icon size={18} aria-hidden="true" /></span>
@@ -220,6 +222,9 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
               </span>
               {!loading && engine && (
                 <EngineMark engine={engine} label={engine.label} format={engine.file_format} />
+              )}
+              {!loading && state && (
+                <span className="hm-tile__state"><HolderBadge badge={state} /></span>
               )}
               {!loading && isMemory && job.holder?.builtIn && (
                 <span className="hm-tile__note">Built-in default</span>

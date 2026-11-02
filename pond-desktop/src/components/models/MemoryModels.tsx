@@ -36,6 +36,17 @@ const BADGE: Record<HolderTone, { icon: typeof Check; className: string }> = {
   stopped: { icon: AlertTriangle, className: "mm-fit mm-fit--big" },
 };
 
+/** What the chosen Memory model may claim, wherever the job names it: its row, the Jobs card, the hub tile. */
+export function HolderBadge({ badge }: { badge: { label: string; tone: HolderTone } }) {
+  const { icon: Icon, className } = BADGE[badge.tone];
+  return (
+    <span className={className}>
+      <Icon size={14} className={badge.tone === "busy" ? "mm-spin" : undefined} aria-hidden="true" />
+      {badge.label}
+    </span>
+  );
+}
+
 /** Where the Memory embedder is, in words. Silent when the pond cannot say. */
 export function EmbedderStatus({
   line,
@@ -134,7 +145,6 @@ function MemoryRow({
   const measured = measuredOf(model.recommended);
   const badge = inUse ? holderBadge(line, { checking }) : null;
   const press = memoryPress(model, { off, offline });
-  const BadgeIcon = badge ? BADGE[badge.tone].icon : null;
   return (
     <li className="mm-mem" data-inuse={inUse ? "true" : undefined}>
       <div className="mm-mem__text">
@@ -154,15 +164,8 @@ function MemoryRow({
       {/* While it comes down the bar and its controls are the row's whole state: "In use" would be early. */}
       {!transfer && (
         <div className="mm-mem__end">
-          {badge && BadgeIcon ? (
-            <span className={BADGE[badge.tone].className}>
-              <BadgeIcon
-                size={14}
-                className={badge.tone === "busy" ? "mm-spin" : undefined}
-                aria-hidden="true"
-              />
-              {badge.label}
-            </span>
+          {badge ? (
+            <HolderBadge badge={badge} />
           ) : (
             <>
               <button

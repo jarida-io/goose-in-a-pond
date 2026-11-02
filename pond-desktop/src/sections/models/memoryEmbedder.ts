@@ -230,6 +230,15 @@ export function holderBadge(
   }
 }
 
+/** The Jobs card and the hub tile already name the model: they add a word only while it is not running. */
+export function jobState(
+  line: EmbedderLine | null,
+  opts: { checking?: boolean } = {},
+): { label: string; tone: HolderTone } | null {
+  const badge = holderBadge(line, opts);
+  return badge.tone === "ok" ? null : badge;
+}
+
 /** The hub's "Model" line: the model by name, and no more than the embedder has done with it. */
 export function holderText(line: EmbedderLine | null, modelId: string | null | undefined): string {
   if (!modelId) return "Chosen on the Models screen.";
