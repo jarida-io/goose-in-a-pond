@@ -316,14 +316,14 @@ export const ORIN_MEMORY: ModelMemoryStatus = {
 };
 
 /** The live nano at the re-score: E4B and a Memory model running. 309 MB available leaves a Memory
- *  model 189 MB of room once EmbeddingGemma 2's share comes back. */
+ *  model 147 MB of room once EmbeddingGemma 2's 138 MB comes back. */
 export const ORIN_MEMORY_SERVING: ModelMemoryStatus = {
   total_mb: 7620,
   available_for_llm_mb: 309,
   budget_mb: 5820,
   loaded_model: null,
   reclaimable_mb: 4965,
-  embedder_room_mb: 189,
+  embedder_room_mb: 147,
 };
 
 /** A desktop with room to spare: the primary pick fits with its picture support. */

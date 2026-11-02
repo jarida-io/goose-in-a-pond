@@ -334,10 +334,10 @@ describe("what a Memory model needs, and whether this pond has room", () => {
     expect(memoryNeed(eg2({ ram_estimate_mb: undefined }))).toBeNull();
   });
 
-  // The live nano at the re-score: 309 MB available, so 189 MB of room once EmbeddingGemma 2 gives its share back.
+  // The live nano at the re-score: 309 MB available, so 147 MB of room once EmbeddingGemma 2 gives its share back.
   it("reads the need against the room in a word", () => {
-    expect(memoryFit(miniLm(), 189)).toBe("fits");
-    expect(memoryFit(eg2(), 189)).toBe("tight");
+    expect(memoryFit(miniLm(), 147)).toBe("fits");
+    expect(memoryFit(eg2(), 147)).toBe("tight");
     expect(memoryFit(eg2(), 368)).toBe("fits");
     expect(FIT_WORD.fits).toBe("Fits");
     expect(FIT_WORD.tight).toBe("Tight on this pond");

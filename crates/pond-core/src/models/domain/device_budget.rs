@@ -545,8 +545,8 @@ pub fn device_window(gguf_path: Option<&Path>, chat_model: &str) -> DeviceWindow
 pub const EG2_TEXT_ENCODER_CUDA_MB: u64 = 500;
 
 /// What swapping EmbeddingGemma 2 out on CUDA gives back (MB): CUDA keeps the first load's pools.
-/// Measured on the Orin Nano, 2026-11-02, as MemAvailable: swaps to MiniLM gave back 180-220.
-pub const EG2_CUDA_RETURNS_MB: u64 = 180;
+/// Measured on the Orin Nano, 2026-11-02, as MemAvailable: turning it off gave back 138.
+pub const EG2_CUDA_RETURNS_MB: u64 = 138;
 
 /// MemAvailable the pond keeps once a Memory model loads (MB): context-space 5.1's margin, a
 /// choice, not a measurement.
