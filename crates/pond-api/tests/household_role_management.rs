@@ -128,7 +128,7 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
         guest_device_access: Arc::new(pond_infra::sqlite_guest_device_access::SqliteGuestDeviceAccess::new(pool.clone())),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
-        embedding_provider: None,
+        embedder: Default::default(),
         vector_index: None,
         index_reindex: None,
         lane: None,

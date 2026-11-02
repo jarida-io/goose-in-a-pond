@@ -7308,7 +7308,7 @@ impl LongTaskHelpers {
                     target: "giap::trace",
                     kind = "long_task_reply_saved",
                     task_id = %task.id(),
-                    title = %draft.title(),
+                    title_chars = draft.title().chars().count(),
                     chars = draft.body().len(),
                     "a helper's work was in its reply; the runner saved it"
                 );

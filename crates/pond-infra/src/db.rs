@@ -74,7 +74,12 @@ impl Database {
         "model_role_assignments",
         "notifications",
         "pairing_codes",
+        "profile_interviews",
         "profiles",
+        // `0074_member_prompt_extras` let a row be one member's own (`profile_id` set), not just
+        // the household's -- a factory reset must erase those, so the whole table goes with them
+        // rather than splitting household-wide rows out as config.
+        "prompt_extras",
         "push_tokens",
         "reminders",
         "rides",
@@ -99,8 +104,7 @@ impl Database {
         "agent_prefills",   // compiled prefill cache, rebuildable, no household data
         "models",           // the model catalog, like the `models/` directory on disk
         "onboarding_state", // owned by `OnboardingService::reset()`, not this function
-        "prompt_extras",    // shipped + user-customized prompt text, treated as config
-        "prompt_templates", // ditto
+        "prompt_templates", // shipped + user-customized prompt text, treated as config
     ];
 
     /// Erases every household-personal row across `system` and the derived `vectors` index.
