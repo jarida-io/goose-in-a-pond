@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
+use super::embedding_models::EmbeddingModel;
 use super::gguf::parse_gguf_header;
 use super::vision_encoder::{EncoderSpec, EncoderState};
 use super::vision_pairing::encoder_for_model;
@@ -543,9 +544,13 @@ pub fn device_window(gguf_path: Option<&Path>, chat_model: &str) -> DeviceWindow
 /// swaps from MiniLM take 180-220 MB and return it, since CUDA keeps the first load's pools.
 pub const EG2_TEXT_ENCODER_CUDA_MB: u64 = 500;
 
-/// MemAvailable the pond keeps once a GPU embedder loads (MB): context-space 5.1's margin, a
+/// What swapping EmbeddingGemma 2 out on CUDA gives back (MB): CUDA keeps the first load's pools.
+/// Measured on the Orin Nano, 2026-11-02, as MemAvailable: swaps to MiniLM gave back 180-220.
+pub const EG2_CUDA_RETURNS_MB: u64 = 180;
+
+/// MemAvailable the pond keeps once a Memory model loads (MB): context-space 5.1's margin, a
 /// choice, not a measurement.
-pub const EMBEDDER_GPU_MARGIN_MB: u64 = 300;
+pub const EMBEDDER_MARGIN_MB: u64 = 300;
 
 /// What `model_id` costs resident on CUDA, for the one embedder allowed there; every other model
 /// stays on the CPU, off the GPU the chat model needs.
@@ -560,7 +565,22 @@ pub fn embedder_on_gpu(cuda_build: bool, model_id: &str, available_mb: Option<u6
     let Some(cost) = embedder_gpu_cost_mb(model_id) else {
         return false;
     };
-    cuda_build && available_mb.is_none_or(|a| a >= cost + EMBEDDER_GPU_MARGIN_MB)
+    cuda_build && available_mb.is_none_or(|a| a >= cost + EMBEDDER_MARGIN_MB)
+}
+
+/// What swapping `model` out gives back here (MB): its estimate, except where CUDA keeps pools.
+pub fn embedder_returns_mb(model: &EmbeddingModel, budgeted: bool) -> u64 {
+    match embedder_gpu_cost_mb(model.model_id) {
+        Some(_) if budgeted => EG2_CUDA_RETURNS_MB,
+        _ => model.ram_estimate_mb(),
+    }
+}
+
+/// The room a Memory model has beside the conversation model (MB): MemAvailable, plus what the
+/// Memory model in use gives back on a switch, less [`EMBEDDER_MARGIN_MB`]. A model fits when its
+/// `ram_estimate_mb` does; on CUDA that holds too, since the GPU is used only with its own room.
+pub fn embedder_room_mb(available_mb: u64, in_use_returns_mb: u64) -> u64 {
+    (available_mb + in_use_returns_mb).saturating_sub(EMBEDDER_MARGIN_MB)
 }
 
 #[cfg(test)]
@@ -1148,7 +1168,7 @@ mod tests {
     #[test]
     fn the_embedder_goes_on_the_gpu_only_with_room_on_a_cuda_build() {
         let eg2 = "embeddinggemma-2-256";
-        let enough = EG2_TEXT_ENCODER_CUDA_MB + EMBEDDER_GPU_MARGIN_MB;
+        let enough = EG2_TEXT_ENCODER_CUDA_MB + EMBEDDER_MARGIN_MB;
         assert!(embedder_on_gpu(true, eg2, Some(enough)));
         assert!(
             !embedder_on_gpu(true, eg2, Some(enough - 1)),
@@ -1165,6 +1185,52 @@ mod tests {
             "bge-base-en-v1.5",
         ] {
             assert!(!embedder_on_gpu(true, other, Some(8_000)), "{other}");
+        }
+    }
+
+    #[test]
+    fn the_memory_models_room_counts_what_the_model_in_use_gives_back() {
+        use crate::models::domain::embedding_models::{ALL_MINILM_L6_V2, EMBEDDINGGEMMA_2};
+        // The live nano at the re-score: 309 MB available with EmbeddingGemma 2 running.
+        let room = embedder_room_mb(309, embedder_returns_mb(&EMBEDDINGGEMMA_2, true));
+        assert_eq!(room, 309 + EG2_CUDA_RETURNS_MB - EMBEDDER_MARGIN_MB);
+        assert!(
+            ALL_MINILM_L6_V2.ram_estimate_mb() <= room,
+            "the lighter choice an out-of-memory failure names fits"
+        );
+        assert!(
+            EG2_CUDA_RETURNS_MB < EMBEDDINGGEMMA_2.ram_estimate_mb(),
+            "CUDA keeps its pools, so a swap gives back less than the estimate"
+        );
+        assert_eq!(
+            embedder_returns_mb(&EMBEDDINGGEMMA_2, false),
+            EMBEDDINGGEMMA_2.ram_estimate_mb()
+        );
+        assert_eq!(
+            embedder_returns_mb(&ALL_MINILM_L6_V2, true),
+            ALL_MINILM_L6_V2.ram_estimate_mb()
+        );
+        assert_eq!(embedder_room_mb(EMBEDDER_MARGIN_MB - 1, 0), 0);
+    }
+
+    /// A model the room fits leaves the margin on whichever placement the pond then picks.
+    #[test]
+    fn a_fit_never_spends_the_margin_on_the_gpu_or_the_cpu() {
+        use crate::models::domain::embedding_models::{ALL_MINILM_L6_V2, EMBEDDINGGEMMA_2};
+        let eg2 = &EMBEDDINGGEMMA_2;
+        let gives_back = ALL_MINILM_L6_V2.ram_estimate_mb();
+        for available in 0..2_000u64 {
+            if eg2.ram_estimate_mb() > embedder_room_mb(available, gives_back) {
+                continue;
+            }
+            // The switch drops the old model first, so the load reads its memory back.
+            let at_load = available + gives_back;
+            let takes = if embedder_on_gpu(true, eg2.model_id, Some(at_load)) {
+                EG2_TEXT_ENCODER_CUDA_MB
+            } else {
+                eg2.ram_estimate_mb()
+            };
+            assert!(at_load - takes >= EMBEDDER_MARGIN_MB, "{available}");
         }
     }
 }

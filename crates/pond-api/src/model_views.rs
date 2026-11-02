@@ -235,6 +235,43 @@ pub(crate) async fn reclaimable_mb(
     )
 }
 
+/// Where the Memory model stands now: the host's MemAvailable and what the model running gives
+/// back on a switch.
+pub(crate) struct MemoryFooting {
+    available_mb: Option<u64>,
+    returns_mb: u64,
+}
+
+impl MemoryFooting {
+    pub(crate) fn read(
+        state: &AppState,
+        status: &pond_core::models::ports::model_scheduler::MemoryStatus,
+    ) -> Self {
+        use pond_core::models::domain::{device_budget, embedding_models};
+        use pond_core::models::services::active_embedder::EmbedderState;
+
+        // Only a loaded model gives anything back; one still loading or failed holds nothing yet.
+        let returns_mb = match state.embedder.state() {
+            EmbedderState::Ready { model_id, .. } => embedding_models::find_by_model_id(&model_id)
+                .map_or(0, |m| {
+                    device_budget::embedder_returns_mb(m, device_budget::budgeted_device())
+                }),
+            _ => 0,
+        };
+        Self {
+            available_mb: status.available_mb,
+            returns_mb,
+        }
+    }
+
+    /// [`device_budget::embedder_room_mb`](pond_core::models::domain::device_budget::embedder_room_mb);
+    /// `None` where the host's memory was not read.
+    pub(crate) fn room_mb(&self) -> Option<u64> {
+        self.available_mb
+            .map(|a| pond_core::models::domain::device_budget::embedder_room_mb(a, self.returns_mb))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -6460,7 +6460,8 @@ async fn get_active_roles(State(state): State<Arc<AppState>>) -> Json<Value> {
 /// GET /api/v1/models/memory-status — returns current LLM memory budget snapshot: the board's on
 /// a budgeted device, the machine's own elsewhere. `budget_mb` is the most the LLM slot may ever
 /// hold here; `reclaimable_mb` is what switching away from the model in use would free, so a fit
-/// check can count it.
+/// check can count it. `embedder_room_mb` is the Memory model's room beside the conversation
+/// model, null where nothing was read.
 async fn get_memory_status(State(state): State<Arc<AppState>>) -> Json<Value> {
     let status = state
         .model_scheduler
@@ -6475,6 +6476,7 @@ async fn get_memory_status(State(state): State<Arc<AppState>>) -> Json<Value> {
         "budget_mb":            status.budget_mb,
         "loaded_model":         status.loaded_model,
         "reclaimable_mb":       reclaimable_mb,
+        "embedder_room_mb":     crate::model_views::MemoryFooting::read(&state, &status).room_mb(),
     }))
 }
 

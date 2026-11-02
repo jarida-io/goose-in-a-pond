@@ -2025,6 +2025,7 @@ impl pond_core::models::ports::model_scheduler::ModelScheduler for LoadedSchedul
             available_for_llm_mb: 1000,
             budget_mb: pond_core::models::domain::device_budget::llm_budget_mb(),
             loaded_model: None,
+            available_mb: Some(1000),
         }
     }
 }
@@ -2041,6 +2042,7 @@ impl pond_core::models::ports::model_scheduler::ModelScheduler for DesktopSchedu
             available_for_llm_mb: 22_000,
             budget_mb: 24_576,
             loaded_model: None,
+            available_mb: Some(22_000),
         }
     }
 }
@@ -2084,6 +2086,11 @@ async fn memory_status_counts_what_a_switch_would_free() {
     assert_eq!(
         body["reclaimable_mb"],
         3000u64.min(budget.saturating_sub(1000))
+    );
+    assert_eq!(
+        body["embedder_room_mb"],
+        1000 - pond_core::models::domain::device_budget::EMBEDDER_MARGIN_MB,
+        "no Memory model is loaded, so none gives anything back"
     );
 
     // Another program's model frees nothing the pond holds.
@@ -2135,6 +2142,10 @@ async fn memory_status_reports_a_desktop_by_its_own_budget() {
     assert_eq!(
         body["reclaimable_mb"], 2_576,
         "never more than the budget is short of"
+    );
+    assert_eq!(
+        body["embedder_room_mb"],
+        22_000 - pond_core::models::domain::device_budget::EMBEDDER_MARGIN_MB
     );
 }
 
