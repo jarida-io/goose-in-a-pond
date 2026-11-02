@@ -3,13 +3,17 @@
 //! as its wake detector, its voice input and its interrupt watch.
 
 mod echo;
+mod enrol;
 mod hearing;
 mod reference;
 mod worker;
 
+pub use enrol::{TakeEar, TakeHeard, ENROL_MAX_SECONDS};
 pub use hearing::Hearing;
 /// What the operating system says this process holds.
 pub use pond_ear::ear::mem::{now as process_memory, Mem as ProcessMemory};
+pub use pond_ear::score::{Policy, Print};
+pub use pond_ear::{Household, ModelFile};
 
 use std::path::Path;
 use std::sync::mpsc::Sender;
@@ -25,7 +29,7 @@ use pond_core::models::ports::wake_word::{StreamingWakeWordDetector, WakeWordAct
 use pond_core::shared::domain::agent::{ThrottledAudioLevelSink, WorkflowState};
 use pond_core::shared::services::chat::{SpokenObserver, StateObserver};
 use pond_ear::ear::WakeConfig;
-use pond_ear::{Ear, Household, ModelFile};
+use pond_ear::Ear;
 use tokio::sync::oneshot;
 
 use worker::{Cmd, Heard, ListenFrom, RefChunk, Segment, Woke, Worker, WorkerState};
@@ -43,6 +47,9 @@ pub enum WakeMode {
     /// Whisper on each speech segment the ear endpoints, for any phrase.
     Segments,
 }
+
+/// What the ear calls Voice Match's model in its parts table.
+pub const VOICE_MATCH_LABEL: &str = "ResNet34-LM";
 
 /// One part of the ear and the bytes it holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,6 +81,8 @@ pub struct EarConfig {
     pub output_latency_ms: u32,
     pub cue: Option<Cue>,
     pub audio_level: Option<Arc<ThrottledAudioLevelSink>>,
+    /// Voice Match's speaker model (`.vmw`); without it nobody is recognised.
+    pub speaker: Option<ModelFile>,
 }
 
 impl EarConfig {
@@ -85,8 +94,20 @@ impl EarConfig {
             output_latency_ms: 10,
             cue: None,
             audio_level: None,
+            speaker: None,
         }
     }
+}
+
+/// Voice Match's ResNet34 as the ear loads it: the `.vmw` beside the ONNX, converted once.
+pub fn load_speaker(onnx: &Path) -> Result<ModelFile> {
+    let vmw = onnx.with_extension("vmw");
+    let path = match vmw.exists() {
+        true => vmw,
+        false => pond_ear::convert::ensure_vmw(onnx)
+            .with_context(|| format!("converting {}", onnx.display()))?,
+    };
+    ModelFile::read(&path).with_context(|| format!("loading {}", path.display()))
 }
 
 /// Silero as the ear loads it: converted once to `.vmw` beside the ONNX, since parsing ONNX in a
@@ -112,13 +133,15 @@ pub struct EarRig {
     last_wake: Mutex<Option<Woke>>,
     primed: Mutex<Option<Primed>>,
     parts: Mutex<Vec<EarPart>>,
+    /// Who Voice Match heard wake the pond; a follow-up must be their voice too.
+    waker: Mutex<Option<String>>,
 }
 
 impl EarRig {
     /// Start the ear on `mic` with Silero `vad`; call inside the runtime. It claims the mic until
     /// the rig is dropped, so the ear's clock never has a gap.
     pub fn start(
-        cfg: EarConfig,
+        mut cfg: EarConfig,
         vad: ModelFile,
         mic: MicHandle,
         transcriber: Arc<dyn Transcriber>,
@@ -126,6 +149,14 @@ impl EarRig {
         let wake = WakeConfig::hey_goose().context("loading the wake model")?;
         let mut ear_cfg = pond_ear::Config::new(wake, vad);
         ear_cfg.segments = cfg.wake == WakeMode::Segments;
+        ear_cfg.speaker = cfg
+            .speaker
+            .take()
+            .map(|model| pond_ear::ear::SpeakerConfig {
+                model,
+                label: VOICE_MATCH_LABEL.into(),
+                max_seconds: pond_ear::ear::machine::SPEAKER_MAX_SECONDS,
+            });
         let ear = Ear::new(ear_cfg, Household::default()).context("starting the ear")?;
         let parts = ear
             .parts()
@@ -193,6 +224,7 @@ impl EarRig {
             last_wake: Mutex::new(None),
             primed: Mutex::new(None),
             parts: Mutex::new(Vec::new()),
+            waker: Mutex::new(None),
         }))
     }
 
@@ -304,6 +336,8 @@ impl StreamingWakeWordDetector for EarRig {
             reference::RATE,
         );
         let speaker = woke.speaker.clone();
+        *self.waker.lock().unwrap_or_else(|e| e.into_inner()) =
+            speaker.as_ref().map(|s| s.profile_id.clone());
         *self.last_wake.lock().unwrap_or_else(|e| e.into_inner()) = Some(woke);
         Ok(WakeWordActivation {
             captured_audio: Some(wav),
@@ -326,6 +360,8 @@ impl StreamingWakeWordDetector for EarRig {
 impl VoiceInput for EarRig {
     async fn listen(&self) -> Result<Option<String>> {
         let primed = self.primed.lock().unwrap_or_else(|e| e.into_inner()).take();
+        // A follow-up with no wake of its own: an identified waker's must be in their voice.
+        let follow_up = primed.is_none();
         let mut from = ListenFrom::Now;
         match primed {
             Some(Primed::Woke(woke)) => {
@@ -355,11 +391,20 @@ impl VoiceInput for EarRig {
                 end,
                 pcm,
                 transcript,
+                speaker,
                 ..
             } = self.heard(from).await?
             else {
                 return Ok(Some(String::new()));
             };
+            let waker = self.waker.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if follow_up && waker.is_some() && speaker != waker {
+                tracing::info!(
+                    heard = ?speaker,
+                    "ear: a follow-up in another voice than the wake's ignored"
+                );
+                return Ok(Some(String::new()));
+            }
             let raw = match transcript {
                 Some(t) => t,
                 None => self.transcribe(pcm).await?,

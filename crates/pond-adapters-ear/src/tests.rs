@@ -23,9 +23,15 @@ struct FakeEar {
     audio: Vec<f32>,
     state: State,
     household: Household,
+    /// Whose voice every span is.
+    voice: Arc<Mutex<Option<String>>>,
 }
 
 impl Hearing for FakeEar {
+    fn identify(&mut self, _start: usize, _end: usize) -> Option<String> {
+        self.voice.lock().unwrap().clone()
+    }
+
     fn push_into(&mut self, mic: &[f32], out: &mut Vec<Event>) {
         self.audio.extend_from_slice(mic);
         self.pushed.fetch_add(mic.len(), Ordering::SeqCst);
@@ -88,6 +94,7 @@ struct Ctl {
     inbox: Arc<Mutex<VecDeque<Event>>>,
     pushed: Arc<AtomicUsize>,
     mic: MicHandle,
+    voice: Arc<Mutex<Option<String>>>,
 }
 
 impl Ctl {
@@ -157,6 +164,7 @@ async fn rig_for(wake: WakeMode, says: Arc<Says>, phrase: &str) -> (Arc<EarRig>,
     let log = Arc::new(Mutex::new(Log::default()));
     let inbox = Arc::new(Mutex::new(VecDeque::new()));
     let pushed = Arc::new(AtomicUsize::new(0));
+    let voice = Arc::new(Mutex::new(None));
     let fake = FakeEar {
         log: log.clone(),
         inbox: inbox.clone(),
@@ -164,6 +172,7 @@ async fn rig_for(wake: WakeMode, says: Arc<Says>, phrase: &str) -> (Arc<EarRig>,
         audio: Vec::new(),
         state: State::Wait,
         household: Household::default(),
+        voice: voice.clone(),
     };
     let triggers = pond_voice::text::wake_triggers(phrase, &[]);
     let cfg = EarConfig::new(wake, triggers, format!("say \"{phrase}\""));
@@ -173,6 +182,7 @@ async fn rig_for(wake: WakeMode, says: Arc<Says>, phrase: &str) -> (Arc<EarRig>,
         inbox,
         pushed,
         mic,
+        voice,
     };
     ctl.until("two seconds of audio", |_, at| at >= 2 * S).await;
     (rig, ctl)
@@ -479,6 +489,69 @@ async fn the_ponds_own_words_heard_back_never_interrupt_its_reply() {
     ctl.emit(segment(at - S, at));
     let interrupt = bounded("the person's interrupt", watch).await.unwrap();
     assert_eq!(interrupt.why, InterruptReason::WakeWord);
+}
+
+fn enrolled(ids: &[&str]) -> Household {
+    Household {
+        prints: ids
+            .iter()
+            .map(|id| pond_ear::score::Print {
+                id: id.to_string(),
+                name: id.to_string(),
+                embs: vec![vec![1.0, 0.0]],
+            })
+            .collect(),
+        ..Household::default()
+    }
+}
+
+#[tokio::test]
+async fn a_recognised_wake_names_its_speaker_and_a_follow_up_must_be_their_voice() {
+    let says = Says::new(&["Goose, what's the weather?", "and tomorrow"]);
+    let (rig, ctl) = rig_for(WakeMode::Segments, says.clone(), "goose").await;
+    rig.set_household(enrolled(&["amina", "zawadi"]));
+    *ctl.voice.lock().unwrap() = Some("amina".into());
+    let waiting = tokio::spawn({
+        let rig = rig.clone();
+        async move { rig.wait_for_activation_with_audio().await }
+    });
+    let at = ctl.at();
+    ctl.emit(segment(at - S, at));
+    let activation = bounded("the wake", waiting).await.unwrap().unwrap();
+    assert_eq!(
+        activation.speaker.map(|s| s.profile_id).as_deref(),
+        Some("amina")
+    );
+    rig.prime_with_captured(activation.captured_audio.unwrap());
+    let heard = bounded("the request", rig.listen()).await.unwrap();
+    assert_eq!(heard.as_deref(), Some("what's the weather?"));
+
+    // Zawadi talking in the room is no follow-up to Amina's question.
+    *ctl.voice.lock().unwrap() = Some("zawadi".into());
+    let listening = tokio::spawn({
+        let rig = rig.clone();
+        async move { rig.listen().await }
+    });
+    ctl.until("the follow-up listen", |l, _| l.listens.len() == 1)
+        .await;
+    ctl.emit(utterance(ctl.at() - S, ctl.at()));
+    let heard = bounded("Zawadi's words", listening).await.unwrap().unwrap();
+    assert_eq!(heard.as_deref(), Some(""), "another voice is no follow-up");
+
+    *ctl.voice.lock().unwrap() = Some("amina".into());
+    let listening = tokio::spawn({
+        let rig = rig.clone();
+        async move { rig.listen().await }
+    });
+    ctl.until("the second follow-up listen", |l, _| l.listens.len() == 2)
+        .await;
+    ctl.emit(utterance(ctl.at() - S, ctl.at()));
+    let heard = bounded("Amina's follow-up", listening)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(heard.as_deref(), Some("and tomorrow"));
+    assert_eq!(says.calls(), 2, "Zawadi's words were never transcribed");
 }
 
 #[tokio::test]

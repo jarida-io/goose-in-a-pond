@@ -42,6 +42,8 @@ pub(crate) enum Heard {
         pcm: Vec<f32>,
         /// Already transcribed by the segment matcher.
         transcript: Option<String>,
+        /// The household member Voice Match heard, when anyone is enrolled.
+        speaker: Option<String>,
     },
     Silence,
 }
@@ -269,11 +271,13 @@ impl Worker {
             Event::Utterance { start, end, .. } => {
                 let mut pcm = Vec::new();
                 self.hearing.audio(start, end, &mut pcm);
+                let speaker = self.speaker_of(start, end);
                 self.heard(Heard::Utterance {
                     start,
                     end,
                     pcm,
                     transcript: None,
+                    speaker,
                 });
             }
             Event::Silence { .. } => self.heard(Heard::Silence),
@@ -288,6 +292,7 @@ impl Worker {
                         pcm: pcm.clone(),
                     });
                 }
+                let speaker = self.speaker_of(start, end);
                 self.state.stash = Some((
                     start,
                     Heard::Utterance {
@@ -295,6 +300,7 @@ impl Worker {
                         end,
                         pcm,
                         transcript: None,
+                        speaker,
                     },
                 ));
             }
@@ -307,6 +313,14 @@ impl Worker {
             }
             _ => {}
         }
+    }
+
+    /// Voice Match on a span, only once someone is enrolled.
+    fn speaker_of(&mut self, start: usize, end: usize) -> Option<String> {
+        if self.hearing.household().prints.is_empty() {
+            return None;
+        }
+        self.hearing.identify(start, end)
     }
 
     fn cue(&mut self) {
@@ -468,6 +482,9 @@ impl Worker {
                     );
                     return true;
                 }
+                let mut woke = woke;
+                let who = self.speaker_of(woke.start, woke.end);
+                woke.speaker = speaker_named(self.hearing.household(), who.clone());
                 self.cue();
                 linger(QUIET_UNTIL_THE_TURN);
                 self.state.quiet_listening = false;
@@ -481,6 +498,7 @@ impl Worker {
                                 end: woke.end,
                                 pcm: woke.pcm,
                                 transcript: woke.transcript,
+                                speaker: who,
                             },
                         ));
                         self.interrupt(start, InterruptReason::WakeWord);
