@@ -68,6 +68,7 @@ impl AudioBus {
                 if clause.is_empty() {
                     continue;
                 }
+                crate::tap::report_spoken(&clause);
                 match voice_synth.synthesize(&clause).await {
                     Ok(Some(wav)) if !wav.is_empty() => {
                         if audio_tx.send(AudioItem::Wav(wav)).await.is_err() {
@@ -143,6 +144,7 @@ impl AudioBus {
                 if clause.is_empty() {
                     continue;
                 }
+                crate::tap::report_spoken(&clause);
                 match voice_synth.synthesize(&clause).await {
                     Ok(Some(wav)) if !wav.is_empty() => {
                         if audio_tx.send(AudioItem::Wav(wav)).await.is_err() {
@@ -289,6 +291,32 @@ mod tests {
             voice.played.load(Ordering::SeqCst)
         );
         assert!(!voice.utterance_active.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn what_the_bus_says_reaches_the_spoken_tap() {
+        // The only test that sets the spoken tap, so it needs no lock.
+        let said = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        crate::set_spoken_tap(Some({
+            let said = said.clone();
+            Arc::new(move |text: &str| said.lock().unwrap().push(text.to_string()))
+        }));
+        let voice = Arc::new(MockVoice {
+            synthesized: Arc::new(AtomicUsize::new(0)),
+            played: Arc::new(AtomicUsize::new(0)),
+            spoken: Arc::new(AtomicUsize::new(0)),
+            utterance_active: Arc::new(AtomicBool::new(false)),
+        });
+        AudioBus::new(voice)
+            .speak_text("Your timer is done. The tea is ready.", true)
+            .await
+            .unwrap();
+        crate::set_spoken_tap(None);
+        let said = said.lock().unwrap().join(" ");
+        assert!(
+            said.contains("Your timer is done") && said.contains("The tea is ready"),
+            "{said}"
+        );
     }
 
     #[tokio::test]

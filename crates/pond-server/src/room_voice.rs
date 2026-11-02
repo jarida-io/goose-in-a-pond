@@ -440,6 +440,7 @@ async fn run_once(
     *lock(&inner.control) = None;
     *lock(&inner.turn) = None;
     pond_audio_out::set_playback_tap(None);
+    pond_audio_out::set_spoken_tap(None);
     drop(chat);
     drop(listening);
     inner.set_view(|v| {

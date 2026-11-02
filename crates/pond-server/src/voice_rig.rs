@@ -21,7 +21,7 @@ use pond_core::models::ports::wake_word::StreamingWakeWordDetector;
 use pond_core::models::services::instant_activation::InstantActivation;
 use pond_core::models::services::voice::quiet;
 use pond_core::shared::domain::agent::ThrottledAudioLevelSink;
-use pond_core::shared::services::chat::{ChatService, StateObserver};
+use pond_core::shared::services::chat::{ChatService, SpokenObserver, StateObserver};
 use pond_core::user_data::domain::settings::Settings;
 
 use crate::model_download;
@@ -67,6 +67,8 @@ pub struct Listening {
     pub interrupt: Option<Arc<dyn InterruptWatch>>,
     pub energy: Option<Arc<dyn SpeechEnergy>>,
     pub state_observer: Option<StateObserver>,
+    /// Told what the loop says, so the ear can tell its echo from a person.
+    pub spoken_observer: Option<SpokenObserver>,
     pub front: Front,
     pub wake_word: String,
     /// Calibration takes behind the wake word's triggers.
@@ -85,6 +87,9 @@ impl Listening {
         }
         if let Some(observer) = &self.state_observer {
             chat = chat.with_state_observer(observer.clone());
+        }
+        if let Some(observer) = &self.spoken_observer {
+            chat = chat.with_spoken_observer(observer.clone());
         }
         if let Some(energy) = &self.energy {
             chat = chat.with_speech_energy(energy.clone());
@@ -210,6 +215,8 @@ pub async fn build_listening(opts: ListeningOptions<'_>) -> Listening {
         }
     };
     pond_audio_out::set_playback_tap(Some(ear.tap()));
+    // Scheduled speech goes through the audio bus, not the loop.
+    pond_audio_out::set_spoken_tap(Some(ear.spoken_hook()));
     tracing::info!(detector = ?detector, reason = ?reason, "room voice: the ear listens");
 
     let wake: Arc<dyn StreamingWakeWordDetector> = if opts.no_wake_word {
@@ -223,6 +230,7 @@ pub async fn build_listening(opts: ListeningOptions<'_>) -> Listening {
         interrupt: Some(ear.clone()),
         energy: None,
         state_observer: Some(ear.state_hook()),
+        spoken_observer: Some(ear.spoken_hook()),
         front: Front::Ear { detector, reason },
         wake_word,
         calibrated: settings.voice_wake_word_transcriptions.len(),
@@ -273,6 +281,7 @@ async fn whisper_front(
         // reply plays and hands what it hears to the next capture.
         energy: Some(Arc::new(pond_audio::MicEnergy::new(opts.mic))),
         state_observer: None,
+        spoken_observer: None,
         front: Front::Whisper(why),
         wake_word,
         calibrated: settings.voice_wake_word_transcriptions.len(),

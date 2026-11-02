@@ -2,6 +2,7 @@
 //! microphone claim, fed the microphone and everything the pond plays, and serves the voice loop
 //! as its wake detector, its voice input and its interrupt watch.
 
+mod echo;
 mod hearing;
 mod reference;
 mod worker;
@@ -20,7 +21,7 @@ use pond_core::models::ports::interrupt::{Interrupt, InterruptWatch};
 use pond_core::models::ports::voice_input::VoiceInput;
 use pond_core::models::ports::wake_word::{StreamingWakeWordDetector, WakeWordActivation};
 use pond_core::shared::domain::agent::{ThrottledAudioLevelSink, WorkflowState};
-use pond_core::shared::services::chat::StateObserver;
+use pond_core::shared::services::chat::{SpokenObserver, StateObserver};
 use pond_ear::ear::WakeConfig;
 use pond_ear::{Ear, Household, ModelFile};
 use tokio::sync::oneshot;
@@ -186,6 +187,15 @@ impl EarRig {
         let cmds = self.cmds.clone();
         Arc::new(move |state: WorkflowState| {
             let _ = cmds.send(Cmd::Loop(state));
+        })
+    }
+
+    /// For `ChatService::with_spoken_observer` and `pond_audio_out::set_spoken_tap`: what the
+    /// pond says, so its echo is not taken for a wake.
+    pub fn spoken_hook(&self) -> SpokenObserver {
+        let cmds = self.cmds.clone();
+        Arc::new(move |text: &str| {
+            let _ = cmds.send(Cmd::Spoken(text.to_string()));
         })
     }
 

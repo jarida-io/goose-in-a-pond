@@ -377,10 +377,16 @@ pub struct ChatService {
     interrupt_watch: Option<Arc<dyn InterruptWatch>>,
     /// Told every state the loop announces, so a front end can follow the loop.
     state_observer: Option<StateObserver>,
+    /// Told the text of everything the loop says, as it goes to synthesis.
+    spoken_observer: Option<SpokenObserver>,
 }
 
 /// Hears each `WorkflowState` the loop enters, synchronously, from `emit_event`.
 pub type StateObserver = Arc<dyn Fn(WorkflowState) + Send + Sync>;
+
+/// Hears the text of each unit of speech as it goes to synthesis, e.g. so the ear can tell the
+/// pond's own words, heard back through the room, from a person's.
+pub type SpokenObserver = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Result of one non-persisting agent stream, with the stats from its `Done` event.
 #[derive(Debug)]
@@ -470,6 +476,7 @@ impl ChatService {
             speaking: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             interrupt_watch: None,
             state_observer: None,
+            spoken_observer: None,
         }
     }
 
@@ -544,6 +551,7 @@ impl ChatService {
                 );
             }
             UnpromptedSpeech::Spoken => {
+                self.report_spoken(utterance.text);
                 if let Err(e) = self.voice_output.speak(utterance.text).await {
                     tracing::warn!(error = %e, "unprompted speech failed to play");
                 }
@@ -662,6 +670,18 @@ impl ChatService {
     pub fn with_state_observer(mut self, observer: StateObserver) -> Self {
         self.state_observer = Some(observer);
         self
+    }
+
+    /// Tell `observer` the text of everything the loop says, as it goes to synthesis.
+    pub fn with_spoken_observer(mut self, observer: SpokenObserver) -> Self {
+        self.spoken_observer = Some(observer);
+        self
+    }
+
+    fn report_spoken(&self, text: &str) {
+        if let Some(observer) = &self.spoken_observer {
+            observer(text);
+        }
     }
 
     /// Set the wake-word detector; defaults to `InstantActivation` (no wait).
@@ -1185,11 +1205,15 @@ impl ChatService {
         let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<AudioItem>(16);
 
         let voice_for_synth = self.voice_output.clone();
+        let spoken_observer = self.spoken_observer.clone();
         let synth_handle = tokio::spawn(async move {
             while let Some(text) = speech_rx.recv().await {
                 let spoken = text.trim().to_string();
                 if spoken.is_empty() {
                     continue;
+                }
+                if let Some(observer) = &spoken_observer {
+                    observer(&spoken);
                 }
                 match voice_for_synth.synthesize(&spoken).await {
                     Ok(Some(wav)) if !wav.is_empty() => {
@@ -1830,6 +1854,7 @@ impl ChatService {
                     abort_speculative(speculative);
                     let farewell = "Until next time. Just say my name when you need me.";
                     diag!("  {}", farewell);
+                    self.report_spoken(farewell);
                     if let Err(e) = self.voice_output.speak(farewell).await {
                         tracing::warn!("TTS farewell failed: {}", e);
                     }
@@ -1841,6 +1866,7 @@ impl ChatService {
                     abort_speculative(speculative);
                     let farewell = "Goodbye! I'll be here whenever you need me.";
                     diag!("  {}", farewell);
+                    self.report_spoken(farewell);
                     if let Err(e) = self.voice_output.speak(farewell).await {
                         tracing::warn!("TTS farewell failed: {}", e);
                     }
@@ -4220,6 +4246,26 @@ mod tests {
         let heard = heard.lock().unwrap().clone();
         assert_eq!(heard, states_of(&events));
         assert!(heard.contains(&WorkflowState::Thinking) && heard.contains(&WorkflowState::Speak));
+    }
+
+    #[tokio::test]
+    async fn the_spoken_observer_hears_each_unit_the_loop_says() {
+        let storage = Arc::new(InMemorySessionStorage::new());
+        let session_id = "spoken".to_string();
+        storage.create_session(session_id.clone()).await.unwrap();
+        let said = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let svc = ChatService::new(Arc::new(MockAgent::new()), session_id, storage)
+            .with_voice_input(Arc::new(ScriptedListenInput::new(["hello"])))
+            .with_voice_output(Arc::new(CapturingSpeak::default()))
+            .with_spoken_observer({
+                let said = said.clone();
+                Arc::new(move |text: &str| said.lock().unwrap().push(text.to_string()))
+            });
+
+        run_bounded(&svc).await.unwrap();
+
+        let said = said.lock().unwrap().join(" ");
+        assert!(said.contains("Echo: hello"), "{said:?}");
     }
 
     /// Wakes once, recognising `who`, then never again.

@@ -148,6 +148,10 @@ impl Transcriber for Says {
 const S: usize = 16_000;
 
 async fn rig(wake: WakeMode, says: Arc<Says>) -> (Arc<EarRig>, Ctl) {
+    rig_for(wake, says, "hey goose").await
+}
+
+async fn rig_for(wake: WakeMode, says: Arc<Says>, phrase: &str) -> (Arc<EarRig>, Ctl) {
     let capture = ScriptedCapture::new(vec![0.0; S * 600], 20).paced(1);
     let (mic, _owner) = pond_audio::spawn(Box::new(capture), 16_000, 15_000, true);
     let log = Arc::new(Mutex::new(Log::default()));
@@ -161,8 +165,8 @@ async fn rig(wake: WakeMode, says: Arc<Says>) -> (Arc<EarRig>, Ctl) {
         state: State::Wait,
         household: Household::default(),
     };
-    let triggers = pond_voice::text::wake_triggers("hey goose", &[]);
-    let cfg = EarConfig::new(wake, triggers, "say \"hey goose\"");
+    let triggers = pond_voice::text::wake_triggers(phrase, &[]);
+    let cfg = EarConfig::new(wake, triggers, format!("say \"{phrase}\""));
     let rig = EarRig::with_hearing(cfg, Box::new(fake), mic.clone(), says).unwrap();
     let ctl = Ctl {
         log,
@@ -430,6 +434,51 @@ async fn a_segment_that_is_only_the_wake_phrase_listens_for_the_request_after_it
     let heard = bounded("the request", listening).await.unwrap().unwrap();
     assert_eq!(heard.as_deref(), Some("set a timer for ten minutes"));
     assert_eq!(says.calls(), 2);
+}
+
+/// The nano woke itself five times telling a story about Goosey Goose: the canceller left
+/// enough of the reply for Whisper, and these are two of the segments it transcribed.
+#[tokio::test]
+async fn the_ponds_own_words_heard_back_never_interrupt_its_reply() {
+    let says = Says::new(&[
+        "Goosey Goose left a pond.",
+        "since the lock story about Goosey. Goose leaving the pilot has been delivered",
+        "Goose, stop.",
+    ]);
+    let (rig, ctl) = rig_for(WakeMode::Segments, says.clone(), "goose").await;
+    let hook = rig.state_hook();
+    let spoken = rig.spoken_hook();
+    hook(WorkflowState::Thinking);
+    spoken("Once upon a time, Goosey Goose left the pond to see the wide world.");
+    hook(WorkflowState::Speak);
+    spoken("Since the long story about Goosey Goose leaving the pond has been delivered, shall I tell another?");
+    ctl.until("Think then Speak", |l, _| {
+        l.states == [State::Think, State::Speak]
+    })
+    .await;
+    let mut watch = tokio::spawn({
+        let rig = rig.clone();
+        async move { rig.wait_for_interrupt().await }
+    });
+    for n in 1..=2 {
+        let at = ctl.at();
+        ctl.emit(segment(at - S, at));
+        let until = Instant::now() + Duration::from_secs(5);
+        while says.calls() < n {
+            assert!(Instant::now() < until, "segment {n} was never transcribed");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), &mut watch)
+                .await
+                .is_err(),
+            "the pond's own words, heard back, interrupted its reply"
+        );
+    }
+    let at = ctl.at();
+    ctl.emit(segment(at - S, at));
+    let interrupt = bounded("the person's interrupt", watch).await.unwrap();
+    assert_eq!(interrupt.why, InterruptReason::WakeWord);
 }
 
 #[tokio::test]

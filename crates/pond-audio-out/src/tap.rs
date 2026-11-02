@@ -21,6 +21,27 @@ pub fn playback_tap() -> Option<PlaybackTap> {
     TAP.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+/// Receives the text of each unit of speech as it goes to synthesis, so a listener can tell the
+/// pond's own words, heard back through the room, from a person's.
+pub type SpokenTap = Arc<dyn Fn(&str) + Send + Sync>;
+
+static SPOKEN: RwLock<Option<SpokenTap>> = RwLock::new(None);
+
+/// Install (or remove) the process-wide spoken-text tap.
+pub fn set_spoken_tap(tap: Option<SpokenTap>) {
+    *SPOKEN.write().unwrap_or_else(|e| e.into_inner()) = tap;
+}
+
+pub fn spoken_tap() -> Option<SpokenTap> {
+    SPOKEN.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+pub(crate) fn report_spoken(text: &str) {
+    if let Some(tap) = spoken_tap() {
+        tap(text);
+    }
+}
+
 /// Frames handed over per call: 10 ms at 48 kHz, so the callback thread calls the tap rarely.
 const BLOCK_FRAMES: usize = 480;
 
