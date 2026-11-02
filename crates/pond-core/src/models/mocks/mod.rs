@@ -4,4 +4,5 @@ pub mod mock_model_downloader;
 pub mod mock_model_repository;
 pub mod mock_model_storage;
 pub mod mock_provider;
+pub mod mock_room_voice;
 pub mod mock_tts_control;

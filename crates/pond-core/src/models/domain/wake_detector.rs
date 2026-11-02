@@ -1,12 +1,12 @@
 //! Which detector hears the wake word when the ear runs: the "hey goose" CNN only where it hears
 //! this household, Whisper on the ear's speech segments everywhere else.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// The one phrase the ear's CNN was trained on.
 pub const CNN_PHRASE: &str = "hey goose";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WakeDetector {
     /// The ear's wake CNN, every 80 ms.
@@ -15,7 +15,7 @@ pub enum WakeDetector {
     Whisper,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WakeDetectorReason {
     /// The household picked it (`voice_wake_detector`).
@@ -26,6 +26,8 @@ pub enum WakeDetectorReason {
     NotCalibrated,
     /// The phrase is not "hey goose", the only one the CNN knows.
     CustomPhrase,
+    /// The ear is not running (`vad_backend` is `rms`): Whisper listens on a timer.
+    NoEar,
 }
 
 /// The detector for `setting` (`WAKE_DETECTORS`), the household's `phrase`, and whether the CNN

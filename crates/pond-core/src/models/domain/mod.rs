@@ -19,6 +19,7 @@ pub mod model_probe;
 pub mod model_record; // re-exports ModelRecord, ModelCategory, ModelRoleAssignment, BinaryRecord
 pub mod model_role;
 pub mod recommended;
+pub mod room_voice;
 pub mod taxonomy;
 pub mod vision_encoder;
 pub mod vision_pairing;

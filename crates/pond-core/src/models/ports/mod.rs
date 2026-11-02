@@ -12,6 +12,7 @@ pub mod model_repository;
 pub mod model_scheduler;
 pub mod model_storage;
 pub mod provider;
+pub mod room_voice;
 pub mod speech_energy;
 pub mod token_counter;
 pub mod tts_control;
