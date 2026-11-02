@@ -161,6 +161,13 @@ mod tests {
             .execute(&l.pool)
             .await
             .unwrap();
+        // And one an earlier release ran and this one dropped.
+        sqlx::query("INSERT INTO lane_job_runs (job, last_run_at) VALUES (?, ?)")
+            .bind("index_maintenance")
+            .bind(sql_ts(at(90)))
+            .execute(&l.pool)
+            .await
+            .unwrap();
         assert_eq!(l.load().await.unwrap(), vec![(LaneJob::Titling, at(0))]);
     }
 
@@ -182,14 +189,14 @@ mod tests {
     async fn a_stamp_written_by_the_column_default_spelling_is_still_read() {
         let l = log().await;
         sqlx::query("INSERT INTO lane_job_runs (job, last_run_at) VALUES (?, ?)")
-            .bind(LaneJob::IndexMaintenance.as_str())
+            .bind(LaneJob::SummaryRefresh.as_str())
             .bind("2026-09-17 10:00:00")
             .execute(&l.pool)
             .await
             .unwrap();
         let loaded = l.load().await.unwrap();
         assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].0, LaneJob::IndexMaintenance);
+        assert_eq!(loaded[0].0, LaneJob::SummaryRefresh);
         assert_eq!(loaded[0].1.to_rfc3339(), "2026-09-17T10:00:00+00:00");
     }
 }

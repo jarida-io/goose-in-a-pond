@@ -14,6 +14,8 @@ import {
 } from "./models/modelsView";
 import { isInFlight } from "./models/modelDownloads";
 import { ModelRow } from "./models/ModelRow";
+import { MemoryModels } from "../components/models/MemoryModels";
+import { useMemoryJob } from "../hooks/useMemoryJob";
 import { PickCard } from "./models/PickCard";
 import { AddBand } from "./models/AddBand";
 import { VoicePicker } from "../hub/views/settings/VoicePicker";
@@ -25,10 +27,12 @@ import "../hub/views/settings/voice-picker.css";
 // ─── Jobs band ─────────────────────────────────────────────────────────────
 
 function RoleCard({
-  role, holder, emptyText, onChange,
+  role, holder, note, emptyText, onChange,
 }: {
   role: (typeof ROLES)[number];
   holder: { title: string; engine: ModelEngine | null } | null;
+  /** A quiet line under the holder, e.g. that nobody chose it. */
+  note?: string | null;
   /** What an unnamed job reads when that is not a gap, e.g. memory's built-in model. */
   emptyText: string | null;
   /** Null when no list below can fill the job, so there is nothing to press. */
@@ -44,6 +48,7 @@ function RoleCard({
           {holder.engine && (
             <EngineMark engine={holder.engine} label={holder.engine.label} format={holder.engine.file_format} />
           )}
+          {note && <span className="mdl-role__built">{note}</span>}
         </>
       ) : emptyText ? (
         <span className="mdl-role__built">{emptyText}</span>
@@ -103,6 +108,8 @@ export function Models() {
 
   const actions = useModelActions(data, say);
   const { busy, withPictures } = actions;
+
+  const job = useMemoryJob(data, actions, say);
 
   // ── Voice, for the Speaking group ──
   // Choosing a voice is not managing a model file, so Speaking gets a picker, not a row list.
@@ -257,7 +264,9 @@ export function Models() {
 
   function change(role: RoleKey) {
     const label = ROLES.find((r) => r.key === role)?.label.toLowerCase();
-    if (!jumpTo(`mdl-job-${role}`)) jumpTo(role === "chat" ? "mdl-recommended" : "mdl-get");
+    if (!jumpTo(role === "embedding" ? "mdl-memory" : `mdl-job-${role}`)) {
+      jumpTo(role === "chat" ? "mdl-recommended" : "mdl-get");
+    }
     say(role === "tts" ? "Pick a voice under Speaking." : `Press Use on the model you want for ${label}.`);
   }
 
@@ -314,22 +323,41 @@ export function Models() {
         <p className="mdl-band__sub">Which model does what. This is the only part most ponds ever change.</p>
         <div className="mdl-roles">
           {ROLES.map((role) => {
-            const entry = holderEntry(models, roles, role.key);
-            const name = roleHolder(roles, role.key);
+            const memoryHeld = role.key === "embedding" ? job.holder : null;
+            const entry = role.key === "embedding" ? job.holder?.entry ?? null : holderEntry(models, roles, role.key);
+            const name = role.key === "embedding" ? job.holder?.name ?? null : roleHolder(roles, role.key);
             // Something below must be able to fill the job, or there is nothing to press.
             const canChoose =
               role.key === "chat" ||
               role.key === "tts" ||
+              (role.key === "embedding" && job.rows.length > 0) ||
               groups.some((g) => g.key === role.key) ||
               (role.key === "asr" && getMoreListening.length > 0);
             return (
               <RoleCard key={role.key} role={role}
                 holder={name ? { title: entry ? modelLabel(entry) : name, engine: entry ? engineOf(entry) : null } : null}
+                note={memoryHeld?.builtIn ? "Built-in default" : null}
                 emptyText={emptyJobText(roles, role.key)}
                 onChange={canChoose ? () => change(role.key) : null} />
             );
           })}
         </div>
+
+        {job.rows.length > 0 && (
+          <section id="mdl-memory" className="mdl-group" aria-label="Memory models">
+            <header className="mdl-group__head">
+              <h3 className="mdl-group__title">Memory models</h3>
+              <span className="mdl-group__count">{job.rows.length} models</span>
+            </header>
+            <div className="mdl-group__body">
+              <MemoryModels models={models} roles={roles} transferFor={transferFor}
+                line={job.line} retrying={job.retrying} busy={busy} off={job.off} offline={job.offline}
+                onTurnOn={() => void job.turnOn()} onUse={(m) => void job.useModel(m)}
+                onControl={(m, transfer, action) => void actions.control(m, transfer, action)}
+                onRetry={() => void job.retry()} />
+            </div>
+          </section>
+        )}
       </section>
 
       {picks.length > 0 && (

@@ -70,14 +70,19 @@ fn names_a_non_chat_task(name: &str) -> bool {
 }
 
 /// The name the household reads: a pick's title, the pairing table's name for a llama.cpp file it
-/// lists, a scanned file's own header name, a bundled speech or voice row's description, and
-/// otherwise the row's name. Never the placeholder.
+/// lists, a scanned file's own header name, an embedding row's catalogue title, a bundled speech
+/// or voice row's description, and otherwise the row's name. Never the placeholder.
 pub fn title(record: &ModelRecord, pick_title: Option<&str>) -> String {
     if let Some(title) = pick_title {
         return title.to_string();
     }
     if let Some(label) = listed_label(record) {
         return label.to_string();
+    }
+    if record.category == ModelCategory::Embedding {
+        if let Some(model) = super::embedding_models::find(&record.name) {
+            return model.title.to_string();
+        }
     }
     let description = record.description.trim();
     let described = !description.is_empty() && description != ON_DISK_PLACEHOLDER;
@@ -415,6 +420,9 @@ mod tests {
         former.description = "Llama 3.2 3B Instruct Q4_K_M (~2 GB, balanced)".to_string();
         assert_eq!(title(&former, None), "llama-3.2-3b");
         assert_eq!(title(&former, Some("Gemma 4 E4B")), "Gemma 4 E4B");
+
+        let embedder = crate::models::domain::embedding_models::EMBEDDINGGEMMA_2.record();
+        assert_eq!(title(&embedder, None), "EmbeddingGemma 2");
 
         let mut voice = row(ModelCategory::TtsKokoro, "af_heart");
         voice.description = "American female — Heart".to_string();

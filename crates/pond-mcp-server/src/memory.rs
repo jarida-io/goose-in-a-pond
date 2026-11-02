@@ -94,7 +94,7 @@ impl MemoryMcpServer {
         let limit = params.0.limit.unwrap_or(10) as usize;
 
         let filtered: Vec<_> = if let Some(ref query) = params.0.query {
-            if let Some(ref emb) = self.embedding_provider {
+            if let Some(emb) = self.embedding_provider.as_ref().filter(|e| e.available()) {
                 // A query, not a document -- see EmbeddingProvider::embed_query.
                 match emb.embed_query(query).await {
                     Ok(query_vec) => {
@@ -265,7 +265,8 @@ impl MemoryMcpServer {
 
         let decay_rate = tier.default_decay_rate();
 
-        let embedding = if let Some(ref emb) = self.embedding_provider {
+        let embedder = self.embedding_provider.as_ref().filter(|e| e.available());
+        let embedding = if let Some(emb) = embedder {
             match emb.embed(&content).await {
                 Ok(vec) => {
                     tracing::debug!(dims = vec.len(), "save_memory: embedding generated");

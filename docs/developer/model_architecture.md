@@ -59,7 +59,7 @@ All in `crates/pond-core/src/models/domain/`.
 | `tool` | the same | `tool_model` | the tool-call argument repair helper |
 | `asr` | whisper | `active_whisper_model` | the voice pipeline |
 | `tts` | tts_kokoro, tts_http, tts_piper | `active_tts_model` (and `voice_tts_voice` for Kokoro) | Kokoro output |
-| `embedding` | embedding | `active_embedding_model` | the embedder (the engine is the separate `embedding_provider` setting) |
+| `embedding` | embedding | `active_embedding_model` | the embedder; the model's row picks the engine, and `embedding_provider = "none"` turns it off |
 
 `ModelRole::loads_a_model` is false for think and task, so nothing done on behalf of their
 assignments (the boot restore included) acts on them. `ModelRole::rebuilds_llm_provider` is true
@@ -82,7 +82,7 @@ the next boot's `sync_assignments_to_settings` (see [mistralrs-provider.md](mist
 | `LlmProvider` (`provider.rs`) | `LocalInferenceLlmAdapter`, `OllamaProvider`, `LlamafileProvider` | The direct, non-agent path in `AppState.llm_provider`; turns go through the agent instead |
 | `Agent` (`agent.rs`) | `GooseAdapter`; `MistralRsAgent` behind `mistralrs-agent`; `PondAgent` (quarantined) | The serving path |
 | `InferenceProvider` (`inference.rs`) | `pond-inference`, `MistralRsProvider` | Feeds the quarantined `pond-agent` loop and the mistral.rs checkpoint, not the live path |
-| `EmbeddingProvider` (`embedding.rs`) | fastembed (`pond-infra`), the GGUF embedder (`pond-inference/src/embedding.rs`) | Chosen by `embedding_provider`: `fastembed`, `gguf`, `none` |
+| `EmbeddingProvider` (`embedding.rs`) | fastembed (`pond-infra`), the GGUF embedder (`pond-inference/src/embedding.rs`), both behind `ActiveEmbedder` (`pond-core/src/models/services/active_embedder.rs`) | The Memory-role model, switched on a settings save without a restart; built by `EmbedderFactory` (`pond-server/src/embedder_factory.rs`) |
 
 ## Lifecycle
 

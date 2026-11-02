@@ -63,6 +63,8 @@ pub struct LaneSnapshot {
     pub running: Option<LaneJob>,
     /// How long `running` has held the slot.
     pub running_for_secs: Option<u64>,
+    /// How long the embedding slot has been embedding, while it is; it runs beside the lane.
+    pub embedding_slot_running_for_secs: Option<u64>,
 }
 
 /// What asking for a job to run now did.

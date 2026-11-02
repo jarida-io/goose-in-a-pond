@@ -90,16 +90,6 @@ impl MemoryRepository for RedactingMemoryRepository {
         self.inner.search_unembedded(limit).await
     }
 
-    async fn search_stale_dimension(
-        &self,
-        expected_dims: usize,
-        limit: usize,
-    ) -> Result<Vec<MemoryFragment>> {
-        self.inner
-            .search_stale_dimension(expected_dims, limit)
-            .await
-    }
-
     async fn update_embedding(&self, id: &str, embedding: &[f32]) -> Result<()> {
         self.inner.update_embedding(id, embedding).await
     }

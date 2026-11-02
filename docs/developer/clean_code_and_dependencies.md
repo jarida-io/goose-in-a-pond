@@ -42,7 +42,7 @@ Internal crates are referenced either way: `pond-core = { workspace = true }` or
 
 | Dependency | Pin | Why |
 |---|---|---|
-| `llama-cpp-2`, `llama-cpp-sys-2` | `=0.1.156`, patched to `jarida-io/llama-cpp-rs-giap` at a full SHA | breaking changes ship in patch releases; the fork carries the OpenAI-compatible templating and allocation fixes |
+| `llama-cpp-2`, `llama-cpp-sys-2` | `=0.1.156`, patched to `jarida-io/llama-cpp-rs-giap` at a full SHA | breaking changes ship in patch releases; the fork carries the OpenAI-compatible templating, allocation fixes and the EmbeddingGemma 2 backports |
 | `rmcp` | `=2.1.0` | Goose, its optional code-mode and `pond-mcp-server` must share one MCP SDK |
 | Goose's workspace dependencies | mirrored in the root `Cargo.toml` | Cargo resolves the goose crates' `workspace = true` entries against this workspace, not goose's |
 

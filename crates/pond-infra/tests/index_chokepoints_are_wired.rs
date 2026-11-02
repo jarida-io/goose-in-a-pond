@@ -113,7 +113,7 @@ fn every_memory_repository_construction_mirrors_into_the_index() {
 }
 
 /// These three paths have no embedder. `None` makes `mirror` defer to the sweep; a guessed
-/// model id would silently corrupt the index.
+/// model would silently corrupt the index.
 #[test]
 fn the_cli_paths_index_without_a_model_id() {
     let lines: Vec<&str> = MAIN.lines().collect();
@@ -122,12 +122,7 @@ fn the_cli_paths_index_without_a_model_id() {
     let attributed: Vec<String> = found
         .iter()
         .filter(|&&site| {
-            chained_within(
-                &lines,
-                site,
-                "vector_model_id",
-                "SqliteMemoryRepository::new(",
-            )
+            chained_within(&lines, site, "vector_stamp", "SqliteMemoryRepository::new(")
         })
         .map(|&site| enclosing_fn(&lines, site))
         .collect();
@@ -135,9 +130,9 @@ fn the_cli_paths_index_without_a_model_id() {
     assert_eq!(
         attributed,
         vec!["run_server"],
-        "exactly one path -- run_server -- constructs an embedding provider and \
-         can therefore say which model produced a vector. If a CLI path has \
-         started passing a model id, check it actually built an embedder: \
+        "exactly one path -- run_server -- constructs an embedder and can \
+         therefore say which model produced a vector. If a CLI path has \
+         started passing one, check it actually loads a model: \
          attributing vectors to a model that did not produce them makes the \
          index disagree with the store in a way no sweep repairs. If run_server \
          has stopped passing one, its writes are no longer attributable and the \
@@ -152,7 +147,7 @@ fn the_window_never_reaches_over_a_later_construction() {
         "",
         "    let split = Arc::new(",
         "        SqliteMemoryRepository::new(db.system.clone())",
-        "            .with_vector_index(vector_index.clone(), vector_model_id.clone()),",
+        "            .with_vector_index(vector_index.clone(), vector_stamp.clone()),",
         "    );",
         "    let inline = Arc::new(SqliteMemoryRepository::new(p).with_vector_index(ix, None));",
     ];

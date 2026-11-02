@@ -6,6 +6,8 @@ import { useModels } from "../../../hooks/useModels";
 import { useModelActions } from "../../../hooks/useModelActions";
 import { AddOnLine, EngineMark, FitCell, SourceChip, TransferView } from "../../../components/models/ModelMarks";
 import { PickCard } from "../../../sections/models/PickCard";
+import { MemoryModels } from "../../../components/models/MemoryModels";
+import { useMemoryJob } from "../../../hooks/useMemoryJob";
 import { engineOf, groupByEngine } from "../../../lib/modelProvider";
 import {
   ROLES, type RoleKey, addOnOf, askingPick, budgetReading, downloadedOnly, emptyJobText, fitReading,
@@ -129,6 +131,7 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
   useEffect(() => () => { if (flashTimer.current) clearTimeout(flashTimer.current); }, []);
 
   const actions = useModelActions(data, say);
+  const job = useMemoryJob(data, actions, say);
 
   const onDisk = useMemo(() => downloadedOnly(models), [models]);
   const groups = useMemo(() => groupByJob(onDisk), [onDisk]);
@@ -197,8 +200,9 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
       <div className="hm-tiles" role="list" aria-label="Which model does each job">
         {ROLES.map((role) => {
           const Icon = ROLE_ICON[role.key];
-          const entry = holderEntry(models, roles, role.key);
-          const name = roleHolder(roles, role.key);
+          const isMemory = role.key === "embedding";
+          const entry = isMemory ? job.holder?.entry ?? null : holderEntry(models, roles, role.key);
+          const name = isMemory ? job.holder?.name ?? null : roleHolder(roles, role.key);
           const engine = entry ? engineOf(entry) : null;
           const empty = emptyJobText(roles, role.key);
           return (
@@ -216,6 +220,9 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
               </span>
               {!loading && engine && (
                 <EngineMark engine={engine} label={engine.label} format={engine.file_format} />
+              )}
+              {!loading && isMemory && job.holder?.builtIn && (
+                <span className="hm-tile__note">Built-in default</span>
               )}
             </div>
           );
@@ -303,6 +310,26 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
           </>
         )}
       </Card>
+
+      {job.rows.length > 0 && (
+        <Card title="Memory">
+          <MemoryModels
+            models={models}
+            roles={roles}
+            transferFor={transferFor}
+            line={job.line}
+            retrying={job.retrying}
+            busy={actions.busy}
+            off={job.off}
+            offline={job.offline}
+            onTurnOn={() => void job.turnOn()}
+            onUse={(m) => void job.useModel(m)}
+            onControl={(m, transfer, action) => void actions.control(m, transfer, action)}
+            onRetry={() => void job.retry()}
+            fold
+          />
+        </Card>
+      )}
     </DetailShell>
   );
 }
