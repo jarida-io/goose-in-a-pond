@@ -5,7 +5,9 @@ import AxeBuilder from "@axe-core/playwright";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
 import { contrastOf, fillContrastOf } from "./helpers/contrast";
 import { navigateTo } from "./helpers/nav";
-import { memoryHealth, memoryRows, mockModels, typicalModels, type ModelMocks } from "./helpers/model-mocks";
+import {
+  memoryHealth, memoryRows, mockModels, ORIN_SERVING_MEMORY, typicalModels, type ModelMocks,
+} from "./helpers/model-mocks";
 
 const ROLES = (embedding: Record<string, unknown>) => ({
   chat: { provider: "local", model: "gemma-4-E2B-it-qat-UD-Q4_K_XL", model_id: "gguf/gemma-4-E2B-it-qat-UD-Q4_K_XL" },
@@ -279,6 +281,18 @@ test.describe("Memory, classic Models page", () => {
     await expect.poll(() => seen.saved).toContainEqual({ embedding_provider: "auto" });
   });
 
+  test("says what each model needs while it runs, and whether this pond has room for it", async ({ page }) => {
+    await setup(page, { section: "models", memory: ORIN_SERVING_MEMORY });
+    const memory = await openClassicModels(page);
+    const row = (name: string) => memory.getByRole("listitem").filter({ hasText: name });
+    await expect(row("EmbeddingGemma 2")).toContainText("Needs about 368 MB while it runs");
+    await expect(row("EmbeddingGemma 2")).toContainText("Tight on this pond");
+    await expect(row("Nomic Embed Text v1.5")).toContainText("Fits");
+    // The model in use says how it is doing, not whether it would fit.
+    await expect(row("all-MiniLM-L6-v2")).toContainText("Needs about 50 MB while it runs");
+    await expect(row("all-MiniLM-L6-v2")).not.toContainText("Fits");
+  });
+
   test("keeps the four bands the page always had", async ({ page }) => {
     await setup(page, { section: "models" });
     await openClassicModels(page);
@@ -482,6 +496,17 @@ for (const scheme of ["Light", "Dark"] as const) {
       await page.route("**/api/v1/context/index/health", (r) => r.fulfill({ json: memoryHealth({ state: "loading" }, { matching: 0 }) }));
       await page.reload();
       expect(await contrastOf(page.getByRole("region", { name: "Memory models" }).getByText("Loading", { exact: true })), "Loading").toBeGreaterThanOrEqual(4.5);
+    });
+
+    test("the need and the fit word, measured", async ({ page }) => {
+      await setup(page, { section: "models", scheme, memory: ORIN_SERVING_MEMORY });
+      const memory = await openClassicModels(page);
+      expect(await contrastOf(memory.getByText("Tight on this pond")), "Tight").toBeGreaterThanOrEqual(4.5);
+      expect(await contrastOf(memory.getByText("Fits").first()), "Fits").toBeGreaterThanOrEqual(4.5);
+      expect(
+        await contrastOf(memory.getByText("Needs about 368 MB while it runs")), "the need",
+      ).toBeGreaterThanOrEqual(4.5);
+      await scan(page, "#mdl-memory", "classic Memory models, with a fit reading");
     });
 
     test("the offline note, measured", async ({ page }) => {

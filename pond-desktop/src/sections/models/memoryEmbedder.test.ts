@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { ContextIndexHealth, EmbedderHealth } from "../../api/types";
 import {
-  embedderLine, embedderTitle, embedderWatching, holderBadge, holderText, holdsMemory, isOutOfMemory, jobState,
-  memoryChosenText, memoryCost, memoryHolder, memoryIsOff, memoryModels, memoryPress, NEEDS_CONNECTION,
-  resolvedMemoryName,
+  embedderLine, embedderTitle, embedderWatching, FIT_WORD, holderBadge, holderText, holdsMemory, isOutOfMemory,
+  jobState, memoryChosenText, memoryCost, memoryFit, memoryHolder, memoryIsOff, memoryModels, memoryNeed,
+  memoryPress, NEEDS_CONNECTION, resolvedMemoryName,
 } from "./memoryEmbedder";
 import { e4b, eg2, memoryRoles, miniLm, nomicEmbed, NO_ROLES } from "./fixtures";
 import { modelLabel } from "./modelsView";
@@ -322,5 +322,29 @@ describe("what the model's row and line may claim", () => {
       "EmbeddingGemma 2 is chosen and loads at a quiet moment.",
     );
     expect(holderText(null, null)).toBe("Chosen on the Models screen.");
+  });
+});
+
+describe("what a Memory model needs, and whether this pond has room", () => {
+  it("says what a model needs while it runs, from the pond's estimate", () => {
+    expect(memoryNeed(eg2())).toBe("Needs about 368 MB while it runs");
+    expect(memoryNeed(miniLm())).toBe("Needs about 50 MB while it runs");
+    expect(memoryNeed(eg2({ ram_estimate_mb: undefined }))).toBeNull();
+  });
+
+  // The live nano at the re-score: 309 MB available, so 189 MB of room once EmbeddingGemma 2 gives its share back.
+  it("reads the need against the room in a word", () => {
+    expect(memoryFit(miniLm(), 189)).toBe("fits");
+    expect(memoryFit(eg2(), 189)).toBe("tight");
+    expect(memoryFit(eg2(), 368)).toBe("fits");
+    expect(FIT_WORD.fits).toBe("Fits");
+    expect(FIT_WORD.tight).toBe("Tight on this pond");
+  });
+
+  it("claims nothing where the pond read no room or the catalogue lists no need", () => {
+    expect(memoryFit(eg2(), null)).toBeNull();
+    expect(memoryFit(eg2(), undefined)).toBeNull();
+    expect(memoryFit(eg2({ ram_estimate_mb: undefined }), 1000)).toBeNull();
+    expect(memoryFit(eg2(), 0)).toBe("tight");
   });
 });

@@ -26,7 +26,7 @@ import { ApiError } from "../../../api/types";
 import type { ContextIndexHealth, DownloadEntry, EmbedderHealth, ModelEntry, ModelMemoryStatus } from "../../../api/types";
 import {
   DESKTOP_MEMORY, E4B_ORIN, e2b, e4b, entry, eg2, foundOnDisk, litertE2b, litertE4b, llamafile, memoryRoles,
-  miniLm, nomicEmbed, NO_ROLES, ollama, ORIN_MEMORY, rolesWith, voice, whisper,
+  miniLm, nomicEmbed, NO_ROLES, ollama, ORIN_MEMORY, ORIN_MEMORY_SERVING, rolesWith, voice, whisper,
 } from "../../../sections/models/fixtures";
 
 const HERE = { downloaded: true };
@@ -509,6 +509,30 @@ describe("Hub Models: Memory", () => {
     const memory = await card("Memory");
     expect(await within(memory).findByText("Chosen, not loaded")).toBeTruthy();
     expect(within(memory).queryByText("In use")).toBeNull();
+  });
+
+  it("says what each model needs while it runs, and whether this pond has room for it", async () => {
+    setup({ models: ROWS(), roles: memoryRoles("", "fastembed"), memory: { ...ORIN_MEMORY_SERVING, embedder_room_mb: 200 } });
+    renderHub();
+    const memory = await card("Memory");
+    fireEvent.click(within(memory).getByRole("button", { name: "Other Memory models (1)" }));
+    const [recommended, inUse, other] = within(memory).getAllByRole("listitem");
+    await waitFor(() => expect(within(recommended).getByText("Tight on this pond")).toBeTruthy());
+    expect(within(recommended).getByText("Needs about 368 MB while it runs")).toBeTruthy();
+    expect(within(other).getByText("Fits")).toBeTruthy();
+    // The model in use says how it is doing instead.
+    expect(within(inUse).getByText("Needs about 50 MB while it runs")).toBeTruthy();
+    expect(within(inUse).queryByText("Fits")).toBeNull();
+  });
+
+  it("names no fit where the pond reports no room", async () => {
+    setup({ models: ROWS(), roles: memoryRoles("", "fastembed"), memory: ORIN_MEMORY });
+    renderHub();
+    const memory = await card("Memory");
+    const rows = within(memory).getAllByRole("listitem");
+    expect(within(rows[0]).getByText("Needs about 368 MB while it runs")).toBeTruthy();
+    expect(within(memory).queryByText("Fits")).toBeNull();
+    expect(within(memory).queryByText("Tight on this pond")).toBeNull();
   });
 });
 

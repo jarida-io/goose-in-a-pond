@@ -1,12 +1,12 @@
 import { useId, useState } from "react";
 import {
-  AlertTriangle, Check, ChevronDown, ChevronRight, Clock, Download, Loader2, RefreshCw, RotateCw, SearchX,
+  AlertTriangle, Check, ChevronDown, ChevronRight, Clock, Download, Gauge, Loader2, RefreshCw, RotateCw, SearchX,
 } from "lucide-react";
 import type { ModelActiveRoles, ModelEntry } from "../../api/types";
 import type { ModelTransfer, TransferAction } from "../../sections/models/modelDownloads";
 import {
-  type EmbedderKind, type EmbedderLine, type HolderTone, holderBadge, holdsMemory, memoryCost, memoryModels,
-  memoryPress,
+  type EmbedderKind, type EmbedderLine, FIT_WORD, type HolderTone, holderBadge, holdsMemory, memoryCost, memoryFit,
+  memoryModels, memoryNeed, memoryPress,
 } from "../../sections/models/memoryEmbedder";
 import { measuredOf, modelFullName, modelLabel, sourceChip } from "../../sections/models/modelsView";
 import { SourceChip, TransferView } from "./ModelMarks";
@@ -133,11 +133,12 @@ export function EmbedderStatus({
 }
 
 function MemoryRow({
-  model, inUse, line, checking, off, offline, transfer, busy, onUse, onControl,
+  model, inUse, line, checking, off, offline, room, transfer, busy, onUse, onControl,
 }: {
   model: ModelEntry;
   inUse: boolean;
   line: EmbedderLine | null;
+  room: number | null;
   checking: boolean;
   off: boolean;
   offline: boolean;
@@ -153,6 +154,9 @@ function MemoryRow({
   const measured = measuredOf(model.recommended);
   const badge = inUse ? holderBadge(line, { checking }) : null;
   const press = memoryPress(model, { off, offline });
+  const need = memoryNeed(model);
+  // The model in use has its own state on the row; the word is for a model the household might switch to.
+  const fit = inUse ? null : memoryFit(model, room);
   return (
     <li className="mm-mem" data-inuse={inUse ? "true" : undefined}>
       <div className="mm-mem__text">
@@ -168,6 +172,17 @@ function MemoryRow({
           </span>
         )}
         <span className="mm-mem__cost">{memoryCost(model)}</span>
+        {need && (
+          <span className="mm-mem__need">
+            <span>{need}</span>
+            {fit && (
+              <span className="mm-mem__fit" data-fit={fit}>
+                {fit === "fits" ? <Check size={14} aria-hidden="true" /> : <Gauge size={14} aria-hidden="true" />}
+                {FIT_WORD[fit]}
+              </span>
+            )}
+          </span>
+        )}
       </div>
       {/* While it comes down the bar and its controls are the row's whole state: "In use" would be early. */}
       {!transfer && (
@@ -218,6 +233,8 @@ export interface MemoryModelsProps {
   off?: boolean;
   /** The pond reaches nothing outside the house: a model whose file is not here cannot be fetched. */
   offline?: boolean;
+  /** The room the pond reports for a Memory model beside the conversation model; null where it read none. */
+  room?: number | null;
   onTurnOn?: () => void;
   onUse: (m: ModelEntry) => void;
   onControl: (m: ModelEntry, transfer: ModelTransfer, action: TransferAction) => void;
@@ -227,8 +244,8 @@ export interface MemoryModelsProps {
 }
 
 export function MemoryModels({
-  models, roles, transferFor, line, checking = false, retrying, busy, off = false, offline = false, onTurnOn,
-  onUse, onControl, onRetry, fold = false,
+  models, roles, transferFor, line, checking = false, retrying, busy, off = false, offline = false, room = null,
+  onTurnOn, onUse, onControl, onRetry, fold = false,
 }: MemoryModelsProps) {
   const [open, setOpen] = useState(!fold);
   const listId = useId();
@@ -272,6 +289,7 @@ export function MemoryModels({
             checking={checking}
             off={off}
             offline={offline}
+            room={room}
             transfer={transferFor(m)}
             busy={busy}
             onUse={() => onUse(m)}

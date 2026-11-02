@@ -30,7 +30,7 @@ import { ConfirmProvider } from "../components/shared";
 import { Models } from "./Models";
 import {
   DESKTOP_MEMORY, E4B_ORIN, EG2_ORIN, e2b, e4b, entry, eg2, foundOnDisk, functionGemma, litertE2b, litertE4b,
-  llamafile, memoryRoles, miniLm, nomicEmbed, NO_ROLES, ollama, ORIN_MEMORY, rolesWith, whisper,
+  llamafile, memoryRoles, miniLm, nomicEmbed, NO_ROLES, ollama, ORIN_MEMORY, ORIN_MEMORY_SERVING, rolesWith, whisper,
 } from "./models/fixtures";
 
 const NOT_DOWNLOADED = { downloaded: false };
@@ -972,6 +972,18 @@ describe("Memory", () => {
       expect(api.activateModel).toHaveBeenCalledWith("embedding", "all-MiniLM-L6-v2", "embedding"),
     );
     expect(await screen.findByText(/^Now using all-MiniLM-L6-v2 for memory/)).toBeTruthy();
+  });
+
+  it("says what each model needs while it runs, and which ones this pond has room for", async () => {
+    setup({ models: MEMORY_ROWS(), roles: memoryRoles("embeddinggemma-2"), memory: ORIN_MEMORY_SERVING });
+    renderModels();
+    const memory = await memoryModels();
+    const row = (title: string) => within(memory).getByText(title).closest("li") as HTMLElement;
+    await waitFor(() => expect(within(row("all-MiniLM-L6-v2")).getByText("Fits")).toBeTruthy());
+    expect(within(row("all-MiniLM-L6-v2")).getByText("Needs about 50 MB while it runs")).toBeTruthy();
+    expect(within(row("EmbeddingGemma 2")).getByText("Needs about 368 MB while it runs")).toBeTruthy();
+    expect(within(row("EmbeddingGemma 2")).queryByText("Fits")).toBeNull();
+    expect(within(row("EmbeddingGemma 2")).queryByText("Tight on this pond")).toBeNull();
   });
 
   it("shows the measured numbers only where the server sent them", async () => {

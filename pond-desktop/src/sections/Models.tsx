@@ -358,7 +358,7 @@ export function Models() {
             <div className="mdl-group__body">
               <MemoryModels models={models} roles={roles} transferFor={transferFor}
                 line={job.line} checking={job.checking} retrying={job.retrying} busy={busy} off={job.off}
-                offline={job.offline}
+                offline={job.offline} room={memory?.embedder_room_mb ?? null}
                 onTurnOn={() => void job.turnOn()} onUse={(m) => void job.useModel(m)}
                 onControl={(m, transfer, action) => void actions.control(m, transfer, action)}
                 onRetry={() => void job.retry()} />

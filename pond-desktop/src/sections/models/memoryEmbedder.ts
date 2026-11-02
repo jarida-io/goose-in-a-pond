@@ -74,6 +74,25 @@ export function memoryCost(m: Pick<ModelEntry, "size_mb" | "downloaded" | "acqui
   return size ? `${size} to download` : "Size not listed";
 }
 
+/** What a model needs while it runs, from the pond's estimate; null where the catalogue lists none. */
+export function memoryNeed(m: Pick<ModelEntry, "ram_estimate_mb">): string | null {
+  const size = formatSize(m.ram_estimate_mb);
+  return size ? `Needs about ${size} while it runs` : null;
+}
+
+export type MemoryFit = "fits" | "tight";
+
+export const FIT_WORD: Record<MemoryFit, string> = { fits: "Fits", tight: "Tight on this pond" };
+
+/** Whether a model's need fits the room the pond reports for a Memory model; null where either is unknown. */
+export function memoryFit(
+  m: Pick<ModelEntry, "ram_estimate_mb">,
+  roomMb: number | null | undefined,
+): MemoryFit | null {
+  if (roomMb == null || !m.ram_estimate_mb) return null;
+  return m.ram_estimate_mb <= roomMb ? "fits" : "tight";
+}
+
 export type EmbedderKind =
   | "off" | "waiting" | "loading" | "downloading" | "missing" | "failed" | "reindexing" | "ready";
 
