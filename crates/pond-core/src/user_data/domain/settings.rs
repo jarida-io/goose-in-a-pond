@@ -95,6 +95,10 @@ pub const TTS_QUALITIES: &[&str] = &["q4", "q4f16", "q8", "q8f16", "fp16", "fp32
 /// Speech detectors: `rms` (energy gate, fooled by steady noise) or `silero` (2 MB ONNX model).
 pub const VAD_BACKENDS: &[&str] = &["rms", "silero"];
 
+/// Wake detectors with the ear: `auto` lets the household's calibration choose, `hey_goose` is the
+/// ear's CNN (that phrase only), `whisper` transcribes the ear's speech segments.
+pub const WAKE_DETECTORS: &[&str] = &["auto", "hey_goose", "whisper"];
+
 /// A factory default that changed after installs existed, adopted once by `migration`.
 /// Saved snapshots pin every key, so only a stored value equal to `old_default` is rewritten.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +222,10 @@ pub struct Settings {
     /// Wake-word variants from calibration (any matches); empty falls back to `voice_wake_word`.
     #[serde(default)]
     pub voice_wake_word_transcriptions: Vec<String>,
+
+    /// Which detector hears the wake word when the ear runs (`WAKE_DETECTORS`).
+    #[serde(default = "Settings::default_wake_detector")]
+    pub voice_wake_detector: String,
 
     /// Suggestor ids muted on Home; per kind, as a derived suggestion has no durable id.
     #[serde(default)]
@@ -816,6 +824,7 @@ impl Default for Settings {
             llm_temperature: Self::default_temperature(),
             llm_provider: Self::default_llm_provider(),
             voice_wake_word: Self::default_wake_word(),
+            voice_wake_detector: Self::default_wake_detector(),
             voice_kws_energy_threshold: Self::default_kws_energy_threshold(),
             voice_kws_post_trigger_silence_ms: Self::default_kws_post_trigger_silence_ms(),
             voice_kws_cooldown_ms: Self::default_kws_cooldown_ms(),
@@ -1012,6 +1021,10 @@ impl Settings {
     }
     fn default_tts_quality() -> String {
         "q8f16".to_string()
+    }
+    /// The calibration decides: the CNN missed most real voices it was not trained on.
+    fn default_wake_detector() -> String {
+        "auto".to_string()
     }
     /// A one-time 2 MB download beats shipping a detector that can't tell a fridge from a voice.
     fn default_vad_backend() -> String {
@@ -2035,6 +2048,8 @@ mod tests {
             "voice_max_turns",
             // No control yet.
             "vad_backend",
+            // Its control comes with the phone's Voice agent page, beside the detector it reports.
+            "voice_wake_detector",
             // Needs a `vision-onnx` build; its UI comes with the Models-tab vision section.
             "vision_classifier_model",
             // No control yet; owed one on the Privacy section, beside `network_mode`.

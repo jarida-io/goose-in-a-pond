@@ -22,3 +22,4 @@ pub mod recommended;
 pub mod taxonomy;
 pub mod vision_encoder;
 pub mod vision_pairing;
+pub mod wake_detector;

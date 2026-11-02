@@ -107,6 +107,7 @@ impl SettingsRepository for SqliteSettingsRepository {
         upsert!("voice_tts_speed", settings.voice_tts_speed.to_string());
         upsert!("voice_tts_quality", &settings.voice_tts_quality);
         upsert!("vad_backend", &settings.vad_backend);
+        upsert!("voice_wake_detector", &settings.voice_wake_detector);
         upsert!(
             "voice_recording_duration_secs",
             settings.voice_recording_duration_secs.to_string()
@@ -901,6 +902,7 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
         "voice_tts_quality" => s.voice_tts_quality = value.to_string(),
         // Stored verbatim so write and read agree; `settings_validation` rejects unknown backends.
         "vad_backend" => s.vad_backend = value.to_string(),
+        "voice_wake_detector" => s.voice_wake_detector = value.to_string(),
         "voice_recording_duration_secs" => {
             if let Ok(v) = value.parse() {
                 s.voice_recording_duration_secs = v;
