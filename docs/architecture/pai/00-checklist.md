@@ -4279,3 +4279,30 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
     targets, and `scripts/live-test.sh` on the deployed binary (PAI-1 section 7).
 - Not done: `GET /sessions` still lists every conversation; `POST /chat/stream` checks no
   ownership of the session it is given (both PAI-1 section 4d).
+
+- Not done: the phone app's embedding setting (an on/off switch, in its own pull request); the
+  desktop surfaces' design gate scored revise, and its fixes are their own pull request.
+
+**2026-11-02 — `relevant` re-picks tool groups on every message and always offers web search
+(touches PAI-3; not a PAI milestone).**
+
+- **What the Orin showed** (2026-10-28 06:20-06:23Z, E4B, `relevant`). "What has happened to
+  China's stock market?" loaded memory, system, toolkit and weather, so no `search_web`, and the
+  model said it had no tool for market data. The set was chosen from the first message only, so
+  "Look it up?" got the same set and an empty turn. "Do a web search on..." made the model enable
+  `giap-knowledge` itself.
+- **What landed.** `giap-knowledge` is core (`tool_group.rs`, decision D1 of
+  `small-model-tools.md`, `relevant` only; `minimal` still offers the hatch alone). Each later
+  message is scored with the same signals and every group at or above the embedder model's floor
+  is added (0.28 on MiniLM, 0.71 on EmbeddingGemma 2; an unmeasured model keeps every group;
+  `select_groups_for_later_message`, no top-scorer rescue, so small talk adds nothing);
+  `union_groups` never removes a held group, whether the opening message, a later one or
+  `enable_tool_group` loaded it. The union is persisted only when it grew. Embedding failure
+  still widens to every permitted group, and every path still clamps to the turn's permitted set.
+  `kind="tool_selection_added"` traces a turn that added groups.
+- **PAI-3 cost.** Knowledge adds 253 tokens keyless, 329 with the Brave key, 404 with both keys
+  (o200k on the minified schemas), 4.1-6.6% of a 6,144-token prompt. A turn that adds a group
+  re-prefills from the first added tool on; the core block ahead of it keeps its KV. The default
+  tool order moved once (`prefix_oracle.rs`); keyed core tools sort just after the core block.
+  A later turn now runs one to three embeddings, skipped once every permitted group is held.
+- **Not verified on the Orin**, nor by `scripts/live-test.sh`: unit tests only.

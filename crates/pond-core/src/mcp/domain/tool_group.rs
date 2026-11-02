@@ -13,8 +13,11 @@ pub struct ToolGroup {
 }
 
 /// Why each core group is core: no opening message predicts a need for memory, `giap-system`
-/// holds `get_current_time`, and `giap-toolkit` keeps narrowing reversible.
-pub const CORE_RATIONALE: &str = "memory=cross-cutting, system=time, toolkit=escape";
+/// holds `get_current_time`, `giap-toolkit` keeps narrowing reversible, and `giap-knowledge`
+/// carries `search_web`, which any factual question may need and no group description predicts
+/// (decision D1, `docs/architecture/small-model-tools.md`).
+pub const CORE_RATIONALE: &str =
+    "memory=cross-cutting, system=time, toolkit=escape, knowledge=facts and the web";
 
 /// The extension providing the discovery / enable escape hatch.
 pub const TOOLKIT_EXTENSION: &str = "giap-toolkit";
@@ -95,7 +98,7 @@ pub const TOOL_GROUPS: &[ToolGroup] = &[
     ToolGroup {
         extension: "giap-knowledge",
         description: KNOWLEDGE_WITH_WEB_AND_COMPUTE,
-        core: false,
+        core: true,
     },
     ToolGroup {
         extension: "giap-device",
@@ -261,12 +264,15 @@ pub fn tools_missing_secrets<'a>(
 }
 
 /// Sort key putting core tools first, then by name, so turns share the longest prompt prefix.
+/// A core tool that needs a secret sorts after the rest of the core block: it comes and goes
+/// with its key, so storing one moves the prefix only from that tool on.
 pub fn prefix_sort_key(tool_name: &str) -> (u8, &str) {
     // A user-added server ranks non-core: nothing guarantees it is there next turn.
     let extension = tool_name.split("__").next().unwrap_or("");
     let tier = match find_group(extension) {
-        Some(group) if group.core => 0,
-        _ => 1,
+        Some(group) if group.core && required_secret(tool_name).is_none() => 0,
+        Some(group) if group.core => 1,
+        _ => 2,
     };
     (tier, tool_name)
 }
@@ -388,10 +394,28 @@ mod tests {
 
     /// Pinned so a change to the core set is deliberate.
     #[test]
-    fn core_groups_are_exactly_the_documented_three() {
+    fn core_groups_are_exactly_the_documented_four() {
         let mut core = core_group_names();
         core.sort_unstable();
-        assert_eq!(core, vec!["giap-memory", "giap-system", "giap-toolkit"]);
+        assert_eq!(
+            core,
+            vec![
+                "giap-knowledge",
+                "giap-memory",
+                "giap-system",
+                "giap-toolkit"
+            ]
+        );
+    }
+
+    /// Web search is always offered when narrowing, so the group carrying it must be core.
+    #[test]
+    fn the_group_carrying_web_search_is_core() {
+        let group = group_of_tool(SEARCH_WEB_TOOL).expect("a prefixed tool name");
+        assert!(
+            find_group(group).is_some_and(|g| g.core),
+            "{SEARCH_WEB_TOOL} belongs to {group}, which is not core"
+        );
     }
 
     #[test]
@@ -556,7 +580,7 @@ mod prefix_order_tests {
             "giap-toolkit__enable_tool_group",
         ]);
         let b = ordered(vec![
-            "giap-knowledge__compute_answer",
+            "giap-schedule__set_timer",
             "giap-memory__recall_memories",
             "giap-toolkit__enable_tool_group",
         ]);
@@ -578,6 +602,26 @@ mod prefix_order_tests {
             "giap-weather__get_current_weather",
         ]);
         assert_eq!(forward, backward);
+    }
+
+    /// A keyed core tool comes and goes with its key, so it must not sit inside the stable block.
+    #[test]
+    fn a_keyed_core_tool_sorts_between_the_core_block_and_the_rest() {
+        let got = ordered(vec![
+            "giap-weather__get_current_weather",
+            SEARCH_WEB_TOOL,
+            "giap-memory__recall_memories",
+            "giap-knowledge__get_wikipedia_article",
+        ]);
+        assert_eq!(
+            got,
+            vec![
+                "giap-knowledge__get_wikipedia_article",
+                "giap-memory__recall_memories",
+                SEARCH_WEB_TOOL,
+                "giap-weather__get_current_weather",
+            ]
+        );
     }
 
     #[test]

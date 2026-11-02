@@ -415,7 +415,8 @@ pub struct GooseAdapter {
     cached_tools: tokio::sync::RwLock<Option<std::collections::HashSet<String>>>,
     /// Sessions whose Goose default extensions are already stripped (once per session).
     defaults_stripped: Mutex<HashSet<String>>,
-    /// Session id -> chosen tool groups, held fixed so the tools JSON (and KV prefix) don't churn.
+    /// Session id -> chosen tool groups. Only ever grows within a session (a later message or
+    /// `enable_tool_group` adds), so the tools JSON (and KV prefix) never loses a tool mid-way.
     /// Persisted in `pond_system.db`, so a restart keeps groups the model enabled itself.
     session_tool_groups: tokio::sync::RwLock<HashMap<String, Vec<String>>>,
     /// Session id -> groups it may EVER hold; the enable hatch widens only within this.
@@ -1987,11 +1988,13 @@ impl GooseAdapter {
         Some((generation, vectors))
     }
 
-    /// This session's tool groups, sticky: per-turn re-scoring would break KV prefix reuse.
+    /// This session's tool groups. The opening message picks them; every later message is scored
+    /// the same way and may only ADD groups (`tool_selection::union_groups`): a group dropped
+    /// mid-conversation strands tool results the history refers to, and moves the KV prefix.
     async fn resolve_session_tool_groups(
         &self,
         giap_session_id: &str,
-        first_message: &str,
+        message: &str,
         memories: &str,
         skills: &str,
         scope: &ProfileScope,
@@ -1999,61 +2002,34 @@ impl GooseAdapter {
     ) -> SessionGroups {
         use pond_core::mcp::services::tool_selection as sel;
 
-        // Filtered up front, which sticks: `select_groups` filters core groups by `available`.
+        // Filtered up front, which sticks: selection filters core groups by `permitted` too.
         let permitted = self.permitted_groups(scope);
+        self.remember_permitted(giap_session_id, &permitted).await;
 
-        if let Some(cached) = self
-            .session_tool_groups
-            .read()
-            .await
-            .get(giap_session_id)
-            .cloned()
-        {
-            // Clamp to what is permitted NOW: scope is re-derived per turn, and an Owner turn
-            // may have filled this cache before a Guest (or failed-rung) turn reads it.
-            let cached =
-                pond_core::mcp::services::tool_selection::clamp_to_permitted(cached, &permitted);
-            self.remember_permitted(giap_session_id, &permitted).await;
-            return SessionGroups {
-                loaded: cached,
-                permitted,
-            };
-        }
-
-        if let Some(storage) = &self.giap_session_storage {
-            if let Ok(Some(groups)) = storage.get_session_tool_groups(giap_session_id).await {
-                if !groups.is_empty() {
-                    // Stored per session, scope is per turn: clamp to what is permitted now.
-                    let groups = pond_core::mcp::services::tool_selection::clamp_to_permitted(
-                        groups, &permitted,
-                    );
-                    self.session_tool_groups
-                        .write()
-                        .await
-                        .insert(giap_session_id.to_string(), groups.clone());
-                    self.remember_permitted(giap_session_id, &permitted).await;
-                    tracing::debug!(
-                        session_id = %giap_session_id,
-                        groups = ?groups,
-                        "tool selection: restored persisted groups"
-                    );
-                    return SessionGroups {
-                        loaded: groups,
-                        permitted,
-                    };
-                }
+        // Held unclamped, so a wider speaker's groups survive a narrower turn; every return
+        // clamps to what is permitted NOW, as scope is re-derived per turn.
+        let held = self.held_session_tool_groups(giap_session_id).await;
+        if let Some(held) = &held {
+            // "minimal" never scores; and with every permitted group held, scoring adds nothing.
+            if minimal || permitted.iter().all(|p| held.contains(p)) {
+                return SessionGroups {
+                    loaded: sel::clamp_to_permitted(held.clone(), &permitted),
+                    permitted,
+                };
             }
         }
 
-        let available: Vec<String> = permitted.clone();
-
-        // "minimal": the hatch only, no scoring. After the cache and persisted row so groups
-        // the model enabled earlier this session come back without another round trip.
+        // "minimal": the hatch only, no scoring. After the held groups so ones the model enabled
+        // earlier this session come back without another round trip.
         if minimal {
-            let selection = sel::minimal_groups(&available);
-            self.persist_session_tool_groups(giap_session_id, &selection.groups)
-                .await;
-            self.remember_permitted(giap_session_id, &permitted).await;
+            let selection = sel::minimal_groups(&permitted);
+            Self::merge_session_tool_groups(
+                &self.session_tool_groups,
+                self.giap_session_storage.as_deref(),
+                giap_session_id,
+                &selection.groups,
+            )
+            .await;
             tracing::info!(
                 target: "giap::trace",
                 kind = "tool_selection",
@@ -2071,42 +2047,15 @@ impl GooseAdapter {
         }
 
         // Scored separately and max-merged, so a kilobyte of memories can't drown a short question.
-        let signals = sel::selection_signals(first_message, memories, skills);
-
-        // Failures widen to all groups: a missing tool is a wrong answer, a surplus one is tokens.
+        let signals = sel::selection_signals(message, memories, skills);
         let scores: Option<Vec<sel::GroupScore>> = match (
             self.group_description_embeddings().await,
-            self.embedding_provider.as_ref(),
+            self.embedding_provider.as_deref(),
         ) {
             (Some((generation, group_vectors)), Some(provider)) => {
-                let mut per_signal: Vec<Vec<sel::GroupScore>> = Vec::with_capacity(signals.len());
-                let mut failed = None;
-                for signal in &signals {
-                    match provider.embed(signal).await {
-                        Ok(query) => per_signal.push(
-                            group_vectors
-                                .iter()
-                                .map(|(extension, v)| sel::GroupScore {
-                                    extension: extension.clone(),
-                                    score: cosine_similarity(&query, v),
-                                })
-                                .collect(),
-                        ),
-                        Err(e) => failed = Some(e),
-                    }
-                }
-                match (per_signal.is_empty(), failed) {
-                    // The model changed under the scoring: its signals and groups are two spaces.
-                    _ if provider.generation() != generation => None,
-                    // Every signal failed to embed: widen.
-                    (true, Some(e)) => {
-                        tracing::warn!("tool selection: embedding the opening message failed: {e}");
-                        None
-                    }
-                    (true, None) => None,
-                    // Score whatever embedded; don't drop a good signal because another failed.
-                    _ => Some(sel::merge_scores(&per_signal)),
-                }
+                let scores = Self::score_signals(provider, &group_vectors, &signals).await;
+                // The model changed under the scoring: its signals and groups are two spaces.
+                scores.filter(|_| provider.generation() == generation)
             }
             _ => None,
         };
@@ -2115,7 +2064,11 @@ impl GooseAdapter {
             .embedding_provider
             .as_ref()
             .and_then(|p| sel::relevance_floor(p.as_ref()));
-        let selection = sel::select_groups(&available, scores.as_deref(), floor);
+        // Failures widen to all groups: a missing tool is a wrong answer, a surplus one is tokens.
+        let selection = match &held {
+            None => sel::select_groups(&permitted, scores.as_deref(), floor),
+            Some(_) => sel::select_groups_for_later_message(&permitted, scores.as_deref(), floor),
+        };
 
         if matches!(selection.basis, sel::SelectionBasis::Unmeasured) {
             tracing::info!(
@@ -2161,29 +2114,139 @@ impl GooseAdapter {
             }
         }
 
-        self.persist_session_tool_groups(giap_session_id, &selection.groups)
-            .await;
-        self.remember_permitted(giap_session_id, &permitted).await;
+        let (groups, added) = Self::merge_session_tool_groups(
+            &self.session_tool_groups,
+            self.giap_session_storage.as_deref(),
+            giap_session_id,
+            &selection.groups,
+        )
+        .await;
+        if held.is_some() && !added.is_empty() {
+            // The tools block changes from the first added tool on, so this turn re-prefills
+            // from there; the core block ahead of it keeps its KV.
+            tracing::info!(
+                target: "giap::trace",
+                kind = "tool_selection_added",
+                session_id = %giap_session_id,
+                added = ?added,
+                groups = ?groups,
+                "a later message added tool groups to the session"
+            );
+        }
         SessionGroups {
-            loaded: selection.groups,
+            loaded: sel::clamp_to_permitted(groups, &permitted),
             permitted,
         }
     }
 
-    /// Caches in-process and persists; a failed persist only costs stickiness across restarts.
-    async fn persist_session_tool_groups(&self, giap_session_id: &str, groups: &[String]) {
-        self.session_tool_groups
-            .write()
+    /// The groups this session already holds: the in-process cache, else the persisted row, which
+    /// is cached on the way. `None` when selection has never run for the session.
+    async fn held_session_tool_groups(&self, giap_session_id: &str) -> Option<Vec<String>> {
+        if let Some(cached) = self
+            .session_tool_groups
+            .read()
             .await
-            .insert(giap_session_id.to_string(), groups.to_vec());
-        if let Some(storage) = &self.giap_session_storage {
-            if let Err(e) = storage
-                .set_session_tool_groups(giap_session_id, groups)
-                .await
-            {
-                tracing::warn!("tool selection: persisting groups failed: {e}");
+            .get(giap_session_id)
+            .cloned()
+        {
+            return Some(cached);
+        }
+        let storage = self.giap_session_storage.as_ref()?;
+        match storage.get_session_tool_groups(giap_session_id).await {
+            Ok(Some(stored)) if !stored.is_empty() => {
+                // Merged, not inserted: a concurrent turn may have filled the cache meanwhile.
+                let (held, _) = Self::merge_session_tool_groups(
+                    &self.session_tool_groups,
+                    None,
+                    giap_session_id,
+                    &stored,
+                )
+                .await;
+                tracing::debug!(
+                    session_id = %giap_session_id,
+                    groups = ?held,
+                    "tool selection: read back the persisted groups"
+                );
+                Some(held)
+            }
+            Ok(_) => None,
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %giap_session_id,
+                    "tool selection: reading the persisted groups failed, selecting afresh: {e}"
+                );
+                None
             }
         }
+    }
+
+    /// Every signal's cosine against every group vector, max-merged across signals. `None`, which
+    /// widens, when no signal embedded; a signal that failed does not sink one that embedded.
+    async fn score_signals(
+        provider: &dyn EmbeddingProvider,
+        group_vectors: &[(String, Vec<f32>)],
+        signals: &[String],
+    ) -> Option<Vec<pond_core::mcp::services::tool_selection::GroupScore>> {
+        use pond_core::mcp::services::tool_selection as sel;
+
+        let mut per_signal: Vec<Vec<sel::GroupScore>> = Vec::with_capacity(signals.len());
+        let mut failed = None;
+        for signal in signals {
+            match provider.embed(signal).await {
+                Ok(query) => per_signal.push(
+                    group_vectors
+                        .iter()
+                        .map(|(extension, v)| sel::GroupScore {
+                            extension: extension.clone(),
+                            score: cosine_similarity(&query, v),
+                        })
+                        .collect(),
+                ),
+                Err(e) => failed = Some(e),
+            }
+        }
+        match (per_signal.is_empty(), failed) {
+            (true, Some(e)) => {
+                tracing::warn!("tool selection: embedding the message failed: {e}");
+                None
+            }
+            (true, None) => None,
+            _ => Some(sel::merge_scores(&per_signal)),
+        }
+    }
+
+    /// Unions `picked` into the session's held groups, never removing one, and persists the result
+    /// when it grew. Always leaves an entry, so `enable_tool_group` finds the session narrowing.
+    /// Returns the held groups after the merge and the ones it added. A failed persist only costs
+    /// the groups across a restart.
+    async fn merge_session_tool_groups(
+        held: &tokio::sync::RwLock<HashMap<String, Vec<String>>>,
+        storage: Option<&dyn pond_core::user_data::ports::session_storage::SessionStorage>,
+        giap_session_id: &str,
+        picked: &[String],
+    ) -> (Vec<String>, Vec<String>) {
+        let (groups, added) = {
+            let mut map = held.write().await;
+            let entry = map.entry(giap_session_id.to_string()).or_default();
+            let (groups, added) =
+                pond_core::mcp::services::tool_selection::union_groups(entry, picked);
+            entry.clone_from(&groups);
+            (groups, added)
+        };
+        if !added.is_empty() {
+            if let Some(storage) = storage {
+                if let Err(e) = storage
+                    .set_session_tool_groups(giap_session_id, &groups)
+                    .await
+                {
+                    tracing::warn!(
+                        session_id = %giap_session_id,
+                        "tool selection: persisting groups failed: {e}"
+                    );
+                }
+            }
+        }
+        (groups, added)
     }
 
     /// The groups this scope may ever hold; the rule is `tool_selection::permitted_groups`.
@@ -5265,6 +5328,163 @@ mod tests {
             GooseAdapter::visible_user_texts(&messages),
             ["after compaction"]
         );
+    }
+
+    // ── Tool groups re-picked on every message ────────────────────────────
+
+    /// Embeds only the texts it was given; anything else fails, as a broken embedder would.
+    struct FixedEmbedder(HashMap<&'static str, Vec<f32>>);
+
+    #[async_trait]
+    impl EmbeddingProvider for FixedEmbedder {
+        async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+            self.0
+                .get(text)
+                .cloned()
+                .ok_or_else(|| anyhow!("no vector for {text:?}"))
+        }
+
+        fn dimensions(&self) -> usize {
+            2
+        }
+    }
+
+    fn strings(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    /// MiniLM's tool-relevance floor, which the later-message fixtures were written against.
+    fn minilm_floor() -> Option<f32> {
+        pond_core::models::domain::embedding_models::ALL_MINILM_L6_V2
+            .floors
+            .map(|f| f.tool_relevance)
+    }
+
+    fn catalog() -> Vec<String> {
+        pond_core::mcp::domain::tool_group::TOOL_GROUPS
+            .iter()
+            .map(|g| g.extension.to_string())
+            .collect()
+    }
+
+    /// The opening message loaded weather, the model enabled device control, and the session
+    /// then asks for a reminder: schedule joins, and nothing already held leaves.
+    #[tokio::test]
+    async fn a_later_message_adds_the_group_it_scores_on_and_keeps_every_held_one() {
+        use pond_core::mcp::services::tool_selection as sel;
+        use pond_core::user_data::mocks::mock_session::InMemorySessionStorage;
+        use pond_core::user_data::ports::session_storage::SessionStorage;
+
+        let opening = strings(&[
+            "giap-device-control",
+            "giap-knowledge",
+            "giap-memory",
+            "giap-system",
+            "giap-toolkit",
+            "giap-weather",
+        ]);
+        let storage = InMemorySessionStorage::new();
+        storage
+            .set_session_tool_groups("s1", &opening)
+            .await
+            .unwrap();
+        let held = tokio::sync::RwLock::new(HashMap::from([("s1".to_string(), opening.clone())]));
+
+        let embedder = FixedEmbedder(HashMap::from([("Remind me at six", vec![1.0, 0.0])]));
+        let group_vectors = vec![
+            ("giap-schedule".to_string(), vec![1.0, 0.0]),
+            ("giap-weather".to_string(), vec![0.0, 1.0]),
+        ];
+        let signals = sel::selection_signals("Remind me at six", "", "");
+        let scores = GooseAdapter::score_signals(&embedder, &group_vectors, &signals).await;
+        let picked =
+            sel::select_groups_for_later_message(&catalog(), scores.as_deref(), minilm_floor());
+        assert!(
+            !picked.groups.iter().any(|g| g == "giap-weather"),
+            "the fixture must leave a held group out of the pick, or 'never removes' is untested"
+        );
+
+        let (groups, added) =
+            GooseAdapter::merge_session_tool_groups(&held, Some(&storage), "s1", &picked.groups)
+                .await;
+
+        assert_eq!(added, strings(&["giap-schedule"]));
+        for kept in &opening {
+            assert!(groups.contains(kept), "{kept} was dropped: {groups:?}");
+        }
+        assert!(groups.iter().any(|g| g == "giap-schedule"));
+        assert_eq!(held.read().await.get("s1"), Some(&groups));
+        assert_eq!(
+            storage.get_session_tool_groups("s1").await.unwrap(),
+            Some(groups),
+            "the widened set must survive a restart"
+        );
+    }
+
+    /// A later message the embedder cannot read widens, as the opening one does.
+    #[tokio::test]
+    async fn a_later_message_that_fails_to_embed_widens_to_every_group() {
+        use pond_core::mcp::services::tool_selection as sel;
+        use pond_core::user_data::mocks::mock_session::InMemorySessionStorage;
+        use pond_core::user_data::ports::session_storage::SessionStorage;
+
+        let embedder = FixedEmbedder(HashMap::new());
+        let group_vectors = vec![("giap-schedule".to_string(), vec![1.0, 0.0])];
+        let signals = sel::selection_signals("Look it up?", "", "");
+        let scores = GooseAdapter::score_signals(&embedder, &group_vectors, &signals).await;
+        assert!(scores.is_none());
+
+        let picked =
+            sel::select_groups_for_later_message(&catalog(), scores.as_deref(), minilm_floor());
+        let storage = InMemorySessionStorage::new();
+        let held = tokio::sync::RwLock::new(HashMap::from([(
+            "s1".to_string(),
+            strings(&["giap-memory", "giap-toolkit"]),
+        )]));
+        let (groups, _) =
+            GooseAdapter::merge_session_tool_groups(&held, Some(&storage), "s1", &picked.groups)
+                .await;
+
+        let mut everything = catalog();
+        everything.sort();
+        assert_eq!(groups, everything);
+        assert_eq!(
+            storage.get_session_tool_groups("s1").await.unwrap(),
+            Some(everything)
+        );
+    }
+
+    /// Nothing new means no write: the store is on eMMC and this runs every turn.
+    #[tokio::test]
+    async fn a_message_that_adds_nothing_writes_nothing() {
+        use pond_core::user_data::mocks::mock_session::InMemorySessionStorage;
+        use pond_core::user_data::ports::session_storage::SessionStorage;
+
+        let storage = InMemorySessionStorage::new();
+        let held = tokio::sync::RwLock::new(HashMap::from([(
+            "s1".to_string(),
+            strings(&["giap-knowledge", "giap-memory"]),
+        )]));
+        let (groups, added) = GooseAdapter::merge_session_tool_groups(
+            &held,
+            Some(&storage),
+            "s1",
+            &strings(&["giap-memory"]),
+        )
+        .await;
+
+        assert!(added.is_empty());
+        assert_eq!(groups, strings(&["giap-knowledge", "giap-memory"]));
+        assert_eq!(storage.get_session_tool_groups("s1").await.unwrap(), None);
+    }
+
+    /// `enable_tool_group` refuses a session with no entry, so even an empty pick leaves one.
+    #[tokio::test]
+    async fn the_first_merge_leaves_an_entry_even_when_it_picks_nothing() {
+        let held = tokio::sync::RwLock::new(HashMap::new());
+        let (groups, added) = GooseAdapter::merge_session_tool_groups(&held, None, "s1", &[]).await;
+        assert!(groups.is_empty() && added.is_empty());
+        assert_eq!(held.read().await.get("s1"), Some(&Vec::new()));
     }
 
     // ── thinking section stability ────────────────────────────────────────

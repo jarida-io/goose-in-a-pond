@@ -274,7 +274,10 @@ embedding slot (`embedding_slot.rs`).
   ones, so a widen lands on the next provider call of the same reply loop.
   Core set: `giap-memory` (cross-cutting), `giap-system` (holds
   `get_current_time`), `giap-toolkit` (the hatch). `giap-draft` was the fourth
-  until its group was deleted on 2026-09-10.
+  until its group was deleted on 2026-09-10. Since 2026-11-02 `giap-knowledge`
+  is core (web search always offered), and each later message is scored too
+  and may add groups, never remove one; the first-message-only rule above is
+  history.
   Escape hatch: `giap-toolkit`'s `list_tool_groups` + `enable_tool_group`, plus a
   `<tool-groups>` listing of dormant groups in `<system-context>` so the model
   usually skips the discovery round trip. This is NOT a keyword classifier and

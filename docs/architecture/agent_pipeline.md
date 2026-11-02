@@ -54,7 +54,7 @@ flowchart TD
 | Memory block | Candidates ranked by `rank_by_relevance`, cut to `CompactionProfile::max_memory_fragments` and `memory_token_budget`, minus lines an earlier turn already showed; access is recorded for decay |
 | 5. Provider | `ensure_provider_current` builds or swaps the provider when the chat model changed; with none configured the turn fails with a household-readable message |
 | 6. Builtins | Goose's own builtins in `GOOSE_STRIPPED_BUILTINS` (`developer`, `computercontroller`, `extensionmanager`, `todo`, `apps`, `analyze`, `summon`, `summarize`, `orchestrator`, `tom`) are removed once per session |
-| 6c. Tool groups | When `tool_selection_mode` is `relevant` or `minimal` (default `all`), the tool groups for the session are chosen once and stored (`session_tool_groups`); only those schemas ride the prompt, and the shim enforces the set per call |
+| 6c. Tool groups | When `tool_selection_mode` is `relevant` or `minimal` (default `all`), the tool groups for the session are chosen from its opening message and stored (`session_tool_groups`); in `relevant` each later message is scored too and may add groups, never remove one; only those schemas ride the prompt, and the shim enforces the set per call |
 | 6d, 6e. Subtractions | A guest turn loses the tools `subtract_guest_denied_tools` denies, in every mode; tools whose secret (API key) is not stored are withheld |
 | 7. Mode | `GooseMode::Auto` |
 | 8. User text | `<user-message>` first, then `<system-context>` holding the dynamic suffix, the `<memories>` block and the answer contract (`answer_contract()`), so the system and tools prefix stays byte-stable across turns |

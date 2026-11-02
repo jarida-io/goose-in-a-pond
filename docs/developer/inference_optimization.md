@@ -156,7 +156,7 @@ schemas ([prefill-cost-audit.md](prefill-cost-audit.md)).
 
 | Setting | Values (default first) | Effect |
 |---|---|---|
-| `tool_selection_mode` | `all`, `relevant`, `minimal` | `relevant` sends core groups plus those scored relevant, fixed per session so the KV prefix holds; `minimal` sends only the toolkit hatch and loads groups through `enable_tool_group` |
+| `tool_selection_mode` | `all`, `relevant`, `minimal` | `relevant` sends the core groups (memory, system, toolkit, knowledge, so web search is always offered) plus those scored relevant; the opening message picks them, each later message may add groups scored at or above the threshold and never removes one, so the KV prefix only moves when a group joins; `minimal` sends only the toolkit hatch and loads groups through `enable_tool_group` |
 | `thinking_mode` | `auto`, `on`, `off` | `auto` thinks only on models whose template supports it; on the Orin every thinking token is decode-bound silence |
 | `reasoning_effort` | `brief`, `balanced`, `thorough` | Thinking length when thinking is on |
 | `hybrid_compaction_enabled` | on | Compacts long conversations while the household is quiet, so the next turn does not stall for it |
