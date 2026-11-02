@@ -272,6 +272,29 @@ pub fn chunk(text: &str, vocab: &Vocab) -> Result<(Vec<Chunk>, usize)> {
     Ok((out, dropped))
 }
 
+/// `chunk` as two shorter passes, cut at the space nearest its middle, or just after a clause
+/// mark in its middle half so the cut lands on a pause; `None` for a chunk with no inner space.
+pub fn halves(chunk: &Chunk) -> Option<(Chunk, Chunk)> {
+    let chars: Vec<char> = chunk.phonemes.chars().collect();
+    debug_assert_eq!(chars.len(), chunk.tokens.len());
+    let n = chars.len();
+    let spaces: Vec<usize> = (1..n.saturating_sub(1))
+        .filter(|&i| chars[i] == ' ')
+        .collect();
+    let middle = |i: &&usize| (**i as isize - n as isize / 2).unsigned_abs();
+    let at_mark = spaces
+        .iter()
+        .filter(|&&i| (n / 4..=3 * n / 4).contains(&i) && matches!(chars[i - 1], ',' | ';' | ':'))
+        .min_by_key(middle);
+    let cut = *at_mark.or_else(|| spaces.iter().min_by_key(middle))?;
+    let part = |range: std::ops::Range<usize>| Chunk {
+        text: chunk.text.clone(),
+        phonemes: chars[range.clone()].iter().collect(),
+        tokens: chunk.tokens[range].to_vec(),
+    };
+    Some((part(0..cut), part(cut + 1..n)))
+}
+
 /// Split at the last space before the limit. `encode` keeps `ids` and `phonemes` index-aligned.
 fn split_to_limit(ids: &[i64], phonemes: &str) -> Vec<(Vec<i64>, String)> {
     let chars: Vec<char> = phonemes.chars().collect();

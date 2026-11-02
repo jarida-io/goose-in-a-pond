@@ -542,3 +542,40 @@ async fn render_replies_as_spoken() {
     )
     .unwrap();
 }
+
+/// Sentences the nano's q4f16 once returned as 0.5 s of silence: each must come back as speech.
+#[tokio::test]
+#[ignore = "needs Kokoro weights and an audio device; set KOKORO_DIR"]
+async fn the_sentences_that_came_back_empty_are_spoken() {
+    let dir = model_dir().expect("set KOKORO_DIR");
+    let output = pond_adapters_kokoro::KokoroOutput::new(pond_adapters_kokoro::KokoroConfig {
+        model_path: dir.join(model_file()),
+        voices_dir: dir.join("voices"),
+        tokenizer_path: dir.join("tokenizer.json"),
+        intra_threads: intra_threads(),
+        espeak_data: None,
+    })
+    .expect("Kokoro output");
+    for text in [
+        "Goose, remind me to water the plants at six.",
+        "Goose, how far is the walk to the market?",
+        "Remind me to water the plants at six.",
+        "How far is the walk to the market?",
+        "Goose, what should I cook tonight?",
+        "Hey goose, remind me to call Mum at six.",
+    ] {
+        let unit = pond_voice::text::SpeechUnit::from_text(text);
+        let samples = output.synth_samples(&unit).await.unwrap();
+        let secs = duration_secs(&samples);
+        let peak = samples.iter().fold(0f32, |m, s| m.max(s.abs()));
+        println!("{text:?}: {secs:.2} s, peak {peak:.3}");
+        assert!(
+            samples.iter().all(|s| s.is_finite()),
+            "{text:?} has non-finite samples"
+        );
+        assert!(
+            secs > 1.5 && peak > 0.05,
+            "{text:?} came back as {secs:.2} s, peak {peak}"
+        );
+    }
+}
