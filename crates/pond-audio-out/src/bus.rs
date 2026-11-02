@@ -4,15 +4,10 @@ use anyhow::Result;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use pond_core::models::ports::voice_output::VoiceOutput;
+use pond_core::models::services::voice::speech_pipeline::{SpeechPipeline, SENTENCE_HOLD};
 use pond_core::shared::domain::agent::AgentStreamEvent;
-use pond_voice::text::{split_reply_units, split_speech_units};
+use pond_voice::text::{split_text, ReplySplitter};
 use std::sync::Arc;
-use tokio::sync::mpsc;
-
-enum AudioItem {
-    Wav(Vec<u8>),
-    Fallback(String),
-}
 
 /// Unified audio bus coordinating speech synthesis and hardware playback.
 #[derive(Clone)]
@@ -45,80 +40,34 @@ impl AudioBus {
         self.voice.is_playing()
     }
 
+    fn pipeline(&self) -> SpeechPipeline {
+        let voice = self.voice.clone();
+        SpeechPipeline::start(
+            self.voice.clone(),
+            Some(Arc::new(|text: &str| crate::tap::report_spoken(text))),
+            Some(Box::new(move || voice.end_utterance())),
+        )
+    }
+
     /// Deliver text speech units, optionally waiting for speaker playback to finish.
     pub async fn speak_text(&self, text: &str, wait_for_playback: bool) -> Result<()> {
-        let (units, remainder) = split_speech_units(text, true);
-        let mut all_units = units;
-        let remainder = remainder.trim();
-        if !remainder.is_empty() {
-            all_units.push(remainder.to_string());
-        }
-        if all_units.is_empty() {
+        let units = split_text(text);
+        if units.is_empty() {
             return Ok(());
         }
 
         self.voice.begin_utterance();
-
-        let (speech_tx, mut speech_rx) = mpsc::channel::<String>(8);
-        let (audio_tx, mut audio_rx) = mpsc::channel::<AudioItem>(8);
-
-        let voice_synth = self.voice.clone();
-        let synth_handle = tokio::spawn(async move {
-            while let Some(clause) = speech_rx.recv().await {
-                if clause.is_empty() {
-                    continue;
-                }
-                crate::tap::report_spoken(&clause);
-                match voice_synth.synthesize(&clause).await {
-                    Ok(Some(wav)) if !wav.is_empty() => {
-                        if audio_tx.send(AudioItem::Wav(wav)).await.is_err() {
-                            break;
-                        }
-                    }
-                    _ => {
-                        if audio_tx.send(AudioItem::Fallback(clause)).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-
-        let voice_play = self.voice.clone();
-        let playback_handle = tokio::spawn(async move {
-            while let Some(item) = audio_rx.recv().await {
-                match item {
-                    AudioItem::Wav(wav) => {
-                        if let Err(e) = voice_play.play_audio(wav).await {
-                            tracing::warn!("AudioBus playback failed: {e}");
-                        }
-                    }
-                    AudioItem::Fallback(text) => {
-                        if let Err(e) = voice_play.speak(&text).await {
-                            tracing::warn!("AudioBus fallback speak failed: {e}");
-                        }
-                    }
-                }
-            }
-            voice_play.end_utterance();
-        });
-
-        for unit in all_units {
-            let clean = unit.trim().to_string();
-            if !clean.is_empty() && speech_tx.send(clean).await.is_err() {
+        let mut pipeline = self.pipeline();
+        for unit in units {
+            if !pipeline.say(unit).await {
                 break;
             }
         }
-        drop(speech_tx);
 
         if wait_for_playback {
-            let _ = synth_handle.await;
-            let _ = playback_handle.await;
+            pipeline.finish().await;
         } else {
-            tokio::spawn(async move {
-                let _ = synth_handle.await;
-                let _ = playback_handle.await;
-            });
+            tokio::spawn(async move { pipeline.finish().await });
         }
 
         Ok(())
@@ -134,98 +83,55 @@ impl AudioBus {
         wait_for_playback: bool,
     ) -> Result<String> {
         self.voice.begin_utterance();
-
-        let (speech_tx, mut speech_rx) = mpsc::channel::<String>(8);
-        let (audio_tx, mut audio_rx) = mpsc::channel::<AudioItem>(8);
-
-        let voice_synth = self.voice.clone();
-        let synth_handle = tokio::spawn(async move {
-            while let Some(clause) = speech_rx.recv().await {
-                if clause.is_empty() {
-                    continue;
-                }
-                crate::tap::report_spoken(&clause);
-                match voice_synth.synthesize(&clause).await {
-                    Ok(Some(wav)) if !wav.is_empty() => {
-                        if audio_tx.send(AudioItem::Wav(wav)).await.is_err() {
-                            break;
-                        }
-                    }
-                    _ => {
-                        if audio_tx.send(AudioItem::Fallback(clause)).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-
-        let voice_play = self.voice.clone();
-        let playback_handle = tokio::spawn(async move {
-            while let Some(item) = audio_rx.recv().await {
-                match item {
-                    AudioItem::Wav(wav) => {
-                        if let Err(e) = voice_play.play_audio(wav).await {
-                            tracing::warn!("AudioBus playback failed: {e}");
-                        }
-                    }
-                    AudioItem::Fallback(text) => {
-                        if let Err(e) = voice_play.speak(&text).await {
-                            tracing::warn!("AudioBus fallback speak failed: {e}");
-                        }
-                    }
-                }
-            }
-            voice_play.end_utterance();
-        });
+        let mut pipeline = self.pipeline();
 
         let mut full_text = String::new();
-        let mut sentence_buf = String::new();
-        let mut split_a_unit = false;
+        let mut splitter = ReplySplitter::new();
 
-        while let Some(event_result) = stream.next().await {
-            match event_result? {
-                AgentStreamEvent::Text { content } => {
-                    full_text.push_str(&content);
-                    sentence_buf.push_str(&content);
-
-                    let (units, remainder) = split_reply_units(&sentence_buf, true, !split_a_unit);
-                    sentence_buf = remainder;
-                    split_a_unit |= !units.is_empty();
-                    for unit in units {
-                        let clean = unit.trim().to_string();
-                        if !clean.is_empty() && speech_tx.send(clean).await.is_err() {
-                            break;
+        loop {
+            let event = if splitter.pending().trim().is_empty() {
+                stream.next().await
+            } else {
+                match tokio::time::timeout(SENTENCE_HOLD, stream.next()).await {
+                    Ok(event) => event,
+                    Err(_) => {
+                        for unit in splitter.pause(pipeline.pace()) {
+                            pipeline.say(unit).await;
                         }
+                        continue;
                     }
                 }
-                AgentStreamEvent::Done { .. } => {
-                    break;
+            };
+            let Some(event_result) = event else {
+                break;
+            };
+            let units = match event_result? {
+                AgentStreamEvent::Text { content } => {
+                    full_text.push_str(&content);
+                    splitter.push(&content, pipeline.pace())
                 }
+                AgentStreamEvent::ToolCall { .. } => splitter.pause(pipeline.pace()),
+                AgentStreamEvent::Done { .. } => break,
                 AgentStreamEvent::Error { content } => {
                     return Err(anyhow::anyhow!("agent stream error: {content}"));
                 }
-                _ => {}
+                _ => Vec::new(),
+            };
+            for unit in units {
+                if !pipeline.say(unit).await {
+                    break;
+                }
             }
         }
 
-        let remainder = sentence_buf.trim();
-        if !remainder.is_empty() {
-            let clean = remainder.to_string();
-            if !clean.is_empty() {
-                let _ = speech_tx.send(clean).await;
-            }
+        for unit in splitter.finish() {
+            pipeline.say(unit).await;
         }
-        drop(speech_tx);
 
         if wait_for_playback {
-            let _ = synth_handle.await;
-            let _ = playback_handle.await;
+            pipeline.finish().await;
         } else {
-            tokio::spawn(async move {
-                let _ = synth_handle.await;
-                let _ = playback_handle.await;
-            });
+            tokio::spawn(async move { pipeline.finish().await });
         }
 
         Ok(full_text)

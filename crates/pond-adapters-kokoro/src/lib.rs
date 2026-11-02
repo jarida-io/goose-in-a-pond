@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use pond_audio_out::{play_wav_on, start_thinking_tone_thread, Speaker, TONE_OFF};
 use pond_core::models::ports::voice_output::VoiceOutput;
 use pond_core::shared::domain::agent::ThrottledAudioLevelSink;
-use pond_voice::dsp::{encode_wav_pcm16, f32_to_pcm16};
-use pond_voice::text::split_speech_units;
+use pond_voice::dsp::{encode_wav_pcm16, f32_to_pcm16, speech_bounds};
+use pond_voice::text::{split_text, Boundary, SpeechUnit};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,6 +27,13 @@ pub const DEFAULT_SPEED: f32 = 1.0;
 /// Below 0.5 the prosody smears; above 2.0 it clips words.
 pub const MIN_SPEED: f32 = 0.5;
 pub const MAX_SPEED: f32 = 2.0;
+
+/// Kept of Kokoro's own silence before a chunk's first sound and after its last. The model puts
+/// ~0.3 s before and ~0.5 s after every forward pass, which made every unit boundary ~0.8 s long.
+const LEAD_KEEP_SECS: f32 = 0.03;
+const TAIL_KEEP_SECS: f32 = 0.05;
+/// Fade at a trimmed edge, so the cut never clicks.
+const EDGE_FADE_SECS: f32 = 0.005;
 
 /// Where Kokoro's files live, and how hard to work.
 #[derive(Debug, Clone)]
@@ -205,26 +212,32 @@ impl KokoroOutput {
         self.ensure_loaded().await
     }
 
-    /// Mono f32 at [`SAMPLE_RATE`]; empty for text that phonemizes to nothing.
-    pub async fn synth_samples(&self, text: &str) -> Result<Vec<f32>> {
-        self.synth_samples_with(text, None).await
+    /// Mono f32 at [`SAMPLE_RATE`], ending in the pause `unit` calls for; empty for text that
+    /// phonemizes to nothing.
+    pub async fn synth_samples(&self, unit: &SpeechUnit) -> Result<Vec<f32>> {
+        self.synth_samples_with(&unit.text, unit.boundary, None)
+            .await
     }
 
     /// `text` in `voice` as a WAV, leaving the selected voice untouched: a turn reads the
     /// selection between sentences, so swapping it for a preview would race that turn.
     pub async fn synth_wav_in_voice(&self, voice: &str, text: &str) -> Result<Vec<u8>> {
         let style = Arc::new(StyleTable::load(&self.config.voices_dir, voice)?);
-        let samples = self.synth_samples_with(text, Some(style)).await?;
+        let samples = self
+            .synth_samples_with(text, Boundary::End, Some(style))
+            .await?;
         if samples.is_empty() {
             return Ok(Vec::new());
         }
         Ok(encode_wav_pcm16(&f32_to_pcm16(&samples), SAMPLE_RATE))
     }
 
-    /// `style` is the voice to use; `None` is the selected one.
+    /// `style` is the voice to use; `None` is the selected one. Each forward pass is cut to its
+    /// speech and followed by the pause its end calls for, `after` for the last one.
     async fn synth_samples_with(
         &self,
         text: &str,
+        after: Boundary,
         style: Option<Arc<StyleTable>>,
     ) -> Result<Vec<f32>> {
         let vocab = self.vocab.clone();
@@ -258,9 +271,14 @@ impl KokoroOutput {
                 anyhow::bail!("the Kokoro engine was unloaded before synthesis");
             };
             let mut samples = Vec::new();
-            for chunk in &chunks {
+            for (k, chunk) in chunks.iter().enumerate() {
                 let style_row = style.style_for(chunk.tokens.len());
-                samples.extend(engine.synthesize(chunk, style_row, speed)?);
+                let audio = engine.synthesize(chunk, style_row, speed)?;
+                let end = match chunks.get(k + 1) {
+                    Some(_) => Boundary::from_text_end(&chunk.phonemes),
+                    None => after,
+                };
+                push_paced(&mut samples, &audio, end, speed);
             }
             Ok(samples)
         })
@@ -270,8 +288,8 @@ impl KokoroOutput {
     }
 
     /// Synthesize to a WAV buffer ready for playback or an HTTP response.
-    pub async fn synth_wav(&self, text: &str) -> Result<Vec<u8>> {
-        let samples = self.synth_samples(text).await?;
+    pub async fn synth_wav(&self, unit: &SpeechUnit) -> Result<Vec<u8>> {
+        let samples = self.synth_samples(unit).await?;
         if samples.is_empty() {
             return Ok(Vec::new());
         }
@@ -297,12 +315,7 @@ impl KokoroOutput {
 impl VoiceOutput for KokoroOutput {
     async fn speak(&self, text: &str) -> Result<()> {
         self.begin_utterance();
-        let (units, remainder) = split_speech_units(text, true);
-        let mut all_units = units;
-        let remainder = remainder.trim();
-        if !remainder.is_empty() {
-            all_units.push(remainder.to_string());
-        }
+        let all_units = split_text(text);
         if all_units.is_empty() {
             return Ok(());
         }
@@ -362,7 +375,11 @@ impl VoiceOutput for KokoroOutput {
     }
 
     async fn synthesize(&self, text: &str) -> Result<Option<Vec<u8>>> {
-        let wav = self.synth_wav(text).await?;
+        self.synthesize_unit(&SpeechUnit::from_text(text)).await
+    }
+
+    async fn synthesize_unit(&self, unit: &SpeechUnit) -> Result<Option<Vec<u8>>> {
+        let wav = self.synth_wav(unit).await?;
         Ok((!wav.is_empty()).then_some(wav))
     }
 
@@ -523,6 +540,63 @@ mod tests {
         });
     }
 
+    /// Kokoro's shape: ~0.3 s of near-silence, speech, ~0.5 s of near-silence.
+    fn forward_pass(speech_secs: f32) -> Vec<f32> {
+        let sr = SAMPLE_RATE as f32;
+        let mut x = vec![0.0f32; (0.3 * sr) as usize];
+        x.extend((0..(speech_secs * sr) as usize).map(|i| 0.3 * (i as f32 * 0.07).sin()));
+        x.extend(vec![0.0f32; (0.5 * sr) as usize]);
+        x
+    }
+
+    fn secs(samples: usize) -> f32 {
+        samples as f32 / SAMPLE_RATE as f32
+    }
+
+    #[test]
+    fn a_unit_keeps_its_speech_and_ends_in_its_own_pause() {
+        let mut out = Vec::new();
+        push_paced(&mut out, &forward_pass(1.0), Boundary::Sentence, 1.0);
+        let want = LEAD_KEEP_SECS + 1.0 + TAIL_KEEP_SECS + Boundary::Sentence.pause_secs();
+        assert!(
+            (secs(out.len()) - want).abs() < 0.02,
+            "{} vs {want}",
+            secs(out.len())
+        );
+
+        let mut para = Vec::new();
+        push_paced(&mut para, &forward_pass(1.0), Boundary::Paragraph, 1.0);
+        assert!(
+            para.len() > out.len(),
+            "a paragraph rests longer than a sentence"
+        );
+        let mut last = Vec::new();
+        push_paced(&mut last, &forward_pass(1.0), Boundary::End, 1.0);
+        assert!(
+            last.len() < out.len(),
+            "nothing is added after the last unit"
+        );
+    }
+
+    #[test]
+    fn pauses_shrink_with_the_speed_like_the_models_own() {
+        let mut slow = Vec::new();
+        push_paced(&mut slow, &[], Boundary::Sentence, 0.8);
+        let mut fast = Vec::new();
+        push_paced(&mut fast, &[], Boundary::Sentence, 1.25);
+        assert!((secs(slow.len()) - 0.625).abs() < 0.001);
+        assert!((secs(fast.len()) - 0.4).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_trimmed_edge_starts_and_ends_at_rest() {
+        let mut out = Vec::new();
+        let loud = vec![0.5f32; SAMPLE_RATE as usize / 2];
+        push_paced(&mut out, &loud, Boundary::End, 1.0);
+        assert_eq!(out[0], 0.0);
+        assert!(out.last().unwrap().abs() < 0.01);
+    }
+
     #[test]
     fn quality_tiers_map_to_repo_filenames() {
         assert_eq!(model_filename("q8"), "model_quantized.onnx");
@@ -659,6 +733,24 @@ mod tests {
             );
         }
     }
+}
+
+/// Append `audio` cut to its speech, then the silence `end` calls for at `speed`: the model's own
+/// pauses shrink as it speeds up, so the ones put between units do too.
+fn push_paced(out: &mut Vec<f32>, audio: &[f32], end: Boundary, speed: f32) {
+    if let Some(range) = speech_bounds(audio, SAMPLE_RATE, LEAD_KEEP_SECS, TAIL_KEEP_SECS) {
+        let start = out.len();
+        out.extend_from_slice(&audio[range]);
+        let fade = ((SAMPLE_RATE as f32 * EDGE_FADE_SECS) as usize).min((out.len() - start) / 2);
+        let len = out.len();
+        for i in 0..fade {
+            let gain = i as f32 / fade as f32;
+            out[start + i] *= gain;
+            out[len - 1 - i] *= gain;
+        }
+    }
+    let pause = (end.pause_secs() / speed.max(MIN_SPEED) * SAMPLE_RATE as f32) as usize;
+    out.resize(out.len() + pause, 0.0);
 }
 
 /// Phonemizing and synthesis take about real time; on a runtime worker they stall every task
