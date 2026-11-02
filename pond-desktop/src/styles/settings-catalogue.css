@@ -605,6 +605,20 @@
 /* "Gemma 4 E2B · llama.cpp" is longer than a typed value. */
 select.scat__field--text { width: 264px; }
 
+/* On is the household's accent, as on the hub, not HeroUI's blue. Purple on --color-surface is 5.70:1 light;
+   dark lifts it 15% toward white, 2.97:1 to 3.90:1, keeping the white thumb at 4.34:1. */
+.scat__swWrap .switch {
+  --switch-control-bg-checked: var(--color-accent);
+  --switch-control-bg-checked-hover: var(--color-accent-hover);
+  /* Off was HeroUI's light grey, 1.19:1. Slate is 6.22:1 light and 4.80:1 dark, the white thumb 6.22:1 and 3.53:1. */
+  --switch-control-bg: var(--color-text-tertiary);
+  --switch-control-bg-hover: color-mix(in srgb, var(--color-text-tertiary) 80%, var(--color-text));
+}
+:root[data-theme="dark"] .scat__swWrap .switch {
+  --switch-control-bg-checked: color-mix(in srgb, var(--color-accent) 85%, white);
+  --switch-control-bg-checked-hover: color-mix(in srgb, var(--color-accent) 75%, white);
+}
+
 /* An inert control keeps its stored position but never wears the accent —
    brand purple on a switch nothing reads says "on and working". */
 .scat__swWrap--inert { filter: grayscale(1); opacity: 0.65; }

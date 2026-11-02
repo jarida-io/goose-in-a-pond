@@ -162,6 +162,9 @@ pub fn file_pin(repo: &str, revision: &str, filename: &str) -> Option<FilePin> {
             sha256: drafter.sha256,
         });
     }
+    if let Some(pin) = super::voice_match_model::pinned(repo, revision, filename) {
+        return Some(pin);
+    }
     super::vision_pairing::encoder_pinned(repo, revision, filename).map(|spec| FilePin {
         size_bytes: spec.size_bytes,
         sha256: spec.sha256,

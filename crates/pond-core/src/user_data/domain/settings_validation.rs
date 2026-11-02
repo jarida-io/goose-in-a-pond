@@ -9,6 +9,7 @@ use crate::user_data::domain::settings::{
     Settings, AGENT_BACKENDS, CONSOLIDATION_MODES, EMBEDDING_PROVIDERS, NETWORK_MODES,
     PROMPT_STYLES, QUARANTINED_AGENT_BACKENDS, REASONING_EFFORTS, REVIEW_MODES,
     SECURITY_POLICY_MODES, THINKING_MODES, TOOL_SELECTION_MODES, TTS_QUALITIES, VAD_BACKENDS,
+    WAKE_DETECTORS,
 };
 use crate::user_data::services::location::normalize_zone;
 
@@ -138,6 +139,11 @@ pub const FIELD_RULES: &[FieldRule] = &[
     FieldRule {
         key: "vad_backend",
         check: Check::OneOf(VAD_BACKENDS),
+        blank_ok: false,
+    },
+    FieldRule {
+        key: "voice_wake_detector",
+        check: Check::OneOf(WAKE_DETECTORS),
         blank_ok: false,
     },
     // ── Time ───────────────────────────────────────────────────────────────

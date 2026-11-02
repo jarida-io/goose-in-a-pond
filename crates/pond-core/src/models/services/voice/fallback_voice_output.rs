@@ -3,6 +3,7 @@
 use crate::models::ports::voice_output::VoiceOutput;
 use anyhow::Result;
 use async_trait::async_trait;
+use pond_voice::text::SpeechUnit;
 use std::sync::Arc;
 
 pub struct FallbackVoiceOutput {
@@ -32,6 +33,13 @@ impl VoiceOutput for FallbackVoiceOutput {
         match self.primary.synthesize(text).await {
             Ok(v) => Ok(v),
             Err(_) => self.fallback.synthesize(text).await,
+        }
+    }
+
+    async fn synthesize_unit(&self, unit: &SpeechUnit) -> Result<Option<Vec<u8>>> {
+        match self.primary.synthesize_unit(unit).await {
+            Ok(v) => Ok(v),
+            Err(_) => self.fallback.synthesize_unit(unit).await,
         }
     }
 
@@ -90,6 +98,30 @@ mod tests {
         async fn speak(&self, _: &str) -> Result<()> {
             Err(anyhow::anyhow!("TTS server offline"))
         }
+    }
+
+    /// Records the boundary each unit arrived with.
+    struct UnitTts(std::sync::Mutex<Vec<pond_voice::text::Boundary>>);
+
+    #[async_trait]
+    impl VoiceOutput for UnitTts {
+        async fn speak(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn synthesize_unit(&self, unit: &SpeechUnit) -> Result<Option<Vec<u8>>> {
+            self.0.lock().unwrap().push(unit.boundary);
+            Ok(Some(vec![1]))
+        }
+    }
+
+    #[tokio::test]
+    async fn the_unit_boundary_reaches_the_engine() {
+        use pond_voice::text::Boundary;
+        let engine = Arc::new(UnitTts(Default::default()));
+        let tts = FallbackVoiceOutput::new(engine.clone(), Arc::new(FailingTts));
+        let unit = SpeechUnit::new("First paragraph ends here.", Boundary::Paragraph);
+        tts.synthesize_unit(&unit).await.unwrap();
+        assert_eq!(*engine.0.lock().unwrap(), vec![Boundary::Paragraph]);
     }
 
     #[tokio::test]
