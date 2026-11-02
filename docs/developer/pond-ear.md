@@ -76,8 +76,8 @@ Recipe, evaluation and numbers are in
 
 ResNet34 and Silero are not embedded. The crate takes paths or bytes, and `locations` names where
 the pond keeps them: `models/silero/silero_vad.onnx`, which the voice child already downloads
-(`ensure_silero_model`), and `models/voice-match/resnet34_LM.onnx`, where the pond is to fetch it
-for Voice Match. Nothing fetches ResNet34 yet.
+(`ensure_silero_model`), and `models/voice-match/resnet34_LM.onnx`, which serve fetches by default
+for Voice Match (see [Voice Match](../voice-match.md)).
 
 ### Credit: the Voice Match model
 
@@ -201,4 +201,7 @@ recording of a person is in the repository.
 | **pond-audio-out playback tap**: every played source copies what the mixer pulls to a process-wide tap; the ear resamples it to 16 kHz, stamps it with the mic's clock plus 10 ms, and passes it to `Ear::play` before the mic samples it overlaps | built | `crates/pond-audio-out/src/tap.rs`, `crates/pond-adapters-ear/src/reference.rs` |
 | **The host** moves the ear through `Think` and `Speak` and back to `Wait` from `ChatService`'s state observer, and calls `listen(start)` after an interrupt | built | `EarRig::state_hook`, `ChatService::with_state_observer` |
 | **Room voice in serve**, sharing serve's model, Whisper and Kokoro; the desktop attaches to it | built | `crates/pond-server/src/room_voice.rs`, `pond-desktop/electron/main/voice/roomClient.ts` |
-| **Models**: Silero as `.vmw` through `ensure_vmw` (`load_vad`); ResNet34 fetched to `models/voice-match/`; enrolment with `Ear::embed`; prints set with `set_household`, `who` being the print's id | Silero built; Voice Match not started | Nothing fetches ResNet34 or enrols anyone |
+| **Models**: Silero as `.vmw` through `ensure_vmw` (`load_vad`); ResNet34 fetched by default to `models/voice-match/` (pinned revision and SHA-256) and converted once (`load_speaker`) | built | `crates/pond-server/src/voice_match.rs`, `pond_core::models::domain::voice_match_model` |
+| **Enrolment**: one flow of five takes teaches the wake word and Voice Match (`POST /voice/takes`): Whisper records the phrase as heard, an ear of its own (`TakeEar`) scores the take with the CNN and embeds up to 12 s with `Ear::embed`; the audio is never kept | built | `crates/pond-adapters-ear/src/enrol.rs`, `crates/pond-api/src/voice_match.rs` |
+| **Recognition in the room**: the room's ear loads ResNet34 once someone has five prints, gets `set_household` at start and on every change, and names the waker on CNN wakes and Whisper segment wakes alike; a follow-up after a recognised wake must be the same voice | built | `crates/pond-server/src/room_voice.rs`, `EarRig::listen`, `Worker::speaker_of` |
+| **Echo**: a Whisper segment wake whose words are mostly, in order, what the pond said this turn or in the last 10 s is dropped (`ear: own echo ignored`) | built | `crates/pond-adapters-ear/src/echo.rs` |
