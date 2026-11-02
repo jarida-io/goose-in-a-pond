@@ -250,6 +250,7 @@ async fn app_with(
         setup_claims,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
     });
     (
