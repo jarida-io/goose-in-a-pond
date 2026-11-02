@@ -511,6 +511,21 @@ describe("Hub Models: Memory", () => {
     expect(within(memory).queryByText("In use")).toBeNull();
   });
 
+  it("keeps the lighter model the error names in front of the fold, one press away", async () => {
+    setup({ models: ROWS(), roles: memoryRoles("embeddinggemma-2") });
+    vi.mocked(api.getContextIndexHealth).mockResolvedValue(
+      memoryHealth({ state: "failed", reason: "loading embeddinggemma-2-Q8_0.gguf on the Gpu: out of memory" }, { matching: 0 }),
+    );
+    renderHub();
+    const memory = await card("Memory");
+    await within(memory).findByRole("alert");
+    const rows = within(memory).getAllByRole("listitem");
+    expect(rows).toHaveLength(2);
+    expect(within(rows[1]).getByText("all-MiniLM-L6-v2")).toBeTruthy();
+    expect(within(rows[1]).getByRole("button", { name: "Use all-MiniLM-L6-v2 for memory" })).toBeTruthy();
+    expect(within(memory).getByRole("button", { name: "Other Memory models (1)" })).toBeTruthy();
+  });
+
   it("says what each model needs while it runs, and whether this pond has room for it", async () => {
     setup({ models: ROWS(), roles: memoryRoles("", "fastembed"), memory: { ...ORIN_MEMORY_SERVING, embedder_room_mb: 200 } });
     renderHub();

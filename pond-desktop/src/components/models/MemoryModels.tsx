@@ -252,7 +252,8 @@ export function MemoryModels({
   const rows = memoryModels(models);
   if (rows.length === 0) return null;
 
-  const front = (m: ModelEntry, i: number) => i === 0 || holdsMemory(m, roles);
+  // The model a failed load names as the way out stays one press away.
+  const front = (m: ModelEntry, i: number) => i === 0 || holdsMemory(m, roles) || m.name === line?.wayOut;
   const shown = open ? rows : rows.filter(front);
   const folded = rows.length - rows.filter(front).length;
 

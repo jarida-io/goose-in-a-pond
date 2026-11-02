@@ -170,6 +170,7 @@ describe("what the pond says while it switches", () => {
         "Choose the lighter all-MiniLM-L6-v2 (23 MB), or try again.",
     );
     expect(line?.text).not.toMatch(/Gpu|gguf|out of memory/);
+    expect(line?.wayOut).toBe("all-MiniLM-L6-v2");
   });
 
   it("does not send the lightest model to itself when it is the one that ran out of room", () => {
@@ -179,6 +180,7 @@ describe("what the pond says while it switches", () => {
     expect(line?.text).toBe(
       "There is not enough free memory to load all-MiniLM-L6-v2, so Memory is searching by keyword. Try again later.",
     );
+    expect(line?.wayOut).toBeNull();
   });
 
   it("recognises a load that ran out of room by the words engines use for it", () => {

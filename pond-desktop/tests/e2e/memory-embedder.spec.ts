@@ -386,6 +386,22 @@ test.describe("Memory, hub", () => {
     }
   });
 
+  test("after an out-of-memory failure the lighter model stays in front of the fold", async ({ page }) => {
+    await setup(page, {
+      section: "hub", size: [800, 480], roles: ROLES(ON_EG2), memory: ORIN_SERVING_MEMORY,
+      health: memoryHealth({ state: "failed", reason: "loading x.gguf on the Gpu: out of memory" }, { matching: 0 }),
+    });
+    const card = await openHubModels(page);
+    await expect(card.getByRole("alert")).toContainText("all-MiniLM-L6-v2");
+    const rows = card.getByRole("listitem");
+    await expect(rows).toHaveCount(2);
+    await expect(rows.nth(1)).toContainText("all-MiniLM-L6-v2");
+    await expect(rows.nth(1)).toContainText("Fits");
+    const use = rows.nth(1).getByRole("button", { name: "Use all-MiniLM-L6-v2 for memory" });
+    await expect(use).toBeVisible();
+    expect((await use.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
+  });
+
   test("claims nothing about the chosen model before the pond's first answer", async ({ page }) => {
     await setup(page, { section: "hub", size: [800, 480], roles: ROLES(ON_EG2) });
     const answer = await holdHealth(page, memoryHealth({ state: "loading" }, { matching: 0 }));

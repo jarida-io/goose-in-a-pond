@@ -110,6 +110,8 @@ export interface EmbedderLine {
   progress: { done: number; total: number } | null;
   /** What a screen reader hears where `text` changes on every poll; the count stays on the progress bar. */
   spoken: string | null;
+  /** The model the line tells the household to choose instead, by catalogue name. */
+  wayOut: string | null;
 }
 
 /** A failed load that is only the pond waiting on a file it fetches itself, which is no fault. */
@@ -120,7 +122,7 @@ export function isFetching(reason: string | null | undefined): boolean {
 function line(kind: EmbedderKind, text: string, over: Partial<EmbedderLine> = {}): EmbedderLine {
   return {
     kind, text, detail: null, retry: false, retryLabel: "Try again", retryingLabel: "Trying again",
-    progress: null, spoken: null, ...over,
+    progress: null, spoken: null, wayOut: null, ...over,
   };
 }
 
@@ -157,13 +159,12 @@ export function embedderLine(
         });
       }
       if (isOutOfMemory(reason)) {
-        const next = embedder.model_id === LIGHTER_CHOICE
-          ? "Try again later."
-          : `Choose the lighter ${LIGHTER_CHOICE_TEXT}, or try again.`;
+        const lighter = embedder.model_id !== LIGHTER_CHOICE;
+        const next = lighter ? `Choose the lighter ${LIGHTER_CHOICE_TEXT}, or try again.` : "Try again later.";
         return line(
           "failed",
           `There is not enough free memory to load ${title}, so Memory is searching by keyword. ${next}`,
-          { detail: reason, retry: true },
+          { detail: reason, retry: true, wayOut: lighter ? LIGHTER_CHOICE : null },
         );
       }
       return line(
