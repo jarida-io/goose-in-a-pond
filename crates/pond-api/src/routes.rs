@@ -4093,14 +4093,43 @@ async fn set_message_feedback_handler(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Whether the caller may read this conversation: their own member's, or nobody's.
+/// The caller is resolved from their device alone; resolving from the session asked for would
+/// make every unattributed caller that session's member.
+async fn caller_may_read_session(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    session_id: &str,
+) -> bool {
+    let principal = principal.map(|axum::Extension(p)| p);
+    let caller = read_only_caller_scope(state, principal, None).await;
+    match state.session_storage.get_session_identity(session_id).await {
+        Ok(identity) => identity.readable_by(&caller),
+        Err(e) => {
+            tracing::warn!(error = %e, session_id, "could not read whose conversation this is");
+            false
+        }
+    }
+}
+
 /// Session messages: the newest `limit` (≤500) by default, or oldest-first from `offset`.
 async fn get_session_messages(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(session_id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     use pond_core::models::domain::message::Role;
     use pond_core::user_data::ports::session_storage::SessionStorageError;
+
+    // Another member's conversation reads as a missing one, so an id can't be probed either.
+    if !caller_may_read_session(&state, principal.as_ref(), &session_id).await {
+        let missing = SessionStorageError::SessionNotFound(session_id);
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("{}", missing)})),
+        ));
+    }
 
     let limit: usize = params
         .get("limit")
@@ -4440,20 +4469,22 @@ fn urlencoding_lite(s: &str) -> String {
     out
 }
 
-/// Serves one attachment's raw bytes; `session_id` must own it, so ids can't cross sessions.
+/// Serves one attachment's raw bytes, if `session_id` owns it and the caller may read that session.
 /// Bearer-protected, so not usable as a bare `<img src>`; the desktop fetches it with its token.
 async fn get_session_attachment(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path((session_id, attachment_id)): Path<(String, String)>,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
     use axum::response::IntoResponse;
 
-    let owns_it = state
-        .session_storage
-        .list_session_attachments(&session_id)
-        .await
-        .map(|atts| atts.iter().any(|a| a.id == attachment_id))
-        .unwrap_or(false);
+    let owns_it = caller_may_read_session(&state, principal.as_ref(), &session_id).await
+        && state
+            .session_storage
+            .list_session_attachments(&session_id)
+            .await
+            .map(|atts| atts.iter().any(|a| a.id == attachment_id))
+            .unwrap_or(false);
     if !owns_it {
         return Err((
             StatusCode::NOT_FOUND,

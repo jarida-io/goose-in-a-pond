@@ -1,4 +1,5 @@
 use crate::models::domain::message::ChatMessage;
+use crate::user_data::domain::profile::ProfileScope;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -142,6 +143,16 @@ impl SessionIdentity {
     /// strength does, so a fresh face match can re-identify.
     pub fn supersedes(&self, existing: &SessionIdentity) -> bool {
         self.source.rank() <= existing.source.rank()
+    }
+
+    /// Whether a caller at `scope` may read this conversation: their own, or nobody's.
+    /// A named member narrows even without evidence, since a read must never widen on doubt.
+    pub fn readable_by(&self, scope: &ProfileScope) -> bool {
+        match (self.profile_id.as_deref(), scope) {
+            (_, ProfileScope::Household) | (None, _) => true,
+            (Some(owner), ProfileScope::Owner(caller)) => owner == caller,
+            (Some(_), ProfileScope::Guest) => false,
+        }
     }
 }
 
@@ -288,6 +299,37 @@ mod session_identity_tests {
     #[test]
     fn a_new_session_is_unattributed() {
         assert_eq!(Session::new("s1".to_string()).profile_id, None);
+    }
+
+    #[test]
+    fn a_members_conversation_is_readable_by_them_and_the_household_only() {
+        use crate::user_data::domain::profile::{EXEMPLAR_OWNER_ID, SECOND_EXEMPLAR_OWNER_ID};
+        let theirs = identity(IdentificationSource::PairedDevice, EXEMPLAR_OWNER_ID);
+        assert!(theirs.readable_by(&ProfileScope::Owner(EXEMPLAR_OWNER_ID.into())));
+        assert!(theirs.readable_by(&ProfileScope::Household));
+        assert!(!theirs.readable_by(&ProfileScope::Owner(SECOND_EXEMPLAR_OWNER_ID.into())));
+        assert!(!theirs.readable_by(&ProfileScope::Guest));
+    }
+
+    #[test]
+    fn an_unattributed_conversation_stays_readable_by_every_caller() {
+        let nobody = SessionIdentity::unknown();
+        for scope in ProfileScope::every_shape() {
+            assert!(
+                nobody.readable_by(&scope),
+                "{scope:?} lost a shared conversation"
+            );
+        }
+    }
+
+    /// `resolve` ignores an id with no source; reading must not, or the member's words leak.
+    #[test]
+    fn a_member_named_without_evidence_still_narrows_the_read() {
+        use crate::user_data::domain::profile::{EXEMPLAR_OWNER_ID, SECOND_EXEMPLAR_OWNER_ID};
+        let unproven = identity(IdentificationSource::Unknown, EXEMPLAR_OWNER_ID);
+        assert!(!unproven.readable_by(&ProfileScope::Owner(SECOND_EXEMPLAR_OWNER_ID.into())));
+        assert!(!unproven.readable_by(&ProfileScope::Guest));
+        assert!(unproven.readable_by(&ProfileScope::Owner(EXEMPLAR_OWNER_ID.into())));
     }
 }
 
