@@ -141,6 +141,11 @@ async fn make_app_with_bus() -> (axum::Router, Arc<InProcessEventBus>, tempfile:
         pond_admin: None,
     });
 
+    // As `serve` does, so the stream route has the bus's device changes.
+    state
+        .device_events
+        .clone()
+        .follow(bus.clone() as Arc<dyn EventBus>);
     let router = build_router(state, std::path::PathBuf::from("pond-desktop/dist"));
     (router, bus, tmp)
 }
@@ -185,4 +190,111 @@ async fn sensor_post_publishes_to_event_bus() {
         }
         other => panic!("expected BusEvent::Sensor, got {other:?}"),
     }
+}
+
+fn power(device: &str, on: bool) -> BusEvent {
+    BusEvent::Device(pond_core::user_data::domain::device::DeviceStateChanged {
+        device_id: pond_core::user_data::domain::device::DeviceId::new(device),
+        key: "power".into(),
+        value: pond_core::user_data::domain::device::DeviceStateValue::Bool(on),
+        changed_at: chrono::Utc::now(),
+    })
+}
+
+/// The stream's response, opened as the app opens it.
+async fn open_device_events(
+    app: &axum::Router,
+    after_seq: Option<u64>,
+) -> axum::response::Response {
+    let uri = match after_seq {
+        Some(seq) => format!("/api/v1/devices/events?after_seq={seq}"),
+        None => "/api/v1/devices/events".to_string(),
+    };
+    let request = Request::builder()
+        .uri(uri)
+        .header("Authorization", "Bearer test-token")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response
+}
+
+/// The first `count` events on a stream, as `(event, data)`.
+async fn sse_events(
+    response: axum::response::Response,
+    count: usize,
+) -> Vec<(String, serde_json::Value)> {
+    let mut body = response.into_body().into_data_stream();
+    let mut text = String::new();
+    let mut events = Vec::new();
+    while events.len() < count {
+        let chunk = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .expect("an event within the timeout")
+            .expect("the stream stays open")
+            .unwrap();
+        text.push_str(std::str::from_utf8(&chunk).unwrap());
+        while let Some(end) = text.find("\n\n") {
+            let block: String = text.drain(..end + 2).collect();
+            let field = |name: &str| {
+                block
+                    .lines()
+                    .find_map(|line| line.strip_prefix(name))
+                    .map(|v| v.trim().to_string())
+            };
+            if let (Some(event), Some(data)) = (field("event:"), field("data:")) {
+                events.push((event, serde_json::from_str(&data).unwrap()));
+            }
+        }
+    }
+    events
+}
+
+/// Lets the feed's follower and an opened stream's subscription catch up.
+async fn settle() {
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn a_device_state_change_reaches_an_open_device_stream() {
+    let (app, bus, _tmp) = make_app_with_bus().await;
+    let stream = open_device_events(&app, None).await;
+    settle().await;
+    bus.publish(power("matter-1", true));
+
+    let events = sse_events(stream, 1).await;
+    assert_eq!(events[0].0, "device_state");
+    let data = &events[0].1;
+    assert_eq!(data["device_id"], "matter-1");
+    assert_eq!(data["key"], "power");
+    assert_eq!(data["value"], true);
+    assert!(data["seq"].as_u64().is_some(), "{data}");
+}
+
+#[tokio::test]
+async fn a_phone_resumes_after_the_last_change_it_saw() {
+    let (app, bus, _tmp) = make_app_with_bus().await;
+    let stream = open_device_events(&app, None).await;
+    settle().await;
+    for on in [true, false, true] {
+        bus.publish(power("matter-1", on));
+    }
+    let seen = sse_events(stream, 3).await;
+    let first = seen[0].1["seq"].as_u64().unwrap();
+
+    let resumed = sse_events(open_device_events(&app, Some(first)).await, 2).await;
+    let seqs: Vec<_> = resumed
+        .iter()
+        .map(|(_, d)| d["seq"].as_u64().unwrap())
+        .collect();
+    assert_eq!(seqs, vec![first + 1, first + 2]);
+    assert_eq!(resumed[0].1["value"], false);
+}
+
+#[tokio::test]
+async fn a_number_from_before_a_restart_asks_for_a_resync() {
+    let (app, _bus, _tmp) = make_app_with_bus().await;
+    let events = sse_events(open_device_events(&app, Some(7)).await, 1).await;
+    assert_eq!(events[0].0, "resync");
 }
