@@ -1,7 +1,6 @@
 //! Which parent session a live child agent works for, and at what scope, keyed by the child's
-//! engine session id. A tool server reads the id Goose stamps into `_meta`, so it finds a helper's
-//! work and whose data it may touch without the model naming either. Leases unbind on drop; never
-//! persisted.
+//! engine session id: a tool server reads it from Goose's `_meta`, so the model names neither.
+//! Leases unbind on drop; never persisted.
 use crate::user_data::domain::profile::ProfileScope;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock, Weak};
