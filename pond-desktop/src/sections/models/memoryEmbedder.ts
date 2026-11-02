@@ -163,7 +163,8 @@ export function embedderLine(
         const next = lighter ? `Choose the lighter ${LIGHTER_CHOICE_TEXT}, or try again.` : "Try again later.";
         return line(
           "failed",
-          `There is not enough free memory to load ${title}, so Memory is searching by keyword. ${next}`,
+          `This pond does not have room to load ${title} beside the conversation model, so Memory is searching ` +
+            `by keyword. ${next}`,
           { detail: reason, retry: true, wayOut: lighter ? LIGHTER_CHOICE : null },
         );
       }

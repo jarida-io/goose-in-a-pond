@@ -1040,7 +1040,7 @@ describe("Memory", () => {
       renderModels();
       const memory = await memoryModels();
       const alert = await within(memory).findByRole("alert");
-      expect(alert.textContent).toContain("There is not enough free memory to load EmbeddingGemma 2, so Memory is searching by keyword.");
+      expect(alert.textContent).toContain("This pond does not have room to load EmbeddingGemma 2 beside the conversation model, so Memory is searching by keyword.");
       expect(alert.textContent).toContain("Choose the lighter all-MiniLM-L6-v2 (23 MB), or try again.");
       expect(alert.textContent).not.toContain("Gpu");
       const details = within(alert).getByRole("button", { name: "Details" });

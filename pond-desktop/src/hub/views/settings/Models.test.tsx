@@ -491,7 +491,7 @@ describe("Hub Models: Memory", () => {
     renderHub();
     const memory = await card("Memory");
     const alert = await within(memory).findByRole("alert");
-    expect(alert.textContent).toContain("There is not enough free memory to load EmbeddingGemma 2");
+    expect(alert.textContent).toContain("This pond does not have room to load EmbeddingGemma 2 beside the conversation model");
     expect(alert.textContent).toContain("all-MiniLM-L6-v2 (23 MB)");
     expect(within(alert).queryByText(/on the Gpu/)).toBeNull();
     fireEvent.click(within(alert).getByRole("button", { name: "Details" }));

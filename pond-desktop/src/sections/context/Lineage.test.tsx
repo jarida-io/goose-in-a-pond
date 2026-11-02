@@ -235,7 +235,7 @@ describe("Lineage: the embedder", () => {
       />,
     );
     const alert = screen.getByRole("alert");
-    expect(alert.textContent).toContain("There is not enough free memory to load EmbeddingGemma 2, so Memory is searching by keyword.");
+    expect(alert.textContent).toContain("This pond does not have room to load EmbeddingGemma 2 beside the conversation model, so Memory is searching by keyword.");
     expect(alert.textContent).toContain("all-MiniLM-L6-v2 (23 MB)");
     // The pond's own words wait behind Details.
     expect(screen.queryByText("out of memory")).toBeNull();

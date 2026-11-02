@@ -162,11 +162,11 @@ describe("what the pond says while it switches", () => {
     );
   });
 
-  it("says plainly that there is not enough memory, and names the lighter model, keeping the raw reason aside", () => {
+  it("says plainly that the pond has no room for it, and names the lighter model, keeping the raw reason aside", () => {
     const line = embedderLine(health({ state: "failed", reason: "loading x.gguf on the Gpu: out of memory" }));
     expect(line).toMatchObject({ kind: "failed", retry: true, detail: "loading x.gguf on the Gpu: out of memory" });
     expect(line?.text).toBe(
-      "There is not enough free memory to load EmbeddingGemma 2, so Memory is searching by keyword. " +
+      "This pond does not have room to load EmbeddingGemma 2 beside the conversation model, so Memory is searching by keyword. " +
         "Choose the lighter all-MiniLM-L6-v2 (23 MB), or try again.",
     );
     expect(line?.text).not.toMatch(/Gpu|gguf|out of memory/);
@@ -178,7 +178,7 @@ describe("what the pond says while it switches", () => {
       health({ state: "failed", model_id: "all-MiniLM-L6-v2", reason: "out of memory" }, { model_id: "all-MiniLM-L6-v2" }),
     );
     expect(line?.text).toBe(
-      "There is not enough free memory to load all-MiniLM-L6-v2, so Memory is searching by keyword. Try again later.",
+      "This pond does not have room to load all-MiniLM-L6-v2 beside the conversation model, so Memory is searching by keyword. Try again later.",
     );
     expect(line?.wayOut).toBeNull();
   });

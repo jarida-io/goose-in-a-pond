@@ -209,7 +209,7 @@ test.describe("Memory, classic Models page", () => {
     });
     const memory = await openClassicModels(page);
     const alert = memory.getByRole("alert");
-    await expect(alert).toContainText("There is not enough free memory to load EmbeddingGemma 2, so Memory is searching by keyword.");
+    await expect(alert).toContainText("This pond does not have room to load EmbeddingGemma 2 beside the conversation model, so Memory is searching by keyword.");
     await expect(alert).toContainText("Choose the lighter all-MiniLM-L6-v2 (23 MB), or try again.");
     // The pond's own words wait behind Details, and the row does not claim the model runs.
     await expect(alert).not.toContainText("on the Gpu");
@@ -375,7 +375,7 @@ test.describe("Memory, hub", () => {
       health: memoryHealth({ state: "failed", reason: "loading x.gguf on the Gpu: out of memory" }, { matching: 0 }),
     });
     const card = await openHubModels(page);
-    await expect(card.getByRole("alert")).toContainText("not enough free memory");
+    await expect(card.getByRole("alert")).toContainText("does not have room to load");
     await expect(card.getByRole("listitem").first()).toContainText("Chosen, not loaded");
     await expect(page.locator(".hm-tile", { hasText: "Memory" })).toContainText("Chosen, not loaded");
     await card.getByRole("button", { name: "Details" }).click();
@@ -564,7 +564,7 @@ for (const scheme of ["Light", "Dark"] as const) {
       }, scheme === "Dark");
       const hubSwitch = page.getByRole("button", { name: "Search by meaning" });
       await expect(hubSwitch).toHaveCSS("background-color", accent);
-      await expect(page.getByRole("alert").filter({ hasText: "not enough free memory" })).toBeVisible();
+      await expect(page.getByRole("alert").filter({ hasText: "does not have room to load" })).toBeVisible();
       await expect(page.getByText("EmbeddingGemma 2 is chosen but did not load.")).toBeVisible();
       // The card this change owns; the screen's own Add button measures 3.74:1 and is not part of it.
       await scan(page, ".setcard:has(.hm-embed)", "hub Memory screen, Search by meaning");
