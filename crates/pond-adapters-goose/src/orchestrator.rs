@@ -34,6 +34,7 @@ use pond_core::shared::domain::orchestration::{
 };
 use pond_core::shared::ports::orchestrator::Orchestrator;
 use pond_core::shared::services::turn_authority::TurnAuthorityRegistry;
+use pond_core::user_data::domain::profile::ProfileScope;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::Semaphore;
@@ -489,6 +490,8 @@ pub struct ChildPlan {
     pub role: String,
     pub parent_session_id: String,
     pub child_session_id: String,
+    /// [`TaskSpec::profile_scope`]: the child's clamped scope, which its tools resolve by session.
+    pub profile_scope: ProfileScope,
     pub system_prompt: String,
     pub user_message: String,
     pub extensions: Vec<ExtensionConfig>,
@@ -775,6 +778,7 @@ pub fn build_child_plan(
         role: spec.role().to_string(),
         parent_session_id: spec.parent_session_id().to_string(),
         child_session_id: child_session_id.to_string(),
+        profile_scope: spec.profile_scope().clone(),
         system_prompt,
         user_message: child_user_message(spec),
         extensions,
@@ -919,6 +923,7 @@ async fn drive_run(
 ) -> Result<TaskRun> {
     let parent_session_id = run.parent_session_id.clone();
     let plan_child_session_id = plan.child_session_id.clone();
+    let plan_scope = plan.profile_scope.clone();
     // Invariant 3. A child of a turn holding the device takes the hold's one permit: acquiring the
     // process permits deadlocks on its own parent, and `needed = 0` lets siblings overlap.
     let inherited = ledger.inherited_child_permits(&parent_session_id);
@@ -962,8 +967,11 @@ async fn drive_run(
     );
 
     let max_turns = plan.max_turns;
-    let _bound = pond_core::shared::services::child_sessions::process_child_sessions()
-        .bind(&plan_child_session_id, &parent_session_id);
+    let _bound = pond_core::shared::services::child_sessions::process_child_sessions().bind(
+        &plan_child_session_id,
+        &parent_session_id,
+        plan_scope,
+    );
     // A child's engine calls take the model's one context rather than a second beside the parent's.
     let (compile, retention) = (plan.compile_shape.clone(), plan.prefill_retention);
     let rebuild = plan.prefill_rebuild;

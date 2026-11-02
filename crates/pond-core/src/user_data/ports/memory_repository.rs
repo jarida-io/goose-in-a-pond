@@ -32,6 +32,16 @@ pub trait MemoryRepository: Send + Sync {
     /// Delete a memory fragment by ID.
     async fn delete(&self, id: &str) -> Result<()>;
 
+    /// One fragment by ID, any lifecycle, only if `scope` reaches it: out of scope and missing
+    /// both read `None`. The default finds nothing, so an adapter without it refuses by-id acts.
+    async fn get_in_scope(
+        &self,
+        _id: &str,
+        _scope: &ProfileScope,
+    ) -> Result<Option<MemoryFragment>> {
+        Ok(None)
+    }
+
     /// Fragments owned by exactly this member; excludes the shared `IS NULL` rows, which
     /// survive the member and must not be reported as deleted.
     async fn count_for_profile(&self, _profile_id: &str) -> Result<u64> {

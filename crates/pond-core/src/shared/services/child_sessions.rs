@@ -1,13 +1,20 @@
-//! Which parent session a live child agent works for, keyed by the child's engine session id.
-//! A tool server reads the id Goose stamps into `_meta`, so it finds a helper's work without the
-//! model naming it. Leases unbind on drop; never persisted.
+//! Which parent session a live child agent works for, and at what scope, keyed by the child's
+//! engine session id. A tool server reads the id Goose stamps into `_meta`, so it finds a helper's
+//! work and whose data it may touch without the model naming either. Leases unbind on drop; never
+//! persisted.
+use crate::user_data::domain::profile::ProfileScope;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock, Weak};
 
-/// Live children, child engine session id to parent session id.
+struct LiveChild {
+    parent: String,
+    scope: ProfileScope,
+}
+
+/// Live children, by child engine session id.
 #[derive(Default)]
 pub struct ChildSessionRegistry {
-    parents: RwLock<HashMap<String, String>>,
+    children: RwLock<HashMap<String, LiveChild>>,
 }
 
 impl ChildSessionRegistry {
@@ -15,12 +22,24 @@ impl ChildSessionRegistry {
         Self::default()
     }
 
-    /// Records that `child` works for `parent` until the returned lease drops.
-    pub fn bind(self: &Arc<Self>, child: &str, parent: &str) -> ChildSessionLease {
-        self.parents
+    /// Records that `child` works for `parent` at `scope`, the child's own clamped scope rather
+    /// than the parent's, until the returned lease drops.
+    pub fn bind(
+        self: &Arc<Self>,
+        child: &str,
+        parent: &str,
+        scope: ProfileScope,
+    ) -> ChildSessionLease {
+        self.children
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(child.to_string(), parent.to_string());
+            .insert(
+                child.to_string(),
+                LiveChild {
+                    parent: parent.to_string(),
+                    scope,
+                },
+            );
         ChildSessionLease {
             registry: Arc::downgrade(self),
             child: child.to_string(),
@@ -29,15 +48,27 @@ impl ChildSessionRegistry {
 
     /// The parent a live child works for; `None` for anything that is not a live child.
     pub fn parent_of(&self, child: &str) -> Option<String> {
-        self.parents
+        self.children
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .get(child)
-            .cloned()
+            .map(|live| live.parent.clone())
+    }
+
+    /// The scope a live child runs at; `None` for anything that is not one, which must refuse.
+    pub fn scope_of(&self, child: &str) -> Option<ProfileScope> {
+        self.children
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(child)
+            .map(|live| live.scope.clone())
     }
 
     pub fn live_children(&self) -> usize {
-        self.parents.read().unwrap_or_else(|e| e.into_inner()).len()
+        self.children
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 }
 
@@ -51,7 +82,7 @@ impl Drop for ChildSessionLease {
     fn drop(&mut self) {
         if let Some(registry) = self.registry.upgrade() {
             registry
-                .parents
+                .children
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&self.child);
@@ -70,14 +101,23 @@ pub fn process_child_sessions() -> Arc<ChildSessionRegistry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::user_data::domain::profile::EXEMPLAR_OWNER_ID;
 
     #[test]
     fn a_child_resolves_to_its_parent_only_while_its_lease_lives() {
         let registry = Arc::new(ChildSessionRegistry::new());
-        let lease = registry.bind("child-1", "sched-long-task-a");
+        let lease = registry.bind(
+            "child-1",
+            "sched-long-task-a",
+            ProfileScope::Owner(EXEMPLAR_OWNER_ID.into()),
+        );
         assert_eq!(
             registry.parent_of("child-1").as_deref(),
             Some("sched-long-task-a")
+        );
+        assert_eq!(
+            registry.scope_of("child-1"),
+            Some(ProfileScope::Owner(EXEMPLAR_OWNER_ID.into()))
         );
         assert_eq!(
             registry.parent_of("child-2"),
@@ -89,6 +129,11 @@ mod tests {
             registry.parent_of("child-1"),
             None,
             "a finished child must stop resolving, or a stale id reaches its parent's work"
+        );
+        assert_eq!(
+            registry.scope_of("child-1"),
+            None,
+            "a finished child must stop resolving, or a stale id keeps its member's data"
         );
         assert_eq!(registry.live_children(), 0);
     }
