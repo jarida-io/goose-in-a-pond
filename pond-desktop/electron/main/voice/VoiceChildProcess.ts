@@ -401,8 +401,8 @@ export class VoiceChildProcess {
       const attached = this.attached;
       if (attached) {
         attached.stopping = true;
+        // Detach only: the room keeps waiting for its wake word, and its toggle is what turns it off.
         attached.events?.close();
-        await this.deps.room?.setEnabled(false);
         this.endAttached(attached, "stopped");
         return;
       }

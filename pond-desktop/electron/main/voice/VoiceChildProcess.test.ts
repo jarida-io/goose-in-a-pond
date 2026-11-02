@@ -566,7 +566,7 @@ describe("attaching to the server's room voice", () => {
     ]);
   });
 
-  it("maps interrupt and stop onto the room", async () => {
+  it("maps interrupt onto the room, and stop detaches without switching the room off", async () => {
     const room = new FakeRoom();
     const h = harness({ room });
     await h.voice.start(null);
@@ -575,7 +575,7 @@ describe("attaching to the server's room voice", () => {
     expect(room.interrupts).toBe(1);
 
     await h.voice.stop();
-    expect(room.switched).toEqual([false]);
+    expect(room.switched).toEqual([]);
     expect(room.streams[0]!.closed).toBe(true);
     expect(h.emitted.at(-1)).toEqual({
       name: "voice-session-ended",
@@ -647,6 +647,6 @@ describe("attaching to the server's room voice", () => {
     expect(room.streams).toHaveLength(2);
     expect(room.streams[0]!.closed).toBe(true);
     expect(room.streams[1]!.closed).toBe(false);
-    expect(room.switched).toEqual([false, true]);
+    expect(room.switched).toEqual([]);
   });
 });
