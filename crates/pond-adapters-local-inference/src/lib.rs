@@ -462,9 +462,9 @@ impl LocalInferenceLlmAdapter {
             type_v: Some("f16".to_string()),
             // Unless memory is tight: goose fits the window to the memory free after the load,
             // and when f16 would leave it under 8,192 tokens and q8_0 a wider one it takes q8_0
-            // (kind="kv_cache_type_chosen"). On 2026-11-02 E4B, its 945 MB encoder reserved, had
-            // 1,037 MB free: f16 hit the 4,096 floor, which a ~3,300-token preamble leaves almost
-            // no room in, and q8_0 buys 5,120. A 5-8% slower decode is the cheaper failure.
+            // (kind="kv_cache_type_chosen"): a ~3,300-token preamble needs about as much again
+            // for a turn, and a 5-8% slower decode is the cheaper failure. On 2026-11-02 E4B, its
+            // 945 MB encoder reserved, had 1,037 MB free, which holds 12,288 tokens in f16.
             kv_cache_policy: KvCachePolicy::Q8WhenTight,
             // Prefill on the Orin (llama-bench, E4B/E2B QAT, depth 0 and 4,096): 256 is 1-6% faster
             // than 128 and 512 is slower than both. The compute buffer no longer scales with it:

@@ -132,11 +132,26 @@ In `goose/crates/goose-local-inference/src/llamacpp/`.
   which a slower decode only delays. Same window either way, f16 stays. Logged as
   `kind="kv_cache_type_chosen"` with `preferred_n_ctx` (f16), `q8_n_ctx`, the type chosen and a
   `reason` (`tight`, `roomy`, `requested_fits`, `q8_no_wider`, `no_candidate` without flash
-  attention). On 2026-11-02 E4B with its 945 MB encoder reserved had 1,037 MB free: f16 hit the
-  4,096 floor and q8_0 takes the 5,120 rung added for that case; on 2026-10-28, 1,419 MB free, f16
-  would get 6,144 and q8_0 gets 12,288. The fit charges every KV-owning layer the full window, so
-  it over-states a windowed cache (E4B f16 at 16K: 1,536 MiB charged, 286 MiB measured); the
-  type is chosen against that same bound.
+  attention). The ladder has a 5,120 rung so a load just above the floor, where q8_0 holds more
+  than 4,096 tokens but not 6,144, still gains from it.
+- **KV estimate on unified memory.** The fit reads the KV layout per layer from the GGUF header
+  (`KvMeta` / `KvGeometry` in `memory.rs`): `head_count_kv`, the full and sliding key and value
+  widths, `sliding_window` and `sliding_window_pattern`, less `shared_kv_layers`. Full-attention
+  layers cost bytes per position of the window; sliding layers cost a fixed cache of
+  `GGML_PAD(n_swa + n_ubatch, 256)` cells, which is what llama.cpp's windowed cache
+  (`llama_kv_cache_iswa`) gives them at most, with `n_ubatch` charged at no less than 512 so a
+  picture turn's context is covered. A header without a per-layer pattern or a window is charged
+  every layer in full. `kind="context_sized"` logs `kv_kib_per_token` (full layers),
+  `sliding_kv_mb`, `full_layers`, `sliding_layers` and `n_swa`. For E4B (4 full and 20 sliding
+  KV layers, 512-position window) at 16K the estimate is 296 MiB in f16 and 157 in q8_0, against
+  286 and 152 measured on the Orin at `n_ubatch` 256 (llama.cpp's sizing gives those exactly);
+  the full-window bound it replaces charged 1,536 MiB. With the 256 MiB compute reserve and the
+  512 MiB margin, E4B gets:
+
+  | Free after the load | KV budget | f16 window | q8_0 window | Chosen |
+  |---|---|---|---|---|
+  | 1,037 MB (2026-11-02, encoder reserved) | 269 MiB | 12,288 | 16,384 | f16, 12,288 |
+  | 1,419 MB (2026-10-28) | 651 MiB | 16,384 | 16,384 | f16, 16,384 |
 - **Stable-prefix snapshot on disk** (`prompt_snapshot.rs`). The longest token prefix every prompt
   for a model has shared (system prompt and tool schemas, never conversation) is saved under goose's
   data directory (`<data_dir>/engine/data/prompt-cache/`), keyed by model file, context size and
