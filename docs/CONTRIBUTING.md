@@ -110,8 +110,9 @@ cargo fmt --check
 
 # "Fast crates": nothing here pulls the Goose submodule or a heavy native library.
 FAST="-p pond-voice -p pond-audio -p pond-audio-out -p pond-adapters-audio-devices -p pond-ear \
-  -p pond-core -p pond-infra -p pond-infra-scheduler -p pond-api -p pond-adapters-llamafile \
-  -p pond-adapters-ollama -p pond-adapters-whisper -p pond-adapters-matter -p pond-adapters-vision \
+  -p pond-adapters-ear -p pond-core -p pond-infra -p pond-infra-scheduler -p pond-api \
+  -p pond-adapters-llamafile -p pond-adapters-ollama -p pond-adapters-whisper -p pond-adapters-matter \
+  -p pond-adapters-vision \
   -p pond-adapters-weather -p pond-adapters-uber -p pond-adapters-caldav -p pond-adapters-imap \
   -p pond-adapters-mcp-memory -p pond-mesh-protocol -p pond-mcp-server -p pond-hf-cache \
   -p pond-net -p pond-connect"

@@ -395,6 +395,31 @@ pub struct AudioDeviceStatus {
     pub sound_server: Option<SoundServerDefaults>,
 }
 
+impl AudioDeviceStatus {
+    /// A microphone and speaker shown to work together: a pair the sound test heard, or, where
+    /// no sound test ran, a speaker that took audio and a microphone that heard the room.
+    pub fn pair_works(&self) -> bool {
+        if self.input.heard_with.is_some() && self.output.heard_with.is_some() {
+            return true;
+        }
+        let chosen = |c: &AudioChoice| {
+            c.device.is_some()
+                && !matches!(
+                    c.basis,
+                    ChoiceBasis::NoDevice
+                        | ChoiceBasis::MicOff
+                        | ChoiceBasis::NotTested
+                        | ChoiceBasis::BestEffort
+                )
+        };
+        !self.output.unheard
+            && chosen(&self.input)
+            && chosen(&self.output)
+            && self.input.outcome.proven()
+            && self.output.outcome.works()
+    }
+}
+
 /// The order to try devices in: the pin, then the system default, then the rest best-first.
 /// With `plugged_in_first`, plugged-in devices go ahead of the default: on a board the sound
 /// server picks its default by priority, while the household plugged the USB card in on purpose.
@@ -539,6 +564,62 @@ mod tests {
     }
     fn probed(id: &str, is_default: bool, outcome: ProbeOutcome) -> ProbedDevice {
         ProbedDevice::new(dev(id, is_default, DeviceKind::Hardware), outcome)
+    }
+
+    fn status(input: AudioChoice, output: AudioChoice) -> AudioDeviceStatus {
+        AudioDeviceStatus {
+            input,
+            output,
+            updated_at_ms: 0,
+            source: "serve".into(),
+            pid: 1,
+            raised: Vec::new(),
+            sound_server: None,
+        }
+    }
+
+    #[test]
+    fn a_room_needs_a_pair_that_works_together() {
+        let mic = choose(IN, vec![probed("USB mic", true, hearing())], None, false);
+        let speaker = choose(
+            OUT,
+            vec![probed("USB speaker", true, ProbeOutcome::Accepting)],
+            None,
+            false,
+        );
+        assert!(
+            status(mic.clone(), speaker.clone()).pair_works(),
+            "no sound test ran: two devices that each work"
+        );
+
+        let mut unheard = speaker.clone();
+        unheard.unheard = true;
+        assert!(
+            !status(mic.clone(), unheard).pair_works(),
+            "the sound test ran and nothing heard the speaker"
+        );
+
+        let silent = choose(
+            IN,
+            vec![probed("USB mic", true, ProbeOutcome::Silent)],
+            None,
+            false,
+        );
+        assert!(!status(silent, speaker.clone()).pair_works());
+
+        let untested = AudioChoice::not_tested(
+            IN,
+            vec![dev("USB mic", true, DeviceKind::Hardware)],
+            None,
+            false,
+        );
+        assert!(!status(untested, speaker.clone()).pair_works());
+        assert!(!status(AudioChoice::mic_off(None), speaker.clone()).pair_works());
+
+        let (mut heard_in, mut heard_out) = (mic, speaker);
+        heard_in.heard_with = Some("USB speaker".into());
+        heard_out.heard_with = Some("USB mic".into());
+        assert!(status(heard_in, heard_out).pair_works());
     }
 
     #[test]

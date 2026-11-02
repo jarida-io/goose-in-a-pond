@@ -1,0 +1,25 @@
+[package]
+name = "pond-adapters-ear"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "The ear behind the voice ports: wake word, endpointing, interrupts and the echo canceller's reference"
+
+[lints]
+workspace = true
+
+# No Whisper, ONNX Runtime or rodio here: speech-to-text comes in through `Transcriber`, and the
+# playback tap is a plain closure the server installs, so this stays in CI's fast set.
+[dependencies]
+pond-ear = { workspace = true }
+pond-audio = { path = "../pond-audio" }
+pond-voice = { path = "../pond-voice" }
+pond-core = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

@@ -32,8 +32,6 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-# Audio feedback (wake-word confirmation ping)
-rodio = "0.19"
 # In-process whisper.cpp bindings.
 whisper-rs = { version = "0.16", default-features = false, features = ["log_backend"] }
 

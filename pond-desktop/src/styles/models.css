@@ -210,6 +210,9 @@
 .mdl-role__none { color: var(--color-warning-fg); }
 .mdl-role__built { color: var(--color-text-secondary); }
 
+/* A Memory model chosen but not running says so under its name, in its row's own words. */
+.mdl-role__state { display: inline-flex; margin-top: var(--space-1); }
+
 .mdl-role__change { margin-top: var(--space-2); }
 
 /* ── Model cards ────────────────────────────────────────────────────────── */

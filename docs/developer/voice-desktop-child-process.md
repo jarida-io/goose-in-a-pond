@@ -1,5 +1,12 @@
 # Desktop voice: the child process
 
+Where serve already runs room voice and `GET /api/v1/voice/room` answers `available: true`, the
+desktop attaches to it instead of spawning anything: `VoiceChildProcess` subscribes to
+`/voice/room/events`, whose `data:` lines are this same NDJSON, maps stop and start to
+`PUT /voice/room {enabled}` and interrupt to `POST /voice/room/interrupt`, and authenticates with the
+token the renderer paired with (`roomClient.ts`). The rest of this page is the child it spawns
+everywhere else.
+
 The desktop app's voice mode runs the terminal voice loop as a child process. The Electron main
 process spawns:
 

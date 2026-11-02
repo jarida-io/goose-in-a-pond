@@ -1729,7 +1729,10 @@ mod tests {
                     work,
                 },
             );
-            (binding, self.children.bind(engine, root))
+            (
+                binding,
+                self.children.bind(engine, root, ProfileScope::Household),
+            )
         }
 
         async fn task(&self, scope: ProfileScope, goal: &str) -> LongTask {
@@ -2197,7 +2200,11 @@ mod tests {
 
         let no_meta = worker.run_list(&Meta::new()).await.unwrap_err();
         let not_a_child = worker.run_list(&meta_for("engine-x")).await.unwrap_err();
-        let _unbound_child = pond.children.bind("engine-orphan", "root-with-no-binding");
+        let _unbound_child = pond.children.bind(
+            "engine-orphan",
+            "root-with-no-binding",
+            ProfileScope::Household,
+        );
         let unbound = worker
             .run_list(&meta_for("engine-orphan"))
             .await

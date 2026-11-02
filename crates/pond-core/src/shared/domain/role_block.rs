@@ -65,7 +65,7 @@ const AFTER_HOOKS: &[&str] = &["notify_owner", "save_artifact", "start_task", "h
 // ── Types ───────────────────────────────────────────────────────────────────
 
 /// One few-shot pair, rendered into the role's instructions by [`render_examples`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct RoleExample {
     pub brief: String,
     pub answer: String,

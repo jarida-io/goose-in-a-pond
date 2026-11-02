@@ -4,6 +4,7 @@ import { PassThrough, Writable } from "node:stream";
 import type { ChildProcess } from "node:child_process";
 import { VoiceChildProcess, type VoiceChildDeps } from "./VoiceChildProcess";
 import { STDERR_TAIL_LINES } from "./ndjson";
+import type { RoomStatus, RoomVoiceClient } from "./roomClient";
 
 class FakeChild extends EventEmitter {
   stdout = new PassThrough();
@@ -480,5 +481,172 @@ describe("a child that cannot be spawned at all", () => {
     expect(ended.payload).toMatchObject({ reason: "failed_to_start" });
     expect((ended.payload as { detail: string }).detail).toContain("EACCES");
     expect(h.voice.isActive).toBe(false);
+  });
+});
+
+/** A room the test steers: its status, what it was asked, and its event stream. */
+class FakeRoom implements RoomVoiceClient {
+  status_: RoomStatus | null = {
+    enabled: true,
+    available: true,
+    unavailable_reason: null,
+    state: "wait",
+    session_id: "room-1",
+  };
+  switched: boolean[] = [];
+  interrupts = 0;
+  streams: Array<{ onLine: (l: string) => void; onEnd: (e: string | null) => void; closed: boolean }> = [];
+
+  async status() {
+    return this.status_;
+  }
+  async setEnabled(enabled: boolean) {
+    this.switched.push(enabled);
+    if (this.status_) this.status_ = { ...this.status_, enabled };
+    return this.status_;
+  }
+  async interrupt() {
+    this.interrupts += 1;
+  }
+  events(onLine: (l: string) => void, onEnd: (e: string | null) => void) {
+    const stream = { onLine, onEnd, closed: false };
+    this.streams.push(stream);
+    return {
+      close() {
+        stream.closed = true;
+      },
+    };
+  }
+  /** One line on the newest stream. */
+  say(line: string) {
+    this.streams.at(-1)!.onLine(line);
+  }
+}
+
+describe("attaching to the server's room voice", () => {
+  it("attaches where the room is available, and spawns nothing", async () => {
+    const room = new FakeRoom();
+    const h = harness({ room });
+    const id = await h.voice.start(null);
+
+    expect(id).toBe("room-1");
+    expect(h.spawnArgs).toHaveLength(0);
+    expect(room.switched).toEqual([]);
+    expect(h.emitted).toEqual([
+      { name: "voice-ready", payload: { session_id: "room-1" } },
+      { name: "voice-state", payload: "wait" },
+    ]);
+    expect(h.voice.isActive).toBe(true);
+  });
+
+  it("turns the room on when it is off but able to listen", async () => {
+    const room = new FakeRoom();
+    room.status_ = { ...room.status_!, enabled: false, state: "off", session_id: null };
+    const h = harness({ room });
+    await h.voice.start(null);
+    expect(room.switched).toEqual([true]);
+    // The room sends its own ready line once its loop starts.
+    room.say('{"event":"ready","session_id":"room-2"}');
+    expect(h.emitted).toEqual([{ name: "voice-ready", payload: { session_id: "room-2" } }]);
+    expect(h.voice.sessionId).toBe("room-2");
+  });
+
+  it("forwards the room's lines as the child's would be, and skips the ear's own", async () => {
+    const room = new FakeRoom();
+    const h = harness({ room });
+    await h.voice.start(null);
+    h.emitted.length = 0;
+    room.say('{"event":"state","state":"listen"}');
+    room.say('{"event":"wake","who":null}');
+    room.say('{"event":"transcript","text":"what time is it"}');
+    room.say('{"event":"interrupt","why":"wake_word"}');
+    expect(h.emitted).toEqual([
+      { name: "voice-state", payload: "listen" },
+      { name: "voice-transcript", payload: { text: "what time is it" } },
+    ]);
+  });
+
+  it("maps interrupt onto the room, and stop detaches without switching the room off", async () => {
+    const room = new FakeRoom();
+    const h = harness({ room });
+    await h.voice.start(null);
+    h.voice.interrupt();
+    await tick();
+    expect(room.interrupts).toBe(1);
+
+    await h.voice.stop();
+    expect(room.switched).toEqual([]);
+    expect(room.streams[0]!.closed).toBe(true);
+    expect(h.emitted.at(-1)).toEqual({
+      name: "voice-session-ended",
+      payload: { code: null, reason: "stopped", session_id: "room-1", detail: null },
+    });
+    expect(h.voice.isActive).toBe(false);
+  });
+
+  it("spawns the child as before where the room cannot listen", async () => {
+    const room = new FakeRoom();
+    room.status_ = {
+      ...room.status_!,
+      available: false,
+      unavailable_reason: "no_mic_speaker_pair",
+      state: "off",
+      session_id: null,
+    };
+    const h = harness({ room });
+    await h.voice.start("s1");
+    expect(h.spawnArgs).toHaveLength(1);
+    expect(room.streams).toHaveLength(0);
+
+    const unreachable = new FakeRoom();
+    unreachable.status_ = null;
+    const h2 = harness({ room: unreachable });
+    await h2.voice.start("s2");
+    expect(h2.spawnArgs).toHaveLength(1);
+  });
+
+  it("ends the session when the room's loop ends or its stream drops", async () => {
+    const room = new FakeRoom();
+    const h = harness({ room });
+    await h.voice.start(null);
+    room.say('{"event":"exit","reason":"dismissed"}');
+    expect(h.emitted.at(-1)).toMatchObject({
+      name: "voice-session-ended",
+      payload: { reason: "dismissed", session_id: "room-1" },
+    });
+    expect(h.voice.isActive).toBe(false);
+
+    await h.voice.start(null);
+    room.streams.at(-1)!.onEnd("socket hang up");
+    expect(h.emitted.at(-1)).toMatchObject({
+      name: "voice-session-ended",
+      payload: { reason: "crashed" },
+    });
+  });
+
+  it("never lets a stopped attachment's late lines reach the renderer or end a newer one", async () => {
+    const room = new FakeRoom();
+    const h = harness({ room });
+    await h.voice.start(null);
+    const stale = room.streams[0]!;
+    await h.voice.stop();
+    await h.voice.start(null);
+    h.emitted.length = 0;
+
+    stale.onLine('{"event":"state","state":"speak"}');
+    stale.onEnd("late close");
+    expect(h.emitted).toEqual([]);
+    expect(h.voice.isActive).toBe(true);
+  });
+
+  it("serialises an overlapping stop and start into one attachment at a time", async () => {
+    const room = new FakeRoom();
+    const h = harness({ room });
+    await h.voice.start(null);
+    await Promise.all([h.voice.stop(), h.voice.start(null)]);
+    expect(room.streams).toHaveLength(2);
+    expect(room.streams[0]!.closed).toBe(true);
+    expect(room.streams[1]!.closed).toBe(false);
+    expect(room.switched).toEqual([]);
   });
 });

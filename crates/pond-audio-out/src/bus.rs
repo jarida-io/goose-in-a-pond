@@ -2,14 +2,9 @@
 
 use anyhow::Result;
 use pond_core::models::ports::voice_output::VoiceOutput;
-use pond_voice::text::split_speech_units;
+use pond_core::models::services::voice::speech_pipeline::SpeechPipeline;
+use pond_voice::text::split_text;
 use std::sync::Arc;
-use tokio::sync::mpsc;
-
-enum AudioItem {
-    Wav(Vec<u8>),
-    Fallback(String),
-}
 
 /// Unified audio bus coordinating speech synthesis and hardware playback.
 #[derive(Clone)]
@@ -42,79 +37,34 @@ impl AudioBus {
         self.voice.is_playing()
     }
 
+    fn pipeline(&self) -> SpeechPipeline {
+        let voice = self.voice.clone();
+        SpeechPipeline::start(
+            self.voice.clone(),
+            Some(Arc::new(|text: &str| crate::tap::report_spoken(text))),
+            Some(Box::new(move || voice.end_utterance())),
+        )
+    }
+
     /// Deliver text speech units, optionally waiting for speaker playback to finish.
     pub async fn speak_text(&self, text: &str, wait_for_playback: bool) -> Result<()> {
-        let (units, remainder) = split_speech_units(text, true);
-        let mut all_units = units;
-        let remainder = remainder.trim();
-        if !remainder.is_empty() {
-            all_units.push(remainder.to_string());
-        }
-        if all_units.is_empty() {
+        let units = split_text(text);
+        if units.is_empty() {
             return Ok(());
         }
 
         self.voice.begin_utterance();
-
-        let (speech_tx, mut speech_rx) = mpsc::channel::<String>(8);
-        let (audio_tx, mut audio_rx) = mpsc::channel::<AudioItem>(8);
-
-        let voice_synth = self.voice.clone();
-        let synth_handle = tokio::spawn(async move {
-            while let Some(clause) = speech_rx.recv().await {
-                if clause.is_empty() {
-                    continue;
-                }
-                match voice_synth.synthesize(&clause).await {
-                    Ok(Some(wav)) if !wav.is_empty() => {
-                        if audio_tx.send(AudioItem::Wav(wav)).await.is_err() {
-                            break;
-                        }
-                    }
-                    _ => {
-                        if audio_tx.send(AudioItem::Fallback(clause)).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-
-        let voice_play = self.voice.clone();
-        let playback_handle = tokio::spawn(async move {
-            while let Some(item) = audio_rx.recv().await {
-                match item {
-                    AudioItem::Wav(wav) => {
-                        if let Err(e) = voice_play.play_audio(wav).await {
-                            tracing::warn!("AudioBus playback failed: {e}");
-                        }
-                    }
-                    AudioItem::Fallback(text) => {
-                        if let Err(e) = voice_play.speak(&text).await {
-                            tracing::warn!("AudioBus fallback speak failed: {e}");
-                        }
-                    }
-                }
-            }
-            voice_play.end_utterance();
-        });
-
-        for unit in all_units {
-            let clean = unit.trim().to_string();
-            if !clean.is_empty() && speech_tx.send(clean).await.is_err() {
+        let mut pipeline = self.pipeline();
+        for unit in units {
+            if !pipeline.say(unit).await {
                 break;
             }
         }
-        drop(speech_tx);
 
         if wait_for_playback {
-            let _ = synth_handle.await;
-            let _ = playback_handle.await;
+            pipeline.finish().await;
         } else {
-            tokio::spawn(async move {
-                let _ = synth_handle.await;
-                let _ = playback_handle.await;
-            });
+            tokio::spawn(async move { pipeline.finish().await });
         }
 
         Ok(())
@@ -180,5 +130,31 @@ mod tests {
             voice.played.load(Ordering::SeqCst)
         );
         assert!(!voice.utterance_active.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn what_the_bus_says_reaches_the_spoken_tap() {
+        // The only test that sets the spoken tap, so it needs no lock.
+        let said = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        crate::set_spoken_tap(Some({
+            let said = said.clone();
+            Arc::new(move |text: &str| said.lock().unwrap().push(text.to_string()))
+        }));
+        let voice = Arc::new(MockVoice {
+            synthesized: Arc::new(AtomicUsize::new(0)),
+            played: Arc::new(AtomicUsize::new(0)),
+            spoken: Arc::new(AtomicUsize::new(0)),
+            utterance_active: Arc::new(AtomicBool::new(false)),
+        });
+        AudioBus::new(voice)
+            .speak_text("Your timer is done. The tea is ready.", true)
+            .await
+            .unwrap();
+        crate::set_spoken_tap(None);
+        let said = said.lock().unwrap().join(" ");
+        assert!(
+            said.contains("Your timer is done") && said.contains("The tea is ready"),
+            "{said}"
+        );
     }
 }

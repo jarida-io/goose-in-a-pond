@@ -28,7 +28,7 @@ pub struct ResolvedIdentity {
     pub source: IdentificationSource,
 }
 
-/// Resolve one turn's scope: paired device, explicit, then face give `Owner`. Otherwise
+/// Resolve one turn's scope: paired device, explicit, face, then voice give `Owner`. Otherwise
 /// `Household` in a one-member pond (`Guest` would refuse to remember its only user), else `Guest`.
 pub fn resolve(inputs: &ResolutionInputs<'_>) -> ResolvedIdentity {
     if let Some(profile) = inputs.paired_device_profile {
@@ -43,7 +43,8 @@ pub fn resolve(inputs: &ResolutionInputs<'_>) -> ResolvedIdentity {
         match inputs.session.source {
             IdentificationSource::PairedDevice
             | IdentificationSource::Explicit
-            | IdentificationSource::Face => {
+            | IdentificationSource::Face
+            | IdentificationSource::Voice => {
                 return ResolvedIdentity {
                     scope: ProfileScope::Owner(profile.to_string()),
                     source: inputs.session.source,

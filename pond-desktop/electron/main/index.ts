@@ -14,6 +14,7 @@ import {
   resolveServerBinary,
 } from "./serverProcess";
 import { VoiceChildProcess } from "./voice/VoiceChildProcess";
+import { createRoomClient, RENDERER_TOKEN_KEY } from "./voice/roomClient";
 import { registerIpc } from "./ipc";
 import { installMenu, setAboutPanel } from "./menu";
 import { createTray, setTrayStatus, destroyTray } from "./tray";
@@ -91,11 +92,27 @@ const server = new ServerProcess({
   log,
 });
 
+/** The token the renderer paired with, read from its own storage; null before it pairs. */
+async function rendererToken(): Promise<string | null> {
+  if (!win || win.isDestroyed()) return null;
+  try {
+    const token: unknown = await win.webContents.executeJavaScript(
+      `window.localStorage.getItem(${JSON.stringify(RENDERER_TOKEN_KEY)})`,
+      true,
+    );
+    return typeof token === "string" && token !== "" ? token : null;
+  } catch (e) {
+    log.debug(`renderer token unreadable: ${String(e)}`);
+    return null;
+  }
+}
+
 const voice = new VoiceChildProcess({
   resolveBinary: () => serverBinaryForVoice(),
   cwd: app.isPackaged ? undefined : repoRoot,
   emit,
   log,
+  room: createRoomClient({ baseUrl: () => server.url, bearer: rendererToken, log }),
 });
 
 /** The voice child runs the sidecar's binary, found by the same lookup so they can't disagree. */

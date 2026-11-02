@@ -252,6 +252,16 @@
   }
 }
 
+/* Read aloud in place of a line that would otherwise be spoken again on every poll. */
+.mm-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 /* Above a coverage figure it explains, so the two read as one panel. */
 .mm-embedder--above {
   margin-bottom: var(--space-3);
