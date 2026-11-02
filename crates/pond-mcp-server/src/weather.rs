@@ -28,7 +28,7 @@ pub struct WeatherParams {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ForecastParams {
     pub location: Option<String>,
-    /// 1-7, default 3.
+    /// Days asked for, 1-7 (omitted: 3).
     pub days: Option<u8>,
     /// Catch-all for unexpected fields the model might send.
     #[serde(flatten)]
@@ -125,8 +125,8 @@ which city. Never guess weather or shell out for it.")]
     }
 
     #[tool(description = "\
-Forecast, days 1-7 (default 3): highs/lows, rain chance, UV, sun times. Omit \
-location for the configured home. Never guess data.")]
+Forecast for the days asked, 1-7 (a week is 7): highs/lows, rain chance, UV, sun \
+times. Omit location for the configured home. Never guess data.")]
     async fn get_weather_forecast(
         &self,
         _ctx: RequestContext<RoleServer>,
