@@ -467,6 +467,35 @@ pub const BUILTIN_PROMPT_TEMPLATES: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// The text inside a template's `<voice-mode>` section, tags and their line breaks excluded.
+pub fn voice_mode_body(template: &str) -> Option<&str> {
+    let (start, end) = voice_mode_span(template)?;
+    template.get(start..end)
+}
+
+/// `template` with its `<voice-mode>` text replaced by `body`, which Tera prints as written: it
+/// is the household's text, and a brace in it must not become a template tag.
+pub fn with_voice_mode_body(template: &str, body: &str) -> Option<String> {
+    let (start, end) = voice_mode_span(template)?;
+    // `{%` is the only way out of a raw block, so the text cannot hold one.
+    let body = body.replace("{%", "{ %");
+    let mut out = String::with_capacity(template.len() + body.len() + 32);
+    out.push_str(template.get(..start)?);
+    out.push_str("{% raw %}");
+    out.push_str(&body);
+    out.push_str("{% endraw %}");
+    out.push_str(template.get(end..)?);
+    Some(out)
+}
+
+fn voice_mode_span(template: &str) -> Option<(usize, usize)> {
+    const OPEN: &str = "<voice-mode>\n";
+    const CLOSE: &str = "\n</voice-mode>";
+    let start = template.find(OPEN)? + OPEN.len();
+    let end = start + template.get(start..)?.find(CLOSE)?;
+    Some((start, end))
+}
+
 /// Factory-default `(content, description)` for a built-in name; `None` for any other name.
 pub fn builtin_template_content(name: &str) -> Option<(&'static str, &'static str)> {
     BUILTIN_PROMPT_TEMPLATES
