@@ -123,6 +123,7 @@ async fn body(state: &AppState, agent: &VoiceAgent) -> Value {
         "examples": agent.examples,
         "tool_groups": tool_groups,
         "max_turns": agent.max_turns,
+        "thinking": agent.thinking.as_str(),
         "shipped_max_turns": shipped_max_turns,
         "prefill": prefill,
     })
