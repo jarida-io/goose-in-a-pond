@@ -1471,7 +1471,7 @@ bearer-token middleware applies, with its own 20-a-minute limit and a 4 KiB body
 
 | Route | Request | Response |
 |---|---|---|
-| `GET /api/v1/remote-access/configuration` | | `{enabled, controlUrl, state, lapsesAt}` for a paired device; `403` otherwise |
+| `GET /api/v1/remote-access/configuration` | | `{enabled, controlUrl, state, lapsesAt, enableFrom}` for a paired device; `403` otherwise. While off, `enableFrom` lists where it can be turned on (`["dashboard"]`); `null` while on |
 | `POST /api/v1/remote-access/enrollment` | `{authUrl, nodeKey, machineKey}` (unknown fields refused) | the enrollment; `409` while a revocation is pending |
 | `POST /api/v1/remote-access/recovery` | | `{id}` for the host to approve |
 | `GET/POST/DELETE /api/v1/remote-access/recovery/{id}` | | poll, execute (after approval) or cancel |
