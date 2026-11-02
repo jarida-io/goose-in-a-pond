@@ -121,6 +121,13 @@ pub fn recommendation_for(model_id: &str) -> Option<&'static Recommendation> {
     RECOMMENDED.iter().find(|r| r.model_id == model_id)
 }
 
+/// Whether a Memory recommendation stands on this pond: not for a model that takes more than
+/// `free_mb`, MemAvailable plus what the model in use gives back, so the margin spent too. The
+/// model running now stands; with nothing read, every one does.
+pub fn memory_recommendation_stands(takes_mb: u64, free_mb: Option<u64>, running: bool) -> bool {
+    running || free_mb.is_none_or(|free| takes_mb <= free)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +200,18 @@ mod tests {
                 .and_then(|m| m.window_tokens),
             Some(16_384)
         );
+    }
+
+    #[test]
+    fn a_memory_recommendation_goes_only_where_the_model_cannot_load() {
+        use crate::models::domain::embedding_models::EMBEDDINGGEMMA_2;
+        let takes = EMBEDDINGGEMMA_2.ram_estimate_mb();
+        assert!(memory_recommendation_stands(takes, Some(takes), false));
+        assert!(!memory_recommendation_stands(takes, Some(takes - 1), false));
+        assert!(
+            memory_recommendation_stands(takes, Some(0), true),
+            "the model running here has loaded"
+        );
+        assert!(memory_recommendation_stands(takes, None, false));
     }
 }

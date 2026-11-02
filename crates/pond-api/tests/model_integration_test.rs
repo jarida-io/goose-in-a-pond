@@ -2107,6 +2107,66 @@ async fn memory_status_counts_what_a_switch_would_free() {
     assert_eq!(body_json(resp).await["reclaimable_mb"], 0);
 }
 
+/// The Orin with too little left for any Memory model beside the conversation model.
+struct FullScheduler;
+
+#[async_trait::async_trait]
+impl pond_core::models::ports::model_scheduler::ModelScheduler for FullScheduler {
+    async fn notify_wake_word(&self) {}
+    fn memory_status(&self) -> pond_core::models::ports::model_scheduler::MemoryStatus {
+        pond_core::models::ports::model_scheduler::MemoryStatus {
+            total_mb: 7620,
+            available_for_llm_mb: 200,
+            budget_mb: pond_core::models::domain::device_budget::llm_budget_mb(),
+            loaded_model: None,
+            available_mb: Some(200),
+        }
+    }
+}
+
+/// The Memory recommendation's row, as `GET /models` lists it on a pond with `scheduler`.
+async fn listed_eg2(scheduler: Scheduler) -> serde_json::Value {
+    use pond_core::models::domain::embedding_models::EMBEDDINGGEMMA_2;
+    let f = pond_with_parts(
+        Arc::new(MockAgent::new()),
+        Parts {
+            scheduler,
+            ..Parts::default()
+        },
+    )
+    .await;
+    f.repo.upsert(&EMBEDDINGGEMMA_2.record()).await.unwrap();
+    let resp = f
+        .app
+        .clone()
+        .oneshot(auth_req("GET", "/api/v1/models", None))
+        .await
+        .unwrap();
+    let body = body_json(resp).await;
+    body["embedding"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|r| r["name"] == EMBEDDINGGEMMA_2.name))
+        .cloned()
+        .expect("the EmbeddingGemma 2 row")
+}
+
+/// "Recommended" is not shown on a Memory model this pond has no room to load now.
+#[tokio::test]
+async fn the_memory_recommendation_is_weighed_against_the_room_it_has() {
+    let roomy = listed_eg2(Some(Arc::new(LoadedScheduler))).await;
+    assert_eq!(roomy["recommended"]["rank"], "primary");
+
+    let full = listed_eg2(Some(Arc::new(FullScheduler))).await;
+    assert!(full["recommended"].is_null(), "{full}");
+    assert_eq!(full["ram_estimate_mb"], roomy["ram_estimate_mb"]);
+
+    let unread = listed_eg2(None).await;
+    assert_eq!(
+        unread["recommended"]["rank"], "primary",
+        "with nothing read, the suggestion stands"
+    );
+}
+
 /// A desktop's own numbers come through whole, and what a switch frees is measured against its
 /// own budget, not the board's.
 #[tokio::test]

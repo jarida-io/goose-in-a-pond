@@ -6983,8 +6983,16 @@ async fn list_models(
     let mut ollama = vec![];
     let mut embedding = vec![];
 
+    let memory = state
+        .model_scheduler
+        .as_ref()
+        .map(|s| s.memory_status())
+        .unwrap_or_default();
+    let footing = crate::model_views::MemoryFooting::read(&state, &memory);
+
     for m in &records {
         let mut dto = record_to_dto(m, &assignments, state.engine_availability);
+        footing.weigh(&mut dto);
         if let Some(v) = vision.get(&m.id) {
             dto.reads_images = Some(v.reads_images);
             dto.image_support_bytes = v.image_support_bytes;
