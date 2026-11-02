@@ -81,7 +81,7 @@ never the dashboard. The queue could not serve it either: it holds per-phone cop
 all for a household without a paired phone, and none for a member's notice to a member without one.
 
 **The history.** `BroadcastNotificationSender::with_history` records every durable notice once,
-under its household id, in `notification_history` (migration `0062`), through the
+under its household id, in `notification_history` (migration `0076`), through the
 `NotificationHistory` port (`crates/pond-core/src/mcp/ports/notification_history.rs`, SQLite adapter
 `crates/pond-infra/src/sqlite_notification_history.rs`). Who may read a row is its
 `HistoryAudience` (`crates/pond-core/src/mcp/domain/notification_history.rs`), decided when the

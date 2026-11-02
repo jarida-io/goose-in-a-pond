@@ -9,7 +9,7 @@ use pond_core::mcp::ports::notification::Notification;
 use pond_core::mcp::ports::notification_history::NotificationHistory;
 use sqlx::{Pool, Row, Sqlite};
 
-/// The household's notification history in `pond_system.db` (migration `0062`).
+/// The household's notification history in `pond_system.db` (migration `0076`).
 pub struct SqliteNotificationHistory {
     pool: Pool<Sqlite>,
 }

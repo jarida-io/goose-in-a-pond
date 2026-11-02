@@ -12,7 +12,7 @@ import { readyReport } from "../agents/prefillFixtures";
 const dispatch = vi.fn();
 
 vi.mock("../state/useAppContext", () => ({
-  useAppState: () => ({ sessionId: "s1", unreadRunCount: 0, serverOnline: true, scheduleRuns: [] }),
+  useAppState: () => ({ sessionId: "s1", unreadRunCount: 0, serverOnline: true, scheduleRuns: [], householdNotices: [] }),
   useAppDispatch: () => dispatch,
 }));
 
