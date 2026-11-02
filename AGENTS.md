@@ -166,9 +166,13 @@ by hand to diagnose the shell keeps the microphone, and the desktop's voice, unt
   `/api/v1/chat/stream` and `/api/v1/tts`. A check that wrongly returns false drops the desktop onto
   that path and still appears to work.
 
-A turn: wake word (`WhisperKeywordDetector`, matched on Whisper's transcript) → capture with Silero
-end-of-speech (`pond-adapters-whisper`, `pond-adapters-silero`) → think → tokens split into clauses
-and spoken by Kokoro while the reply streams (`pond-adapters-kokoro`, `pond-audio-out`) → barge-in on
-microphone energy (`pond_voice::barge`) cuts the reply → a follow-up listen without the wake word.
-`pond-audio` is the single microphone owner. `pond-ear` (a wake-word CNN, echo cancellation, Voice
-Match) is built but nothing depends on it yet.
+A turn, where Silero is available (`crates/pond-server/src/voice_rig.rs` picks): the ear
+(`pond-adapters-ear` running `pond-ear` on its own thread, fed the mic and, through
+`pond_audio_out::tap`, everything played) hears the wake word, either its "hey goose" CNN or
+Whisper on each speech segment, and endpoints the request with Silero on echo-cancelled audio →
+Whisper transcribes it → think → tokens split into clauses and spoken by Kokoro while the reply
+streams (`pond-adapters-kokoro`, `pond-audio-out`) → the wake word, or an enrolled household voice,
+interrupts the reply (`InterruptWatch`) → a follow-up listen without the wake word. With
+`vad_backend = "rms"` or no Silero, the older path runs: `WhisperKeywordDetector` on a 1.4 s window,
+RMS gates, and barge-in on microphone energy (`pond_voice::barge`). `pond-audio` is the single
+microphone owner. Voice Match is built in `pond-ear` but nothing enrols anyone yet.

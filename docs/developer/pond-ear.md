@@ -6,11 +6,10 @@ speaking), and an echo canceller fed the exact audio the pond plays. The code is
 with std only and no crates. It is a port of the voice-match-lab engine, minus training, the lab
 website and Moonshine. Speech-to-text stays Whisper.
 
-It is not wired in yet. No crate depends on `pond-ear`; CI builds, lints and tests it with the
-fast crates. The voice loop's wake word is Whisper transcription matching
-([wake-word calibration](../wake-word-calibration.md)), its end-of-speech detector is
-`pond-adapters-silero` through ONNX Runtime, and it has no echo canceller. The plan for wiring the
-ear in is [at the end](#wiring-it-into-the-voice-child-plan).
+`crates/pond-adapters-ear` runs it behind the voice loop's ports, and `chat --voice` uses it
+wherever Silero is available and `vad_backend` is not `rms` (`build_listening` in
+`crates/pond-server/src/voice_rig.rs`). Room voice inside serve, and Voice Match enrolment, are
+not built yet. [The wiring](#wiring-it-into-the-voice-loop) is at the end.
 
 ```
 mic 16 kHz -> echo canceller -> 32 s ring + 80-dim fbank every 10 ms -> wake CNN (every 80 ms)
@@ -193,14 +192,13 @@ recording of a person is in the repository.
 ...  "ops" (32-byte records), "w32" (f32 weights, biases, int8 scales and sums), optional "i8w"
 ```
 
-## Wiring it into the voice child (plan)
+## Wiring it into the voice loop
 
-None of this exists yet. The `Ear` methods it names (`push_into`, `audio`, `play`, `set_state`,
-`listen`, `embed`, `set_household`) do.
-
-| Step | Status | Evidence |
+| Step | Status | Where |
 |---|---|---|
-| **pond-adapters-ear**: runs an `Ear` on its own thread, reads the mic through `MicReader`, calls `push_into`, and maps `Event::Wake`, `Utterance`, `Silence` and `BargeIn` to `WakeWordActivation` (speaker, endpointed audio from `Ear::audio`), an interrupt watch and NDJSON. The interrupt rule (an enrolled voice for about 300 ms, or the wake word) lives there, not in the ear | not started | No such crate; not a workspace member |
-| **pond-audio-out playback tap**: played samples resampled with `dsp::Resampler::new(24_000, 16_000)`, stamped with the mic's clock, passed to `Ear::play(at, pcm)` before the matching mic samples arrive | not started | `crates/pond-audio-out` has no tap |
-| **The host** moves the ear to `Think` and `Speak` with `set_state`, back to `Wait` when the reply ends, and calls `listen(start)` for push-to-talk or after a barge-in | not started | `ChatService` drives `WhisperKeywordDetector` and `pond_voice::barge` instead |
-| **Models**: Silero as today; ResNet34 fetched to `models/voice-match/` and cached as `.vmw` with `ensure_vmw`; enrolment with `Ear::embed`; household prints set with `set_household`, `who` in events being the print's id | not started | Only Silero is fetched (`ensure_silero_model`); no Voice Match enrolment exists |
+| **pond-adapters-ear** runs one `Ear` on its own thread with a permanent mic claim, read through `MicReader`. It serves `ChatService` as its `StreamingWakeWordDetector` (the activation is the endpointed request from `Ear::audio`, so nothing is recorded twice), its `VoiceInput` (`listen(start)`, then `Utterance` or `Silence`) and its `InterruptWatch`. The interrupt rule lives there: the wake word, or a `BargeIn` with an enrolled `who` | built | `crates/pond-adapters-ear/src/worker.rs` |
+| **Whisper as the wake detector**: with `Config.segments`, each `Segment`'s first 6 s is transcribed (the accurate profile Whisper prepared at load) and matched against `wake_triggers`; a match is the wake and its transcript the request | built | `match_segments` and `wake_in` in `crates/pond-adapters-ear` |
+| **pond-audio-out playback tap**: every played source copies what the mixer pulls to a process-wide tap; the ear resamples it to 16 kHz, stamps it with the mic's clock plus 10 ms, and passes it to `Ear::play` before the mic samples it overlaps | built | `crates/pond-audio-out/src/tap.rs`, `crates/pond-adapters-ear/src/reference.rs` |
+| **The host** moves the ear through `Think` and `Speak` and back to `Wait` from `ChatService`'s state observer, and calls `listen(start)` after an interrupt | built | `EarRig::state_hook`, `ChatService::with_state_observer` |
+| **Room voice in serve**, sharing serve's model, Whisper and Kokoro | not started | `chat --voice` only |
+| **Models**: Silero as `.vmw` through `ensure_vmw` (`load_vad`); ResNet34 fetched to `models/voice-match/`; enrolment with `Ear::embed`; prints set with `set_household`, `who` being the print's id | Silero built; Voice Match not started | Nothing fetches ResNet34 or enrols anyone |

@@ -12153,6 +12153,7 @@ dependencies = [
  "libc",
  "pond-adapters-audio-devices",
  "pond-adapters-caldav",
+ "pond-adapters-ear",
  "pond-adapters-face-onnx",
  "pond-adapters-goose",
  "pond-adapters-imap",

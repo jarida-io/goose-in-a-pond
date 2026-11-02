@@ -27,6 +27,7 @@ mod three_stage_consolidator;
 mod tracing_setup;
 mod voice_lock;
 mod voice_models;
+mod voice_rig;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -36,7 +37,7 @@ use pond_adapters_llamafile::LlamafileProvider;
 use pond_adapters_mesh_libp2p::{Libp2pMeshTransport, Libp2pMeshTransportConfig};
 use pond_adapters_ollama::OllamaProvider;
 use pond_adapters_weather::{OpenMeteoWeatherAdapter, WeatherProvider};
-use pond_adapters_whisper::{WhisperKeywordDetector, WhisperRsInput};
+use pond_adapters_whisper::WhisperRsInput;
 use pond_api::{AppState, LlamafileManager};
 use pond_core::mcp::ports::mcp_server::McpServerRepository as _;
 use pond_core::models::domain::model_record::{ModelCategory, ModelRecord};
@@ -4861,59 +4862,6 @@ fn write_ndjson_line(ev: &pond_core::shared::domain::agent::WorkflowEvent) {
     }
 }
 
-/// Returns the Silero VAD, or `None` (energy gate) on any failure: a worse VAD, never a deaf pond.
-/// Diagnostics use stderr: `out!` is a no-op under `--json-events`, the desktop's only mode.
-async fn build_speech_detector(
-    vad_backend: &str,
-    data_dir: &std::path::Path,
-) -> Option<Box<dyn pond_voice::dsp::SpeechDetector + Send>> {
-    if vad_backend.eq_ignore_ascii_case("rms") {
-        // The escape hatch, for a board whose ONNX Runtime is broken.
-        return None;
-    }
-    if !vad_backend.eq_ignore_ascii_case("silero") {
-        // A hand-edited DB can land here: `apply_key` skips the API's `VAD_BACKENDS` validation.
-        eprintln!("  Listen   unknown vad_backend \"{vad_backend}\" — using the energy gate.");
-        return None;
-    }
-
-    // Fetched before `ready`, unlike Kokoro: it's 2 MB and `chat --voice` must work with no server.
-    let path = model_download::ensure_silero_model(data_dir).await?;
-
-    // Bounded: with no dylib, ort's `load-dynamic` init hangs forever instead of failing.
-    const LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
-    let loading = tokio::time::timeout(
-        LOAD_TIMEOUT,
-        tokio::task::spawn_blocking(move || pond_adapters_silero::SileroDetector::new(&path)),
-    )
-    .await;
-
-    match loading {
-        Ok(Ok(Ok(detector))) => {
-            tracing::info!("silero VAD active");
-            Some(Box::new(detector) as Box<dyn pond_voice::dsp::SpeechDetector + Send>)
-        }
-        Ok(Ok(Err(e))) => {
-            eprintln!("  Listen   silero VAD failed to load: {e}");
-            eprintln!("           Using the energy gate.");
-            None
-        }
-        Ok(Err(e)) => {
-            eprintln!("  Listen   silero VAD load panicked: {e}");
-            None
-        }
-        Err(_) => {
-            eprintln!(
-                "  Listen   silero VAD load timed out after {}s — the ONNX Runtime is \
-                 probably missing or version-incompatible.",
-                LOAD_TIMEOUT.as_secs()
-            );
-            eprintln!("           Using the energy gate.");
-            None
-        }
-    }
-}
-
 /// Background wake-ups for phones: FCM v1 when a service-account key exists (data-only pings,
 /// no content via Google), else the logging stub.
 fn push_relay(
@@ -5615,18 +5563,28 @@ async fn run_chat(
         None
     };
 
-    // Set on the shared backend, so both voice input and the wake-word detector use it.
-    if let Some(backend) = &whisper_backend {
-        if let Some(detector) = build_speech_detector(&settings.vad_backend, &data_dir).await {
-            backend.set_speech_detector(detector);
-        }
-    }
+    // The ear where Silero is available, the Whisper detector and energy gates otherwise.
+    let listening = match &whisper_backend {
+        Some(backend) => Some(
+            voice_rig::build_listening(voice_rig::ListeningOptions {
+                settings: &settings,
+                data_dir: &data_dir,
+                mic: &mic_handle,
+                whisper: backend.clone(),
+                wake_word,
+                no_wake_word,
+                audio_level: audio_level_sink.clone(),
+            })
+            .await,
+        ),
+        None => None,
+    };
 
     // Under --json-events stdin is the shell's command channel; typed turns share it.
     let control = json_events.then(VoiceControl::new);
     let mut typed_lines = None;
-    let voice: Arc<dyn VoiceInput> = match &whisper_backend {
-        Some(backend) => {
+    match &listening {
+        Some(listening) => {
             out!(
                 "  Listen   {}",
                 voice_models
@@ -5636,20 +5594,22 @@ async fn run_chat(
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "whisper".to_string())
             );
-            backend.clone() as Arc<dyn VoiceInput>
+            chat_service = listening.apply(chat_service);
         }
         None => {
             out!("  Listen   typed input (no speech model)");
-            if control.is_some() {
+            let voice: Arc<dyn VoiceInput> = if control.is_some() {
                 let (tx, typed) = TypedLineInput::channel();
                 typed_lines = Some(tx);
                 Arc::new(typed)
             } else {
                 Arc::new(StdinInput::new())
-            }
+            };
+            chat_service = chat_service
+                .with_voice_input(voice)
+                .with_wake_word_detector(Arc::new(InstantActivation));
         }
-    };
-    chat_service = chat_service.with_voice_input(voice);
+    }
     if let Some(control) = &control {
         chat_service = chat_service.with_control(control.clone());
         let control = control.clone();
@@ -5660,53 +5620,19 @@ async fn run_chat(
             .spawn(move || pump_stdin(std::io::stdin().lock(), &control, typed_lines))?;
     }
 
-    // ── Wire wake word detector ──
-    if no_wake_word || whisper_backend.is_none() {
-        chat_service = chat_service.with_wake_word_detector(Arc::new(InstantActivation));
-    } else {
-        let backend = whisper_backend.clone().expect("checked above");
-        let trigger = wake_word.unwrap_or(settings.voice_wake_word.as_str());
-        let transcriptions = settings.voice_wake_word_transcriptions.clone();
-
-        if transcriptions.is_empty() {
-            out!("  Wake     \"{}\"", trigger);
+    if let Some(listening) = listening.as_ref().filter(|_| !no_wake_word) {
+        if listening.calibrated == 0 {
+            out!("  Wake     \"{}\"", listening.wake_word);
         } else {
             out!(
                 "  Wake     \"{}\" ({} calibrated variants)",
-                trigger,
-                transcriptions.len()
+                listening.wake_word,
+                listening.calibrated
             );
         }
-        use pond_adapters_whisper::{KeywordDetectorConfig, WhisperBackend};
-        let kws_config = KeywordDetectorConfig {
-            energy_threshold: settings.voice_kws_energy_threshold,
-            post_trigger_silence_ms: settings.voice_kws_post_trigger_silence_ms,
-            cooldown_ms: settings.voice_kws_cooldown_ms,
-            ..KeywordDetectorConfig::default()
-        };
-
-        let mut detector_builder = WhisperKeywordDetector::new(
-            backend.clone() as Arc<dyn WhisperBackend>,
-            trigger,
-            mic_handle.clone(),
-        )
-        .with_transcriptions(transcriptions)
-        .with_config(kws_config);
-        if let Some(sink) = &audio_level_sink {
-            detector_builder = detector_builder.with_audio_level_sink(sink.clone());
-        }
-        let detector = Arc::new(detector_builder);
-        // The command clip contains the wake word; strip exactly the triggers the detector used.
-        backend.set_wake_words(detector.triggers());
-        chat_service = chat_service.with_wake_word_detector(detector);
-    };
-
-    // ── Wire barge-in energy ──
-    // Required for barge-in: the default `NoEnergy` is inert. Only with speech input, because
-    // it opens the mic while the reply plays and hands what it hears to the next capture.
-    if whisper_backend.is_some() {
-        chat_service =
-            chat_service.with_speech_energy(Arc::new(pond_audio::MicEnergy::new(&mic_handle)));
+    }
+    if let Some(listening) = &listening {
+        out!("  Ear      {}", listening.describe());
     }
 
     // Spotify's Developer Policy III.7: Spotify pauses while this process makes a sound, its wake

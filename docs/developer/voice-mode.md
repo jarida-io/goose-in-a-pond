@@ -8,16 +8,20 @@ and the desktop app run the same loop; the desktop spawns it as a child process
 |---|---|
 | Microphone (one owner, 16 kHz mono ring) | `crates/pond-audio` (`pond_audio::spawn`, `MicHandle`) |
 | Device choice and supervision | `crates/pond-adapters-audio-devices`, started in `run_chat` with `Role::Voice` |
-| Wake word | `WhisperKeywordDetector` in `crates/pond-adapters-whisper/src/lib.rs` |
-| End of speech | `pond-adapters-silero` (`vad_backend = "silero"`, the default) or an RMS gate |
+| Which front end listens | `build_listening` in `crates/pond-server/src/voice_rig.rs` |
+| Wake word | The ear (`crates/pond-adapters-ear`): the "hey goose" CNN or Whisper on each speech segment (`voice_wake_detector`); without Silero, `WhisperKeywordDetector` in `crates/pond-adapters-whisper/src/lib.rs` |
+| End of speech | The ear's Silero endpointer on echo-cancelled audio; without the ear, `pond-adapters-silero` or an RMS gate |
+| Interrupting a reply | The ear's `InterruptWatch`: the wake word, or an enrolled voice; without the ear, energy barge-in |
 | Speech to text | `WhisperRsInput` in `crates/pond-adapters-whisper/src/in_process.rs` (whisper-rs 0.16, in process) |
 | The turn | `ChatService::run_loop` and `stream_response_inner` in `crates/pond-core/src/shared/services/chat.rs` |
 | Speech text | `crates/pond-voice/src/text.rs` ([TTS text normalization](../tts-text-normalization.md)) |
 | Text to speech | `KokoroOutput` in `crates/pond-adapters-kokoro` |
 | Playback, wake ping, working tone | `crates/pond-audio-out` |
 
-`crates/pond-ear` (a hand-written wake word, VAD, echo canceller and Voice Match) is not wired into
-this loop yet; see [pond-ear](pond-ear.md).
+The ear runs `crates/pond-ear` (a hand-written wake word, VAD, echo canceller and Voice Match) on
+its own thread; see [pond-ear](pond-ear.md). It is chosen whenever Silero is available and
+`vad_backend` is not `rms`. Voice Match is not enrolled by anything yet, so an interrupt today is the
+wake word.
 
 ## Running it
 

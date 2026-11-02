@@ -232,6 +232,13 @@ impl WhisperRsInput {
         Self::transcribe_samples(&engine, samples_16k)
     }
 
+    /// 16 kHz mono PCM through the accurate profile, the wake word left in. Blocking: call it
+    /// from a blocking thread, where `blocking_read` is safe.
+    pub fn transcribe_pcm(&self, samples: &[f32]) -> Result<String> {
+        let engine = self.engine.blocking_read().clone();
+        Self::transcribe_samples(&engine, samples.to_vec())
+    }
+
     /// Transcribe 16 kHz mono PCM (artifacts stripped); empty → `Ok("")`, panic → `Err`.
     fn transcribe_samples(engine: &Engine, samples: Vec<f32>) -> Result<String> {
         Self::transcribe_samples_with(engine, samples, TranscribeOpts::accurate())
