@@ -4464,10 +4464,18 @@ async fn run_server(
     // TensorRT engines and a GPU embedder loading beside the language model's own GPU load risk
     // an NvMap OOM, so both wait for the prewarm.
     let (prewarm_done, prewarmed) = tokio::sync::watch::channel(false);
-    tokio::spawn(async move {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(600), prewarm).await;
-        let _ = prewarm_done.send(true);
-    });
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            // The typed shape first, then the Voice agent's: a spoken turn renders its own preamble.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(600), async {
+                let _ = prewarm.await;
+                pond_api::compile_voice_prefill(state).await;
+            })
+            .await;
+            let _ = prewarm_done.send(true);
+        });
+    }
     if let Some(plan) = onnx_gpu_plan {
         let mut prewarmed = prewarmed.clone();
         tokio::spawn(async move {
@@ -9515,6 +9523,8 @@ async fn build_goose_backend(
             };
             // Read per turn, so mesh_rebuild filling it later needs no adapter rebuild.
             let adapter = adapter.with_mesh_provider(mesh_provider);
+            // A spoken turn reads the household's Voice agent edit from it.
+            let adapter = adapter.with_recipe_repo(recipe_repo.clone());
             if voice_mode {
                 adapter.set_voice_mode(true);
             }
