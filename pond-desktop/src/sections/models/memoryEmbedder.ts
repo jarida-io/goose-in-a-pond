@@ -89,6 +89,8 @@ export interface EmbedderLine {
   retryingLabel: string;
   /** Reading again only: items that can be found by meaning, of those there are across every store. */
   progress: { done: number; total: number } | null;
+  /** What a screen reader hears where `text` changes on every poll; the count stays on the progress bar. */
+  spoken: string | null;
 }
 
 /** A failed load that is only the pond waiting on a file it fetches itself, which is no fault. */
@@ -99,7 +101,7 @@ export function isFetching(reason: string | null | undefined): boolean {
 function line(kind: EmbedderKind, text: string, over: Partial<EmbedderLine> = {}): EmbedderLine {
   return {
     kind, text, detail: null, retry: false, retryLabel: "Try again", retryingLabel: "Trying again",
-    progress: null, ...over,
+    progress: null, spoken: null, ...over,
   };
 }
 
@@ -156,7 +158,9 @@ export function embedderLine(
       const total = health.rows ?? 0;
       const done = Math.min(health.matching ?? 0, total);
       if (done < total) {
-        return line("reindexing", `Reading memories again: ${done} of ${total} items`, { progress: { done, total } });
+        return line("reindexing", `Reading memories again: ${done} of ${total} items`, {
+          progress: { done, total }, spoken: "Reading memories again",
+        });
       }
       return line("ready", `${title} is ready. Every memory can be found by meaning.`);
     }

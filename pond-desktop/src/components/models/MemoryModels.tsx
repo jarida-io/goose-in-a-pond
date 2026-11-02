@@ -84,7 +84,14 @@ export function EmbedderStatus({
           className={SPINS.includes(line.kind) ? "mm-embedder__icon mm-spin" : "mm-embedder__icon"}
           aria-hidden="true"
         />
-        <span>{line.text}</span>
+        {line.spoken ? (
+          <span>
+            <span aria-hidden="true">{line.text}</span>
+            <span className="mm-sr">{line.spoken}</span>
+          </span>
+        ) : (
+          <span>{line.text}</span>
+        )}
       </p>
       {pct !== null && (
         <div
@@ -94,6 +101,7 @@ export function EmbedderStatus({
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={pct}
+          aria-valuetext={`${line.progress?.done} of ${line.progress?.total} items`}
         >
           <span className="mm-embedder__fill" style={{ width: `${pct}%` }} />
         </div>
