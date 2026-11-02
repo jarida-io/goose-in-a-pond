@@ -179,7 +179,7 @@ take a valid bearer, a 4 KiB body and 20 requests a minute:
 
 | Route | Purpose |
 |---|---|
-| `GET /api/v1/remote-access/configuration` | `{enabled, controlUrl, state, lapsesAt}` |
+| `GET /api/v1/remote-access/configuration` | `{enabled, controlUrl, state, lapsesAt, enableFrom}`; while off, `enableFrom` names where the household can turn it on (`["dashboard"]`), so the app can explain it once the phone is away |
 | `POST /api/v1/remote-access/enrollment` | enroll this phone's node (LAN peer only) |
 | `POST /api/v1/remote-access/recovery`, `GET/POST/DELETE .../recovery/{id}` | request, poll, execute and cancel a recovery (LAN peer only) |
 
