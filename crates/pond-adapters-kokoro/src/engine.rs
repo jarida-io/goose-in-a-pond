@@ -131,8 +131,9 @@ impl Engine {
             .with_memory_pattern(false)
             .map_err(|e| anyhow!("failed to turn off ort memory patterns: {e}"))?;
         // The CPU even with the Orin's GPU runtime: CUDA synthesised 7x faster but took 650-940 MB
-        // beside E4B and halved the language model's decode while both ran.
-        let cpu = ort::ep::CPU::default().build();
+        // beside E4B and halved the language model's decode while both ran. No arena, as ort's
+        // default already has it: an arena would hold the longest unit's peak for good.
+        let cpu = ort::ep::CPU::default().with_arena_allocator(false).build();
         builder = builder
             .with_execution_providers([cpu])
             .map_err(|e| anyhow!("failed to set ort cpu execution provider: {e}"))?;

@@ -375,3 +375,99 @@ fn disk_cache_speeds_up_model_load() {
             .unwrap_or(0)
     );
 }
+
+/// Hand freed heap pages back to the OS, as `KOKORO_TRIM` asks, to tell the allocator's
+/// retention from memory ORT still holds.
+fn return_freed_memory() {
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+        }
+        // SAFETY: a null zone asks every zone to release what it can; no memory is touched.
+        unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: glibc's trim only returns free pages at the heap's top and in its arenas.
+        unsafe { malloc_trim(0) };
+    }
+}
+
+/// Resident memory of this process, from `ps`, in MB.
+fn rss_mb() -> f64 {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .expect("ps");
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<f64>()
+        .unwrap_or(0.0)
+        / 1024.0
+}
+
+/// Fifty units of a reply's lengths, a short one between long ones as a room loop gets them.
+const UNITS: &[&str] = &[
+    "Sure.",
+    "It's nineteen degrees in Nairobi right now, with light cloud, and it should reach twenty six by mid-afternoon.",
+    "Rain is unlikely before evening.",
+    "You have three things on the calendar: a call with Amina at ten, lunch with your brother at half past one, and the plumber, who said he would come some time between four and six.",
+    "Keep your phone nearby.",
+    "Kneading builds a stretchy network of gluten, the protein in wheat, and that network traps the gas in thousands of tiny pockets, so the dough puffs up like a balloon instead of letting the gas escape.",
+    "Okay.",
+    "Heat speeds everything up, which is why a warm kitchen gives you a faster rise, while a cold one can take most of the day.",
+    "Shall I tell them it's Ngong Lane?",
+    "A wrong address usually means the parcel goes back to the depot, and that can add two or three days, sometimes more.",
+];
+
+#[test]
+#[ignore = "needs Kokoro weights; set KOKORO_DIR"]
+fn resident_memory_over_fifty_units() {
+    let Some(dir) = model_dir() else {
+        panic!("set KOKORO_DIR");
+    };
+    let vocab = Vocab::load(&dir.join("tokenizer.json")).unwrap();
+    let style = StyleTable::load(&dir.join("voices"), "af_heart").unwrap();
+    let mut engine = Engine::load(&dir.join(model_file()), intra_threads()).unwrap();
+    // As the splitter cuts them, so no unit passes its token budget.
+    let units: Vec<String> = pond_voice::text::split_text(&UNITS.join(" "))
+        .into_iter()
+        .map(|u| u.text)
+        .collect();
+    let loaded = rss_mb();
+    let (mut peak, mut synth_secs, mut audio_secs) = (loaded, 0.0f32, 0.0f32);
+    let (mut marks, mut longest) = (Vec::new(), 0usize);
+    for n in 0..50 {
+        let (chunks, _) = tokenizer::chunk(&units[n % units.len()], &vocab).unwrap();
+        let t0 = Instant::now();
+        for c in &chunks {
+            let audio = engine
+                .synthesize(c, style.style_for(c.tokens.len()), 1.0)
+                .unwrap();
+            audio_secs += duration_secs(&audio);
+        }
+        synth_secs += t0.elapsed().as_secs_f32();
+        if std::env::var("KOKORO_TRIM").is_ok() {
+            return_freed_memory();
+        }
+        let now = rss_mb();
+        peak = peak.max(now);
+        longest = longest.max(chunks.iter().map(|c| c.tokens.len()).max().unwrap_or(0));
+        if (n + 1) % 10 == 0 {
+            marks.push(format!("{}:{now:.0}", n + 1));
+        }
+    }
+    println!(
+        "kokoro {} rss: {} units, longest {longest} tokens; loaded {loaded:.0} MB, after units {}, \
+         peak {peak:.0} MB, growth {:.0} MB, RTF {:.3}",
+        model_file(),
+        units.len(),
+        marks.join(" "),
+        peak - loaded,
+        synth_secs / audio_secs
+    );
+}
