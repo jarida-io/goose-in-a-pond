@@ -19,6 +19,8 @@ export interface MemoryJob {
   /** The pond reaches nothing outside the house, so a file that is not here cannot be fetched. */
   offline: boolean;
   line: EmbedderLine | null;
+  /** The pond has not answered yet, so no row may claim the model runs. */
+  checking: boolean;
   retrying: boolean;
   useModel: (m: ModelEntry) => Promise<void>;
   turnOn: () => Promise<void>;
@@ -77,6 +79,7 @@ export function useMemoryJob(
     off: memoryIsOff(roles),
     offline,
     line,
+    checking: embedder.loading,
     retrying: embedder.retrying,
     useModel,
     turnOn,

@@ -41,3 +41,21 @@ export async function contrastOf(el: Locator): Promise<number> {
   const [hi, lo] = [luminance(text), luminance(behind)].sort((a, b) => b - a);
   return (hi + 0.05) / (lo + 0.05);
 }
+
+/** WCAG contrast of an element's own fill over what is behind it: the 3:1 a control's boundary needs. */
+export async function fillContrastOf(el: Locator): Promise<number> {
+  const { fill, backgrounds } = await el.evaluate((node) => {
+    const layers: string[] = [];
+    for (let e: Element | null = node.parentElement; e; e = e.parentElement) {
+      layers.push(getComputedStyle(e).backgroundColor);
+    }
+    return { fill: getComputedStyle(node).backgroundColor, backgrounds: layers };
+  });
+  let behind: number[] = [255, 255, 255];
+  for (const layer of backgrounds.map(parse).reverse()) {
+    const alpha = layer[3];
+    behind = [0, 1, 2].map((i) => layer[i] * alpha + behind[i] * (1 - alpha));
+  }
+  const [hi, lo] = [luminance(parse(fill)), luminance(behind)].sort((a, b) => b - a);
+  return (hi + 0.05) / (lo + 0.05);
+}

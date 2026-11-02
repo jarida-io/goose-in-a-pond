@@ -3,7 +3,7 @@ import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
-import { contrastOf } from "./helpers/contrast";
+import { contrastOf, fillContrastOf } from "./helpers/contrast";
 import { navigateTo } from "./helpers/nav";
 import { memoryHealth, memoryRows, mockModels, typicalModels, type ModelMocks } from "./helpers/model-mocks";
 
@@ -85,6 +85,17 @@ async function setup(
   const [width, height] = opts.size ?? (opts.section === "hub" ? [1024, 600] : [1280, 900]);
   await page.setViewportSize({ width, height });
   return seen;
+}
+
+/** Holds every index report until the returned function is called, as a slow pond does on its first read. */
+async function holdHealth(page: Page, json: Record<string, unknown>): Promise<() => void> {
+  let release = () => {};
+  const answered = new Promise<void>((ok) => { release = ok; });
+  await page.route("**/api/v1/context/index/health", async (route) => {
+    await answered;
+    await route.fulfill({ json }).catch(() => undefined);
+  });
+  return release;
 }
 
 async function openClassicModels(page: Page) {
@@ -205,10 +216,24 @@ test.describe("Memory, classic Models page", () => {
     const row = memory.getByRole("listitem").filter({ hasText: "EmbeddingGemma 2" });
     await expect(row).toContainText("Chosen, not loaded");
     await expect(memory.getByText("In use")).toHaveCount(0);
+    // The Jobs card names the model and, while it is not running, says so too.
+    await expect(page.locator(".mdl-role", { hasText: "Memory" })).toContainText("Chosen, not loaded");
     await alert.getByRole("button", { name: "Try again" }).click();
     await expect.poll(() => seen.activated.length).toBe(1);
     expect(seen.activated[0].body).toEqual({ role: "embedding" });
     expect(seen.rebuilt).toBe(0);
+  });
+
+  test("claims nothing about the chosen model before the pond's first answer", async ({ page }) => {
+    await setup(page, { section: "models", roles: ROLES(ON_EG2) });
+    const answer = await holdHealth(page, memoryHealth({ state: "failed", reason: "loading x.gguf on the Gpu: out of memory" }, { matching: 0 }));
+    const memory = await openClassicModels(page);
+    const row = memory.getByRole("listitem").filter({ hasText: "EmbeddingGemma 2" });
+    await expect(row).toContainText("Checking");
+    await expect(memory.getByText("In use")).toHaveCount(0);
+    answer();
+    await expect(row).toContainText("Chosen, not loaded");
+    await expect(memory.getByText("In use")).toHaveCount(0);
   });
 
   test("rests Download and use, with the reason, when the pond reaches nothing outside the house", async ({ page }) => {
@@ -318,6 +343,10 @@ test.describe("Memory, hub", () => {
     await expect(rows.nth(0)).toContainText("295 MB to download");
     await expect(rows.nth(0).getByRole("button")).toHaveText("Download and use");
     await expect(rows.nth(1)).toContainText("In use");
+    // What a model costs is read at body size in the text colour, not the faintest line on the card.
+    const cost = rows.nth(0).getByText("295 MB to download");
+    await expect(cost).toHaveCSS("font-size", "13px");
+    expect(await contrastOf(cost)).toBeGreaterThanOrEqual(15);
     await card.getByRole("button", { name: "Other Memory models (1)" }).click();
     await expect(rows).toHaveCount(3);
     for (const button of await card.getByRole("button").all()) {
@@ -334,12 +363,40 @@ test.describe("Memory, hub", () => {
     const card = await openHubModels(page);
     await expect(card.getByRole("alert")).toContainText("not enough free memory");
     await expect(card.getByRole("listitem").first()).toContainText("Chosen, not loaded");
+    await expect(page.locator(".hm-tile", { hasText: "Memory" })).toContainText("Chosen, not loaded");
     await card.getByRole("button", { name: "Details" }).click();
     await expect(card.getByRole("alert")).toContainText("on the Gpu: out of memory");
     for (const button of await card.getByRole("button").all()) {
       const box = await button.boundingBox();
       expect(box?.height ?? 0, await button.innerText()).toBeGreaterThanOrEqual(44);
     }
+  });
+
+  test("claims nothing about the chosen model before the pond's first answer", async ({ page }) => {
+    await setup(page, { section: "hub", size: [800, 480], roles: ROLES(ON_EG2) });
+    const answer = await holdHealth(page, memoryHealth({ state: "loading" }, { matching: 0 }));
+    const card = await openHubModels(page);
+    await expect(card.getByRole("listitem").first()).toContainText("Checking");
+    await expect(card.getByText("In use")).toHaveCount(0);
+    answer();
+    await expect(card.getByRole("listitem").first()).toContainText("Loading");
+  });
+
+  test("the Memory tile takes a press to the Memory card, and the keyboard with it", async ({ page }) => {
+    await setup(page, {
+      section: "hub", size: [800, 480], roles: ROLES(ON_EG2),
+      health: memoryHealth({ state: "failed", reason: "loading x.gguf on the Gpu: out of memory" }, { matching: 0 }),
+    });
+    const card = await openHubModels(page);
+    await expect(card).not.toBeInViewport();
+    const tile = page.getByRole("button", { name: "Memory: EmbeddingGemma 2, Chosen, not loaded. Change" });
+    expect((await tile.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
+    await tile.click();
+    await expect(card).toBeInViewport();
+    await expect(card).toBeFocused();
+    // Listening and the voice are both chosen on the Speech card.
+    await page.getByRole("button", { name: /^Speaking: / }).click();
+    await expect(page.locator("#hm-card-speech")).toBeFocused();
   });
 
   test("Use assigns the Memory role from the hub", async ({ page }) => {
@@ -415,6 +472,9 @@ for (const scheme of ["Light", "Dark"] as const) {
       const alert = memory.getByRole("alert");
       expect(await contrastOf(alert.getByRole("button", { name: "Details" })), "Details").toBeGreaterThanOrEqual(4.5);
       expect(await contrastOf(memory.getByText("Chosen, not loaded")), "Chosen, not loaded").toBeGreaterThanOrEqual(4.5);
+      expect(
+        await contrastOf(page.locator(".mdl-role").getByText("Chosen, not loaded")), "the Jobs card's state",
+      ).toBeGreaterThanOrEqual(4.5);
       await alert.getByRole("button", { name: "Details" }).click();
       expect(await contrastOf(alert.getByText(/on the Gpu: out of memory/)), "the pond's reason").toBeGreaterThanOrEqual(4.5);
 
@@ -446,20 +506,63 @@ for (const scheme of ["Light", "Dark"] as const) {
       const card = await openHubModels(page);
       await expect(card.getByRole("alert")).toBeVisible();
       await scan(page, ".ghub__main", "hub Memory card");
+      expect(
+        await contrastOf(page.locator(".hm-tile").getByText("Chosen, not loaded")), "the Memory tile's state",
+      ).toBeGreaterThanOrEqual(4.5);
 
       await navigateTo(page, "Context");
       await expect(page.locator(".setcard__title", { hasText: /^Search by meaning$/ })).toBeVisible();
+      // The hub's switch wears the same accent as the classic one, lifted the same way in dark.
+      const accent = await page.evaluate((dark) => {
+        const probe = document.createElement("span");
+        probe.style.background = dark ? "color-mix(in srgb, var(--pp) 85%, white)" : "var(--pp)";
+        document.body.append(probe);
+        const value = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        return value;
+      }, scheme === "Dark");
+      const hubSwitch = page.getByRole("button", { name: "Search by meaning" });
+      await expect(hubSwitch).toHaveCSS("background-color", accent);
       await expect(page.getByRole("alert").filter({ hasText: "not enough free memory" })).toBeVisible();
       await expect(page.getByText("EmbeddingGemma 2 is chosen but did not load.")).toBeVisible();
       // The card this change owns; the screen's own Add button measures 3.74:1 and is not part of it.
       await scan(page, ".setcard:has(.hm-embed)", "hub Memory screen, Search by meaning");
+      // Off is a slate track that still clears 3:1 on the card.
+      await hubSwitch.click();
+      await expect(hubSwitch).toHaveAttribute("aria-pressed", "false");
+      await page.mouse.move(0, 0);
+      await expect.poll(() => fillContrastOf(hubSwitch), { message: "the hub switch, off" }).toBeGreaterThanOrEqual(3);
+      // The knob rests at the track's ends, inside it: left when off, right when on.
+      const knobAt = async () => {
+        const [track, knob] = await Promise.all([hubSwitch.boundingBox(), hubSwitch.locator(".htoggle__knob").boundingBox()]);
+        return { left: (knob?.x ?? 0) - (track?.x ?? 0), right: (track?.x ?? 0) + (track?.width ?? 0) - (knob?.x ?? 0) - (knob?.width ?? 0) };
+      };
+      await expect.poll(async () => (await knobAt()).left).toBeLessThanOrEqual(4);
+      await hubSwitch.click();
+      await expect.poll(async () => (await knobAt()).right).toBeGreaterThanOrEqual(0);
+      await expect.poll(async () => (await knobAt()).right).toBeLessThanOrEqual(4);
     });
 
     test("the settings switch row", async ({ page }) => {
       await setup(page, { section: "settings", scheme });
       await page.goto("/");
       await page.getByRole("button", { name: /^Models/ }).click();
-      await expect(page.locator(".scat__row", { hasText: "Search memories by meaning" })).toBeVisible();
+      const row = page.locator(".scat__row", { hasText: "Search memories by meaning" });
+      await expect(row).toBeVisible();
+      // On is the household's accent, lifted in dark to clear 3:1 on the card, never HeroUI's blue.
+      const accent = await page.evaluate((dark) => {
+        const probe = document.createElement("span");
+        probe.style.background = dark ? "color-mix(in srgb, var(--color-accent) 85%, white)" : "var(--color-accent)";
+        document.body.append(probe);
+        const value = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        return value;
+      }, scheme === "Dark");
+      await expect(row.locator(".switch__control")).toHaveCSS("background-color", accent);
+      await row.locator(".switch__control").click();
+      await page.mouse.move(0, 0);
+      await expect.poll(() => fillContrastOf(row.locator(".switch__control")), { message: "the Settings switch, off" })
+        .toBeGreaterThanOrEqual(3);
       // The row this change owns; a "New" badge elsewhere in the category measures 2.74:1 in dark.
       await scan(page, ".scat__row:has([aria-label='Search memories by meaning'])", "settings switch");
     });
