@@ -249,15 +249,15 @@ export const EG2_ORIN = {
   measured_on: "2026-10-31",
 };
 
-/** A Memory model, as the server sends it: its whole description is its title. */
-function embeddingRow(name: string, description: string, over: Partial<ModelEntry> = {}): ModelEntry {
+/** A Memory model, as the server sends it. */
+function embeddingRow(name: string, title: string, description: string, over: Partial<ModelEntry> = {}): ModelEntry {
   return {
     id: `embedding/${name}`,
     provider: "embedding",
     category: "embedding",
     name,
     display_name: description,
-    title: description,
+    title,
     is_active: false,
     downloaded: false,
     recommended_role: "embedding",
@@ -272,6 +272,7 @@ function embeddingRow(name: string, description: string, over: Partial<ModelEntr
 export function miniLm(over: Partial<ModelEntry> = {}): ModelEntry {
   return embeddingRow(
     "all-MiniLM-L6-v2",
+    "all-MiniLM-L6-v2",
     "all-MiniLM-L6-v2 \u2014 fast, lightweight sentence embeddings. 23 MB, 384 dimensions. Best for domain classification and semantic search.",
     { size_mb: 23, ram_estimate_mb: 50, acquire: "external", ...over },
   );
@@ -280,6 +281,7 @@ export function miniLm(over: Partial<ModelEntry> = {}): ModelEntry {
 export function nomicEmbed(over: Partial<ModelEntry> = {}): ModelEntry {
   return embeddingRow(
     "nomic-embed-text-v1.5",
+    "Nomic Embed Text v1.5",
     "Nomic Embed Text v1.5 \u2014 8-bit GGUF run by llama.cpp. 768 dimensions, tuned for search.",
     { size_mb: 139, ram_estimate_mb: 173, filename: "nomic-embed-text-v1.5.Q8_0.gguf", ...over },
   );
@@ -288,6 +290,7 @@ export function nomicEmbed(over: Partial<ModelEntry> = {}): ModelEntry {
 export function eg2(over: Partial<ModelEntry> = {}): ModelEntry {
   return embeddingRow(
     "embeddinggemma-2",
+    "EmbeddingGemma 2",
     "EmbeddingGemma 2 \u2014 8-bit GGUF run by llama.cpp. Over 100 languages, so a fact said in Swahili is found by a question in English. 256 dimensions.",
     {
       size_mb: 295,

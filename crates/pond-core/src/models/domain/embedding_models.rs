@@ -69,6 +69,8 @@ pub struct SimilarityFloors {
 pub struct EmbeddingModel {
     /// The catalogue name: what the household picks and `active_embedding_model` stores.
     pub name: &'static str,
+    /// The name the household reads.
+    pub title: &'static str,
     /// Stamped on every vector the model makes; vectors under another id are another space.
     pub model_id: &'static str,
     /// The width of a stored vector.
@@ -173,6 +175,7 @@ pub const EMBEDDINGGEMMA_2_Q8_0: GgufFile = GgufFile {
 
 pub const ALL_MINILM_L6_V2: EmbeddingModel = EmbeddingModel {
     name: "all-MiniLM-L6-v2",
+    title: "all-MiniLM-L6-v2",
     model_id: "all-MiniLM-L6-v2",
     dims: 384,
     summary: "all-MiniLM-L6-v2 — fast, lightweight sentence embeddings. 23 MB, 384 dimensions. \
@@ -190,6 +193,7 @@ pub const ALL_MINILM_L6_V2: EmbeddingModel = EmbeddingModel {
 
 pub const BGE_SMALL_EN_V1_5: EmbeddingModel = EmbeddingModel {
     name: "bge-small-en-v1.5",
+    title: "BGE Small EN v1.5",
     model_id: "bge-small-en-v1.5",
     dims: 384,
     summary: "BGE Small EN v1.5 — high-quality English embedding model. 33 MB, 384 dimensions.",
@@ -202,6 +206,7 @@ pub const BGE_SMALL_EN_V1_5: EmbeddingModel = EmbeddingModel {
 
 pub const NOMIC_EMBED_TEXT_V1_5: EmbeddingModel = EmbeddingModel {
     name: "nomic-embed-text-v1.5",
+    title: "Nomic Embed Text v1.5",
     model_id: "nomic-embed-text-v1.5",
     dims: 768,
     summary: "Nomic Embed Text v1.5 — 8-bit GGUF run by llama.cpp. 768 dimensions, tuned for \
@@ -212,6 +217,7 @@ pub const NOMIC_EMBED_TEXT_V1_5: EmbeddingModel = EmbeddingModel {
 
 pub const BGE_BASE_EN_V1_5: EmbeddingModel = EmbeddingModel {
     name: "bge-base-en-v1.5",
+    title: "BGE Base EN v1.5",
     model_id: "bge-base-en-v1.5",
     dims: 768,
     summary: "BGE Base EN v1.5 — 8-bit GGUF run by llama.cpp. 768 dimensions, English.",
@@ -221,6 +227,7 @@ pub const BGE_BASE_EN_V1_5: EmbeddingModel = EmbeddingModel {
 
 pub const EMBEDDINGGEMMA_2: EmbeddingModel = EmbeddingModel {
     name: "embeddinggemma-2",
+    title: "EmbeddingGemma 2",
     // The 256-dimension cut is part of the space: 768 or 128 from the same model is another one.
     model_id: "embeddinggemma-2-256",
     dims: 256,

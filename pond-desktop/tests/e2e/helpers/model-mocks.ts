@@ -121,12 +121,12 @@ export const whisperBase = (over: Record<string, unknown> = {}) => ({
 
 const EG2_REASON = "Finds facts in Swahili, Sheng or English, whichever language you ask in";
 
-/** A Memory model as the server sends it: its whole description is its title. */
-const embeddingRow = (name: string, description: string, over: Record<string, unknown> = {}) => ({
+/** A Memory model as the server sends it. */
+const embeddingRow = (name: string, title: string, description: string, over: Record<string, unknown> = {}) => ({
   id: `embedding/${name}`,
   category: "embedding",
   name,
-  title: description,
+  title,
   description,
   downloaded: false,
   active: false,
@@ -141,6 +141,7 @@ const embeddingRow = (name: string, description: string, over: Record<string, un
 export const miniLmRow = (over: Record<string, unknown> = {}) =>
   embeddingRow(
     "all-MiniLM-L6-v2",
+    "all-MiniLM-L6-v2",
     "all-MiniLM-L6-v2 \u2014 fast, lightweight sentence embeddings. 23 MB, 384 dimensions. Best for domain classification and semantic search.",
     { size_mb: 23, acquire: "external", ...over },
   );
@@ -148,6 +149,7 @@ export const miniLmRow = (over: Record<string, unknown> = {}) =>
 export const nomicRow = (over: Record<string, unknown> = {}) =>
   embeddingRow(
     "nomic-embed-text-v1.5",
+    "Nomic Embed Text v1.5",
     "Nomic Embed Text v1.5 \u2014 8-bit GGUF run by llama.cpp. 768 dimensions, tuned for search.",
     { size_mb: 139, filename: "nomic-embed-text-v1.5.Q8_0.gguf", ...over },
   );
@@ -155,6 +157,7 @@ export const nomicRow = (over: Record<string, unknown> = {}) =>
 export const eg2Row = (over: Record<string, unknown> = {}) =>
   embeddingRow(
     "embeddinggemma-2",
+    "EmbeddingGemma 2",
     "EmbeddingGemma 2 \u2014 8-bit GGUF run by llama.cpp. Over 100 languages, so a fact said in Swahili is found by a question in English. 256 dimensions.",
     {
       size_mb: 295,
