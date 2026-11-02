@@ -206,7 +206,7 @@ describe("Lineage: the embedder", () => {
   it("names the model as the household reads it, not its stamp and dimensions", () => {
     render(<Lineage memories={[]} health={indexWith({})} />);
     expect(screen.getByText(/^Read by/).textContent).toBe(
-      "Read by EmbeddingGemma 2. Anything not indexed is still found by word, just less well.",
+      "Read by EmbeddingGemma 2. Anything not read yet is still found by word, just less well.",
     );
     expect(screen.queryByText(/dimensions|embeddinggemma-2-256/)).toBeNull();
   });
@@ -215,7 +215,7 @@ describe("Lineage: the embedder", () => {
     render(<Lineage memories={[]} health={indexWith({ state: "failed", reason: "bad magic number" }, { matching: 0 })} />);
     expect(screen.queryByText(/^Read by/)).toBeNull();
     expect(screen.getByText(/^Chosen:/).textContent).toBe(
-      "Chosen: EmbeddingGemma 2. Anything not indexed is still found by word, just less well.",
+      "Chosen: EmbeddingGemma 2. Anything not read yet is still found by word, just less well.",
     );
   });
 
