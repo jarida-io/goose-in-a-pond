@@ -134,14 +134,19 @@ In `goose/crates/goose-local-inference/src/llamacpp/`.
   `reason` (`tight`, `roomy`, `requested_fits`, `q8_no_wider`, `no_candidate` without flash
   attention). The ladder has a 5,120 rung so a load just above the floor, where q8_0 holds more
   than 4,096 tokens but not 6,144, still gains from it.
-- **KV estimate on unified memory.** The fit reads the KV layout per layer from the GGUF header
-  (`KvMeta` / `KvGeometry` in `memory.rs`): `head_count_kv`, the full and sliding key and value
-  widths, `sliding_window` and `sliding_window_pattern`, less `shared_kv_layers`. Full-attention
+- **KV estimate on unified memory.** The fit reads the KV layout per layer from the GGUF file's
+  header at load (`KvMeta::read` in `memory.rs`, ggml's `gguf_init_from_file` with no tensor
+  data): `head_count_kv`, the full and sliding key and value widths, `sliding_window` and
+  `sliding_window_pattern`, less `shared_kv_layers`. Not through `LlamaModel::meta_val_str`:
+  llama.cpp keeps only scalar metadata as strings and drops every array, the per-layer pattern
+  among them, which is why the first build of this estimate charged E4B in full on the Orin. Full-attention
   layers cost bytes per position of the window; sliding layers cost a fixed cache of
   `GGML_PAD(n_swa + n_ubatch, 256)` cells, which is what llama.cpp's windowed cache
   (`llama_kv_cache_iswa`) gives them at most, with `n_ubatch` charged at no less than 512 so a
   picture turn's context is covered. A header without a per-layer pattern or a window is charged
-  every layer in full. `kind="context_sized"` logs `kv_kib_per_token` (full layers),
+  every layer in full; when the model slides (it declares a window, sliding widths or a pattern)
+  that is logged as WARN `kind="kv_estimate_fallback"` with the `missing_key`, as is a header
+  that cannot be read. `kind="context_sized"` logs `kv_kib_per_token` (full layers),
   `sliding_kv_mb`, `full_layers`, `sliding_layers` and `n_swa`. For E4B (4 full and 20 sliding
   KV layers, 512-position window) at 16K the estimate is 296 MiB in f16 and 157 in q8_0, against
   286 and 152 measured on the Orin at `n_ubatch` 256 (llama.cpp's sizing gives those exactly);
