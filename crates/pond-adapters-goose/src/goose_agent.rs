@@ -398,6 +398,8 @@ pub struct GooseAdapter {
     /// Read-only source of the rolling summary for the trimmer; `None` just skips the splice.
     giap_session_storage:
         Option<Arc<dyn pond_core::user_data::ports::session_storage::SessionStorage>>,
+    /// Where the household's edit of the Voice agent lives; `None` runs the shipped one.
+    recipe_repo: Option<Arc<dyn pond_core::user_data::ports::recipe::AgentRecipeRepository>>,
     /// Engine-reported prompt tokens per session (trimmer feedback); an Arc the stream can hold.
     last_prompt_tokens_arc: std::sync::OnceLock<Arc<Mutex<HashMap<String, u32>>>>,
     /// Tool set from the last `list_tools()`; cleared when extensions change.
@@ -527,6 +529,7 @@ impl GooseAdapter {
             last_prefix_hash: Mutex::new(0),
             prefix_cache: Mutex::new(PrefixCacheState::new(0, std::time::Instant::now())),
             giap_session_storage: None,
+            recipe_repo: None,
             last_prompt_tokens_arc: std::sync::OnceLock::new(),
             cached_tools: tokio::sync::RwLock::new(None),
             defaults_stripped: Mutex::new(HashSet::new()),
@@ -1328,8 +1331,8 @@ impl GooseAdapter {
         }
     }
 
-    /// Whether this turn's prompt carries `<vision>`. `voice` is the INSTANCE flag: it matches
-    /// `capabilities()` and, fixed per process, can't flip the KV-cached prefix between turns.
+    /// Whether this turn's prompt carries `<vision>`. `voice` is the TURN's flag: a phone's spoken
+    /// turn has no attachment either, and its prefix differs from a typed turn's anyway.
     fn vision_section_applies(
         provider: &str,
         model: &str,
@@ -2318,6 +2321,36 @@ impl GooseAdapter {
         self
     }
 
+    /// The agent recipes, so a spoken turn runs the household's edit of the Voice agent.
+    pub fn with_recipe_repo(
+        mut self,
+        repo: Arc<dyn pond_core::user_data::ports::recipe::AgentRecipeRepository>,
+    ) -> Self {
+        self.recipe_repo = Some(repo);
+        self
+    }
+
+    /// The Voice agent a spoken turn runs: the household's edit, or the shipped one when there is
+    /// none or it does not read.
+    async fn voice_agent(&self) -> pond_core::shared::services::voice_agent::VoiceAgent {
+        use pond_core::shared::services::voice_agent::{
+            voice_agent_from_row, VoiceAgent, VOICE_AGENT,
+        };
+        let Some(repo) = &self.recipe_repo else {
+            return VoiceAgent::default();
+        };
+        match repo.get_by_name(VOICE_AGENT).await {
+            Ok(row) => voice_agent_from_row(row.as_ref()).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "the Voice agent's edit does not read; using the shipped one");
+                VoiceAgent::default()
+            }),
+            Err(e) => {
+                tracing::warn!(error = %e, "the Voice agent's edit could not be read; using the shipped one");
+                VoiceAgent::default()
+            }
+        }
+    }
+
     /// Session storage, so the turn trimmer can splice in the rolling `<conversation-summary>`.
     pub fn with_giap_session_storage(
         mut self,
@@ -2558,6 +2591,22 @@ impl GooseAdapter {
         let voice_instance = self.voice_mode.load(std::sync::atomic::Ordering::Relaxed);
         let is_voice = Self::voice_turn(voice_instance, request.voice_mode);
 
+        // A spoken turn runs the Voice agent: its text in `<voice-mode>`, its tools, its turn cap.
+        let voice_agent = if is_voice {
+            self.voice_agent().await
+        } else {
+            pond_core::shared::services::voice_agent::VoiceAgent::default()
+        };
+        let template_content = if is_voice {
+            pond_core::shared::services::voice_agent::voice_template(
+                &template_content,
+                &voice_agent,
+            )
+            .into_owned()
+        } else {
+            template_content
+        };
+
         // Voice disables thinking (it wastes TTS time and can leak as speech). Drives both the
         // prompt's <thinking> section and the engine's `enable_thinking`, which must agree.
         let thinking_enabled = Self::thinking_section_applies(
@@ -2612,7 +2661,7 @@ impl GooseAdapter {
             Self::vision_section_applies(
                 &settings.chat_provider,
                 &settings.chat_model,
-                voice_instance,
+                is_voice,
                 self.data_dir.as_deref(),
             ),
             prompt_state.compact_prompt,
@@ -3031,9 +3080,19 @@ impl GooseAdapter {
         // A standing rule, not news: in the appendix it is prefilled once per session instead of on
         // every turn (86 tokens a turn while it rode the envelope). The shim strips Goose's
         // <turn-context>, so this note is the model's only turn budget.
-        let max_turns = settings.effective_max_turns(is_voice);
+        // The Voice agent's own cap stands in for `voice_max_turns`, still within the agent's.
+        let turn_settings = match voice_agent.max_turns.filter(|_| is_voice) {
+            Some(cap) => {
+                std::borrow::Cow::Owned(pond_core::user_data::domain::settings::Settings {
+                    voice_max_turns: cap,
+                    ..settings.clone()
+                })
+            }
+            None => std::borrow::Cow::Borrowed(&settings),
+        };
+        let max_turns = turn_settings.effective_max_turns(is_voice);
         shim_appendix.push(pond_core::models::services::turn_budget::turn_budget_note(
-            (!settings.turns_are_uncapped(is_voice)).then_some(max_turns),
+            (!turn_settings.turns_are_uncapped(is_voice)).then_some(max_turns),
         ));
         // Standing too: the CURRENT CONTEXT line is news each turn, the rule for reading it is not.
         shim_appendix.push(pond_core::models::services::prompt_builder::TEMPORAL_RULE.to_string());
@@ -3113,6 +3172,32 @@ impl GooseAdapter {
                 tools
             }
         });
+
+        // The groups the household turned off for the Voice agent, from both sets: only ever
+        // narrower than the prime's.
+        let voice_keeps = |tool: &String| {
+            pond_core::mcp::domain::tool_group::group_of_tool(tool)
+                .is_none_or(|group| voice_agent.keeps_group(group))
+        };
+        let (allowed_tools, entitled_tools): (HashSet<String>, Option<HashSet<String>>) =
+            if is_voice && !voice_agent.tool_groups_off.is_empty() {
+                let before = allowed_tools.len();
+                let kept: HashSet<String> = allowed_tools.into_iter().filter(voice_keeps).collect();
+                tracing::info!(
+                    target: "giap::trace",
+                    kind = "voice_agent_tools_off",
+                    session_id = %session_id,
+                    groups = ?voice_agent.tool_groups_off,
+                    removed = before - kept.len(),
+                    "the Voice agent's groups that are off were withheld from the turn"
+                );
+                (
+                    kept,
+                    entitled_tools.map(|t| t.into_iter().filter(voice_keeps).collect()),
+                )
+            } else {
+                (allowed_tools, entitled_tools)
+            };
 
         // A long task's work tools belong to its helpers alone: a turn has no step to work on.
         let allowed_tools: HashSet<String> =
@@ -4227,8 +4312,13 @@ impl AgentPort for GooseAdapter {
         // Home shows that the pond is building caches while this runs, under the name a person
         // knows rather than the shape's.
         let building = pond_core::shared::services::prefill_progress::process_prefill_progress();
+        let warming = if voice_mode {
+            pond_core::shared::services::voice_agent::VOICE_AGENT
+        } else {
+            "assistant"
+        };
         building.begin(1);
-        building.working_on("assistant");
+        building.working_on(warming);
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(300), async {
             use futures::StreamExt;
             for (turn, message) in ["Alpha. Warm-up ping.", "Begin. Warm-up ping."]
@@ -4249,7 +4339,7 @@ impl AgentPort for GooseAdapter {
         })
         .await;
 
-        building.finished("assistant", matches!(outcome, Ok(Ok(()))));
+        building.finished(warming, matches!(outcome, Ok(Ok(()))));
         let elapsed_ms = started.elapsed().as_millis() as u64;
         match outcome {
             Ok(Ok(())) => {
@@ -4296,7 +4386,8 @@ impl AgentPort for GooseAdapter {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         // Voice: thinking wastes TTS time; vision/audio inputs go unused.
-        // `vision_section_applies` reads this same flag, so voice prompts never claim vision.
+        // A voice turn's prompt never claims vision either: `vision_section_applies` takes the
+        // turn's flag, which this one forces on.
         if self.voice_mode.load(std::sync::atomic::Ordering::Relaxed) {
             caps.thinking = false;
             caps.vision = false;
@@ -5723,6 +5814,41 @@ mod tests {
             gate < authority,
             "delegation must not regain a withheld tool"
         );
+    }
+
+    /// The Voice agent narrows what the guest rule left, and both readers see the narrowed set.
+    #[test]
+    fn the_voice_agents_groups_are_withheld_after_the_guest_rule_and_before_both_readers() {
+        let lines = stream_body_code();
+        let at = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("`{needle}` is gone from the turn; re-anchor this test"))
+        };
+        let guest = at("subtract_guest_denied_tools(");
+        let voice = at("if is_voice && !voice_agent.tool_groups_off.is_empty()");
+        let allow_set = at("session_controls.set_allowed_tools(allowed_tools.clone())");
+        let authority = at("self.turn_authorities.publish(");
+        assert!(guest < voice, "a guest's subtraction comes first");
+        assert!(voice < allow_set, "the shim must get the narrowed set");
+        assert!(
+            voice < authority,
+            "delegation must not regain a group turned off"
+        );
+    }
+
+    /// A phone's spoken turn is a voice turn on a serve adapter, whose instance flag is off.
+    #[test]
+    fn the_vision_section_follows_the_turns_voice_flag() {
+        let lines = stream_body_code();
+        let call = lines
+            .iter()
+            .position(|l| l.contains("Self::vision_section_applies("))
+            .expect("the turn no longer asks whether `<vision>` applies; re-anchor this test");
+        let args = lines[call..call + 6].join("\n");
+        assert!(args.contains("is_voice,"), "{args}");
+        assert!(!args.contains("voice_instance"), "{args}");
     }
 
     /// Production source lines with `//` comments cut, so prose can't satisfy a guard.
