@@ -255,6 +255,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/usage/summary", get(usage_summary))
         .route("/devices", get(list_devices).post(register_device))
+        .route("/devices/events", get(device_events_stream))
         .route("/devices/commission", post(commission_device))
         .route("/devices/discovered", get(discover_devices))
         .route("/matter/status", get(matter_status))
@@ -11283,6 +11284,87 @@ fn require_own_device(
     }
     tracing::debug!(operation, "device authorization accepted");
     Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct DeviceEventsParams {
+    after_seq: Option<u64>,
+}
+
+fn device_event(frame: &crate::device_events::Frame) -> Event {
+    Event::default()
+        .event("device_state")
+        .data(frame.data.to_string())
+}
+
+fn resync_event() -> Event {
+    Event::default().event("resync").data("{}")
+}
+
+/// `GET /api/v1/devices/events?after_seq=N` — device state changes as devices report them. With
+/// `after_seq`, first what followed it, or `resync` when that is no longer kept (see
+/// `crate::device_events`).
+async fn device_events_stream(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<DeviceEventsParams>,
+) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)>
+{
+    use crate::device_events::Since;
+    // A phone holds this open while its Devices screen is in front, as it holds notifications.
+    let permit = state
+        .notification_sse_semaphore
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "Too many concurrent streams" })),
+            )
+        })?;
+    let events = state.device_events.clone();
+    let (since, mut live) = events.open(params.after_seq);
+    let stream = async_stream::stream! {
+        let _permit = permit;
+        let mut last = 0;
+        match since {
+            Since::Resync => yield Ok(resync_event()),
+            Since::Frames(frames) => {
+                last = params.after_seq.unwrap_or(0);
+                for frame in frames {
+                    last = frame.seq;
+                    yield Ok(device_event(&frame));
+                }
+            }
+        }
+        loop {
+            match live.recv().await {
+                Ok(frame) if frame.seq > last => {
+                    last = frame.seq;
+                    yield Ok(device_event(&frame));
+                }
+                Ok(_) => {}
+                // What it missed is still in the ring, which outlasts the live queue.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    let (since, again) = events.open(Some(last));
+                    live = again;
+                    match since {
+                        Since::Resync => {
+                            last = 0;
+                            yield Ok(resync_event());
+                        }
+                        Since::Frames(frames) => {
+                            for frame in frames {
+                                last = frame.seq;
+                                yield Ok(device_event(&frame));
+                            }
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 #[derive(serde::Deserialize)]
