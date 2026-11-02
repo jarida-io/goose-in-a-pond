@@ -471,3 +471,74 @@ fn resident_memory_over_fifty_units() {
         synth_secs / audio_secs
     );
 }
+
+/// Each text in `KOKORO_TEXTS` (a JSON object of name to text) said as the voice loop splits and
+/// paces it, with no synthesis gaps, into `KOKORO_OUT`: `<name>.wav`, one file per unit, and the
+/// same units at their own uncapped style rows with the model's own edges, for comparison.
+#[tokio::test]
+#[ignore = "needs Kokoro weights and an audio device; set KOKORO_DIR, KOKORO_TEXTS, KOKORO_OUT"]
+async fn render_replies_as_spoken() {
+    let Some(dir) = model_dir() else {
+        panic!("set KOKORO_DIR");
+    };
+    let (Ok(texts), Ok(out)) = (std::env::var("KOKORO_TEXTS"), std::env::var("KOKORO_OUT")) else {
+        panic!("set KOKORO_TEXTS to a JSON file of texts and KOKORO_OUT to a directory");
+    };
+    let texts: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(texts).unwrap()).unwrap();
+    std::fs::create_dir_all(format!("{out}/units")).unwrap();
+    let output = pond_adapters_kokoro::KokoroOutput::new(pond_adapters_kokoro::KokoroConfig {
+        model_path: dir.join(model_file()),
+        voices_dir: dir.join("voices"),
+        tokenizer_path: dir.join("tokenizer.json"),
+        intra_threads: intra_threads(),
+        espeak_data: None,
+    })
+    .expect("Kokoro output");
+    output
+        .set_voice(pond_adapters_kokoro::DEFAULT_VOICE)
+        .await
+        .unwrap();
+    let vocab = Vocab::load(&dir.join("tokenizer.json")).unwrap();
+    let pack = std::fs::read(dir.join("voices/af_heart.bin")).unwrap();
+    let own_row = |tokens: usize| -> Vec<f32> {
+        let row = tokens.clamp(1, 510) - 1;
+        pack[row * 1024..(row + 1) * 1024]
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect()
+    };
+    let mut engine = Engine::load(&dir.join(model_file()), intra_threads()).unwrap();
+    let mut manifest = Vec::new();
+    for (name, text) in &texts {
+        let units = pond_voice::text::split_text(text.as_str().unwrap());
+        let mut reply = Vec::new();
+        for (i, unit) in units.iter().enumerate() {
+            let samples = output.synth_samples(unit).await.unwrap();
+            write_wav(&format!("{out}/units/{name}_{i:02}.wav"), &samples);
+            reply.extend_from_slice(&samples);
+            // The same unit at its own row, as before the cap, with Kokoro's edges left on.
+            let (chunks, _) = tokenizer::chunk(&unit.text, &vocab).unwrap();
+            let mut own = Vec::new();
+            for c in &chunks {
+                own.extend(engine.synthesize(c, &own_row(c.tokens.len()), 1.0).unwrap());
+            }
+            write_wav(&format!("{out}/units/{name}_{i:02}_own_row.wav"), &own);
+            manifest.push(serde_json::json!({
+                "text": name, "i": i, "unit": unit.text, "boundary": format!("{:?}", unit.boundary),
+                "tokens": chunks.iter().map(|c| c.tokens.len()).sum::<usize>(),
+            }));
+        }
+        write_wav(&format!("{out}/{name}.wav"), &reply);
+        println!(
+            "{name}: {} units, {:.1} s",
+            units.len(),
+            duration_secs(&reply)
+        );
+    }
+    std::fs::write(
+        format!("{out}/units/manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+}
