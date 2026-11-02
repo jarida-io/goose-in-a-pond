@@ -343,6 +343,10 @@ test.describe("Memory, hub", () => {
     await expect(rows.nth(0)).toContainText("295 MB to download");
     await expect(rows.nth(0).getByRole("button")).toHaveText("Download and use");
     await expect(rows.nth(1)).toContainText("In use");
+    // What a model costs is read at body size in the text colour, not the faintest line on the card.
+    const cost = rows.nth(0).getByText("295 MB to download");
+    await expect(cost).toHaveCSS("font-size", "13px");
+    expect(await contrastOf(cost)).toBeGreaterThanOrEqual(15);
     await card.getByRole("button", { name: "Other Memory models (1)" }).click();
     await expect(rows).toHaveCount(3);
     for (const button of await card.getByRole("button").all()) {
