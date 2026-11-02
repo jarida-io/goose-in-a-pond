@@ -7,7 +7,7 @@ markdown, and with symbols, units and abbreviations spelled out ("5km" as "5 kil
 ## Where it runs
 
 ```
-model tokens -> ThoughtFilter (reasoning removed) -> split_speech_units(buf, true)
+model tokens -> ThoughtFilter (reasoning removed) -> split_reply_units(buf, true, first)
   -> KokoroOutput::synthesize(unit)
        tokenizer::chunk: strip_markdown_for_speech -> normalize_for_speech
                          -> phonemize (espeak-ng, per run of speech, punctuation kept)
@@ -17,7 +17,8 @@ model tokens -> ThoughtFilter (reasoning removed) -> split_speech_units(buf, tru
 
 | Step | Function | Callers |
 |---|---|---|
-| Split a streaming buffer into units | `split_speech_units(text, allow_clauses)` | `ChatService::stream_response_inner` (voice loop), `AudioBus::speak_stream` / `speak_text` (`crates/pond-audio-out/src/bus.rs`, spoken scheduled tasks), `KokoroOutput::speak` |
+| Split a streaming reply into units | `split_reply_units(text, allow_clauses, first)` | `ChatService::stream_response_inner` (voice loop), `AudioBus::speak_stream` (`crates/pond-audio-out/src/bus.rs`, spoken scheduled tasks) |
+| Split a whole text into units | `split_speech_units(text, allow_clauses)`, the same with `first` false | `AudioBus::speak_text`, `KokoroOutput::speak` |
 | Markdown to plain text, then normalize | `strip_markdown_for_speech` -> `normalize_for_speech` | `tokenizer::chunk` in `crates/pond-adapters-kokoro/src/tokenizer.rs`, so every Kokoro synthesis: the voice loop, `AudioBus`, `POST /api/v1/tts`, voice previews |
 
 Normalization happens inside the Kokoro adapter, not in the callers, so every path gets it once.
@@ -26,9 +27,11 @@ UI and stored in history is the model's text, not the normalized one.
 
 ## Splitting into speech units
 
-`split_speech_units` returns `(units, remainder)`; the remainder waits for more tokens, and the
+`split_reply_units` returns `(units, remainder)`; the remainder waits for more tokens, and the
 caller flushes it when the stream ends. With `allow_clauses = true` (every caller in the voice
-path) a reply starts playing after its first clause, not its first sentence.
+path) a reply starts playing after its first clause, not its first sentence. The caller passes
+`first` until a unit of the reply has been split off, which caps that unit's length: Kokoro
+synthesises each unit whole at about real time, so the first sound waits on the first unit.
 
 | Rule | Detail |
 |---|---|
@@ -37,6 +40,7 @@ path) a reply starts playing after its first clause, not its first sentence.
 | Numbers | `,` and `:` between digits do not split (`1,000`, `3:45`); `.` after a digit does not split when a digit follows or the buffer ends there (a decimal still streaming) |
 | Abbreviations | `.` after a known abbreviation (`Dr`, `Mr`, `etc`, `e.g`, `a.m`, month names and others in `is_abbrev_suffix`) or a single letter does not split |
 | Newlines | A blank line after at least 3 words splits; a single newline does not; a newline with nothing before it is dropped |
+| First unit | With `first`, the unit also ends after 6 complete words (`FIRST_UNIT_MAX_WORDS`) when no mark comes first; a word is complete once whitespace follows it. Later units have no word cap |
 | Force flush | Past 250 bytes (`MAX_BUF`) the buffer is cut at the last whitespace |
 
 `split_sentences(text)` is the same with `allow_clauses = false`.
@@ -153,15 +157,16 @@ Matched case-insensitively at the start of a word (start of text, or after white
 2. Add a test in the same file's `tests` module.
 3. Run `cargo test -p pond-voice`.
 
-The `tests` module has 81 tests: 51 `normalize_*`, 13 `split_*`, 11 `markdown_*`, 5 `filter_*` and
-one punctuation test.
+The `tests` module has 109 tests, among them 51 `normalize_*`, 16 `split_*`, 11 `markdown_*` and
+5 `filter_*`; the rest cover wake-word matching and Whisper artifacts.
 
 ## The browser voice path
 
 `pond-desktop/src/modes/voice/webAudioUtils.ts` carries TypeScript versions used by
 `WebVoiceBackend` before it posts each unit to `/api/v1/tts` (where Kokoro normalizes again):
 
-- `splitSpeechUnits` ports `split_speech_units` but splits clauses after 4 words, not 3.
+- `splitSpeechUnits` ports `split_speech_units` but splits clauses after 4 words, not 3, and has
+  no first-unit word cap.
 - `stripMarkdown` ports `strip_markdown_for_speech`.
 - `normalizeForSpeech` is not a port: a short regex list covering times, a few units (kg, MB/s,
   KB/s, GB, MB, KB, ms, Hz), $, €, £, Kenyan shillings, e.g., i.e., Dr., Mr., Mrs., °C, °F, %, +, &,

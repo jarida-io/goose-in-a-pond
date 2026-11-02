@@ -52,19 +52,52 @@ fn is_abbrev_suffix(prefix: &str) -> bool {
     ) || (clean.len() == 1 && clean.chars().all(|c| c.is_ascii_alphabetic()))
 }
 
+/// The first unit of a reply ends after this many words when no mark comes first: synthesis takes
+/// about real time, so the first sound waits on the length of the first unit.
+pub const FIRST_UNIT_MAX_WORDS: usize = 6;
+
+/// Byte offset just past the `n`th word, once whitespace after it shows the word is complete.
+fn end_of_complete_word(text: &str, n: usize) -> Option<usize> {
+    let mut words = 0;
+    let mut in_word = false;
+    for (i, c) in text.char_indices() {
+        if c.is_whitespace() {
+            if in_word {
+                in_word = false;
+                words += 1;
+                if words == n {
+                    return Some(i);
+                }
+            }
+        } else {
+            in_word = true;
+        }
+    }
+    None
+}
+
 /// Split speakable units out of a streaming buffer, returning `(units, remainder)`.
 ///
 /// When `allow_clauses` is true, clause marks (`,`, `;`, `:`, `—`) split if at least
 /// `MIN_CLAUSE_WORDS` words have accumulated.
 pub fn split_speech_units(text: &str, allow_clauses: bool) -> (Vec<String>, String) {
+    split_reply_units(text, allow_clauses, false)
+}
+
+/// [`split_speech_units`] for a streaming reply; `first` until a unit of it has been split off, and
+/// then the first unit also ends after [`FIRST_UNIT_MAX_WORDS`] complete words.
+pub fn split_reply_units(text: &str, allow_clauses: bool, first: bool) -> (Vec<String>, String) {
     const MAX_BUF: usize = 250;
     const MIN_CLAUSE_WORDS: usize = 3;
     let mut units: Vec<String> = Vec::with_capacity(8);
     let mut remainder = text.to_string();
 
     loop {
+        let cap = (first && units.is_empty())
+            .then(|| end_of_complete_word(&remainder, FIRST_UNIT_MAX_WORDS))
+            .flatten();
         // Force-flush at max buffer: break at last whitespace within the limit
-        if remainder.len() > MAX_BUF {
+        if remainder.len() > MAX_BUF && cap.is_none_or(|cap| cap >= MAX_BUF) {
             if let Some(split_at) = remainder[..MAX_BUF].rfind(|c: char| c.is_whitespace()) {
                 units.push(remainder[..split_at].trim().to_string());
                 remainder = remainder[split_at..]
@@ -77,6 +110,15 @@ pub fn split_speech_units(text: &str, allow_clauses: bool) -> (Vec<String>, Stri
         let mut found = false;
         let chars: Vec<(usize, char)> = remainder.char_indices().collect();
         for (i, ch) in chars.iter().copied() {
+            if cap.is_some_and(|cap| i >= cap) {
+                let cut = cap.unwrap_or(i);
+                units.push(remainder[..cut].trim().to_string());
+                remainder = remainder[cut..]
+                    .trim_start_matches(|c: char| c.is_whitespace())
+                    .to_string();
+                found = true;
+                break;
+            }
             let is_terminal = matches!(ch, '.' | '?' | '!');
             let is_clause = allow_clauses && matches!(ch, ',' | ';' | ':' | '—');
 
@@ -1209,6 +1251,140 @@ mod tests {
         assert_eq!(remainder, "");
     }
 
+    /// Feed a reply a token at a time, as the voice loop does, flushing the rest at the end.
+    fn stream_reply(tokens: &[&str]) -> Vec<String> {
+        let (mut units, mut buf) = (Vec::new(), String::new());
+        for token in tokens {
+            buf.push_str(token);
+            let (more, rest) = split_reply_units(&buf, true, units.is_empty());
+            // Callers trim: a unit split at the buffer's end leaves the next token's space.
+            units.extend(more.iter().map(|u| u.trim().to_string()));
+            buf = rest;
+        }
+        if !buf.trim().is_empty() {
+            units.push(buf.trim().to_string());
+        }
+        units
+    }
+
+    #[test]
+    fn split_reply_units_releases_the_first_clause_once_it_has_three_words() {
+        let (units, rest) = split_reply_units("It is sunny, and the high is", true, true);
+        assert_eq!(units, vec!["It is sunny,"]);
+        assert_eq!(rest, "and the high is");
+        let (units, _) = split_reply_units("Sure, it is 23 degrees. The", true, true);
+        assert_eq!(units, vec!["Sure, it is 23 degrees."]);
+    }
+
+    #[test]
+    fn split_reply_units_caps_only_the_first_unit_at_six_complete_words() {
+        let reply =
+            "The weather in Nairobi today is expected to be warm and mostly sunny all afternoon. Then";
+        let (units, rest) = split_reply_units(reply, true, true);
+        assert_eq!(
+            units,
+            vec![
+                "The weather in Nairobi today is",
+                "expected to be warm and mostly sunny all afternoon.",
+            ]
+        );
+        assert_eq!(rest, "Then");
+        // A word still being written is not yet a word: "is" could become "isn't".
+        let (units, _) = split_reply_units("The weather in Nairobi today is", true, true);
+        assert!(units.is_empty(), "{units:?}");
+        let (units, _) = split_reply_units(reply, true, false);
+        assert_eq!(
+            units,
+            vec!["The weather in Nairobi today is expected to be warm and mostly sunny all afternoon."],
+            "a later unit has no word cap"
+        );
+        assert_eq!(
+            split_speech_units(reply, true),
+            split_reply_units(reply, true, false)
+        );
+    }
+
+    #[test]
+    fn split_reply_units_cut_a_streamed_reply_where_they_cut_the_whole_of_it() {
+        let reply = "Herons hunt by standing still for a long time, then striking fast. \
+                     They eat fish, frogs and insects, and some even bait the water with bread. \
+                     Dr. Smith counted 1,000 of them at 7:30 a.m. near the lake.";
+        let tokens: Vec<String> = reply
+            .split_inclusive(' ')
+            .flat_map(|w| {
+                let (word, space) = w.split_at(w.trim_end().len());
+                [word.to_string(), space.to_string()]
+            })
+            .filter(|t| !t.is_empty())
+            .collect();
+        let tokens: Vec<&str> = tokens.iter().map(String::as_str).collect();
+        let want = vec![
+            "Herons hunt by standing still for",
+            "a long time,",
+            "then striking fast.",
+            "They eat fish,",
+            "frogs and insects,",
+            "and some even bait the water with bread.",
+            "Dr. Smith counted 1,000 of them at 7:30 a.m. near the lake.",
+        ];
+        assert_eq!(stream_reply(&tokens), want);
+        let (mut whole, rest) = split_reply_units(reply, true, true);
+        if !rest.trim().is_empty() {
+            whole.push(rest.trim().to_string());
+        }
+        assert_eq!(whole, want);
+    }
+
+    #[test]
+    fn a_mark_inside_the_first_six_words_ends_the_first_unit_there() {
+        assert_eq!(
+            stream_reply(&[
+                "Yes",
+                ".",
+                " Tomorrow",
+                " looks",
+                " warm",
+                " and",
+                " sunny",
+                ",",
+                " with",
+                " a",
+                " high",
+                " of",
+                " 26",
+                "."
+            ]),
+            vec![
+                "Yes.",
+                "Tomorrow looks warm and sunny,",
+                "with a high of 26."
+            ]
+        );
+    }
+
+    #[test]
+    fn wake_triggers_put_the_phrase_first_and_reduce_calibrated_sentences_to_the_phrase() {
+        let t = wake_triggers("Hey Goose", &["Hey goos, good morning".to_string()]);
+        assert_eq!(t[0], "hey goose");
+        assert!(t.contains(&"hey goos".to_string()), "{t:?}");
+        assert!(!t.iter().any(|v| v.contains("morning")), "{t:?}");
+        assert!(
+            t.contains(&"hey gus".to_string()),
+            "built-in mishearings ride along"
+        );
+        let custom = wake_triggers("Jarvis", &[]);
+        assert_eq!(custom, vec!["jarvis"]);
+    }
+
+    #[test]
+    fn heard_wake_matches_whole_words_in_any_punctuation() {
+        let t = wake_triggers("goose", &[]);
+        assert!(heard_wake("Goose, what's the time?", &t));
+        assert!(heard_wake("um... hey Goose!", &t));
+        assert!(!heard_wake("a mongoose ran past", &t));
+        assert!(!heard_wake("", &t));
+    }
+
     #[test]
     fn split_sentences_ignores_clauses_even_when_long() {
         let text = "I would be glad to help with that, and here are the details.";
@@ -1664,6 +1840,51 @@ pub fn find_trigger_words(haystack: &str, trigger: &str) -> Option<(usize, usize
 /// Whether `haystack` contains `trigger` as whole words.
 pub fn contains_trigger(haystack: &str, trigger: &str) -> bool {
     find_trigger_words(haystack, trigger).is_some()
+}
+
+/// Common Whisper mishearings of the shipped wake phrases (worst on the tiny and base models).
+fn builtin_wake_variants(wake_word: &str) -> &'static [&'static str] {
+    match wake_word {
+        "goose" => &[
+            "goose",
+            "goos",
+            "gooes",
+            "gus",
+            "gooch",
+            "hey goose",
+            "a goose",
+            "the goose",
+        ],
+        "hey goose" => &["hey goose", "hey goos", "hey gus", "a goose", "hey gooch"],
+        _ => &[],
+    }
+}
+
+/// Everything a transcript may contain for the wake phrase to count as said, normalized, the phrase
+/// itself first: the phrase, each calibrated take reduced to the phrase as heard (older
+/// calibrations stored whole sentences), and Whisper's usual mishearings of the shipped phrases.
+pub fn wake_triggers(wake_word: &str, calibrated: &[String]) -> Vec<String> {
+    let wake_word = normalize_transcript(wake_word);
+    let mut triggers = vec![wake_word.clone()];
+    let heard = calibrated
+        .iter()
+        .filter_map(|v| extract_wake_variant(v, &wake_word, None));
+    let builtin = builtin_wake_variants(&wake_word)
+        .iter()
+        .map(|v| v.to_string());
+    for t in heard.chain(builtin) {
+        if !t.is_empty() && !triggers.contains(&t) {
+            triggers.push(t);
+        }
+    }
+    triggers
+}
+
+/// Whether `transcript` contains any of `triggers` as whole words, so "goose" never fires on
+/// "mongoose".
+pub fn heard_wake(transcript: &str, triggers: &[String]) -> bool {
+    let heard = normalize_transcript(transcript);
+    triggers.iter().any(|t| contains_trigger(&heard, t))
 }
 
 /// Filler that may precede a leading wake word; a content word here could erase a command.
