@@ -77,11 +77,18 @@ fn provider(args: &Args) -> Result<Arc<dyn EmbeddingProvider>> {
     let dir = args.data_dir.join("models").join("embedding");
     Ok(match model.engine() {
         EmbeddingEngine::Fastembed => Arc::new(
-            pond_infra::fastembed_embedding::FastembedEmbeddingProvider::new(model.name, Some(dir))?,
+            pond_infra::fastembed_embedding::FastembedEmbeddingProvider::new(
+                model.name,
+                Some(dir),
+            )?,
         ),
         EmbeddingEngine::LlamaCpp => {
             use pond_inference::{EmbeddingModelSpec, GgufEmbeddingProvider, Placement};
-            let placement = if args.gpu { Placement::Gpu } else { Placement::Cpu };
+            let placement = if args.gpu {
+                Placement::Gpu
+            } else {
+                Placement::Cpu
+            };
             let spec = EmbeddingModelSpec::resolve(model.name)?.with_placement(placement);
             Arc::new(GgufEmbeddingProvider::new(spec, &dir))
         }

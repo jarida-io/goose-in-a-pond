@@ -341,7 +341,10 @@ mod tests {
         use crate::models::domain::embedding_models::{ALL_MINILM_L6_V2, EMBEDDINGGEMMA_2};
         assert_eq!(ALL_MINILM_L6_V2.floors.map(|f| f.tool_relevance), MINILM);
         // Its cosines sit higher: unneeded groups score 0.50-0.82, where MiniLM's sit near zero.
-        assert_eq!(EMBEDDINGGEMMA_2.floors.map(|f| f.tool_relevance), Some(0.71));
+        assert_eq!(
+            EMBEDDINGGEMMA_2.floors.map(|f| f.tool_relevance),
+            Some(0.71)
+        );
     }
 
     /// A cosine on an unmeasured scale rules nothing out, however low it is.

@@ -1438,10 +1438,13 @@ impl BatchExtractionService {
     /// another measured model brings its bands, and an unmeasured one dedups lexically alone.
     fn cosine_bands(&self, config: &BatchExtractionConfig) -> Option<(f32, f32)> {
         let floors = self.embedding_provider.as_ref()?.similarity_floors()?;
-        Some(floors.dedup.map_or(
-            (config.reinforce_threshold, config.relate_threshold),
-            |b| (b.reinforce, b.relate),
-        ))
+        Some(
+            floors
+                .dedup
+                .map_or((config.reinforce_threshold, config.relate_threshold), |b| {
+                    (b.reinforce, b.relate)
+                }),
+        )
     }
 
     /// Embed, recording health; `None` whether there is no embedder or it failed.

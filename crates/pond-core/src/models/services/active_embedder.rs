@@ -500,7 +500,11 @@ mod tests {
         assert_eq!(embedder.similarity_floors(), None, "loaded");
 
         embedder.choose(EG2).await;
-        assert_eq!(embedder.similarity_floors(), EMBEDDINGGEMMA_2.floors, "its own scale");
+        assert_eq!(
+            embedder.similarity_floors(),
+            EMBEDDINGGEMMA_2.floors,
+            "its own scale"
+        );
 
         embedder.choose(EmbedderChoice::Off).await;
         assert_eq!(embedder.similarity_floors(), None);
