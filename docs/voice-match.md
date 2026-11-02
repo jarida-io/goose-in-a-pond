@@ -54,8 +54,10 @@ margin.
   `profile_context`.
 - A different voice's wake starts a session of its own, as does an unrecognised voice after a
   member's turns, because `claim_session_identity` never moves a session to another member.
-- A follow-up after a recognised wake must be the same voice; another voice's words are ignored
-  without being transcribed. An unrecognised wake keeps today's follow-ups.
+- After a recognised wake, a follow-up Voice Match hears as another enrolled member is ignored
+  without being transcribed (`ear: a follow-up in another member's voice ignored`, with `who`).
+  One it does not recognise continues the conversation, because a short follow-up is often too
+  little to recognise even the waker. An unrecognised wake keeps every follow-up.
 - With anyone enrolled, `interrupts` reads `enrolled_or_wake`: an enrolled voice over the reply
   for about 300 ms, or the wake word. With nobody enrolled, the wake word only.
 

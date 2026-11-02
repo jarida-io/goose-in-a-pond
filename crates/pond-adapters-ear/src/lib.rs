@@ -398,12 +398,24 @@ impl VoiceInput for EarRig {
                 return Ok(Some(String::new()));
             };
             let waker = self.waker.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            if follow_up && waker.is_some() && speaker != waker {
-                tracing::info!(
-                    heard = ?speaker,
-                    "ear: a follow-up in another voice than the wake's ignored"
-                );
-                return Ok(Some(String::new()));
+            // Only another enrolled member's voice ends it: a short follow-up is often too little
+            // for Voice Match to recognise even the waker.
+            if follow_up {
+                match (&waker, &speaker) {
+                    (Some(waker), Some(who)) if who != waker => {
+                        tracing::info!(
+                            who = %who,
+                            waker = %waker,
+                            "ear: a follow-up in another member's voice ignored"
+                        );
+                        return Ok(Some(String::new()));
+                    }
+                    (Some(waker), None) => tracing::debug!(
+                        waker = %waker,
+                        "ear: a follow-up Voice Match did not recognise continues the conversation"
+                    ),
+                    _ => {}
+                }
             }
             let raw = match transcript {
                 Some(t) => t,
