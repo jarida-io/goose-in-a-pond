@@ -279,6 +279,10 @@ The route summary's "Also" column names these.
 | POST | /voice/calibrate | wizard | | Add a wake-phrase calibration sample |
 | DELETE | /voice/calibrate | wizard | | Clear wake-phrase calibration |
 | POST | /transcribe | token +onb | | Transcribe multipart audio |
+| GET | /voice/room | token +onb | | Room voice: switched on, able to listen or why not, its state, wake detector and last speaker |
+| PUT | /voice/room | token +onb | `{enabled}` | Switch room voice on or off now, saved as `voice_room_enabled` |
+| GET | /voice/room/events | token +onb | `?levels=1` | SSE: each `data:` is one NDJSON line of the room's loop (`state`, `wake`, `interrupt`, ...); `audio_level` only with `levels=1` |
+| POST | /voice/room/interrupt | token +onb | | End the room's turn in flight (204) |
 | GET | /audio/devices | token +onb | | Which microphone and speaker are in use, and why |
 | POST | /audio/devices/test | token +onb | | Re-test the audio devices, optionally with a chime |
 

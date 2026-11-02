@@ -32,11 +32,12 @@ impl SpeechEnergy for NoEnergy {
     }
 }
 
-/// A claim on the microphone, released on drop.
-pub struct MicHold(Option<Box<dyn FnOnce() + Send>>);
+/// A claim on the microphone, released on drop. `Sync` so a voice turn's future, which holds
+/// one, can run on any runtime worker.
+pub struct MicHold(Option<Box<dyn FnOnce() + Send + Sync>>);
 
 impl MicHold {
-    pub fn new(release: impl FnOnce() + Send + 'static) -> Self {
+    pub fn new(release: impl FnOnce() + Send + Sync + 'static) -> Self {
         Self(Some(Box::new(release)))
     }
 

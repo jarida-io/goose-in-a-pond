@@ -109,6 +109,18 @@ describe("classifyLine: the NDJSON to shell-event mapping", () => {
   });
 });
 
+describe("classifyLine: the ear's lines", () => {
+  it("accepts wake and interrupt without forwarding them", () => {
+    for (const line of [
+      '{"event":"wake","who":null}',
+      '{"event":"wake","who":{"profile_id":"p-1","name":"Ana"}}',
+      '{"event":"interrupt","why":"wake_word"}',
+    ]) {
+      expect(classifyLine(line)).toEqual({ ok: true, value: { kind: "skip" } });
+    }
+  });
+});
+
 describe("classifyLine: exit lines", () => {
   // The reason is held until stdout closes, then reported once as voice-session-ended.
   it("classifies exit as exit, never as an event", () => {

@@ -181,6 +181,7 @@ pond-adapters-kokoro = { path = "../../crates/pond-adapters-kokoro" }
 # The spoken pairing code's bundled clips play through it when no voice is installed.
 pond-audio-out = { path = "../pond-audio-out" }
 pond-audio = { path = "../pond-audio" }
+pond-adapters-ear = { workspace = true }
 pond-adapters-audio-devices = { path = "../pond-adapters-audio-devices" }
 cpal = "0.15"
 pond-mcp-server    = { path = "../pond-mcp-server" }

@@ -75,17 +75,21 @@ pub enum IdentificationSource {
     Explicit,
     /// Above-threshold face match, anti-spoof passed; the only source with a confidence.
     Face,
+    /// Voice Match on the wake phrase: personal context only, never an approval.
+    Voice,
     /// Nobody has been identified. The default, and never an error.
     Unknown,
 }
 
 impl IdentificationSource {
-    /// Stored form; must match the values in migration `0037_session_identification.sql`.
+    /// Stored form: the values in migration `0037_session_identification.sql`, and `voice` from
+    /// `0077_voice_prints.sql` (an applied migration's text is fixed by its checksum).
     pub fn as_str(&self) -> &'static str {
         match self {
             IdentificationSource::PairedDevice => "paired_device",
             IdentificationSource::Explicit => "explicit",
             IdentificationSource::Face => "face",
+            IdentificationSource::Voice => "voice",
             IdentificationSource::Unknown => "unknown",
         }
     }
@@ -96,6 +100,7 @@ impl IdentificationSource {
             "paired_device" => IdentificationSource::PairedDevice,
             "explicit" => IdentificationSource::Explicit,
             "face" => IdentificationSource::Face,
+            "voice" => IdentificationSource::Voice,
             _ => IdentificationSource::Unknown,
         }
     }
@@ -105,7 +110,8 @@ impl IdentificationSource {
         ("paired_device", 0),
         ("explicit", 1),
         ("face", 2),
-        ("unknown", 3),
+        ("voice", 3),
+        ("unknown", 4),
     ];
 
     /// Strength, lower is stronger. Only meaningful in comparison.
@@ -114,7 +120,8 @@ impl IdentificationSource {
             IdentificationSource::PairedDevice => 0,
             IdentificationSource::Explicit => 1,
             IdentificationSource::Face => 2,
-            IdentificationSource::Unknown => 3,
+            IdentificationSource::Voice => 3,
+            IdentificationSource::Unknown => 4,
         }
     }
 }
@@ -344,6 +351,7 @@ mod ranked_table_tests {
             IdentificationSource::PairedDevice,
             IdentificationSource::Explicit,
             IdentificationSource::Face,
+            IdentificationSource::Voice,
             IdentificationSource::Unknown,
         ] {
             let entry = IdentificationSource::ALL_RANKED
@@ -359,7 +367,7 @@ mod ranked_table_tests {
         }
         assert_eq!(
             IdentificationSource::ALL_RANKED.len(),
-            4,
+            5,
             "a new source was added without a rank for the SQL comparison"
         );
     }

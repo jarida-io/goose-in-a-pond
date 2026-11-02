@@ -24,6 +24,32 @@ pub struct ProfileContext {
     pub member_notes: Vec<crate::user_data::domain::prompt_extra::PromptExtra>,
 }
 
+impl ProfileContext {
+    /// What the prompt may state on a turn that is the member's own; the keys are the contract
+    /// with `PATCH /api/v1/profiles/{id}`. The speaker is named by their preferred name, else
+    /// their display name: most members never set a preferred name, and "who am I" still needs
+    /// one. A blank value names nobody.
+    pub fn of_member(
+        display_name: &str,
+        prefs: &std::collections::HashMap<String, String>,
+        member_notes: Vec<crate::user_data::domain::prompt_extra::PromptExtra>,
+    ) -> Self {
+        let named = |name: &str| (!name.trim().is_empty()).then(|| name.to_string());
+        Self {
+            speaker_name: prefs
+                .get("preferred_name")
+                .and_then(|name| named(name))
+                .or_else(|| named(display_name)),
+            birthday: prefs.get("birthday").cloned(),
+            language: prefs.get("language").cloned(),
+            atypical_speech: prefs
+                .get("accessibility_atypical_speech")
+                .is_some_and(|v| v == "true"),
+            member_notes,
+        }
+    }
+}
+
 // ── Runtime prompt state ──────────────────────────────────────────────────────
 
 /// Per-request runtime state for the Jinja2 template, filled by `GooseAdapter::chat_stream()`.
@@ -468,6 +494,35 @@ pub const BUILTIN_PROMPT_TEMPLATES: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// The text inside a template's `<voice-mode>` section, tags and their line breaks excluded.
+pub fn voice_mode_body(template: &str) -> Option<&str> {
+    let (start, end) = voice_mode_span(template)?;
+    template.get(start..end)
+}
+
+/// `template` with its `<voice-mode>` text replaced by `body`, which Tera prints as written: it
+/// is the household's text, and a brace in it must not become a template tag.
+pub fn with_voice_mode_body(template: &str, body: &str) -> Option<String> {
+    let (start, end) = voice_mode_span(template)?;
+    // `{%` is the only way out of a raw block, so the text cannot hold one.
+    let body = body.replace("{%", "{ %");
+    let mut out = String::with_capacity(template.len() + body.len() + 32);
+    out.push_str(template.get(..start)?);
+    out.push_str("{% raw %}");
+    out.push_str(&body);
+    out.push_str("{% endraw %}");
+    out.push_str(template.get(end..)?);
+    Some(out)
+}
+
+fn voice_mode_span(template: &str) -> Option<(usize, usize)> {
+    const OPEN: &str = "<voice-mode>\n";
+    const CLOSE: &str = "\n</voice-mode>";
+    let start = template.find(OPEN)? + OPEN.len();
+    let end = start + template.get(start..)?.find(CLOSE)?;
+    Some((start, end))
+}
+
 /// Factory-default `(content, description)` for a built-in name; `None` for any other name.
 pub fn builtin_template_content(name: &str) -> Option<(&'static str, &'static str)> {
     BUILTIN_PROMPT_TEMPLATES
@@ -522,9 +577,7 @@ pub fn profile_context_lines(profile: Option<&ProfileContext>) -> Vec<String> {
 /// One line, under 30 tokens for a three-word name: it rides every turn's `<system-context>`.
 fn speaker_line(name: &str) -> Option<String> {
     let name = sanitize_field(name, 50);
-    (!name.is_empty()).then(|| {
-        format!("You are talking with {name}; \"I\" and \"my\" in their messages mean {name}.")
-    })
+    (!name.is_empty()).then(|| format!("You are talking with {name}; \"I\" means them."))
 }
 
 /// A BCP-47 code as a language a model recognises. Unknown codes pass through.

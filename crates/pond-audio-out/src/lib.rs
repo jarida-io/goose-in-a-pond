@@ -8,8 +8,10 @@ use std::time::{Duration, Instant};
 
 pub mod bus;
 pub mod route;
+pub mod tap;
 pub use bus::AudioBus;
 pub use route::{output_device, set_output_device};
+pub use tap::{set_playback_tap, set_spoken_tap, spoken_tap, PlaybackTap, SpokenTap};
 
 // ── Working tone ──────────────────────────────────────────────────────────────
 
@@ -21,6 +23,8 @@ const TONE_CHIME_MS: u64 = 1_100;
 
 /// `thinking_for` value meaning no tone; generations start at 1, so it never names a turn.
 pub const TONE_OFF: u64 = 0;
+/// Applied before the tap, as every level here is, so the echo canceller's reference is what plays.
+const TONE_VOLUME: f32 = 0.10;
 
 /// One tone cycle: a soft major-sixth chime (E5 over G4), then mostly silence.
 fn working_tone_cycle() -> Vec<f32> {
@@ -66,17 +70,15 @@ pub fn start_thinking_tone_thread(thinking_for: Arc<AtomicU64>, mine: u64) {
             release(&thinking_for);
             return;
         };
-        sink.set_volume(0.10);
 
         let cycle = working_tone_cycle();
         let polls_per_cycle = TONE_CYCLE_MS / 50;
         let ours = |thinking_for: &AtomicU64| thinking_for.load(Ordering::Relaxed) == mine;
 
         while ours(&thinking_for) {
-            sink.append(rodio::buffer::SamplesBuffer::new(
-                1,
-                TONE_RATE,
-                cycle.clone(),
+            use rodio::Source;
+            sink.append(tap::tapped(
+                rodio::buffer::SamplesBuffer::new(1, TONE_RATE, cycle.clone()).amplify(TONE_VOLUME),
             ));
             for _ in 0..polls_per_cycle {
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -87,6 +89,51 @@ pub fn start_thinking_tone_thread(thinking_for: Arc<AtomicU64>, mine: u64) {
             }
         }
         sink.stop();
+    });
+}
+
+// ── Wake ping ─────────────────────────────────────────────────────────────────
+
+/// The longest the ping waits for other audio to pause before it plays anyway.
+const PING_WAITS_AT_MOST: Duration = Duration::from_millis(400);
+const PING_RATE: u32 = 44_100;
+const PING_VOLUME: f32 = 0.35;
+
+/// The wake word was heard: C6 then E6, about 220 ms, rising.
+fn wake_ping_samples() -> Vec<f32> {
+    let tone = |freq: f32, ms: u64| -> Vec<f32> {
+        let n = (PING_RATE as u64 * ms / 1000) as usize;
+        (0..n)
+            .map(|i| {
+                let t = i as f32 / PING_RATE as f32;
+                let fade_out = 1.0 - (i as f32 / n as f32);
+                (2.0 * std::f32::consts::PI * freq * t).sin() * fade_out * 0.6
+            })
+            .collect()
+    };
+    let mut samples = tone(1047.0, 100);
+    samples.extend(tone(1319.0, 120));
+    samples
+}
+
+/// Play the wake ping on its own thread once other audio is paused, holding it paused meanwhile.
+pub fn play_wake_ping(quiet: Option<Arc<pond_core::models::services::voice::quiet::Quiet>>) {
+    std::thread::spawn(move || {
+        let _quiet = quiet.as_ref().map(|quiet| {
+            let hold = quiet.hold();
+            quiet.until_quiet_blocking(PING_WAITS_AT_MOST);
+            hold
+        });
+        use rodio::{Sink, Source};
+        let Ok((_stream, handle, _)) = route::open_routed() else {
+            return;
+        };
+        let Ok(sink) = Sink::try_new(&handle) else {
+            return;
+        };
+        let ping = rodio::buffer::SamplesBuffer::new(1, PING_RATE, wake_ping_samples());
+        sink.append(tap::tapped(ping.amplify(PING_VOLUME)));
+        sink.sleep_until_end();
     });
 }
 
@@ -326,9 +373,20 @@ pub fn play_wav_on(
 }
 
 /// USB DACs ramp analog output over ~150 ms from idle squelch; leading silence keeps speech from clipping.
-static LAST_PLAYBACK_AT: Mutex<Option<Instant>> = Mutex::new(None);
+/// The last moment audio played, and the utterance it belonged to.
+static LAST_PLAYBACK_AT: Mutex<Option<(Instant, u64)>> = Mutex::new(None);
 const HARDWARE_WAKE_PREROLL_MS: u64 = 300;
 const HARDWARE_IDLE_GAP_MS: u64 = 500;
+
+/// Whether to lead with the wake pre-roll: only the first audio after idle. Inside one reply the
+/// units' pauses are timed by the voice, and a slow synthesis must not be stretched by 300 ms more.
+fn needs_wake_preroll(last: Option<(Instant, u64)>, now: Instant, utterance: u64) -> bool {
+    match last {
+        Some((_, previous)) if previous == utterance => false,
+        Some((at, _)) => now.duration_since(at) >= Duration::from_millis(HARDWARE_IDLE_GAP_MS),
+        None => true,
+    }
+}
 
 fn play(
     wav: Vec<u8>,
@@ -352,11 +410,9 @@ fn play(
 
     let needs_preroll = {
         let mut last = LAST_PLAYBACK_AT.lock().unwrap_or_else(|e| e.into_inner());
-        let wake = match *last {
-            Some(t) => t.elapsed() >= Duration::from_millis(HARDWARE_IDLE_GAP_MS),
-            None => true,
-        };
-        *last = Some(Instant::now());
+        let now = Instant::now();
+        let wake = needs_wake_preroll(*last, now, mine);
+        *last = Some((now, mine));
         wake
     };
 
@@ -379,9 +435,9 @@ fn play(
             (sample_rate as usize * channels as usize * HARDWARE_WAKE_PREROLL_MS as usize) / 1000;
         let silence =
             rodio::buffer::SamplesBuffer::new(channels, sample_rate, vec![0.0f32; samples]);
-        sink.append(silence);
+        sink.append(tap::tapped(silence));
     }
-    sink.append(decoder);
+    sink.append(tap::tapped(decoder));
 
     let mut tick: usize = 0;
     let mut position = sink.get_pos();
@@ -420,19 +476,40 @@ fn play(
         }
         tick += 1;
         if let Ok(mut last) = LAST_PLAYBACK_AT.lock() {
-            *last = Some(Instant::now());
+            *last = Some((Instant::now(), mine));
         }
         std::thread::sleep(std::time::Duration::from_millis(POLL_MS));
     }
 
     if let Ok(mut last) = LAST_PLAYBACK_AT.lock() {
-        *last = Some(Instant::now());
+        *last = Some((Instant::now(), mine));
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_the_first_audio_after_idle_gets_the_wake_preroll() {
+        use super::{needs_wake_preroll, HARDWARE_IDLE_GAP_MS};
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let later = t0 + Duration::from_millis(HARDWARE_IDLE_GAP_MS + 300);
+        assert!(needs_wake_preroll(None, t0, 1), "nothing has played yet");
+        assert!(
+            !needs_wake_preroll(Some((t0, 1)), later, 1),
+            "a unit of the same reply after a slow synthesis"
+        );
+        assert!(
+            needs_wake_preroll(Some((t0, 1)), later, 2),
+            "a new reply after idle"
+        );
+        assert!(
+            !needs_wake_preroll(Some((t0, 1)), t0 + Duration::from_millis(100), 2),
+            "a new reply straight after the last is still awake"
+        );
+    }
+
     #[test]
     fn wav_header_is_correct() {
         // 2 bytes of PCM (one 16-bit sample at 22050 Hz mono)
@@ -462,6 +539,19 @@ mod tests {
 #[cfg(test)]
 mod working_tone_tests {
     use super::*;
+
+    #[test]
+    fn the_wake_ping_is_short_and_starts_and_ends_near_silence() {
+        let ping = wake_ping_samples();
+        assert!(
+            ping.len() <= PING_RATE as usize / 4,
+            "{} samples",
+            ping.len()
+        );
+        assert_eq!(ping[0], 0.0);
+        assert!(ping.last().is_some_and(|v| v.abs() < 0.01));
+        assert!(ping.iter().all(|v| v.abs() <= 0.6));
+    }
 
     /// Mostly silence, so a thirty-second answer is bearable to sit through.
     #[test]

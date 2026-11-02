@@ -1,5 +1,6 @@
 //! Kokoro voice styles: `voices/<name>.bin` is raw little-endian `f32` `[510, 256]`, no header.
-//! Row `n` is the style for `n` phoneme tokens; a wrong row drifts prosody rather than failing.
+//! Row `n - 1` is the style for `n` phoneme tokens, as hexgrad's pipeline and kokoro-onnx index it;
+//! a wrong row drifts prosody rather than failing.
 
 use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
@@ -10,6 +11,9 @@ pub const STYLE_DIM: usize = 256;
 pub const STYLE_ROWS: usize = 510;
 /// Exact size of a well-formed voice file.
 pub const VOICE_FILE_BYTES: usize = STYLE_ROWS * STYLE_DIM * 4;
+/// Longer units take this length's style. Higher rows speak slower: at their own rows, 130+-token
+/// units ran at 12.6 phones/s on the nano against 13.8 for short ones, and rows near 125 close that.
+pub const STYLE_LENGTH_CAP: usize = 125;
 
 /// One voice's length-conditioned style table.
 #[derive(Debug, Clone)]
@@ -52,7 +56,7 @@ impl StyleTable {
 
     /// Style row for `token_count` tokens. Clamps: a bad count should degrade prosody, never panic.
     pub fn style_for(&self, token_count: usize) -> &[f32] {
-        let row = token_count.min(STYLE_ROWS - 1);
+        let row = token_count.clamp(1, STYLE_LENGTH_CAP.min(STYLE_ROWS)) - 1;
         &self.rows[row * STYLE_DIM..(row + 1) * STYLE_DIM]
     }
 }
@@ -113,21 +117,34 @@ mod tests {
     }
 
     #[test]
-    fn style_row_matches_token_count() {
+    fn n_tokens_take_row_n_minus_one() {
         // Row n is filled with the value n, so the row index is readable back.
         let t = table(|i| (i / STYLE_DIM) as f32);
-        assert_eq!(t.style_for(0)[0], 0.0);
+        assert_eq!(t.style_for(1)[0], 0.0);
         assert_eq!(t.style_for(37).len(), STYLE_DIM);
-        assert!(t.style_for(37).iter().all(|v| *v == 37.0));
+        assert!(t.style_for(37).iter().all(|v| *v == 36.0));
+    }
+
+    #[test]
+    fn long_units_share_the_capped_row() {
+        let t = table(|i| (i / STYLE_DIM) as f32);
+        let capped = (STYLE_LENGTH_CAP - 1) as f32;
+        assert!(t.style_for(STYLE_LENGTH_CAP)[0] == capped);
+        assert!(t
+            .style_for(STYLE_LENGTH_CAP + 1)
+            .iter()
+            .all(|v| *v == capped));
+        assert!(t.style_for(400).iter().all(|v| *v == capped));
+        assert!(
+            t.style_for(STYLE_LENGTH_CAP - 1)[0] < capped,
+            "below the cap rows still track length"
+        );
     }
 
     #[test]
     fn style_row_clamps_instead_of_panicking() {
         let t = table(|i| (i / STYLE_DIM) as f32);
-        assert!(t
-            .style_for(999_999)
-            .iter()
-            .all(|v| *v == (STYLE_ROWS - 1) as f32));
+        assert_eq!(t.style_for(0)[0], 0.0, "an empty chunk takes the first row");
         assert_eq!(t.style_for(usize::MAX).len(), STYLE_DIM);
     }
 
