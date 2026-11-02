@@ -194,10 +194,179 @@ pub fn split_sentences(text: &str) -> (Vec<String>, String) {
     split_speech_units(text, false)
 }
 
+/// The tags GIAP wraps a turn's context in; any of them in a reply is the prompt echoed back.
+pub const SCAFFOLD_TAGS: &[&str] = &[
+    "system-context",
+    "user-message",
+    "answer-contract",
+    "memories",
+    "turn-context",
+];
+
+/// Drop markup a model wrote as text, so it is never spoken: a closed scaffold block with its body,
+/// any tag-shaped span, and a `group__tool` name with the arguments written after it.
+pub fn strip_markup_for_speech(text: &str) -> String {
+    let mut s = text.to_string();
+    for tag in SCAFFOLD_TAGS {
+        s = drop_closed_blocks(&s, &format!("<{tag}>"), &format!("</{tag}>"));
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if let Some(end) = tag_span_end(&chars, i).or_else(|| tool_call_end(&chars, i)) {
+            i = end;
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+fn drop_closed_blocks(text: &str, open: &str, close: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(open) {
+        let Some(len) = rest[start..].find(close) else {
+            break;
+        };
+        out.push_str(&rest[..start]);
+        rest = &rest[start + len + close.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn is_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':')
+}
+
+/// End of a `<name attr="v" .../>` span at `i`. An unclosed one counts only for a tool-like name,
+/// because a clause split can cut a written call in half but rarely an HTML tag.
+fn tag_span_end(chars: &[char], i: usize) -> Option<usize> {
+    if chars.get(i) != Some(&'<') {
+        return None;
+    }
+    let mut j = i + 1;
+    if chars.get(j) == Some(&'/') {
+        j += 1;
+    }
+    if !chars.get(j).is_some_and(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let name_start = j;
+    while chars.get(j).copied().is_some_and(is_name_char) {
+        j += 1;
+    }
+    let tool_like = chars[name_start..j].windows(2).any(|w| w == ['_', '_']);
+    loop {
+        while chars.get(j).is_some_and(|c| c.is_whitespace()) {
+            j += 1;
+        }
+        match chars.get(j) {
+            None => return tool_like.then_some(chars.len()),
+            Some('>') => return Some(j + 1),
+            Some('/') if chars.get(j + 1) == Some(&'>') => return Some(j + 2),
+            Some('/') if j + 1 == chars.len() => return tool_like.then_some(chars.len()),
+            Some(c) if is_name_char(*c) => {
+                while chars.get(j).copied().is_some_and(is_name_char) {
+                    j += 1;
+                }
+                while chars.get(j).is_some_and(|c| c.is_whitespace()) {
+                    j += 1;
+                }
+                if chars.get(j) == Some(&'=') {
+                    j += 1;
+                    while chars.get(j).is_some_and(|c| c.is_whitespace()) {
+                        j += 1;
+                    }
+                    match chars.get(j) {
+                        Some(q @ ('"' | '\'')) => {
+                            let q = *q;
+                            j += 1;
+                            while chars.get(j).is_some_and(|c| *c != q) {
+                                j += 1;
+                            }
+                            if j >= chars.len() {
+                                return tool_like.then_some(chars.len());
+                            }
+                            j += 1;
+                        }
+                        _ => {
+                            while chars
+                                .get(j)
+                                .is_some_and(|c| !c.is_whitespace() && *c != '>' && *c != '/')
+                            {
+                                j += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            Some(_) => return None,
+        }
+    }
+}
+
+/// End of a `group__tool` name at a word start, with any `{...}` or `(...)` written after it.
+fn tool_call_end(chars: &[char], i: usize) -> Option<usize> {
+    if (i > 0 && chars[i - 1].is_ascii_alphanumeric()) || !chars[i].is_ascii_alphanumeric() {
+        return None;
+    }
+    let mut j = i;
+    while chars
+        .get(j)
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-')
+    {
+        j += 1;
+    }
+    if j == i || chars.get(j) != Some(&'_') || chars.get(j + 1) != Some(&'_') {
+        return None;
+    }
+    j += 2;
+    let tool_start = j;
+    while chars
+        .get(j)
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_')
+    {
+        j += 1;
+    }
+    if j == tool_start {
+        return None;
+    }
+    let (open, close) = match chars.get(j) {
+        Some('{') => ('{', '}'),
+        Some('(') => ('(', ')'),
+        _ => return Some(j),
+    };
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    while let Some(&c) = chars.get(j) {
+        j += 1;
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None if c == open => depth += 1,
+            None if c == close => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(j);
+                }
+            }
+            None => {}
+        }
+    }
+    Some(chars.len())
+}
+
 /// Convert markdown to plain text for TTS, then apply `normalize_for_speech`.
 ///
-/// Drops code blocks, images, link URLs and horizontal rules; other markup keeps its text.
+/// Drops markup written as text, code blocks, images, link URLs and horizontal rules; other
+/// markdown keeps its text.
 pub fn strip_markdown_for_speech(text: &str) -> String {
+    let text = strip_markup_for_speech(text);
     let mut out = String::with_capacity(text.len());
     let mut in_code_fence = false;
 
@@ -1311,6 +1480,45 @@ mod tests {
     #[test]
     fn markdown_blockquote_stripped() {
         assert_eq!(strip_markdown_for_speech("> quoted text"), "quoted text");
+    }
+
+    /// Replies a guest's voice turns began with on the nano (2026-11-02), verbatim.
+    #[test]
+    fn tool_calls_written_as_text_are_never_spoken() {
+        for leaked in [
+            r#"<giap-knowledge__search_web question="what to pack for a day hike" />"#,
+            r#"<giap-knowledge__get_wikipedia_article topic="Why is the sky blue?"/>"#,
+            r#"<knowledge__get_wikipedia_article topic="why is the sky blue?"/"#,
+            r#"<call>giap-knowledge__get_wikipedia_article{topic:"crocodile vs alligator"}"#,
+            r#"<giap-knowledge__get_wikipedia_article topic="Why is the sky blue?"#,
+        ] {
+            assert_eq!(strip_markdown_for_speech(leaked), "", "{leaked}");
+        }
+    }
+
+    #[test]
+    fn an_echoed_scaffold_block_is_dropped_with_its_body() {
+        let leaked = "<answer-contract>\nReply with the result, not the route to it.\n\
+                      </answer-contract>\nThe sky scatters blue light.";
+        assert_eq!(
+            strip_markdown_for_speech(leaked),
+            "The sky scatters blue light."
+        );
+        let echoed = "<user-message>\nWhat is a crocodile?\n</user-message>\nA large reptile.";
+        assert_eq!(strip_markdown_for_speech(echoed), "A large reptile.");
+    }
+
+    #[test]
+    fn comparisons_and_prose_survive_the_markup_strip() {
+        assert_eq!(
+            strip_markup_for_speech("3 < 5 and 7 > 2"),
+            "3 < 5 and 7 > 2"
+        );
+        assert_eq!(
+            strip_markup_for_speech("The __init__ method runs first."),
+            "The __init__ method runs first."
+        );
+        assert_eq!(strip_markup_for_speech("I <3 tea."), "I <3 tea.");
     }
 
     #[test]

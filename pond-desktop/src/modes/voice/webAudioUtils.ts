@@ -437,9 +437,26 @@ export function splitSentences(text: string): string[] {
 
 // ── Markdown Stripping (for TTS) ─────────────────────────────────
 
+/** Port of `SCAFFOLD_TAGS` in `crates/pond-voice/src/text.rs`. */
+const SCAFFOLD_TAGS = ["system-context", "user-message", "answer-contract", "memories", "turn-context"];
+
+/** Port of `strip_markup_for_speech` in `crates/pond-voice/src/text.rs`. */
+export function stripMarkupForSpeech(text: string): string {
+  let out = text;
+  for (const tag of SCAFFOLD_TAGS) {
+    out = out.replace(new RegExp(`<${tag}>[\\s\\S]*?</${tag}>`, "g"), "");
+  }
+  const attr = `\\s+[\\w.:-]+(?:\\s*=\\s*(?:"[^"]*"|'[^']*'|[^\\s>/]+))?`;
+  // A tool-like name may be cut off unclosed by a clause split; an HTML tag never counts so.
+  out = out.replace(new RegExp(`</?[A-Za-z][\\w.:-]*__[\\w.:-]*(?:${attr})*(?:\\s*/?>|[\\s\\S]*$)`, "g"), "");
+  out = out.replace(new RegExp(`</?[A-Za-z][\\w.:-]*(?:${attr})*\\s*/?>`, "g"), "");
+  out = out.replace(/(?<![A-Za-z0-9])[a-z0-9-]+__[a-z0-9_]+(?:\{[^}]*\}?|\([^)]*\)?)?/g, "");
+  return out;
+}
+
 /** Port of `strip_markdown_for_speech` in `crates/pond-voice/src/text.rs`. */
 export function stripMarkdown(text: string): string {
-  let out = text;
+  let out = stripMarkupForSpeech(text);
   // Code fences
   out = out.replace(/```[\s\S]*?```/g, "");
   out = out.replace(/~~~[\s\S]*?~~~/g, "");
