@@ -55,7 +55,6 @@ impl ServerEmbedderFactory {
     #[cfg(feature = "local-inference")]
     async fn gguf(&self, model: &EmbeddingModel) -> Result<Arc<dyn EmbeddingProvider>> {
         use pond_core::models::domain::device_budget::embedder_on_gpu;
-        use pond_core::models::domain::gpu_gate::gpu_gate;
         use pond_inference::{EmbeddingModelSpec, Placement};
 
         let file = model
@@ -72,7 +71,7 @@ impl ServerEmbedderFactory {
         // Read and loaded with no generation running: a chore making its context beside them would
         // leave the reading stale and stack the two allocations.
         let on_gpu = {
-            let _setup = gpu_gate().setup().await;
+            let _setup = setup_for_load().await;
             let available = mem_available_mb();
             if embedder_on_gpu(
                 pond_adapters_local_inference::CUDA_ENABLED,
@@ -101,7 +100,7 @@ impl ServerEmbedderFactory {
             }
         }
         let provider = {
-            let _setup = gpu_gate().setup().await;
+            let _setup = setup_for_load().await;
             self.loaded(spec, file.filename).await?
         };
         Self::warmed(provider, file.filename).await
@@ -170,6 +169,25 @@ impl ServerEmbedderFactory {
             pond_api::model_acquisition::restore_model(state, &id).await;
         });
     }
+}
+
+/// The GPU gate's setup side, for one embedder load; a wait for a generation is logged.
+#[cfg(feature = "local-inference")]
+async fn setup_for_load() -> pond_core::models::domain::gpu_gate::SetupGuard {
+    let asked = std::time::Instant::now();
+    let guard = pond_core::models::domain::gpu_gate::gpu_gate()
+        .setup()
+        .await;
+    let waited = asked.elapsed();
+    if waited >= Duration::from_millis(10) {
+        tracing::info!(
+            target: "giap::trace",
+            kind = "embedder_load_waited",
+            waited_ms = waited.as_millis() as u64,
+            "the embedder's load waited for a generation to finish"
+        );
+    }
+    guard
 }
 
 /// `MemAvailable` in MB; `None` off Linux or when unreadable.
