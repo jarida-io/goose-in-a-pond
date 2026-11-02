@@ -3,7 +3,7 @@ import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
-import { contrastOf } from "./helpers/contrast";
+import { contrastOf, fillContrastOf } from "./helpers/contrast";
 import { navigateTo } from "./helpers/nav";
 import { memoryHealth, memoryRows, mockModels, typicalModels, type ModelMocks } from "./helpers/model-mocks";
 
@@ -521,11 +521,17 @@ for (const scheme of ["Light", "Dark"] as const) {
         probe.remove();
         return value;
       }, scheme === "Dark");
-      await expect(page.getByRole("button", { name: "Search by meaning" })).toHaveCSS("background-color", accent);
+      const hubSwitch = page.getByRole("button", { name: "Search by meaning" });
+      await expect(hubSwitch).toHaveCSS("background-color", accent);
       await expect(page.getByRole("alert").filter({ hasText: "not enough free memory" })).toBeVisible();
       await expect(page.getByText("EmbeddingGemma 2 is chosen but did not load.")).toBeVisible();
       // The card this change owns; the screen's own Add button measures 3.74:1 and is not part of it.
       await scan(page, ".setcard:has(.hm-embed)", "hub Memory screen, Search by meaning");
+      // Off is a slate track that still clears 3:1 on the card.
+      await hubSwitch.click();
+      await expect(hubSwitch).toHaveAttribute("aria-pressed", "false");
+      await page.mouse.move(0, 0);
+      await expect.poll(() => fillContrastOf(hubSwitch), { message: "the hub switch, off" }).toBeGreaterThanOrEqual(3);
     });
 
     test("the settings switch row", async ({ page }) => {
@@ -544,6 +550,10 @@ for (const scheme of ["Light", "Dark"] as const) {
         return value;
       }, scheme === "Dark");
       await expect(row.locator(".switch__control")).toHaveCSS("background-color", accent);
+      await row.locator(".switch__control").click();
+      await page.mouse.move(0, 0);
+      await expect.poll(() => fillContrastOf(row.locator(".switch__control")), { message: "the Settings switch, off" })
+        .toBeGreaterThanOrEqual(3);
       // The row this change owns; a "New" badge elsewhere in the category measures 2.74:1 in dark.
       await scan(page, ".scat__row:has([aria-label='Search memories by meaning'])", "settings switch");
     });
