@@ -137,6 +137,11 @@ pub const FIELD_RULES: &[FieldRule] = &[
         blank_ok: false,
     },
     FieldRule {
+        key: "voice_tts_accelerator",
+        check: Check::OneOf(crate::models::domain::device_budget::TTS_ACCELERATORS),
+        blank_ok: false,
+    },
+    FieldRule {
         key: "vad_backend",
         check: Check::OneOf(VAD_BACKENDS),
         blank_ok: false,

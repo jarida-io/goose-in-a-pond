@@ -255,6 +255,11 @@ pub struct Settings {
     #[serde(default = "Settings::default_tts_quality")]
     pub voice_tts_quality: String,
 
+    /// Where Kokoro runs (`TTS_ACCELERATORS`): `cpu`, `gpu`, or `auto` for the GPU only when the
+    /// memory budget beside the chat model fits it. The CPU until the GPU is measured beside E4B.
+    #[serde(default = "Settings::default_tts_accelerator")]
+    pub voice_tts_accelerator: String,
+
     /// End-of-speech detector (`rms` | `silero`); `silero` falls back to `rms` if it cannot load.
     /// Onset stays on the energy gate: a freshly reset Silero would clip the first word.
     #[serde(default = "Settings::default_vad_backend")]
@@ -845,6 +850,7 @@ impl Default for Settings {
             voice_tts_voice: Self::default_tts_voice(),
             voice_tts_speed: Self::default_tts_speed(),
             voice_tts_quality: Self::default_tts_quality(),
+            voice_tts_accelerator: Self::default_tts_accelerator(),
             vad_backend: Self::default_vad_backend(),
             voice_thinking_tone_enabled: Self::default_voice_thinking_tone_enabled(),
             audio_input_device: String::new(),
@@ -1038,6 +1044,9 @@ impl Settings {
     }
     fn default_tts_quality() -> String {
         "q8f16".to_string()
+    }
+    fn default_tts_accelerator() -> String {
+        "cpu".to_string()
     }
     /// The calibration decides: the CNN missed most real voices it was not trained on.
     fn default_wake_detector() -> String {
@@ -2217,6 +2226,8 @@ mod tests {
             "audio_sound_test",
             "audio_manage_system",
             "voice_tts_quality",
+            // The Voice section's accelerator row, applied like the quality by an engine reload.
+            "voice_tts_accelerator",
             "voice_tts_speed",
             "voice_tts_voice",
             "voice_wake_word",

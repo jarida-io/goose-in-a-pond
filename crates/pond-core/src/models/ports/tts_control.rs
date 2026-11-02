@@ -17,6 +17,20 @@ pub struct TtsApplied {
     pub engine_reloaded: bool,
 }
 
+/// Where the speech engine runs, for the TTS status.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TtsAcceleration {
+    /// `voice_tts_accelerator` as applied: `auto`, `cpu` or `gpu`.
+    pub setting: String,
+    /// `cpu` or `cuda` once the engine has loaded.
+    pub device: Option<String>,
+    /// Why the engine runs there.
+    pub reason: Option<String>,
+    /// How long the last load took, and the GPU warm-up within it.
+    pub load_ms: Option<u64>,
+    pub warm_ms: Option<u64>,
+}
+
 #[async_trait]
 pub trait TtsControl: Send + Sync {
     /// Must be safe mid-speech: the settings screen calls it on every slider release.
@@ -43,5 +57,14 @@ pub trait TtsControl: Send + Sync {
     /// Prewarm the speech engine into RAM.
     async fn prewarm(&self) -> Result<()> {
         Ok(())
+    }
+    /// Choose where the engine runs (`auto`, `cpu`, `gpu`); `true` when that drops the loaded
+    /// session, so the next utterance reloads it there.
+    async fn set_accelerator(&self, _setting: &str) -> Result<bool> {
+        Ok(false)
+    }
+    /// Where the engine runs and why; `None` for an engine with one place to run.
+    async fn acceleration(&self) -> Option<TtsAcceleration> {
+        None
     }
 }

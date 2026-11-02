@@ -106,6 +106,7 @@ impl SettingsRepository for SqliteSettingsRepository {
         upsert!("voice_tts_voice", &settings.voice_tts_voice);
         upsert!("voice_tts_speed", settings.voice_tts_speed.to_string());
         upsert!("voice_tts_quality", &settings.voice_tts_quality);
+        upsert!("voice_tts_accelerator", &settings.voice_tts_accelerator);
         upsert!("vad_backend", &settings.vad_backend);
         upsert!("voice_wake_detector", &settings.voice_wake_detector);
         upsert!(
@@ -904,6 +905,7 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
             }
         }
         "voice_tts_quality" => s.voice_tts_quality = value.to_string(),
+        "voice_tts_accelerator" => s.voice_tts_accelerator = value.to_string(),
         // Stored verbatim so write and read agree; `settings_validation` rejects unknown backends.
         "vad_backend" => s.vad_backend = value.to_string(),
         "voice_wake_detector" => s.voice_wake_detector = value.to_string(),
@@ -1422,6 +1424,18 @@ mod tests {
              upsert in update_fields or an arm in apply_key):\n  {}",
             unsaved.join("\n  ")
         );
+    }
+
+    #[tokio::test]
+    async fn the_voice_accelerator_round_trips_and_starts_on_the_cpu() {
+        let repo = fresh_repo().await;
+        assert_eq!(repo.get().await.unwrap().voice_tts_accelerator, "cpu");
+        for setting in ["gpu", "auto", "cpu"] {
+            let mut s = repo.get().await.unwrap();
+            s.voice_tts_accelerator = setting.to_string();
+            repo.update(&s).await.unwrap();
+            assert_eq!(repo.get().await.unwrap().voice_tts_accelerator, setting);
+        }
     }
 
     #[tokio::test]

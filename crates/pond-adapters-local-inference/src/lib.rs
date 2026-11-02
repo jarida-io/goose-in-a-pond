@@ -5,6 +5,21 @@
 pub const CUDA_ENABLED: bool = cfg!(feature = "cuda");
 
 pub mod scheduler;
+
+/// MB of the budgeted device's LLM budget that `model_id` leaves free, from the GGUF the
+/// registry resolves it to; `None` off the budgeted device, where no such budget is kept.
+pub fn chat_model_spare_mb(model_id: &str) -> Option<u64> {
+    use goose::providers::local_inference::local_model_registry::get_registry;
+    use pond_core::models::domain::device_budget::{budgeted_device, spare_beside_model_mb};
+    if !budgeted_device() {
+        return None;
+    }
+    let gguf = get_registry().lock().ok().and_then(|reg| {
+        reg.get_model(model_id)
+            .map(|e| std::fs::canonicalize(&e.local_path).unwrap_or_else(|_| e.local_path.clone()))
+    });
+    Some(spare_beside_model_mb(gguf.as_deref(), model_id))
+}
 pub mod tool_caller;
 pub use scheduler::{
     NoopScheduler, ResourceAwareModelScheduler, JETSON_TOTAL_RAM_MB, LLM_BUDGET_MB,

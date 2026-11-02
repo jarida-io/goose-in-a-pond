@@ -563,11 +563,132 @@ pub fn embedder_on_gpu(cuda_build: bool, model_id: &str, available_mb: Option<u6
     cuda_build && available_mb.is_none_or(|a| a >= cost + EMBEDDER_GPU_MARGIN_MB)
 }
 
+/// Kokoro q4f16 on CUDA beside E4B (MB of MemAvailable), measured on the Orin Nano 2026-10-27
+/// with Exhaustive convolution search and power-of-two arena growth: 650-940 MB. The upper end
+/// until the trial of its provider options re-measures it.
+pub const KOKORO_CUDA_MB: u64 = 940;
+
+/// MemAvailable kept once Kokoro moves to the GPU: the embedder's margin, a choice.
+pub const TTS_GPU_MARGIN_MB: u64 = 300;
+
+/// The values `voice_tts_accelerator` takes.
+pub const TTS_ACCELERATORS: &[&str] = &["auto", "cpu", "gpu"];
+
+/// Where Kokoro runs, and why, in words the TTS status shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TtsPlacement {
+    pub gpu: bool,
+    pub reason: String,
+}
+
+/// MB of the LLM budget the chat model leaves free: the budget less its weights, compute
+/// buffers, any vision encoder and the KV cache of the window it is given.
+pub fn spare_beside_model_mb(gguf_path: Option<&Path>, chat_model: &str) -> u64 {
+    let w = device_window(gguf_path, chat_model);
+    let encoder_mb = if w.encoder_bytes > 0 {
+        w.encoder_bytes / MIB + ENCODER_COMPUTE_MB
+    } else {
+        0
+    };
+    let kv_mb = u64::from(w.window) * slope(w.kv_kib_per_token) / 1024;
+    llm_budget_mb()
+        .saturating_sub(w.model_bytes / MIB)
+        .saturating_sub(COMPUTE_BUFFER_MB)
+        .saturating_sub(encoder_mb)
+        .saturating_sub(kv_mb)
+}
+
+/// Where Kokoro runs. `gpu` takes the GPU whenever the runtime has CUDA; `auto` only when both
+/// the budget beside the chat model (`spare_mb`, `None` off the budgeted device) and the memory
+/// free now (`available_mb`) cover [`KOKORO_CUDA_MB`] and the margin. Anything else is the CPU.
+pub fn tts_placement(
+    setting: &str,
+    cuda_runtime: bool,
+    spare_mb: Option<u64>,
+    available_mb: Option<u64>,
+) -> TtsPlacement {
+    let cpu = |reason: String| TtsPlacement { gpu: false, reason };
+    let need = KOKORO_CUDA_MB + TTS_GPU_MARGIN_MB;
+    match setting {
+        "gpu" if cuda_runtime => TtsPlacement {
+            gpu: true,
+            reason: "the voice accelerator setting asks for the GPU".into(),
+        },
+        "gpu" | "auto" if !cuda_runtime => {
+            cpu("this pond's ONNX Runtime has no CUDA provider".into())
+        }
+        "auto" => match (spare_mb, available_mb) {
+            (Some(spare), _) if spare < need => cpu(format!(
+                "the chat model leaves {spare} MB of the memory budget; the voice on the GPU \
+                 needs {need} MB"
+            )),
+            (_, Some(free)) if free < need => cpu(format!(
+                "{free} MB of memory is free; the voice on the GPU needs {need} MB"
+            )),
+            _ => TtsPlacement {
+                gpu: true,
+                reason: format!("{need} MB fits beside the chat model"),
+            },
+        },
+        _ => cpu("the voice accelerator setting asks for the CPU".into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::domain::gguf::test_gguf::GgufWriter;
     use crate::models::domain::vision_encoder::encoder_by_dir;
+
+    #[test]
+    fn auto_takes_the_gpu_only_when_the_budget_and_free_memory_both_fit() {
+        let need = KOKORO_CUDA_MB + TTS_GPU_MARGIN_MB;
+        assert!(tts_placement("auto", true, Some(need), Some(need)).gpu);
+        assert!(
+            tts_placement("auto", true, None, None).gpu,
+            "no readings do not refuse"
+        );
+        let tight = tts_placement("auto", true, Some(need - 1), Some(4000));
+        assert!(!tight.gpu);
+        assert!(tight.reason.contains("budget"), "{}", tight.reason);
+        let busy = tts_placement("auto", true, Some(4000), Some(need - 1));
+        assert!(!busy.gpu);
+        assert!(busy.reason.contains("free"), "{}", busy.reason);
+        assert!(!tts_placement("auto", false, Some(9000), Some(9000)).gpu);
+    }
+
+    #[test]
+    fn gpu_and_cpu_are_obeyed_where_the_runtime_allows() {
+        assert!(
+            tts_placement("gpu", true, Some(0), Some(0)).gpu,
+            "the setting is a choice"
+        );
+        let no_cuda = tts_placement("gpu", false, None, None);
+        assert!(!no_cuda.gpu);
+        assert!(no_cuda.reason.contains("CUDA"), "{}", no_cuda.reason);
+        assert!(!tts_placement("cpu", true, Some(9000), Some(9000)).gpu);
+        assert!(
+            !tts_placement("", true, None, None).gpu,
+            "an unknown value is the CPU"
+        );
+        for setting in TTS_ACCELERATORS {
+            assert!(!tts_placement(setting, true, None, None).reason.is_empty());
+        }
+    }
+
+    #[test]
+    fn the_budget_left_beside_a_model_shrinks_as_the_model_grows() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small.gguf");
+        let large = dir.path().join("large.gguf");
+        std::fs::write(&small, vec![0u8; 1 << 20]).unwrap();
+        std::fs::write(&large, vec![0u8; 8 << 20]).unwrap();
+        assert!(
+            spare_beside_model_mb(Some(&small), "small")
+                >= spare_beside_model_mb(Some(&large), "large")
+        );
+        assert!(spare_beside_model_mb(None, "nothing-on-disk") <= llm_budget_mb());
+    }
 
     /// The pairing a model's own file name finds, with no header to read.
     fn enc(model: &str) -> Option<EncoderSpec> {

@@ -88,6 +88,8 @@ export interface Settings {
   voice_tts_speed?: number;
   /** Kokoro quantization (`q8` | `q8f16` | `q4f16` | `fp16` | `fp32`); picks the `.onnx` file. */
   voice_tts_quality?: string;
+  /** Where the voice engine runs: `cpu`, `gpu`, or `auto` (the GPU only when memory allows). */
+  voice_tts_accelerator?: string;
   voice_thinking_tone_enabled?: boolean;
   /** Pinned microphone, by its system name; "" picks one that works. */
   audio_input_device?: string;

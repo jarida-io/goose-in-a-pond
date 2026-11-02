@@ -80,6 +80,7 @@ export const TIER_NOTE: Record<Tier, string> = {
 
 /** The tiers `pond_adapters_kokoro::model_filename` recognises, smallest first. */
 const TTS_QUALITY = ["q4", "q4f16", "q8", "q8f16", "fp16", "fp32"] as const;
+const TTS_ACCELERATOR = ["cpu", "auto", "gpu"] as const;
 
 export const CATALOGUE: CatalogueCategory[] = [
   // ── Household ───────────────────────────────────────────────────────────
@@ -208,6 +209,7 @@ export const CATALOGUE: CatalogueCategory[] = [
           // The engine's own `speed` multiplier, stored as-is (not a percentage).
           { key: "voice_tts_speed", label: "Speaking pace", description: "How fast it speaks. 1.0 is its natural pace.", control: { kind: "number", step: 0.05, min: 0.5, max: 2 }, consumer: "live", validate: range(0.5, 2) },
           { key: "voice_tts_quality", label: "Voice quality", description: "How much detail the voice is made with. Higher sounds smoother and takes longer.", control: { kind: "select", options: TTS_QUALITY }, consumer: "live" },
+          { key: "voice_tts_accelerator", label: "Voice processor", description: "Where the voice is made. The graphics processor is faster but shares memory with the chat model; auto uses it only when there is room.", control: { kind: "select", options: TTS_ACCELERATOR }, consumer: "live" },
           // No `note`: notes mark unconnected controls; the Voice view's subtitle explains the tone.
           { key: "voice_thinking_tone_enabled", label: "Sound while it thinks", description: "Play a soft tone while it is thinking, so silence does not read as broken.", control: { kind: "toggle" }, consumer: "live" },
           { key: "active_tts_model", label: "Speech model", ownedBy: "models", description: "The voice used for speaking. Chosen on the Models page.", control: { kind: "text", placeholder: "af_heart" }, consumer: "live" },

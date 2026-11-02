@@ -1884,6 +1884,8 @@ struct ApplyTtsRequest {
     /// Pace multiplier. Clamped by the engine, not here.
     speed: Option<f32>,
     quality: Option<String>,
+    /// `auto`, `cpu` or `gpu`.
+    accelerator: Option<String>,
 }
 
 /// Applies voice settings to the live engine, downloading anything missing first.
@@ -1919,7 +1921,18 @@ async fn apply_tts_settings(
         .and_then(|b| b.quality.clone())
         .unwrap_or(saved.voice_tts_quality);
 
+    let accelerator = req
+        .as_ref()
+        .and_then(|b| b.accelerator.clone())
+        .unwrap_or(saved.voice_tts_accelerator);
+
     let applied = control.apply(&voice, speed, &quality).await.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
+    let moved = control.set_accelerator(&accelerator).await.map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": e.to_string()})),
@@ -1930,9 +1943,10 @@ async fn apply_tts_settings(
         "voice": applied.voice,
         "speed": applied.speed_milli as f32 / 1000.0,
         "quality": applied.quality,
+        "accelerator": accelerator,
         "downloaded_voice": applied.downloaded_voice,
         "downloaded_weights": applied.downloaded_weights,
-        "engine_reloaded": applied.engine_reloaded,
+        "engine_reloaded": applied.engine_reloaded || moved,
         "installed_voices": control.installed_voices().await,
     })))
 }
@@ -1980,13 +1994,30 @@ async fn status_tts(
         return Ok(Json(json!({"available": false, "loaded": false})));
     };
     let loaded = control.is_loaded().await;
-    let accelerator = pond_core::models::domain::acceleration::onnx_device(
+    let device = pond_core::models::domain::acceleration::onnx_device(
         pond_core::models::domain::acceleration::TTS_KOKORO,
     )
     .map(|d| d.as_str());
-    Ok(Json(
-        json!({"available": true, "loaded": loaded, "accelerator": accelerator}),
-    ))
+    let acceleration = control.acceleration().await;
+    Ok(Json(tts_status_body(loaded, device, acceleration.as_ref())))
+}
+
+/// The TTS status: `accelerator` is the device in use (`cpu`, `cuda`), `accelerator_setting`
+/// what the household chose, and `accelerator_reason` why the one led to the other.
+fn tts_status_body(
+    loaded: bool,
+    device: Option<&str>,
+    acceleration: Option<&pond_core::models::ports::tts_control::TtsAcceleration>,
+) -> Value {
+    json!({
+        "available": true,
+        "loaded": loaded,
+        "accelerator": acceleration.and_then(|a| a.device.clone()).or(device.map(str::to_string)),
+        "accelerator_setting": acceleration.map(|a| a.setting.clone()),
+        "accelerator_reason": acceleration.and_then(|a| a.reason.clone()),
+        "load_ms": acceleration.and_then(|a| a.load_ms),
+        "warm_ms": acceleration.and_then(|a| a.warm_ms),
+    })
 }
 
 async fn revoke_model(
@@ -6089,6 +6120,15 @@ async fn update_settings(
 
     if phrase_changed {
         crate::voice_match::wake_phrase_changed(&state).await;
+    }
+
+    // The engine reloads on its next utterance; no client has to call `/voice/tts/apply`.
+    if current.voice_tts_accelerator != merged.voice_tts_accelerator {
+        if let Some(control) = &state.tts_control {
+            if let Err(e) = control.set_accelerator(&merged.voice_tts_accelerator).await {
+                tracing::warn!(error = %e, "the voice accelerator was saved but not applied");
+            }
+        }
     }
 
     // Privacy controls must apply now, not at the next restart.
@@ -21548,5 +21588,41 @@ mod tests {
             other.mic_enabled = !current.mic_enabled;
             assert!(!save_needs_prewarm(&current, &other));
         }
+    }
+}
+
+#[cfg(test)]
+mod tts_status_tests {
+    use super::tts_status_body;
+    use pond_core::models::ports::tts_control::TtsAcceleration;
+
+    #[test]
+    fn the_tts_status_names_the_device_the_setting_and_the_reason() {
+        let a = TtsAcceleration {
+            setting: "auto".into(),
+            device: Some("cpu".into()),
+            reason: Some("the chat model leaves 120 MB of the memory budget".into()),
+            load_ms: Some(840),
+            warm_ms: None,
+        };
+        let body = tts_status_body(true, Some("cpu"), Some(&a));
+        assert_eq!(body["accelerator"], "cpu");
+        assert_eq!(body["accelerator_setting"], "auto");
+        assert!(body["accelerator_reason"]
+            .as_str()
+            .unwrap()
+            .contains("budget"));
+        assert_eq!(body["load_ms"], 840);
+        assert!(body["warm_ms"].is_null());
+        let gpu = TtsAcceleration {
+            device: Some("cuda".into()),
+            warm_ms: Some(2100),
+            ..a
+        };
+        let body = tts_status_body(true, Some("cpu"), Some(&gpu));
+        assert_eq!(body["accelerator"], "cuda", "the engine's own record wins");
+        assert_eq!(body["warm_ms"], 2100);
+        let bare = tts_status_body(false, None, None);
+        assert!(bare["accelerator"].is_null() && bare["accelerator_setting"].is_null());
     }
 }
