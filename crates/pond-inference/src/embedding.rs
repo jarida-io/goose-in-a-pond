@@ -10,6 +10,7 @@ use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
+use pond_core::models::domain::embedding_models::{self, EmbeddingModel, GgufFile};
 use pond_core::models::domain::gpu_gate::gpu_gate;
 use pond_core::models::ports::embedding::EmbeddingProvider;
 use std::num::NonZeroU32;
@@ -23,6 +24,8 @@ const MAX_EMBED_TOKENS: usize = 2048;
 /// Everything that makes one embedding model's vectors incompatible with another's.
 #[derive(Clone, Debug)]
 pub struct EmbeddingModelSpec {
+    /// The catalogue row's name, which `active_embedding_model` stores.
+    pub name: &'static str,
     /// Stable identifier stamped onto every vector this model produces.
     pub model_id: String,
     /// GGUF filename expected under `{data_dir}/models/embedding/`.
@@ -39,57 +42,63 @@ pub struct EmbeddingModelSpec {
     pub n_gpu_layers: u32,
     /// ggml threads; small because llama.cpp's default 4 starves chat prefill on a 6-core Orin.
     pub n_threads: i32,
-    /// Download URL for `filename`; fetch it only via a gated (egress-tracked) downloader.
-    pub download_url: String,
-    /// Approximate download size, for progress display only.
-    pub size_hint_mb: u64,
 }
 
 impl EmbeddingModelSpec {
-    /// Default: `nomic-embed-text-v1.5`, 768-dim, mean-pooled, retrieval-tuned.
-    pub fn nomic_embed_text_v1_5() -> Self {
+    /// The run settings for a catalogue row's GGUF; identity, width and file come from the row.
+    fn for_row(
+        model: &EmbeddingModel,
+        file: &GgufFile,
+        pooling: LlamaPoolingType,
+        content_prefix: &'static str,
+        query_prefix: &'static str,
+    ) -> Self {
         Self {
-            model_id: "nomic-embed-text-v1.5".to_string(),
-            filename: "nomic-embed-text-v1.5.Q8_0.gguf".to_string(),
-            dims: 768,
-            pooling: LlamaPoolingType::Mean,
-            // nomic needs a task prefix, and a different one per side.
-            content_prefix: "search_document: ",
-            query_prefix: "search_query: ",
+            name: model.name,
+            model_id: model.model_id.to_string(),
+            filename: file.filename.to_string(),
+            dims: model.dims,
+            pooling,
+            content_prefix,
+            query_prefix,
             n_gpu_layers: 0,
             n_threads: 2,
-            download_url: "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/\
-                           resolve/main/nomic-embed-text-v1.5.Q8_0.gguf"
-                .to_string(),
-            size_hint_mb: 146,
         }
+    }
+
+    /// Default: `nomic-embed-text-v1.5`, 768-dim, mean-pooled, retrieval-tuned.
+    pub fn nomic_embed_text_v1_5() -> Self {
+        Self::for_row(
+            &embedding_models::NOMIC_EMBED_TEXT_V1_5,
+            &embedding_models::NOMIC_EMBED_TEXT_V1_5_Q8_0,
+            LlamaPoolingType::Mean,
+            // nomic needs a task prefix, and a different one per side.
+            "search_document: ",
+            "search_query: ",
+        )
     }
 
     /// `bge-base-en-v1.5`, 768-dim, CLS-pooled: the fallback if nomic won't load. Never add a
     /// 384-dim model: width is what tells these vectors apart from fastembed's 384-dim ones.
     pub fn bge_base_en_v1_5() -> Self {
-        Self {
-            model_id: "bge-base-en-v1.5".to_string(),
-            filename: "bge-base-en-v1.5-q8_0.gguf".to_string(),
-            dims: 768,
-            pooling: LlamaPoolingType::Cls,
-            content_prefix: "",
-            query_prefix: "",
-            n_gpu_layers: 0,
-            n_threads: 2,
-            download_url: "https://huggingface.co/CompendiumLabs/bge-base-en-v1.5-gguf/\
-                           resolve/main/bge-base-en-v1.5-q8_0.gguf"
-                .to_string(),
-            size_hint_mb: 117,
-        }
+        Self::for_row(
+            &embedding_models::BGE_BASE_EN_V1_5,
+            &embedding_models::BGE_BASE_EN_V1_5_Q8_0,
+            LlamaPoolingType::Cls,
+            "",
+            "",
+        )
     }
 
     /// Resolve a settings model name ("" and "gguf" mean nomic). An unknown name is usually a
     /// leftover fastembed name (the setting is shared), so callers fall back to the default.
     pub fn resolve(name: &str) -> Result<Self> {
         match name {
-            "" | "gguf" | "nomic-embed-text-v1.5" => Ok(Self::nomic_embed_text_v1_5()),
-            "bge-base-en-v1.5" => Ok(Self::bge_base_en_v1_5()),
+            "" | "gguf" => Ok(Self::nomic_embed_text_v1_5()),
+            n if n == embedding_models::NOMIC_EMBED_TEXT_V1_5.name => {
+                Ok(Self::nomic_embed_text_v1_5())
+            }
+            n if n == embedding_models::BGE_BASE_EN_V1_5.name => Ok(Self::bge_base_en_v1_5()),
             other => Err(anyhow!(
                 "unknown GGUF embedding model: '{other}'. \
                  Supported: nomic-embed-text-v1.5, bge-base-en-v1.5"
@@ -369,6 +378,26 @@ mod tests {
                 "{} is {}-dim, which collides with fastembed's width and makes a \
                  mixed store undetectable",
                 spec.model_id, spec.dims
+            );
+        }
+    }
+
+    /// The catalogue downloads the file this crate loads; a second copy of either would drift.
+    #[test]
+    fn every_spec_is_its_catalogue_row() {
+        let ggufs: Vec<_> = embedding_models::EMBEDDING_MODELS
+            .iter()
+            .filter(|m| m.gguf().is_some())
+            .collect();
+        assert_eq!(ggufs.len(), EmbeddingModelSpec::all().len());
+        for model in ggufs {
+            let spec = EmbeddingModelSpec::resolve(model.name).unwrap();
+            assert_eq!(spec.name, model.name);
+            assert_eq!(spec.model_id, model.model_id);
+            assert_eq!(spec.dims, model.dims);
+            assert_eq!(
+                Some(spec.filename.as_str()),
+                model.gguf().map(|f| f.filename)
             );
         }
     }

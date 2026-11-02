@@ -218,7 +218,7 @@ What the pond fetches without a choice in the moment, and why each is safe to fe
 | Kokoro engine weights and voices, espeak-ng phoneme data | At `serve` and `chat --voice` start | `crates/pond-server/src/model_download.rs` |
 | Silero VAD, the ONNX Runtime library | When voice starts | `model_download::ensure_silero_model`, `ensure_onnx_runtime` in `main.rs` |
 | fastembed's embedding model | On first use by fastembed (`embedding_provider = "fastembed"`, the default) | fastembed itself |
-| The GGUF embedding model (`nomic-embed-text-v1.5` unless `active_embedding_model` names another, about 146 MB) | At `serve` start with `embedding_provider = "gguf"`, in the background | `EmbeddingModelSpec` in `crates/pond-inference/src/embedding.rs`, `main.rs` |
+| The GGUF embedding model (`nomic-embed-text-v1.5` unless `active_embedding_model` names another, about 146 MB, pinned by size and sha256) | At `serve` start with `embedding_provider = "gguf"` when its file is missing (`restore_model`), through the tracker into `<data_dir>/models/embedding/`, so it shows on the Models page. It is also a catalogue row the household can download | `pond_core::models::domain::embedding_models`, `main.rs` |
 | Face models | With the `face-onnx` feature, at `serve` start, in the background: the listeners never wait on them, and recognition switches on when they land ([face-recognition.md](../face-recognition.md#startup-never-waits-on-the-download)) | `model_download.rs`, `start_face_recognition` in `main.rs` |
 | The vision classifier (YOLOX-Nano, about 4 MB) | With the `vision-onnx` feature and no `vision_classifier_model` set, at `serve` start, before the listeners bind | `model_download.rs` |
 

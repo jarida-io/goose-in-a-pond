@@ -7109,8 +7109,8 @@ async fn download_model(
     // Gigabytes for a model nothing here can run.
     refuse_unavailable_engine(&state, &m, "download")?;
 
-    // fastembed downloads embedding models itself on first use.
-    if cat == ModelCategory::Embedding {
+    // fastembed downloads its own models on first use; a GGUF embedder is a file like any other.
+    if cat == ModelCategory::Embedding && m.filename.is_none() {
         return Ok(Json(
             json!({"status": "ready", "name": name, "note": "Embedding model will download automatically on first use"}),
         ));
