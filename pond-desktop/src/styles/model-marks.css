@@ -261,6 +261,13 @@
   color: var(--color-warning-fg);
 }
 
+/* Chosen and on its way: quieter than "In use" until it is. Secondary text, 6.22:1 light and 5.45:1 dark. */
+.mm-fit--wait {
+  font-family: var(--font-body);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-secondary);
+}
+
 .mm-fit svg {
   flex-shrink: 0;
 }

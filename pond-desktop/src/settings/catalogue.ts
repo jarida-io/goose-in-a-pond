@@ -265,7 +265,7 @@ export const CATALOGUE: CatalogueCategory[] = [
         name: "Search by meaning",
         entries: [
           {
-            key: "embedding_provider", label: "Search memories by meaning", description: "Find a memory by what it means, not only the words in it, so a question in English can find a fact said in Swahili. Off, the pond searches by keyword. The model is chosen on the Models page.", consumer: "live",
+            key: "embedding_provider", label: "Search memories by meaning", description: "Find a memory by what it means, not only the words in it. Off, Memory searches by keyword. The model is chosen on the Models page.", consumer: "live",
             // "none" is off; every other stored value, including the older "fastembed" and "gguf", is on.
             control: { kind: "toggle", values: { on: "auto", off: "none" } },
             validate: oneOf(["auto", "fastembed", "gguf", "none"]),

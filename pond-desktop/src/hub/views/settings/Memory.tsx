@@ -8,7 +8,7 @@ import type { MemoryFragment, MemorySegment } from "../../../api/types";
 import { segmentLabel } from "../../../memory/labels";
 import { EmbedderStatus } from "../../../components/models/MemoryModels";
 import { useEmbedderHealth } from "../../../hooks/useEmbedderHealth";
-import { embedderLine, embedderTitle } from "../../../sections/models/memoryEmbedder";
+import { embedderLine, holderText } from "../../../sections/models/memoryEmbedder";
 
 // ─── Icon path strings ────────────────────────────────────────
 const TRASH_PATH =
@@ -316,7 +316,7 @@ export function MemoryDetail({ go }: MemoryDetailProps) {
       );
       showFlash(
         on
-          ? "Search by meaning is on. The pond reads your memories at the next quiet moment."
+          ? "Search by meaning is on. The pond reads memories again at the next quiet moment."
           : "Search by meaning is off. Memory searches by keyword.",
       );
       void embedder.refresh();
@@ -341,6 +341,7 @@ export function MemoryDetail({ go }: MemoryDetailProps) {
   }
 
   const visibleMems = mems;
+  const embedderSaid = embedderLine(embedder.health, { downloading: embedder.downloading });
 
   return (
     <DetailShell
@@ -434,10 +435,10 @@ export function MemoryDetail({ go }: MemoryDetailProps) {
       </Card>
 
       {/* How memories are searched */}
-      <Card title="Semantic search">
+      <Card title="Search by meaning">
         <Row
           label="Search by meaning"
-          sub="Find a memory by what it means, not only the words in it, so a question in English can find a fact said in Swahili. Off, Memory searches by keyword."
+          sub="Find a memory by what it means, not only the words in it. Off, Memory searches by keyword."
           control={
             <Toggle
               key={`${loading ? "loading" : "loaded"}-${switchKey}`}
@@ -449,11 +450,7 @@ export function MemoryDetail({ go }: MemoryDetailProps) {
         />
         <Row
           label="Model"
-          sub={
-            embedder.health?.embedder?.model_id
-              ? `Using ${embedderTitle(embedder.health.embedder.model_id)}.`
-              : "Chosen on the Models screen."
-          }
+          sub={holderText(embedderSaid, semanticOn ? embedder.health?.embedder?.model_id : null)}
           control={
             <button className="mm-btn" type="button" onClick={() => go("models")}>
               Choose a model
@@ -462,7 +459,7 @@ export function MemoryDetail({ go }: MemoryDetailProps) {
         />
         <div className="hm-embed">
           <EmbedderStatus
-            line={embedderLine(embedder.health, { downloading: embedder.downloading })}
+            line={embedderSaid}
             onRetry={() =>
               void embedder.retry().catch((e) => showFlash(String(e instanceof Error ? e.message : e), false))
             }

@@ -167,30 +167,42 @@ export const eg2Row = (over: Record<string, unknown> = {}) =>
     },
   );
 
-/** The three Memory models a pond with the default on it offers. */
-export const memoryRows = () => [eg2Row(), miniLmRow(), nomicRow()];
+/** The three Memory models a pond with the default on it offers; `onDisk` names the ones whose file is here,
+ *  which a model in use always is unless its file is still coming down. */
+export const memoryRows = (onDisk: string[] = []) =>
+  [eg2Row(), miniLmRow(), nomicRow()].map((row) => ({ ...row, downloaded: onDisk.includes(row.name) }));
 
-/** What the index reports with Memory on EmbeddingGemma 2; the embedder and the rows reached are the dials. */
+const CORPUS_ROWS: [string, number][] = [["memory", 45], ["context", 0], ["summary", 50]];
+
+/** What the index reports with Memory on EmbeddingGemma 2; the embedder and the rows reached are the dials.
+ *  The corpora add up to the totals, as the server counts them, so a bar never disagrees with its line. */
 export function memoryHealth(
   embedder: { state?: string; model_id?: string | null; reason?: string | null } = {},
   over: Record<string, unknown> = {},
 ) {
   const model_id = embedder.model_id === undefined ? "embeddinggemma-2-256" : embedder.model_id;
+  const total = CORPUS_ROWS.reduce((n, [, rows]) => n + rows, 0);
+  const matching = typeof over.matching === "number" ? over.matching : total;
+  let left = matching;
+  const corpora = CORPUS_ROWS.map(([corpus, rows]) => {
+    const indexed = Math.min(left, rows);
+    left -= indexed;
+    return {
+      corpus, rows, source_rows: rows, indexed_rows: indexed, missing_rows: 0, mismatched: rows - indexed,
+      coverage: rows === 0 ? null : indexed / rows, structurally_excluded: false,
+    };
+  });
   return {
     indexed: true,
     embedder: { state: "ready", model_id, reason: null, ...embedder },
     model_id,
     dims: 256,
-    rows: 95,
-    matching: 95,
-    mismatched: 0,
+    rows: total,
+    matching,
+    mismatched: total - matching,
     missing: 0,
-    coverage: 1,
-    corpora: [
-      { corpus: "memory", rows: 45, source_rows: 45, indexed_rows: 45, missing_rows: 0, mismatched: 0, coverage: 1, structurally_excluded: false },
-      { corpus: "context", rows: 0, source_rows: 0, indexed_rows: 0, missing_rows: 0, mismatched: 0, coverage: null, structurally_excluded: false },
-      { corpus: "summary", rows: 50, source_rows: 50, indexed_rows: 50, missing_rows: 0, mismatched: 0, coverage: 1, structurally_excluded: false },
-    ],
+    coverage: matching / total,
+    corpora,
     ...over,
   };
 }

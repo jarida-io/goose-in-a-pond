@@ -1,9 +1,12 @@
 import { useId, useState } from "react";
-import { AlertTriangle, Check, ChevronDown, ChevronRight, Clock, Loader2, RefreshCw, RotateCw, SearchX } from "lucide-react";
+import {
+  AlertTriangle, Check, ChevronDown, ChevronRight, Clock, Download, Loader2, RefreshCw, RotateCw, SearchX,
+} from "lucide-react";
 import type { ModelActiveRoles, ModelEntry } from "../../api/types";
 import type { ModelTransfer, TransferAction } from "../../sections/models/modelDownloads";
 import {
-  type EmbedderKind, type EmbedderLine, holdsMemory, memoryCost, memoryModels,
+  type EmbedderKind, type EmbedderLine, type HolderTone, holderBadge, holdsMemory, memoryCost, memoryModels,
+  memoryPress,
 } from "../../sections/models/memoryEmbedder";
 import { measuredOf, modelFullName, modelLabel, sourceChip } from "../../sections/models/modelsView";
 import { SourceChip, TransferView } from "./ModelMarks";
@@ -25,6 +28,14 @@ const STATUS_ICON: Record<EmbedderKind, typeof Check> = {
 
 const SPINS: EmbedderKind[] = ["loading", "downloading", "reindexing"];
 
+/** A word and an icon, never a hue: only a model that is not running borrows the warning colour. */
+const BADGE: Record<HolderTone, { icon: typeof Check; className: string }> = {
+  ok: { icon: Check, className: "mm-fit mm-fit--use" },
+  wait: { icon: Clock, className: "mm-fit mm-fit--wait" },
+  busy: { icon: Loader2, className: "mm-fit mm-fit--wait" },
+  stopped: { icon: AlertTriangle, className: "mm-fit mm-fit--big" },
+};
+
 /** Where the Memory embedder is, in words. Silent when the pond cannot say. */
 export function EmbedderStatus({
   line,
@@ -37,11 +48,19 @@ export function EmbedderStatus({
   retrying?: boolean;
   className?: string;
 }) {
+  const [showWhy, setShowWhy] = useState(false);
+  const whyId = useId();
   if (!line) return null;
   const Icon = STATUS_ICON[line.kind];
   const pct = line.progress && line.progress.total > 0
     ? Math.round((line.progress.done / line.progress.total) * 100)
     : null;
+  const retry = line.retry && onRetry ? (
+    <button type="button" className="mm-btn mm-embedder__retry" onClick={onRetry} disabled={retrying}>
+      <RotateCw size={15} aria-hidden="true" />
+      <span>{retrying ? line.retryingLabel : line.retryLabel}</span>
+    </button>
+  ) : null;
   return (
     <div
       className={className ? `mm-embedder ${className}` : "mm-embedder"}
@@ -60,7 +79,7 @@ export function EmbedderStatus({
         <div
           className="mm-embedder__track"
           role="progressbar"
-          aria-label="Memories re-indexed"
+          aria-label="Items read again"
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={pct}
@@ -68,31 +87,53 @@ export function EmbedderStatus({
           <span className="mm-embedder__fill" style={{ width: `${pct}%` }} />
         </div>
       )}
-      {line.detail && <p className="mm-embedder__why">{line.detail}</p>}
-      {line.retry && onRetry && (
-        <button type="button" className="mm-btn mm-embedder__retry" onClick={onRetry} disabled={retrying}>
-          <RotateCw size={15} aria-hidden="true" />
-          <span>{retrying ? line.retryingLabel : line.retryLabel}</span>
-        </button>
+      {line.detail ? (
+        <div className="mm-embedder__actions">
+          <button
+            type="button"
+            className="mm-embedder__more"
+            aria-expanded={showWhy}
+            aria-controls={whyId}
+            onClick={() => setShowWhy((v) => !v)}
+          >
+            {showWhy ? <ChevronDown size={15} aria-hidden="true" /> : <ChevronRight size={15} aria-hidden="true" />}
+            <span>Details</span>
+          </button>
+          {retry}
+        </div>
+      ) : (
+        retry
+      )}
+      {line.detail && showWhy && (
+        <p className="mm-embedder__why" id={whyId}>
+          {line.detail}
+        </p>
       )}
     </div>
   );
 }
 
 function MemoryRow({
-  model, inUse, transfer, busy, onUse, onControl,
+  model, inUse, line, off, offline, transfer, busy, onUse, onControl,
 }: {
   model: ModelEntry;
   inUse: boolean;
+  line: EmbedderLine | null;
+  off: boolean;
+  offline: boolean;
   transfer: ModelTransfer | null;
   busy: boolean;
   onUse: () => void;
   onControl: (action: TransferAction) => void;
 }) {
+  const noteId = useId();
   const title = modelLabel(model);
   const full = modelFullName(model);
   const chip = sourceChip(model);
   const measured = measuredOf(model.recommended);
+  const badge = inUse ? holderBadge(line) : null;
+  const press = memoryPress(model, { off, offline });
+  const BadgeIcon = badge ? BADGE[badge.tone].icon : null;
   return (
     <li className="mm-mem" data-inuse={inUse ? "true" : undefined}>
       <div className="mm-mem__text">
@@ -112,15 +153,34 @@ function MemoryRow({
       {/* While it comes down the bar and its controls are the row's whole state: "In use" would be early. */}
       {!transfer && (
         <div className="mm-mem__end">
-          {inUse ? (
-            <span className="mm-fit mm-fit--use">
-              <Check size={14} aria-hidden="true" />
-              In use
+          {badge && BadgeIcon ? (
+            <span className={BADGE[badge.tone].className}>
+              <BadgeIcon
+                size={14}
+                className={badge.tone === "busy" ? "mm-spin" : undefined}
+                aria-hidden="true"
+              />
+              {badge.label}
             </span>
           ) : (
-            <button type="button" className="mm-btn" onClick={onUse} disabled={busy} aria-label={`Use ${full} for memory`}>
-              Use
-            </button>
+            <>
+              <button
+                type="button"
+                className="mm-btn"
+                onClick={onUse}
+                disabled={busy || press.blocked !== null}
+                aria-describedby={press.blocked ? noteId : undefined}
+                aria-label={`${press.label} ${full} for memory${press.download && press.size ? `, ${press.size}` : ""}`}
+              >
+                {press.download && <Download size={15} aria-hidden="true" />}
+                <span>{press.label}</span>
+              </button>
+              {press.blocked && (
+                <span className="mm-mem__note" id={noteId}>
+                  {press.blocked}
+                </span>
+              )}
+            </>
           )}
         </div>
       )}
@@ -142,6 +202,8 @@ export interface MemoryModelsProps {
   busy: boolean;
   /** Memory is switched off: the status says so and offers to turn it on. */
   off?: boolean;
+  /** The pond reaches nothing outside the house: a model whose file is not here cannot be fetched. */
+  offline?: boolean;
   onTurnOn?: () => void;
   onUse: (m: ModelEntry) => void;
   onControl: (m: ModelEntry, transfer: ModelTransfer, action: TransferAction) => void;
@@ -151,8 +213,8 @@ export interface MemoryModelsProps {
 }
 
 export function MemoryModels({
-  models, roles, transferFor, line, retrying, busy, off = false, onTurnOn, onUse, onControl, onRetry,
-  fold = false,
+  models, roles, transferFor, line, retrying, busy, off = false, offline = false, onTurnOn, onUse, onControl,
+  onRetry, fold = false,
 }: MemoryModelsProps) {
   const [open, setOpen] = useState(!fold);
   const listId = useId();
@@ -166,8 +228,10 @@ export function MemoryModels({
   return (
     <div className="mm-memory">
       <p className="mm-memory__intro">
-        Memory finds what the pond knows by meaning, so a question in English can find a fact said in
-        Swahili. A new model reads your memories again once, at a quiet moment.
+        {off
+          ? "Choose the model Memory will use to find what the pond knows by meaning. "
+          : "Memory finds what the pond knows by meaning. "}
+        A new model makes the pond read memories again once, at a quiet moment.
       </p>
       {off ? (
         <div className="mm-embedder" data-kind="off" role="status">
@@ -190,6 +254,9 @@ export function MemoryModels({
             key={m.id}
             model={m}
             inUse={holdsMemory(m, roles)}
+            line={line}
+            off={off}
+            offline={offline}
             transfer={transferFor(m)}
             busy={busy}
             onUse={() => onUse(m)}

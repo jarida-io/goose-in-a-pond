@@ -235,7 +235,7 @@ describe("IndexCoveragePanel: the embedder", () => {
       switching({}, { rows: 95, matching: 40, missing: 0, mismatched: 55, coverage: 40 / 95 }),
     );
     renderPanel();
-    expect((await screen.findByRole("status")).textContent).toBe("Re-indexing: 40 of 95");
+    expect((await screen.findByRole("status")).textContent).toBe("Reading memories again: 40 of 95 items");
     expect(screen.getByText("40 of 95 rows searchable")).toBeTruthy();
   });
 
@@ -249,7 +249,7 @@ describe("IndexCoveragePanel: the embedder", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("says a failed load in plain words, with the pond's own reason, and asks again without clearing anything", async () => {
+  it("says a failed load in plain words, keeps the pond's own reason behind Details, and asks again without clearing anything", async () => {
     mocked(api.getContextIndexHealth).mockResolvedValue(
       switching({ state: "failed", reason: "loading embeddinggemma-2-Q8_0.gguf on the Gpu: out of memory" }, { matching: 0 }),
     );
@@ -258,8 +258,10 @@ describe("IndexCoveragePanel: the embedder", () => {
     renderPanel();
 
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("EmbeddingGemma 2 did not load, so Memory is searching by keyword.");
-    expect(alert.textContent).toContain("out of memory");
+    expect(alert.textContent).toContain("There is not enough free memory to load EmbeddingGemma 2, so Memory is searching by keyword.");
+    expect(within(alert).queryByText(/on the Gpu/)).toBeNull();
+    fireEvent.click(within(alert).getByRole("button", { name: "Details" }));
+    expect(within(alert).getByText(/on the Gpu: out of memory/)).toBeTruthy();
 
     fireEvent.click(within(alert).getByRole("button", { name: "Try again" }));
     await waitFor(() =>

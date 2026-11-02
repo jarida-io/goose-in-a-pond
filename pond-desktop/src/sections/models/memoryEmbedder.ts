@@ -48,8 +48,21 @@ export function holdsMemory(m: Pick<ModelEntry, "name">, roles: ModelActiveRoles
 export function embedderTitle(modelId: string | null | undefined): string {
   if (!modelId) return "the Memory model";
   if (modelId.startsWith("embeddinggemma-2")) return "EmbeddingGemma 2";
+  if (modelId === "nomic-embed-text-v1.5") return "Nomic Embed Text v1.5";
   return modelId;
 }
+
+/** The built-in default, which every surface can name as the lighter choice without the catalogue. */
+const LIGHTER_CHOICE = "all-MiniLM-L6-v2";
+const LIGHTER_CHOICE_TEXT = `${LIGHTER_CHOICE} (23 MB)`;
+
+/** A load that failed for want of room, which asking again rarely fixes. */
+export function isOutOfMemory(reason: string | null | undefined): boolean {
+  return /out of memory|\boom\b|failed to allocate|cannot allocate|unable to allocate|insufficient memory/i.test(reason ?? "");
+}
+
+/** Shown where a press cannot start the download it would need. */
+export const NEEDS_CONNECTION = "Needs a connection to download";
 
 /** What a model costs and where its file is: the size is said before anyone presses Use. */
 export function memoryCost(m: Pick<ModelEntry, "size_mb" | "downloaded" | "acquire">): string {
@@ -74,7 +87,7 @@ export interface EmbedderLine {
   /** What the button says before and while it asks. */
   retryLabel: string;
   retryingLabel: string;
-  /** Re-indexing only: memories that can be found by meaning, of those there are. */
+  /** Reading again only: items that can be found by meaning, of those there are across every store. */
   progress: { done: number; total: number } | null;
 }
 
@@ -122,6 +135,16 @@ export function embedderLine(
           detail: reason,
         });
       }
+      if (isOutOfMemory(reason)) {
+        const next = embedder.model_id === LIGHTER_CHOICE
+          ? "Try again later."
+          : `Choose the lighter ${LIGHTER_CHOICE_TEXT}, or try again.`;
+        return line(
+          "failed",
+          `There is not enough free memory to load ${title}, so Memory is searching by keyword. ${next}`,
+          { detail: reason, retry: true },
+        );
+      }
       return line(
         "failed",
         `${title} did not load, so Memory is searching by keyword. Try again, or choose another Memory model.`,
@@ -133,7 +156,7 @@ export function embedderLine(
       const total = health.rows ?? 0;
       const done = Math.min(health.matching ?? 0, total);
       if (done < total) {
-        return line("reindexing", `Re-indexing: ${done} of ${total}`, { progress: { done, total } });
+        return line("reindexing", `Reading memories again: ${done} of ${total} items`, { progress: { done, total } });
       }
       return line("ready", `${title} is ready. Every memory can be found by meaning.`);
     }
@@ -159,14 +182,80 @@ export function embedderWatching(health: ContextIndexHealth | null): boolean {
   }
 }
 
-/** What the pond says once Memory has been given a model: a download first where the file is not here. */
-export function memoryChosenText(
-  m: Pick<ModelEntry, "title" | "display_name" | "name" | "category" | "provider" | "downloaded" | "acquire" | "size_mb">,
-): string {
+type ChosenModel = Pick<
+  ModelEntry,
+  "title" | "display_name" | "name" | "category" | "provider" | "downloaded" | "acquire" | "size_mb"
+>;
+
+/** What the pond says once Memory has been given a model: a download first where the file is not here,
+ *  and while search by meaning is off, that the model waits for the switch. */
+export function memoryChosenText(m: ChosenModel, opts: { off?: boolean } = {}): string {
   const title = modelLabel(m);
-  if (m.acquire === "download" && !m.downloaded) {
-    const size = formatSize(m.size_mb);
+  const size = formatSize(m.size_mb);
+  const needsFile = m.acquire === "download" && !m.downloaded;
+  if (opts.off) {
+    return needsFile
+      ? `${title} is set for memory. Once you turn on search by meaning, the pond downloads it${size ? ` (${size})` : ""} and uses it.`
+      : `${title} is set for memory. The pond uses it once you turn on search by meaning.`;
+  }
+  if (needsFile) {
     return `Using ${title} for memory once it downloads${size ? ` (${size})` : ""}. Memory searches by keyword until then.`;
   }
-  return `Now using ${title} for memory. The pond reads your memories again at the next quiet moment.`;
+  return `Now using ${title} for memory. The pond reads memories again at the next quiet moment.`;
+}
+
+export type HolderTone = "ok" | "wait" | "busy" | "stopped";
+
+/** What the row of the model Memory is set to may claim, from where the embedder really is. "In use"
+ *  only once it runs; silence from the pond is not a fault, so it keeps the household's choice. */
+export function holderBadge(line: EmbedderLine | null): { label: string; tone: HolderTone } {
+  switch (line?.kind) {
+    case "waiting":
+      return { label: "Waiting to load", tone: "wait" };
+    case "loading":
+      return { label: "Loading", tone: "busy" };
+    case "downloading":
+      return { label: "Downloading", tone: "busy" };
+    case "missing":
+      return { label: "Chosen, not downloaded", tone: "stopped" };
+    case "failed":
+      return { label: "Chosen, not loaded", tone: "stopped" };
+    default:
+      return { label: "In use", tone: "ok" };
+  }
+}
+
+/** The hub's "Model" line: the model by name, and no more than the embedder has done with it. */
+export function holderText(line: EmbedderLine | null, modelId: string | null | undefined): string {
+  if (!modelId) return "Chosen on the Models screen.";
+  const title = embedderTitle(modelId);
+  switch (line?.kind) {
+    case "waiting":
+      return `${title} is chosen and loads at a quiet moment.`;
+    case "loading":
+      return `${title} is loading.`;
+    case "downloading":
+      return `${title} is downloading.`;
+    case "missing":
+      return `${title} is chosen but not downloaded.`;
+    case "failed":
+      return `${title} is chosen but did not load.`;
+    default:
+      return `Using ${title}.`;
+  }
+}
+
+/** What pressing a model's button does: only a press that starts a download says so, and that press
+ *  needs a connection. While search is off nothing is fetched, so it stays a plain Use. */
+export function memoryPress(
+  m: Pick<ModelEntry, "downloaded" | "acquire" | "size_mb">,
+  ctx: { off: boolean; offline: boolean },
+): { label: string; download: boolean; size: string; blocked: string | null } {
+  const download = m.acquire === "download" && !m.downloaded && !ctx.off;
+  return {
+    label: download ? "Download and use" : "Use",
+    download,
+    size: formatSize(m.size_mb),
+    blocked: download && ctx.offline ? NEEDS_CONNECTION : null,
+  };
 }

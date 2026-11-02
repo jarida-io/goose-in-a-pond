@@ -10,11 +10,14 @@ import {
 import type { ModelActions } from "./useModelActions";
 import type { UseModels } from "./useModels";
 import { useEmbedderHealth } from "./useEmbedderHealth";
+import { useOffline } from "./useOffline";
 
 export interface MemoryJob {
   rows: ModelEntry[];
   holder: ReturnType<typeof memoryHolder>;
   off: boolean;
+  /** The pond reaches nothing outside the house, so a file that is not here cannot be fetched. */
+  offline: boolean;
   line: EmbedderLine | null;
   retrying: boolean;
   useModel: (m: ModelEntry) => Promise<void>;
@@ -31,6 +34,7 @@ export function useMemoryJob(
   // The pond fetches a chosen file only once it has a quiet moment, so the downloads are watched too.
   const embedder = useEmbedderHealth({ onWatch: () => void reloadDownloads() });
   const { refresh, retry: askAgain } = embedder;
+  const offline = useOffline();
 
   const rows = useMemo(() => memoryModels(models), [models]);
   const holder = useMemo(() => memoryHolder(models, roles), [models, roles]);
@@ -51,7 +55,7 @@ export function useMemoryJob(
       await api.updateSettings({ embedding_provider: "auto" });
       await reloadRoles();
       void refresh();
-      say("Search by meaning is on. The pond reads your memories at the next quiet moment.");
+      say("Search by meaning is on. The pond reads memories again at the next quiet moment.");
     } catch (e) {
       say(e instanceof Error ? e.message : String(e), false);
     } finally {
@@ -71,6 +75,7 @@ export function useMemoryJob(
     rows,
     holder,
     off: memoryIsOff(roles),
+    offline,
     line,
     retrying: embedder.retrying,
     useModel,
