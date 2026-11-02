@@ -31,6 +31,7 @@ pub mod test_support;
 pub mod thought_filter;
 pub mod tool_context;
 pub mod uber_accounts;
+pub mod voice_agent;
 pub mod voice_sample;
 pub mod web_search;
 
@@ -368,6 +369,8 @@ pub async fn apply_embedding_choice(
     let choice = pond_core::models::domain::embedding_models::EmbedderChoice::resolve(settings);
     state.embedder.choose(choice).await;
 }
+
+pub use voice_agent::{compile_voice_prefill, spawn_voice_prefill};
 
 /// Background prefix warm-up, mirrored into `state.warmup`; a failed warm-up just starts cold.
 pub fn spawn_prefix_prewarm(state: Arc<AppState>, voice_mode: bool) -> tokio::task::JoinHandle<()> {

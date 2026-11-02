@@ -587,6 +587,12 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/admin/power", get(crate::pond_admin::power))
         .route("/admin/power/mode", put(crate::pond_admin::set_power_mode))
         .route("/admin/power/restart", post(crate::pond_admin::restart))
+        .route(
+            "/agents/voice",
+            get(crate::voice_agent::get_voice_agent)
+                .put(crate::voice_agent::put_voice_agent)
+                .delete(crate::voice_agent::reset_voice_agent),
+        )
         .route("/agents/prefills", get(agent_prefills))
         .route("/agents/prefills/rebuild", post(rebuild_all_prefills))
         .route(
@@ -15487,7 +15493,12 @@ async fn list_recipes(State(state): State<Arc<AppState>>) -> impl axum::response
     };
     match repo.list().await {
         Ok(recipes) => {
-            let views: Vec<Value> = recipes.iter().map(recipe_view_json).collect();
+            // The Voice agent's edit is no member's own agent; `/agents/voice` shows it.
+            let views: Vec<Value> = recipes
+                .iter()
+                .filter(|r| !crate::voice_agent::is_voice_row(r))
+                .map(recipe_view_json)
+                .collect();
             Json(json!(views)).into_response()
         }
         Err(e) => (
@@ -15537,6 +15548,13 @@ async fn create_recipe(
                 .into_response()
         }
     };
+    if req.name.trim() == pond_core::shared::services::voice_agent::VOICE_AGENT {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "`voice` is the shipped Voice agent; edit it at /agents/voice"})),
+        )
+            .into_response();
+    }
     let on_host = on_this_host(peer.ok(), insecure.is_some(), tailnet.is_some());
     let owner_profile_id = acting_member(&state, principal.as_ref(), on_host).await;
     let recipe = AgentRecipe {
@@ -15561,7 +15579,7 @@ async fn create_recipe(
 
 /// Whether a request comes from a process on this machine, the desktop: a loopback peer, not
 /// the plaintext development listener and not the tailnet, whose node also connects from here.
-fn on_this_host(
+pub(crate) fn on_this_host(
     peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     insecure_dev: bool,
     tailnet: bool,
@@ -15574,7 +15592,7 @@ fn on_this_host(
 /// The member a request acts for when it saves an agent: its paired device's member, else, from
 /// this host, the household's primary member. Nobody otherwise; an unreadable attribution is
 /// nobody too, never the primary member, who may be someone else.
-async fn acting_member(
+pub(crate) async fn acting_member(
     state: &Arc<AppState>,
     principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
     on_host: bool,
@@ -16472,6 +16490,7 @@ async fn prefill_agents(
         .into_iter()
         .filter_map(Result::ok)
         .collect();
+    agents.extend(crate::voice_agent::voice_prefill_role(state).await);
     agents.extend(long_task_runner::step_roles(&recipes));
     agents
 }
@@ -16480,7 +16499,6 @@ async fn prefill_agents(
 /// agent's prefill stands.
 async fn agent_prefills(State(state): State<Arc<AppState>>) -> impl axum::response::IntoResponse {
     use pond_core::shared::ports::agent_prefill::AgentPrefillRegistry as _;
-    use pond_core::shared::services::agent_prefill::{is_default_agent, prefill_state};
     use pond_core::shared::services::prefill_progress::process_prefill_progress;
 
     let progress = process_prefill_progress();
@@ -16503,29 +16521,50 @@ async fn agent_prefills(State(state): State<Arc<AppState>>) -> impl axum::respon
         .await
         .iter()
         .map(|role| {
-            let name = role.name();
-            let is_default = is_default_agent(name);
-            let record = records.get(name);
-            let status = prefill_state(
+            prefill_row(
                 role,
-                is_default,
-                record,
-                build.current.as_deref() == Some(name),
-                queued.includes(name),
-                failed.contains(name),
+                records.get(role.name()),
+                &build,
+                &queued,
+                &failed,
                 now,
                 retention,
-            );
-            json!({
-                "agent": name,
-                "kind": if is_default { "default" } else { "member" },
-                "status": status,
-                "compiled_at": record.and_then(|r| r.compiled_at),
-                "last_used_at": record.and_then(|r| r.last_used_at),
-            })
+            )
         })
         .collect();
     Json(json!({ "building": build, "retention_days": retention, "agents": agents }))
+}
+
+/// One agent's row of `GET /agents/prefills`.
+pub(crate) fn prefill_row(
+    role: &pond_core::shared::domain::orchestration::AgentRole,
+    record: Option<&pond_core::shared::domain::agent_prefill::PrefillRecord>,
+    build: &pond_core::shared::services::prefill_progress::PrefillBuild,
+    queued: &pond_core::shared::services::prefill_progress::RebuildRequests,
+    failed: &std::collections::BTreeSet<String>,
+    now: chrono::DateTime<chrono::Utc>,
+    retention: u32,
+) -> Value {
+    use pond_core::shared::services::agent_prefill::{is_default_agent, prefill_state};
+    let name = role.name();
+    let is_default = is_default_agent(name);
+    let status = prefill_state(
+        role,
+        is_default,
+        record,
+        build.current.as_deref() == Some(name),
+        queued.includes(name),
+        failed.contains(name),
+        now,
+        retention,
+    );
+    json!({
+        "agent": name,
+        "kind": if is_default { "default" } else { "member" },
+        "status": status,
+        "compiled_at": record.and_then(|r| r.compiled_at),
+        "last_used_at": record.and_then(|r| r.last_used_at),
+    })
 }
 
 /// `POST /api/v1/agents/{name}/prefill/rebuild` -- invalidates one agent's prefill; the pond
@@ -16545,14 +16584,22 @@ async fn rebuild_agent_prefill(
         )
             .into_response();
     }
-    pond_core::shared::services::prefill_progress::process_prefill_progress()
-        .request_rebuild(Some(&name));
+    // Serve's prewarm compiles the Voice agent, not the long-task pass.
+    if name == pond_core::shared::services::voice_agent::VOICE_AGENT {
+        crate::spawn_voice_prefill(state.clone());
+    } else {
+        pond_core::shared::services::prefill_progress::process_prefill_progress()
+            .request_rebuild(Some(&name));
+    }
     (StatusCode::ACCEPTED, Json(json!({"queued": [name]}))).into_response()
 }
 
 /// `POST /api/v1/agents/prefills/rebuild` -- invalidates every agent's prefill.
-async fn rebuild_all_prefills() -> impl axum::response::IntoResponse {
+async fn rebuild_all_prefills(
+    State(state): State<Arc<AppState>>,
+) -> impl axum::response::IntoResponse {
     pond_core::shared::services::prefill_progress::process_prefill_progress().request_rebuild(None);
+    crate::spawn_voice_prefill(state);
     (StatusCode::ACCEPTED, Json(json!({"queued": "all"})))
 }
 
@@ -16842,6 +16889,13 @@ async fn update_recipe(
                 .into_response()
         }
     };
+    if crate::voice_agent::is_voice_row(&existing) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "the Voice agent is edited at /agents/voice"})),
+        )
+            .into_response();
+    }
     if let (Some(template), Some(yaml)) = (existing.template.as_deref(), req.yaml.as_deref()) {
         let widened = pond_core::shared::services::agent_templates::widened_groups(template, yaml);
         if !widened.is_empty() {
@@ -16943,8 +16997,8 @@ async fn run_recipe(
     })?;
 
     let recipe = match repo.get_by_name(&name).await {
-        Ok(Some(r)) => r,
-        Ok(None) => {
+        Ok(Some(r)) if !crate::voice_agent::is_voice_row(&r) => r,
+        Ok(_) => {
             return Err((
                 StatusCode::NOT_FOUND,
                 Json(json!({"error": format!("Recipe '{}' not found", name)})),
