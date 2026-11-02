@@ -75,6 +75,26 @@ impl VoiceLock {
     }
 }
 
+impl VoiceLock {
+    /// Whether no voice session holds the lock now: tried and let go at once, file left alone.
+    pub fn is_free() -> bool {
+        let Ok(file) = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path())
+        else {
+            return false;
+        };
+        if file.try_lock_exclusive().is_err() {
+            return false;
+        }
+        let _ = FileExt::unlock(&file);
+        true
+    }
+}
+
 impl Drop for VoiceLock {
     fn drop(&mut self) {
         // Best effort: the kernel releases the lock at exit anyway; unlinking is just tidiness.
@@ -139,6 +159,16 @@ mod tests {
         );
 
         drop(first);
+    }
+
+    #[test]
+    fn the_probe_sees_a_holder_and_takes_nothing() {
+        let _serial = serial();
+        assert!(VoiceLock::is_free());
+        let held = VoiceLock::acquire().expect("free after the probe");
+        assert!(!VoiceLock::is_free());
+        drop(held);
+        assert!(VoiceLock::is_free());
     }
 
     #[test]

@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use crate::user_data::domain::profile::ProfileScope;
+use crate::user_data::domain::session::IdentificationSource;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -277,9 +278,11 @@ pub const REASON_UNPROVEN_IDENTITY: &str =
 
 /// May this caller decide a draft? `Err` carries the refusal reason.
 /// Guests are refused here as a backstop to the tool-group denylist. An unowned draft falls back
-/// to its staging session, since `save_draft` cannot yet resolve a speaker on every pond.
+/// to its staging session, since `save_draft` cannot yet resolve a speaker on every pond. A
+/// voice match names the speaker for context only, so it never decides one.
 pub fn is_draft_decision_permitted(
     actor: Option<&ProfileScope>,
+    actor_source: IdentificationSource,
     actor_session_id: &str,
     draft_owner: Option<&str>,
     draft_session_id: &str,
@@ -287,6 +290,9 @@ pub fn is_draft_decision_permitted(
     let Some(actor) = actor else {
         return Err(REASON_UNRESOLVED_ACTOR);
     };
+    if actor_source == IdentificationSource::Voice {
+        return Err(REASON_VOICE_DRAFT_DECISION);
+    }
     if actor_session_id.trim().is_empty() {
         return Err(REASON_UNRESOLVED_ACTOR);
     }
@@ -319,6 +325,9 @@ pub const REASON_UNOWNED_DRAFT: &str = "unowned draft decided from a session tha
 
 pub const REASON_GUEST_DRAFT_DECISION: &str = "draft decided by an unidentified speaker";
 
+pub const REASON_VOICE_DRAFT_DECISION: &str =
+    "draft decided by a speaker the pond knows only by voice";
+
 /// Driven port: authorization decisions and audit at the privacy boundary.
 #[async_trait]
 pub trait SecurityPolicy: Send + Sync {
@@ -340,6 +349,31 @@ pub trait SecurityPolicy: Send + Sync {
 #[cfg(test)]
 mod policy_rule_tests {
     use super::*;
+
+    #[test]
+    fn a_voice_match_never_decides_a_draft_even_its_owners() {
+        let amina = ProfileScope::Owner("amina".into());
+        assert_eq!(
+            is_draft_decision_permitted(
+                Some(&amina),
+                IdentificationSource::Voice,
+                "sess-a",
+                Some("amina"),
+                "sess-a"
+            ),
+            Err(REASON_VOICE_DRAFT_DECISION)
+        );
+        assert_eq!(
+            is_draft_decision_permitted(
+                Some(&amina),
+                IdentificationSource::PairedDevice,
+                "sess-a",
+                Some("amina"),
+                "sess-a"
+            ),
+            Ok(())
+        );
+    }
 
     #[test]
     fn mode_parses_and_anything_unrecognised_is_audit() {
@@ -422,12 +456,24 @@ mod policy_rule_tests {
     fn a_member_may_not_decide_another_members_draft() {
         let liz = ProfileScope::Owner("liz".into());
         assert_eq!(
-            is_draft_decision_permitted(Some(&liz), "sess-a", Some("jerry"), "sess-a"),
+            is_draft_decision_permitted(
+                Some(&liz),
+                IdentificationSource::PairedDevice,
+                "sess-a",
+                Some("jerry"),
+                "sess-a"
+            ),
             Err(REASON_FOREIGN_DRAFT),
             "same session is not the boundary: two speakers share a voice session"
         );
         assert_eq!(
-            is_draft_decision_permitted(Some(&liz), "sess-b", Some("liz"), "sess-a"),
+            is_draft_decision_permitted(
+                Some(&liz),
+                IdentificationSource::PairedDevice,
+                "sess-b",
+                Some("liz"),
+                "sess-a"
+            ),
             Ok(()),
             "her own draft, from her phone, is still hers"
         );
@@ -437,11 +483,23 @@ mod policy_rule_tests {
     fn an_unowned_draft_may_only_be_decided_from_the_session_that_staged_it() {
         let anyone = ProfileScope::Owner("liz".into());
         assert_eq!(
-            is_draft_decision_permitted(Some(&anyone), "sess-a", None, "sess-a"),
+            is_draft_decision_permitted(
+                Some(&anyone),
+                IdentificationSource::PairedDevice,
+                "sess-a",
+                None,
+                "sess-a"
+            ),
             Ok(())
         );
         assert_eq!(
-            is_draft_decision_permitted(Some(&anyone), "sess-b", None, "sess-a"),
+            is_draft_decision_permitted(
+                Some(&anyone),
+                IdentificationSource::PairedDevice,
+                "sess-b",
+                None,
+                "sess-a"
+            ),
             Err(REASON_UNOWNED_DRAFT),
             "the reported hole: any session approving any draft id"
         );
@@ -450,17 +508,35 @@ mod policy_rule_tests {
     #[test]
     fn a_guest_and_an_unresolvable_caller_are_both_refused() {
         assert_eq!(
-            is_draft_decision_permitted(Some(&ProfileScope::Guest), "sess-a", None, "sess-a"),
+            is_draft_decision_permitted(
+                Some(&ProfileScope::Guest),
+                IdentificationSource::PairedDevice,
+                "sess-a",
+                None,
+                "sess-a"
+            ),
             Err(REASON_GUEST_DRAFT_DECISION),
             "a visitor may not run a staged action even in its own session"
         );
         assert_eq!(
-            is_draft_decision_permitted(Some(&ProfileScope::Household), "", None, ""),
+            is_draft_decision_permitted(
+                Some(&ProfileScope::Household),
+                IdentificationSource::PairedDevice,
+                "",
+                None,
+                ""
+            ),
             Err(REASON_UNRESOLVED_ACTOR),
             "a blank session is not a session; two unresolvable callers must not match"
         );
         assert_eq!(
-            is_draft_decision_permitted(None, "sess-a", Some("liz"), "sess-a"),
+            is_draft_decision_permitted(
+                None,
+                IdentificationSource::PairedDevice,
+                "sess-a",
+                Some("liz"),
+                "sess-a"
+            ),
             Err(REASON_UNRESOLVED_ACTOR)
         );
     }
@@ -471,6 +547,7 @@ mod policy_rule_tests {
         assert_eq!(
             is_draft_decision_permitted(
                 Some(&ProfileScope::Household),
+                IdentificationSource::PairedDevice,
                 "sess-a",
                 Some("the-only-member"),
                 "sess-b"

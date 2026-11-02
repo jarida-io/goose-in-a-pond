@@ -174,8 +174,24 @@ describe("Lineage: the embedder", () => {
 
   it("counts reading memories again, in items, because the total spans every store", () => {
     render(<Lineage memories={[]} health={indexWith({}, { matching: 40 })} />);
-    expect(screen.getByRole("status").textContent).toBe("Reading memories again: 40 of 95 items");
-    expect(screen.getByRole("progressbar", { name: "Items read again" }).getAttribute("aria-valuenow")).toBe("42");
+    expect(screen.getByText("Reading memories again: 40 of 95 items")).toBeTruthy();
+    const bar = screen.getByRole("progressbar", { name: "Items read again" });
+    expect(bar.getAttribute("aria-valuenow")).toBe("42");
+    expect(bar.getAttribute("aria-valuetext")).toBe("40 of 95 items");
+  });
+
+  it("does not speak the count again on every look: the live line stays put and the bar keeps the number", () => {
+    const { rerender } = render(<Lineage memories={[]} health={indexWith({}, { matching: 40 })} />);
+    const heard = () => {
+      const status = screen.getByRole("status");
+      const copy = status.cloneNode(true) as HTMLElement;
+      copy.querySelectorAll("[aria-hidden='true'], [role='progressbar']").forEach((n) => n.remove());
+      return copy.textContent;
+    };
+    expect(heard()).toBe("Reading memories again");
+    rerender(<Lineage memories={[]} health={indexWith({}, { matching: 41 })} />);
+    expect(heard()).toBe("Reading memories again");
+    expect(screen.getByText("Reading memories again: 41 of 95 items").getAttribute("aria-hidden")).toBe("true");
   });
 
   it("gives the action one name before and while it runs", async () => {

@@ -164,6 +164,82 @@ impl Endpointer {
     }
 }
 
+/// Silero turns on after a word has begun; a host transcribing the segment needs its first consonant.
+pub const SEGMENT_PRE_ROLL_MS: usize = 200;
+/// Less voiced time than this is a click or a cough, and Whisper invents words for it (the official
+/// `min_speech_duration_ms`).
+pub const SEGMENT_MIN_SPEECH_MS: usize = 250;
+
+#[derive(Clone, Copy, Debug)]
+struct Open {
+    start: usize,
+    last_voice: usize,
+    voiced: usize,
+}
+
+/// Each stretch of speech outside a turn, for a wake detector that reads whole segments: it ends
+/// after the endpoint's quiet stretch, and none outlasts the longest utterance.
+#[derive(Clone, Debug, Default)]
+pub struct Segmenter {
+    open: Option<Open>,
+    last_end: usize,
+}
+
+impl Segmenter {
+    pub fn reset(&mut self) {
+        self.open = None;
+        self.last_end = 0;
+    }
+
+    /// Drop a segment in progress: its audio belongs to a turn now.
+    pub fn cancel(&mut self) {
+        self.open = None;
+    }
+
+    /// A voice-activity step ending at `end` that a turn took instead.
+    pub fn skip(&mut self, end: usize) {
+        self.open = None;
+        self.last_end = end;
+    }
+
+    /// One voice-activity step ending at absolute sample `end`, `speaking` after the endpointer's
+    /// hysteresis; returns a finished segment `(start, end)` in absolute samples.
+    pub fn step(&mut self, cfg: &Endpoint, end: usize, speaking: bool) -> Option<(usize, usize)> {
+        let chunk = end.saturating_sub(self.last_end);
+        self.last_end = end;
+        let ms = |samples: usize| samples * 1000 / RATE;
+        if speaking {
+            let open = self.open.get_or_insert(Open {
+                start: end.saturating_sub(chunk + RATE * SEGMENT_PRE_ROLL_MS / 1000),
+                last_voice: end,
+                voiced: 0,
+            });
+            open.last_voice = end;
+            open.voiced += chunk;
+        }
+        let open = self.open?;
+        let quiet = !speaking && ms(end - open.last_voice) >= cfg.end_silence_ms as usize;
+        let too_long = ms(end - open.start) >= cfg.max_ms as usize;
+        if !quiet && !too_long {
+            return None;
+        }
+        self.open = None;
+        if speaking {
+            // Cut at the longest utterance; the speech still going on opens the next segment.
+            self.open = Some(Open {
+                start: end,
+                last_voice: end,
+                voiced: 0,
+            });
+        }
+        if ms(open.voiced) < SEGMENT_MIN_SPEECH_MS {
+            return None;
+        }
+        let pad = RATE * SPEECH_PAD_MS / 1000;
+        Some((open.start, (open.last_voice + pad).min(end)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,6 +344,68 @@ mod tests {
         };
         assert_eq!(fired * 1000 / 16_000, 3_008);
         assert_eq!(end, fired);
+    }
+
+    /// Feeds `(probability, chunks)` runs through an endpointer's hysteresis into a segmenter.
+    fn segments(cfg: Endpoint, runs: &[(f32, usize)]) -> Vec<(usize, usize, usize)> {
+        let mut e = Endpointer::new(cfg);
+        let mut s = Segmenter::default();
+        let (mut at, mut out) = (0, Vec::new());
+        for &(p, n) in runs {
+            for _ in 0..n {
+                at += CHUNK;
+                e.vad(at, p);
+                if let Some((start, end)) = s.step(&cfg, at, e.speaking()) {
+                    out.push((at, start, end));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_segment_reaches_back_before_the_onset_and_ends_after_the_quiet() {
+        let out = segments(Endpoint::default(), &[(0.1, 20), (0.9, 40), (0.1, 40)]);
+        let [(fired, start, end)] = out[..] else {
+            panic!("{out:?}")
+        };
+        let onset = 21 * CHUNK;
+        assert_eq!(start, onset - CHUNK - 16_000 * SEGMENT_PRE_ROLL_MS / 1000);
+        let last_voice = 60 * CHUNK;
+        assert_eq!(end, last_voice + 480);
+        let quiet_ms = (fired - last_voice) * 1000 / 16_000;
+        assert!((800..832).contains(&quiet_ms), "{quiet_ms} ms");
+    }
+
+    #[test]
+    fn a_pause_shorter_than_the_quiet_stretch_stays_inside_one_segment() {
+        let out = segments(
+            Endpoint::default(),
+            &[(0.9, 20), (0.1, 20), (0.9, 20), (0.1, 40)],
+        );
+        assert_eq!(out.len(), 1, "{out:?}");
+    }
+
+    #[test]
+    fn a_click_is_not_a_segment() {
+        let out = segments(Endpoint::default(), &[(0.1, 5), (0.9, 2), (0.1, 60)]);
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn endless_speech_is_cut_into_segments_of_the_longest_utterance() {
+        let cfg = Endpoint {
+            max_ms: 3_000,
+            ..Endpoint::default()
+        };
+        let out = segments(cfg, &[(0.9, 200), (0.1, 40)]);
+        assert!(out.len() >= 2, "{out:?}");
+        let (fired, start, _) = out[0];
+        assert!((fired - start) * 1000 / 16_000 >= 3_000);
+        assert_eq!(
+            out[1].1, fired,
+            "the next segment starts where the cut fell"
+        );
     }
 
     #[test]

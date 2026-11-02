@@ -89,6 +89,8 @@ export interface EmbedderLine {
   retryingLabel: string;
   /** Reading again only: items that can be found by meaning, of those there are across every store. */
   progress: { done: number; total: number } | null;
+  /** What a screen reader hears where `text` changes on every poll; the count stays on the progress bar. */
+  spoken: string | null;
 }
 
 /** A failed load that is only the pond waiting on a file it fetches itself, which is no fault. */
@@ -99,7 +101,7 @@ export function isFetching(reason: string | null | undefined): boolean {
 function line(kind: EmbedderKind, text: string, over: Partial<EmbedderLine> = {}): EmbedderLine {
   return {
     kind, text, detail: null, retry: false, retryLabel: "Try again", retryingLabel: "Trying again",
-    progress: null, ...over,
+    progress: null, spoken: null, ...over,
   };
 }
 
@@ -156,7 +158,9 @@ export function embedderLine(
       const total = health.rows ?? 0;
       const done = Math.min(health.matching ?? 0, total);
       if (done < total) {
-        return line("reindexing", `Reading memories again: ${done} of ${total} items`, { progress: { done, total } });
+        return line("reindexing", `Reading memories again: ${done} of ${total} items`, {
+          progress: { done, total }, spoken: "Reading memories again",
+        });
       }
       return line("ready", `${title} is ready. Every memory can be found by meaning.`);
     }
@@ -207,8 +211,13 @@ export function memoryChosenText(m: ChosenModel, opts: { off?: boolean } = {}): 
 export type HolderTone = "ok" | "wait" | "busy" | "stopped";
 
 /** What the row of the model Memory is set to may claim, from where the embedder really is. "In use"
- *  only once it runs; silence from the pond is not a fault, so it keeps the household's choice. */
-export function holderBadge(line: EmbedderLine | null): { label: string; tone: HolderTone } {
+ *  only once it runs; before the pond's first answer it claims nothing, and silence after that is
+ *  not a fault, so it keeps the household's choice. */
+export function holderBadge(
+  line: EmbedderLine | null,
+  opts: { checking?: boolean } = {},
+): { label: string; tone: HolderTone } {
+  if (!line && opts.checking) return { label: "Checking", tone: "busy" };
   switch (line?.kind) {
     case "waiting":
       return { label: "Waiting to load", tone: "wait" };
@@ -223,6 +232,15 @@ export function holderBadge(line: EmbedderLine | null): { label: string; tone: H
     default:
       return { label: "In use", tone: "ok" };
   }
+}
+
+/** The Jobs card and the hub tile already name the model: they add a word only while it is not running. */
+export function jobState(
+  line: EmbedderLine | null,
+  opts: { checking?: boolean } = {},
+): { label: string; tone: HolderTone } | null {
+  const badge = holderBadge(line, opts);
+  return badge.tone === "ok" ? null : badge;
 }
 
 /** The hub's "Model" line: the model by name, and no more than the embedder has done with it. */

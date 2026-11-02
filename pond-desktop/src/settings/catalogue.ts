@@ -171,13 +171,14 @@ export const CATALOGUE: CatalogueCategory[] = [
       {
         name: "Wake word",
         entries: [
-          { key: "voice_wake_word", label: "Wake word", description: "The phrase that wakes the pond. Capitalisation does not matter.", control: { kind: "text", placeholder: "goose" }, consumer: "live", validate: wakePhrase },
+          { key: "voice_wake_word", label: "Wake word", description: "The phrase that wakes the pond. Capitalisation does not matter.", control: { kind: "text", placeholder: "hey goose" }, consumer: "live", validate: wakePhrase },
           { key: "voice_wake_word_transcriptions", label: "Learned pronunciations", description: "Alternative spellings learned while training the wake word, so it still answers.", control: { kind: "text", placeholder: "Not calibrated" }, consumer: "live" },
         ],
       },
       {
         name: "Listening",
         entries: [
+          { key: "voice_room_enabled", label: "Listen in this room", description: "The pond listens for its wake word through its own microphone and answers on its speaker, wherever a microphone and speaker work together.", control: { kind: "toggle" }, consumer: "live" },
           { key: "voice_kws_energy_threshold", label: "Ignore sound quieter than", description: "How loud a sound must be before the pond bothers listening for its name.", control: { kind: "number", step: 0.001, min: 0, max: 1 }, consumer: "live", validate: range(0, 1) },
           { key: "voice_kws_post_trigger_silence_ms", label: "Stop after silence", description: "How long a pause means you have finished speaking.", control: { kind: "number", min: 0, unit: "ms" }, consumer: "live", validate: all(integer, atLeast(0, "ms")) },
           { key: "voice_kws_cooldown_ms", label: "Wait before listening again", description: "How long to wait after answering before listening for its name again.", control: { kind: "number", min: 0, unit: "ms" }, consumer: "live", validate: all(integer, atLeast(0, "ms")) },

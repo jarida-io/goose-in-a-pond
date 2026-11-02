@@ -235,7 +235,8 @@ describe("IndexCoveragePanel: the embedder", () => {
       switching({}, { rows: 95, matching: 40, missing: 0, mismatched: 55, coverage: 40 / 95 }),
     );
     renderPanel();
-    expect((await screen.findByRole("status")).textContent).toBe("Reading memories again: 40 of 95 items");
+    expect(await screen.findByText("Reading memories again: 40 of 95 items")).toBeTruthy();
+    expect(screen.getByRole("progressbar", { name: "Items read again" }).getAttribute("aria-valuetext")).toBe("40 of 95 items");
     expect(screen.getByText("40 of 95 rows searchable")).toBeTruthy();
   });
 
