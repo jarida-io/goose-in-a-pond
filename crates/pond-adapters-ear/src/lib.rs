@@ -2,11 +2,14 @@
 //! microphone claim, fed the microphone and everything the pond plays, and serves the voice loop
 //! as its wake detector, its voice input and its interrupt watch.
 
+mod echo;
 mod hearing;
 mod reference;
 mod worker;
 
 pub use hearing::Hearing;
+/// What the operating system says this process holds.
+pub use pond_ear::ear::mem::{now as process_memory, Mem as ProcessMemory};
 
 use std::path::Path;
 use std::sync::mpsc::Sender;
@@ -20,7 +23,7 @@ use pond_core::models::ports::interrupt::{Interrupt, InterruptWatch};
 use pond_core::models::ports::voice_input::VoiceInput;
 use pond_core::models::ports::wake_word::{StreamingWakeWordDetector, WakeWordActivation};
 use pond_core::shared::domain::agent::{ThrottledAudioLevelSink, WorkflowState};
-use pond_core::shared::services::chat::StateObserver;
+use pond_core::shared::services::chat::{SpokenObserver, StateObserver};
 use pond_ear::ear::WakeConfig;
 use pond_ear::{Ear, Household, ModelFile};
 use tokio::sync::oneshot;
@@ -39,6 +42,14 @@ pub enum WakeMode {
     HeyGoose,
     /// Whisper on each speech segment the ear endpoints, for any phrase.
     Segments,
+}
+
+/// One part of the ear and the bytes it holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EarPart {
+    pub role: &'static str,
+    pub name: String,
+    pub bytes: usize,
 }
 
 /// Played when the wake word is heard.
@@ -100,6 +111,7 @@ pub struct EarRig {
     transcriber: Arc<dyn Transcriber>,
     last_wake: Mutex<Option<Woke>>,
     primed: Mutex<Option<Primed>>,
+    parts: Mutex<Vec<EarPart>>,
 }
 
 impl EarRig {
@@ -115,7 +127,23 @@ impl EarRig {
         let mut ear_cfg = pond_ear::Config::new(wake, vad);
         ear_cfg.segments = cfg.wake == WakeMode::Segments;
         let ear = Ear::new(ear_cfg, Household::default()).context("starting the ear")?;
-        EarRig::with_hearing(cfg, Box::new(ear), mic, transcriber)
+        let parts = ear
+            .parts()
+            .into_iter()
+            .map(|p| EarPart {
+                role: p.role,
+                name: p.name,
+                bytes: p.bytes.total(),
+            })
+            .collect();
+        let rig = EarRig::with_hearing(cfg, Box::new(ear), mic, transcriber)?;
+        *rig.parts.lock().unwrap_or_else(|e| e.into_inner()) = parts;
+        Ok(rig)
+    }
+
+    /// What each part of the ear holds, as it started.
+    pub fn parts(&self) -> Vec<EarPart> {
+        self.parts.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub(crate) fn with_hearing(
@@ -164,6 +192,7 @@ impl EarRig {
             transcriber,
             last_wake: Mutex::new(None),
             primed: Mutex::new(None),
+            parts: Mutex::new(Vec::new()),
         }))
     }
 
@@ -186,6 +215,15 @@ impl EarRig {
         let cmds = self.cmds.clone();
         Arc::new(move |state: WorkflowState| {
             let _ = cmds.send(Cmd::Loop(state));
+        })
+    }
+
+    /// For `ChatService::with_spoken_observer` and `pond_audio_out::set_spoken_tap`: what the
+    /// pond says, so its echo is not taken for a wake.
+    pub fn spoken_hook(&self) -> SpokenObserver {
+        let cmds = self.cmds.clone();
+        Arc::new(move |text: &str| {
+            let _ = cmds.send(Cmd::Spoken(text.to_string()));
         })
     }
 

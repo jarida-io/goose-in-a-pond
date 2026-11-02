@@ -11,7 +11,7 @@ pub mod route;
 pub mod tap;
 pub use bus::AudioBus;
 pub use route::{output_device, set_output_device};
-pub use tap::{set_playback_tap, PlaybackTap};
+pub use tap::{set_playback_tap, set_spoken_tap, spoken_tap, PlaybackTap, SpokenTap};
 
 // ── Working tone ──────────────────────────────────────────────────────────────
 

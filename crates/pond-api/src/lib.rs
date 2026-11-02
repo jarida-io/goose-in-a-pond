@@ -724,12 +724,13 @@ fn build_transport_router(state: Arc<AppState>, static_dir: Option<std::path::Pa
     ));
 
     let mut router = Router::new().nest("/api/v1", routes::api_routes(state.clone()));
-    if let Some(static_dir) = static_dir {
-        router = router
+    router = match static_dir {
+        Some(static_dir) => router
             .route("/dev/test", axum::routing::get(routes::dev_test_page))
             .route("/dev/face", axum::routing::get(routes::dev_face_page))
-            .fallback(move |uri: axum::http::Uri| routes::serve_web(uri, static_dir.clone()));
-    }
+            .fallback(move |uri: axum::http::Uri| routes::serve_web(uri, static_dir.clone())),
+        None => router.fallback(routes::api_not_found),
+    };
     router
         .layer(axum::middleware::from_fn(middleware::log_requests))
         // Must come after log_requests: axum applies layers in reverse order.

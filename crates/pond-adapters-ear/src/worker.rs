@@ -12,6 +12,7 @@ use pond_core::shared::domain::agent::{ThrottledAudioLevelSink, VoiceSpeaker, Wo
 use pond_ear::{Event, Household, State};
 use tokio::sync::oneshot;
 
+use crate::echo::Spoken;
 use crate::hearing::Hearing;
 use crate::reference::{Reference, RATE};
 use crate::Cue;
@@ -88,6 +89,8 @@ pub(crate) enum Cmd {
     },
     /// The matcher heard the wake phrase in a segment.
     SegmentWake(Woke),
+    /// The pond is about to say this.
+    Spoken(String),
     Household(Household),
     Shutdown,
 }
@@ -128,6 +131,10 @@ pub(crate) struct WorkerState {
     dropped: u64,
     quiet_listening: bool,
     quiet_renewed: Instant,
+    /// What the pond said lately, to tell its echo from a person.
+    spoken: Spoken,
+    /// When the turn under way began thinking; what it says is kept for the whole turn.
+    turn_began: Option<Instant>,
 }
 
 impl WorkerState {
@@ -151,6 +158,8 @@ impl WorkerState {
             dropped: 0,
             quiet_listening: false,
             quiet_renewed: now,
+            spoken: Spoken::default(),
+            turn_began: None,
         }
     }
 }
@@ -444,6 +453,21 @@ impl Worker {
                 }
             }
             Cmd::SegmentWake(woke) => {
+                let now = Instant::now();
+                self.state.spoken.forget_old(now, self.state.turn_began);
+                let echo = woke
+                    .transcript
+                    .as_deref()
+                    .and_then(|heard| self.state.spoken.echo_of(heard));
+                if let Some(share) = echo {
+                    tracing::info!(
+                        heard = woke.transcript.as_deref().unwrap_or_default(),
+                        share,
+                        state = ?self.state.host,
+                        "ear: own echo ignored"
+                    );
+                    return true;
+                }
                 self.cue();
                 linger(QUIET_UNTIL_THE_TURN);
                 self.state.quiet_listening = false;
@@ -464,6 +488,11 @@ impl Worker {
                     _ => self.woke(woke),
                 }
             }
+            Cmd::Spoken(text) => {
+                let now = Instant::now();
+                self.state.spoken.forget_old(now, self.state.turn_began);
+                self.state.spoken.say(&text, now);
+            }
             Cmd::Household(household) => self.hearing.set_household(household),
             Cmd::Shutdown => return false,
         }
@@ -473,6 +502,12 @@ impl Worker {
     /// The loop's own state, mapped onto the ear's.
     fn follow(&mut self, state: WorkflowState) {
         self.state.host = state;
+        match state {
+            WorkflowState::Thinking | WorkflowState::Speak => {
+                self.state.turn_began.get_or_insert_with(Instant::now);
+            }
+            WorkflowState::Wait | WorkflowState::Listen => self.state.turn_began = None,
+        }
         match state {
             WorkflowState::Wait => {
                 self.state.interrupted = false;

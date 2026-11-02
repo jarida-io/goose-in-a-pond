@@ -30,9 +30,9 @@ const KNOWN_MINTERS: &[(&str, &str)] = &[
         "the terminal voice/chat CLI's own session -- a person, in another process",
     ),
     (
-        "crates/pond-server/src/room_voice.rs",
-        "someone in the room spoke to the pond: room voice's own session, a fresh UUID per run \
-         -- a person",
+        "crates/pond-core/src/shared/services/chat.rs",
+        "a voice loop's first turn (`with_session_on_first_turn`): someone in the room spoke to \
+         the pond, and room voice minted the id as a fresh UUID -- a person",
     ),
     (
         "crates/pond-server/src/schedule_executors.rs",
