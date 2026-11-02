@@ -17,6 +17,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use pond_core::models::domain::embedding_models::{SimilarityFloors, ALL_MINILM_L6_V2};
 use pond_core::models::domain::message::ChatMessage;
 use pond_core::models::ports::embedding::EmbeddingProvider;
 use pond_core::models::services::context::context_budget::CompactionProfile;
@@ -39,7 +40,7 @@ use pond_core::user_data::services::memory_extraction::{
     BatchExtractionConfig, BatchExtractionService,
 };
 use pond_core::user_data::services::memory_relevance::{
-    content_tokens, is_duplicate_content, rank_by_relevance, SEMANTIC_DEDUP_THRESHOLD,
+    content_tokens, is_duplicate_content, rank_by_relevance,
 };
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -215,6 +216,11 @@ impl EmbeddingProvider for HashEmbedder {
 
     fn model_id(&self) -> String {
         "harness-hash-256".to_string()
+    }
+
+    /// Stands in for the shipped MiniLM, so the gate runs its cosine bands as a pond does.
+    fn similarity_floors(&self) -> Option<SimilarityFloors> {
+        ALL_MINILM_L6_V2.floors
     }
 }
 
@@ -1043,8 +1049,8 @@ async fn the_write_gate_baseline() {
         println!("  NEAR  {sim:.3}  {a}\n              {b}");
     }
     println!(
-        "  {} stored pair(s) at or above the Related band ({RELATED_BAND}) that the lexical \n  \
-         rule and the {SEMANTIC_DEDUP_THRESHOLD} semantic rule both let through",
+        "  {} stored pair(s) at or above the Related band ({RELATED_BAND}) that the write gate \n  \
+         let through",
         near_dup_pairs.len()
     );
     measured.insert("dup_rate".into(), dup_rate as f64);

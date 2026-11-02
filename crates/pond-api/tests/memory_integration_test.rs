@@ -3,7 +3,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use pond_api::{build_router, AppState};
-use pond_core::context::index_maintenance::{run_index_maintenance, IndexBudget};
+use pond_core::context::embedding_slot::{EmbeddingSlot, SlotControl, SlotStores};
 use pond_core::context::vector_index::{Corpus, VectorIndex};
 use pond_core::models::ports::embedding::EmbeddingProvider;
 use pond_core::shared::mocks::mock_agent::MockAgent;
@@ -130,7 +130,10 @@ async fn router_over(
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
         matter: None,
         memory_repo,
-        embedding_provider,
+        embedder: Arc::new(embedding_provider.map_or_else(
+            pond_core::models::services::active_embedder::ActiveEmbedder::off,
+            |p| pond_core::models::services::active_embedder::ActiveEmbedder::loaded(p),
+        )),
         vector_index,
         index_reindex: None,
         lane: None,
@@ -228,8 +231,10 @@ async fn make_app_with_semantic_memory(
     let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
     let repo: Arc<dyn MemoryRepository + Send + Sync> = Arc::new(RedactingMemoryRepository::new(
         Arc::new(
-            SqliteMemoryRepository::new(db.system.clone())
-                .with_vector_index(index.clone(), Some(embedder.model_id())),
+            SqliteMemoryRepository::new(db.system.clone()).with_vector_index(
+                index.clone(),
+                Some(embedder.clone() as Arc<dyn EmbeddingProvider>),
+            ),
         ),
         Arc::new(RuleRedactor::new()),
     ));
@@ -963,7 +968,7 @@ async fn a_memory_saved_through_the_route_is_returned_by_semantic_search() {
 
     assert!(
         app.repo.search_unembedded(10).await.unwrap().is_empty(),
-        "a memory saved through the route was left for the sweep"
+        "a memory saved through the route was left for the embedding slot"
     );
 }
 
@@ -1098,9 +1103,9 @@ async fn a_credential_never_reaches_a_vector_through_either_memory_route() {
     );
 }
 
-/// The save never waits on a working embedder; a scheduled sweep tick embeds the row later.
+/// The save never waits on a working embedder; the embedding slot embeds the row later.
 #[tokio::test]
-async fn a_memory_saved_while_the_embedder_is_down_is_kept_and_a_sweep_embeds_it() {
+async fn a_memory_saved_while_the_embedder_is_down_is_kept_and_the_slot_embeds_it() {
     let app = make_app_with_semantic_memory(Arc::new(DownEmbedder)).await;
     let id = post_memory(
         &app,
@@ -1117,18 +1122,39 @@ async fn a_memory_saved_while_the_embedder_is_down_is_kept_and_a_sweep_embeds_it
         .into_iter()
         .map(|m| m.id)
         .collect();
-    assert_eq!(waiting, vec![id.clone()], "the sweep cannot see the row");
+    assert_eq!(
+        waiting,
+        vec![id.clone()],
+        "the row was saved without a vector"
+    );
 
-    let report = run_index_maintenance(
-        &app.index,
-        &app.sessions,
-        app.repo.as_ref(),
-        &WordsEmbedder,
-        &tokio_util::sync::CancellationToken::new(),
-        IndexBudget::OneBatch,
-    )
-    .await;
-    assert_eq!(report.memories_indexed, 1);
+    struct Idle;
+    #[async_trait::async_trait]
+    impl SlotControl for Idle {
+        async fn may_continue(&self) -> bool {
+            true
+        }
+    }
+    let embedder = pond_core::models::services::active_embedder::ActiveEmbedder::loaded(Arc::new(
+        WordsEmbedder,
+    ));
+    let report = EmbeddingSlot::new()
+        .run_pass(
+            &SlotStores {
+                index: app.index.as_ref(),
+                memories: app.repo.as_ref(),
+                sessions: &app.sessions,
+                context: None,
+            },
+            &embedder,
+            &Idle,
+        )
+        .await;
+    assert_eq!(report.memories, 1);
+    assert!(
+        app.repo.search_unembedded(10).await.unwrap().is_empty(),
+        "the row itself holds the vector, not just the index"
+    );
 
     let query = WordsEmbedder
         .embed_query("What am I building at the moment?")

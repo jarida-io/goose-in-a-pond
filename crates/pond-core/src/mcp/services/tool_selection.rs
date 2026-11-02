@@ -5,10 +5,7 @@ use crate::mcp::domain::tool_group::{
     core_group_names, find_group, group_of_tool, is_catalog_extension, TOOLKIT_EXTENSION,
     TOOL_GROUPS,
 };
-
-/// Cosine floor for a non-core group on all-MiniLM-L6-v2 (unrelated ~0.00-0.15, on-topic >0.40).
-/// Low because a missing group costs a ~10s round trip, a surplus one only prompt tokens.
-pub const DEFAULT_RELEVANCE_THRESHOLD: f32 = 0.28;
+use crate::models::ports::embedding::EmbeddingProvider;
 
 /// Cosine similarity of the session's opening context against one group.
 #[derive(Debug, Clone, PartialEq)]
@@ -24,6 +21,8 @@ pub enum SelectionBasis {
     ModeAll,
     /// No embedder available, or embedding/scoring failed — widened to all.
     NoEmbedder,
+    /// The embedder's model has no measured floor, so no cosine can rule a group out.
+    Unmeasured,
     /// Scored against group descriptions.
     Scored,
     /// `tool_selection_mode = "minimal"`: the toolkit hatch only, no scoring.
@@ -98,16 +97,25 @@ pub fn scorable_groups(available: &[String]) -> Vec<(&'static str, &'static str)
         .collect()
 }
 
-/// Groups for a session. No scores (no embedder, or scoring failed) means every available group;
-/// else registered core groups, every group at or above `threshold`, and the top non-core scorer.
+/// The embedder model's floor for [`select_groups`]; `None` where it was never measured.
+pub fn relevance_floor(provider: &dyn EmbeddingProvider) -> Option<f32> {
+    provider.similarity_floors().map(|f| f.tool_relevance)
+}
+
+/// Groups for a session. No floor, or no scores (no embedder, or scoring failed), means every
+/// available group; else registered core groups, every group at or above `floor`, and the top
+/// non-core scorer.
 pub fn select_groups(
     available: &[String],
     scores: Option<&[GroupScore]>,
-    threshold: f32,
+    floor: Option<f32>,
 ) -> ToolSelection {
     if available.is_empty() {
         return ToolSelection::all(available, SelectionBasis::ModeAll);
     }
+    let Some(threshold) = floor else {
+        return ToolSelection::all(available, SelectionBasis::Unmeasured);
+    };
     let Some(scores) = scores else {
         return ToolSelection::all(available, SelectionBasis::NoEmbedder);
     };
@@ -325,6 +333,59 @@ mod tests {
         assert_eq!(without_interview_tools([&save, &weather]), vec![weather]);
     }
 
+    /// The shipped embedder's floor, which every scored case below was tuned on.
+    const MINILM: Option<f32> = Some(0.28);
+
+    #[test]
+    fn each_measured_model_keeps_its_own_floor() {
+        use crate::models::domain::embedding_models::{ALL_MINILM_L6_V2, EMBEDDINGGEMMA_2};
+        assert_eq!(ALL_MINILM_L6_V2.floors.map(|f| f.tool_relevance), MINILM);
+        // Its cosines sit higher: unneeded groups score 0.50-0.82, where MiniLM's sit near zero.
+        assert_eq!(
+            EMBEDDINGGEMMA_2.floors.map(|f| f.tool_relevance),
+            Some(0.71)
+        );
+    }
+
+    /// A cosine on an unmeasured scale rules nothing out, however low it is.
+    #[test]
+    fn a_model_without_a_measured_floor_keeps_every_group() {
+        let avail = available();
+        let scores: Vec<GroupScore> = scorable_groups(&avail)
+            .iter()
+            .map(|(ext, _)| score(ext, 0.0))
+            .collect();
+        let sel = select_groups(&avail, Some(&scores), None);
+        assert_eq!(sel.basis, SelectionBasis::Unmeasured);
+        assert_eq!(sel.groups.len(), avail.len());
+
+        let narrowed = select_groups(&avail, Some(&scores), MINILM);
+        assert_eq!(narrowed.basis, SelectionBasis::Scored);
+        assert!(narrowed.groups.len() < avail.len(), "MiniLM still narrows");
+    }
+
+    /// The floor comes from the model the embedder runs, looked up by the id it stamps.
+    #[test]
+    fn the_floor_is_read_off_the_embedders_model() {
+        struct Named(&'static str);
+        #[async_trait::async_trait]
+        impl EmbeddingProvider for Named {
+            async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+                Ok(vec![0.0])
+            }
+            fn dimensions(&self) -> usize {
+                1
+            }
+            fn model_id(&self) -> String {
+                self.0.to_string()
+            }
+        }
+        assert_eq!(relevance_floor(&Named("all-MiniLM-L6-v2")), MINILM);
+        assert_eq!(relevance_floor(&Named("embeddinggemma-2-256")), Some(0.71));
+        assert_eq!(relevance_floor(&Named("nomic-embed-text-v1.5")), None);
+        assert_eq!(relevance_floor(&Named("not-a-catalogue-model")), None);
+    }
+
     fn available() -> Vec<String> {
         TOOL_GROUPS
             .iter()
@@ -343,7 +404,7 @@ mod tests {
     #[test]
     fn no_scores_falls_back_to_every_group() {
         let avail = available();
-        let sel = select_groups(&avail, None, DEFAULT_RELEVANCE_THRESHOLD);
+        let sel = select_groups(&avail, None, MINILM);
         assert_eq!(sel.basis, SelectionBasis::NoEmbedder);
         assert_eq!(sel.groups.len(), avail.len());
         for ext in &avail {
@@ -353,7 +414,7 @@ mod tests {
 
     #[test]
     fn empty_availability_is_not_a_crash() {
-        let sel = select_groups(&[], None, DEFAULT_RELEVANCE_THRESHOLD);
+        let sel = select_groups(&[], None, MINILM);
         assert!(sel.groups.is_empty());
         assert_eq!(sel.basis, SelectionBasis::ModeAll);
     }
@@ -442,7 +503,7 @@ mod tests {
             .iter()
             .map(|(e, _)| score(e, 0.0))
             .collect();
-        let sel = select_groups(&avail, Some(&scores), DEFAULT_RELEVANCE_THRESHOLD);
+        let sel = select_groups(&avail, Some(&scores), MINILM);
         for c in core_group_names() {
             assert!(sel.groups.contains(&c.to_string()), "core {c} was dropped");
         }
@@ -461,7 +522,7 @@ mod tests {
                 s.score = 0.61;
             }
         }
-        let sel = select_groups(&avail, Some(&scores), DEFAULT_RELEVANCE_THRESHOLD);
+        let sel = select_groups(&avail, Some(&scores), MINILM);
         assert_eq!(sel.basis, SelectionBasis::Scored);
         // Core + weather, and nothing else.
         assert_eq!(sel.groups.len(), core_group_names().len() + 1);
@@ -478,7 +539,7 @@ mod tests {
             score("giap-schedule", 0.30),
             score("giap-knowledge", 0.02),
         ];
-        let sel = select_groups(&avail, Some(&scores), DEFAULT_RELEVANCE_THRESHOLD);
+        let sel = select_groups(&avail, Some(&scores), MINILM);
         for want in ["giap-device", "giap-device-control", "giap-schedule"] {
             assert!(sel.groups.contains(&want.to_string()), "{want} missing");
         }
@@ -493,7 +554,7 @@ mod tests {
             score("giap-knowledge", 0.11),
             score("giap-sensors", 0.03),
         ];
-        let sel = select_groups(&avail, Some(&scores), DEFAULT_RELEVANCE_THRESHOLD);
+        let sel = select_groups(&avail, Some(&scores), MINILM);
         assert!(
             sel.groups.contains(&"giap-weather".to_string()),
             "top scorer should be rescued"
@@ -510,7 +571,7 @@ mod tests {
             "giap-weather".into(),
         ];
         let scores = vec![score("giap-schedule", 0.99), score("giap-weather", 0.50)];
-        let sel = select_groups(&avail, Some(&scores), DEFAULT_RELEVANCE_THRESHOLD);
+        let sel = select_groups(&avail, Some(&scores), MINILM);
         assert!(!sel.groups.contains(&"giap-schedule".to_string()));
         assert!(sel.groups.contains(&"giap-weather".to_string()));
         // giap-memory / giap-system are core but not registered here.
@@ -598,7 +659,7 @@ mod tests {
         );
 
         // No embedder — the widening path, which is what a fresh Jetson takes.
-        let selection = select_groups(&permitted, None, DEFAULT_RELEVANCE_THRESHOLD);
+        let selection = select_groups(&permitted, None, MINILM);
         for c in &denied_core {
             assert!(
                 !selection.groups.iter().any(|g| g == c),
@@ -615,7 +676,7 @@ mod tests {
             .iter()
             .map(|(e, _)| score(e, 0.0))
             .collect();
-        let sel = select_groups(&avail, Some(&scores), DEFAULT_RELEVANCE_THRESHOLD);
+        let sel = select_groups(&avail, Some(&scores), MINILM);
         assert!(sel.groups.contains(&"my-home-assistant-mcp".to_string()));
     }
 
@@ -754,7 +815,7 @@ mod tests {
             },
         ];
         let merged = merge_scores(&[question, mems]);
-        let sel = select_groups(&avail, Some(&merged), DEFAULT_RELEVANCE_THRESHOLD);
+        let sel = select_groups(&avail, Some(&merged), MINILM);
         assert!(
             sel.groups.contains(&"giap-weather".to_string()),
             "got {:?}",
@@ -787,7 +848,7 @@ mod tests {
             },
         ];
         let merged = merge_scores(&[question, skill]);
-        let sel = select_groups(&avail, Some(&merged), DEFAULT_RELEVANCE_THRESHOLD);
+        let sel = select_groups(&avail, Some(&merged), MINILM);
         assert!(
             sel.groups.contains(&"giap-schedule".to_string()),
             "got {:?}",

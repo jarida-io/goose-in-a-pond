@@ -1,7 +1,13 @@
-import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { api } from "../../api/PondApiClient";
 import { Lineage } from "./Lineage";
-import type { MemoryFragment } from "../../api/types";
+import type { ContextIndexHealth, EmbedderHealth, MemoryFragment } from "../../api/types";
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 function memory(id: string, over: Partial<MemoryFragment> = {}): MemoryFragment {
   return {
@@ -140,5 +146,110 @@ describe("Lineage", () => {
       />,
     );
     expect(screen.getByText(/5 were read by an older model/)).toBeTruthy();
+  });
+});
+
+/** The index with the embedder's own report beside it. */
+function indexWith(embedder: Partial<EmbedderHealth> | null, over: Partial<ContextIndexHealth> = {}): ContextIndexHealth {
+  return {
+    indexed: true,
+    model_id: "embeddinggemma-2-256",
+    dims: 256,
+    rows: 95,
+    matching: 95,
+    mismatched: 0,
+    missing: 0,
+    coverage: 1,
+    corpora: [],
+    ...(embedder ? { embedder: { state: "ready", model_id: "embeddinggemma-2-256", reason: null, ...embedder } } : {}),
+    ...over,
+  };
+}
+
+describe("Lineage: the embedder", () => {
+  it("says it searches by keyword while the model loads", () => {
+    render(<Lineage memories={[]} health={indexWith({ state: "loading" }, { matching: 0 })} />);
+    expect(screen.getByRole("status").textContent).toBe("Searching by keyword while EmbeddingGemma 2 loads");
+  });
+
+  it("counts reading memories again, in items, because the total spans every store", () => {
+    render(<Lineage memories={[]} health={indexWith({}, { matching: 40 })} />);
+    expect(screen.getByRole("status").textContent).toBe("Reading memories again: 40 of 95 items");
+    expect(screen.getByRole("progressbar", { name: "Items read again" }).getAttribute("aria-valuenow")).toBe("42");
+  });
+
+  it("gives the action one name before and while it runs", async () => {
+    vi.spyOn(api, "rebuildContextIndex").mockImplementation(() => new Promise(() => {}));
+    render(<Lineage memories={[]} health={indexWith({})} />);
+    const button = screen.getByRole("button", { name: "Read memories again" });
+    fireEvent.click(button);
+    expect(await screen.findByRole("button", { name: "Reading memories again" })).toBeTruthy();
+    expect(screen.queryByText(/Clearing|Read everything again|Re-indexing/)).toBeNull();
+  });
+
+  it("names the model as the household reads it, not its stamp and dimensions", () => {
+    render(<Lineage memories={[]} health={indexWith({})} />);
+    expect(screen.getByText(/^Read by/).textContent).toBe(
+      "Read by EmbeddingGemma 2. Anything not indexed is still found by word, just less well.",
+    );
+    expect(screen.queryByText(/dimensions|embeddinggemma-2-256/)).toBeNull();
+  });
+
+  it("does not say a model that failed or is loading has read anything", () => {
+    render(<Lineage memories={[]} health={indexWith({ state: "failed", reason: "bad magic number" }, { matching: 0 })} />);
+    expect(screen.queryByText(/^Read by/)).toBeNull();
+    expect(screen.getByText(/^Chosen:/).textContent).toBe(
+      "Chosen: EmbeddingGemma 2. Anything not indexed is still found by word, just less well.",
+    );
+  });
+
+  it("keeps quiet once every row is reachable", () => {
+    render(<Lineage memories={[]} health={indexWith({})} />);
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("says a failed load in plain words and offers another go", () => {
+    const onRetry = vi.fn();
+    render(
+      <Lineage
+        memories={[]}
+        health={indexWith({ state: "failed", reason: "out of memory" }, { matching: 0 })}
+        onRetry={onRetry}
+      />,
+    );
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toContain("There is not enough free memory to load EmbeddingGemma 2, so Memory is searching by keyword.");
+    expect(alert.textContent).toContain("all-MiniLM-L6-v2 (23 MB)");
+    // The pond's own words wait behind Details.
+    expect(screen.queryByText("out of memory")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Details" }));
+    expect(screen.getByText("out of memory")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it("says any other failed load in plain words too", () => {
+    render(<Lineage memories={[]} health={indexWith({ state: "failed", reason: "bad magic number" }, { matching: 0 })} />);
+    expect(screen.getByRole("alert").textContent).toContain(
+      "EmbeddingGemma 2 did not load, so Memory is searching by keyword. Try again, or choose another Memory model.",
+    );
+  });
+
+  it("says search by meaning is off, instead of the server's sentence about a configured model", () => {
+    render(
+      <Lineage
+        memories={[]}
+        health={indexWith({ state: "off", model_id: null }, { indexed: false, reason: "no embedding model is configured" })}
+      />,
+    );
+    expect(screen.getByRole("status").textContent).toBe("Search by meaning is off. Memory searches by keyword.");
+    expect(screen.queryByText(/no embedding model is configured/)).toBeNull();
+  });
+
+  it("reads a pond that predates the embedder report as before", () => {
+    render(<Lineage memories={[]} health={indexWith(null)} />);
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByText(/Read by/)).toBeTruthy();
   });
 });

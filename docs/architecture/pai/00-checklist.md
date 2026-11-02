@@ -4207,3 +4207,36 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
   - A linked page in chat was read in 1.8 s.
   - A deep-research acknowledgement with a link took 9.9 s once the note said the helpers read it (39.5 s before).
   - Not verified on the Orin: `reply_as_draft`, since no helper left work in a reply in round four; and the bench (R1).
+
+**2026-11-02 — the context space, P2: the embedding slot, EmbeddingGemma 2 for Memory.**
+
+- **What is built** (PRs #735 with llama-cpp-rs-giap#4, #734, #736, #737, #738 and #739, merged as `bf38019c`):
+  - the four upstream llama.cpp commits for EmbeddingGemma 2, backported, since the October chat
+    API would have meant porting the OpenAI-compatible surface;
+  - embedders as pinned catalogue rows downloaded by the models pipeline;
+  - live switching with one embedder loaded, and same-width vector spaces never compared;
+  - the embedding slot in place of the startup backfill and `IndexMaintenance`;
+  - EmbeddingGemma 2 (`embeddinggemma-2-256`, 256 of 768 dims) as the recommended Memory model.
+- **PAI-3.** Recall across the household's languages is the point (Swahili and mixed R@5 0.73
+  against MiniLM's 0.39, P0). Similarity floors are per model: MiniLM keeps 0.28 and the dedup
+  dials set on it; EmbeddingGemma 2 has its own, measured on the Orin over
+  `fixtures/embedding-floors` (tool relevance 0.71, dedup relate 0.92, reinforce 0.97). At MiniLM's
+  cost a turn they keep 82% of the tool groups a turn needs to MiniLM's 56%, and drop as many
+  repeats and related facts as MiniLM's dials. An unmeasured model keeps every tool group and
+  dedups lexically.
+- **PAI-1.** Retrieval scope is unchanged; vectors carry the model that made them.
+- **Verified on the Orin** (the stack on `feat/p2-embeddinggemma2`, E4B QAT):
+  - The backport changes no time to first token, decode speed (a fixed counting reply at the same
+    length), Whisper, or KV snapshot (an old build's snapshot loads `Valid`).
+  - Switching Memory to EmbeddingGemma 2 downloaded the pinned file through the pipeline in about
+    2 minutes, loaded it on the GPU and re-embedded 219 rows in 2.6 s, with no restart.
+  - Turns are not slower with the slot idle, re-indexing between turns, or interrupted mid-pass.
+  - The first GPU load took 494 MB of MemAvailable from a fresh pond; later swaps with MiniLM
+    take 180-220 MB and return it.
+  - An English question found a member's Swahili memory among 139 others with either embedder,
+    so it showed recall working end to end, not EmbeddingGemma 2's advantage.
+  - Long-task steps beside the slot: Memory switched to EmbeddingGemma 2 three seconds into a
+    step. The slot loaded and embedded nothing until the task's last step settled 68 s later, then
+    loaded the model and re-indexed 86 rows in 4 s.
+- Not done: the phone app's embedding setting (an on/off switch, in its own pull request); the
+  desktop surfaces' design gate scored revise, and its fixes are their own pull request.

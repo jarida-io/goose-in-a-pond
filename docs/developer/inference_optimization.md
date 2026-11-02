@@ -63,8 +63,8 @@ model is listed as unavailable and refused with 409 rather than failing its firs
 
 `llama-cpp-2` and `llama-cpp-sys-2` are patched in the root `Cargo.toml` to the
 `jarida-io/llama-cpp-rs-giap` fork, pinned by full SHA: 0.1.156 (which has MTP) with the
-0.1.146 OpenAI-compatible template surface re-applied, plus allocation-failure fixes listed in the
-fork's `llama-cpp-sys-2/POND-PATCH.md`. No published version has both APIs; the history is in
+0.1.146 OpenAI-compatible template surface re-applied, plus allocation-failure fixes and the
+EmbeddingGemma 2 backports listed in the fork's `llama-cpp-sys-2/POND-PATCH.md`. No published version has both APIs; the history is in
 [jetson-mtp-in-process-scope.md](jetson-mtp-in-process-scope.md).
 
 ## Per-model settings
@@ -185,10 +185,11 @@ schemas ([prefill-cost-audit.md](prefill-cost-audit.md)).
 already cached.
 
 Background model work (quiet compaction, memory consolidation and extraction, titling, proactive
-review, summary refresh, index maintenance: `LaneJob` in
-`crates/pond-core/src/user_data/services/inference_lane.rs`) runs one job at a time through the
-inference lane (`crates/pond-server/src/inference_lane_runner.rs`), so background jobs never queue
-on each other for the one model slot.
+review, summary refresh: `LaneJob` in `crates/pond-core/src/user_data/services/inference_lane.rs`)
+runs one job at a time through the inference lane (`crates/pond-server/src/inference_lane_runner.rs`),
+so background jobs never queue on each other for the one model slot. Embedding is not a lane job:
+the embedding slot (`crates/pond-server/src/embedding_slot_runner.rs`) runs beside a chore and
+yields to turns, compaction and due long-task steps (`embedding_may_run`).
 
 ## Memory fit
 

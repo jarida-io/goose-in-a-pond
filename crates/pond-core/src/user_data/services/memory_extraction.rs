@@ -257,7 +257,8 @@ pub struct BandHistogram {
     pub related: usize,
     /// Below the relate threshold.
     pub fresh: usize,
-    /// No embedder, an embed failure, or no comparable vectors; not evidence the candidate is new.
+    /// No embedder, an embed failure, no comparable vectors, or a model whose cosine scale is
+    /// unmeasured; not evidence the candidate is new.
     pub unscored: usize,
 }
 
@@ -426,7 +427,7 @@ impl ExtractionEngineStatus {
 }
 
 /// Whether the embedder is worth asking: wired and not failed recently. Not "no unembedded
-/// rows", which latches shut because only a one-shot startup backfill fills them.
+/// rows", which would latch shut while the embedding slot waits for quiet.
 #[derive(Debug, Default)]
 pub struct EmbedderHealth {
     /// When the embedder last failed; a sync `Mutex` so the lane can read it without an await.
@@ -613,7 +614,10 @@ impl BatchExtractionService {
 
     /// The lane's enable predicate, asked before it takes the slot: is there a working embedder?
     pub fn embedder_is_usable(&self) -> bool {
-        self.embedding_provider.is_some() && self.health.is_stale()
+        self.embedding_provider
+            .as_ref()
+            .is_some_and(|p| p.available())
+            && self.health.is_stale()
     }
 
     /// Run one pass: up to `sessions_per_pass` windows, one per conversation.
@@ -1264,9 +1268,13 @@ impl BatchExtractionService {
             let band = if lexical_dupe {
                 Band::Same
             } else {
-                match self.embed(&content).await {
-                    None => Band::Unscored,
-                    Some(vector) => {
+                match (self.embed(&content).await, self.cosine_bands(config)) {
+                    (None, _) => Band::Unscored,
+                    (Some(vector), None) => {
+                        vector_for_row = Some(vector);
+                        Band::Unscored
+                    }
+                    (Some(vector), Some((reinforce, relate))) => {
                         let neighbours = repo
                             .search_similar(&vector, scope, BAND_NEIGHBOURS)
                             .await
@@ -1288,9 +1296,9 @@ impl BatchExtractionService {
                             None => Band::Unscored,
                             Some((id, sim)) => {
                                 matched = Some(id);
-                                if sim >= config.reinforce_threshold {
+                                if sim >= reinforce {
                                     Band::Same
-                                } else if sim >= config.relate_threshold {
+                                } else if sim >= relate {
                                     Band::Related
                                 } else {
                                     Band::Fresh
@@ -1333,7 +1341,7 @@ impl BatchExtractionService {
                 tier,
             );
             // Reuse the banding vector if any. Best-effort: an embed failure leaves the row
-            // for `IndexMaintenance`'s sweep and never aborts the window.
+            // for the embedding slot and never aborts the window.
             fragment.embedding = match vector_for_row {
                 Some(vector) => Some(vector),
                 None => self.embed(&content).await,
@@ -1426,6 +1434,19 @@ impl BatchExtractionService {
         }
     }
 
+    /// `(reinforce, relate)` on the embedder's own scale. The dials are cosines on MiniLM's, so
+    /// another measured model brings its bands, and an unmeasured one dedups lexically alone.
+    fn cosine_bands(&self, config: &BatchExtractionConfig) -> Option<(f32, f32)> {
+        let floors = self.embedding_provider.as_ref()?.similarity_floors()?;
+        Some(
+            floors
+                .dedup
+                .map_or((config.reinforce_threshold, config.relate_threshold), |b| {
+                    (b.reinforce, b.relate)
+                }),
+        )
+    }
+
     /// Embed, recording health; `None` whether there is no embedder or it failed.
     async fn embed(&self, text: &str) -> Option<Vec<f32>> {
         let provider = self.embedding_provider.as_ref()?;
@@ -1490,6 +1511,7 @@ fn segment_label(segment: &MemorySegment) -> &'static str {
 #[cfg(test)]
 mod batch_tests {
     use super::*;
+    use crate::models::domain::embedding_models::{DedupBands, SimilarityFloors, ALL_MINILM_L6_V2};
     use crate::models::domain::message::ChatMessage;
     use crate::user_data::domain::memory::MemoryTier;
     use crate::user_data::domain::session::SessionMessage;
@@ -1537,6 +1559,29 @@ mod batch_tests {
 
         fn dimensions(&self) -> usize {
             64
+        }
+
+        /// Stands in for the shipped MiniLM, whose scale the relate and reinforce dials are on.
+        fn similarity_floors(&self) -> Option<SimilarityFloors> {
+            ALL_MINILM_L6_V2.floors
+        }
+    }
+
+    /// Every text lands on one vector, so every cosine is 1.0 and only the floors decide.
+    struct ConstantEmbedder(Option<SimilarityFloors>);
+
+    #[async_trait]
+    impl EmbeddingProvider for ConstantEmbedder {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![1.0, 0.0, 0.0, 0.0])
+        }
+
+        fn dimensions(&self) -> usize {
+            4
+        }
+
+        fn similarity_floors(&self) -> Option<SimilarityFloors> {
+            self.0
         }
     }
 
@@ -2399,6 +2444,89 @@ mod batch_tests {
         assert_eq!(report.bands.same, 1, "bands: {:?}", report.bands);
         assert_eq!(report.bands.fresh, 1, "bands: {:?}", report.bands);
         assert_eq!(report.bands.total(), 2);
+    }
+
+    /// MiniLM drops a candidate its dials match. A model with its own bands is judged on its own
+    /// scale, and one with no measured floors drops only what the lexical check calls a repeat.
+    #[tokio::test]
+    async fn dedup_reads_the_bands_of_the_model_in_use() {
+        let known = "Jerry waters the greenhouse before work.";
+        let unrelated = "Jerry's sister Amara lives in Kisumu.";
+        // Above every cosine, so a model on this scale calls even an identical vector fresh.
+        let own_scale = Some(SimilarityFloors {
+            tool_relevance: 0.5,
+            dedup: Some(DedupBands {
+                reinforce: 1.01,
+                relate: 1.01,
+            }),
+        });
+        for (floors, stored) in [
+            (ALL_MINILM_L6_V2.floors, None),
+            (own_scale, Some("fresh")),
+            (None, Some("unscored")),
+        ] {
+            let storage = InMemorySessionStorage::new();
+            seed(&storage, "sess-1", 4).await;
+            let repo = MockMemoryRepository::new();
+            let mut fragment = MemoryFragment::from_extraction(
+                "existing".to_string(),
+                None,
+                known.to_string(),
+                MemorySegment::Preference,
+                0.7,
+                None,
+            );
+            fragment.embedding = Some(vec![1.0, 0.0, 0.0, 0.0]);
+            repo.add(fragment).await.unwrap();
+
+            let extractor = ScriptedExtractor::yielding(vec![
+                (known, MemoryKind::Routine),
+                (unrelated, MemoryKind::Relationship),
+            ]);
+            let service = BatchExtractionService::new()
+                .with_embedding_provider(
+                    Arc::new(ConstantEmbedder(floors)) as Arc<dyn EmbeddingProvider>
+                )
+                .with_reminder_repository(Arc::new(MockReminderRepository::new()));
+            let report = service
+                .run_pass(
+                    &storage,
+                    &repo,
+                    &extractor,
+                    &BatchExtractionConfig {
+                        mode: ExtractionMode::Write,
+                        ..config()
+                    },
+                    &CancellationToken::new(),
+                )
+                .await;
+
+            let rows = repo
+                .search_recent(&ProfileScope::Household, 10)
+                .await
+                .unwrap();
+            let kept = rows.iter().find(|f| f.content.contains("Amara"));
+            if let Some(band) = stored {
+                assert_eq!(
+                    report.bands.same, 1,
+                    "only the lexical repeat: {:?}",
+                    report.bands
+                );
+                let counted = match band {
+                    "fresh" => report.bands.fresh,
+                    _ => report.bands.unscored,
+                };
+                assert_eq!(counted, 1, "{band}: {:?}", report.bands);
+                let kept = kept.expect("the unrelated fact is stored");
+                assert!(kept.embedding.is_some(), "it is stored with its vector");
+            } else {
+                assert_eq!(report.bands.same, 2, "bands: {:?}", report.bands);
+                assert!(
+                    kept.is_none(),
+                    "a cosine of 1.0 is the same memory to MiniLM"
+                );
+            }
+        }
     }
 
     #[tokio::test]

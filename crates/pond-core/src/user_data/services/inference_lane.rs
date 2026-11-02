@@ -25,9 +25,6 @@ pub enum LaneJob {
     ProactiveReview,
     /// Keep each active conversation's rolling summary current.
     SummaryRefresh,
-    /// Embed what the personal-context index lacks and prune what it should drop. Declared after
-    /// `SummaryRefresh` so on a tie a summary is written before it is indexed.
-    IndexMaintenance,
     /// Mine one window of one conversation for what to remember about its person.
     /// Declared late to lose ties: the costliest pass, not urgent, and resumable by its cursor.
     MemoryExtraction,
@@ -45,7 +42,6 @@ impl LaneJob {
         LaneJob::LongTaskStep,
         LaneJob::ProactiveReview,
         LaneJob::SummaryRefresh,
-        LaneJob::IndexMaintenance,
         LaneJob::MemoryExtraction,
         LaneJob::SuggestionGeneration,
     ];
@@ -59,7 +55,6 @@ impl LaneJob {
             LaneJob::LongTaskStep => "long_task_step",
             LaneJob::ProactiveReview => "proactive_review",
             LaneJob::SummaryRefresh => "summary_refresh",
-            LaneJob::IndexMaintenance => "index_maintenance",
             LaneJob::MemoryExtraction => "memory_extraction",
             LaneJob::SuggestionGeneration => "suggestion_generation",
         }
@@ -74,7 +69,6 @@ impl LaneJob {
             LaneJob::LongTaskStep => "Work on long tasks",
             LaneJob::ProactiveReview => "Look for something to suggest",
             LaneJob::SummaryRefresh => "Refresh conversation summaries",
-            LaneJob::IndexMaintenance => "Maintain the search index",
             LaneJob::MemoryExtraction => "Read conversations for memories",
             LaneJob::SuggestionGeneration => "Think of things to suggest",
         }
@@ -270,6 +264,34 @@ pub fn compaction_quiet(in_use: bool, its_turn_compacts: bool, times_stopped: u3
     base * (1u32 << times_stopped.min(COMPACTION_QUIET_MAX_DOUBLINGS))
 }
 
+/// What the embedding slot reads before each batch.
+#[derive(Debug, Clone, Copy)]
+pub struct EmbedGate<'a> {
+    /// A turn being answered, or a background subagent still holding the device.
+    pub turn_running: bool,
+    /// The job holding the lane's slot at this instant.
+    pub holder: Option<LaneJob>,
+    /// The lane as its jobs' last ticks left it; `asking` must be `None`, as for a status read.
+    pub lane: LaneInputs<'a>,
+}
+
+/// Work the household is waiting on, which the embedding slot never runs beside.
+fn holds_off_embedding(job: LaneJob) -> bool {
+    matches!(job, LaneJob::Compaction | LaneJob::LongTaskStep)
+}
+
+/// Whether the embedding slot may run a batch now. It is not a second lane slot: it may run
+/// beside a chore, never beside a turn, a compaction or a long-task step that holds or is due
+/// the slot. Due means `select_next` would pick it now, so a task that only waits blocks nothing.
+pub fn embedding_may_run(gate: EmbedGate<'_>) -> bool {
+    if gate.turn_running || gate.holder.is_some_and(holds_off_embedding) {
+        return false;
+    }
+    !select_next(gate.lane)
+        .job()
+        .is_some_and(holds_off_embedding)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,7 +326,7 @@ mod tests {
     fn an_asleep_job_does_not_take_a_tick_from_the_job_that_is_asking() {
         let jobs = [
             // Both have never run, so both wait `Duration::MAX`.
-            job(LaneJob::IndexMaintenance, None, 60),
+            job(LaneJob::SummaryRefresh, None, 60),
             job(LaneJob::MemoryExtraction, None, 60),
         ];
 
@@ -325,9 +347,9 @@ mod tests {
                 saw_activity_since_start: true,
                 idle_for: LONG_IDLE,
                 jobs: &jobs,
-                asking: Some(LaneJob::IndexMaintenance),
+                asking: Some(LaneJob::SummaryRefresh),
             }),
-            LaneDecision::Run(LaneJob::IndexMaintenance),
+            LaneDecision::Run(LaneJob::SummaryRefresh),
         );
     }
 
@@ -355,7 +377,7 @@ mod tests {
     #[test]
     fn a_read_with_nobody_asking_still_breaks_ties_by_declaration_order() {
         let jobs = [
-            job(LaneJob::IndexMaintenance, None, 60),
+            job(LaneJob::SummaryRefresh, None, 60),
             job(LaneJob::MemoryExtraction, None, 60),
         ];
 
@@ -366,7 +388,7 @@ mod tests {
                 jobs: &jobs,
                 asking: None,
             }),
-            LaneDecision::Run(LaneJob::IndexMaintenance),
+            LaneDecision::Run(LaneJob::SummaryRefresh),
         );
     }
 
@@ -381,7 +403,6 @@ mod tests {
             LaneJob::LongTaskStep,
             LaneJob::ProactiveReview,
             LaneJob::SummaryRefresh,
-            LaneJob::IndexMaintenance,
             LaneJob::MemoryExtraction,
             LaneJob::SuggestionGeneration,
         ] {
@@ -391,7 +412,7 @@ mod tests {
                 job.as_str()
             );
         }
-        assert_eq!(LaneJob::ALL.len(), 9, "a job was added or removed");
+        assert_eq!(LaneJob::ALL.len(), 8, "a job was added or removed");
     }
 
     #[test]
@@ -497,9 +518,9 @@ mod tests {
 
     #[test]
     fn an_exemption_belongs_to_one_job_and_does_not_qualify_the_rest() {
-        let mut sweep = job(LaneJob::IndexMaintenance, None, 0);
-        sweep.exempt_from_activity_gate = true;
-        let jobs = [job(LaneJob::Consolidation, None, 0), sweep];
+        let mut exempt = job(LaneJob::LongTaskStep, None, 0);
+        exempt.exempt_from_activity_gate = true;
+        let jobs = [job(LaneJob::Consolidation, None, 0), exempt];
 
         let decision = select_next(LaneInputs {
             saw_activity_since_start: false,
@@ -509,7 +530,7 @@ mod tests {
         });
         assert_eq!(
             decision,
-            LaneDecision::Run(LaneJob::IndexMaintenance),
+            LaneDecision::Run(LaneJob::LongTaskStep),
             "the exempt job must win, and must not have qualified consolidation"
         );
     }
@@ -518,7 +539,7 @@ mod tests {
     fn no_job_runs_before_the_pond_has_been_used() {
         let jobs = [
             job(LaneJob::Consolidation, None, 0),
-            job(LaneJob::IndexMaintenance, None, 0),
+            job(LaneJob::SummaryRefresh, None, 0),
         ];
         let decision = select_next(LaneInputs {
             saw_activity_since_start: false,
@@ -677,55 +698,39 @@ mod tests {
     }
 
     #[test]
-    fn a_summary_is_written_before_anything_tries_to_index_it() {
-        assert!(
-            LaneJob::SummaryRefresh < LaneJob::IndexMaintenance,
-            "declaration order is the tie-break the runner sorts by, so this ordering IS the \
-             policy: a variant added between these two silently reverses it"
-        );
-
-        // Presented in the order the runner produces, which sorts by `LaneJob`.
-        let jobs = [
-            job(LaneJob::SummaryRefresh, Some(500), 0),
-            job(LaneJob::IndexMaintenance, Some(500), 0),
-        ];
-        assert_eq!(tick(&jobs), LaneDecision::Run(LaneJob::SummaryRefresh));
-    }
-
-    #[test]
     fn the_most_expensive_job_loses_every_tie() {
         assert!(
-            LaneJob::IndexMaintenance < LaneJob::MemoryExtraction,
+            LaneJob::SummaryRefresh < LaneJob::MemoryExtraction,
             "declaration order is the tie-break the runner sorts by, so this ordering IS the \
              policy: a variant added after MemoryExtraction silently reverses it"
         );
 
         // Presented in the order the runner produces, which sorts by `LaneJob`.
         let jobs = [
-            job(LaneJob::IndexMaintenance, Some(500), 0),
+            job(LaneJob::SummaryRefresh, Some(500), 0),
             job(LaneJob::MemoryExtraction, Some(500), 0),
         ];
-        assert_eq!(tick(&jobs), LaneDecision::Run(LaneJob::IndexMaintenance));
+        assert_eq!(tick(&jobs), LaneDecision::Run(LaneJob::SummaryRefresh));
 
         // Losing ties is not starving: a longer wait wins outright.
         let starved = [
-            job(LaneJob::IndexMaintenance, Some(500), 0),
+            job(LaneJob::SummaryRefresh, Some(500), 0),
             job(LaneJob::MemoryExtraction, Some(9_000), 0),
         ];
         assert_eq!(tick(&starved), LaneDecision::Run(LaneJob::MemoryExtraction));
     }
 
     #[test]
-    fn the_index_sweep_cannot_run_beside_another_job() {
+    fn a_starved_job_cannot_run_beside_another_job() {
         // Starved far longer than the other, so it wins the tick outright...
         let jobs = [
             job(LaneJob::Consolidation, Some(60), 0),
-            job(LaneJob::IndexMaintenance, Some(9_000), 0),
+            job(LaneJob::SummaryRefresh, Some(9_000), 0),
         ];
-        assert_eq!(tick(&jobs), LaneDecision::Run(LaneJob::IndexMaintenance));
+        assert_eq!(tick(&jobs), LaneDecision::Run(LaneJob::SummaryRefresh));
 
         // ...and winning is the whole grant: `LaneDecision` cannot name two jobs.
-        assert_eq!(tick(&jobs).job(), Some(LaneJob::IndexMaintenance));
+        assert_eq!(tick(&jobs).job(), Some(LaneJob::SummaryRefresh));
     }
 
     // ── Reporting ──────────────────────────────────────────────────────────
@@ -763,6 +768,114 @@ mod tests {
             asking: None,
         });
         assert_eq!(decision, LaneDecision::Run(LaneJob::SummaryRefresh));
+    }
+
+    #[test]
+    fn the_embedding_slot_yields_to_what_the_household_waits_on_and_nothing_else() {
+        let chore = job(LaneJob::MemoryExtraction, Some(600), 0);
+        let step_due = job(LaneJob::LongTaskStep, Some(2), 0);
+        // Its task waits on a member, so its loop asks with `enabled: false`.
+        let step_waiting = JobState {
+            enabled: false,
+            ..job(LaneJob::LongTaskStep, Some(2), 0)
+        };
+        let compaction_due = job(LaneJob::Compaction, Some(60), 0);
+
+        struct Case {
+            name: &'static str,
+            turn_running: bool,
+            holder: Option<LaneJob>,
+            jobs: Vec<JobState>,
+            idle_for: Duration,
+            runs: bool,
+        }
+        let cases = [
+            Case {
+                name: "nothing registered",
+                turn_running: false,
+                holder: None,
+                jobs: vec![],
+                idle_for: LONG_IDLE,
+                runs: true,
+            },
+            Case {
+                name: "a turn or a subagent in flight",
+                turn_running: true,
+                holder: None,
+                jobs: vec![chore],
+                idle_for: LONG_IDLE,
+                runs: false,
+            },
+            Case {
+                name: "a compaction holds the slot",
+                turn_running: false,
+                holder: Some(LaneJob::Compaction),
+                jobs: vec![chore],
+                idle_for: LONG_IDLE,
+                runs: false,
+            },
+            Case {
+                name: "a long-task step holds the slot",
+                turn_running: false,
+                holder: Some(LaneJob::LongTaskStep),
+                jobs: vec![],
+                idle_for: LONG_IDLE,
+                runs: false,
+            },
+            Case {
+                name: "a long-task step is due",
+                turn_running: false,
+                holder: None,
+                jobs: vec![chore, step_due],
+                idle_for: LONG_IDLE,
+                runs: false,
+            },
+            Case {
+                name: "a compaction is due",
+                turn_running: false,
+                holder: None,
+                jobs: vec![chore, compaction_due],
+                idle_for: LONG_IDLE,
+                runs: false,
+            },
+            Case {
+                name: "a long task waits on a member",
+                turn_running: false,
+                holder: None,
+                jobs: vec![chore, step_waiting],
+                idle_for: LONG_IDLE,
+                runs: true,
+            },
+            Case {
+                name: "a long task waits out its quiet",
+                turn_running: false,
+                holder: None,
+                jobs: vec![step_due],
+                idle_for: Duration::from_secs(5),
+                runs: true,
+            },
+            Case {
+                name: "a chore holds the slot",
+                turn_running: false,
+                holder: Some(LaneJob::MemoryExtraction),
+                jobs: vec![chore],
+                idle_for: LONG_IDLE,
+                runs: true,
+            },
+        ];
+        for case in cases {
+            let gate = EmbedGate {
+                turn_running: case.turn_running,
+                holder: case.holder,
+                lane: LaneInputs {
+                    saw_activity_since_start: true,
+                    idle_for: case.idle_for,
+                    jobs: &case.jobs,
+                    asking: None,
+                },
+            };
+            assert_eq!(embedding_may_run(gate), case.runs, "{}", case.name);
+        }
     }
 
     #[test]

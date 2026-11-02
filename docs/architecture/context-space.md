@@ -271,20 +271,32 @@ What follows:
   4 times slower on the CPU, no lighter, runs fp16 on the GPU (which the card warns against) and
   does not batch. ONNX Runtime was not tried: Google publishes no ONNX and forbids fp16.
 - **Wiring it, in P2:**
-  1. Bump llama-cpp-rs-giap's llama.cpp (at `8ac8291`, v1 only) past upstream's `gemma-embedding2`
-     support (ggml-org/llama.cpp#30054), its no-cache attention fix (#30416) and its pooled graphs
-     without logits (#30255, #30445). The chat path shares it, so the bump needs the Orin
-     regression run: E4B, the drafter and KV snapshots.
-  2. Check the width against `n_embd_out` (768), not `n_embd` (512), which the GGUF provider
-     compares today and would refuse.
-  3. Keep one context: n_ctx 256-512, 16 sequences or fewer, unified KV.
-  4. Map the token table on CUDA rather than pinning it, which kept 136 MB out of NvMap.
-  5. Give it a `model_id` of its own, since nomic is also 768 wide.
-  6. Acquire it like any other model (decision 11): an entry in the catalog's Embedding category,
-     downloaded by the models pipeline into `<data_dir>/models/embedding/`, with its progress,
-     pause, resume and checksum, and chosen for the Memory role (`active_embedding_model`). Its
-     vision and audio encoders are that entry's companions, sized up front. The GGUF provider's
-     own download URL goes.
+  1. Backport into llama-cpp-rs-giap's August llama.cpp upstream's `gemma-embedding2` support
+     (ggml-org/llama.cpp#30054), its no-cache attention fix (#30416) and its pooled graphs without
+     logits (#30255, #30445). Moving the tree to October instead would bring upstream's reworked
+     chat API, which the OpenAI-compatible surface goose calls is written against. The chat path
+     shares the backported graph code, so it needs the Orin regression run: E4B, the drafter and
+     KV snapshots.
+  2. The GGUF provider (`pond-inference/src/embedding.rs`) checks the width against `n_embd_out`
+     (768), not `n_embd` (512), and stores the leading 256 dimensions, re-normalised.
+  3. It keeps one context: n_ctx 512, 16 sequences or fewer, unified KV. `embed_batch` packs up to
+     16 texts into one decode, each cut to 512 tokens.
+  4. On a CUDA build it runs every layer on the GPU with the token table mapped rather than pinned
+     (`no_host`), which kept 136 MB out of NvMap. It runs on the CPU when MemAvailable cannot cover
+     `EG2_TEXT_ENCODER_CUDA_MB` (P0's derived 300 MB) plus a 300 MB margin (a choice), or when the
+     GPU load fails.
+  5. Its `model_id` is `embeddinggemma-2-256`: nomic is also 768 wide, and the 256 cut is part of
+     the space.
+  6. It is acquired like any other model (decision 11): the catalog row `embeddinggemma-2` pins
+     `ggml-org/embeddinggemma-2-GGUF` at `6ea3e3a3` by size and sha256, its vectors matching P0's
+     own conversion at cosine 0.9997 or better (checked on a Mac). The models pipeline downloads
+     it into `<data_dir>/models/embedding/`, with its progress, pause, resume and checksum, and the
+     Memory role (`active_embedding_model`) chooses it. The GGUF provider has no download of its
+     own. Its vision and audio encoders are not yet the entry's companions.
+  7. `recommended.rs` suggests it for the Memory role with P0's Orin numbers; nothing switches to
+     it, and MiniLM stays the default. Its similarity floors are its own, measured on the Orin
+     (`fixtures/embedding-floors`): tool relevance 0.71 against MiniLM's 0.28, and dedup bands of
+     0.97 and 0.92 against the dials MiniLM's scale uses.
 - **Not measured:** the cost inside `pond-server`, recall on the household's real store, audio
   retrieval and video.
 
@@ -300,18 +312,33 @@ The lane already orders background work, and the context space slots into it:
 2. compaction;
 3. a member's long task, one step at a time;
 4. chores, including every context agent: the least recently run goes first, and one that has
-   waited 15 minutes gets a turn;
+   waited 30 minutes (`CHORE_PATIENCE`) gets a turn ahead of a long task;
 5. the embedding slot (6.2).
 
-Heavy agents (Consolidation, Profile, media backfill, re-embedding after a model change) also hold
-to the household's quiet hours, as PAI-6 section 8.3 asks of long tasks.
+Heavy LLM agents (Consolidation, Profile) and media backfill also hold to the household's quiet
+hours, as PAI-6 section 8.3 asks of long tasks. Re-embedding after a model switch does not: it runs
+at the next idle moment, because the store re-embeds in seconds and waiting for the night would
+leave recall on keywords all day.
 
 ### 6.2 The embedding slot
 
-- **When it runs.** It is new, and it runs only when nothing in steps 1 to 3 is active. It may
-  overlap a chore, because both are background work.
-- **Batches.** Each batch must finish within a measured bound: 250 ms on the Orin for text, which
-  P0 measured as 24 items on CUDA and 3 on the CPU. The slot checks the lane between batches.
+- **When it runs.** Only when nothing in steps 1 to 3 is active: no turn or subagent, and no
+  compaction or long-task step holding the lane's slot or due to take it next
+  (`embedding_may_run`, `inference_lane.rs`). It may overlap a chore, because it is a separate task
+  the lane lets in, not a second lane slot. It wakes on a bell (Reindex, a model choice, a model
+  file arriving, a refreshed summary) or a 60 s poll, a choice and not a measurement
+  (`embedding_slot_runner.rs`). Loading the chosen embedder happens here too, so a load never
+  lands in a turn.
+- **Batches.** Each batch must finish within a bound: 250 ms on the Orin for text, which P0
+  measured as 24 items on CUDA and 3 on the CPU. A `BatchSizer` learns milliseconds per estimated
+  token and packs each batch to that bound, starting at one item. The slot checks the lane, and
+  whether anyone has started a turn since the pass began, between batches; whether the bound holds
+  under the slot is not yet measured on the Orin.
+- **Order and writes.** Memory first, then summaries, then context items. Memory is written through
+  `MemoryRepository::update_embedding`, which writes the row and the index; each vector is made
+  and stored under one lease of the embedder, so it carries the model that made it. Nothing is
+  adopted: a stored vector the index does not vouch for may be another model's of the same width.
+  Once the backlog is empty the slot prunes orphans and logs the index's health.
 - **Encoders.** The vision encoder loads only when free RAM covers its measured budget, and it
   unloads when serving starts.
 - **No queue.** Work is found by the staleness join. Agents keep cursors
@@ -625,7 +652,7 @@ same release. Before any restart on the nano, check that no long task is running
 |---|---|---|---|
 | P0 Measure | EmbeddingGemma 2 on the Orin: RAM per encoder beside E4B and its drafter; query-embed latency against the warm TTFT; recall against MiniLM on the two corpora, a Swahili and mixed-language set, and image queries. Pick the runtime | Nothing | It fits the budget and beats MiniLM. **Measured 2026-10-31:** it passes for the text encoder in MiniLM's place, on llama.cpp; vision and audio run per batch (5.1) |
 | P1 Store and keys | The item header and links, with a header for every memory, summary, context item and suggestion, each table kept as that kind's details; the lifecycle per kind. The LUKS2 volume on the fTPM with the admin card as recovery; TLS and secrets keys sealed; per-blob keys | The `Corpus` split, the unwired code, and the old tables a release later | The nano's real store migrated, then re-run; the volume opens at boot and not from a disk copy |
-| P2 Embedding slot | The slot in the lane's order; the text encoder, wired as 5.1 lists and acquired like any other model; EmbeddingGemma 2 as the recommended Memory model; re-embedding when the household switches | Startup backfill, `IndexMaintenance`, the GGUF provider's own download. MiniLM stays selectable, but one embedder is loaded at a time, since the budget has no room for both | No turn or long-task step measurably slower while it runs |
+| P2 Embedding slot | The slot in the lane's order; the text encoder, wired as 5.1 lists and acquired like any other model; EmbeddingGemma 2 as the recommended Memory model; re-embedding when the household switches | Startup backfill, `IndexMaintenance`, the GGUF provider's own download. MiniLM stays selectable, but one embedder is loaded at a time, since the budget has no room for both | No turn or long-task step measurably slower while it runs. **Measured 2026-11-02 on the Orin:** turns that land mid-pass are as fast as idle ones; the slot holds off between back-to-back turns and re-embeds the store (219 rows) in 2.6 s once they stop. Long-task steps not measured |
 | P3 Recipe catalog and default agents | `context.ingest` and `session.quiet` activations; `context`, `save_items` and `propose` hooks; Conversation and Consolidation; the unified retriever and `search_context`; contextual extraction and adversarial consolidation (7.3) | Extraction, summary refresh, titling, consolidation, `topical_memories`, `giap-memory`, `giap-context` | pai-bench PAI-3 and PAI-8 on the Orin; one activation fired there (P16 has none yet); the two memory tests in 7.3 |
 | P4 Phone | The ingest route, the share target, the outbox, wakes and APNs. Then OCR, visits, notifications and albums, each behind its switch | The chat-only photo path, as an ingest case | A shared screenshot is found by a text search on the Orin |
 | P5 Suggested agents | Understanding, Profile and Proposal; long-task results as items; feedback | Suggestion generation, proactive review | A real suggestion reaches a phone and is decided there |

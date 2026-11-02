@@ -496,6 +496,8 @@ fn every_entry_point_installs_the_gate_before_it_downloads() {
         "download_and_extract_ort(",
         // The boot restore of an assigned model whose file is missing.
         "restore_assigned_models(",
+        // The boot fetch of the GGUF embedder when its file is missing.
+        "restore_model(",
     ];
 
     /// Helpers, not entry points (callers own the install); named so each exemption is audited.

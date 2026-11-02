@@ -149,7 +149,7 @@ impl ContextMcpServer {
         }
 
         // Semantic hits rank on the context blend, not raw cosine, so recency can beat similarity.
-        if let Some(embedder) = &self.embedder {
+        if let Some(embedder) = self.embedder.as_ref().filter(|e| e.available()) {
             // A query, not a document -- see EmbeddingProvider::embed_query.
             if let Ok(vector) = embedder.embed_query(&query).await {
                 match self.repo.search_similar(&vector, &scope, limit).await {

@@ -179,9 +179,6 @@ mod tests {
         ) -> Result<Vec<(String, String)>> {
             Ok(vec![])
         }
-        async fn backfill_from_source(&self, _c: Corpus, _m: &str, _d: usize) -> Result<u64> {
-            Ok(0)
-        }
         async fn prune_orphans(&self) -> Result<u64> {
             Ok(0)
         }
