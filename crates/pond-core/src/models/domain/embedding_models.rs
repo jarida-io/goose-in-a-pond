@@ -63,6 +63,16 @@ pub enum Weights {
 pub struct SimilarityFloors {
     /// Tool selection keeps a non-core group that scores at least this.
     pub tool_relevance: f32,
+    /// Memory dedup's bands on this model's scale; `None` reads the `memory_*_threshold` dials,
+    /// which are set on MiniLM.
+    pub dedup: Option<DedupBands>,
+}
+
+/// A candidate at or above `reinforce` is the same stored memory; at or above `relate`, about it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DedupBands {
+    pub reinforce: f32,
+    pub relate: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -78,7 +88,7 @@ pub struct EmbeddingModel {
     pub summary: &'static str,
     pub weights: Weights,
     /// `None` until measured on the Orin: tool selection then keeps every group, and memory dedup
-    /// skips its cosine bands (the `memory_*_threshold` dials, set on MiniLM) for its lexical check.
+    /// skips its cosine bands for its lexical check.
     pub floors: Option<SimilarityFloors>,
 }
 
@@ -188,6 +198,7 @@ pub const ALL_MINILM_L6_V2: EmbeddingModel = EmbeddingModel {
         // Unrelated text scores ~0.00-0.15 and on-topic >0.40; low because a missing group costs a
         // ~10 s round trip, a surplus one only prompt tokens.
         tool_relevance: 0.28,
+        dedup: None,
     }),
 };
 
@@ -234,7 +245,15 @@ pub const EMBEDDINGGEMMA_2: EmbeddingModel = EmbeddingModel {
     summary: "EmbeddingGemma 2 — 8-bit GGUF run by llama.cpp. Over 100 languages, so a fact said \
               in Swahili is found by a question in English. 256 dimensions.",
     weights: Weights::Gguf(EMBEDDINGGEMMA_2_Q8_0),
-    floors: None,
+    // Orin, 2026-11-02, fixtures/embedding-floors: at MiniLM's surplus groups a turn and its dedup
+    // drops, these keep 82% of the tool groups a turn needs to its 56%.
+    floors: Some(SimilarityFloors {
+        tool_relevance: 0.71,
+        dedup: Some(DedupBands {
+            reinforce: 0.97,
+            relate: 0.92,
+        }),
+    }),
 };
 
 /// Every embedding model, in the order the catalogue lists them.
@@ -506,18 +525,23 @@ mod tests {
         assert_eq!(chosen("auto", "embeddinggemma-2"), Some("embeddinggemma-2"));
     }
 
-    /// Only MiniLM's cut-offs were measured; a model without them must not borrow its scale.
+    /// Only MiniLM's and EmbeddingGemma 2's cut-offs were measured; another model must not borrow
+    /// either scale, and MiniLM's dedup stays on the dials that were set on it.
     #[test]
-    fn only_minilm_carries_similarity_floors() {
+    fn only_measured_models_carry_similarity_floors() {
         assert_eq!(
             ALL_MINILM_L6_V2.floors,
             Some(SimilarityFloors {
-                tool_relevance: 0.28
+                tool_relevance: 0.28,
+                dedup: None,
             })
         );
+        let eg2 = EMBEDDINGGEMMA_2.floors.expect("measured");
+        let bands = eg2.dedup.expect("its own scale");
+        assert!(bands.relate < bands.reinforce && bands.reinforce < 1.0);
         for m in EMBEDDING_MODELS
             .iter()
-            .filter(|m| m.name != ALL_MINILM_L6_V2.name)
+            .filter(|m| ![ALL_MINILM_L6_V2.name, EMBEDDINGGEMMA_2.name].contains(&m.name))
         {
             assert_eq!(m.floors, None, "{}", m.name);
         }

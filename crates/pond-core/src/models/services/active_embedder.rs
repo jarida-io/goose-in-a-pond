@@ -494,10 +494,17 @@ mod tests {
         assert_eq!(embedder.similarity_floors(), ALL_MINILM_L6_V2.floors);
         assert!(embedder.similarity_floors().is_some());
 
-        embedder.choose(EG2).await;
+        embedder.choose(NOMIC).await;
         assert_eq!(embedder.similarity_floors(), None, "chosen, not yet loaded");
         embedder.ensure_loaded(&factory).await;
         assert_eq!(embedder.similarity_floors(), None, "loaded");
+
+        embedder.choose(EG2).await;
+        assert_eq!(
+            embedder.similarity_floors(),
+            EMBEDDINGGEMMA_2.floors,
+            "its own scale"
+        );
 
         embedder.choose(EmbedderChoice::Off).await;
         assert_eq!(embedder.similarity_floors(), None);
