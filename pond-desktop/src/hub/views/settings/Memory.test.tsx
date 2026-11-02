@@ -114,6 +114,32 @@ describe("Hub Memory: search by meaning", () => {
     expect(within(semanticCard()).getByRole("button", { name: "Search by meaning" }).getAttribute("aria-pressed")).toBe("false");
   });
 
+  it("says so when the setting cannot be read, rather than showing a switch in either position", async () => {
+    vi.mocked(api.getSettings).mockRejectedValue(new Error("offline"));
+    render(<MemoryDetail go={() => {}} />);
+    expect(await within(await waitFor(() => semanticCard())).findByText("Could not read this setting")).toBeTruthy();
+    expect(within(semanticCard()).queryByRole("button", { name: "Search by meaning" })).toBeNull();
+  });
+
+  it("shows a setting changed elsewhere once the screen reads it again", async () => {
+    await renderMemory();
+    expect(within(semanticCard()).getByRole("button", { name: "Search by meaning" }).getAttribute("aria-pressed")).toBe("true");
+    vi.mocked(api.getSettings).mockResolvedValue({ embedding_provider: "none" } as never);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh memories" }));
+    await waitFor(() =>
+      expect(within(semanticCard()).getByRole("button", { name: "Search by meaning" }).getAttribute("aria-pressed")).toBe("false"),
+    );
+  });
+
+  it("keeps focus on the switch when it is pressed", async () => {
+    await renderMemory();
+    const toggle = within(semanticCard()).getByRole("button", { name: "Search by meaning" });
+    toggle.focus();
+    fireEvent.click(toggle);
+    await waitFor(() => expect(api.updateSettings).toHaveBeenCalled());
+    expect(document.activeElement).toBe(toggle);
+  });
+
   it("shows the switch off when the pond has it off, once the settings arrive", async () => {
     vi.mocked(api.getSettings).mockResolvedValue({ embedding_provider: "none" } as never);
     await renderMemory();

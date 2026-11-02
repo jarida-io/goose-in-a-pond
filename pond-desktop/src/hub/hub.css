@@ -754,6 +754,8 @@ button.hm-tile:hover { background: var(--hub-bg); }
 .hm-skel { display: block; width: 110px; height: 12px; border-radius: 4px; background: var(--line); }
 .hm-skel--wide { width: 180px; margin-bottom: 6px; }
 .hm-skel--toggle { width: 46px; height: 27px; border-radius: 999px; }
+/* Said in place of a switch whose setting could not be read: --mut, 6.22:1 light and 4.80:1 dark. */
+.hm-ctl-note { max-width: 16ch; font-size: 12.5px; font-weight: 600; color: var(--mut); text-align: right; }
 .mrow__btn { border: 1px solid var(--line); background: var(--panel); color: var(--pp); font-family: inherit; font-size: 12.5px; font-weight: 700; padding: 7px 14px; border-radius: 9px; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
 .mrow__btn:hover { background: var(--pp-50); }
 

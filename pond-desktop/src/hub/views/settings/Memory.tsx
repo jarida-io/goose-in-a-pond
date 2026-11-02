@@ -234,6 +234,9 @@ export function MemoryDetail({ go }: MemoryDetailProps) {
   const [semanticOn, setSemanticOn] = useState<boolean | null>(null);
   /** The switch keeps its own state, so a refused save has to remount it to put it back. */
   const [switchKey, setSwitchKey] = useState(0);
+  /** Each settings read remounts the switches with what the pond said; a press alone keeps focus where it is. */
+  const [settingsRead, setSettingsRead] = useState(0);
+  const [settingsFailed, setSettingsFailed] = useState(false);
   const embedder = useEmbedderHealth();
   const [flash, setFlash] = useState<{ text: string; ok: boolean } | null>(null);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -253,8 +256,10 @@ export function MemoryDetail({ go }: MemoryDetailProps) {
       .then((settings) => {
         setCompactionEnabled(settings.memory_consolidation_enabled === true);
         setSemanticOn(settings.embedding_provider !== "none");
+        setSettingsFailed(false);
+        setSettingsRead((n) => n + 1);
       })
-      .catch(() => undefined);
+      .catch(() => setSettingsFailed(true));
     try {
       const fragments = await api.listMemories(100);
       // Only show active lifecycle memories; fall back for old API (no lifecycle field)
@@ -424,6 +429,7 @@ export function MemoryDetail({ go }: MemoryDetailProps) {
           sub="Merge and dedupe at 3:00 AM to keep memory lean"
           control={
             <Toggle
+              key={settingsRead}
               on={compactionEnabled}
               onChange={handleToggleCompaction}
               label="Compact memory nightly"
@@ -439,9 +445,18 @@ export function MemoryDetail({ go }: MemoryDetailProps) {
           sub="Find a memory by what it means, not only the words in it. Off, Memory searches by keyword."
           control={
             semanticOn === null ? (
-              <span className="hm-skel hm-skel--toggle" aria-hidden="true" />
+              settingsFailed ? (
+                <span className="hm-ctl-note">Could not read this setting</span>
+              ) : (
+                <span className="hm-skel hm-skel--toggle" aria-hidden="true" />
+              )
             ) : (
-              <Toggle key={switchKey} on={semanticOn} onChange={handleToggleSemantic} label="Search by meaning" />
+              <Toggle
+                key={`${settingsRead}-${switchKey}`}
+                on={semanticOn}
+                onChange={handleToggleSemantic}
+                label="Search by meaning"
+              />
             )
           }
         />
