@@ -137,7 +137,7 @@ const PROSODY_PUNCT: &[char] = &[
 /// (The docstring this replaces claimed espeak returned one string per
 /// sentence and that the streaming path could rely on it as a sentence split.
 /// It returns one element regardless of input. Nothing downstream depended on
-/// the claim — `split_sentences` in `pond-voice` had already done the real
+/// the claim — `ReplySplitter` in `pond-voice` had already done the real
 /// split — but it is worth naming, because it is the reason nobody looked
 /// here.)
 ///

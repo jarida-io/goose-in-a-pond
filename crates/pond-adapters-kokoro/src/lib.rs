@@ -7,7 +7,7 @@ use pond_audio_out::{play_wav_on, start_thinking_tone_thread, Speaker, TONE_OFF}
 use pond_core::models::ports::voice_output::VoiceOutput;
 use pond_core::shared::domain::agent::ThrottledAudioLevelSink;
 use pond_voice::dsp::{encode_wav_pcm16, f32_to_pcm16, speech_bounds};
-use pond_voice::text::{split_speech_units, Boundary, SpeechUnit};
+use pond_voice::text::{split_text, Boundary, SpeechUnit};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -315,16 +315,10 @@ impl KokoroOutput {
 impl VoiceOutput for KokoroOutput {
     async fn speak(&self, text: &str) -> Result<()> {
         self.begin_utterance();
-        let (units, remainder) = split_speech_units(text, true);
-        let mut all_units: Vec<SpeechUnit> = units.into_iter().map(SpeechUnit::from_text).collect();
-        let remainder = remainder.trim();
-        if !remainder.is_empty() {
-            all_units.push(SpeechUnit::from_text(remainder));
-        }
-        let Some(last) = all_units.last_mut() else {
+        let all_units = split_text(text);
+        if all_units.is_empty() {
             return Ok(());
-        };
-        last.boundary = Boundary::End;
+        }
         if all_units.len() == 1 {
             let wav = self.synth_wav(&all_units[0]).await?;
             if !wav.is_empty() {

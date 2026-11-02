@@ -308,7 +308,9 @@ impl Drop for WorkingTone {
 }
 
 // TTS text handling is in `pond-voice` so the desktop shell (separate workspace) shares it.
-use pond_voice::text::split_reply_units;
+use pond_voice::text::{ReplySplitter, SpeechUnit};
+
+use crate::models::services::voice::speech_pipeline::{SpeechPipeline, SENTENCE_HOLD};
 
 /// Re-exported to keep pond-core's public API path.
 pub use pond_voice::text::filter_thinking;
@@ -1219,8 +1221,7 @@ impl ChatService {
         let mut turn_usage: Option<crate::models::ports::provider::UsageStats> = None;
         let mut turn_stats: Option<crate::shared::domain::turn_stats::TurnStats> = None;
         let mut full_text = String::new();
-        let mut sentence_buf = String::new();
-        let mut split_a_unit = false;
+        let mut splitter = ReplySplitter::new();
         let mut spoken_first = false;
         let mut barge_in: Option<BargeInWatch> = None;
         let (barge_tx, mut barge_rx) = tokio::sync::oneshot::channel::<BargedIn>();
@@ -1235,72 +1236,40 @@ impl ChatService {
             }
         };
         let mut thought_filter = crate::models::services::thought_filter::ThoughtFilter::new();
-
-        enum AudioItem {
-            Wav(Vec<u8>),
-            Fallback(String),
-        }
-
-        let (speech_tx, mut speech_rx) = tokio::sync::mpsc::channel::<String>(16);
-        let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<AudioItem>(16);
-
-        let voice_for_synth = self.voice_output.clone();
-        let spoken_observer = self.spoken_observer.clone();
-        let synth_handle = tokio::spawn(async move {
-            while let Some(text) = speech_rx.recv().await {
-                let spoken = text.trim().to_string();
-                if spoken.is_empty() {
-                    continue;
-                }
-                if let Some(observer) = &spoken_observer {
-                    observer(&spoken);
-                }
-                match voice_for_synth.synthesize(&spoken).await {
-                    Ok(Some(wav)) if !wav.is_empty() => {
-                        if audio_tx.send(AudioItem::Wav(wav)).await.is_err() {
-                            break;
-                        }
-                    }
-                    _ => {
-                        if audio_tx.send(AudioItem::Fallback(spoken)).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-
-        let voice_for_playback = self.voice_output.clone();
-        let playback_handle = tokio::spawn(async move {
-            while let Some(item) = audio_rx.recv().await {
-                match item {
-                    AudioItem::Wav(wav) => {
-                        if let Err(e) = voice_for_playback.play_audio(wav).await {
-                            tracing::warn!("TTS playback failed: {}", e);
-                        }
-                    }
-                    AudioItem::Fallback(spoken) => {
-                        if let Err(e) = voice_for_playback.speak(&spoken).await {
-                            tracing::warn!("TTS failed: {}", e);
-                        }
-                    }
-                }
-            }
-        });
-
-        struct TaskGuard(Option<tokio::task::JoinHandle<()>>);
-        impl Drop for TaskGuard {
-            fn drop(&mut self) {
-                if let Some(h) = self.0.take() {
-                    h.abort();
-                }
-            }
-        }
-        let mut synth_guard = TaskGuard(Some(synth_handle));
-        let mut playback_guard = TaskGuard(Some(playback_handle));
+        // Dropped with `speaking` on a barge-in, which stops synthesis and playback with it.
+        let mut pipeline = SpeechPipeline::start(
+            self.voice_output.clone(),
+            self.spoken_observer.clone(),
+            None,
+        );
 
         let speaking = async {
-            while let Some(event_result) = stream.next().await {
+            loop {
+                let mut units: Vec<SpeechUnit> = Vec::new();
+                let mut done = false;
+                let event = if splitter.pending().trim().is_empty() {
+                    stream.next().await
+                } else {
+                    match tokio::time::timeout(SENTENCE_HOLD, stream.next()).await {
+                        Ok(event) => event,
+                        Err(_) => {
+                            // Stalled: say the sentences already whole rather than wait for more.
+                            for unit in splitter.pause(pipeline.pace()) {
+                                tone.stop();
+                                if let Some(tx) = barge_tx.take().filter(|_| energy_barge_in) {
+                                    barge_in = self.watch_for_barge_in(tx);
+                                }
+                                if !pipeline.say(unit).await {
+                                    break;
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                };
+                let Some(event_result) = event else {
+                    break;
+                };
                 match event_result? {
                 AgentStreamEvent::ToolCall { id, tool, .. } => {
                     // Shown, not spoken: the working tone covers tool use, and keeps playing.
@@ -1308,6 +1277,8 @@ impl ChatService {
                         tool: tool.clone(),
                         id: id.clone(),
                     });
+                    // The model has paused for the tool: say the sentences it finished first.
+                    units = splitter.pause(pipeline.pace());
                 }
                 AgentStreamEvent::Text { content } => {
                     // Strip all thinking/reasoning tags — not meant for TTS or transcript.
@@ -1332,21 +1303,7 @@ impl ChatService {
                         content: content.clone(),
                     });
                     full_text.push_str(&content);
-                    sentence_buf.push_str(&content);
-
-                    let (units, remainder) =
-                        split_reply_units(&sentence_buf, true, !split_a_unit);
-                    sentence_buf = remainder;
-                    split_a_unit |= !units.is_empty();
-                    for unit in units {
-                        tone.stop();
-                        if let Some(tx) = barge_tx.take().filter(|_| energy_barge_in) {
-                            barge_in = self.watch_for_barge_in(tx);
-                        }
-                        if speech_tx.send(unit).await.is_err() {
-                            break;
-                        }
-                    }
+                    units = splitter.push(&content, pipeline.pace());
                 }
                 AgentStreamEvent::Done { usage, stats, .. } => {
                     turn_usage = usage;
@@ -1365,18 +1322,10 @@ impl ChatService {
                             content: tail.clone(),
                         });
                         full_text.push_str(&tail);
-                        sentence_buf.push_str(&tail);
+                        units = splitter.push(&tail, pipeline.pace());
                     }
-                    let remainder = sentence_buf.trim().to_string();
-                    if !remainder.is_empty() {
-                        tone.stop();
-                        if let Some(tx) = barge_tx.take().filter(|_| energy_barge_in) {
-                            barge_in = self.watch_for_barge_in(tx);
-                        }
-                        let _ = speech_tx.send(remainder).await;
-                    }
-                    sentence_buf.clear();
-                    break;
+                    units.extend(splitter.finish());
+                    done = true;
                 }
                 AgentStreamEvent::Error { content } => {
                     return Err(anyhow::anyhow!("Agent stream error: {}", content));
@@ -1399,10 +1348,23 @@ impl ChatService {
                     // Not spoken during streaming — informational only
                 }
             }
+                for unit in units {
+                    tone.stop();
+                    if let Some(tx) = barge_tx.take().filter(|_| energy_barge_in) {
+                        barge_in = self.watch_for_barge_in(tx);
+                    }
+                    if !pipeline.say(unit).await {
+                        break;
+                    }
+                }
+                if done {
+                    break;
+                }
             }
 
             // If the stream ended without Done, its filter tail must reach `full_text` here too.
             let tail = thought_filter.flush();
+            let mut units = Vec::new();
             if !tail.is_empty() {
                 if !spoken_first {
                     self.emit_event(WorkflowEvent::StateChanged {
@@ -1413,25 +1375,18 @@ impl ChatService {
                     content: tail.clone(),
                 });
                 full_text.push_str(&tail);
-                sentence_buf.push_str(&tail);
+                units = splitter.push(&tail, pipeline.pace());
             }
-            let remainder = sentence_buf.trim().to_string();
-            if !remainder.is_empty() {
+            units.extend(splitter.finish());
+            for unit in units {
                 tone.stop();
                 if let Some(tx) = barge_tx.take().filter(|_| energy_barge_in) {
                     barge_in = self.watch_for_barge_in(tx);
                 }
-                let _ = speech_tx.send(remainder).await;
+                let _ = pipeline.say(unit).await;
             }
-            sentence_buf.clear();
 
-            drop(speech_tx);
-            if let Some(h) = synth_guard.0.take() {
-                let _ = h.await;
-            }
-            if let Some(h) = playback_guard.0.take() {
-                let _ = h.await;
-            }
+            pipeline.finish().await;
 
             // A turn that produced no speakable text still has to stop the tone.
             tone.stop();
