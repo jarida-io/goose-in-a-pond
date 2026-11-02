@@ -1,6 +1,6 @@
 //! Weather MCP server: current weather and forecasts.
 
-use pond_adapters_weather::WeatherProvider;
+use pond_adapters_weather::{ForecastData, WeatherProvider};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
@@ -30,6 +30,8 @@ pub struct ForecastParams {
     pub location: Option<String>,
     /// Days asked for, 1-7 (omitted: 3).
     pub days: Option<u8>,
+    /// One day, YYYY-MM-DD; overrides `days`.
+    pub date: Option<String>,
     /// Catch-all for unexpected fields the model might send.
     #[serde(flatten)]
     #[schemars(skip)]
@@ -125,9 +127,9 @@ which city. Never guess weather or shell out for it.")]
     }
 
     #[tool(description = "\
-Forecast for the days asked, 1-7 (a week is 7; for a date, count from today as 1): \
-highs/lows, rain chance, UV, sun times. One call per place. Omit location for the \
-configured home. Never guess data.")]
+Forecast: date (YYYY-MM-DD) for one day, or days 1-7 (a week is 7): highs/lows, rain \
+chance, UV, sun times. One call per place. Omit location for the configured home. Never \
+guess data.")]
     async fn get_weather_forecast(
         &self,
         _ctx: RequestContext<RoleServer>,
@@ -135,12 +137,37 @@ configured home. Never guess data.")]
     ) -> Result<CallToolResult, ErrorData> {
         crate::set_current_tool("get_weather_forecast");
         let location = resolve_forecast_location(&params.0);
-        let days = params.0.days.unwrap_or(3).clamp(1, 7);
+        let date = params
+            .0
+            .date
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty());
+        if let Some(d) = date {
+            if chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").is_err() {
+                tracing::warn!(
+                    kind = "forecast_date_invalid",
+                    date = d,
+                    "forecast date is not YYYY-MM-DD"
+                );
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                    "The date {d} is not YYYY-MM-DD. Pass the day asked for, e.g. 2026-11-05."
+                ))]));
+            }
+        }
+        // A date is matched against the forecast's own dates, so all seven are fetched and the
+        // model never has to count days from today -- a small model gets that sum wrong.
+        let days = if date.is_some() {
+            7
+        } else {
+            params.0.days.unwrap_or(3).clamp(1, 7)
+        };
 
         tracing::debug!(
-            "get_weather_forecast called, location={:?}, days={}, provider={}",
+            "get_weather_forecast called, location={:?}, days={}, date={:?}, provider={}",
             location,
             days,
+            date,
             if self.weather.is_some() {
                 "configured"
             } else {
@@ -158,6 +185,20 @@ configured home. Never guess data.")]
                 let result = match &location {
                     Some(loc) => w.forecast_for(loc, days).await,
                     None => w.forecast(days).await,
+                };
+                let result = match (result, date) {
+                    (Ok(mut data), Some(d)) => match narrow_to_date(&mut data, d) {
+                        Ok(()) => Ok(data),
+                        Err(missing) => {
+                            tracing::warn!(
+                                kind = "forecast_date_out_of_range",
+                                date = d,
+                                "{missing}"
+                            );
+                            return Ok(CallToolResult::error(vec![ContentBlock::text(missing)]));
+                        }
+                    },
+                    (other, _) => other,
                 };
                 match result {
                     Ok(data) => {
@@ -244,6 +285,21 @@ fn resolve_location(params: &WeatherParams) -> Option<String> {
     None
 }
 
+/// Keep only `date`'s day of a forecast, or say which dates the forecast does cover.
+fn narrow_to_date(data: &mut ForecastData, date: &str) -> Result<(), String> {
+    let covered = match (data.days.first(), data.days.last()) {
+        (Some(first), Some(last)) => format!("{} to {}", first.date, last.date),
+        _ => "no dates".to_string(),
+    };
+    data.days.retain(|d| d.date == date);
+    if data.days.is_empty() {
+        return Err(format!(
+            "No forecast for {date}: the forecast covers {covered}. Say so; do not use another day."
+        ));
+    }
+    Ok(())
+}
+
 /// Extract location from ForecastParams, scanning extras as fallback.
 fn resolve_forecast_location(params: &ForecastParams) -> Option<String> {
     if let Some(ref loc) = params.location {
@@ -312,6 +368,7 @@ pub fn spawn_weather_server(reader: DuplexStream, writer: DuplexStream) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pond_adapters_weather::ForecastDay;
 
     #[test]
     fn server_constructs_with_none() {
@@ -356,11 +413,52 @@ mod tests {
         assert_eq!(resolve_location(&params), None);
     }
 
+    fn forecast(dates: &[&str]) -> ForecastData {
+        ForecastData {
+            location_name: "Kisumu, Kenya".to_string(),
+            days: dates
+                .iter()
+                .map(|d| ForecastDay {
+                    date: (*d).to_string(),
+                    description: "Light drizzle".to_string(),
+                    temp_max_c: 30.0,
+                    temp_min_c: 18.0,
+                    precipitation_sum_mm: 1.0,
+                    precipitation_probability_pct: 70,
+                    wind_speed_max_kmh: 20.0,
+                    uv_index_max: 9.0,
+                    sunrise: "06:20".to_string(),
+                    sunset: "18:30".to_string(),
+                })
+                .collect(),
+            fetched_at: chrono::Utc::now(),
+        }
+    }
+
+    /// On 2026-11-02 "the 4th of November" came back as the 3rd's figures, labelled the 4th:
+    /// the model counted two days from today instead of three.
+    #[test]
+    fn a_date_keeps_only_that_day() {
+        let mut data = forecast(&["2026-11-02", "2026-11-03", "2026-11-04", "2026-11-05"]);
+        narrow_to_date(&mut data, "2026-11-04").unwrap();
+        assert_eq!(data.days.len(), 1);
+        assert_eq!(data.days[0].date, "2026-11-04");
+    }
+
+    #[test]
+    fn a_date_outside_the_forecast_says_what_is_covered() {
+        let mut data = forecast(&["2026-11-02", "2026-11-08"]);
+        let err = narrow_to_date(&mut data, "2026-11-12").unwrap_err();
+        assert!(err.contains("2026-11-02 to 2026-11-08"), "{err}");
+        assert!(data.days.is_empty());
+    }
+
     #[test]
     fn resolve_forecast_location_works() {
         let params = ForecastParams {
             location: Some("Eldoret".to_string()),
             days: Some(5),
+            date: None,
             extra: Default::default(),
         };
         assert_eq!(

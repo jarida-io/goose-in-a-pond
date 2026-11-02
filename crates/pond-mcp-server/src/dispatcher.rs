@@ -279,7 +279,8 @@ fn _tool_param_schema_removed(tool_name: &str) -> serde_json::Value {
             "type": "object",
             "properties": {
                 "location": { "type": "string", "description": "City name. Omit for home location." },
-                "days": { "type": "integer", "description": "Days asked for, 1-7 (omitted: 3)." }
+                "days": { "type": "integer", "description": "Days asked for, 1-7 (omitted: 3)." },
+                "date": { "type": "string", "description": "One day, YYYY-MM-DD; overrides days." }
             }
         }),
         "giap-knowledge__get_wikipedia_article" => json!({
