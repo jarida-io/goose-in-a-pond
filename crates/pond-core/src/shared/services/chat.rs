@@ -379,6 +379,9 @@ pub struct ChatService {
     state_observer: Option<StateObserver>,
     /// Told the text of everything the loop says, as it goes to synthesis.
     spoken_observer: Option<SpokenObserver>,
+    /// The session row is made at the first turn, so a loop nobody talks to leaves none.
+    session_on_first_turn: bool,
+    session_made: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Hears each `WorkflowState` the loop enters, synchronously, from `emit_event`.
@@ -477,6 +480,8 @@ impl ChatService {
             interrupt_watch: None,
             state_observer: None,
             spoken_observer: None,
+            session_on_first_turn: false,
+            session_made: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -676,6 +681,39 @@ impl ChatService {
     pub fn with_spoken_observer(mut self, observer: SpokenObserver) -> Self {
         self.spoken_observer = Some(observer);
         self
+    }
+
+    /// Make the session row at the first turn instead of expecting it to exist.
+    pub fn with_session_on_first_turn(mut self) -> Self {
+        self.session_on_first_turn = true;
+        self
+    }
+
+    /// Makes the session row the first time a turn needs it; a failure is left to the write.
+    async fn ensure_session(&self) {
+        use std::sync::atomic::Ordering;
+        if !self.session_on_first_turn || self.session_made.load(Ordering::Acquire) {
+            return;
+        }
+        let made = match self.session_storage.get_session(&self.session_id).await {
+            Ok(_) => true,
+            Err(_) => match self
+                .session_storage
+                .create_session(self.session_id.clone())
+                .await
+            {
+                Ok(_) => true,
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = %self.session_id,
+                        error = %e,
+                        "could not make the voice session at its first turn"
+                    );
+                    false
+                }
+            },
+        };
+        self.session_made.store(made, Ordering::Release);
     }
 
     fn report_spoken(&self, text: &str) {
@@ -1115,6 +1153,7 @@ impl ChatService {
     /// Speculative transcripts must use the non-persisting `stream_response_inner` instead.
     pub async fn chat_stream_once(&self, message: String) -> Result<String> {
         let fired_at = std::time::Instant::now();
+        self.ensure_session().await;
         let user_msg = ChatMessage::user(message.clone());
         let session_msg = SessionMessage::new(
             Uuid::new_v4().to_string(),
@@ -1148,6 +1187,7 @@ impl ChatService {
         message: String,
         fired_at: std::time::Instant,
     ) -> Result<TurnOutcome> {
+        self.ensure_session().await;
         // Only the voice loop reaches this, hence `voice_mode: true` (TTS-friendly prompt).
         let request = AgentRequest {
             message: message.clone(),
@@ -1582,6 +1622,7 @@ impl ChatService {
         response_text: &str,
         usage: Option<&crate::models::ports::provider::UsageStats>,
     ) -> Result<()> {
+        self.ensure_session().await;
         let user_msg = ChatMessage::user(confirmed_message.to_string());
         let session_msg = SessionMessage::new(
             Uuid::new_v4().to_string(),
@@ -4246,6 +4287,24 @@ mod tests {
         let heard = heard.lock().unwrap().clone();
         assert_eq!(heard, states_of(&events));
         assert!(heard.contains(&WorkflowState::Thinking) && heard.contains(&WorkflowState::Speak));
+    }
+
+    #[tokio::test]
+    async fn a_session_made_on_the_first_turn_exists_only_once_somebody_talks() {
+        let storage = Arc::new(InMemorySessionStorage::new());
+        let quiet = ChatService::new(Arc::new(MockAgent::new()), "quiet".into(), storage.clone())
+            .with_voice_input(Arc::new(ScriptedListenInput::new([])))
+            .with_voice_output(Arc::new(CapturingSpeak::default()))
+            .with_session_on_first_turn();
+        run_bounded(&quiet).await.unwrap();
+        assert!(storage.get_session("quiet").await.is_err(), "nobody spoke");
+
+        let spoken = ChatService::new(Arc::new(MockAgent::new()), "spoken".into(), storage.clone())
+            .with_voice_input(Arc::new(ScriptedListenInput::new(["hello"])))
+            .with_voice_output(Arc::new(CapturingSpeak::default()))
+            .with_session_on_first_turn();
+        run_bounded(&spoken).await.unwrap();
+        assert_eq!(storage.get_messages("spoken").await.unwrap().len(), 2);
     }
 
     #[tokio::test]

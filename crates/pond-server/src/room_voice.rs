@@ -22,7 +22,7 @@ use pond_core::security::ports::telemetry::TelemetryPort;
 use pond_core::shared::domain::agent::{ThrottledAudioLevelSink, WorkflowEvent, WorkflowState};
 use pond_core::shared::services::chat::{ChatService, WorkflowEventSink};
 use pond_core::shared::services::voice_control::{StopReason, VoiceControl};
-use pond_core::user_data::ports::session_storage::{SessionStorage, SessionStorageError};
+use pond_core::user_data::ports::session_storage::SessionStorage;
 use pond_core::user_data::ports::settings::SettingsRepository;
 use tokio::sync::{broadcast, watch};
 
@@ -368,11 +368,8 @@ async fn run_once(
     else {
         return Ran::Ended(Err(anyhow::anyhow!("no speech model or voice")));
     };
+    // Its row is made at the first turn: a room switched on and off leaves no empty conversation.
     let session_id = uuid::Uuid::new_v4().to_string();
-    match inner.deps.storage.create_session(session_id.clone()).await {
-        Ok(_) | Err(SessionStorageError::StorageError(_)) => {}
-        Err(e) => return Ran::Ended(Err(e.into())),
-    }
 
     let events = inner.events.clone();
     let levels = Arc::new(ThrottledAudioLevelSink::new(Box::new(move |rms: f32| {
@@ -418,7 +415,8 @@ async fn run_once(
     .with_voice_output(Arc::new(crate::room_memory::MeasuredVoice(output)))
     .with_control(control.clone())
     .with_stdout_diagnostics(false)
-    .with_event_sink(sink);
+    .with_event_sink(sink)
+    .with_session_on_first_turn();
     if let Some(telemetry) = &inner.deps.telemetry {
         chat = chat.with_telemetry(telemetry.clone());
     }
