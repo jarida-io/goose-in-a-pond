@@ -551,7 +551,8 @@ fn top_level_fn_body<'a>(src: &'a str, signature: &str) -> &'a str {
 /// This is a source tripwire because a behavioural test would need a real paired device.
 #[test]
 fn the_device_rung_is_persisted_as_a_claim_never_by_strength_alone() {
-    let body = top_level_fn_body(ROUTES, "async fn resolve_turn_scope(");
+    // `resolve_turn_scope` is `resolve_turn_identity`'s scope; the rung lives in the latter.
+    let body = top_level_fn_body(ROUTES, "async fn resolve_turn_identity(");
     assert!(
         body.contains("DeviceRung::Member"),
         "vacuity: this did not find resolve_turn_scope's device arm, so every assertion \

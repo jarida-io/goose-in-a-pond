@@ -123,6 +123,7 @@ pub async fn prune_once(logs: &Pool<Sqlite>, system: &Pool<Sqlite>, config: &Pru
     prune_events(logs, config).await;
     prune_session_messages(system, config.session_messages_keep).await;
     prune_orphan_face_embeddings(system).await;
+    prune_orphan_voice_prints(system).await;
     prune_notifications(system).await;
 }
 
@@ -266,6 +267,32 @@ async fn prune_orphan_face_embeddings(pool: &Pool<Sqlite>) {
         }
         Ok(_) => {}
         Err(e) => warn!("pruning: face_embeddings failed: {}", e),
+    }
+}
+
+/// The face sweep's twin for Voice Match: prints and wake takes of members no longer here.
+async fn prune_orphan_voice_prints(pool: &Pool<Sqlite>) {
+    for table in ["voice_prints", "voice_wake_takes"] {
+        let exists: Option<(i64,)> =
+            sqlx::query_as("SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?")
+                .bind(table)
+                .fetch_optional(pool)
+                .await
+                .unwrap_or(None);
+        if exists.is_none() {
+            continue;
+        }
+        let sql = format!(
+            "DELETE FROM {table} \
+             WHERE profile_id IS NOT NULL AND profile_id NOT IN (SELECT id FROM profiles)"
+        );
+        match sqlx::query(&sql).execute(pool).await {
+            Ok(r) if r.rows_affected() > 0 => {
+                info!("pruning: deleted {} orphan {table} rows", r.rows_affected())
+            }
+            Ok(_) => {}
+            Err(e) => warn!("pruning: {table} failed: {}", e),
+        }
     }
 }
 

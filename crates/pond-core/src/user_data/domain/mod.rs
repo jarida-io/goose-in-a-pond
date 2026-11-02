@@ -19,3 +19,4 @@ pub mod settings_validation;
 pub mod skill;
 pub mod suggestion;
 pub mod vision;
+pub mod voice_print;

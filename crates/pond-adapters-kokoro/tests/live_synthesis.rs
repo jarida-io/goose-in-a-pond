@@ -336,7 +336,10 @@ async fn a_sample_in_another_voice_leaves_the_selected_voice_alone() {
 
     let text = "Hello, I'm Goose. This is how I sound.";
     let sample = output.synth_wav_in_voice(&other, text).await.unwrap();
-    let selected = output.synth_wav(text).await.unwrap();
+    let selected = output
+        .synth_wav(&pond_voice::text::SpeechUnit::from_text(text))
+        .await
+        .unwrap();
     assert!(sample.len() > 44, "the sample has no audio");
     assert_ne!(
         sample, selected,
@@ -371,4 +374,171 @@ fn disk_cache_speeds_up_model_load() {
             .map(|m| m.len() / (1024 * 1024))
             .unwrap_or(0)
     );
+}
+
+/// Hand freed heap pages back to the OS, as `KOKORO_TRIM` asks, to tell the allocator's
+/// retention from memory ORT still holds.
+fn return_freed_memory() {
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+        }
+        // SAFETY: a null zone asks every zone to release what it can; no memory is touched.
+        unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: glibc's trim only returns free pages at the heap's top and in its arenas.
+        unsafe { malloc_trim(0) };
+    }
+}
+
+/// Resident memory of this process, from `ps`, in MB.
+fn rss_mb() -> f64 {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .expect("ps");
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<f64>()
+        .unwrap_or(0.0)
+        / 1024.0
+}
+
+/// Fifty units of a reply's lengths, a short one between long ones as a room loop gets them.
+const UNITS: &[&str] = &[
+    "Sure.",
+    "It's nineteen degrees in Nairobi right now, with light cloud, and it should reach twenty six by mid-afternoon.",
+    "Rain is unlikely before evening.",
+    "You have three things on the calendar: a call with Amina at ten, lunch with your brother at half past one, and the plumber, who said he would come some time between four and six.",
+    "Keep your phone nearby.",
+    "Kneading builds a stretchy network of gluten, the protein in wheat, and that network traps the gas in thousands of tiny pockets, so the dough puffs up like a balloon instead of letting the gas escape.",
+    "Okay.",
+    "Heat speeds everything up, which is why a warm kitchen gives you a faster rise, while a cold one can take most of the day.",
+    "Shall I tell them it's Ngong Lane?",
+    "A wrong address usually means the parcel goes back to the depot, and that can add two or three days, sometimes more.",
+];
+
+#[test]
+#[ignore = "needs Kokoro weights; set KOKORO_DIR"]
+fn resident_memory_over_fifty_units() {
+    let Some(dir) = model_dir() else {
+        panic!("set KOKORO_DIR");
+    };
+    let vocab = Vocab::load(&dir.join("tokenizer.json")).unwrap();
+    let style = StyleTable::load(&dir.join("voices"), "af_heart").unwrap();
+    let mut engine = Engine::load(&dir.join(model_file()), intra_threads()).unwrap();
+    // As the splitter cuts them, so no unit passes its token budget.
+    let units: Vec<String> = pond_voice::text::split_text(&UNITS.join(" "))
+        .into_iter()
+        .map(|u| u.text)
+        .collect();
+    let loaded = rss_mb();
+    let (mut peak, mut synth_secs, mut audio_secs) = (loaded, 0.0f32, 0.0f32);
+    let (mut marks, mut longest) = (Vec::new(), 0usize);
+    for n in 0..50 {
+        let (chunks, _) = tokenizer::chunk(&units[n % units.len()], &vocab).unwrap();
+        let t0 = Instant::now();
+        for c in &chunks {
+            let audio = engine
+                .synthesize(c, style.style_for(c.tokens.len()), 1.0)
+                .unwrap();
+            audio_secs += duration_secs(&audio);
+        }
+        synth_secs += t0.elapsed().as_secs_f32();
+        if std::env::var("KOKORO_TRIM").is_ok() {
+            return_freed_memory();
+        }
+        let now = rss_mb();
+        peak = peak.max(now);
+        longest = longest.max(chunks.iter().map(|c| c.tokens.len()).max().unwrap_or(0));
+        if (n + 1) % 10 == 0 {
+            marks.push(format!("{}:{now:.0}", n + 1));
+        }
+    }
+    println!(
+        "kokoro {} rss: {} units, longest {longest} tokens; loaded {loaded:.0} MB, after units {}, \
+         peak {peak:.0} MB, growth {:.0} MB, RTF {:.3}",
+        model_file(),
+        units.len(),
+        marks.join(" "),
+        peak - loaded,
+        synth_secs / audio_secs
+    );
+}
+
+/// Each text in `KOKORO_TEXTS` (a JSON object of name to text) said as the voice loop splits and
+/// paces it, with no synthesis gaps, into `KOKORO_OUT`: `<name>.wav`, one file per unit, and the
+/// same units at their own uncapped style rows with the model's own edges, for comparison.
+#[tokio::test]
+#[ignore = "needs Kokoro weights and an audio device; set KOKORO_DIR, KOKORO_TEXTS, KOKORO_OUT"]
+async fn render_replies_as_spoken() {
+    let Some(dir) = model_dir() else {
+        panic!("set KOKORO_DIR");
+    };
+    let (Ok(texts), Ok(out)) = (std::env::var("KOKORO_TEXTS"), std::env::var("KOKORO_OUT")) else {
+        panic!("set KOKORO_TEXTS to a JSON file of texts and KOKORO_OUT to a directory");
+    };
+    let texts: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(texts).unwrap()).unwrap();
+    std::fs::create_dir_all(format!("{out}/units")).unwrap();
+    let output = pond_adapters_kokoro::KokoroOutput::new(pond_adapters_kokoro::KokoroConfig {
+        model_path: dir.join(model_file()),
+        voices_dir: dir.join("voices"),
+        tokenizer_path: dir.join("tokenizer.json"),
+        intra_threads: intra_threads(),
+        espeak_data: None,
+    })
+    .expect("Kokoro output");
+    output
+        .set_voice(pond_adapters_kokoro::DEFAULT_VOICE)
+        .await
+        .unwrap();
+    let vocab = Vocab::load(&dir.join("tokenizer.json")).unwrap();
+    let pack = std::fs::read(dir.join("voices/af_heart.bin")).unwrap();
+    let own_row = |tokens: usize| -> Vec<f32> {
+        let row = tokens.clamp(1, 510) - 1;
+        pack[row * 1024..(row + 1) * 1024]
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect()
+    };
+    let mut engine = Engine::load(&dir.join(model_file()), intra_threads()).unwrap();
+    let mut manifest = Vec::new();
+    for (name, text) in &texts {
+        let units = pond_voice::text::split_text(text.as_str().unwrap());
+        let mut reply = Vec::new();
+        for (i, unit) in units.iter().enumerate() {
+            let samples = output.synth_samples(unit).await.unwrap();
+            write_wav(&format!("{out}/units/{name}_{i:02}.wav"), &samples);
+            reply.extend_from_slice(&samples);
+            // The same unit at its own row, as before the cap, with Kokoro's edges left on.
+            let (chunks, _) = tokenizer::chunk(&unit.text, &vocab).unwrap();
+            let mut own = Vec::new();
+            for c in &chunks {
+                own.extend(engine.synthesize(c, &own_row(c.tokens.len()), 1.0).unwrap());
+            }
+            write_wav(&format!("{out}/units/{name}_{i:02}_own_row.wav"), &own);
+            manifest.push(serde_json::json!({
+                "text": name, "i": i, "unit": unit.text, "boundary": format!("{:?}", unit.boundary),
+                "tokens": chunks.iter().map(|c| c.tokens.len()).sum::<usize>(),
+            }));
+        }
+        write_wav(&format!("{out}/{name}.wav"), &reply);
+        println!(
+            "{name}: {} units, {:.1} s",
+            units.len(),
+            duration_secs(&reply)
+        );
+    }
+    std::fs::write(
+        format!("{out}/units/manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
 }

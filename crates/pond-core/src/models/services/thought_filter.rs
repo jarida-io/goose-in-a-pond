@@ -145,7 +145,7 @@ fn strip_standalones(s: &str) -> String {
 
 /// Emittable byte length of `s`: only a tail that is a *proper* marker prefix is withheld,
 /// since a complete one would be held forever. Markers are ASCII, so this is a char boundary.
-fn safe_emit_len(s: &str, markers: &[&str]) -> usize {
+pub(crate) fn safe_emit_len(s: &str, markers: &[&str]) -> usize {
     let longest = markers.iter().map(|m| m.len()).max().unwrap_or(0);
     let earliest = s.len().saturating_sub(longest.saturating_sub(1));
 

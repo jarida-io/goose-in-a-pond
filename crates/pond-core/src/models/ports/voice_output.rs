@@ -1,5 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use pond_voice::text::SpeechUnit;
 
 #[async_trait]
 pub trait VoiceOutput: Send + Sync {
@@ -9,6 +10,11 @@ pub trait VoiceOutput: Send + Sync {
     /// Synthesize without playing (to overlap with playback); `None` = unsupported, use `speak()`.
     async fn synthesize(&self, _text: &str) -> Result<Option<Vec<u8>>> {
         Ok(None)
+    }
+    /// [`Self::synthesize`] for one unit of a longer text, which says what follows it so an
+    /// output can end the unit in the matching silence. Wrappers must forward it.
+    async fn synthesize_unit(&self, unit: &SpeechUnit) -> Result<Option<Vec<u8>>> {
+        self.synthesize(&unit.text).await
     }
 
     /// Play `synthesize()` output; returns when playback finishes.
