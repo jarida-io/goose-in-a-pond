@@ -128,6 +128,7 @@ export interface Settings {
 
   // Active model selection
   active_embedding_model?: string;
+  /** `"none"` is off; any other value is on, and the Memory-role model picks the engine. */
   embedding_provider?: string;
 
   // Voice KWS tuning
@@ -606,8 +607,22 @@ export interface ContextCorpusCoverage {
   coverage: number | null;
 }
 
+/** Where the Memory-role embedder is in its life: `chosen` waits for a quiet moment to load. */
+export type EmbedderState = "off" | "chosen" | "loading" | "ready" | "failed";
+
+/** Mirrors `embedder_status` in pond-api routes.rs; present whether or not an index exists. */
+export interface EmbedderHealth {
+  state: EmbedderState;
+  /** The stamp on its vectors, which is not always the catalogue name (`embeddinggemma-2-256`). */
+  model_id: string | null;
+  /** The pond's own words for a failed load; null in every other state. */
+  reason: string | null;
+}
+
 /** How much of what the pond knows retrieval can currently reach. */
 export interface ContextIndexHealth {
+  /** Absent from a pond that predates the live embedder switch. */
+  embedder?: EmbedderHealth;
   indexed: boolean;
   /** Why there is nothing to report. Sent only when `indexed` is false. */
   reason?: string;

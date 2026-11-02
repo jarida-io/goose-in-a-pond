@@ -5,7 +5,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Plus, Search, RefreshCw, Pencil, Trash2, Check, X } from "lucide-react";
 import { api } from "../api/PondApiClient";
-import type { ContextIndexHealth, MemoryFragment } from "../api/types";
+import type { MemoryFragment } from "../api/types";
+import { useEmbedderHealth } from "../hooks/useEmbedderHealth";
 import { ConnectionsPanel } from "../connections/ConnectionsPanel";
 import { UberAccountsPanel } from "../connections/UberAccountsPanel";
 import { WebSearchPanel } from "../connections/WebSearchPanel";
@@ -46,7 +47,8 @@ export function Context() {
   const { sessionId } = useAppState();
   const [view, setView] = useState<View>("remembered");
   const [memories, setMemories] = useState<MemoryFragment[]>([]);
-  const [health, setHealth] = useState<ContextIndexHealth | null>(null);
+  const embedder = useEmbedderHealth();
+  const health = embedder.health;
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -56,24 +58,23 @@ export function Context() {
   const [editDraft, setEditDraft] = useState("");
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
 
+  const { refresh: refreshHealth } = embedder;
   const load = useCallback(async () => {
     setLoading(true);
+    // A changed memory changes what the index still has to read.
+    void refreshHealth();
     try {
       // 500, not the default 20: the lineage view is meaningless over a slice.
-      const [rows, index] = await Promise.all([
-        api.listMemories(500),
-        api.getContextIndexHealth().catch(() => null),
-      ]);
+      const rows = await api.listMemories(500);
       // For an empty body `request` returns undefined typed as T; coerce, or `.filter` white-screens.
       setMemories(Array.isArray(rows) ? rows : []);
-      setHealth(index);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not read what the pond remembers.");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [refreshHealth]);
 
   useEffect(() => {
     void load();
@@ -305,7 +306,14 @@ export function Context() {
       )}
 
       {view === "lineage" && (
-        <Lineage memories={memories} health={health} onRebuilt={() => void load()} />
+        <Lineage
+          memories={memories}
+          health={health}
+          onRebuilt={() => void load()}
+          onRetry={() => void embedder.retry().catch((e) => setError(e instanceof Error ? e.message : String(e)))}
+          retrying={embedder.retrying}
+          downloading={embedder.downloading}
+        />
       )}
     </div>
   );

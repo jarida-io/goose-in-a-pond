@@ -241,6 +241,69 @@ export function voice(name = "af_heart", over: Partial<ModelEntry> = {}): ModelE
   };
 }
 
+/** The numbers the server sends for EmbeddingGemma 2, only on a pond that keeps the Orin budget. */
+export const EG2_ORIN = {
+  device: "orin" as const,
+  summary:
+    "Searches memory in 18 ms on the GPU or 41 ms on the CPU. Puts the right Swahili or mixed-language fact in its top five 73% of the time, against 39% for the default",
+  measured_on: "2026-10-31",
+};
+
+/** A Memory model, as the server sends it: its whole description is its title. */
+function embeddingRow(name: string, description: string, over: Partial<ModelEntry> = {}): ModelEntry {
+  return {
+    id: `embedding/${name}`,
+    provider: "embedding",
+    category: "embedding",
+    name,
+    display_name: description,
+    title: description,
+    is_active: false,
+    downloaded: false,
+    recommended_role: "embedding",
+    provenance: "catalogue",
+    kind: "helper",
+    acquire: "download",
+    companions: [],
+    ...over,
+  };
+}
+
+export function miniLm(over: Partial<ModelEntry> = {}): ModelEntry {
+  return embeddingRow(
+    "all-MiniLM-L6-v2",
+    "all-MiniLM-L6-v2 \u2014 fast, lightweight sentence embeddings. 23 MB, 384 dimensions. Best for domain classification and semantic search.",
+    { size_mb: 23, ram_estimate_mb: 50, acquire: "external", ...over },
+  );
+}
+
+export function nomicEmbed(over: Partial<ModelEntry> = {}): ModelEntry {
+  return embeddingRow(
+    "nomic-embed-text-v1.5",
+    "Nomic Embed Text v1.5 \u2014 8-bit GGUF run by llama.cpp. 768 dimensions, tuned for search.",
+    { size_mb: 139, ram_estimate_mb: 173, filename: "nomic-embed-text-v1.5.Q8_0.gguf", ...over },
+  );
+}
+
+export function eg2(over: Partial<ModelEntry> = {}): ModelEntry {
+  return embeddingRow(
+    "embeddinggemma-2",
+    "EmbeddingGemma 2 \u2014 8-bit GGUF run by llama.cpp. Over 100 languages, so a fact said in Swahili is found by a question in English. 256 dimensions.",
+    {
+      size_mb: 295,
+      ram_estimate_mb: 368,
+      filename: "embeddinggemma-2-Q8_0.gguf",
+      recommended: { rank: "primary", reason: "Finds facts in Swahili, Sheng or English, whichever language you ask in" },
+      ...over,
+    },
+  );
+}
+
+/** The roles reply with Memory on `model` ("" means nobody chose: the pond runs its default). */
+export function memoryRoles(model: string, provider = "auto"): ModelActiveRoles {
+  return { ...NO_ROLES, embedding: { provider, model } };
+}
+
 /** The Orin's reading with nothing loaded: 4.2 GB fits, 4.2 GB with its picture support does not. */
 export const ORIN_MEMORY: ModelMemoryStatus = {
   total_mb: 7620,

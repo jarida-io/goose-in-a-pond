@@ -6,6 +6,7 @@ import { api } from "../api/PondApiClient";
 import type { ModelEntry } from "../api/types";
 import type { UseModels } from "./useModels";
 import { controlResult, startedText, type ModelTransfer, type TransferAction } from "../sections/models/modelDownloads";
+import { memoryChosenText } from "../sections/models/memoryEmbedder";
 import {
   ROLES, type RoleKey, fitsOnlyWithoutPictures, modelLabel, offersPictures,
 } from "../sections/models/modelsView";
@@ -67,9 +68,16 @@ export function useModelActions(
         // and `provider` is only the list endpoint's group key ("tts").
         await api.activateModel(m.category ?? m.provider, m.name, role);
         await Promise.all([reloadRoles(), reloadMemory()]);
+        if (role === "embedding") {
+          // The pond fetches a chosen file that is missing, so the page has to start watching for it.
+          await reloadDownloads();
+          watchDownloads();
+          say(memoryChosenText(m));
+          return;
+        }
         say(`Now using ${modelLabel(m)} for ${ROLES.find((r) => r.key === role)?.label.toLowerCase()}.`);
       }),
-    [attempt, reloadRoles, reloadMemory, say],
+    [attempt, reloadRoles, reloadMemory, reloadDownloads, watchDownloads, say],
   );
 
   const download = useCallback(

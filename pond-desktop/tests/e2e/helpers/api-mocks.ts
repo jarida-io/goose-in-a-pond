@@ -306,12 +306,34 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
         saw_activity_since_start: true,
         would_run: "titling",
         idle_reason: null,
+        embedding_slot: { running: false, running_for_secs: null },
         jobs: [
           { job: "consolidation", title: "Tidy the memory store", present: true, registered: true, enabled: true, since_last_run_secs: 3600, interval_floor_secs: 86400, idle_threshold_secs: 900, blocked_by: "interval_floor", would_run_next: false },
           { job: "titling", title: "Name conversations", present: true, registered: true, enabled: true, since_last_run_secs: 300, interval_floor_secs: 300, idle_threshold_secs: 900, blocked_by: null, would_run_next: true },
           { job: "proactive_review", title: "Look for something to suggest", present: true, registered: false, enabled: false, since_last_run_secs: null, interval_floor_secs: 0, idle_threshold_secs: 0, blocked_by: null, would_run_next: false },
           { job: "summary_refresh", title: "Refresh conversation summaries", present: true, registered: true, enabled: true, since_last_run_secs: 120, interval_floor_secs: 30, idle_threshold_secs: 120, blocked_by: "still_active", would_run_next: false },
           { job: "memory_extraction", title: "Read conversations for memories", present: true, registered: true, enabled: true, since_last_run_secs: null, interval_floor_secs: 60, idle_threshold_secs: 900, blocked_by: "still_active", would_run_next: false },
+        ],
+      },
+    }),
+  );
+  // The Memory embedder at rest: loaded, with every row reachable. Specs that watch a switch replace it.
+  await page.route("**/api/v1/context/index/health", (route) =>
+    route.fulfill({
+      json: {
+        indexed: true,
+        embedder: { state: "ready", model_id: "all-MiniLM-L6-v2", reason: null },
+        model_id: "all-MiniLM-L6-v2",
+        dims: 384,
+        rows: 95,
+        matching: 95,
+        mismatched: 0,
+        missing: 0,
+        coverage: 1,
+        corpora: [
+          { corpus: "memory", rows: 45, source_rows: 45, indexed_rows: 45, missing_rows: 0, mismatched: 0, coverage: 1, structurally_excluded: false },
+          { corpus: "context", rows: 0, source_rows: 0, indexed_rows: 0, missing_rows: 0, mismatched: 0, coverage: null, structurally_excluded: false },
+          { corpus: "summary", rows: 50, source_rows: 50, indexed_rows: 50, missing_rows: 0, mismatched: 0, coverage: 1, structurally_excluded: false },
         ],
       },
     }),

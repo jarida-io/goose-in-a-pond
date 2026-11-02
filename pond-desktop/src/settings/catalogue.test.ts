@@ -110,6 +110,22 @@ describe("settings catalogue", () => {
     }
   });
 
+  // The toggle's two strings go to the server verbatim, so each has to pass the validator it ships with.
+  it("accepts both values a string-valued switch writes", () => {
+    for (const e of entries) {
+      if (e.control.kind !== "toggle" || !e.control.values) continue;
+      expect(e.validate, `${e.key} writes strings and must validate them`).toBeTypeOf("function");
+      expect(e.validate!(e.control.values.on), `${e.key} rejects its own "on"`).toBeNull();
+      expect(e.validate!(e.control.values.off), `${e.key} rejects its own "off"`).toBeNull();
+    }
+    const provider = entries.find((e) => e.key === "embedding_provider")!;
+    expect(provider.control).toEqual({ kind: "toggle", values: { on: "auto", off: "none" } });
+    // The engine names the pond stored before the switch existed still pass, so no save is blocked.
+    expect(provider.validate!("fastembed")).toBeNull();
+    expect(provider.validate!("gguf")).toBeNull();
+    expect(provider.validate!("ollama")).toBeTruthy();
+  });
+
   it("bounds every numeric control it validates", () => {
     // Without min/max the number box renders no native stepper limits.
     const unbounded = entries

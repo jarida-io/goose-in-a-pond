@@ -119,6 +119,79 @@ export const whisperBase = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+const EG2_REASON = "Finds facts in Swahili, Sheng or English, whichever language you ask in";
+
+/** A Memory model as the server sends it: its whole description is its title. */
+const embeddingRow = (name: string, description: string, over: Record<string, unknown> = {}) => ({
+  id: `embedding/${name}`,
+  category: "embedding",
+  name,
+  title: description,
+  description,
+  downloaded: false,
+  active: false,
+  recommended_role: "embedding",
+  provenance: "catalogue",
+  kind: "helper",
+  acquire: "download",
+  companions: [],
+  ...over,
+});
+
+export const miniLmRow = (over: Record<string, unknown> = {}) =>
+  embeddingRow(
+    "all-MiniLM-L6-v2",
+    "all-MiniLM-L6-v2 \u2014 fast, lightweight sentence embeddings. 23 MB, 384 dimensions. Best for domain classification and semantic search.",
+    { size_mb: 23, acquire: "external", ...over },
+  );
+
+export const nomicRow = (over: Record<string, unknown> = {}) =>
+  embeddingRow(
+    "nomic-embed-text-v1.5",
+    "Nomic Embed Text v1.5 \u2014 8-bit GGUF run by llama.cpp. 768 dimensions, tuned for search.",
+    { size_mb: 139, filename: "nomic-embed-text-v1.5.Q8_0.gguf", ...over },
+  );
+
+export const eg2Row = (over: Record<string, unknown> = {}) =>
+  embeddingRow(
+    "embeddinggemma-2",
+    "EmbeddingGemma 2 \u2014 8-bit GGUF run by llama.cpp. Over 100 languages, so a fact said in Swahili is found by a question in English. 256 dimensions.",
+    {
+      size_mb: 295,
+      filename: "embeddinggemma-2-Q8_0.gguf",
+      recommended: { rank: "primary", reason: EG2_REASON },
+      ...over,
+    },
+  );
+
+/** The three Memory models a pond with the default on it offers. */
+export const memoryRows = () => [eg2Row(), miniLmRow(), nomicRow()];
+
+/** What the index reports with Memory on EmbeddingGemma 2; the embedder and the rows reached are the dials. */
+export function memoryHealth(
+  embedder: { state?: string; model_id?: string | null; reason?: string | null } = {},
+  over: Record<string, unknown> = {},
+) {
+  const model_id = embedder.model_id === undefined ? "embeddinggemma-2-256" : embedder.model_id;
+  return {
+    indexed: true,
+    embedder: { state: "ready", model_id, reason: null, ...embedder },
+    model_id,
+    dims: 256,
+    rows: 95,
+    matching: 95,
+    mismatched: 0,
+    missing: 0,
+    coverage: 1,
+    corpora: [
+      { corpus: "memory", rows: 45, source_rows: 45, indexed_rows: 45, missing_rows: 0, mismatched: 0, coverage: 1, structurally_excluded: false },
+      { corpus: "context", rows: 0, source_rows: 0, indexed_rows: 0, missing_rows: 0, mismatched: 0, coverage: null, structurally_excluded: false },
+      { corpus: "summary", rows: 50, source_rows: 50, indexed_rows: 50, missing_rows: 0, mismatched: 0, coverage: 1, structurally_excluded: false },
+    ],
+    ...over,
+  };
+}
+
 /** A pond with Gemma 4 E2B on it and the rest of the picks still to get. */
 export function typicalModels(over: Record<string, unknown[]> = {}) {
   return {
@@ -144,6 +217,8 @@ export interface ModelMocks {
   roles?: Record<string, unknown>;
   memory?: Record<string, unknown>;
   downloads?: unknown[];
+  /** The index report, with the embedder's own state in it. */
+  health?: Record<string, unknown>;
 }
 
 /** Specific models routes, to register AFTER `mockAllApiRoutes`: the last registered wins. */
@@ -161,6 +236,9 @@ export async function mockModels(page: Page, opts: ModelMocks = {}): Promise<voi
       },
     }),
   );
+  if (opts.health) {
+    await page.route("**/api/v1/context/index/health", (r) => r.fulfill({ json: opts.health }));
+  }
   await page.route("**/api/v1/models/memory-status", (r) => r.fulfill({ json: opts.memory ?? ORIN_MEMORY }));
   await page.route("**/api/v1/models/download/progress", (r) =>
     r.fulfill({ json: { downloads: opts.downloads ?? [] } }),
