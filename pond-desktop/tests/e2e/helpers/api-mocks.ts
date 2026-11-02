@@ -311,7 +311,6 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
           { job: "titling", title: "Name conversations", present: true, registered: true, enabled: true, since_last_run_secs: 300, interval_floor_secs: 300, idle_threshold_secs: 900, blocked_by: null, would_run_next: true },
           { job: "proactive_review", title: "Look for something to suggest", present: true, registered: false, enabled: false, since_last_run_secs: null, interval_floor_secs: 0, idle_threshold_secs: 0, blocked_by: null, would_run_next: false },
           { job: "summary_refresh", title: "Refresh conversation summaries", present: true, registered: true, enabled: true, since_last_run_secs: 120, interval_floor_secs: 30, idle_threshold_secs: 120, blocked_by: "still_active", would_run_next: false },
-          { job: "index_maintenance", title: "Maintain the search index", present: false, registered: false, enabled: false, since_last_run_secs: null, interval_floor_secs: 0, idle_threshold_secs: 0, blocked_by: null, would_run_next: false },
           { job: "memory_extraction", title: "Read conversations for memories", present: true, registered: true, enabled: true, since_last_run_secs: null, interval_floor_secs: 60, idle_threshold_secs: 900, blocked_by: "still_active", would_run_next: false },
         ],
       },

@@ -131,10 +131,10 @@ Never write sensor, camera or telemetry rows to `db.system`; they live here.
 
 The table deliberately has no text column and no foreign keys. A source row and its vector cannot
 be deleted atomically across files under WAL, so orphans are expected; an orphan holds only an
-offset, resolves to nothing on the join, and `VectorIndex::prune_orphans` (called from
-`crates/pond-core/src/context/index_maintenance.rs`) removes it. Retrieval filters on `model_id`,
-so vectors from a different embedder are never scored together. Deleting the file is safe: the pond
-re-embeds.
+offset, resolves to nothing on the join, and `VectorIndex::prune_orphans` (called by the embedding
+slot, `crates/pond-core/src/context/embedding_slot.rs`, once its backlog drains) removes it.
+Retrieval filters on `model_id`, so vectors from a different embedder are never scored together.
+Deleting the file is safe: the slot re-embeds every row from its source.
 
 ---
 

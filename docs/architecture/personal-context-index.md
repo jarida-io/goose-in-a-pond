@@ -4,6 +4,12 @@
 2026-08-17. Still open by design: G's passive prompt tier (a measurement, not a guess) and F's media
 captioning (waiting on an encoder measured on the Orin, §1.8). See §7.**
 
+> Status (2026-11-02): the embedding slot (`context-space.md` 6.2) replaced phase D's sweep
+> (`run_index_maintenance`), the startup backfill, `summary_indexing`, adoption by width
+> (`backfill_from_source`, which stamped a same-width vector of another model as the current one's)
+> and `search_stale_dimension`. A row is now re-embedded whenever the index holds no vector for it
+> under the current model; nothing is adopted.
+
 > Status (2026-10-23): unchanged against the code. Context items still reach the model only through
 > the `giap-context` tools (`search_context`, `recall`, `get_recent_context`), behind
 > `ext_context_enabled`, which ships off; nothing captions media; `embedding_provider` still defaults

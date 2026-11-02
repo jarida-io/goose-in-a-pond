@@ -67,6 +67,9 @@ impl FastembedEmbeddingProvider {
     }
 }
 
+/// fastembed's own default batch size; the embedding slot's time budget usually packs fewer.
+const MAX_BATCH: usize = 256;
+
 #[async_trait]
 impl EmbeddingProvider for FastembedEmbeddingProvider {
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
@@ -89,6 +92,25 @@ impl EmbeddingProvider for FastembedEmbeddingProvider {
         .map_err(|e| anyhow!("spawn_blocking join error: {e}"))??;
 
         Ok(result)
+    }
+
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let model = Arc::clone(&self.model);
+        let owned = texts.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let mut guard = model
+                .lock()
+                .map_err(|e| anyhow!("fastembed mutex poisoned: {e}"))?;
+            guard
+                .embed(owned, None)
+                .map_err(|e| anyhow!("fastembed embed failed: {e}"))
+        })
+        .await
+        .map_err(|e| anyhow!("spawn_blocking join error: {e}"))?
+    }
+
+    fn max_batch(&self) -> usize {
+        MAX_BATCH
     }
 
     fn dimensions(&self) -> usize {

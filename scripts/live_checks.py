@@ -1115,7 +1115,7 @@ def section_redaction():
 VECTORS_DB = os.path.join(DATA_DIR, "pond_vectors.db")
 
 # Stored by live-test.sh with no vector while the first server is down, so only the second
-# server's boot backfill can have embedded it.
+# server's embedding slot can have embedded it.
 UNEMBEDDED_BEFORE_RESTART_ID = "live-unembedded-before-restart"
 
 
@@ -1275,12 +1275,11 @@ def section_memory_vectors():
 
 
 def section_memory_vectors_after_restart():
-    """Both repairs for a memory with no vector: the next boot, and the sweep rung by hand.
+    """Both repairs for a memory with no vector: the embedding slot after boot, and Reindex.
 
-    The sweep runs last, after `section_lane_clock_after_restart`, which needs every job but
-    titling never to have run.
+    Runs last: Reindex empties the whole index, which the slot then refills.
     """
-    print("\n=== memory vectors after a restart: the boot backfill and the sweep ===")
+    print("\n=== memory vectors after a restart: the embedding slot and Reindex ===")
     dims = _embedder_dims("memory vectors after a restart")
     if not dims:
         return
@@ -1298,7 +1297,7 @@ def section_memory_vectors_after_restart():
         return
     vector = _wait_for_vector(UNEMBEDDED_BEFORE_RESTART_ID, 30)
     check(
-        "the boot backfill embedded it",
+        "the embedding slot embedded it after boot",
         vector is not None and len(vector) == width,
         "no vector after 30s" if vector is None else "%d bytes" % len(vector),
     )
@@ -1308,7 +1307,7 @@ def section_memory_vectors_after_restart():
         _index_state(UNEMBEDDED_BEFORE_RESTART_ID, vector),
     )
 
-    # A save whose embed failed after boot: only the sweep repairs it.
+    # A save whose embed failed after boot: the slot repairs it, here at once through Reindex.
     sweep_id = "live-unembedded-sweep"
     con = db()
     con.execute(
@@ -1318,17 +1317,17 @@ def section_memory_vectors_after_restart():
     )
     con.commit()
     con.close()
-    code, body = call("POST", "/api/v1/lane/jobs/index_maintenance/run")
+    code, body = call("POST", "/api/v1/context/index/rebuild")
     if expect(
-        "the index sweep can be rung",
+        "Reindex rings the embedding slot",
         code,
         200,
         body,
-        ("it woke", lambda b: isinstance(b, dict) and b.get("woken") is True),
+        ("it is refilling", lambda b: isinstance(b, dict) and b.get("refilling") is True),
     ):
         swept = _wait_for_vector(sweep_id, 60)
         check(
-            "the sweep embedded a memory stored without a vector",
+            "the slot embedded a memory stored without a vector",
             swept is not None and len(swept) == width,
             "no vector after 60s" if swept is None else "%d bytes" % len(swept),
         )
@@ -1596,6 +1595,11 @@ def section_inference_lane():
         # answered.
         ("says whether this process has a lane at all", lambda b: "lane" in b),
         ("carries a job list", lambda b: isinstance(b.get("jobs"), list)),
+        (
+            "shows whether the embedding slot is running",
+            lambda b: b.get("lane") is False
+            or isinstance(b.get("embedding_slot", {}).get("running"), bool),
+        ),
     )
 
     jobs = body.get("jobs", []) if isinstance(body, dict) else []
@@ -1616,7 +1620,6 @@ def section_inference_lane():
         "titling",
         "proactive_review",
         "summary_refresh",
-        "index_maintenance",
         "memory_extraction",
     ]
     check(

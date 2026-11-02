@@ -11,7 +11,7 @@ use pond_core::user_data::ports::lane_control::{
 };
 use pond_core::user_data::services::consolidation_schedule;
 use pond_core::user_data::services::inference_lane::{
-    self, JobState, LaneDecision, LaneInputs, LaneJob,
+    self, EmbedGate, JobState, LaneDecision, LaneInputs, LaneJob,
 };
 
 /// Proof of owning the inference slot; a drop releases it, so early returns can't wedge it.
@@ -119,9 +119,34 @@ pub struct InferenceLane {
     /// Whether a turn is being answered; see [`InferenceLane::watch_turns`]. Unset in tests and
     /// before the API state exists, when no turn can be running.
     turns: std::sync::OnceLock<TurnProbe>,
+    /// Since when the embedding slot has been embedding, while it is. Std, never held across an
+    /// await; cleared by [`EmbeddingSlotShown`]'s `Drop`.
+    embedding_slot: std::sync::Mutex<Option<Instant>>,
 }
 
 type TurnProbe = Box<dyn Fn() -> bool + Send + Sync>;
+
+/// Every registered job's state, in declaration order, which `select_next` breaks ties by.
+fn job_states(
+    registry: &HashMap<LaneJob, Registration>,
+    last_run: &HashMap<LaneJob, DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Vec<JobState> {
+    let mut states: Vec<JobState> = registry
+        .iter()
+        .map(|(&job, reg)| JobState {
+            job,
+            enabled: reg.enabled,
+            since_last_run: last_run.get(&job).map(|t| elapsed_since(now, *t)),
+            interval_floor: reg.interval_floor,
+            idle_threshold: reg.idle_threshold,
+            exempt_from_activity_gate: reg.exempt_from_activity_gate,
+        })
+        .collect();
+    // Undo HashMap order; `LaneJob: Ord` is declaration order.
+    states.sort_unstable_by_key(|s| s.job);
+    states
+}
 
 /// Saturating elapsed time between wall-clock stamps. A future `then` (NTP step, RTC-less boot)
 /// reads as zero, holding the job behind its floor rather than firing every job at once.
@@ -165,6 +190,7 @@ impl InferenceLane {
             observed: std::sync::Mutex::new(None),
             tallies: std::sync::Mutex::new(HashMap::new()),
             turns: std::sync::OnceLock::new(),
+            embedding_slot: std::sync::Mutex::new(None),
         })
     }
 
@@ -178,6 +204,56 @@ impl InferenceLane {
 
     fn turn_running(&self) -> bool {
         self.turns.get().is_some_and(|running| running())
+    }
+
+    /// The household's activity as the last tick of any job read it, extrapolated to now. No
+    /// tick yet: nothing has observed the household, so no activity and zero idle.
+    fn observed_now(&self) -> (bool, Duration) {
+        match self.observed.lock().ok().and_then(|o| *o) {
+            Some(o) => (o.saw_activity_since_start, o.idle_for + o.at.elapsed()),
+            None => (false, Duration::ZERO),
+        }
+    }
+
+    fn holder_job(&self) -> Option<LaneJob> {
+        self.holder
+            .lock()
+            .map(|h| h.map(|(job, _)| job))
+            .unwrap_or_else(|poisoned| poisoned.into_inner().map(|(job, _)| job))
+    }
+
+    /// Whether the embedding slot may embed a batch now; see
+    /// [`inference_lane::embedding_may_run`]. It reads the lane and never takes its slot.
+    pub async fn embedding_may_run(&self) -> bool {
+        let turn_running = self.turn_running();
+        let holder = self.holder_job();
+        let (saw_activity_since_start, idle_for) = self.observed_now();
+        let states = {
+            let registry = self.registry.lock().await;
+            let last_run = self
+                .last_run
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            job_states(&registry, &last_run, Utc::now())
+        };
+        inference_lane::embedding_may_run(EmbedGate {
+            turn_running,
+            holder,
+            lane: LaneInputs {
+                saw_activity_since_start,
+                idle_for,
+                jobs: &states,
+                asking: None,
+            },
+        })
+    }
+
+    /// Shows the embedding slot as running in the snapshot until the guard drops.
+    pub fn embedding_slot_running(&self) -> EmbeddingSlotShown<'_> {
+        if let Ok(mut since) = self.embedding_slot.lock() {
+            since.get_or_insert_with(Instant::now);
+        }
+        EmbeddingSlotShown { lane: self }
     }
 
     fn tally(&self, job: LaneJob, f: impl FnOnce(&mut Tally)) {
@@ -251,21 +327,7 @@ impl InferenceLane {
                 .last_run
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let now = Utc::now();
-            let mut states: Vec<JobState> = registry
-                .iter()
-                .map(|(&j, reg)| JobState {
-                    job: j,
-                    enabled: reg.enabled,
-                    since_last_run: last_run.get(&j).map(|t| elapsed_since(now, *t)),
-                    interval_floor: reg.interval_floor,
-                    idle_threshold: reg.idle_threshold,
-                    exempt_from_activity_gate: reg.exempt_from_activity_gate,
-                })
-                .collect();
-
-            // Ties break by position, so undo HashMap order; `LaneJob: Ord` is declaration order.
-            states.sort_unstable_by_key(|s| s.job);
+            let mut states = job_states(&registry, &last_run, Utc::now());
 
             // Waiver on the asker's copy only, so it never reaches another job's tick.
             if waive {
@@ -386,6 +448,20 @@ impl Cadence {
     }
 }
 
+/// Marks the embedding slot running for `/lane`; dropping it clears the mark.
+pub struct EmbeddingSlotShown<'a> {
+    lane: &'a InferenceLane,
+}
+
+impl Drop for EmbeddingSlotShown<'_> {
+    fn drop(&mut self) {
+        match self.lane.embedding_slot.lock() {
+            Ok(mut since) => *since = None,
+            Err(poisoned) => *poisoned.into_inner() = None,
+        }
+    }
+}
+
 /// Both of a job's bells, handed over by [`InferenceLane::claim`].
 pub struct Bells {
     by_hand: Arc<tokio::sync::Notify>,
@@ -393,22 +469,9 @@ pub struct Bells {
 }
 
 impl Bells {
-    /// The bell a person rings, for callers that need it alone (the Reindex button).
-    pub fn hand_bell(&self) -> Arc<tokio::sync::Notify> {
-        self.by_hand.clone()
-    }
-
     /// A nudge that keeps every gate: for work that arrived and should run once it is polite to.
     pub fn nudge_bell(&self) -> Arc<tokio::sync::Notify> {
         self.scheduled.clone()
-    }
-
-    /// Which bell rang; for the sweep, whose own `select!` can't use `wait_for_tick`.
-    pub async fn rang(&self) -> Tick {
-        tokio::select! {
-            _ = self.by_hand.notified() => Tick::HandAsked,
-            _ = self.scheduled.notified() => Tick::Scheduled,
-        }
     }
 }
 
@@ -446,13 +509,8 @@ impl pond_core::user_data::ports::lane_control::LaneControl for InferenceLane {
     async fn snapshot(&self) -> LaneSnapshot {
         use pond_core::user_data::services::consolidation_schedule::{self as sched, GateInputs};
 
-        // No tick yet: nothing has observed the household, so no activity and zero idle.
-        let observed = self.observed.lock().ok().and_then(|o| *o);
-        let (saw_activity_since_start, idle_for) = match observed {
-            // Extrapolated; if somebody came back, the next tick corrects it.
-            Some(o) => (o.saw_activity_since_start, o.idle_for + o.at.elapsed()),
-            None => (false, Duration::ZERO),
-        };
+        // Extrapolated; if somebody came back, the next tick corrects it.
+        let (saw_activity_since_start, idle_for) = self.observed_now();
 
         let tallies = self
             .tallies
@@ -474,18 +532,7 @@ impl pond_core::user_data::ports::lane_control::LaneControl for InferenceLane {
         let now = Utc::now();
 
         // Registered jobs only: an unticked job has no cadence, and a default would invent one.
-        let mut states: Vec<JobState> = registry
-            .iter()
-            .map(|(&job, reg)| JobState {
-                job,
-                enabled: reg.enabled,
-                since_last_run: last_run.get(&job).map(|t| elapsed_since(now, *t)),
-                interval_floor: reg.interval_floor,
-                idle_threshold: reg.idle_threshold,
-                exempt_from_activity_gate: reg.exempt_from_activity_gate,
-            })
-            .collect();
-        states.sort_unstable_by_key(|s| s.job);
+        let states = job_states(&registry, &last_run, now);
 
         let decision = inference_lane::select_next(LaneInputs {
             saw_activity_since_start,
@@ -566,6 +613,11 @@ impl pond_core::user_data::ports::lane_control::LaneControl for InferenceLane {
             running_for_secs: running.map(|(_, since)| since.elapsed().as_secs()),
             // From the holder: a status read must never take the slot itself.
             slot_busy: running.is_some(),
+            embedding_slot_running_for_secs: self
+                .embedding_slot
+                .lock()
+                .ok()
+                .and_then(|since| since.map(|at| at.elapsed().as_secs())),
         }
     }
 
@@ -1247,6 +1299,86 @@ mod tests {
             titling.since_last_run_secs.is_some(),
             "and it has run, so it is no longer infinitely starved"
         );
+    }
+
+    #[tokio::test]
+    async fn the_embedding_slot_waits_on_a_compaction_and_runs_beside_a_chore() {
+        let lane = InferenceLane::new();
+        let _c = lane.claim(LaneJob::Compaction);
+        let _t = lane.claim(LaneJob::Titling);
+        assert!(lane.embedding_may_run().await, "an idle lane");
+
+        let held = ask(&lane, LaneJob::Compaction).await.expect("free slot");
+        assert!(
+            !lane.embedding_may_run().await,
+            "a compaction holds the slot"
+        );
+        drop(held);
+        // Nothing left to compact, so its loop asks with `enabled: false`.
+        assert!(lane
+            .acquire(
+                LaneJob::Compaction,
+                false,
+                Cadence::new(Duration::ZERO, IDLE_THRESHOLD, false),
+                false,
+                true,
+                LONG_IDLE,
+            )
+            .await
+            .is_none());
+
+        let chore = ask(&lane, LaneJob::Titling).await.expect("free slot");
+        assert!(
+            lane.embedding_may_run().await,
+            "the slot is no second lane slot: it may run beside a chore"
+        );
+        drop(chore);
+    }
+
+    #[tokio::test]
+    async fn the_embedding_slot_waits_out_a_turn_and_a_due_long_task_step() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let running = Arc::new(AtomicBool::new(true));
+        let lane = InferenceLane::new();
+        let probe = running.clone();
+        lane.watch_turns(move || probe.load(Ordering::Relaxed));
+        assert!(!lane.embedding_may_run().await, "a turn is being answered");
+        running.store(false, Ordering::Relaxed);
+        assert!(lane.embedding_may_run().await);
+
+        let _bells = lane.claim(LaneJob::LongTaskStep);
+        let step = lane
+            .acquire(
+                LaneJob::LongTaskStep,
+                true,
+                Cadence::new(Duration::ZERO, Duration::from_secs(10), true),
+                false,
+                true,
+                LONG_IDLE,
+            )
+            .await
+            .expect("free slot");
+        assert!(!lane.embedding_may_run().await, "a step holds the slot");
+        drop(step);
+        assert!(
+            !lane.embedding_may_run().await,
+            "the task's next step is due at once"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_snapshot_shows_the_embedding_slot_while_it_runs() {
+        use pond_core::user_data::ports::lane_control::LaneControl;
+
+        let lane = InferenceLane::new();
+        assert_eq!(lane.snapshot().await.embedding_slot_running_for_secs, None);
+        let shown = lane.embedding_slot_running();
+        let snapshot = lane.snapshot().await;
+        assert_eq!(snapshot.embedding_slot_running_for_secs, Some(0));
+        assert!(!snapshot.slot_busy, "it never holds the lane's slot");
+        drop(shown);
+        assert_eq!(lane.snapshot().await.embedding_slot_running_for_secs, None);
     }
 
     /// Not exempt: these tests cover the shared gate and tie-break, which exempt jobs skip.

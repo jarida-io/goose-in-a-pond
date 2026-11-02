@@ -166,10 +166,10 @@ describe("the history beside the instant", () => {
       blocked_by: null,
       granted: 0,
       lost_to_total: 1340,
-      lost_to_most: { job: "index_maintenance", times: 1340 },
+      lost_to_most: { job: "summary_refresh", times: 1340 },
     });
     expect(describeWait(losing)).toBe("Ready");
-    expect(describeHistory(losing)).toContain("waited behind index maintenance 1340×");
+    expect(describeHistory(losing)).toContain("waited behind summary refresh 1340×");
   });
 
   it("says how often it has actually run", () => {

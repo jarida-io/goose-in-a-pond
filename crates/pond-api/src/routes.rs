@@ -14345,7 +14345,7 @@ fn default_source() -> String {
     "api".to_string()
 }
 
-/// The text's document vector, or `None` to leave the row for the index sweep; never fails a save.
+/// The text's document vector, or `None` to leave the row for the embedding slot; never fails a save.
 async fn embed_memory_text(state: &AppState, text: &str) -> Option<Vec<f32>> {
     use pond_core::models::ports::embedding::EmbeddingProvider as _;
     if !state.embedder.available() {
@@ -14354,7 +14354,9 @@ async fn embed_memory_text(state: &AppState, text: &str) -> Option<Vec<f32>> {
     match state.embedder.embed(text).await {
         Ok(vector) => Some(vector),
         Err(e) => {
-            tracing::warn!("could not embed a memory; the index sweep will embed it later: {e:#}");
+            tracing::warn!(
+                "could not embed a memory; the embedding slot will embed it later: {e:#}"
+            );
             None
         }
     }
@@ -14528,7 +14530,7 @@ async fn extraction_status(
 // Both routes answer `lane: false` when this process has no lane, not an empty job list.
 
 /// `GET /api/v1/lane` — what every background job is doing and waiting for.
-/// Figures are up to one poll old (15 min for the index sweep), hence `observed_secs_ago`.
+/// Figures are as of each job's last tick; the embedding slot runs beside the lane.
 async fn lane_status(State(state): State<Arc<AppState>>) -> impl axum::response::IntoResponse {
     let Some(lane) = state.lane.as_ref() else {
         return Json(json!({ "lane": false, "jobs": [] }));
@@ -14580,6 +14582,10 @@ async fn lane_status(State(state): State<Arc<AppState>>) -> impl axum::response:
         "running": snapshot.running.map(|j| j.as_str()),
         "running_title": snapshot.running.map(|j| j.title()),
         "running_for_secs": snapshot.running_for_secs,
+        "embedding_slot": {
+            "running": snapshot.embedding_slot_running_for_secs.is_some(),
+            "running_for_secs": snapshot.embedding_slot_running_for_secs,
+        },
     }))
 }
 
@@ -19206,8 +19212,8 @@ async fn context_index_health(
     })))
 }
 
-/// `POST /api/v1/context/index/rebuild` -- empty the index so the maintenance sweep refills it.
-/// The sweep fills only absent vectors, so this repairs a changed embedder; nothing is lost.
+/// `POST /api/v1/context/index/rebuild` -- empty the index so the embedding slot refills it.
+/// Every row's source survives, so the slot re-embeds all of it; nothing is lost.
 async fn rebuild_context_index(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
@@ -19261,14 +19267,13 @@ async fn rebuild_context_index(
 
     tracing::info!(cleared, "personal-context index cleared for rebuild");
 
-    // Wake the idle-gated sweep (the user isn't idle). `notify_one` stores a permit, so a sweep
-    // mid-pass still runs a fresh pass afterwards.
+    // `notify_one` stores a permit, so a slot mid-pass still runs a fresh pass afterwards.
     let refilling = match state.index_reindex.as_ref() {
         Some(notify) => {
             notify.notify_one();
             true
         }
-        // No sweep to wake; the next process rebuilds from the emptied table.
+        // No slot to wake; the next process rebuilds from the emptied table.
         None => false,
     };
 

@@ -348,8 +348,9 @@ impl VectorIndex for SqliteVectorIndex {
             None => String::new(),
         };
         let extra = liveness_sql(corpus);
+        // DISTINCT: a chunked row matches once per stale passage.
         let sql = format!(
-            "SELECT s.{id_col} FROM {table} s \
+            "SELECT DISTINCT s.{id_col} FROM {table} s \
              LEFT JOIN vectors v ON v.row_id = s.{id_col} AND v.corpus = ? \
              WHERE (v.row_id IS NULL OR v.model_id != ? {staleness}) {extra} \
              LIMIT ?"
@@ -378,7 +379,7 @@ impl VectorIndex for SqliteVectorIndex {
         let extra = liveness_sql(corpus);
         let text = text_sql(corpus);
         let sql = format!(
-            "SELECT s.{id_col}, {text} FROM {table} s \
+            "SELECT DISTINCT s.{id_col}, {text} FROM {table} s \
              LEFT JOIN vectors v ON v.row_id = s.{id_col} AND v.corpus = ? \
              WHERE (v.row_id IS NULL OR v.model_id != ? {staleness}) {extra} \
              LIMIT ?"
@@ -390,58 +391,6 @@ impl VectorIndex for SqliteVectorIndex {
             .fetch_all(&self.pool)
             .await?;
         Ok(rows)
-    }
-
-    async fn backfill_from_source(
-        &self,
-        corpus: Corpus,
-        model_id: &str,
-        expected_dims: usize,
-    ) -> Result<u64> {
-        // Pure SQL across the ATTACH: copies vectors the source already holds, no inference.
-        let (table, id_col) = source_table(corpus);
-        // Sessions hold no vectors; the summary embedding sweep owns that corpus.
-        if corpus == Corpus::Summary {
-            return Ok(0);
-        }
-        let extra = liveness_sql(corpus);
-        // Width filter: a vector from another model must not be restamped with this one.
-        let expected_bytes = (expected_dims * std::mem::size_of::<f32>()) as i64;
-        let rev = match source_rev_sql(corpus) {
-            Some(col) => col,
-            None => "NULL",
-        };
-        // While another model's vectors remain, the store's unindexed ones may be that model's at
-        // the same width, so nothing is adopted until they are re-embedded.
-        let sql = format!(
-            "INSERT INTO vectors (corpus, row_id, model_id, dims, vector, source_rev, embedded_at) \
-             SELECT ?, s.{id_col}, ?, ?, s.embedding, {rev}, ? \
-             FROM {table} s \
-             LEFT JOIN vectors v ON v.row_id = s.{id_col} AND v.corpus = ? \
-             WHERE s.embedding IS NOT NULL AND length(s.embedding) = ? \
-             AND v.row_id IS NULL {extra} \
-             AND NOT EXISTS (SELECT 1 FROM vectors o WHERE o.corpus = ? AND o.model_id != ?)"
-        );
-        let copied = sqlx::query(&sql)
-            .bind(corpus.as_str())
-            .bind(model_id)
-            .bind(expected_dims as i64)
-            .bind(Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true))
-            .bind(corpus.as_str())
-            .bind(expected_bytes)
-            .bind(corpus.as_str())
-            .bind(model_id)
-            .execute(&self.pool)
-            .await?
-            .rows_affected();
-        if copied > 0 {
-            tracing::info!(
-                corpus = corpus.as_str(),
-                copied,
-                "adopted existing vectors into the index"
-            );
-        }
-        Ok(copied)
     }
 
     async fn prune_orphans(&self) -> Result<u64> {
@@ -901,7 +850,6 @@ mod tests {
 mod write_through_tests {
     use super::tests_support::*;
     use super::*;
-    use pond_core::context::vector_index::VectorIndex as _;
     use pond_core::user_data::domain::memory::MemoryFragment;
     use pond_core::user_data::ports::memory_repository::MemoryRepository;
     use std::sync::Arc;
@@ -1166,36 +1114,67 @@ mod write_through_tests {
         assert!(index.get(Corpus::Memory, "m1").await.unwrap().is_none());
     }
 
-    /// After a switch to a model of the same width, the store's unindexed vectors may be the old
-    /// model's; adopting them would stamp them as the new one's.
+    /// A stored vector the index does not vouch for may be another model's at the same width, so
+    /// it is offered for re-embedding, never stamped as the current model's.
     #[tokio::test]
-    async fn adoption_waits_while_another_models_vectors_remain() {
+    async fn a_stored_vector_with_no_index_row_is_re_embedded_not_adopted() {
         let tmp = TempDir::new().unwrap();
         let db = crate::db::Database::init(tmp.path()).await.unwrap();
         let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
         add_memory_with_vector(&db.system, "indexed", &[0.5f32; 8]).await;
         add_memory_with_vector(&db.system, "unindexed", &[0.25f32; 8]).await;
-        index
-            .upsert(&VectorEntry::whole(
-                Corpus::Memory,
-                "indexed".into(),
-                "old".into(),
-                vec![0.5; 8],
-                None,
-            ))
-            .await
-            .unwrap();
+        index_whole(&index, "indexed", &[0.5; 8]).await;
 
-        let copied = index
-            .backfill_from_source(Corpus::Memory, "new", 8)
-            .await
-            .unwrap();
-        assert_eq!(copied, 0);
-        assert!(index
-            .get(Corpus::Memory, "unindexed")
-            .await
-            .unwrap()
-            .is_none());
+        assert_eq!(
+            index
+                .needs_embedding(Corpus::Memory, "m", 10)
+                .await
+                .unwrap(),
+            vec!["unindexed".to_string()]
+        );
+        assert_eq!(
+            index
+                .needs_embedding(Corpus::Memory, "another", 10)
+                .await
+                .unwrap()
+                .len(),
+            2,
+            "under another model both are stale"
+        );
+    }
+
+    /// A chunked row is one row of work, however many of its passages are stale.
+    #[tokio::test]
+    async fn a_chunked_row_is_offered_once() {
+        let tmp = TempDir::new().unwrap();
+        let db = crate::db::Database::init(tmp.path()).await.unwrap();
+        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
+        add_memory_with_vector(&db.system, "m1", &[1.0]).await;
+        for chunk_ix in 0..3 {
+            index
+                .upsert(&VectorEntry {
+                    chunk_ix,
+                    chunk_span: Some((chunk_ix * 10, 10)),
+                    ..VectorEntry::whole(Corpus::Memory, "m1".into(), "old".into(), vec![1.0], None)
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            index
+                .needs_embedding(Corpus::Memory, "new", 10)
+                .await
+                .unwrap(),
+            vec!["m1".to_string()]
+        );
+        assert_eq!(
+            index
+                .needs_embedding_with_text(Corpus::Memory, "new", 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     /// Deleting a memory removes its vector, so the common case needs no sweep.
@@ -1301,10 +1280,8 @@ mod write_through_tests {
 
         add_memory_with_vector(&db.system, "live", &[1.0, 0.0]).await;
         add_memory_with_vector(&db.system, "archived", &[1.0, 0.0]).await;
-        index
-            .backfill_from_source(Corpus::Memory, "m", 2)
-            .await
-            .unwrap();
+        index_whole(&index, "live", &[1.0, 0.0]).await;
+        index_whole(&index, "archived", &[1.0, 0.0]).await;
         sqlx::query("UPDATE memory_fragments SET lifecycle = 'archived' WHERE id = 'archived'")
             .execute(&db.system)
             .await
@@ -1401,10 +1378,8 @@ mod write_through_tests {
         .await
         .unwrap();
         add_memory_with_vector(&db.system, "gone", &[1.0, 0.0]).await;
-        index
-            .backfill_from_source(Corpus::Memory, "m", 2)
-            .await
-            .unwrap();
+        index_whole(&index, "m1", &[1.0, 0.0]).await;
+        index_whole(&index, "gone", &[1.0, 0.0]).await;
 
         // A summary, which resolves from a different column entirely.
         add_session(
@@ -1707,10 +1682,9 @@ mod write_through_tests {
             .execute(&db.system)
             .await
             .unwrap();
-        index
-            .backfill_from_source(Corpus::Memory, "m", 2)
-            .await
-            .unwrap();
+        index_whole(&index, "jerry-own", &[1.0, 0.0]).await;
+        index_whole(&index, "sam-own", &[1.0, 0.0]).await;
+        index_whole(&index, "shared", &[1.0, 0.0]).await;
 
         let ids = |hits: Vec<VectorHit>| {
             let mut v: Vec<String> = hits.into_iter().map(|h| h.row_id).collect();
@@ -1735,67 +1709,6 @@ mod write_through_tests {
             .await
             .unwrap();
         assert!(guest.is_empty(), "a guest reached the household's index");
-    }
-
-    /// Memory sweeps only pick `embedding IS NULL` rows, so embedded ones must be adopted.
-    #[tokio::test]
-    async fn an_already_embedded_memory_is_adopted_when_the_index_is_rebuilt() {
-        let tmp = TempDir::new().unwrap();
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-
-        // A store that is fully embedded, and an index that knows nothing.
-        add_memory_with_vector(&db.system, "m1", &vec![0.5f32; 8]).await;
-        add_memory_with_vector(&db.system, "m2", &vec![0.25f32; 8]).await;
-        assert!(index.get(Corpus::Memory, "m1").await.unwrap().is_none());
-
-        let copied = index
-            .backfill_from_source(Corpus::Memory, "m", 8)
-            .await
-            .unwrap();
-        assert_eq!(copied, 2, "existing vectors were not adopted");
-        let got = index.get(Corpus::Memory, "m1").await.unwrap().unwrap();
-        assert_eq!(
-            got.vector,
-            vec![0.5f32; 8],
-            "the adopted vector is not the stored one"
-        );
-        assert_eq!(got.model_id, "m");
-
-        // Idempotent: a second pass must not duplicate or re-copy.
-        assert_eq!(
-            index
-                .backfill_from_source(Corpus::Memory, "m", 8)
-                .await
-                .unwrap(),
-            0,
-            "adoption ran twice over the same rows"
-        );
-    }
-
-    #[tokio::test]
-    async fn adoption_refuses_a_vector_of_the_wrong_width() {
-        let tmp = TempDir::new().unwrap();
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-
-        add_memory_with_vector(&db.system, "current", &vec![0.5f32; 8]).await;
-        add_memory_with_vector(&db.system, "legacy", &vec![0.5f32; 4]).await;
-
-        let copied = index
-            .backfill_from_source(Corpus::Memory, "m", 8)
-            .await
-            .unwrap();
-        assert_eq!(copied, 1);
-        assert!(index
-            .get(Corpus::Memory, "current")
-            .await
-            .unwrap()
-            .is_some());
-        assert!(
-            index.get(Corpus::Memory, "legacy").await.unwrap().is_none(),
-            "a 4-wide vector was adopted as if this model had produced it"
-        );
     }
 
     #[tokio::test]
@@ -1954,6 +1867,25 @@ pub(crate) mod tests_support {
             .bind(id)
             .bind(id)
             .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// Indexes a memory's whole-text vector under model `m`, as its repository would.
+    pub async fn index_whole(
+        index: &Arc<dyn pond_core::context::vector_index::VectorIndex>,
+        id: &str,
+        v: &[f32],
+    ) {
+        use pond_core::context::vector_index::{Corpus, VectorEntry};
+        index
+            .upsert(&VectorEntry::whole(
+                Corpus::Memory,
+                id.into(),
+                "m".into(),
+                v.to_vec(),
+                None,
+            ))
             .await
             .unwrap();
     }

@@ -302,18 +302,33 @@ The lane already orders background work, and the context space slots into it:
 2. compaction;
 3. a member's long task, one step at a time;
 4. chores, including every context agent: the least recently run goes first, and one that has
-   waited 15 minutes gets a turn;
+   waited 30 minutes (`CHORE_PATIENCE`) gets a turn ahead of a long task;
 5. the embedding slot (6.2).
 
-Heavy agents (Consolidation, Profile, media backfill, re-embedding after a model change) also hold
-to the household's quiet hours, as PAI-6 section 8.3 asks of long tasks.
+Heavy LLM agents (Consolidation, Profile) and media backfill also hold to the household's quiet
+hours, as PAI-6 section 8.3 asks of long tasks. Re-embedding after a model switch does not: it runs
+at the next idle moment, because the store re-embeds in seconds and waiting for the night would
+leave recall on keywords all day.
 
 ### 6.2 The embedding slot
 
-- **When it runs.** It is new, and it runs only when nothing in steps 1 to 3 is active. It may
-  overlap a chore, because both are background work.
-- **Batches.** Each batch must finish within a measured bound: 250 ms on the Orin for text, which
-  P0 measured as 24 items on CUDA and 3 on the CPU. The slot checks the lane between batches.
+- **When it runs.** Only when nothing in steps 1 to 3 is active: no turn or subagent, and no
+  compaction or long-task step holding the lane's slot or due to take it next
+  (`embedding_may_run`, `inference_lane.rs`). It may overlap a chore, because it is a separate task
+  the lane lets in, not a second lane slot. It wakes on a bell (Reindex, a model choice, a model
+  file arriving, a refreshed summary) or a 60 s poll, a choice and not a measurement
+  (`embedding_slot_runner.rs`). Loading the chosen embedder happens here too, so a load never
+  lands in a turn.
+- **Batches.** Each batch must finish within a bound: 250 ms on the Orin for text, which P0
+  measured as 24 items on CUDA and 3 on the CPU. A `BatchSizer` learns milliseconds per estimated
+  token and packs each batch to that bound, starting at one item. The slot checks the lane, and
+  whether anyone has started a turn since the pass began, between batches; whether the bound holds
+  under the slot is not yet measured on the Orin.
+- **Order and writes.** Memory first, then summaries, then context items. Memory is written through
+  `MemoryRepository::update_embedding`, which writes the row and the index; each vector is made
+  and stored under one lease of the embedder, so it carries the model that made it. Nothing is
+  adopted: a stored vector the index does not vouch for may be another model's of the same width.
+  Once the backlog is empty the slot prunes orphans and logs the index's health.
 - **Encoders.** The vision encoder loads only when free RAM covers its measured budget, and it
   unloads when serving starts.
 - **No queue.** Work is found by the staleness join. Agents keep cursors
