@@ -11,7 +11,7 @@ use pond_voice::text::split_speech_units;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::RwLock;
+use tokio::sync::{OwnedRwLockWriteGuard, RwLock};
 
 pub mod engine;
 pub mod tokenizer;
@@ -53,9 +53,10 @@ pub struct KokoroOutput {
     config: KokoroConfig,
     /// The active `.onnx`, which changes at runtime in lockstep with `engine`.
     model_path: RwLock<PathBuf>,
-    vocab: Vocab,
-    /// Loaded lazily on first synthesis; `None` means "not paying for it yet".
-    engine: RwLock<Option<Engine>>,
+    vocab: Arc<Vocab>,
+    /// Loaded lazily on first synthesis; `None` means "not paying for it yet". An `Arc` so a
+    /// synthesis can take its guard onto a blocking thread.
+    engine: Arc<RwLock<Option<Engine>>>,
     /// The currently selected voice's style table, loaded on demand.
     style: RwLock<Option<Arc<StyleTable>>>,
     voice_name: RwLock<String>,
@@ -88,8 +89,8 @@ impl KokoroOutput {
         Ok(Self {
             model_path: RwLock::new(config.model_path.clone()),
             config,
-            vocab,
-            engine: RwLock::new(None),
+            vocab: Arc::new(vocab),
+            engine: Arc::new(RwLock::new(None)),
             style: RwLock::new(None),
             voice_name: RwLock::new(DEFAULT_VOICE.to_string()),
             speed_bits: AtomicU64::new(DEFAULT_SPEED.to_bits() as u64),
@@ -172,7 +173,12 @@ impl KokoroOutput {
 
     /// Ensure the engine is loaded in RAM, loading and caching on disk if absent.
     pub async fn ensure_loaded(&self) -> Result<()> {
-        let mut engine_guard = self.engine.write().await;
+        self.loaded_engine().await.map(drop)
+    }
+
+    /// The engine, loaded if absent, under a guard that can move to a blocking thread.
+    async fn loaded_engine(&self) -> Result<OwnedRwLockWriteGuard<Option<Engine>>> {
+        let mut engine_guard = self.engine.clone().write_owned().await;
         if engine_guard.is_none() {
             let path = self.model_path.read().await.clone();
             let threads = self.config.intra_threads;
@@ -191,7 +197,7 @@ impl KokoroOutput {
             .context("Kokoro model load panicked")??;
             *engine_guard = Some(loaded);
         }
-        Ok(())
+        Ok(engine_guard)
     }
 
     /// Prewarm the model into RAM ahead of time.
@@ -221,15 +227,21 @@ impl KokoroOutput {
         text: &str,
         style: Option<Arc<StyleTable>>,
     ) -> Result<Vec<f32>> {
-        let (chunks, dropped) = tokenizer::chunk(text, &self.vocab)?;
-        if dropped > 0 {
-            // Not fatal, but the word will sound wrong: the model never learned that phoneme.
-            tracing::warn!(
-                dropped,
-                text_chars = text.chars().count(),
-                "Kokoro dropped phonemes outside the model vocab"
-            );
-        }
+        let vocab = self.vocab.clone();
+        let owned = text.to_string();
+        let chunks = off_the_runtime(move || {
+            let (chunks, dropped) = tokenizer::chunk(&owned, &vocab)?;
+            if dropped > 0 {
+                // Not fatal, but the word will sound wrong: the model never learned that phoneme.
+                tracing::warn!(
+                    dropped,
+                    text_chars = owned.chars().count(),
+                    "Kokoro dropped phonemes outside the model vocab"
+                );
+            }
+            Ok(chunks)
+        })
+        .await?;
         if chunks.is_empty() {
             return Ok(Vec::new());
         }
@@ -239,16 +251,20 @@ impl KokoroOutput {
             None => self.ensure_style().await?,
         };
         let speed = self.speed();
+        let mut engine = self.loaded_engine().await?;
 
-        self.ensure_loaded().await?;
-        let mut engine_guard = self.engine.write().await;
-        let engine = engine_guard.as_mut().expect("engine was just loaded above");
-
-        let mut samples = Vec::new();
-        for chunk in &chunks {
-            let style_row = style.style_for(chunk.tokens.len());
-            samples.extend(engine.synthesize(chunk, style_row, speed)?);
-        }
+        let samples = off_the_runtime(move || {
+            let Some(engine) = engine.as_mut() else {
+                anyhow::bail!("the Kokoro engine was unloaded before synthesis");
+            };
+            let mut samples = Vec::new();
+            for chunk in &chunks {
+                let style_row = style.style_for(chunk.tokens.len());
+                samples.extend(engine.synthesize(chunk, style_row, speed)?);
+            }
+            Ok(samples)
+        })
+        .await?;
         *self.last_sample_rate.lock().unwrap() = Some(SAMPLE_RATE);
         Ok(samples)
     }
@@ -475,6 +491,38 @@ pub fn model_size_mb(quality: &str) -> u64 {
 mod tests {
     use super::*;
 
+    /// A turn's tokens are pumped on the same runtime that synthesises its clauses.
+    #[test]
+    fn synthesis_leaves_the_runtime_free_to_stream_tokens() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counting = ticks.clone();
+            let pump = tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    counting.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+            let samples = off_the_runtime(|| {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                Ok(vec![0.0f32; 4])
+            })
+            .await
+            .unwrap();
+            pump.abort();
+            assert_eq!(samples.len(), 4);
+            let ticks = ticks.load(Ordering::SeqCst);
+            assert!(
+                ticks >= 10,
+                "the only worker ticked {ticks} times during 300 ms of synthesis"
+            );
+        });
+    }
+
     #[test]
     fn quality_tiers_map_to_repo_filenames() {
         assert_eq!(model_filename("q8"), "model_quantized.onnx");
@@ -611,6 +659,16 @@ mod tests {
             );
         }
     }
+}
+
+/// Phonemizing and synthesis take about real time; on a runtime worker they stall every task
+/// sharing it, the reply's token stream among them.
+async fn off_the_runtime<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .context("Kokoro synthesis task panicked")?
 }
 
 /// One playback in flight, counted until dropped, however the playback ends.
