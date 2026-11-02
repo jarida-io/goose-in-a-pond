@@ -194,13 +194,24 @@ pub fn split_sentences(text: &str) -> (Vec<String>, String) {
     split_speech_units(text, false)
 }
 
-/// The tags GIAP wraps a turn's context in; any of them in a reply is the prompt echoed back.
+/// The tags GIAP wraps its prompt and a turn's context in; any of them in a reply is an echo.
 pub const SCAFFOLD_TAGS: &[&str] = &[
     "system-context",
     "user-message",
     "answer-contract",
     "memories",
     "turn-context",
+    "identity",
+    "instructions",
+    "context-handling",
+    "tool-usage",
+    "tool-failure",
+    "memory-rules",
+    "output-quality",
+    "voice-mode",
+    "vision",
+    "conversation-summary",
+    "home-devices",
 ];
 
 /// Drop markup a model wrote as text, so it is never spoken: a closed scaffold block with its body,
