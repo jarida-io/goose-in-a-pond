@@ -491,6 +491,16 @@ for (const scheme of ["Light", "Dark"] as const) {
 
       await navigateTo(page, "Context");
       await expect(page.locator(".setcard__title", { hasText: /^Search by meaning$/ })).toBeVisible();
+      // The hub's switch wears the same accent as the classic one, lifted the same way in dark.
+      const accent = await page.evaluate((dark) => {
+        const probe = document.createElement("span");
+        probe.style.background = dark ? "color-mix(in srgb, var(--pp) 85%, white)" : "var(--pp)";
+        document.body.append(probe);
+        const value = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        return value;
+      }, scheme === "Dark");
+      await expect(page.getByRole("button", { name: "Search by meaning" })).toHaveCSS("background-color", accent);
       await expect(page.getByRole("alert").filter({ hasText: "not enough free memory" })).toBeVisible();
       await expect(page.getByText("EmbeddingGemma 2 is chosen but did not load.")).toBeVisible();
       // The card this change owns; the screen's own Add button measures 3.74:1 and is not part of it.
@@ -501,7 +511,18 @@ for (const scheme of ["Light", "Dark"] as const) {
       await setup(page, { section: "settings", scheme });
       await page.goto("/");
       await page.getByRole("button", { name: /^Models/ }).click();
-      await expect(page.locator(".scat__row", { hasText: "Search memories by meaning" })).toBeVisible();
+      const row = page.locator(".scat__row", { hasText: "Search memories by meaning" });
+      await expect(row).toBeVisible();
+      // On is the household's accent, lifted in dark to clear 3:1 on the card, never HeroUI's blue.
+      const accent = await page.evaluate((dark) => {
+        const probe = document.createElement("span");
+        probe.style.background = dark ? "color-mix(in srgb, var(--color-accent) 85%, white)" : "var(--color-accent)";
+        document.body.append(probe);
+        const value = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        return value;
+      }, scheme === "Dark");
+      await expect(row.locator(".switch__control")).toHaveCSS("background-color", accent);
       // The row this change owns; a "New" badge elsewhere in the category measures 2.74:1 in dark.
       await scan(page, ".scat__row:has([aria-label='Search memories by meaning'])", "settings switch");
     });
