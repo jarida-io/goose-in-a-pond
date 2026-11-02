@@ -266,6 +266,8 @@ async fn pond(manager: Option<Arc<CapturingManager>>, installed: Arc<Installed>)
         model_scheduler: None,
         mcp_memory: None,
         warmup: Default::default(),
+        room_voice: None,
+        voice_match: None,
         account_sync: None,
         extension_manager: manager.map(|m| m as Arc<dyn ExtensionManagerPort>),
         mcp_server_repo: Some(installed),

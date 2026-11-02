@@ -95,6 +95,9 @@ impl Database {
         "settings",
         "suggestion_queue",
         "user_skills",
+        // Biometric, same as `face_embeddings`/`face_profile_thresholds` above.
+        "voice_prints",
+        "voice_wake_takes",
     ];
 
     /// Infrastructure/config a factory reset leaves alone — none of it is household-personal.

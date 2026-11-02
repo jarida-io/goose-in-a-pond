@@ -102,6 +102,8 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
     let session_storage = Arc::new(SqliteSessionStorage::new(pool.clone()));
 
     let state = Arc::new(AppState {
+        room_voice: None,
+        voice_match: None,
         data_wipe: None,
         warmup: Default::default(),
         pond_admin: None,

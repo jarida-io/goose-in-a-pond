@@ -75,6 +75,8 @@ export interface Settings {
   // Voice pipeline
   voice_wake_word?: string;
   voice_wake_word_transcriptions?: string[];
+  /** The pond listens through its own microphone and answers on its speaker (room voice). */
+  voice_room_enabled?: boolean;
   /** Suggestor ids never offered on Home; per kind, as a suggestion has no durable id. */
   suggestions_muted?: string[];
   voice_recording_duration_secs?: number;

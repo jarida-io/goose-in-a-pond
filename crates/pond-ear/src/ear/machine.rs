@@ -11,7 +11,7 @@ use crate::score::{identify, Cohort, Policy, Print};
 use crate::Error;
 
 use super::aec::{Aec, AecConfig};
-use super::endpoint::{Endpoint, Endpointer, Outcome};
+use super::endpoint::{Endpoint, Endpointer, Outcome, Segmenter};
 use super::event::Event;
 use super::front::{Front, RATE};
 use super::parts::{SpeakerNet, VadSilero, WakeCnn};
@@ -72,8 +72,9 @@ pub struct SpeakerConfig {
     pub max_seconds: f32,
 }
 
-/// Audio and frames the ear keeps.
-pub const RING_SECONDS: f32 = 15.0;
+/// Audio and frames the ear keeps: past the endpointer's 30 s longest utterance, so `audio` still
+/// holds an utterance's start when it ends.
+pub const RING_SECONDS: f32 = 32.0;
 /// The newest 3 s of a span is all Voice Match reads.
 pub const SPEAKER_MAX_SECONDS: f32 = 3.0;
 /// Speech over the reply for this long is a barge-in.
@@ -98,6 +99,9 @@ pub struct Config {
     pub barge_in_ms: u32,
     /// The echo canceller; `None` feeds the microphone straight to the front end.
     pub aec: Option<AecConfig>,
+    /// Report each speech segment outside Listen (`Event::Segment`) for a wake detector on the
+    /// host, in place of the wake CNN, which then never runs.
+    pub segments: bool,
 }
 
 impl Config {
@@ -111,6 +115,7 @@ impl Config {
             endpoint: Endpoint::default(),
             barge_in_ms: BARGE_IN_MS,
             aec: Some(AecConfig::default()),
+            segments: false,
         }
     }
 }
@@ -128,10 +133,14 @@ pub struct Ear {
     clean: Vec<f32>,
     mic_samples: usize,
     front: Front,
-    wake: WakeCnn,
+    /// `None` with `segments` on: the host's wake detector reads the segments, so the CNN would
+    /// only hold its weights and arena.
+    wake: Option<WakeCnn>,
+    wake_threshold: f32,
     speaker: Option<SpeakerNet>,
     vad: VadSilero,
     endpointer: Endpointer,
+    segmenter: Option<Segmenter>,
     household: Household,
     state: State,
     barge_in_ms: u32,
@@ -144,7 +153,15 @@ pub struct Ear {
 
 impl Ear {
     pub fn new(cfg: Config, household: Household) -> Result<Ear, Error> {
-        let wake = WakeCnn::new(cfg.wake.model, &cfg.wake.label, cfg.wake.threshold)?;
+        let wake_threshold = cfg.wake.threshold;
+        let wake = match cfg.segments {
+            true => None,
+            false => Some(WakeCnn::new(
+                cfg.wake.model,
+                &cfg.wake.label,
+                cfg.wake.threshold,
+            )?),
+        };
         let vad = VadSilero::new(cfg.vad, "Silero v5")?;
         let speaker = match cfg.speaker {
             Some(s) => Some(SpeakerNet::new(s.model, &s.label, s.max_seconds)?),
@@ -159,9 +176,11 @@ impl Ear {
             mic_samples: 0,
             front,
             wake,
+            wake_threshold,
             speaker,
             vad,
             endpointer: Endpointer::new(cfg.endpoint),
+            segmenter: cfg.segments.then(Segmenter::default),
             household,
             state: State::Wait,
             barge_in_ms: cfg.barge_in_ms,
@@ -178,7 +197,9 @@ impl Ear {
     /// Touch every arena and ring once, so what the OS reports after loading is what the ear holds
     /// when running.
     fn warm_up(&mut self) {
-        self.wake.warm_up(self.rung);
+        if let Some(w) = self.wake.as_mut() {
+            w.warm_up(self.rung);
+        }
         if let Some(s) = self.speaker.as_mut() {
             s.warm_up(self.rung);
         }
@@ -201,12 +222,17 @@ impl Ear {
         self.clean.clear();
         self.mic_samples = 0;
         self.front.reset();
-        self.wake.reset();
+        if let Some(w) = self.wake.as_mut() {
+            w.reset();
+        }
         if let Some(s) = self.speaker.as_mut() {
             s.reset();
         }
         self.vad.reset();
         self.endpointer.reset();
+        if let Some(s) = self.segmenter.as_mut() {
+            s.reset();
+        }
         self.state = State::Wait;
         self.barge = Barge::default();
         self.scores.clear();
@@ -227,11 +253,14 @@ impl Ear {
     }
 
     pub fn set_wake_threshold(&mut self, t: f32) {
-        self.wake.threshold = t;
+        self.wake_threshold = t;
+        if let Some(w) = self.wake.as_mut() {
+            w.threshold = t;
+        }
     }
 
     pub fn wake_threshold(&self) -> f32 {
-        self.wake.threshold
+        self.wake_threshold
     }
 
     pub fn endpoint(&self) -> Endpoint {
@@ -244,6 +273,11 @@ impl Ear {
 
     pub fn state(&self) -> State {
         self.state
+    }
+
+    /// Whether the ear reports segments for a host-side wake detector instead of running its CNN.
+    pub fn segments(&self) -> bool {
+        self.segmenter.is_some()
     }
 
     pub fn front(&self) -> &Front {
@@ -319,6 +353,9 @@ impl Ear {
     pub fn listen(&mut self, start: usize) -> Option<Event> {
         self.endpointer
             .listen(start.max(self.front.oldest_sample()));
+        if let Some(s) = self.segmenter.as_mut() {
+            s.cancel();
+        }
         self.barge = Barge::default();
         let t = self.now();
         self.change(State::Listen, t)
@@ -377,7 +414,10 @@ impl Ear {
     }
 
     fn on_wake_frame(&mut self, n: usize, out: &mut Vec<Event>) {
-        let Some(hop) = self.wake.on_frame(&self.front, n, self.rung) else {
+        let Some(wake) = self.wake.as_mut() else {
+            return;
+        };
+        let Some(hop) = wake.on_frame(&self.front, n, self.rung) else {
             return;
         };
         self.scores.push((hop.t, hop.p));
@@ -401,6 +441,7 @@ impl Ear {
     fn on_vad(&mut self, end: usize, p: f32, out: &mut Vec<Event>) {
         let t = end as f64 / RATE as f64;
         self.vad_scores.push((t, p));
+        let listening = self.endpointer.listening();
         let step = self.endpointer.vad(end, p);
         if let Some(on) = step.speech {
             if self.state != State::Wait {
@@ -409,6 +450,14 @@ impl Ear {
         }
         if self.state == State::Speak {
             self.barge_in(end, t, out);
+        }
+        let (speaking, cfg) = (self.endpointer.speaking(), self.endpointer.cfg);
+        if let Some(s) = self.segmenter.as_mut() {
+            if listening {
+                s.skip(end);
+            } else if let Some((start, end)) = s.step(&cfg, end, speaking) {
+                out.push(Event::Segment { t, start, end });
+            }
         }
         match step.outcome {
             Some(Outcome::Utterance { start, end }) => {
@@ -515,14 +564,16 @@ impl Ear {
                 },
             );
         }
-        parts.push(Part {
-            role: "wake",
-            name: format!("wake CNN ({})", self.wake.label),
-            bytes: self.wake.bytes(self.rung),
-            ns: self.wake.ns,
-            calls: self.wake.calls,
-            macs: self.wake.macs(),
-        });
+        if let Some(wake) = self.wake.as_ref() {
+            parts.push(Part {
+                role: "wake",
+                name: format!("wake CNN ({})", wake.label),
+                bytes: wake.bytes(self.rung),
+                ns: wake.ns,
+                calls: wake.calls,
+                macs: wake.macs(),
+            });
+        }
         let ep = self.endpointer.cfg;
         parts.push(Part {
             role: "voice activity",

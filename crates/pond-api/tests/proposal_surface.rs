@@ -94,6 +94,8 @@ async fn make_app() -> Harness {
     let state = Arc::new(AppState {
         data_wipe: None,
         warmup: Default::default(),
+        room_voice: None,
+        voice_match: None,
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
@@ -523,6 +525,42 @@ async fn a_member_disposes_of_their_own_proposal_and_nothing_is_executed() {
              the design says to reuse, not a second confirmation flow"
         );
     }
+}
+
+/// Voice Match names the speaker for context only: their own proposal stays theirs to decide
+/// from their phone or by saying who they are, never on a voice match.
+#[tokio::test]
+async fn a_session_known_only_by_voice_never_decides_a_proposal() {
+    let h = make_app().await;
+    let liz = member(&h, "Liz").await;
+    let id = save_proposal(&h, "p-1", &liz, Duration::hours(2)).await;
+    h.storage
+        .create_session("s-voice".to_string())
+        .await
+        .unwrap();
+    h.storage
+        .set_session_identity(
+            "s-voice",
+            &SessionIdentity {
+                profile_id: Some(liz.clone()),
+                source: IdentificationSource::Voice,
+                confidence: None,
+            },
+        )
+        .await
+        .unwrap();
+    let (status, body) = decide(
+        &h.app,
+        &id,
+        serde_json::json!({"session_id": "s-voice", "decision": "approve"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(
+        body["error"],
+        pond_core::security::ports::policy::REASON_VOICE_DRAFT_DECISION
+    );
+    assert_eq!(status_of(&h, &id).await, DraftStatus::Pending);
 }
 
 /// Ownership comes from `is_draft_decision_permitted`, not a local copy.

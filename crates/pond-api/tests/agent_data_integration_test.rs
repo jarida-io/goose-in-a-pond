@@ -141,6 +141,8 @@ async fn make_app_full(
     let state = Arc::new(AppState {
         data_wipe: None,
         warmup: Default::default(),
+        room_voice: None,
+        voice_match: None,
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
@@ -443,6 +445,8 @@ async fn prompt_template_delete_system_returns_403() {
     let state = Arc::new(AppState {
         data_wipe: None,
         warmup: Default::default(),
+        room_voice: None,
+        voice_match: None,
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
@@ -1277,6 +1281,8 @@ async fn returns_501_when_repos_not_configured() {
     let state = Arc::new(AppState {
         data_wipe: None,
         warmup: Default::default(),
+        room_voice: None,
+        voice_match: None,
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),

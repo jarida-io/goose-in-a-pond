@@ -107,6 +107,11 @@ impl SettingsRepository for SqliteSettingsRepository {
         upsert!("voice_tts_speed", settings.voice_tts_speed.to_string());
         upsert!("voice_tts_quality", &settings.voice_tts_quality);
         upsert!("vad_backend", &settings.vad_backend);
+        upsert!("voice_wake_detector", &settings.voice_wake_detector);
+        upsert!(
+            "voice_room_enabled",
+            settings.voice_room_enabled.to_string()
+        );
         upsert!(
             "voice_recording_duration_secs",
             settings.voice_recording_duration_secs.to_string()
@@ -901,6 +906,12 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
         "voice_tts_quality" => s.voice_tts_quality = value.to_string(),
         // Stored verbatim so write and read agree; `settings_validation` rejects unknown backends.
         "vad_backend" => s.vad_backend = value.to_string(),
+        "voice_wake_detector" => s.voice_wake_detector = value.to_string(),
+        "voice_room_enabled" => {
+            if let Ok(v) = value.parse() {
+                s.voice_room_enabled = v;
+            }
+        }
         "voice_recording_duration_secs" => {
             if let Ok(v) = value.parse() {
                 s.voice_recording_duration_secs = v;
@@ -1662,6 +1673,25 @@ mod tests {
             got.hybrid_compaction_enabled,
             want.hybrid_compaction_enabled
         );
+    }
+
+    #[tokio::test]
+    async fn the_wake_phrase_becomes_hey_goose_only_where_nobody_calibrated_goose() {
+        let repo = fresh_repo().await;
+        seed_row(&repo.pool, "voice_wake_word", "goose", 0).await;
+        seed_row(&repo.pool, "voice_wake_word_transcriptions", "[\"gus\"]", 0).await;
+        replay_adoption_updates(&repo.pool, &migration_sql("0076")).await;
+        assert_eq!(
+            raw_value(&repo.pool, "voice_wake_word").await.as_deref(),
+            Some("goose"),
+            "learned pronunciations were heard for the old phrase"
+        );
+
+        let repo = fresh_repo().await;
+        seed_row(&repo.pool, "voice_wake_word", "goose", 0).await;
+        seed_row(&repo.pool, "voice_wake_word_transcriptions", "[]", 0).await;
+        replay_adoption_updates(&repo.pool, &migration_sql("0076")).await;
+        assert_eq!(repo.get().await.unwrap().voice_wake_word, "hey goose");
     }
 
     #[tokio::test]

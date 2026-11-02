@@ -21,6 +21,7 @@ pub mod pond_admin;
 pub mod quiet_pass;
 mod report_export;
 pub mod rides;
+pub mod room_voice;
 pub mod routes;
 pub mod runs;
 pub mod spoken_code;
@@ -30,6 +31,8 @@ pub mod test_support;
 pub mod thought_filter;
 pub mod tool_context;
 pub mod uber_accounts;
+pub mod voice_agent;
+mod voice_match;
 pub mod voice_sample;
 pub mod web_search;
 
@@ -114,6 +117,10 @@ pub struct AppState {
     pub agent: Arc<dyn Agent>,
     /// Warm-up status for `GET /api/v1/warmup`; `std` lock since its writer is a sync callback.
     pub warmup: Arc<std::sync::RwLock<WarmupStatus>>,
+    /// Serve's room voice loop, behind `/voice/room`; `None` where serve runs none.
+    pub room_voice: Option<Arc<dyn pond_core::models::ports::room_voice::RoomVoiceControl>>,
+    /// Voice Match's speaker model and enrolment takes; `None` where serve built none.
+    pub voice_match: Option<Arc<dyn pond_core::models::ports::voice_match::VoiceMatchEngine>>,
     /// Hot-swappable when role assignments change; `None` inside the lock falls back to `agent`.
     pub llm_provider: Arc<tokio::sync::RwLock<Option<Arc<dyn LlmProvider>>>>,
     /// Local llamafile base URL, kept so settings changes can rebuild the ModelRouter live.
@@ -372,6 +379,8 @@ pub async fn apply_embedding_choice(
     let choice = pond_core::models::domain::embedding_models::EmbedderChoice::resolve(settings);
     state.embedder.choose(choice).await;
 }
+
+pub use voice_agent::{compile_voice_prefill, spawn_voice_prefill};
 
 /// Background prefix warm-up, mirrored into `state.warmup`; a failed warm-up just starts cold.
 pub fn spawn_prefix_prewarm(state: Arc<AppState>, voice_mode: bool) -> tokio::task::JoinHandle<()> {
@@ -725,12 +734,13 @@ fn build_transport_router(state: Arc<AppState>, static_dir: Option<std::path::Pa
     ));
 
     let mut router = Router::new().nest("/api/v1", routes::api_routes(state.clone()));
-    if let Some(static_dir) = static_dir {
-        router = router
+    router = match static_dir {
+        Some(static_dir) => router
             .route("/dev/test", axum::routing::get(routes::dev_test_page))
             .route("/dev/face", axum::routing::get(routes::dev_face_page))
-            .fallback(move |uri: axum::http::Uri| routes::serve_web(uri, static_dir.clone()));
-    }
+            .fallback(move |uri: axum::http::Uri| routes::serve_web(uri, static_dir.clone())),
+        None => router.fallback(routes::api_not_found),
+    };
     router
         .layer(axum::middleware::from_fn(middleware::log_requests))
         // Must come after log_requests: axum applies layers in reverse order.

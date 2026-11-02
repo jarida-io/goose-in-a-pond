@@ -47,6 +47,8 @@ async fn make_app() -> (axum::Router, Arc<Database>, Arc<MockCreditLedger>, temp
     let credit_ledger = Arc::new(MockCreditLedger::new());
 
     let state = Arc::new(AppState {
+        room_voice: None,
+        voice_match: None,
         data_wipe: Some(Arc::new(SystemDataWipe::new(db.clone(), None, None))),
         warmup: Default::default(),
         pond_admin: None,

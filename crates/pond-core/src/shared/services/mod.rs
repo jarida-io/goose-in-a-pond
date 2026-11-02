@@ -22,4 +22,5 @@ pub mod session_title;
 pub mod stdin_input;
 pub mod step_bindings;
 pub mod turn_authority;
+pub mod voice_agent;
 pub mod voice_control;

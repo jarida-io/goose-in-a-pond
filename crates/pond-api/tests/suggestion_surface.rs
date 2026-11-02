@@ -100,6 +100,8 @@ async fn make_app(device_count: usize) -> Harness {
     let state = Arc::new(AppState {
         data_wipe: None,
         warmup: Default::default(),
+        room_voice: None,
+        voice_match: None,
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),

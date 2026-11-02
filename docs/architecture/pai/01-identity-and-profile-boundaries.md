@@ -294,12 +294,24 @@ So P7 is narrower than written — drafts, schedules, and the per-category count
 is the part to keep: three of the four behaviours were decided years ago by migrations nobody
 remembered writing, and the fourth was decided by omission.
 
-### 3.8 Speaker identification is scoped out, and said so
+### 3.8 Speaker identification: Voice Match gives context, never authority (2026-11-02)
 
-Voice is a shared surface. Until `pond-adapters-speaker-embed` exists, a voice session resolves to
-`Household` (if a face is co-present and confident) or `Guest`. **This document does not claim
-per-person voice memory works.** The speaker-ID design in [data_pipeline.md, Biometric User Differentiation](../data_pipeline.md#biometric-user-differentiation) is the
-follow-on; PAI-1 makes it a drop-in by putting `identification_source` in place first.
+Voice is a shared surface. Voice Match ([voice-match.md](../../voice-match.md)) names the speaker
+of a room turn when their voice matches an enrolled member's prints: the session is marked
+`identification_source = 'voice'`, ranked below `face`, and the turn runs at `Owner` scope with
+that member's particulars and notes. That is all a voice match buys:
+
+- `is_draft_decision_permitted` refuses an actor known only by voice, so a proposal is never
+  decided on a voice match (`a_session_known_only_by_voice_never_decides_a_proposal`).
+- Rides are confirmed only from the member's paired phone (`rides::member` reads the device,
+  never a session), so a voice session cannot approve a ride offer.
+- `claim_session_identity` never moves a session to another member, so a different voice's wake
+  starts a session of its own, and so does an unrecognised voice after a member's turns.
+- A follow-up after a recognised wake must be the same voice; an unrecognised wake keeps the
+  follow-ups it had.
+
+Without an enrolled member nothing changes: a voice session resolves to `Household` on a pond of
+one and `Guest` otherwise.
 
 ---
 
