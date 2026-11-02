@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { splitSpeechUnits, normalizeForSpeech } from "./webAudioUtils";
+import { splitSpeechUnits, normalizeForSpeech, stripMarkdown, stripMarkupForSpeech } from "./webAudioUtils";
 
 describe("splitSpeechUnits", () => {
   it("splits opening clause after minimum words when allowClauses is true", () => {
@@ -92,5 +92,32 @@ describe("normalizeForSpeech", () => {
     expect(normalizeForSpeech("dollar to KSH rate")).toBe("dollar to Kenyan shillings rate");
     expect(normalizeForSpeech("exchange is 129.83 KES")).toBe("exchange is 129.83 Kenyan shillings");
     expect(normalizeForSpeech("costs KSh 130 per unit")).toBe("costs 130 Kenyan shillings per unit");
+  });
+});
+
+describe("stripMarkupForSpeech", () => {
+  // Replies a guest's voice turns began with on the nano (2026-11-02), verbatim.
+  it("never speaks a tool call written as text", () => {
+    for (const leaked of [
+      `<giap-knowledge__search_web question="what to pack for a day hike" />`,
+      `<giap-knowledge__get_wikipedia_article topic="Why is the sky blue?"/>`,
+      `<knowledge__get_wikipedia_article topic="why is the sky blue?"/`,
+      `<call>giap-knowledge__get_wikipedia_article{topic:"crocodile vs alligator"}`,
+      `<giap-knowledge__get_wikipedia_article topic="Why is the sky blue?`,
+    ]) {
+      expect(stripMarkdown(leaked), leaked).toBe("");
+    }
+  });
+
+  it("drops an echoed scaffold block with its body and keeps the answer", () => {
+    expect(
+      stripMarkdown("<answer-contract>\nReply with the result.\n</answer-contract>\nThe sky scatters blue light."),
+    ).toBe("The sky scatters blue light.");
+  });
+
+  it("leaves comparisons and dunder names alone", () => {
+    expect(stripMarkupForSpeech("3 < 5 and 7 > 2")).toBe("3 < 5 and 7 > 2");
+    expect(stripMarkupForSpeech("The __init__ method runs first.")).toBe("The __init__ method runs first.");
+    expect(stripMarkupForSpeech("I <3 tea.")).toBe("I <3 tea.");
   });
 });
