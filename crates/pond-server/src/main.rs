@@ -4448,8 +4448,8 @@ async fn run_server(
     }
 
     // Loads the embedder and keeps every vector current, in counter-phase. After AppState,
-    // through which the factory fetches a missing GGUF.
-    embedder_factory.attach(&state);
+    // through which the factory fetches a missing GGUF; its loads give way to the lane's work.
+    embedder_factory.attach(&state, &inference_lane);
     {
         let warmup = state.warmup.clone();
         tokio::spawn(embedding_slot_runner::run(
