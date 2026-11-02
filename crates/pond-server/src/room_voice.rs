@@ -22,8 +22,11 @@ use pond_core::security::ports::telemetry::TelemetryPort;
 use pond_core::shared::domain::agent::{ThrottledAudioLevelSink, WorkflowEvent, WorkflowState};
 use pond_core::shared::services::chat::{ChatService, WorkflowEventSink};
 use pond_core::shared::services::voice_control::{StopReason, VoiceControl};
+use pond_core::user_data::ports::profile::ProfileRepository;
+use pond_core::user_data::ports::prompt_extra::PromptExtraRepository;
 use pond_core::user_data::ports::session_storage::SessionStorage;
 use pond_core::user_data::ports::settings::SettingsRepository;
+use pond_core::user_data::ports::voice_print::VoicePrintRepository;
 use tokio::sync::{broadcast, watch};
 
 use crate::model_download;
@@ -68,6 +71,12 @@ pub struct RoomDeps {
     pub output: Option<Arc<dyn VoiceOutput>>,
     pub audio: Arc<dyn RoomAudio>,
     pub runs: Arc<RunSupervisor>,
+    /// Voice Match: prints and wake calibration, the speaker model, and whose context a
+    /// recognised voice brings.
+    pub voice_prints: Option<Arc<dyn VoicePrintRepository>>,
+    pub voice_match: Option<Arc<crate::voice_match::ServeVoiceMatch>>,
+    pub profiles: Option<Arc<dyn ProfileRepository + Send + Sync>>,
+    pub prompt_extras: Option<Arc<dyn PromptExtraRepository + Send + Sync>>,
 }
 
 /// The part of the status the loop moves.
@@ -78,6 +87,8 @@ struct View {
     wake: RoomWake,
     last_heard: Option<LastHeard>,
     session_id: Option<String>,
+    /// Someone is enrolled and the running ear recognises voices.
+    recognises: bool,
 }
 
 struct Inner {
@@ -91,6 +102,8 @@ struct Inner {
     turn: Mutex<Option<TurnInFlight>>,
     /// The process as the running loop started, for `room voice memory` after each turn.
     memory_at_start: Mutex<Option<pond_adapters_ear::ProcessMemory>>,
+    /// The running ear, so a new print reaches it without a restart.
+    ear: Mutex<Option<Arc<pond_adapters_ear::EarRig>>>,
 }
 
 pub struct RoomVoice {
@@ -122,10 +135,12 @@ impl RoomVoice {
                 wake,
                 last_heard: None,
                 session_id: None,
+                recognises: false,
             }),
             control: Mutex::new(None),
             turn: Mutex::new(None),
             memory_at_start: Mutex::new(None),
+            ear: Mutex::new(None),
         });
         let task = tokio::spawn(supervise(inner.clone()));
         Arc::new(RoomVoice {
@@ -154,8 +169,11 @@ impl RoomVoiceControl for RoomVoice {
             unavailable_reason: view.unavailable_reason,
             state: view.state,
             wake: view.wake.clone(),
-            // Nobody can be enrolled for Voice Match yet.
-            interrupts: RoomInterrupts::WakeOnly,
+            interrupts: if view.recognises {
+                RoomInterrupts::EnrolledOrWake
+            } else {
+                RoomInterrupts::WakeOnly
+            },
             last_heard: view.last_heard.clone(),
             session_id: view.session_id.clone(),
         }
@@ -181,6 +199,112 @@ impl RoomVoiceControl for RoomVoice {
     fn subscribe(&self) -> broadcast::Receiver<WorkflowEvent> {
         self.inner.events.subscribe()
     }
+
+    fn household_changed(&self) {
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            let voices = household(&inner.deps).await;
+            let ear = lock(&inner.ear).clone();
+            let Some(ear) = ear else {
+                return;
+            };
+            let recognises = lock(&inner.view).recognises;
+            if !voices.prints.is_empty() && !recognises {
+                // The running ear has no speaker model: the loop starts again with one.
+                tracing::info!(
+                    "room voice: someone enrolled; the ear starts again to recognise them"
+                );
+                if let Some(control) = lock(&inner.control).as_ref() {
+                    control.stop(StopReason::Requested);
+                }
+                return;
+            }
+            let enrolled = voices.prints.len();
+            ear.set_household(voices);
+            inner.set_view(|v| v.recognises = enrolled > 0);
+        });
+    }
+}
+
+/// The enrolled members the ear may recognise: everyone with a full run of prints.
+async fn household(deps: &RoomDeps) -> pond_adapters_ear::Household {
+    let (Some(repo), Some(engine)) = (&deps.voice_prints, &deps.voice_match) else {
+        return pond_adapters_ear::Household::default();
+    };
+    use pond_core::models::ports::voice_match::VoiceMatchEngine as _;
+    let prints = match repo.prints(engine.model_name()).await {
+        Ok(prints) => prints,
+        Err(e) => {
+            tracing::warn!(error = %e, "room voice: could not read the voice prints");
+            return pond_adapters_ear::Household::default();
+        }
+    };
+    let mut voices = Vec::new();
+    for member in pond_core::user_data::services::voice_match::members(&prints) {
+        if !member.enrolled {
+            continue;
+        }
+        let name = match &deps.profiles {
+            Some(profiles) => profiles
+                .get(&member.profile_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|p| p.display_name),
+            None => None,
+        };
+        voices.push(pond_adapters_ear::Print {
+            name: name.unwrap_or_else(|| member.profile_id.clone()),
+            id: member.profile_id,
+            embs: member.embeddings,
+        });
+    }
+    // No cohort: the policy's default threshold with its single-profile margin.
+    pond_adapters_ear::Household {
+        prints: voices,
+        ..Default::default()
+    }
+}
+
+/// Whether the wake CNN heard every taught member's latest run of the household's phrase.
+async fn cnn_hears_household(deps: &RoomDeps, phrase: &str) -> bool {
+    let Some(repo) = &deps.voice_prints else {
+        return false;
+    };
+    let phrase = pond_voice::text::normalize_transcript(phrase);
+    match repo.wake_takes(&phrase).await {
+        Ok(takes) => {
+            pond_core::user_data::services::voice_match::wake_verdict(&takes).cnn_hears_household
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "room voice: could not read the wake calibration");
+            false
+        }
+    }
+}
+
+/// A recognised speaker's context for their turn, as the routes build it for a typed one.
+fn speaker_context(deps: &RoomDeps) -> pond_core::shared::services::chat::SpeakerContext {
+    let profiles = deps.profiles.clone();
+    let extras = deps.prompt_extras.clone();
+    Arc::new(move |profile_id: String| {
+        let profiles = profiles.clone();
+        let extras = extras.clone();
+        Box::pin(async move {
+            let profile = profiles?.get(&profile_id).await.ok().flatten()?;
+            let notes = match extras {
+                Some(extras) => extras
+                    .list_for_profile(&profile_id)
+                    .await
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            };
+            Some(pond_core::prompts::ProfileContext::of_member(
+                &profile.preferences,
+                notes,
+            ))
+        })
+    })
 }
 
 impl Inner {
@@ -248,6 +372,10 @@ impl Inner {
                 self.set_view(|v| v.last_heard = Some(heard));
             }
             WorkflowEvent::Exit { .. } => *lock(&self.turn) = None,
+            // A different voice's wake moves the loop to a session of its own.
+            WorkflowEvent::Ready { session_id } => {
+                self.set_view(|v| v.session_id = Some(session_id.clone()))
+            }
             _ => {}
         }
         let _ = self.events.send(event.clone());
@@ -265,7 +393,8 @@ async fn supervise(inner: Arc<Inner>) {
         let on = *enabled.borrow_and_update();
         tested &= on;
         let settings = inner.deps.settings.get().await.unwrap_or_default();
-        let (detector, reason) = voice_rig::expected_wake(&settings);
+        let calibrated = cnn_hears_household(&inner.deps, &settings.voice_wake_word).await;
+        let (detector, reason) = voice_rig::expected_wake(&settings, calibrated);
         inner.set_view(|v| {
             v.wake = RoomWake {
                 phrase: settings.voice_wake_word.clone(),
@@ -376,6 +505,19 @@ async fn run_once(
         let _ = events.send(WorkflowEvent::AudioLevel { rms });
     })));
     let memory_before = crate::room_memory::now();
+    let voices = household(&inner.deps).await;
+    let speaker = match (&inner.deps.voice_match, voices.prints.is_empty()) {
+        (Some(engine), false) => {
+            let engine = engine.clone();
+            tokio::task::spawn_blocking(move || engine.speaker_model())
+                .await
+                .ok()
+                .flatten()
+        }
+        _ => None,
+    };
+    let recognises = speaker.is_some();
+    let cnn_hears_household = cnn_hears_household(&inner.deps, &settings.voice_wake_word).await;
     let listening = voice_rig::build_listening(voice_rig::ListeningOptions {
         settings,
         data_dir: &inner.deps.data_dir,
@@ -384,8 +526,15 @@ async fn run_once(
         wake_word: None,
         no_wake_word: false,
         audio_level: Some(levels),
+        speaker,
+        cnn_hears_household,
     })
     .await;
+    let recognises = recognises && listening.ear.is_some();
+    if let Some(ear) = &listening.ear {
+        ear.set_household(voices);
+    }
+    *lock(&inner.ear) = listening.ear.clone();
     let (detector, reason) = listening.wake();
     inner.set_view(|v| {
         v.wake = RoomWake {
@@ -394,6 +543,7 @@ async fn run_once(
             reason,
         };
         v.session_id = Some(session_id.clone());
+        v.recognises = recognises;
     });
 
     let control = VoiceControl::new();
@@ -416,7 +566,8 @@ async fn run_once(
     .with_control(control.clone())
     .with_stdout_diagnostics(false)
     .with_event_sink(sink)
-    .with_session_on_first_turn();
+    .with_session_on_first_turn()
+    .with_voice_identity(speaker_context(&inner.deps));
     if let Some(telemetry) = &inner.deps.telemetry {
         chat = chat.with_telemetry(telemetry.clone());
     }
@@ -454,6 +605,7 @@ async fn run_once(
 
     *lock(&inner.control) = None;
     *lock(&inner.turn) = None;
+    *lock(&inner.ear) = None;
     pond_audio_out::set_playback_tap(None);
     pond_audio_out::set_spoken_tap(None);
     drop(chat);
@@ -508,6 +660,10 @@ mod tests {
             output: None,
             audio: Arc::new(NoDevices),
             runs,
+            voice_prints: None,
+            voice_match: None,
+            profiles: None,
+            prompt_extras: None,
         }
     }
 

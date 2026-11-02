@@ -28,6 +28,7 @@ mod system_deps;
 mod three_stage_consolidator;
 mod tracing_setup;
 mod voice_lock;
+mod voice_match;
 mod voice_models;
 mod voice_rig;
 
@@ -4131,6 +4132,16 @@ async fn run_server(
 
     // Shared with room voice, whose turns hold lane jobs back as a phone's do.
     let runs = Arc::new(pond_api::runs::RunSupervisor::default());
+    // Voice Match: its speaker model is fetched by default, in the background.
+    let voice_prints: Arc<dyn pond_core::user_data::ports::voice_print::VoicePrintRepository> =
+        Arc::new(
+            pond_infra::sqlite_voice_recognition::SqliteVoiceRecognition::new(db.system.clone()),
+        );
+    let voice_match = voice_match::ServeVoiceMatch::new(&data_dir);
+    {
+        use pond_core::models::ports::voice_match::VoiceMatchEngine as _;
+        voice_match.fetch_model();
+    }
     let room_voice = {
         let enabled = settings_repo
             .get()
@@ -4141,7 +4152,16 @@ async fn run_server(
             .get()
             .await
             .unwrap_or_else(|_| settings.clone());
-        let (detector, reason) = voice_rig::expected_wake(&current);
+        let phrase = pond_voice::text::normalize_transcript(&current.voice_wake_word);
+        let calibrated = voice_prints
+            .wake_takes(&phrase)
+            .await
+            .map(|takes| {
+                pond_core::user_data::services::voice_match::wake_verdict(&takes)
+                    .cnn_hears_household
+            })
+            .unwrap_or(false);
+        let (detector, reason) = voice_rig::expected_wake(&current, calibrated);
         println!(
             "  Room voice: {}",
             if enabled {
@@ -4162,6 +4182,10 @@ async fn run_server(
                 output: tts.clone(),
                 audio: Arc::new(serve_audio.clone()),
                 runs: runs.clone(),
+                voice_prints: Some(voice_prints.clone()),
+                voice_match: Some(voice_match.clone()),
+                profiles: Some(profile_repo.clone()),
+                prompt_extras: Some(prompt_extra_repo.clone()),
             },
             enabled,
             pond_core::models::domain::room_voice::RoomWake {
@@ -4172,10 +4196,13 @@ async fn run_server(
         )
     };
 
+    let voice_match_engine: Arc<dyn pond_core::models::ports::voice_match::VoiceMatchEngine> =
+        voice_match.clone();
     let state = Arc::new(AppState {
         room_voice: Some(
             room_voice.clone() as Arc<dyn pond_core::models::ports::room_voice::RoomVoiceControl>
         ),
+        voice_match: Some(voice_match_engine),
         tts_control: tts_control.clone(),
         // Before `db`: fields evaluate in source order and `db` is moved below.
         suggestion_queue: Arc::new(
@@ -5641,6 +5668,9 @@ async fn run_chat(
                 wake_word,
                 no_wake_word,
                 audio_level: audio_level_sink.clone(),
+                // Voice Match runs in serve's room; this terminal loop recognises nobody.
+                speaker: None,
+                cnn_hears_household: false,
             })
             .await,
         ),

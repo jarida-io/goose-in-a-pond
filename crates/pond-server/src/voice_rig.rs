@@ -39,6 +39,10 @@ pub struct ListeningOptions<'a> {
     pub no_wake_word: bool,
     /// Live microphone level for a client's meter.
     pub audio_level: Option<Arc<ThrottledAudioLevelSink>>,
+    /// Voice Match's speaker model; the ear recognises nobody without it.
+    pub speaker: Option<pond_adapters_ear::ModelFile>,
+    /// The wake CNN heard every taught member's latest enrolment run.
+    pub cnn_hears_household: bool,
 }
 
 /// Which front end listens, and why, for status lines and the API.
@@ -72,6 +76,8 @@ pub struct Listening {
     pub front: Front,
     /// What the ear's parts hold; empty on the Whisper front end.
     pub ear_parts: Vec<EarPart>,
+    /// The ear itself, for Voice Match's household; `None` on the Whisper front end.
+    pub ear: Option<Arc<EarRig>>,
     pub wake_word: String,
     /// Calibration takes behind the wake word's triggers.
     pub calibrated: usize,
@@ -146,25 +152,15 @@ impl Transcriber for WhisperTranscriber {
     }
 }
 
-/// Whether the CNN heard this household's calibration takes. Nothing records that result yet,
-/// so `auto` keeps Whisper.
-fn cnn_hears_household(_settings: &Settings) -> bool {
-    false
-}
-
 /// The wake detector `build_listening` would choose, for a status shown before it runs.
-pub fn expected_wake(settings: &Settings) -> (WakeDetector, WakeDetectorReason) {
-    if settings.vad_backend.eq_ignore_ascii_case("rms") {
-        return (WakeDetector::Whisper, WakeDetectorReason::NoEar);
-    }
-    choose_wake_detector(
-        &settings.voice_wake_detector,
-        &settings.voice_wake_word,
-        cnn_hears_household(settings),
-    )
+pub fn expected_wake(
+    settings: &Settings,
+    cnn_hears_household: bool,
+) -> (WakeDetector, WakeDetectorReason) {
+    pond_core::models::domain::wake_detector::household_wake_detector(settings, cnn_hears_household)
 }
 
-pub async fn build_listening(opts: ListeningOptions<'_>) -> Listening {
+pub async fn build_listening(mut opts: ListeningOptions<'_>) -> Listening {
     let settings = opts.settings;
     let wake_word = opts
         .wake_word
@@ -180,7 +176,7 @@ pub async fn build_listening(opts: ListeningOptions<'_>) -> Listening {
     let (detector, reason) = choose_wake_detector(
         &settings.voice_wake_detector,
         &wake_word,
-        cnn_hears_household(settings),
+        opts.cnn_hears_household,
     );
     let mode = match detector {
         WakeDetector::HeyGoose => WakeMode::HeyGoose,
@@ -194,6 +190,7 @@ pub async fn build_listening(opts: ListeningOptions<'_>) -> Listening {
         pond_audio_out::play_wake_ping(quiet::installed())
     }));
     cfg.audio_level = opts.audio_level.clone();
+    cfg.speaker = opts.speaker.take();
     let transcriber: Arc<dyn Transcriber> = Arc::new(WhisperTranscriber(opts.whisper.clone()));
     let mic = opts.mic.clone();
     // Loading converts Silero once and warms every ring: CPU work, off the runtime's workers.
@@ -235,6 +232,7 @@ pub async fn build_listening(opts: ListeningOptions<'_>) -> Listening {
         spoken_observer: Some(ear.spoken_hook()),
         front: Front::Ear { detector, reason },
         ear_parts: ear.parts(),
+        ear: Some(ear.clone()),
         wake_word,
         calibrated: settings.voice_wake_word_transcriptions.len(),
     }
@@ -287,6 +285,7 @@ async fn whisper_front(
         spoken_observer: None,
         front: Front::Whisper(why),
         ear_parts: Vec::new(),
+        ear: None,
         wake_word,
         calibrated: settings.voice_wake_word_transcriptions.len(),
     }
