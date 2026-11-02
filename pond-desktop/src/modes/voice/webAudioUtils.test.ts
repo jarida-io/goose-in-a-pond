@@ -180,6 +180,11 @@ describe("stripMarkupForSpeech", () => {
     ).toBe("The sky scatters blue light.");
   });
 
+  it("drops an invented snake_case block with its body", () => {
+    expect(stripMarkdown("<search_web>What is the story of the Rift Valley</search_web>")).toBe("");
+    expect(stripMarkdown("<turn_plan>Search first.</turn_plan> It formed slowly.")).toBe("It formed slowly.");
+  });
+
   it("leaves comparisons and dunder names alone", () => {
     expect(stripMarkupForSpeech("3 < 5 and 7 > 2")).toBe("3 < 5 and 7 > 2");
     expect(stripMarkupForSpeech("The __init__ method runs first.")).toBe("The __init__ method runs first.");
