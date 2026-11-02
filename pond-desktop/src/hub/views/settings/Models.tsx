@@ -318,6 +318,7 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
             roles={roles}
             transferFor={transferFor}
             line={job.line}
+            checking={job.checking}
             retrying={job.retrying}
             busy={actions.busy}
             off={job.off}

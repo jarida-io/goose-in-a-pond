@@ -87,6 +87,17 @@ async function setup(
   return seen;
 }
 
+/** Holds every index report until the returned function is called, as a slow pond does on its first read. */
+async function holdHealth(page: Page, json: Record<string, unknown>): Promise<() => void> {
+  let release = () => {};
+  const answered = new Promise<void>((ok) => { release = ok; });
+  await page.route("**/api/v1/context/index/health", async (route) => {
+    await answered;
+    await route.fulfill({ json }).catch(() => undefined);
+  });
+  return release;
+}
+
 async function openClassicModels(page: Page) {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Jobs" })).toBeVisible({ timeout: 10_000 });
@@ -209,6 +220,18 @@ test.describe("Memory, classic Models page", () => {
     await expect.poll(() => seen.activated.length).toBe(1);
     expect(seen.activated[0].body).toEqual({ role: "embedding" });
     expect(seen.rebuilt).toBe(0);
+  });
+
+  test("claims nothing about the chosen model before the pond's first answer", async ({ page }) => {
+    await setup(page, { section: "models", roles: ROLES(ON_EG2) });
+    const answer = await holdHealth(page, memoryHealth({ state: "failed", reason: "loading x.gguf on the Gpu: out of memory" }, { matching: 0 }));
+    const memory = await openClassicModels(page);
+    const row = memory.getByRole("listitem").filter({ hasText: "EmbeddingGemma 2" });
+    await expect(row).toContainText("Checking");
+    await expect(memory.getByText("In use")).toHaveCount(0);
+    answer();
+    await expect(row).toContainText("Chosen, not loaded");
+    await expect(memory.getByText("In use")).toHaveCount(0);
   });
 
   test("rests Download and use, with the reason, when the pond reaches nothing outside the house", async ({ page }) => {
@@ -340,6 +363,16 @@ test.describe("Memory, hub", () => {
       const box = await button.boundingBox();
       expect(box?.height ?? 0, await button.innerText()).toBeGreaterThanOrEqual(44);
     }
+  });
+
+  test("claims nothing about the chosen model before the pond's first answer", async ({ page }) => {
+    await setup(page, { section: "hub", size: [800, 480], roles: ROLES(ON_EG2) });
+    const answer = await holdHealth(page, memoryHealth({ state: "loading" }, { matching: 0 }));
+    const card = await openHubModels(page);
+    await expect(card.getByRole("listitem").first()).toContainText("Checking");
+    await expect(card.getByText("In use")).toHaveCount(0);
+    answer();
+    await expect(card.getByRole("listitem").first()).toContainText("Loading");
   });
 
   test("Use assigns the Memory role from the hub", async ({ page }) => {

@@ -207,8 +207,13 @@ export function memoryChosenText(m: ChosenModel, opts: { off?: boolean } = {}): 
 export type HolderTone = "ok" | "wait" | "busy" | "stopped";
 
 /** What the row of the model Memory is set to may claim, from where the embedder really is. "In use"
- *  only once it runs; silence from the pond is not a fault, so it keeps the household's choice. */
-export function holderBadge(line: EmbedderLine | null): { label: string; tone: HolderTone } {
+ *  only once it runs; before the pond's first answer it claims nothing, and silence after that is
+ *  not a fault, so it keeps the household's choice. */
+export function holderBadge(
+  line: EmbedderLine | null,
+  opts: { checking?: boolean } = {},
+): { label: string; tone: HolderTone } {
+  if (!line && opts.checking) return { label: "Checking", tone: "busy" };
   switch (line?.kind) {
     case "waiting":
       return { label: "Waiting to load", tone: "wait" };

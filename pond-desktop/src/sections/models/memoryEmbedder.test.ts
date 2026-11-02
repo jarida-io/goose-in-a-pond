@@ -277,8 +277,14 @@ describe("what the model's row and line may claim", () => {
   it("says In use only once the model runs, reading again included", () => {
     expect(holderBadge(said({}))).toEqual({ label: "In use", tone: "ok" });
     expect(holderBadge(said({}, {}, { matching: 40 }))).toEqual({ label: "In use", tone: "ok" });
-    // The pond has nothing to say yet: the household's choice stands.
+    // The pond answered with nothing to say: the household's choice stands.
     expect(holderBadge(null)).toEqual({ label: "In use", tone: "ok" });
+  });
+
+  it("claims nothing before the pond's first answer", () => {
+    expect(holderBadge(null, { checking: true })).toEqual({ label: "Checking", tone: "busy" });
+    // An answer that arrived wins over the flag.
+    expect(holderBadge(said({ state: "failed", reason: "out of memory" }), { checking: true }).label).toBe("Chosen, not loaded");
   });
 
   it("says a chosen model that failed is chosen and not loaded", () => {
