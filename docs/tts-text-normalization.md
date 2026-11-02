@@ -17,7 +17,7 @@ model tokens -> ThoughtFilter (reasoning removed) -> split_speech_units(buf, tru
 
 | Step | Function | Callers |
 |---|---|---|
-| Split a streaming buffer into units | `split_speech_units(text, allow_clauses)` | `ChatService::stream_response_inner` (voice loop), `AudioBus::speak_stream` / `speak_text` (`crates/pond-audio-out/src/bus.rs`, spoken scheduled tasks), `KokoroOutput::speak` |
+| Split a streaming buffer into units | `split_speech_units(text, allow_clauses)` | `ChatService::stream_response_inner` (voice loop), `AudioBus::speak_text` (`crates/pond-audio-out/src/bus.rs`, spoken scheduled tasks), `KokoroOutput::speak` |
 | Markdown to plain text, then normalize | `strip_markdown_for_speech` -> `normalize_for_speech` | `tokenizer::chunk` in `crates/pond-adapters-kokoro/src/tokenizer.rs`, so every Kokoro synthesis: the voice loop, `AudioBus`, `POST /api/v1/tts`, voice previews |
 
 Normalization happens inside the Kokoro adapter, not in the callers, so every path gets it once.

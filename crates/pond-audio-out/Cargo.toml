@@ -16,7 +16,6 @@ pond-voice = { path = "../pond-voice" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
-futures = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt", "macros"] }
 # rodio is isolated to this crate — playback must not leak into every crate
 # that happens to want to make a sound.
