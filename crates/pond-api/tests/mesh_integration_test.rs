@@ -56,6 +56,7 @@ async fn make_app_with_mesh_provider_and_capabilities(
 
     let state = Arc::new(AppState {
         warmup: Default::default(),
+        room_voice: None,
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
@@ -181,6 +182,7 @@ async fn make_app_with_settlement_deps() -> (
 
     let state = Arc::new(AppState {
         warmup: Default::default(),
+        room_voice: None,
         account_sync: None,
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),

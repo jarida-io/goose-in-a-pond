@@ -46,6 +46,7 @@ pub async fn app_state() -> TestState {
     ));
     let state = AppState {
         warmup: Default::default(),
+        room_voice: None,
         db,
         onboarding_repo: Arc::new(pond_infra::onboarding::SqlxOnboardingRepository::new(
             pool.clone(),

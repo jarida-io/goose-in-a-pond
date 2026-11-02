@@ -92,6 +92,14 @@ impl Listening {
         chat
     }
 
+    /// The wake detector this front end listens with, and why.
+    pub fn wake(&self) -> (WakeDetector, WakeDetectorReason) {
+        match self.front {
+            Front::Ear { detector, reason } => (detector, reason),
+            Front::Whisper(_) => (WakeDetector::Whisper, WakeDetectorReason::NoEar),
+        }
+    }
+
     /// One line for a status display.
     pub fn describe(&self) -> String {
         match self.front {
@@ -105,6 +113,7 @@ impl Listening {
                     WakeDetectorReason::Calibrated => "it hears this household",
                     WakeDetectorReason::NotCalibrated => "not calibrated",
                     WakeDetectorReason::CustomPhrase => "a custom phrase",
+                    WakeDetectorReason::NoEar => "no ear",
                 };
                 format!("echo cancelled; wake word by {detector} ({reason})")
             }
@@ -134,6 +143,18 @@ impl Transcriber for WhisperTranscriber {
 /// so `auto` keeps Whisper.
 fn cnn_hears_household(_settings: &Settings) -> bool {
     false
+}
+
+/// The wake detector `build_listening` would choose, for a status shown before it runs.
+pub fn expected_wake(settings: &Settings) -> (WakeDetector, WakeDetectorReason) {
+    if settings.vad_backend.eq_ignore_ascii_case("rms") {
+        return (WakeDetector::Whisper, WakeDetectorReason::NoEar);
+    }
+    choose_wake_detector(
+        &settings.voice_wake_detector,
+        &settings.voice_wake_word,
+        cnn_hears_household(settings),
+    )
 }
 
 pub async fn build_listening(opts: ListeningOptions<'_>) -> Listening {

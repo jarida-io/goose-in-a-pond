@@ -21,6 +21,7 @@ pub mod pond_admin;
 pub mod quiet_pass;
 mod report_export;
 pub mod rides;
+pub mod room_voice;
 pub mod routes;
 pub mod runs;
 pub mod spoken_code;
@@ -114,6 +115,8 @@ pub struct AppState {
     pub agent: Arc<dyn Agent>,
     /// Warm-up status for `GET /api/v1/warmup`; `std` lock since its writer is a sync callback.
     pub warmup: Arc<std::sync::RwLock<WarmupStatus>>,
+    /// Serve's room voice loop, behind `/voice/room`; `None` where serve runs none.
+    pub room_voice: Option<Arc<dyn pond_core::models::ports::room_voice::RoomVoiceControl>>,
     /// Hot-swappable when role assignments change; `None` inside the lock falls back to `agent`.
     pub llm_provider: Arc<tokio::sync::RwLock<Option<Arc<dyn LlmProvider>>>>,
     /// Local llamafile base URL, kept so settings changes can rebuild the ModelRouter live.

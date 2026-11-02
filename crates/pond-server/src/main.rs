@@ -20,6 +20,7 @@ mod model_download;
 mod node_path;
 mod onnx_gpu;
 mod ports;
+mod room_voice;
 mod schedule_executors;
 mod spoken_code;
 mod system_deps;
@@ -1251,7 +1252,7 @@ async fn run_server(
         pond_core::models::domain::device_budget::allow_gemma_vision();
     }
 
-    // Serve never opens the mic (only `/transcribe`), but `WhisperRsInput::new` needs a handle.
+    // Room voice listens through it; with the room off, only `/transcribe` needs the handle.
     let (mic_handle, _mic_owner_join) = pond_audio::spawn(
         Box::new(pond_audio::CpalCapture::new()),
         pond_audio::CAPTURE_RATE_HZ,
@@ -1259,11 +1260,16 @@ async fn run_server(
         settings.mic_enabled,
     );
 
-    // Choose the speaker before Kokoro opens one. The mic is only tested on request, or by the
-    // voice session, which owns it.
-    {
+    // Choose the speaker before Kokoro opens one. With room voice on, serve owns the mic and
+    // tests it now; otherwise only on request, or by a voice session, which then owns it.
+    let serve_audio = {
+        let role = if settings.voice_room_enabled {
+            pond_adapters_audio_devices::Role::Room
+        } else {
+            pond_adapters_audio_devices::Role::Serve
+        };
         let supervisor = audio_devices::start(
-            pond_adapters_audio_devices::Role::Serve,
+            role,
             &data_dir,
             Some(mic_handle.clone()),
             Arc::new(SqliteSettingsRepository::new(db.system.clone())),
@@ -1274,12 +1280,13 @@ async fn run_server(
             None => println!("  ⚠  Speaker: still being tested; using the system default"),
         }
         let control = Arc::new(pond_adapters_audio_devices::PondAudioControl::new(
-            supervisor,
+            supervisor.clone(),
             data_dir.clone(),
         ));
         pond_api::audio_devices::install(control.clone());
         pond_mcp_server::init_audio_control(control);
-    }
+        supervisor
+    };
 
     // What did not start, told to the household once the notification pipeline exists.
     let mut startup_problems = pond_core::mcp::domain::system_notice::StartupProblems::default();
@@ -1337,23 +1344,25 @@ async fn run_server(
         settings.voice_whisper_url.clone()
     };
 
+    // One model for `/transcribe` and the room.
+    let serve_whisper: Option<Arc<WhisperRsInput>> = whisper_model_path.as_ref().and_then(|p| {
+        match WhisperRsInput::new(p.clone(), mic_handle.clone()) {
+            Ok(w) => Some(Arc::new(w)),
+            Err(e) => {
+                tracing::warn!(
+                    "in-process whisper init failed, transcribe route will proxy to external: {e}"
+                );
+                startup_problems.speech_recognition =
+                    Some(format!("the speech model did not load ({e})"));
+                None
+            }
+        }
+    });
     // A closure, so AppState holds in-process whisper without depending on pond-adapters-whisper.
     let transcribe_audio: Option<Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>> =
-        whisper_model_path.as_ref().and_then(|p| {
-            match WhisperRsInput::new(p.clone(), mic_handle.clone()) {
-                Ok(w) => {
-                    let w = Arc::new(w);
-                    Some(Arc::new(move |wav_bytes: Vec<u8>| {
-                        w.transcribe_wav_bytes(&wav_bytes)
-                    }) as Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>)
-                }
-                Err(e) => {
-                    tracing::warn!("in-process whisper init failed, transcribe route will proxy to external: {e}");
-                    startup_problems.speech_recognition =
-                        Some(format!("the speech model did not load ({e})"));
-                    None
-                }
-            }
+        serve_whisper.clone().map(|w| {
+            Arc::new(move |wav_bytes: Vec<u8>| w.transcribe_wav_bytes(&wav_bytes))
+                as Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>
         });
 
     // Unconditional: Kokoro phonemizes through espeak-ng too.
@@ -4119,7 +4128,53 @@ async fn run_server(
         ))
     };
 
+    // Shared with room voice, whose turns hold lane jobs back as a phone's do.
+    let runs = Arc::new(pond_api::runs::RunSupervisor::default());
+    let room_voice = {
+        let enabled = settings_repo
+            .get()
+            .await
+            .map(|s| s.voice_room_enabled)
+            .unwrap_or(settings.voice_room_enabled);
+        let current = settings_repo
+            .get()
+            .await
+            .unwrap_or_else(|_| settings.clone());
+        let (detector, reason) = voice_rig::expected_wake(&current);
+        println!(
+            "  Room voice: {}",
+            if enabled {
+                "on; it listens once a microphone and speaker pair works"
+            } else {
+                "off (voice_room_enabled)"
+            }
+        );
+        room_voice::RoomVoice::start(
+            room_voice::RoomDeps {
+                agent: agent.clone(),
+                storage: session_storage.clone(),
+                settings: settings_repo.clone(),
+                telemetry: telemetry.clone(),
+                data_dir: data_dir.clone(),
+                mic: mic_handle.clone(),
+                whisper: serve_whisper.clone(),
+                output: tts.clone(),
+                audio: Arc::new(serve_audio.clone()),
+                runs: runs.clone(),
+            },
+            enabled,
+            pond_core::models::domain::room_voice::RoomWake {
+                phrase: current.voice_wake_word.clone(),
+                detector,
+                reason,
+            },
+        )
+    };
+
     let state = Arc::new(AppState {
+        room_voice: Some(
+            room_voice.clone() as Arc<dyn pond_core::models::ports::room_voice::RoomVoiceControl>
+        ),
         tts_control: tts_control.clone(),
         // Before `db`: fields evaluate in source order and `db` is moved below.
         suggestion_queue: Arc::new(
@@ -4188,7 +4243,7 @@ async fn run_server(
         event_log: Some(event_log.clone()),
         push_token_repo: Some(push_token_repo.clone()),
         face_recognition,
-        runs: Arc::new(pond_api::runs::RunSupervisor::default()),
+        runs: runs.clone(),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         // Own, larger pool so long-lived phone streams never starve interactive chat SSE.
         notification_sse_semaphore: Arc::new(tokio::sync::Semaphore::new(32)),
@@ -4719,6 +4774,9 @@ async fn run_server(
     if let Some(matter) = &matter_runtime {
         matter.shutdown().await;
     }
+
+    // Before the model goes: a room turn must not start while it is released.
+    room_voice.shutdown().await;
 
     // While logging still runs, so the release is on record. `async_main` repeats it for the
     // other entry points; a second call finds nothing loaded.

@@ -176,6 +176,7 @@ async fn pond_with_parts(
     mock_hs.add_valid_token("test-token".to_string()).await;
     let state = Arc::new(AppState {
         warmup: Default::default(),
+        room_voice: None,
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),

@@ -30,6 +30,11 @@ const KNOWN_MINTERS: &[(&str, &str)] = &[
         "the terminal voice/chat CLI's own session -- a person, in another process",
     ),
     (
+        "crates/pond-server/src/room_voice.rs",
+        "someone in the room spoke to the pond: room voice's own session, a fresh UUID per run \
+         -- a person",
+    ),
+    (
         "crates/pond-server/src/schedule_executors.rs",
         "MACHINE: `sched-{task_id}-{unix_ts}`, one per schedule fire and per rule \
          AgentPrompt action. Covered by POND_AUTHORED_SESSION_PREFIXES.",

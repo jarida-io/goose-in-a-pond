@@ -203,6 +203,13 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     // ───────────── Protected routes (require onboarding) ─────────────
     let protected_routes = Router::new()
         .route("/transcribe", post(transcribe))
+        // Serve's room voice: its state, the switch, its events and its interrupt.
+        .route(
+            "/voice/room",
+            get(crate::room_voice::status).put(crate::room_voice::set_enabled),
+        )
+        .route("/voice/room/events", get(crate::room_voice::events))
+        .route("/voice/room/interrupt", post(crate::room_voice::interrupt))
         // Which microphone and speaker are in use and why; a test opens real devices.
         .route("/audio/devices", get(crate::audio_devices::status))
         .route("/audio/devices/test", post(crate::audio_devices::test))
@@ -6047,6 +6054,11 @@ async fn update_settings(
 
     // Privacy controls must apply now, not at the next restart.
     pond_core::models::domain::mic_gate::set_mic_enabled(merged.mic_enabled);
+    if current.voice_room_enabled != merged.voice_room_enabled {
+        if let Some(room) = &state.room_voice {
+            room.set_enabled(merged.voice_room_enabled).await;
+        }
+    }
     let cameras = pond_adapters_vision::LiveCameraRegistry::global();
     cameras.sync_settings(&merged);
     cameras.notify_settings_changed();

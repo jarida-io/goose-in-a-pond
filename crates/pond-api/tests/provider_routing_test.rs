@@ -200,6 +200,7 @@ async fn make_app_with_provider(
 
     let state = Arc::new(AppState {
         warmup: Default::default(),
+        room_voice: None,
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
@@ -555,6 +556,7 @@ async fn no_provider_still_returns_agent_response_for_non_task_messages() {
 
     let state = Arc::new(AppState {
         warmup: Default::default(),
+        room_voice: None,
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
@@ -684,6 +686,7 @@ async fn task_message_uses_agent_with_tool_call_events_without_provider() {
 
     let state = Arc::new(AppState {
         warmup: Default::default(),
+        room_voice: None,
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
