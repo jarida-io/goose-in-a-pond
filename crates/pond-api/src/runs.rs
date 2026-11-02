@@ -411,6 +411,8 @@ pub struct RunSupervisor {
     turns_in_flight: Arc<std::sync::atomic::AtomicUsize>,
     /// The quiet-time compaction pass, which every turn path checks in with before the model.
     quiet_passes: crate::quiet_pass::QuietPasses,
+    /// The Voice agent's background compiles, which wait for quiet like the passes do.
+    pub(crate) voice_prefill: crate::voice_agent::VoicePrefillQueue,
 }
 
 /// A turn being answered, counted until it drops; see [`RunSupervisor::turn_started`].
@@ -431,6 +433,7 @@ impl RunSupervisor {
             epoch: uuid::Uuid::new_v4().to_string(),
             turns_in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             quiet_passes: crate::quiet_pass::QuietPasses::default(),
+            voice_prefill: crate::voice_agent::VoicePrefillQueue::default(),
         }
     }
 

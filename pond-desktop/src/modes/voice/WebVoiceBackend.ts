@@ -8,7 +8,7 @@ import type {
 import {
   MIC_CONSTRAINTS,
   encodeWav, calculateRms, downsampleTo16k, getAudioContext, closeAudioContext,
-  playPingTone, playThinkingTone, splitSpeechUnits, stripMarkdown, normalizeForSpeech,
+  playPingTone, playThinkingTone, ReplySplitter, stripMarkdown, normalizeForSpeech,
   isWhisperArtifact, checkDismissal, getToolAnnouncement, getQuip,
   filterThinkingFull, createVadState, advanceVad, DEFAULT_VAD_CONFIG,
   registerTtsSource, clearTtsSource, stopTtsPlayback, isTtsInterrupted, resetTtsInterrupt,
@@ -429,7 +429,8 @@ export class WebVoiceBackend implements VoiceBackend {
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
-    let sseBuf = "", thinkIn = false, firstSent = false, ttsBuf = "";
+    let sseBuf = "", thinkIn = false, firstSent = false;
+    const splitter = new ReplySplitter();
     let ttftLogged = false;
     const ttsQ: Promise<AudioBuffer | null>[] = [];
     let playing = false;
@@ -485,18 +486,14 @@ export class WebVoiceBackend implements VoiceBackend {
             thinkIn = blk;
             if (vis) {
               this.onAgentToken?.(vis, false);
-              ttsBuf += vis;
-              const [units, remainder] = splitSpeechUnits(ttsBuf, true);
-              if (units.length > 0) {
-                for (const u of units) enqueue(u);
-                ttsBuf = remainder;
-              }
+              // Nothing playing yet: any clause mark gets the first sound out sooner.
+              for (const u of splitter.push(vis, !playing)) enqueue(u.text);
             }
           }
 
           if (ev.type === "tool_call") {
             const tn = (ev.tool as string) ?? "tool";
-            if (ttsBuf.trim()) { enqueue(ttsBuf.trim()); ttsBuf = ""; }
+            for (const u of splitter.finish()) enqueue(u.text);
             enqueue(getToolAnnouncement(tn));
             this.onToolCall?.({ tool: tn, data: (ev.arguments as Record<string, unknown>) ?? {} });
           }
@@ -517,7 +514,7 @@ export class WebVoiceBackend implements VoiceBackend {
       }
     } finally { reader.releaseLock(); }
 
-    if (ttsBuf.trim() && !this.cancelled) enqueue(ttsBuf.trim());
+    if (!this.cancelled) for (const u of splitter.finish()) enqueue(u.text);
 
     // Wait for TTS queue to drain (exits immediately if interrupted)
     await new Promise<void>((resolve) => {

@@ -90,11 +90,12 @@ async fn text_mode_listen_think_speak() {
 
     svc.run_loop().await.unwrap();
 
+    // A reply's first spoken unit ends after six words, so the echo arrives in two parts.
     assert!(
         output
             .spoken()
-            .iter()
-            .any(|s| s.contains("What is the capital of France?")),
+            .join(" ")
+            .contains("What is the capital of France?"),
         "voice output should have received the agent response; got: {:?}",
         output.spoken()
     );

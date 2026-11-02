@@ -98,6 +98,10 @@ export function classifyLine(line: string): Classified {
         rms: typeof rms === "number" ? rms : 0,
       });
     }
+    // The ear's wake and interrupt: contract lines the renderer has no use for yet.
+    case "wake":
+    case "interrupt":
+      return { ok: true, value: { kind: "skip" } };
     case "exit": {
       const reason = obj["reason"];
       return {

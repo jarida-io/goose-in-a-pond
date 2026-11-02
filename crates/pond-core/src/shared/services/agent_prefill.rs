@@ -7,6 +7,7 @@ use crate::shared::domain::orchestration::AgentRole;
 use crate::shared::services::long_task_roles::{
     COMPOSER_ROLE, PLANNER_ROLE, VERIFIER_ROLE, WORKER_ROLE,
 };
+use crate::shared::services::voice_agent::VOICE_AGENT;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
@@ -15,9 +16,17 @@ pub const DEFAULT_AGENT_PREFILL_RETENTION_DAYS: u32 = 14;
 /// A retention of zero would skip every agent compiled a moment ago.
 pub const MIN_AGENT_PREFILL_RETENTION_DAYS: u32 = 1;
 
-/// The shipped agents every long task runs on; their prefills are compiled on every start.
+/// The shipped agents: those every long task runs on, and the Voice agent. Their prefills are
+/// compiled on every start.
 pub fn is_default_agent(name: &str) -> bool {
-    [PLANNER_ROLE, WORKER_ROLE, VERIFIER_ROLE, COMPOSER_ROLE].contains(&name)
+    [
+        PLANNER_ROLE,
+        WORKER_ROLE,
+        VERIFIER_ROLE,
+        COMPOSER_ROLE,
+        VOICE_AGENT,
+    ]
+    .contains(&name)
 }
 
 /// 64-bit FNV-1a: stable across builds and releases, unlike `DefaultHasher`, since the hash is
@@ -185,8 +194,10 @@ pub fn plan_prefills<'a>(
             PrefillDecision::Skip { reason } => plan.skipped.push((role.name(), reason)),
         }
     }
+    // A shipped agent's row stays: the Voice agent is compiled by serve's prewarm, not here.
     plan.forget = records
         .keys()
+        .filter(|agent| !is_default_agent(agent))
         .filter(|agent| !roles.iter().any(|role| role.name() == agent.as_str()))
         .cloned()
         .collect();

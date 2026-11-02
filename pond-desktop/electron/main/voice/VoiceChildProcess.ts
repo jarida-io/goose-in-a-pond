@@ -1,5 +1,6 @@
 // Drives the single `pond-server chat --voice --json-events` child. It owns mic and speaker in
-// one process so capture, inference and speech cross no transport boundary.
+// one process so capture, inference and speech cross no transport boundary. Where the server
+// already listens in the room, it attaches to that instead and spawns nothing.
 
 import type { ChildProcess } from "node:child_process";
 import { spawn as realSpawn } from "node:child_process";
@@ -22,6 +23,7 @@ import {
   type OrphanDeps,
   VOICE_CHILD,
 } from "../orphan";
+import type { RoomEvents, RoomStatus, RoomVoiceClient } from "./roomClient";
 
 /** How long to wait after `stop` and stdin close before escalating to a kill. */
 export const GRACEFUL_STOP_MS = 3_000;
@@ -43,6 +45,8 @@ export interface VoiceChildDeps {
   removePid?: () => void;
   gracefulStopMs?: number;
   pollMs?: number;
+  /** The server's room voice; with it available, a session attaches rather than spawns. */
+  room?: RoomVoiceClient;
   log?: {
     info(message: string): void;
     warn(message: string): void;
@@ -66,10 +70,22 @@ interface Session {
   ended: boolean;
 }
 
+/** A session attached to the server's room voice. Callbacks capture it, as with `Session`. */
+interface Attached {
+  id: string;
+  events: RoomEvents | null;
+  sawReady: boolean;
+  /** Set once the shell asked it to stop, so the stream's end is not reported as a crash. */
+  stopping: boolean;
+  ended: boolean;
+}
+
 const noopLog = { info() {}, warn() {}, debug() {} };
 
 export class VoiceChildProcess {
   private session: Session | null = null;
+
+  private attached: Attached | null = null;
 
   /** Serialises start and stop, which otherwise interleave across awaits into a double spawn. */
   private lifecycle: Promise<unknown> = Promise.resolve();
@@ -77,11 +93,11 @@ export class VoiceChildProcess {
   constructor(private readonly deps: VoiceChildDeps) {}
 
   get isActive(): boolean {
-    return this.session !== null;
+    return this.session !== null || this.attached !== null;
   }
 
   get sessionId(): string | null {
-    return this.session?.id ?? null;
+    return this.session?.id ?? this.attached?.id ?? null;
   }
 
   private get log() {
@@ -107,8 +123,16 @@ export class VoiceChildProcess {
   /** `resume`: chat session to continue, or null for a fresh one. Resolves to the id the child got. */
   start(resume: string | null): Promise<string> {
     return this.serialise(async () => {
-      if (this.session) {
+      if (this.session || this.attached) {
         throw new Error("a voice session is already running");
+      }
+      const room = this.deps.room;
+      const status = room ? await room.status() : null;
+      if (room && status?.available) return this.attach(room, status);
+      if (room) {
+        this.log.info(
+          `the server's room voice is ${status ? `unavailable (${status.unavailable_reason})` : "not reachable"}; spawning a voice child`,
+        );
       }
       this.cleanupOrphans();
 
@@ -182,6 +206,72 @@ export class VoiceChildProcess {
       });
 
       return id;
+    });
+  }
+
+  /** Listen through the server's room voice; the room keeps its own session. */
+  private async attach(room: RoomVoiceClient, status: RoomStatus): Promise<string> {
+    const on = status.enabled ? status : ((await room.setEnabled(true)) ?? status);
+    const attached: Attached = {
+      id: on.session_id ?? status.session_id ?? "",
+      events: null,
+      sawReady: false,
+      stopping: false,
+      ended: false,
+    };
+    this.attached = attached;
+    this.log.info(`attached to the server's room voice (session ${attached.id || "starting"})`);
+    attached.events = room.events(
+      (line) => this.onRoomLine(attached, line),
+      (error) => this.onRoomEnd(attached, error),
+    );
+    // A room already listening has sent its ready line; one still starting sends it soon.
+    if (on.session_id) {
+      attached.sawReady = true;
+      this.deps.emit("voice-ready", { session_id: on.session_id });
+      if (on.state !== "off" && on.state !== "starting") this.deps.emit("voice-state", on.state);
+    }
+    return attached.id;
+  }
+
+  private onRoomLine(attached: Attached, line: string): void {
+    if (this.attached !== attached) return;
+    const result = classifyLine(line);
+    if (!result.ok) {
+      this.log.warn(`ignoring non-contract room voice line (${result.error}): ${line}`);
+      return;
+    }
+    const value = result.value;
+    if (value.kind === "skip") return;
+    if (value.kind === "exit") {
+      // The room's loop ended on its own: this session is over, as a child's would be.
+      if (!attached.stopping) this.endAttached(attached, value.reason);
+      return;
+    }
+    if (value.name === "voice-ready") {
+      attached.sawReady = true;
+      attached.id = (value.payload as { session_id: string }).session_id || attached.id;
+    }
+    this.deps.emit(value.name, value.payload);
+  }
+
+  private onRoomEnd(attached: Attached, error: string | null): void {
+    if (attached.stopping || this.attached !== attached) return;
+    if (error) this.log.warn(`room voice events ended: ${error}`);
+    this.endAttached(attached, classifyEnd(null, attached.sawReady, []).reason);
+  }
+
+  private endAttached(attached: Attached, reason: string): void {
+    if (attached.ended) return;
+    attached.ended = true;
+    attached.events?.close();
+    if (this.attached !== attached) return;
+    this.attached = null;
+    this.deps.emit("voice-session-ended", {
+      code: null,
+      reason,
+      session_id: attached.id,
+      detail: null,
     });
   }
 
@@ -292,6 +382,10 @@ export class VoiceChildProcess {
    * state, and during a start or stop there is no turn to end.
    */
   interrupt(): void {
+    if (this.attached) {
+      void this.deps.room?.interrupt();
+      return;
+    }
     const session = this.session;
     if (!session || !this.send(session, "interrupt")) {
       this.log.debug("no voice turn to interrupt");
@@ -304,6 +398,14 @@ export class VoiceChildProcess {
    */
   stop(): Promise<void> {
     return this.serialise(async () => {
+      const attached = this.attached;
+      if (attached) {
+        attached.stopping = true;
+        // Detach only: the room keeps waiting for its wake word, and its toggle is what turns it off.
+        attached.events?.close();
+        this.endAttached(attached, "stopped");
+        return;
+      }
       const session = this.session;
       if (!session) return;
 
@@ -335,6 +437,14 @@ export class VoiceChildProcess {
    * pending close handler stale, so it neither reports this stop nor tears down a newer session.
    */
   killNow(): void {
+    const attached = this.attached;
+    if (attached) {
+      // The room is serve's: on quit only this app's listening ends.
+      this.attached = null;
+      attached.stopping = true;
+      attached.events?.close();
+      return;
+    }
     const session = this.session;
     if (!session) return;
     this.session = null;
