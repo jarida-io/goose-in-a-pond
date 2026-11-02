@@ -837,6 +837,56 @@ have read less than the turn already injected, or the other member's memories.
 
 ---
 
+## 4e. A turn says who is speaking (2026-11-02)
+
+Found from the owner's phone on the Orin: linked to their member (the session row carried
+`profile_id` with source `paired_device`, and the log showed presence `arrived`), yet "Who am I?"
+answered "I do not have any personal information stored about you" and "What is my name?" that no
+name was saved, while the Daily Brief on the same pond greeted the owner by name.
+
+### What reached the model
+
+Nothing named the speaker. `particulars_for` stated a name only from `preferences.preferred_name`,
+and this member's `preferences` were `{}`: only the onboarding flows (the desktop wizard and the
+phone's owner setup) write that key, and only when a preferred name is typed. The only name in the prompt was `{{user_name}}` in the template's identity
+sentence, "You are Goose, {user_name}'s personal agentic assistant", which says whose pond it is,
+not who is talking. The model called `recall_memories`, found nothing, and said so.
+
+Nothing regressed between `4b559ed7` and `ffe2ef23`: `profile_context_for` and `particulars_for`
+are the same apart from member notes, and the templates are unchanged. Until 11:32 that day
+`user_name` was a short nickname, and "Who am I" was answered "I am Goose, {nickname}'s personal
+agentic assistant", the model describing itself with the identity sentence, never naming the user.
+After `user_name` became the owner's full name, it stopped echoing even that.
+
+The repeated `could not record which household member this turn's device belongs to ... Session not
+found: context-setup` warning is unrelated. `context-setup` is the placeholder session id the
+desktop's Context screen and Connections panel read with (`Collected.tsx`, `ConnectionsPanel.tsx`);
+no such session exists, so `claim_session_identity` fails on those read routes. Chat sessions record
+their member as before.
+
+### What changed
+
+* `ProfileContext.preferred_name` is now `speaker_name`: the member's preferred name, else their
+  display name, set only when the turn is attributed (`Owner`). `Household` and `Guest` turns name
+  nobody, as P10 requires.
+* `profile_context_lines` renders it as one line in the dynamic suffix, so the KV prefix is
+  untouched and a change of speaker re-prefills nothing: `You are talking with {name}; "I" and
+  "my" in their messages mean {name}.` It replaces "The user prefers to be called {name}.", and is
+  stated even when the name equals `user_name`. About 27 tokens per turn with a three-word name, counted by hand.
+* Pinned by `a_linked_member_with_no_preferred_name_is_named_by_their_display_name` (the Orin's
+  case), the prompt-assembly tests in `prompt_builder.rs` (a linked member, an unlinked device's
+  `Household` context, a guest, a speaker change leaving `prefix_hash` alone), and
+  `a_turn_names_the_member_whose_phone_it_came_from_and_nobody_else` through `/chat/stream` with
+  two linked phones and one paired to nobody.
+
+### Not verified
+
+The model's answer on the Orin. The line reaches the request (pinned through the route); that E4B
+then answers "who am I" from it, rather than calling `recall_memories` and reporting nothing, has
+not been run on hardware.
+
+---
+
 ## 5. Invariants
 
 1. Profile context stays in `<system-context>` on the user message. Never the system prefix.
