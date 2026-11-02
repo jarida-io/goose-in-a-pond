@@ -20,6 +20,7 @@ mod model_download;
 mod node_path;
 mod onnx_gpu;
 mod ports;
+mod room_memory;
 mod room_voice;
 mod schedule_executors;
 mod spoken_code;

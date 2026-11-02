@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use pond_adapters_ear::{EarConfig, EarRig, Transcriber, WakeMode};
+use pond_adapters_ear::{EarConfig, EarPart, EarRig, Transcriber, WakeMode};
 use pond_adapters_whisper::{
     KeywordDetectorConfig, WhisperBackend, WhisperKeywordDetector, WhisperRsInput,
 };
@@ -70,6 +70,8 @@ pub struct Listening {
     /// Told what the loop says, so the ear can tell its echo from a person.
     pub spoken_observer: Option<SpokenObserver>,
     pub front: Front,
+    /// What the ear's parts hold; empty on the Whisper front end.
+    pub ear_parts: Vec<EarPart>,
     pub wake_word: String,
     /// Calibration takes behind the wake word's triggers.
     pub calibrated: usize,
@@ -140,7 +142,7 @@ struct WhisperTranscriber(Arc<WhisperRsInput>);
 
 impl Transcriber for WhisperTranscriber {
     fn transcribe(&self, pcm: &[f32]) -> anyhow::Result<String> {
-        self.0.transcribe_pcm(pcm)
+        crate::room_memory::measured("whisper", || self.0.transcribe_pcm(pcm))
     }
 }
 
@@ -232,6 +234,7 @@ pub async fn build_listening(opts: ListeningOptions<'_>) -> Listening {
         state_observer: Some(ear.state_hook()),
         spoken_observer: Some(ear.spoken_hook()),
         front: Front::Ear { detector, reason },
+        ear_parts: ear.parts(),
         wake_word,
         calibrated: settings.voice_wake_word_transcriptions.len(),
     }
@@ -283,6 +286,7 @@ async fn whisper_front(
         state_observer: None,
         spoken_observer: None,
         front: Front::Whisper(why),
+        ear_parts: Vec::new(),
         wake_word,
         calibrated: settings.voice_wake_word_transcriptions.len(),
     }

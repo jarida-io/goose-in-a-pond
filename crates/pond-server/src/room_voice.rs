@@ -89,6 +89,8 @@ struct Inner {
     control: Mutex<Option<VoiceControl>>,
     /// Held from Thinking until the turn ends, so lane jobs wait for a room turn too.
     turn: Mutex<Option<TurnInFlight>>,
+    /// The process as the running loop started, for `room voice memory` after each turn.
+    memory_at_start: Mutex<Option<pond_adapters_ear::ProcessMemory>>,
 }
 
 pub struct RoomVoice {
@@ -123,6 +125,7 @@ impl RoomVoice {
             }),
             control: Mutex::new(None),
             turn: Mutex::new(None),
+            memory_at_start: Mutex::new(None),
         });
         let task = tokio::spawn(supervise(inner.clone()));
         Arc::new(RoomVoice {
@@ -226,7 +229,14 @@ impl Inner {
                             *turn = Some(self.deps.runs.turn_started());
                         }
                     }
-                    WorkflowState::Wait | WorkflowState::Listen => *turn = None,
+                    WorkflowState::Wait | WorkflowState::Listen => {
+                        if turn.take().is_some() {
+                            crate::room_memory::log_turn(
+                                *lock(&self.memory_at_start),
+                                self.deps.whisper.as_ref().and_then(|w| w.held_states()),
+                            );
+                        }
+                    }
                 }
             }
             WorkflowEvent::Wake { who: Some(who) } => {
@@ -368,6 +378,7 @@ async fn run_once(
     let levels = Arc::new(ThrottledAudioLevelSink::new(Box::new(move |rms: f32| {
         let _ = events.send(WorkflowEvent::AudioLevel { rms });
     })));
+    let memory_before = crate::room_memory::now();
     let listening = voice_rig::build_listening(voice_rig::ListeningOptions {
         settings,
         data_dir: &inner.deps.data_dir,
@@ -404,7 +415,7 @@ async fn run_once(
     )
     .with_system_prompt(pond_core::prompts::build_system_prompt(settings))
     .with_thinking_tone(settings.voice_thinking_tone_enabled)
-    .with_voice_output(output)
+    .with_voice_output(Arc::new(crate::room_memory::MeasuredVoice(output)))
     .with_control(control.clone())
     .with_stdout_diagnostics(false)
     .with_event_sink(sink);
@@ -420,6 +431,12 @@ async fn run_once(
         front = %listening.describe(),
         "room voice: listening"
     );
+    crate::room_memory::log_start(
+        memory_before,
+        &listening.ear_parts,
+        inner.deps.whisper.as_ref().and_then(|w| w.held_states()),
+    );
+    *lock(&inner.memory_at_start) = crate::room_memory::now();
     inner.on_event(&WorkflowEvent::Ready {
         session_id: session_id.clone(),
     });

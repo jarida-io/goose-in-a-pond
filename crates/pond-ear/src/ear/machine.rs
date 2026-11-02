@@ -133,7 +133,10 @@ pub struct Ear {
     clean: Vec<f32>,
     mic_samples: usize,
     front: Front,
-    wake: WakeCnn,
+    /// `None` with `segments` on: the host's wake detector reads the segments, so the CNN would
+    /// only hold its weights and arena.
+    wake: Option<WakeCnn>,
+    wake_threshold: f32,
     speaker: Option<SpeakerNet>,
     vad: VadSilero,
     endpointer: Endpointer,
@@ -150,7 +153,15 @@ pub struct Ear {
 
 impl Ear {
     pub fn new(cfg: Config, household: Household) -> Result<Ear, Error> {
-        let wake = WakeCnn::new(cfg.wake.model, &cfg.wake.label, cfg.wake.threshold)?;
+        let wake_threshold = cfg.wake.threshold;
+        let wake = match cfg.segments {
+            true => None,
+            false => Some(WakeCnn::new(
+                cfg.wake.model,
+                &cfg.wake.label,
+                cfg.wake.threshold,
+            )?),
+        };
         let vad = VadSilero::new(cfg.vad, "Silero v5")?;
         let speaker = match cfg.speaker {
             Some(s) => Some(SpeakerNet::new(s.model, &s.label, s.max_seconds)?),
@@ -165,6 +176,7 @@ impl Ear {
             mic_samples: 0,
             front,
             wake,
+            wake_threshold,
             speaker,
             vad,
             endpointer: Endpointer::new(cfg.endpoint),
@@ -185,7 +197,9 @@ impl Ear {
     /// Touch every arena and ring once, so what the OS reports after loading is what the ear holds
     /// when running.
     fn warm_up(&mut self) {
-        self.wake.warm_up(self.rung);
+        if let Some(w) = self.wake.as_mut() {
+            w.warm_up(self.rung);
+        }
         if let Some(s) = self.speaker.as_mut() {
             s.warm_up(self.rung);
         }
@@ -208,7 +222,9 @@ impl Ear {
         self.clean.clear();
         self.mic_samples = 0;
         self.front.reset();
-        self.wake.reset();
+        if let Some(w) = self.wake.as_mut() {
+            w.reset();
+        }
         if let Some(s) = self.speaker.as_mut() {
             s.reset();
         }
@@ -237,11 +253,14 @@ impl Ear {
     }
 
     pub fn set_wake_threshold(&mut self, t: f32) {
-        self.wake.threshold = t;
+        self.wake_threshold = t;
+        if let Some(w) = self.wake.as_mut() {
+            w.threshold = t;
+        }
     }
 
     pub fn wake_threshold(&self) -> f32 {
-        self.wake.threshold
+        self.wake_threshold
     }
 
     pub fn endpoint(&self) -> Endpoint {
@@ -395,10 +414,10 @@ impl Ear {
     }
 
     fn on_wake_frame(&mut self, n: usize, out: &mut Vec<Event>) {
-        if self.segmenter.is_some() {
+        let Some(wake) = self.wake.as_mut() else {
             return;
-        }
-        let Some(hop) = self.wake.on_frame(&self.front, n, self.rung) else {
+        };
+        let Some(hop) = wake.on_frame(&self.front, n, self.rung) else {
             return;
         };
         self.scores.push((hop.t, hop.p));
@@ -545,14 +564,16 @@ impl Ear {
                 },
             );
         }
-        parts.push(Part {
-            role: "wake",
-            name: format!("wake CNN ({})", self.wake.label),
-            bytes: self.wake.bytes(self.rung),
-            ns: self.wake.ns,
-            calls: self.wake.calls,
-            macs: self.wake.macs(),
-        });
+        if let Some(wake) = self.wake.as_ref() {
+            parts.push(Part {
+                role: "wake",
+                name: format!("wake CNN ({})", wake.label),
+                bytes: wake.bytes(self.rung),
+                ns: wake.ns,
+                calls: wake.calls,
+                macs: wake.macs(),
+            });
+        }
         let ep = self.endpointer.cfg;
         parts.push(Part {
             role: "voice activity",
