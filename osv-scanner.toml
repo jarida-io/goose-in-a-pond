@@ -15,6 +15,9 @@
 # Re-reviewed 2026-10-20 against main a3230b44: negentropy (RUSTSEC-2026-0365)
 # was bumped to 0.5.2 rather than ignored; the zbus-family, basic-toml and zip
 # entries were added with the blockers stated in each reason.
+# Re-reviewed 2026-11-02 against main bf38019c: follow-redirects and joi were
+# bumped rather than ignored; block-buffer's entry went when OSV narrowed it to
+# 0.11 and later; minimatch was added.
 
 # ── Unmaintained-crate notices ───────────────────────────────────────────────
 #
@@ -130,6 +133,11 @@ id = "GHSA-q7v9-x93c-xqv3"
 ignoreUntil = 2027-01-31
 reason = "zip 8.6.0 does not bound symlink targets during extraction, so a crafted archive can abort or exhaust memory. Patched only in zip 9.0.0; same blocker as RUSTSEC-2026-0367 (candle-core 0.11.0, docx-rs 0.4.22 and umya-spreadsheet 3.1.1, their latest releases, require zip ^8.6.0). Not reachable: it is in extraction, and no code in the build calls extract() or creates symlinks from archive entries."
 
+[[IgnoredVulns]]
+id = "GHSA-g3hv-75wg-m249"
+ignoreUntil = 2027-01-31
+reason = "minimatch: a crafted pattern makes firstPhasePreProcess() (optimizationLevel >= 2) multiply its glob parts, which the second phase then compares pairwise. Fixed only in 11.0.1, a new major, with no fix on any earlier line. Every copy (3.1.5, 5.1.9, 9.0.9, 10.2.6) is in pond-desktop's dev tree under eslint and electron-builder; none ships in the app or the server. Their latest releases still require older majors: eslint 10.14.0 (^10.2.6), app-builder-lib 26.18.0 (^10.2.5), @typescript-eslint/typescript-estree 8.72.1 (^10.2.2), dir-compare 5.0.0 (^3.0.5). Not reachable: the patterns are the repo's own lint and packaging globs. npm audit rates it moderate, below that job's high gate. Remove when eslint and electron-builder take minimatch 11."
+
 # ── A real vulnerability with no upstream fix ────────────────────────────────
 
 [[IgnoredVulns]]
@@ -141,11 +149,6 @@ reason = "rsa: Marvin Attack, key recovery through timing side channels (CVSS 5.
 id = "RUSTSEC-2026-0387"
 ignoreUntil = 2027-01-31
 reason = "crypto-bigint 0.5.5: some operations meant to be constant-time branch on secret data. Fixed only in 0.7.6, a new major. Reached only through pond-adapters-lightning (pond-server's optional `lightning` feature, off by default and absent from the shipped binary), via breez-sdk-spark's k256 and elliptic-curve 0.13; breez-sdk-spark 0.27.2, its latest release, still locks crypto-bigint 0.5.5. Also in goose/Cargo.lock through the same RustCrypto 0.13 stack. Remove when breez-sdk-spark moves to elliptic-curve 0.14."
-
-[[IgnoredVulns]]
-id = "GHSA-qwgh-2vcv-g2f7"
-ignoreUntil = 2027-03-31
-reason = "block-buffer 0.10.4: a panic caught inside a compress callback can leave the buffer's cursor corrupt. Fixed only in 0.12.1; every digest 0.10 crate (sha2, hmac, blake2, ecdsa and the rest of RustCrypto's current release line) requires block-buffer 0.10, so this lockfile cannot move without that whole generation. Not reachable: the callbacks are the hash functions' own block compressors, which do not panic, and nothing catches a panic and reuses a hasher. Remove when the RustCrypto crates we use are on digest 0.11."
 
 # ── Go: present in the module graph, not in the build ────────────────────────
 
