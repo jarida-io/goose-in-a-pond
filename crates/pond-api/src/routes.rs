@@ -666,9 +666,18 @@ fn file_response(path: &str, bytes: Vec<u8>) -> Response<axum::body::Body> {
         .into_response()
 }
 
+/// An `/api/` path no route serves. Never the dashboard: a client would read its `200` as a
+/// write that succeeded.
+pub async fn api_not_found() -> Response<axum::body::Body> {
+    (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response()
+}
+
 /// Serves the embedded UI, else `static_dir` (dev); extensionless paths get `index.html`.
 pub async fn serve_web(uri: axum::http::Uri, static_dir: std::path::PathBuf) -> impl IntoResponse {
     let raw = uri.path().trim_start_matches('/');
+    if raw == "api" || raw.starts_with("api/") {
+        return api_not_found().await;
+    }
     let rel = if raw.is_empty() { "index.html" } else { raw };
 
     if embedded_ui_present() {
