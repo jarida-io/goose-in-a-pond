@@ -1852,7 +1852,7 @@ mod tests {
     #[test]
     fn a_sentence_past_the_budget_is_cut_at_its_last_clause() {
         let clause = "and then the dough is folded over again";
-        let long = format!("Okay. {}.", vec![clause; 8].join(", "));
+        let long = format!("Okay. {}.", [clause; 8].join(", "));
         let units = stream(&long, Pace::UNHURRIED);
         assert!(units.len() >= 3, "{:?}", texts(&units));
         for unit in &units[1..units.len() - 1] {

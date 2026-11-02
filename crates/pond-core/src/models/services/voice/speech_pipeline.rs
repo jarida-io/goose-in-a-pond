@@ -303,7 +303,7 @@ mod tests {
             (4.5..=5.0).contains(&ahead),
             "five seconds of audio are playing: {ahead}"
         );
-        p.say(SpeechUnit::new(&"word ".repeat(40), Boundary::Sentence))
+        p.say(SpeechUnit::new("word ".repeat(40), Boundary::Sentence))
             .await;
         assert!(
             p.pace().slack_secs < ahead,
