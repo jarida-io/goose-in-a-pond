@@ -147,9 +147,16 @@ renderer. It is packaged for macOS; the Jetson kiosk runs the same app unpackage
 
 ### Voice
 
+Serve runs room voice itself (`crates/pond-server/src/room_voice.rs`): the voice loop on the pond's
+own microphone and speaker, with serve's agent, Whisper and Kokoro, wherever the models are there, a
+microphone and speaker pair works and no `chat --voice` holds the voice lock (`GET /voice/room` says
+which). `voice_room_enabled` switches it.
+
 In the shell: `VoiceMode` → `useVoiceSession` (the only `voice-*` listener) → `start_voice_session`
-→ `VoiceChildProcess` (`electron/main/voice/`), which spawns `pond-server chat --voice --json-events`.
-The child owns the microphone and speaker. It writes NDJSON events (`warmup` lines may precede
+→ `VoiceChildProcess` (`electron/main/voice/`). Where `GET /voice/room` says `available`, it attaches:
+the room's SSE lines become the same `voice-*` events, and start, stop and interrupt become
+`PUT /voice/room` and `POST /voice/room/interrupt`, with the renderer's own token. Otherwise it spawns
+`pond-server chat --voice --json-events`, and the child owns the microphone and speaker. It writes NDJSON events (`warmup` lines may precede
 `ready`, then `state`, `transcript`, `token`, ...) and reads `{"cmd":"interrupt"}` and
 `{"cmd":"stop"}` on stdin. A second voice process exits with `already_running`, so a child you start
 by hand to diagnose the shell keeps the microphone, and the desktop's voice, until you kill it.

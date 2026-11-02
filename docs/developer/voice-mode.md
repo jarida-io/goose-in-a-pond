@@ -1,7 +1,9 @@
 # Voice mode
 
-One loop: wake word, request, working tone, spoken answer. The terminal (`pond-server chat --voice`)
-and the desktop app run the same loop; the desktop spawns it as a child process
+One loop: wake word, request, working tone, spoken answer. Serve runs it in the room on the pond's
+own microphone and speaker (`room_voice.rs`, `GET /api/v1/voice/room`), and the desktop attaches to
+that; the terminal (`pond-server chat --voice`) runs the same loop, and the desktop spawns it as a
+child process where serve's room cannot listen
 ([Desktop voice: the child process](voice-desktop-child-process.md)).
 
 | Stage | Code |
