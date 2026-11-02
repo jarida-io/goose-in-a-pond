@@ -1440,12 +1440,19 @@ async fn run_server(
                         }
                     }
                     out.set_speed(settings.voice_tts_speed);
+                    out.set_accelerator(&settings.voice_tts_accelerator).await;
+                    let out = out.with_placement_probe(kokoro_placement_probe(Arc::new(
+                        SqliteSettingsRepository::new(db.system.clone()),
+                    )));
                     println!(
                         "  ✅ Kokoro TTS: {} @ {:.2}x",
                         out.voice().await,
                         out.speed()
                     );
                     let arc = Arc::new(out);
+                    if let Some(after) = kokoro_idle_unload() {
+                        arc.spawn_idle_unload(after);
+                    }
                     let prewarm_arc = arc.clone();
                     tokio::spawn(async move {
                         if let Err(e) = prewarm_arc.prewarm().await {
@@ -5819,6 +5826,7 @@ async fn run_chat(
                             );
                         }
                         out.set_speed(settings.voice_tts_speed);
+                        out.set_accelerator(&settings.voice_tts_accelerator).await;
                         let out = match &audio_level_sink {
                             Some(sink) => out.with_audio_level_sink(sink.clone()),
                             None => out,
@@ -11334,4 +11342,53 @@ mod tests {
     }
 
     // CI only `cargo check`s this crate, so tests here never run there; put guards in pond-core.
+}
+
+/// What Kokoro's `auto` accelerator reads at each load: the budget the chat model now leaves on
+/// the budgeted device, and the memory free now.
+fn kokoro_placement_probe(
+    settings: Arc<dyn pond_core::user_data::ports::settings::SettingsRepository>,
+) -> pond_adapters_kokoro::PlacementProbe {
+    Arc::new(move || {
+        let settings = settings.clone();
+        Box::pin(async move {
+            let model = settings
+                .get()
+                .await
+                .map(|s| s.chat_model)
+                .unwrap_or_default();
+            #[cfg(feature = "local-inference")]
+            let spare_mb = pond_adapters_local_inference::chat_model_spare_mb(&model);
+            #[cfg(not(feature = "local-inference"))]
+            let spare_mb = {
+                let _ = model;
+                None
+            };
+            pond_adapters_kokoro::PlacementInputs {
+                spare_mb,
+                available_mb: mem_available_mb(),
+            }
+        })
+    })
+}
+
+/// MemAvailable from `/proc/meminfo`, in MB; `None` where there is none.
+fn mem_available_mb() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    meminfo
+        .lines()
+        .find_map(|l| l.strip_prefix("MemAvailable:"))
+        .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+        .map(|kb| kb / 1024)
+}
+
+/// The idle unload under trial: `unload=<seconds>` in `POND_KOKORO_TRIAL`, off otherwise.
+fn kokoro_idle_unload() -> Option<std::time::Duration> {
+    let trial = std::env::var("POND_KOKORO_TRIAL").ok()?;
+    trial
+        .split(',')
+        .find_map(|lever| lever.trim().strip_prefix("unload="))
+        .and_then(|secs| secs.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(std::time::Duration::from_secs)
 }

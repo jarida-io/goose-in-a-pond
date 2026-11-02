@@ -13,11 +13,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{OwnedRwLockWriteGuard, RwLock};
 
+pub mod cuda;
 pub mod engine;
 pub mod tokenizer;
 pub mod voices;
 
-pub use engine::{Engine, SAMPLE_RATE};
+pub use engine::{Device, Engine, EngineOptions, SAMPLE_RATE};
 pub use tokenizer::Vocab;
 pub use voices::StyleTable;
 
@@ -54,10 +55,46 @@ pub struct KokoroConfig {
 const ESPEAKNG_DATA_DIRECTORY: &str = "PIPER_ESPEAKNG_DATA_DIRECTORY";
 
 /// ONNX session load deadline: a cold load takes seconds, but a broken ORT blocks forever.
-const LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// What the pond knows when the engine loads, for choosing its device: MB the chat model leaves
+/// of the budget (`None` off the budgeted device) and MB free now.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlacementInputs {
+    pub spare_mb: Option<u64>,
+    pub available_mb: Option<u64>,
+}
+
+/// Reads [`PlacementInputs`] at each load, since the chat model can change between loads.
+pub type PlacementProbe = Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = PlacementInputs> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// The trial's switches for the memory levers; see [`EngineOptions::with_trial`].
+const TRIAL_ENV: &str = "POND_KOKORO_TRIAL";
+
+/// Token lengths a GPU session runs once at load: the splitter's units reach about 220 tokens.
+const WARM_LENGTHS: &[usize] = &[16, 48, 96, 144, 200, 240];
+
+/// Where the engine runs and why, as last loaded.
+#[derive(Debug, Clone, Default)]
+struct Placement {
+    device: Option<Device>,
+    reason: Option<String>,
+    load_ms: Option<u64>,
+    warm_ms: Option<u64>,
+}
 
 pub struct KokoroOutput {
     config: KokoroConfig,
+    /// `voice_tts_accelerator`: `auto`, `cpu` or `gpu`.
+    accelerator: RwLock<String>,
+    probe: Option<PlacementProbe>,
+    placement: Mutex<Placement>,
+    /// When the last synthesis ended, for unloading after a quiet spell.
+    last_used: Mutex<Option<std::time::Instant>>,
     /// The active `.onnx`, which changes at runtime in lockstep with `engine`.
     model_path: RwLock<PathBuf>,
     vocab: Arc<Vocab>,
@@ -96,6 +133,10 @@ impl KokoroOutput {
         Ok(Self {
             model_path: RwLock::new(config.model_path.clone()),
             config,
+            accelerator: RwLock::new("cpu".to_string()),
+            probe: None,
+            placement: Mutex::new(Placement::default()),
+            last_used: Mutex::new(None),
             vocab: Arc::new(vocab),
             engine: Arc::new(RwLock::new(None)),
             style: RwLock::new(None),
@@ -109,6 +150,62 @@ impl KokoroOutput {
             audio_level_sink: None,
             last_sample_rate: Mutex::new(None),
         })
+    }
+
+    /// How to read the memory the device choice needs; without one, `auto` sees no limits.
+    pub fn with_placement_probe(mut self, probe: PlacementProbe) -> Self {
+        self.probe = Some(probe);
+        self
+    }
+
+    /// Choose where the engine runs; `true` when that drops a loaded session to reload there.
+    pub async fn set_accelerator(&self, setting: &str) -> bool {
+        let setting = setting.trim().to_ascii_lowercase();
+        let mut current = self.accelerator.write().await;
+        if *current == setting {
+            return false;
+        }
+        *current = setting;
+        drop(current);
+        let dropped = self.engine.write().await.take().is_some();
+        if dropped {
+            tracing::info!("Kokoro session dropped to reload on its new accelerator");
+        }
+        dropped
+    }
+
+    pub async fn acceleration(&self) -> pond_core::models::ports::tts_control::TtsAcceleration {
+        let p = self.placement.lock().unwrap().clone();
+        pond_core::models::ports::tts_control::TtsAcceleration {
+            setting: self.accelerator.read().await.clone(),
+            device: p.device.map(|d| d.as_str().to_string()),
+            reason: p.reason,
+            load_ms: p.load_ms,
+            warm_ms: p.warm_ms,
+        }
+    }
+
+    /// Unload the session after `after` without synthesis, so a quiet pond gives its memory
+    /// back; the next utterance loads it again. Ends when the output is dropped.
+    pub fn spawn_idle_unload(self: &Arc<Self>, after: std::time::Duration) {
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let tick = (after / 4).max(std::time::Duration::from_secs(1));
+            loop {
+                tokio::time::sleep(tick).await;
+                let Some(out) = weak.upgrade() else { break };
+                let idle = out
+                    .last_used
+                    .lock()
+                    .unwrap()
+                    .is_some_and(|t| t.elapsed() >= after);
+                // Not while a turn speaks: the session may be between two of its units.
+                if idle && out.playing.load(Ordering::SeqCst) == 0 && out.is_loaded().await {
+                    out.unload().await;
+                    *out.last_used.lock().unwrap() = None;
+                }
+            }
+        });
     }
 
     /// Attach a live playback-amplitude reporter, the `speaking` analog of mic RMS.
@@ -188,10 +285,20 @@ impl KokoroOutput {
         let mut engine_guard = self.engine.clone().write_owned().await;
         if engine_guard.is_none() {
             let path = self.model_path.read().await.clone();
+            let setting = self.accelerator.read().await.clone();
+            let inputs = match &self.probe {
+                Some(probe) => probe().await,
+                None => PlacementInputs::default(),
+            };
             let threads = self.config.intra_threads;
-            let loaded = tokio::time::timeout(
+            let vocab = self.vocab.clone();
+            let style = self.ensure_style().await?;
+            let started = std::time::Instant::now();
+            let (loaded, reason, warm_ms) = tokio::time::timeout(
                 LOAD_TIMEOUT,
-                tokio::task::spawn_blocking(move || Engine::load(&path, threads)),
+                tokio::task::spawn_blocking(move || {
+                    load_placed(&path, threads, &setting, inputs, &vocab, &style)
+                }),
             )
             .await
             .map_err(|_| {
@@ -202,6 +309,21 @@ impl KokoroOutput {
                 )
             })?
             .context("Kokoro model load panicked")??;
+            let load_ms = started.elapsed().as_millis() as u64;
+            tracing::info!(
+                target: "giap::trace",
+                kind = "tts_engine_loaded",
+                device = loaded.device().as_str(),
+                load_ms,
+                warm_ms = ?warm_ms,
+                reason = %reason,
+            );
+            *self.placement.lock().unwrap() = Placement {
+                device: Some(loaded.device()),
+                reason: Some(reason),
+                load_ms: Some(load_ms),
+                warm_ms,
+            };
             *engine_guard = Some(loaded);
         }
         Ok(engine_guard)
@@ -284,6 +406,7 @@ impl KokoroOutput {
         })
         .await?;
         *self.last_sample_rate.lock().unwrap() = Some(SAMPLE_RATE);
+        *self.last_used.lock().unwrap() = Some(std::time::Instant::now());
         Ok(samples)
     }
 
@@ -808,6 +931,64 @@ mod tests {
     }
 }
 
+/// Load the engine where `setting` and `inputs` place it: the GPU warmed at the splitter's unit
+/// lengths, or the CPU, including when the GPU was chosen and failed to load.
+fn load_placed(
+    path: &std::path::Path,
+    threads: Option<usize>,
+    setting: &str,
+    inputs: PlacementInputs,
+    vocab: &Vocab,
+    style: &StyleTable,
+) -> Result<(Engine, String, Option<u64>)> {
+    use pond_core::models::domain::device_budget::tts_placement;
+    let trial = std::env::var(TRIAL_ENV).ok();
+    let placement = tts_placement(
+        setting,
+        engine::cuda_runtime_available(),
+        inputs.spare_mb,
+        inputs.available_mb,
+    );
+    let options = |device| EngineOptions::on(device, threads).with_trial(trial.as_deref());
+    if placement.gpu {
+        match Engine::load_with(path, options(Device::Cuda)) {
+            Ok(mut engine) => {
+                let warm_ms = warm(&mut engine, vocab, style);
+                return Ok((engine, placement.reason, Some(warm_ms)));
+            }
+            Err(e) => {
+                tracing::warn!("Kokoro did not load on CUDA, so it runs on the CPU: {e:#}");
+                let engine = Engine::load_with(path, options(Device::Cpu))?;
+                return Ok((engine, format!("CUDA failed to load: {e}"), None));
+            }
+        }
+    }
+    Ok((
+        Engine::load_with(path, options(Device::Cpu))?,
+        placement.reason,
+        None,
+    ))
+}
+
+/// Run each of [`WARM_LENGTHS`] once, so the first reply does not pay CUDA's first run at its
+/// length; returns the milliseconds it took.
+fn warm(engine: &mut Engine, vocab: &Vocab, style: &StyleTable) -> u64 {
+    let started = std::time::Instant::now();
+    let word: Vec<i64> = "hɛloʊ ".chars().filter_map(|c| vocab.id(c)).collect();
+    for &n in WARM_LENGTHS {
+        let tokens: Vec<i64> = word.iter().copied().cycle().take(n).collect();
+        let chunk = tokenizer::Chunk {
+            text: String::new(),
+            phonemes: String::new(),
+            tokens,
+        };
+        if let Err(e) = engine.synthesize(&chunk, style.style_for(n), 1.0) {
+            tracing::warn!(tokens = n, "Kokoro warm-up run failed: {e:#}");
+        }
+    }
+    started.elapsed().as_millis() as u64
+}
+
 /// Append `audio` cut to its speech, then the silence `end` calls for at `speed`: the model's own
 /// pauses shrink as it speeds up, so the ones put between units do too.
 fn push_paced(out: &mut Vec<f32>, audio: &[f32], end: Boundary, speed: f32) {
@@ -828,7 +1009,7 @@ fn push_paced(out: &mut Vec<f32>, audio: &[f32], end: Boundary, speed: f32) {
 
 /// Why a forward pass's audio cannot be used. On the Orin's ONNX Runtime about one q4f16 pass in
 /// ten came back silent for a whole sentence, more often the longer the unit.
-fn unusable(audio: &[f32]) -> Option<&'static str> {
+pub fn unusable(audio: &[f32]) -> Option<&'static str> {
     if audio.iter().any(|v| !v.is_finite()) {
         return Some("non-finite samples");
     }

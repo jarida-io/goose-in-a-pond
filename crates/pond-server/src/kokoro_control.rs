@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use pond_adapters_kokoro::KokoroOutput;
-use pond_core::models::ports::tts_control::{TtsApplied, TtsControl};
+use pond_core::models::ports::tts_control::{TtsAcceleration, TtsApplied, TtsControl};
 
 use crate::model_download;
 
@@ -199,6 +199,19 @@ impl TtsControl for KokoroTtsControl {
 
     async fn prewarm(&self) -> Result<()> {
         self.engine.prewarm().await
+    }
+
+    async fn set_accelerator(&self, setting: &str) -> Result<bool> {
+        let setting = setting.trim().to_ascii_lowercase();
+        anyhow::ensure!(
+            pond_core::models::domain::device_budget::TTS_ACCELERATORS.contains(&setting.as_str()),
+            "{setting:?} is not a voice accelerator (auto, cpu or gpu)"
+        );
+        Ok(self.engine.set_accelerator(&setting).await)
+    }
+
+    async fn acceleration(&self) -> Option<TtsAcceleration> {
+        Some(self.engine.acceleration().await)
     }
 }
 

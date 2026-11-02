@@ -93,6 +93,11 @@ impl Vocab {
         self.map.contains_key(&c)
     }
 
+    /// The id of one symbol, if the model knows it.
+    pub fn id(&self, c: char) -> Option<i64> {
+        self.map.get(&c).copied()
+    }
+
     /// Encode phonemes, dropping and counting anything outside the vocab. On English the count
     /// should be zero; non-zero means espeak emits something the model never learned.
     pub fn encode(&self, phonemes: &str) -> (Vec<i64>, String, usize) {

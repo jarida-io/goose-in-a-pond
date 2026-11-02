@@ -11540,6 +11540,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "espeak-rs",
+ "libloading 0.9.0",
+ "memmap2",
  "ort",
  "pond-audio-out",
  "pond-core",

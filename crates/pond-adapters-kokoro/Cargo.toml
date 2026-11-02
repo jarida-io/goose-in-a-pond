@@ -32,6 +32,10 @@ serde_json  = { workspace = true }
 # while the workspace is on 0.16; tensors are built as (shape, Vec) tuples instead.
 ort = "=2.0.0-rc.12"
 espeak-rs = "0.2"
+# The ORT-format weights are read in place from a map, as page cache rather than anonymous memory.
+memmap2 = "0.9"
+# The CUDA runtime is opened at run time for Kokoro's low-priority stream; nothing links it.
+libloading = { workspace = true }
 # Only for the `OutputStreamHandle` type held by the adapter; playback itself
 # lives in pond-audio-out.
 
