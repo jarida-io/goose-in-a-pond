@@ -991,7 +991,8 @@ describe("Memory", () => {
     setup({ models: [e2b(HERE), miniLm(), eg2({ recommended: measured })], roles: memoryRoles("", "fastembed") });
     renderModels();
     const memory = await memoryModels();
-    expect(within(memory).getByText(/top five 73% of the time, against 39% for the default/)).toBeTruthy();
+    expect(within(memory).getByText(/top five 73% of the time, against 39% for all-MiniLM-L6-v2, the default/)).toBeTruthy();
+    expect(within(memory).getByText(/18 ms on the graphics processor \(GPU\) or 41 ms on the main processor \(CPU\)/)).toBeTruthy();
     expect(within(memory).getByText("Measured on this kind of device, 31 Oct 2026")).toBeTruthy();
   });
 

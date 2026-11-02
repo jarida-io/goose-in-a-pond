@@ -106,9 +106,9 @@ pub const RECOMMENDED: &[Recommendation] = &[
         reason: "Finds facts in Swahili, Sheng or English, whichever language you ask in",
         measured: &[Measured {
             device: DeviceClass::Orin,
-            summary: "Searches memory in 18 ms on the GPU or 41 ms on the CPU. Puts the right \
-                      Swahili or mixed-language fact in its top five 73% of the time, against \
-                      39% for the default",
+            summary: "Searches memory in 18 ms on the graphics processor (GPU) or 41 ms on the \
+                      main processor (CPU). Puts the right Swahili or mixed-language fact in its \
+                      top five 73% of the time, against 39% for all-MiniLM-L6-v2, the default",
             first_reply_s: None,
             tokens_per_second: None,
             window_tokens: None,
@@ -200,6 +200,31 @@ mod tests {
                 .and_then(|m| m.window_tokens),
             Some(16_384)
         );
+    }
+
+    /// DESIGN.md section 6: an acronym is spelled out where it is used, and a comparison names what
+    /// it is compared with.
+    #[test]
+    fn a_measured_sentence_is_plain_language() {
+        for r in RECOMMENDED {
+            for m in r.measured {
+                for (short, spelled) in [
+                    ("GPU", "graphics processor (GPU)"),
+                    ("CPU", "main processor (CPU)"),
+                ] {
+                    assert!(
+                        !m.summary.contains(short) || m.summary.contains(spelled),
+                        "{}: {short}",
+                        r.model_id
+                    );
+                }
+                assert!(
+                    !m.summary.contains("for the default"),
+                    "{}: name the default",
+                    r.model_id
+                );
+            }
+        }
     }
 
     #[test]

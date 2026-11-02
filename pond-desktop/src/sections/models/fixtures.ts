@@ -245,7 +245,8 @@ export function voice(name = "af_heart", over: Partial<ModelEntry> = {}): ModelE
 export const EG2_ORIN = {
   device: "orin" as const,
   summary:
-    "Searches memory in 18 ms on the GPU or 41 ms on the CPU. Puts the right Swahili or mixed-language fact in its top five 73% of the time, against 39% for the default",
+    "Searches memory in 18 ms on the graphics processor (GPU) or 41 ms on the main processor (CPU). Puts the right " +
+    "Swahili or mixed-language fact in its top five 73% of the time, against 39% for all-MiniLM-L6-v2, the default",
   measured_on: "2026-10-31",
 };
 
