@@ -373,9 +373,20 @@ pub fn play_wav_on(
 }
 
 /// USB DACs ramp analog output over ~150 ms from idle squelch; leading silence keeps speech from clipping.
-static LAST_PLAYBACK_AT: Mutex<Option<Instant>> = Mutex::new(None);
+/// The last moment audio played, and the utterance it belonged to.
+static LAST_PLAYBACK_AT: Mutex<Option<(Instant, u64)>> = Mutex::new(None);
 const HARDWARE_WAKE_PREROLL_MS: u64 = 300;
 const HARDWARE_IDLE_GAP_MS: u64 = 500;
+
+/// Whether to lead with the wake pre-roll: only the first audio after idle. Inside one reply the
+/// units' pauses are timed by the voice, and a slow synthesis must not be stretched by 300 ms more.
+fn needs_wake_preroll(last: Option<(Instant, u64)>, now: Instant, utterance: u64) -> bool {
+    match last {
+        Some((_, previous)) if previous == utterance => false,
+        Some((at, _)) => now.duration_since(at) >= Duration::from_millis(HARDWARE_IDLE_GAP_MS),
+        None => true,
+    }
+}
 
 fn play(
     wav: Vec<u8>,
@@ -399,11 +410,9 @@ fn play(
 
     let needs_preroll = {
         let mut last = LAST_PLAYBACK_AT.lock().unwrap_or_else(|e| e.into_inner());
-        let wake = match *last {
-            Some(t) => t.elapsed() >= Duration::from_millis(HARDWARE_IDLE_GAP_MS),
-            None => true,
-        };
-        *last = Some(Instant::now());
+        let now = Instant::now();
+        let wake = needs_wake_preroll(*last, now, mine);
+        *last = Some((now, mine));
         wake
     };
 
@@ -467,19 +476,40 @@ fn play(
         }
         tick += 1;
         if let Ok(mut last) = LAST_PLAYBACK_AT.lock() {
-            *last = Some(Instant::now());
+            *last = Some((Instant::now(), mine));
         }
         std::thread::sleep(std::time::Duration::from_millis(POLL_MS));
     }
 
     if let Ok(mut last) = LAST_PLAYBACK_AT.lock() {
-        *last = Some(Instant::now());
+        *last = Some((Instant::now(), mine));
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_the_first_audio_after_idle_gets_the_wake_preroll() {
+        use super::{needs_wake_preroll, HARDWARE_IDLE_GAP_MS};
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let later = t0 + Duration::from_millis(HARDWARE_IDLE_GAP_MS + 300);
+        assert!(needs_wake_preroll(None, t0, 1), "nothing has played yet");
+        assert!(
+            !needs_wake_preroll(Some((t0, 1)), later, 1),
+            "a unit of the same reply after a slow synthesis"
+        );
+        assert!(
+            needs_wake_preroll(Some((t0, 1)), later, 2),
+            "a new reply after idle"
+        );
+        assert!(
+            !needs_wake_preroll(Some((t0, 1)), t0 + Duration::from_millis(100), 2),
+            "a new reply straight after the last is still awake"
+        );
+    }
+
     #[test]
     fn wav_header_is_correct() {
         // 2 bytes of PCM (one 16-bit sample at 22050 Hz mono)

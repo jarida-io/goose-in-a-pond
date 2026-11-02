@@ -52,6 +52,77 @@ fn is_abbrev_suffix(prefix: &str) -> bool {
     ) || (clean.len() == 1 && clean.chars().all(|c| c.is_ascii_alphabetic()))
 }
 
+/// What ends a speech unit, which decides the silence played after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Boundary {
+    /// A cut inside a phrase, where no mark came in time.
+    Word,
+    Clause,
+    /// The end of a line in a list.
+    ListLine,
+    Sentence,
+    Paragraph,
+    /// The last unit of the text: what follows it is not speech.
+    End,
+}
+
+impl Boundary {
+    /// Silence after a unit, at speed 1.0. Inside one forward pass Kokoro pauses ~0.35 s at a
+    /// comma and ~0.5-0.6 s at a full stop, so units joined by these sound like one passage.
+    pub fn pause_secs(self) -> f32 {
+        match self {
+            Self::Word => 0.10,
+            Self::Clause => 0.30,
+            Self::ListLine => 0.40,
+            Self::Sentence => 0.50,
+            Self::Paragraph => 0.80,
+            Self::End => 0.0,
+        }
+    }
+
+    /// The boundary a unit's last mark implies, for text that arrives without one (`/tts`).
+    pub fn from_text_end(text: &str) -> Self {
+        let last = text
+            .trim_end()
+            .trim_end_matches(['"', '\'', ')', ']', '\u{201d}', '\u{2019}'])
+            .chars()
+            .next_back();
+        match last {
+            Some('.' | '?' | '!' | '\u{2026}') => Self::Sentence,
+            Some(',' | ';' | ':' | '\u{2014}') => Self::Clause,
+            _ => Self::Word,
+        }
+    }
+}
+
+/// Text to say and what follows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpeechUnit {
+    pub text: String,
+    pub boundary: Boundary,
+}
+
+impl SpeechUnit {
+    pub fn new(text: impl Into<String>, boundary: Boundary) -> Self {
+        Self {
+            text: text.into(),
+            boundary,
+        }
+    }
+
+    /// A unit with nothing said about what follows it: its own last mark decides.
+    pub fn from_text(text: impl Into<String>) -> Self {
+        let text = text.into();
+        let boundary = Boundary::from_text_end(&text);
+        Self { text, boundary }
+    }
+}
+
+/// Kokoro tokens for `text`, roughly: espeak IPA runs about 1.1 symbols per character of English.
+pub fn estimate_tokens(text: &str) -> usize {
+    (text.chars().count() * 11).div_ceil(10)
+}
+
 /// The first unit of a reply ends after this many words when no mark comes first: synthesis takes
 /// about real time, so the first sound waits on the length of the first unit.
 pub const FIRST_UNIT_MAX_WORDS: usize = 6;
@@ -1296,6 +1367,41 @@ pub fn filter_thinking(chunk: &str, mut in_block: bool) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_units_last_mark_names_its_boundary() {
+        assert_eq!(
+            Boundary::from_text_end("It is 23 degrees."),
+            Boundary::Sentence
+        );
+        assert_eq!(Boundary::from_text_end("Is it? "), Boundary::Sentence);
+        assert_eq!(
+            Boundary::from_text_end("He said \"go.\""),
+            Boundary::Sentence
+        );
+        assert_eq!(Boundary::from_text_end("a long time,"), Boundary::Clause);
+        assert_eq!(Boundary::from_text_end("You will need:"), Boundary::Clause);
+        assert_eq!(
+            Boundary::from_text_end("The weather in Nairobi"),
+            Boundary::Word
+        );
+        assert_eq!(Boundary::from_text_end(""), Boundary::Word);
+    }
+
+    #[test]
+    fn pauses_rise_with_the_break_they_mark() {
+        let order = [
+            Boundary::End,
+            Boundary::Word,
+            Boundary::Clause,
+            Boundary::ListLine,
+            Boundary::Sentence,
+            Boundary::Paragraph,
+        ];
+        for pair in order.windows(2) {
+            assert!(pair[0].pause_secs() < pair[1].pause_secs(), "{pair:?}");
+        }
+    }
 
     #[test]
     fn split_sentences_splits_on_terminals_and_newlines() {

@@ -8,6 +8,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use pond_adapters_ear::{process_memory, EarPart, ProcessMemory};
 use pond_core::models::ports::voice_output::VoiceOutput;
+use pond_voice::text::SpeechUnit;
 
 /// A call that grows the process by this much is logged with its part; smaller growth is noise.
 const GROWTH_LOGGED: u64 = 8 * 1024 * 1024;
@@ -111,6 +112,13 @@ impl VoiceOutput for MeasuredVoice {
     async fn synthesize(&self, text: &str) -> Result<Option<Vec<u8>>> {
         let before = now();
         let wav = self.0.synthesize(text).await;
+        note_growth("kokoro", before);
+        wav
+    }
+
+    async fn synthesize_unit(&self, unit: &SpeechUnit) -> Result<Option<Vec<u8>>> {
+        let before = now();
+        let wav = self.0.synthesize_unit(unit).await;
         note_growth("kokoro", before);
         wav
     }

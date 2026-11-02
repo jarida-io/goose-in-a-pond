@@ -336,7 +336,10 @@ async fn a_sample_in_another_voice_leaves_the_selected_voice_alone() {
 
     let text = "Hello, I'm Goose. This is how I sound.";
     let sample = output.synth_wav_in_voice(&other, text).await.unwrap();
-    let selected = output.synth_wav(text).await.unwrap();
+    let selected = output
+        .synth_wav(&pond_voice::text::SpeechUnit::from_text(text))
+        .await
+        .unwrap();
     assert!(sample.len() > 44, "the sample has no audio");
     assert_ne!(
         sample, selected,
