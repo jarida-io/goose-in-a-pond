@@ -194,12 +194,10 @@ export function modelLabel(
 ): string {
   const kind = m.category ?? m.provider;
   const voice = kind.startsWith("tts");
-  // An embedding row's title is its whole description: the name, a dash, then what it is.
-  const named = (text: string) => (kind === "embedding" ? text.split(" \u2014 ")[0] : text);
   const shown = (voice ? m.display_name : m.title)?.trim();
-  if (shown && !PLACEHOLDER_DESCRIPTIONS.includes(shown)) return named(shown);
+  if (shown && !PLACEHOLDER_DESCRIPTIONS.includes(shown)) return shown;
   const described = m.display_name?.trim();
-  if (described && !PLACEHOLDER_DESCRIPTIONS.includes(described)) return named(described);
+  if (described && !PLACEHOLDER_DESCRIPTIONS.includes(described)) return described;
   return m.name;
 }
 
